@@ -308,6 +308,67 @@ struct ArithmeticParser {
     private mutating func skipSpaces() { while let c = peek(), c == " " || c == "\t" { advance() } }
 }
 
+/// Ask the *user* a clarifying multiple-choice question mid-answer. The one tool
+/// whose "execution" is a conversation: `execute` publishes the question to the
+/// panel (a card with tappable options under the streaming answer) and suspends
+/// until the user picks one — the picked option text is the tool result the model
+/// reads back. The suspension is bounded: the user tapping an option, the round
+/// being cancelled, or a timeout (the user walked away) each resume it exactly
+/// once — see `NotchModel.awaitUserChoice`, which owns that state. The tool itself
+/// stays UI-agnostic: the bridge closure is injected at registry construction.
+struct AskUserTool: NotchTool {
+    let name = "ask_user"
+    let description = """
+    Shows the user one multiple-choice question in the UI and returns the option \
+    they pick. Call this ONLY when you are blocked on a decision that is genuinely \
+    the user's to make and that materially changes the answer — an ambiguous \
+    request with several plausible readings, or a choice between real alternatives \
+    you cannot infer from context. Never use it for anything you can figure out \
+    yourself or with your other tools, and ask at most one question per answer. \
+    Give 2-4 short, distinct options covering the likely answers. The user may not \
+    respond; in that case proceed with your best judgment and say what you assumed.
+    """
+    let schema: [String: Any] = [
+        "type": "object",
+        "properties": [
+            "question": [
+                "type": "string",
+                "description": "The single question to ask the user — short and specific.",
+            ],
+            "options": [
+                "type": "array",
+                "items": ["type": "string"],
+                "minItems": 2,
+                "maxItems": 4,
+                "description": "2-4 short, mutually exclusive answer choices for the user to pick from.",
+            ],
+        ],
+        "required": ["question", "options"],
+    ]
+
+    /// The UI bridge: present the question and suspend until an option is picked
+    /// (or the wait ends another way). Injected by `NotchModel` when the registry
+    /// is built for a round, capturing that round's answer turn.
+    let present: @Sendable (_ question: String, _ options: [String]) async throws -> String
+
+    func execute(_ input: [String: Any]) async throws -> String {
+        guard let question = (input["question"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !question.isEmpty else {
+            return "Error: no question given."
+        }
+        // Normalize the options: trimmed, non-empty, de-duplicated (the option
+        // strings are ForEach ids in the card), capped at 4.
+        var seen = Set<String>()
+        let options = ((input["options"] as? [Any]) ?? [])
+            .compactMap { ($0 as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
+        guard options.count >= 2 else {
+            return "Error: give at least 2 distinct options for the user to choose from."
+        }
+        return try await present(question, Array(options.prefix(4)))
+    }
+}
+
 /// Kimi's `$web_search` is a *builtin* server tool with an unusual contract
 /// (XII-118): the model emits a tool call, and the client must echo the call's
 /// arguments back **unchanged** for Moonshot to actually run the search

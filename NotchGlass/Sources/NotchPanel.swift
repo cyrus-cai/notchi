@@ -6,8 +6,11 @@ import AppKit
 ///  · no title bar / no shadow drawn by AppKit (the glass draws its own)
 ///  · transparent background so only the SwiftUI glass form is visible
 ///  · floats above every app and joins every Space / full-screen app
-///  · non-activating, so clicking it never steals focus from the frontmost app
-///    (it can still receive key events for the text field via `canBecomeKey`)
+///  · non-activating as a *style*, so a stray click on the glass never activates
+///    the app by itself (it can still receive key events via `canBecomeKey`).
+///    App activation is driven deliberately by the AppDelegate open/close path
+///    instead — the panel must belong to the *focused application* while open,
+///    or AX-based voice/dictation tools (Typeless & co.) can't reach its fields.
 final class NotchPanel: NSPanel {
     /// Resting level: above the menu bar and every normal window, where the island
     /// belongs when it isn't being typed into.

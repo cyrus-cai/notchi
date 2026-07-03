@@ -1459,7 +1459,13 @@ struct NotchBody: View {
                 sources: turn.sources,
                 hoveredSourceID: $hoveredSourceID,
                 sourceCloseWork: $sourceCloseWork,
-                onInAppCopy: { model.rebaselineClipboardAfterInAppWrite() }
+                onInAppCopy: { model.rebaselineClipboardAfterInAppWrite() },
+                // The `ask_user` question card, when the model has paused this
+                // still-streaming answer on a choice only the user can make.
+                pendingQuestion: turn.streaming ? model.pendingQuestion(for: turn.id) : nil,
+                onChooseOption: { questionID, option in
+                    model.chooseUserOption(option, questionID: questionID)
+                }
             )
         }
     }

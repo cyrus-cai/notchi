@@ -198,6 +198,7 @@ enum Strings {
         "general.placement.footer": "External monitors get a menu-bar-height island.",
         "general.dockIcon": "Dock icon",
         "general.dockIcon.footer": "Hidden keeps it a pure overlay — summon with ⌘, or by hovering the notch.",
+        "general.launchAtLogin": "Launch at login",
         "general.quickTools": "Quick tools",
         "general.quickTools.count": "%lld enabled",
         "general.appLanguage": "Language",
@@ -381,6 +382,7 @@ enum Strings {
         "agent.activity.clipboard": "Reading the clipboard…",
         "agent.activity.time": "Checking the time…",
         "agent.activity.calc": "Calculating…",
+        "agent.activity.askUser": "Waiting for your choice…",
         "agent.activity.working": "Working…",
         "agent.activity.thinking": "Thinking…",
 
@@ -454,6 +456,7 @@ enum Strings {
         "general.placement.footer": "外接显示器会得到一个菜单栏高度的小岛。",
         "general.dockIcon": "程序坞图标",
         "general.dockIcon.footer": "隐藏后它就是个纯浮层——用 ⌘, 或把鼠标移到刘海上来唤出。",
+        "general.launchAtLogin": "开机时启动",
         "general.quickTools": "快捷工具",
         "general.quickTools.count": "已选 %lld 个",
         "general.appLanguage": "语言",
@@ -620,6 +623,7 @@ enum Strings {
         "agent.activity.clipboard": "正在读取剪贴板…",
         "agent.activity.time": "正在查看时间…",
         "agent.activity.calc": "正在计算…",
+        "agent.activity.askUser": "等你选一下…",
         "agent.activity.working": "处理中…",
         "agent.activity.thinking": "思考中…",
 
@@ -692,6 +696,7 @@ enum Strings {
         "general.placement.footer": "外接螢幕會得到一個選單列高度的小島。",
         "general.dockIcon": "Dock 圖示",
         "general.dockIcon.footer": "隱藏後它就是個純浮層——用 ⌘, 或把游標移到瀏海上來喚出。",
+        "general.launchAtLogin": "開機時啟動",
         "general.quickTools": "快捷工具",
         "general.quickTools.count": "已選 %lld 個",
         "general.appLanguage": "語言",
@@ -858,6 +863,7 @@ enum Strings {
         "agent.activity.clipboard": "正在讀取剪貼簿…",
         "agent.activity.time": "正在查看時間…",
         "agent.activity.calc": "正在計算…",
+        "agent.activity.askUser": "等你選一下…",
         "agent.activity.working": "處理中…",
         "agent.activity.thinking": "思考中…",
 

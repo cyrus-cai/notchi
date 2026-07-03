@@ -2,6 +2,7 @@ import AppKit
 import Carbon.HIToolbox
 import Combine
 import NaturalLanguage
+import ServiceManagement
 import SwiftUI
 
 /// Owns the notch panels for the lifetime of the app — one per screen the
@@ -60,6 +61,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var summonHotKey: HotKey?
     private var summonDoubleTap: DoubleTapModifierMonitor?
 
+    /// The app that was frontmost right before the panel opened. The open path
+    /// activates Notch (see the `$open` observer) so accessibility-based input
+    /// tools can reach the prompt field; this is who gets activation back when
+    /// the panel closes, so the user lands exactly where they were.
+    private var appToRestoreOnClose: NSRunningApplication?
+
     /// The panel is wider/taller than the resting notch so the glass has room to
     /// unfurl downward. The SwiftUI view draws the notch at the top-center of
     /// this canvas; the empty area around it is fully transparent and
@@ -104,11 +111,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // When the panel opens (on hover), make the active screen's panel the
         // key window so keystrokes land in the prompt field immediately — no
-        // extra click needed. Because it's a non-activating panel, this grabs
-        // keyboard focus WITHOUT stealing app activation or the menu bar from
-        // the frontmost app. Keyed on (open, activeDisplay) together so a
-        // display *switch* while open hands the keyboard over with the island.
-        // On close, hand key status back so we never hold the keyboard at rest.
+        // extra click needed — and ALSO activate the app itself. Key status
+        // alone routes physical keystrokes and Apple's own dictation (both ride
+        // the in-process text-input context), but third-party voice/dictation
+        // tools (Typeless & co.) locate the field to fill via the Accessibility
+        // API's *focused application*, which follows app activation — while we
+        // stay inactive they see no focused field, or type into the app behind
+        // us. Activation is what makes the prompt reachable to them; the app
+        // that was frontmost is recorded and re-activated on close so focus
+        // returns where the user was. (With the default `.accessory` policy the
+        // menu bar stays with the front app even while we're active.) Keyed on
+        // (open, activeDisplay) together so a display *switch* while open hands
+        // the keyboard over with the island.
         openObserver = model.$open
             .combineLatest(model.$activeDisplay)
             .removeDuplicates(by: ==)
@@ -153,6 +167,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             p.resignKey()
                         }
                         target?.makeKeyAndOrderFront(nil)
+                        // Record who was frontmost, then bring Notch forward so
+                        // AX-based input tools can see the focused prompt field.
+                        // A display switch while already open re-runs this block
+                        // with Notch itself frontmost — the guard keeps the
+                        // original app on record instead of overwriting it.
+                        if let front = NSWorkspace.shared.frontmostApplication,
+                           front.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+                            self.appToRestoreOnClose = front
+                        }
+                        NSApp.activate(ignoringOtherApps: true)
                         // Long-running agent: piggyback the daily update check on
                         // panel opens so it still happens without relaunches.
                         UpdaterService.shared.checkIfDue()
@@ -165,6 +189,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         // (editing) level. Force every panel back to resting on close.
                         p.restRestingLevel()
                     }
+                    // Hand activation back to the app the user came from (recorded
+                    // at open). Skipped when we're no longer active — the user
+                    // already switched into another app themselves, and re-activating
+                    // the recorded one would fight that choice.
+                    if NSApp.isActive,
+                       let prev = self.appToRestoreOnClose, !prev.isTerminated {
+                        NSApp.yieldActivation(to: prev)
+                        prev.activate()
+                    }
+                    self.appToRestoreOnClose = nil
                 }
             }
 
@@ -435,7 +469,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .environment(\.notchMetrics, NotchMetrics(
                 canvasWidth: canvasWidth,
                 displayID: id,
-                restHeight: hasNotch ? Tokens.notchTopHeight
+                // The REAL hardware notch height, not the 32pt design constant:
+                // the physical notch is ~37-38pt on notched MacBooks, and the
+                // busy extension sits beside it over visible screen — a drawn
+                // zone even a few px shorter reads as the extension "hanging"
+                // above the notch's bottom edge. (Black-on-black hid the
+                // mismatch for years; the extension exposed it.) The +1 is a
+                // one-sided error margin: measurement/AA residue as DRAWN-TOO-
+                // SHORT shows a step at the junction, while drawn-too-tall just
+                // moves the whole continuous bottom edge down a hair — so bleed
+                // 1pt past the inset and let any residue land on the invisible
+                // side. (Screenshots can't verify this seam — the framebuffer
+                // has no notch — so the margin, not calibration, is the fix.)
+                restHeight: hasNotch ? screen.safeAreaInsets.top + 1
                                      : Self.menuBarHeight(of: screen),
                 hasHardwareNotch: hasNotch
             ))
@@ -563,6 +609,34 @@ enum DockIconVisibility: String, CaseIterable, Identifiable {
         }
         set {
             UserDefaults.standard.set(newValue.rawValue, forKey: key)
+        }
+    }
+}
+
+/// Whether the app launches itself when the user logs in — backed by the system
+/// login-item registry via `SMAppService.mainApp`, not `UserDefaults`. The OS is
+/// the source of truth (the user can also remove the item in System Settings →
+/// General → Login Items), so `isEnabled` reads the live status rather than a
+/// cached flag. Off by default: nothing registers until the user asks for it in
+/// Settings → General.
+enum LaunchAtLogin {
+    /// The live registration status of the main app as a login item.
+    static var isEnabled: Bool {
+        SMAppService.mainApp.status == .enabled
+    }
+
+    /// Register or unregister the app as a login item. Throwing surfaces to the
+    /// caller so the toggle can revert its optimistic state if the OS refuses
+    /// (e.g. the item is disabled at the system level and needs the user to
+    /// re-enable it in System Settings).
+    static func setEnabled(_ enabled: Bool) throws {
+        let service = SMAppService.mainApp
+        if enabled {
+            // `register` throws if already registered as *disabled*; a plain
+            // `.enabled` re-register is a no-op, so only act when the state differs.
+            if service.status != .enabled { try service.register() }
+        } else {
+            if service.status == .enabled { try service.unregister() }
         }
     }
 }

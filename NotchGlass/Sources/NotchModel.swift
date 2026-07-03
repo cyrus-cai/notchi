@@ -236,6 +236,34 @@ final class NotchModel: ObservableObject {
     /// newer one.
     private var thinkingAnswerID: UUID? = nil
 
+    /// How many Ask rounds are currently in flight — on screen or detached. A
+    /// fully closed panel with a non-zero count means an answer is still
+    /// streaming in the background, and the resting notch grows its small
+    /// left-side extension with the waving dots (see `NotchIsland`) so the work
+    /// stays visible in the meanwhile; the walk-away notification and the Recent
+    /// row cover the *result*. Unlike `thinking` (pre-stream wait only), this
+    /// spans the whole round: incremented when a round's task starts, decremented
+    /// on every exit path (clean finish, mid-stream error, supersede-cancel), so
+    /// the indicator can never stick on after the last round settles.
+    @Published private(set) var roundsInFlight = 0
+
+    /// One still-streaming round's live mirror. A detached round streams into a
+    /// task-local snapshot the screen can't see — this mirror is the model's
+    /// copy of that snapshot, refreshed on every chunk/source, which is what
+    /// lets a hover during the busy extension (or a tap on the round's pending
+    /// Recent row) put the answer back on screen mid-write instead of landing
+    /// on the idle prompt (see `attachInFlightRound`).
+    private struct InFlightRound {
+        let answerID: UUID
+        let threadID: UUID
+        var thread: [Turn]
+    }
+
+    /// Live mirrors of every round currently in flight, oldest first — appended
+    /// when a round's task starts and removed on the same defer that settles
+    /// `roundsInFlight`, so the two can never disagree.
+    private var inFlightRounds: [InFlightRound] = []
+
     /// The cursor's velocity at the instant the island opened — SwiftUI
     /// orientation (+x right, +y down), points/second. Hover-opens pass the
     /// tracker's reading; every other path (⌘, / debug launches) leaves it
@@ -521,6 +549,98 @@ final class NotchModel: ObservableObject {
     func setThinkingActivity(_ label: String?) {
         if label != nil { hasUsedToolThisRound = true }
         thinkingActivity = label
+    }
+
+    // MARK: - Ask-the-user questions (the `ask_user` tool)
+
+    /// One clarifying question the model posed mid-answer via the `ask_user` tool,
+    /// waiting on the user to pick an option. Rendered as an option card under the
+    /// streaming assistant turn it belongs to. Runtime-only — never persisted, so
+    /// a saved conversation can't reopen onto a dead question.
+    struct PendingUserQuestion: Identifiable, Equatable {
+        let id: UUID
+        /// The assistant turn (answer) this question interrupts — the card shows
+        /// under that turn while it streams.
+        let answerID: UUID
+        let question: String
+        let options: [String]
+    }
+
+    /// Questions currently awaiting an answer, oldest first. Almost always 0 or 1
+    /// (the tool is told to ask at most one per answer), but a detached round's
+    /// unanswered question can coexist with a newer round's.
+    @Published private(set) var pendingUserQuestions: [PendingUserQuestion] = []
+
+    /// The suspended `ask_user` tool calls, keyed by question id. Resuming each
+    /// exactly once is `resolveUserQuestion`'s job — every exit path (tap, timeout,
+    /// round cancellation) funnels through it, and later calls for an already-
+    /// resolved id are no-ops.
+    private var userChoiceContinuations: [UUID: CheckedContinuation<String, Error>] = [:]
+
+    /// How long an unanswered question waits before the round moves on without one.
+    /// Long enough to answer at leisure (or hover a folded panel back open — the
+    /// card survives reattach), short enough that a walked-away round still
+    /// finishes, lands in Recent, and fires its notification.
+    private static let userChoiceTimeout: TimeInterval = 120
+
+    /// The question card to show under a streaming assistant turn, if any.
+    func pendingQuestion(for answerID: UUID) -> PendingUserQuestion? {
+        pendingUserQuestions.first { $0.answerID == answerID }
+    }
+
+    /// The user tapped an option on the card: feed it back as the tool result and
+    /// let the suspended round continue.
+    func chooseUserOption(_ option: String, questionID: UUID) {
+        resolveUserQuestion(questionID, with: .success("The user chose: \"\(option)\""))
+    }
+
+    /// Suspend an `ask_user` tool call until the user picks an option. Publishes
+    /// the question for the UI, parks the continuation, and arms the timeout; the
+    /// user's tap, the timeout, or the round's cancellation resumes it — whichever
+    /// comes first. Main-actor isolated (with the resolution paths), so the park
+    /// and every resume are serialized and none can be lost.
+    func awaitUserChoice(answerID: UUID, question: String, options: [String]) async throws -> String {
+        let questionID = UUID()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { cont in
+                // Cancelled before we even parked (superseded while the tool call
+                // was dispatched): don't surface a dead card.
+                if Task.isCancelled {
+                    cont.resume(throwing: CancellationError())
+                    return
+                }
+                userChoiceContinuations[questionID] = cont
+                pendingUserQuestions.append(PendingUserQuestion(
+                    id: questionID, answerID: answerID,
+                    question: question, options: options))
+                // Timeout backstop: an unanswered question (user walked away, panel
+                // stayed closed) must not hang the round forever — resolve with an
+                // explicit "no answer" the model is told to proceed on. Unstructured
+                // on purpose: it must fire even after the round detaches, and it's a
+                // no-op when the question resolved some other way first.
+                Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: UInt64(Self.userChoiceTimeout * 1_000_000_000))
+                    self?.resolveUserQuestion(questionID, with: .success(
+                        "The user did not answer. Proceed with your best judgment and state the assumption you made."))
+                }
+            }
+        } onCancel: {
+            // Round superseded/cancelled while waiting — release the harness so its
+            // own cancellation handling runs. Hop to the main actor; idempotent, so
+            // racing a simultaneous tap or timeout is safe.
+            Task { @MainActor [weak self] in
+                self?.resolveUserQuestion(questionID, with: .failure(CancellationError()))
+            }
+        }
+    }
+
+    /// Resume a parked question exactly once and drop its card. Safe to call from
+    /// every path (tap, timeout, cancel) — a second call for the same id finds no
+    /// continuation and does nothing.
+    private func resolveUserQuestion(_ questionID: UUID, with result: Result<String, Error>) {
+        guard let cont = userChoiceContinuations.removeValue(forKey: questionID) else { return }
+        pendingUserQuestions.removeAll { $0.id == questionID }
+        cont.resume(with: result)
     }
 
     /// The recurrence suffix shown live in the Remind hint *before* Enter (" \u{00B7} Daily"
@@ -933,16 +1053,28 @@ final class NotchModel: ObservableObject {
         // fresh in `clipboardContextIfEligible`.
         if !open {
             pasteboardChangeCountAtOpen = pasteboardChangeCountAtRest
-            // Hand back an unsent idle draft parked at the last close, so folding
-            // the notch away and re-opening it doesn't drop what the user was
-            // typing. Only into a fresh, empty idle prompt — never clobber a line
-            // already in the box (e.g. one restored with the panel). Consumed here
-            // so it's handed back exactly once. Runs on the closed→open edge only:
-            // hover re-enters and display migrations keep `open` true and skip it.
-            if mode == .idle, !hasText, !savedIdleDraft.isEmpty {
-                text = savedIdleDraft
+            if mode == .idle, turns.isEmpty, !showOnboarding, let round = inFlightRounds.last {
+                // A round is still streaming in the background — the busy
+                // extension is out, and hovering the working notch should land
+                // on the answer being written, not on the idle prompt with the
+                // work hidden behind a Recent row. Newest round wins when
+                // several are in flight (older ones stay reachable through
+                // their pending Recent rows). The parked idle draft is
+                // deliberately NOT consumed on this path: it stays parked and
+                // hands back on the next plain idle open.
+                attachInFlightRound(round)
+            } else {
+                // Hand back an unsent idle draft parked at the last close, so folding
+                // the notch away and re-opening it doesn't drop what the user was
+                // typing. Only into a fresh, empty idle prompt — never clobber a line
+                // already in the box (e.g. one restored with the panel). Consumed here
+                // so it's handed back exactly once. Runs on the closed→open edge only:
+                // hover re-enters and display migrations keep `open` true and skip it.
+                if mode == .idle, !hasText, !savedIdleDraft.isEmpty {
+                    text = savedIdleDraft
+                }
+                savedIdleDraft = ""
             }
-            savedIdleDraft = ""
         }
         // Re-entering during the close dissolve cancels it: clear the flag so the
         // content (held mounted while `open` is true) springs back to full opacity
@@ -1913,6 +2045,23 @@ final class NotchModel: ObservableObject {
         task?.cancel()
         task = Task { [weak self] in
             guard let self else { return }
+            // Count this round in flight for the resting notch's background
+            // indicator, and park its live mirror for reattach-on-open; the
+            // defer pairs the teardown with every way out of this task —
+            // finish, error, and supersede-cancel alike.
+            self.roundsInFlight += 1
+            self.inFlightRounds.append(
+                InFlightRound(answerID: answerID, threadID: threadID, thread: seedThread))
+            defer {
+                self.roundsInFlight -= 1
+                self.inFlightRounds.removeAll { $0.answerID == answerID }
+                // A question can't normally outlive its round (cancellation and the
+                // timeout both resolve it), but never strand a card on screen — or a
+                // parked continuation — if one somehow does.
+                for q in self.pendingUserQuestions where q.answerID == answerID {
+                    self.resolveUserQuestion(q.id, with: .failure(CancellationError()))
+                }
+            }
             var thread = seedThread
             // Hoisted out of `do` so the error `catch` can read whatever streamed
             // before the failure — a mid-stream drop that already produced text must
@@ -1931,6 +2080,9 @@ final class NotchModel: ObservableObject {
                     if let i = thread.firstIndex(where: { $0.id == answerID }) {
                         thread[i].text = acc
                     }
+                    // Keep the reattach mirror current, so an open mid-stream
+                    // restores everything written so far, not a stale snapshot.
+                    self.syncInFlight(answerID, thread)
                     // First real text for this round ends the thinking phase — clear the
                     // dots even if the panel folded away (the round is detached but still
                     // ours). Idempotent: only the round that owns the flag clears it.
@@ -1953,7 +2105,18 @@ final class NotchModel: ObservableObject {
                 // that can't do tools, or a turn with an empty registry, falls
                 // straight back to the existing behavior: nothing about plain Q&A
                 // changes.
-                let registry = ToolRegistry.standard(for: APIKeyStore.selectedProvider)
+                // The standard tool set, plus this round's `ask_user` bridge: the
+                // tool's suspension is owned by the model (`awaitUserChoice`), keyed
+                // to THIS round's answer turn so the question card renders under the
+                // answer it interrupts.
+                var agentTools = ToolRegistry.standard(for: APIKeyStore.selectedProvider).tools
+                agentTools.append(AskUserTool { [weak self] question, options in
+                    guard let self else { throw CancellationError() }
+                    return try await self.awaitUserChoice(answerID: answerID,
+                                                          question: question,
+                                                          options: options)
+                })
+                let registry = ToolRegistry(agentTools)
                 if let agent = self.ai as? AgentCapableService,
                    APIKeyStore.selectedProvider.supportsTools,
                    !registry.isEmpty {
@@ -1981,6 +2144,7 @@ final class NotchModel: ObservableObject {
                             // the live turn (so the badge appears). Deduped by URL.
                             if let i = thread.firstIndex(where: { $0.id == answerID }) {
                                 thread[i].sources = Self.mergedSources(thread[i].sources, roundSources)
+                                self.syncInFlight(answerID, thread)
                             }
                             if self.isOnScreen(answerID: answerID) {
                                 self.appendSources(id: answerID, roundSources)
@@ -2321,6 +2485,29 @@ final class NotchModel: ObservableObject {
         turns.contains { $0.id == answerID }
     }
 
+    /// Refresh a still-streaming round's reattach mirror with its task's current
+    /// snapshot. No-op once the round has settled (its defer removed the entry).
+    private func syncInFlight(_ answerID: UUID, _ thread: [Turn]) {
+        guard let i = inFlightRounds.firstIndex(where: { $0.answerID == answerID }) else { return }
+        inFlightRounds[i].thread = thread
+    }
+
+    /// Put a still-streaming round back on screen: restore its live snapshot to
+    /// `turns`, adopt its thread id (so follow-ups keep updating the same Recent
+    /// row), and pick `.load` vs `.result` by whether any answer text has landed
+    /// yet (`.load` re-enters the thinking dots + rotating word, which a
+    /// pre-token detached round still owns). From this instant
+    /// `isOnScreen(answerID:)` is true again, so every subsequent chunk, source,
+    /// and activity label flows straight to the panel — the same wiring as a
+    /// round that never left the screen.
+    private func attachInFlightRound(_ round: InFlightRound) {
+        text = ""
+        turns = round.thread
+        threadHistoryID = round.threadID
+        let hasAnswer = round.thread.contains { $0.id == round.answerID && !$0.text.isEmpty }
+        mode = hasAnswer ? .result : .load
+    }
+
     /// Replace the streaming assistant turn's text as chunks arrive. Looked up by
     /// id so an out-of-order or post-`newChat` chunk can't write into the wrong row.
     private func updateAnswer(id: UUID, text: String) {
@@ -2558,12 +2745,19 @@ final class NotchModel: ObservableObject {
     }
 
     func openHistory(_ item: HistoryItem) {
-        // Still answering: this row is a placeholder (no turns, empty answer) whose
-        // live stream runs detached — there's nothing to reopen yet, and rebuilding
-        // a two-turn thread here would show a stuck-empty assistant bubble cut off
-        // from the stream. Leave the list as-is; the row settles into a normal,
-        // tappable item the moment the answer lands.
-        guard !item.pending else { return }
+        // Still answering: this row is a placeholder whose live stream runs
+        // detached — reattach the stream to the screen (the same move as
+        // hovering the busy notch) so tapping the row lands on the answer as
+        // it writes; the `inFlightRounds` mirror carries everything streamed so
+        // far. A pending row with no live round behind it (the round is settling
+        // this very instant) stays a no-op; it becomes a normal row momentarily.
+        if item.pending {
+            guard let round = inFlightRounds.first(where: { $0.threadID == item.id }) else { return }
+            showHistory = false
+            highlightedHistoryIndex = nil
+            attachInFlightRound(round)
+            return
+        }
 
         showHistory = false
         highlightedHistoryIndex = nil

@@ -57,9 +57,10 @@ struct InlineSettingsView: View {
     /// True while `EXA_API_KEY` forces the Exa key — field is then informational.
     private var exaEnvOverride: Bool { APIKeyStore.hasExaEnvOverride() }
 
-    /// The user's chosen search backend (Keenable / Exa), or nil for the provider's
-    /// native search. Pick one and that's what runs — like the model picker, no
-    /// fallback between backends.
+    /// The user's chosen search backend (Keenable / Exa). Pick one and that's what
+    /// runs — like the model picker, one choice with no "Default" / native fallback.
+    /// `nil` only until the user (or the Search tab's first appearance) settles it on
+    /// a concrete backend; `selectedBackend` fills that gap for display.
     @State private var searchBackend: APIKeyStore.SearchBackend? = APIKeyStore.preferredSearchBackend
 
     /// Keenable search key state — a standalone search backend, keyed (its HTTP API
@@ -173,6 +174,12 @@ struct InlineSettingsView: View {
     /// policy immediately.
     @State private var dockIconVisibility: DockIconVisibility = .current
 
+    /// Whether the app launches itself at login — seeded from the live system
+    /// login-item status (`SMAppService`), not `UserDefaults`. Writes go through
+    /// `selectLaunchAtLogin`, which registers/unregisters the item and reverts
+    /// this optimistic flag if the OS refuses.
+    @State private var launchAtLogin: Bool = LaunchAtLogin.isEnabled
+
     /// The global summon shortcut — mirrors the persisted value; writes go through
     /// `commitSummonHotKey` so `AppDelegate` re-registers the Carbon hot key.
     @State private var summonHotKey: SummonHotKey = .current
@@ -219,8 +226,17 @@ struct InlineSettingsView: View {
                         footer
                     case .search:
                         searchBackendRow
-                        keenableKeyRow
-                        exaKeyRow
+                            // No stored pick yet → commit the shown default so the
+                            // UI and what actually runs never disagree.
+                            .onAppear {
+                                if searchBackend == nil { selectSearchBackend(selectedBackend) }
+                            }
+                        // Only the picked backend's key row shows — like the model
+                        // section, one choice, one field to fill.
+                        switch selectedBackend {
+                        case .keenable: keenableKeyRow
+                        case .exa:      exaKeyRow
+                        }
                     case .translation:
                         translationLanguageRow
                     case .general:
@@ -229,6 +245,7 @@ struct InlineSettingsView: View {
                         quickToolsRow
                         placementRow
                         dockIconRow
+                        launchAtLoginRow
                     case .about:
                         aboutSection
                     }
@@ -503,14 +520,12 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// The search-backend picker. Like the model picker: pick one and that's what
-    /// runs. The Default row hands back to the provider's own native search; the two
-    /// concrete picks each run only when keyed (no fallback to the other).
+    /// The search-backend picker. Exactly like the model picker: you pick one and
+    /// that's what runs — no "Default" row, no native fallback. The picker always
+    /// resolves to a concrete backend, and only that backend's key row shows below.
     private var searchBackendRow: some View {
         settingRow(label: L("search.backend")) {
-            GlassMenu(title: searchBackendLabel(searchBackend)) {
-                Button(searchBackendLabel(nil)) { selectSearchBackend(nil) }
-                Divider()
+            GlassMenu(title: searchBackendLabel(selectedBackend)) {
                 ForEach(APIKeyStore.SearchBackend.allCases) { b in
                     Button(searchBackendLabel(b)) { selectSearchBackend(b) }
                 }
@@ -518,15 +533,22 @@ struct InlineSettingsView: View {
         }
     }
 
-    private func searchBackendLabel(_ b: APIKeyStore.SearchBackend?) -> String {
+    /// The concrete backend the picker shows — the stored pick, or the first case
+    /// when nothing has been chosen yet (there's no "none" state in the UI).
+    private var selectedBackend: APIKeyStore.SearchBackend {
+        searchBackend ?? APIKeyStore.SearchBackend.allCases[0]
+    }
+
+    private func searchBackendLabel(_ b: APIKeyStore.SearchBackend) -> String {
         switch b {
         case .keenable: return L("search.backend.keenable")
         case .exa:      return L("search.backend.exa")
-        case nil:       return L("search.backend.native")
         }
     }
 
-    private func selectSearchBackend(_ newValue: APIKeyStore.SearchBackend?) {
+    private func selectSearchBackend(_ newValue: APIKeyStore.SearchBackend) {
+        // Compare against the stored pick (not the display default) so the first
+        // commit from a `nil` state still persists even when it equals the default.
         guard newValue != searchBackend else { return }
         searchBackend = newValue
         APIKeyStore.preferredSearchBackend = newValue
@@ -1029,6 +1051,36 @@ struct InlineSettingsView: View {
         dockIconVisibility = newValue
         DockIconVisibility.current = newValue
         NotificationCenter.default.post(name: .dockIconVisibilityChanged, object: nil)
+    }
+
+    /// Whether Notch launches itself when you log in. Off by default; flipping it
+    /// on registers a login item via `SMAppService` so the notch is there from the
+    /// first hover after every restart, with no manual relaunch.
+    private var launchAtLoginRow: some View {
+        settingRow(label: L("general.launchAtLogin")) {
+            Toggle("", isOn: Binding(
+                get: { launchAtLogin },
+                set: { selectLaunchAtLogin($0) }
+            ))
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .tint(Tokens.text2)
+        }
+    }
+
+    /// Register or unregister the login item, keeping the toggle in sync with the
+    /// OS. On success `launchAtLogin` already matches; on failure we snap it back
+    /// to the real status so the switch never lies about what the system will do.
+    private func selectLaunchAtLogin(_ newValue: Bool) {
+        launchAtLogin = newValue
+        do {
+            try LaunchAtLogin.setEnabled(newValue)
+        } catch {
+            // The OS refused (e.g. the item is disabled at the system level) —
+            // fall back to the true status rather than leave a misleading switch.
+            launchAtLogin = LaunchAtLogin.isEnabled
+        }
     }
 
     /// Which clipboard quick-tools (Summarize / Translate / Proofread …) appear as

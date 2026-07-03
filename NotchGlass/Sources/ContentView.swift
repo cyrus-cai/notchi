@@ -257,6 +257,12 @@ struct NotchIsland: View {
     /// How far the black bleeds above the screen's top edge, guaranteeing no gap.
     private let topBleed: CGFloat = 6
 
+    /// How far the resting notch grows leftward while an answer is still
+    /// streaming in the background — the strip that hosts the small thinking
+    /// dots. Wide enough for the three-dot wave to breathe, narrow enough to
+    /// read as the notch itself flexing, never as a second island.
+    private let busyExtension: CGFloat = 48
+
     /// The transient "entry kick" — the cursor's momentum, absorbed by the
     /// glass. Set to a small displacement in the direction of approach the
     /// instant the island opens, then released to zero on an underdamped
@@ -274,8 +280,18 @@ struct NotchIsland: View {
         model.isOpen(on: metrics.displayID)
     }
 
+    /// True when the panel is fully closed (on every display) but an Ask round
+    /// is still streaming detached — the resting notch shows the busy extension.
+    /// Gated on the GLOBAL `open`, not this display's `isOpen`: while the panel
+    /// is open anywhere the round is on screen there, and the other displays'
+    /// resting notches shouldn't claim background work.
+    private var busy: Bool {
+        !model.open && model.roundsInFlight > 0
+    }
+
     private var width: CGFloat {
-        isOpen ? model.openWidth : Tokens.notchWidth
+        if isOpen { return model.openWidth }
+        return Tokens.notchWidth + (busy ? busyExtension : 0)
     }
 
     private var bottomRadius: CGFloat {
@@ -305,7 +321,25 @@ struct NotchIsland: View {
                             )
                         )
                         .frame(width: 7, height: 7)
+                        // The busy extension shifts the island's center left by
+                        // half its width; push the lens dot back right so it
+                        // never drifts off the physical camera.
+                        .offset(x: busy ? busyExtension / 2 : 0, y: topBleed / 2)
+                }
+
+                // Background-activity dots, centered in the strip the busy
+                // extension opens up on the left: the notch flexes out and the
+                // same calm wave that marks thinking in the panel keeps marking
+                // the detached round while it streams. They live inside the
+                // island's own black zone — one material, one form — which is
+                // what makes the extension read as the notch working, not as a
+                // badge stuck beside it.
+                if busy {
+                    ThinkingDots(dot: 4, spacing: 5)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.leading, 13)
                         .offset(y: topBleed / 2)
+                        .transition(.opacity)
                 }
             }
             .frame(height: metrics.restHeight + topBleed)
@@ -384,10 +418,34 @@ struct NotchIsland: View {
         // top of the open spring's own per-frame layout work.
         .modifier(EntryKickEffect(tx: kick.tx, shear: kick.shear, squash: kick.squash).ignoredByLayout())
         .contentShape(NotchShape(bottomRadius: bottomRadius))
+        // Pin the right edge while the busy extension is out: the island stays
+        // centered in the canvas, so the extra width would otherwise grow half
+        // out of each side — pushing the whole form back left by half the
+        // extension keeps the right edge fused with the hardware notch and puts
+        // all the growth on the left. Sits BEFORE the isOpen animation so an
+        // open/close morph carries the slide on the same spring as the width.
+        .offset(x: busy ? -busyExtension / 2 : 0)
         // Spring expand (eased by how hard the cursor arrived — see `openSpring`);
-        // the collapse now settles on `closeSpring` (XII-108) so the shell drops
-        // back with a touch of gravity/rebound instead of a flat clamp.
-        .animation(isOpen ? openSpring : closeSpring, value: isOpen)
+        // the collapse settles on `closeSpring` (XII-108) so the shell drops back
+        // with a touch of gravity/rebound instead of a flat clamp — EXCEPT when
+        // the close lands on the extended busy rest. The rebound's undershoot
+        // briefly renders the island SMALLER than the hardware notch (shorter
+        // and narrower both); on a normal close that whole dip hides inside the
+        // black cutout, but the busy extension sits over visible screen, so the
+        // same dip reads as the "notch" shrinking away from the bezel. A busy
+        // close takes the overshoot-free settle instead.
+        .animation(isOpen ? openSpring : (busy ? busySettle : closeSpring), value: isOpen)
+        // The busy extension's own grow/retract (no open/close involved — e.g.
+        // the detached answer lands while the notch rests) must NOT bounce: an
+        // underdamped settle undershoots the rest width, and for a beat the
+        // drawn island is NARROWER than the hardware notch it's impersonating —
+        // physically impossible, and exactly the tell that breaks the illusion.
+        // A near-critically-damped, unhurried ease reads as the notch quietly
+        // relaxing back into the bezel. (A close that lands ON the extended
+        // rest still rides `closeSpring` via the isOpen animation above — its
+        // target there is 48pt wider than the notch, so its rebound never dips
+        // below the hardware width.)
+        .animation(busySettle, value: busy)
         // The kick fires on the open *edge*, reading the entry vector the hover
         // just recorded. Closing lets any residual kick decay on its own.
         .onChange(of: isOpen) { _, nowOpen in
@@ -455,6 +513,14 @@ struct NotchIsland: View {
         let s = entryEnergy
         return .spring(response: 0.50 - 0.06 * s,
                        dampingFraction: 0.82 - 0.10 * s)
+    }
+
+    /// The busy extension's grow/retract at rest: gentle and, crucially,
+    /// overshoot-free (dampingFraction ≥ 0.95 keeps the width from ever dipping
+    /// below the hardware notch — see the comment at the use site).
+    private var busySettle: Animation {
+        guard !reduceMotion else { return .easeOut(duration: 0.30) }
+        return .spring(response: 0.50, dampingFraction: 0.95)
     }
 
     /// The retract animation (XII-108): instead of a flat ease-out, the shell

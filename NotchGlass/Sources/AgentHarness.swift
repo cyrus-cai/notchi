@@ -486,6 +486,7 @@ struct AgentHarness {
             switch first.name {
             case "lookup_web", "$web_search", "exa_search", "keenable_search":
                 return L(isRepeatRound ? "agent.activity.refining" : "agent.activity.search")
+            case "ask_user": return L("agent.activity.askUser")
             case "read_clipboard": return L("agent.activity.clipboard")
             case "current_datetime": return L("agent.activity.time")
             case "calculate": return L("agent.activity.calc")

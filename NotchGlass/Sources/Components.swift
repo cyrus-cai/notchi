@@ -1094,16 +1094,20 @@ private struct ConfirmDialogButton: View {
     }
 }
 
-/// The calm three-dot "thinking" wave used while the AI works.
+/// The calm three-dot "thinking" wave used while the AI works. `dot`/`spacing`
+/// scale the wave down for tight homes (the resting notch's busy extension);
+/// the defaults are the original in-panel size.
 struct ThinkingDots: View {
+    var dot: CGFloat = 6
+    var spacing: CGFloat = 7
     @State private var phase = false
 
     var body: some View {
-        HStack(spacing: 7) {
+        HStack(spacing: spacing) {
             ForEach(0..<3, id: \.self) { i in
                 Circle()
                     .fill(Tokens.text2)
-                    .frame(width: 6, height: 6)
+                    .frame(width: dot, height: dot)
                     .scaleEffect(phase ? 1.0 : 0.82)
                     .opacity(phase ? 0.95 : 0.22)
                     .offset(y: phase ? -2 : 0)
@@ -1214,6 +1218,12 @@ struct AssistantTurnView: View {
     var baseFont: CGFloat = 15
     var color: Color = Tokens.text1
     var onInAppCopy: (() -> Void)? = nil
+    /// A clarifying question the model posed via the `ask_user` tool, still
+    /// waiting on the user — renders as an option card under the (possibly still
+    /// empty) answer. Non-nil only while this turn streams.
+    var pendingQuestion: NotchModel.PendingUserQuestion? = nil
+    /// The user tapped an option on the question card: (question id, option text).
+    var onChooseOption: ((UUID, String) -> Void)? = nil
 
     /// One opacity beat, shared by the wait-overlay fade so the handoff reads as
     /// part of the same calm rhythm rather than a separate flourish.
@@ -1226,12 +1236,6 @@ struct AssistantTurnView: View {
     /// unread. `readingIndex` is which source is currently shown; the timer below
     /// advances it, holding each title for `readingDwell` before the next.
     @State private var readingIndex = 0
-    /// True once the host currently on the line has been shown for a full
-    /// `readingDwell` (one clock tick). Until then the read cue is *held* even if
-    /// the answer has begun streaming, so a host never gets cut off mid-glance: the
-    /// answer waits for the current address to finish its dwell before it takes the
-    /// slot. Reset to false whenever the line advances to a new host.
-    @State private var currentHostShown = false
 
     /// The rotation clock. A Combine timer publisher (not a hand-rolled `Timer` +
     /// `RunLoop.add`): `.onReceive` runs its closure in the *current* view context,
@@ -1266,18 +1270,15 @@ struct AssistantTurnView: View {
     /// comes back whenever the answer is momentarily empty again between rounds.
     private var hasText: Bool { !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
-    /// Hold the read cue on screen even after the answer starts, while a host is
-    /// still finishing its dwell — so the answer doesn't snatch the slot before the
-    /// current address has been shown long enough to read. Only applies once there
-    /// are hosts to read (a search happened) and streaming is live; `hasText`-only
-    /// waits (no search) are unaffected.
-    private var readingHold: Bool {
-        streaming && !readingHosts.isEmpty && !currentHostShown
-    }
-
-    /// Show the wait overlay while streaming with no visible answer yet — or while
-    /// holding the read cue for the current host to finish its dwell.
-    private var showWait: Bool { streaming && (!hasText || readingHold) }
+    /// Show the wait overlay while streaming with no visible answer yet. The wait
+    /// yields the INSTANT real text lands — no grace period: the line renders on
+    /// top of the answer (it's an overlay), so any hold past the first tokens
+    /// double-exposes the two texts (the old `readingHold` kept a host name over
+    /// the streaming answer for up to a dwell). A host mid-glance just dissolves
+    /// into the answer on the shared fade. Suppressed while an `ask_user`
+    /// question card is up: the card IS the wait state then, and a "Waiting for
+    /// your choice…" line above it would just say it twice.
+    private var showWait: Bool { streaming && !hasText && pendingQuestion == nil }
 
     /// The distinct hosts to walk through, in first-seen order. `sources` is the
     /// URL-deduped list accumulated across *all* search rounds, so a later round
@@ -1303,11 +1304,7 @@ struct AssistantTurnView: View {
     /// address it's reading, in the same slot. Otherwise it's the live activity
     /// line, or the mood word. nil = nothing to show.
     private var waitLine: String? {
-        // Show the current host while actively reading, OR while holding it on
-        // screen for its dwell to complete after the answer began (`readingHold` —
-        // the activity label has been cleared by then, so `isReading` is false, but
-        // the address must stay put until it's been shown long enough).
-        if (isReading || readingHold), !readingHosts.isEmpty {
+        if isReading, !readingHosts.isEmpty {
             // Walk the DISTINCT hosts. The clock bumps `readingIndex` unbounded;
             // the modulo maps it onto the live distinct-host list (read fresh every
             // render, so hosts from a newer round are included), wrapping back to
@@ -1359,6 +1356,18 @@ struct AssistantTurnView: View {
                     .allowsHitTesting(false)
                 }
 
+            // The `ask_user` question card: the model has paused this answer to ask
+            // the user a multiple-choice question and is suspended until they pick
+            // (or the wait times out). Only while streaming — a settled turn can't
+            // be waiting on anyone.
+            if streaming, let pendingQuestion {
+                UserQuestionCard(question: pendingQuestion) { option in
+                    onChooseOption?(pendingQuestion.id, option)
+                }
+                .padding(.top, 2)
+                .transition(.opacity)
+            }
+
             // Source badge: when this answer was grounded by a web search, show a
             // compact, clickable "site + N" badge beneath it (XII-118). Only once
             // settled — a mid-stream badge would jump as rounds add sources.
@@ -1371,29 +1380,87 @@ struct AssistantTurnView: View {
         }
         .animation(.easeInOut(duration: Self.fade), value: showWait)
         .animation(.easeInOut(duration: 0.12), value: activity != nil)
-        // A clock tick means the host on the line has had its full dwell. Mark it
-        // shown (this lifts any `readingHold`, letting the answer take the slot);
-        // and if the cue is still up because the answer hasn't started, advance to
-        // the next host in the same tick so each host occupies exactly one dwell.
+        // The question card fades in when the model asks and out when the pick (or
+        // timeout) releases the round — same beat as the wait overlay's fade.
+        .animation(.easeInOut(duration: Self.fade), value: pendingQuestion)
+        // A clock tick means the host on the line has had its full dwell — advance
+        // to the next one so each host occupies exactly one dwell while the cue
+        // is up. (No hold once the answer starts: the wait yields immediately.)
         .onReceive(readingClock) { _ in
-            guard isReading || readingHold else { return }
-            if isReading {
-                // Answer not started yet → walk to the next host, which re-earns its
-                // own full dwell (so if the answer arrives during it, it's held too).
-                readingIndex += 1
-                currentHostShown = false
-            } else {
-                // Answer already streaming and we were holding: the current host has
-                // now had its dwell — release the hold so the answer takes the slot.
-                currentHostShown = true
-            }
+            guard isReading else { return }
+            readingIndex += 1
         }
         // Each time the read cue opens, restart the walk from the first host so a
-        // new search begins fresh rather than continuing a stale offset. The first
-        // host starts its dwell now (not yet "shown").
+        // new search begins fresh rather than continuing a stale offset.
         .onChange(of: isReading) { _, reading in
-            if reading { readingIndex = 0; currentHostShown = false }
+            if reading { readingIndex = 0 }
         }
+    }
+}
+
+/// The `ask_user` question card: the model paused mid-answer to ask one
+/// multiple-choice question, and the round is suspended until the user picks (or
+/// walks away and the wait times out). Quiet by design — a hairline-outlined card
+/// with the question on top and one tappable row per option, in the same visual
+/// family as the source popover: this is part of the answer's flow, not a modal
+/// demanding attention.
+struct UserQuestionCard: View {
+    let question: NotchModel.PendingUserQuestion
+    /// Called with the option's text when the user picks it.
+    var choose: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text(question.question)
+                .font(.sf(13, weight: .medium))
+                .foregroundStyle(Tokens.text1)
+                .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 5) {
+                // Options are de-duplicated by the tool before they get here, so
+                // the string itself is a safe ForEach id.
+                ForEach(question.options, id: \.self) { option in
+                    UserQuestionOptionRow(title: option) { choose(option) }
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.white.opacity(0.05))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+        )
+    }
+}
+
+/// One tappable option row on the question card. Full-width and left-aligned so
+/// the whole line is the target; brightens on hover like the other quiet controls.
+private struct UserQuestionOptionRow: View {
+    var title: String
+    var action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.sf(12.5))
+                .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(Color.white.opacity(hovering ? 0.13 : 0.07))
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.14), value: hovering)
     }
 }
 
@@ -2077,7 +2144,7 @@ struct SourcePopoverPanel: View {
 
     // Show at most this many rows; the rest scroll. ~18pt per row (11pt line +
     // 2pt padding top/bottom) plus the 7pt inter-row gap.
-    private static let visibleRows = 8
+    private static let visibleRows = 4
     private static let rowHeight: CGFloat = 18
     private static let rowSpacing: CGFloat = 7
 

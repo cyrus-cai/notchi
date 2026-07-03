@@ -64,6 +64,18 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.1.7",
+            date: "2026-07-03",
+            features: [
+                "The AI can ask a clarifying question — tap an option to answer.",
+                "Launch at login, in Settings → General.",
+            ],
+            improvements: [
+                "Hover the busy notch to get back to the streaming answer.",
+                "Voice tools like Typeless can now type into the prompt.",
+            ]
+        ),
+        Entry(
             version: "0.1.6",
             date: "2026-07-02",
             features: [
