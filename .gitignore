@@ -37,6 +37,11 @@ docs/
 # repo (they have no roadmap files), and its text describes the internal flow.
 scripts/check-roadmap.sh
 
+# Marketing video projects — local-only HyperFrames source + heavy binary
+# artifacts (PNG snapshots, mp3 SFX). Like docs/, these are promo assets that
+# don't belong in the app repo.
+videos/
+
 # Misc
 *.moved-aside
 *.pbxuser
