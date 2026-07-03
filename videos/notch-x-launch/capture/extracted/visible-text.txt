@@ -1,0 +1,41 @@
+NOTCH — 30s X launch promo
+
+PRODUCT
+Notch is a quiet panel that lives in the MacBook notch. You summon it by double-tapping the Option (⌥) key. You type one plain line, and it understands what you meant — without you choosing a mode:
+  • a question  → it answers (ask)
+  • a future time → it sets a reminder (remind)
+  • anything else → it saves a note (note)
+No app to open. No button to pick. The intent is recognized on-device the moment you stop typing.
+
+BRAND CHARACTER
+Quiet, confident, restrained. "Claude 风的底气" — the confidence to let three seconds pass with nothing happening. Empty desktop. The panel only acts when you do. Everything is dark glass on a calm desktop; the only motion is the panel's own real spring and the rhythm of typing.
+
+THE 30s STORY (hand-authored beat sheet — this is the spec)
+0–3s    Still. Clean desktop, the notch sitting quietly at the top. No cursor. Three seconds of nothing — that IS the statement.
+3–4s    Double-tap ⌥. The panel opens from the notch using its real spring (do not speed it up).
+4–10s   Type: what's the time difference between SF and Shanghai. Hands stop. ~1s pause → the panel recognizes it as a QUESTION, the AI answer fades in. [ask]
+10–13s  Answer holds, readable, ~2s. Then the panel collapses. Back to the clean desktop.
+13–14s  Summon the panel again.
+14–20s  Type: remind me to email the landlord at 6pm. Hands stop. Pause → recognized as a REMINDER, the "Added to Reminders" feedback fades in. [remind]
+20–22s  Feedback holds, readable. Panel collapses.
+22–23s  Third summon.
+23–28s  Type: cabin booking code 4471. Hands stop. Pause → recognized as a NOTE, "Added to Notes" fades in. [note]
+28–30s  The panel retracts gently into the notch. Back to the exact same clean desktop as the opening. End.
+
+GROUND TRUTH FROM THE SHIPPING APP (must match — verified in Swift source)
+- The panel does NOT slide down from the notch. It EXPANDS IN PLACE: width grows 192→540pt, bottom corner-radius grows 9→30pt on a spring (response 0.50, dampingFraction 0.82). Top corners stay square, flush to the screen top edge. Body content fades in via opacity transition.
+- Module/content spring: response 0.42, dampingFraction 0.82.
+- Close: content fades out first, then shell retracts on spring response 0.34, dampingFraction 0.68 (one soft settle).
+- Placeholder text: "Type anything…"
+- Prompt font: SF system, 16.5pt, typed text color rgba(255,255,255,0.96).
+- ASK answer: streams in, text color rgba(255,255,255,0.96), ~15pt.
+- REMIND feedback (EXACT): "Added to Reminders" — plain text, 12pt, color rgba(255,255,255,0.40), no time suffix, no icon, auto-dismiss after 1.7s.
+- NOTE feedback (EXACT): "Added to Notes" — plain text, 12pt, color rgba(255,255,255,0.40), no icon, auto-dismiss after 1.7s.
+- Glass: dark smoked glass (~rgba(0,0,0,0.55)) with heavy backdrop blur, faint white rim gradient (top transparent → bottom white@0.26), soft drop shadow (black@0.30, blur 9, y 5).
+- Panel open width 540pt; result width up to 600pt.
+
+VIDEO SPEC (locked with user)
+- 1920×1080, 16:9, silent — only subtle keyboard-typing SFX and panel open/close SFX. No music, no voiceover.
+- Desktop: clean CSS gradient (Claude-style), no real screenshot.
+- Reminder feedback: faithful to app — "Added to Reminders" (no "· 6:00 PM").
+- Panel open: faithful to app — expand-in-place spring, not a drop.

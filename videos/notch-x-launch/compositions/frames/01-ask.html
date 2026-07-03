@@ -1,0 +1,252 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+  </head>
+  <body>
+    <template>
+      <style>
+        /* ── Frame 01 — Stillness, then Ask ──────────────────────────────
+           Faithful reconstruction of the Notch panel. Geometry/glass/springs
+           from the shipping Swift source. Desktop + notch layer is identical
+           across all three frames (continuity). Style the root via #root. */
+
+        #root {
+          position: absolute;
+          inset: 0;
+          width: 1920px;
+          height: 1080px;
+          overflow: hidden;
+          font-family: Inter, system-ui, sans-serif;
+          -webkit-font-smoothing: antialiased;
+          text-rendering: geometricPrecision;
+        }
+
+        /* Desktop ground — a dedicated full-bleed clip (never on #root). Calm
+           near-black with a barely-there cool lift up top so the notch reads. */
+        #desk {
+          position: absolute;
+          inset: 0;
+          background:
+            radial-gradient(120% 85% at 50% -12%, #14151b 0%, #0c0d11 38%, #07070a 72%, #050506 100%);
+        }
+        /* A whisper of vignette to seat the frame — depth, not decoration. */
+        #desk::after {
+          content: "";
+          position: absolute;
+          inset: 0;
+          background: radial-gradient(80% 70% at 50% 42%, transparent 55%, rgba(0,0,0,0.28) 100%);
+          pointer-events: none;
+        }
+
+        /* The notch + panel: one object anchored top-center, flush to the
+           screen top edge (square top corners). Closed = 192px black pill,
+           open = 540px dark glass. */
+        #stage {
+          position: absolute;
+          top: 0;
+          left: 50%;
+          margin-left: -270px;     /* half of 540 layout box; margin, not transform */
+          width: 540px;
+          display: flex;
+          justify-content: center;
+        }
+        #shell {
+          position: relative;
+          width: 192px;            /* animated 192 → 540 on open */
+          height: 37px;            /* animated 37 → open height (grows to fit) */
+          margin: 0 auto;
+          border-radius: 0 0 9px 9px;   /* square top, rounded bottom (9 → 30) */
+          background: rgba(0,0,0,0.86);
+          box-shadow: 0 5px 9px rgba(0,0,0,0.30);
+          overflow: hidden;
+          will-change: width, height, border-radius;
+        }
+        /* Dark smoked glass body — visible only when open, fades in. */
+        #glass {
+          position: absolute;
+          inset: 0;
+          border-radius: inherit;
+          background: rgba(0,0,0,0.55);
+          backdrop-filter: blur(40px) saturate(170%);
+          -webkit-backdrop-filter: blur(40px) saturate(170%);
+          opacity: 0;
+        }
+        /* White rim: transparent top → white@26% bottom (IslandRim). */
+        #glass::before {
+          content: "";
+          position: absolute;
+          inset: 0;
+          border-radius: inherit;
+          padding: 0.9px;
+          background: linear-gradient(to bottom, rgba(255,255,255,0) 0%, rgba(255,255,255,0.08) 50%, rgba(255,255,255,0.26) 100%);
+          -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+          -webkit-mask-composite: xor;
+                  mask-composite: exclude;
+          pointer-events: none;
+        }
+        /* Opaque black hardware cap (the camera zone). */
+        #hw {
+          position: absolute;
+          top: 0; left: 0; right: 0;
+          height: 32px;
+          background: #000;
+          z-index: 3;
+        }
+        /* Content column, below the hardware cap. */
+        #body {
+          position: absolute;
+          top: 32px; left: 0; right: 0;
+          padding: 14px 22px 20px;
+          opacity: 0;
+          z-index: 2;
+        }
+        #promptRow {
+          display: flex;
+          align-items: baseline;
+          min-height: 30px;
+          font-size: 22px;          /* ~16.5pt scaled for 1080 */
+          line-height: 1.34;
+          letter-spacing: -0.01em;
+          color: rgba(255,255,255,0.96);
+          white-space: pre-wrap;
+          word-break: break-word;
+        }
+        #placeholder { color: rgba(255,255,255,0.38); }
+        #typed { color: rgba(255,255,255,0.96); }
+        #caret {
+          display: inline-block;
+          width: 2px;
+          height: 1.05em;
+          margin-left: 1px;
+          position: relative;
+          top: 3px;
+          background: rgba(255,255,255,0.92);
+          border-radius: 1px;
+        }
+        /* "— Ask" intent hint, white@40%, materializes (blur→0). */
+        #hint {
+          margin-left: 10px;
+          font-size: 18px;
+          color: rgba(255,255,255,0.40);
+          opacity: 0;
+          filter: blur(4px);
+          white-space: nowrap;
+        }
+        /* AI answer block, fades+rises in below the prompt. */
+        #answer {
+          margin-top: 14px;
+          font-size: 20px;
+          line-height: 1.42;
+          letter-spacing: -0.005em;
+          color: rgba(255,255,255,0.96);
+          opacity: 0;
+        }
+      </style>
+
+      <div id="root" data-composition-id="01-ask" data-width="1920" data-height="1080">
+        <div id="desk" class="clip" data-start="0" data-duration="13" data-track-index="0"></div>
+
+        <div id="stage" class="clip" data-start="0" data-duration="13" data-track-index="1">
+          <div id="shell" data-layout-allow-overflow>
+            <div id="glass"></div>
+            <div id="hw"></div>
+            <div id="body">
+              <div id="promptRow">
+                <span id="line"><span id="placeholder">Type anything…</span><span id="typed"></span></span><span id="caret"></span><span id="hint">— Ask</span>
+              </div>
+              <div id="answer">Shanghai is 15 hours ahead of San Francisco.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+      <script>
+        (function () {
+          const tl = gsap.timeline({ paused: true });
+
+          const QUERY = "what's the time difference between SF and Shanghai";
+
+          const shell = "#shell", glass = "#glass", body = "#body";
+          const placeholder = "#placeholder", typed = "#typed";
+          const caret = "#caret", hint = "#hint", answer = "#answer";
+
+          // ── Beat times (frame-local seconds) ──
+          const T_OPEN   = 3.0;    // panel summoned
+          const OPEN_DUR = 0.62;   // real open spring ~response 0.50 → ~0.62s settle
+          const T_TYPE   = 4.0;    // typing begins
+          const TYPE_END = 9.4;    // typing stops
+          const T_RECOG  = 10.3;   // recognition fires (after the ~0.9s pause)
+          const T_CLOSE  = 12.0;   // begins closing
+          const CLOSE_DUR = 0.5;
+
+          // Shell heights: closed pill, prompt-only open, prompt+answer open.
+          const H_CLOSED = 37, H_PROMPT = 112, H_ANSWER = 178;
+
+          // 1) Opening stillness — shell closed pill, nothing moves (0–3s).
+          //    Body is display:none while closed so its text isn't laid out
+          //    inside the 37px pill (matches the real app — empty when closed).
+          gsap.set(shell, { width: 192, height: H_CLOSED, borderRadius: "0px 0px 9px 9px" });
+          gsap.set(body, { display: "none" });
+          gsap.set([glass, body], { opacity: 0 });
+          gsap.set(placeholder, { opacity: 1 });
+          gsap.set([typed, caret], { opacity: 0 });
+          gsap.set(hint, { opacity: 0, filter: "blur(4px)" });
+          gsap.set(answer, { opacity: 0, y: 8 });
+
+          // 2) Panel expands in place (width + height + radius); body fades in.
+          //    Overdamped spring (damping 0.82 → no overshoot) ≈ long-tail decel.
+          tl.fromTo(shell,
+            { width: 192, height: H_CLOSED, borderRadius: "0px 0px 9px 9px" },
+            { width: 540, height: H_PROMPT, borderRadius: "0px 0px 30px 30px", duration: OPEN_DUR, ease: "power3.out" },
+            T_OPEN);
+          tl.set(body, { display: "block" }, T_OPEN);
+          tl.to([glass, body], { opacity: 1, duration: 0.34, ease: "power2.out" }, T_OPEN + 0.06);
+
+          // Caret on + deterministic blink to close.
+          tl.set(caret, { opacity: 1 }, T_OPEN + 0.30);
+          for (let t = T_OPEN + 0.30, i = 0; t < T_CLOSE; t += 0.53, i++) {
+            tl.set(caret, { opacity: i % 2 === 0 ? 1 : 0.15 }, t);
+          }
+
+          // 3) Type-on with caret (4.0 → 9.4s); placeholder gone.
+          tl.set(placeholder, { display: "none" }, T_TYPE);
+          tl.set(typed, { opacity: 1 }, T_TYPE);
+          const typeState = { n: 0 };
+          tl.to(typeState, {
+            n: QUERY.length,
+            duration: TYPE_END - T_TYPE,
+            ease: "none",
+            onUpdate: function () {
+              const el = document.querySelector(typed);
+              if (el) el.textContent = QUERY.slice(0, Math.round(typeState.n));
+            }
+          }, T_TYPE);
+          tl.set(typeState, { n: QUERY.length }, TYPE_END);
+          tl.call(() => { const el = document.querySelector(typed); if (el) el.textContent = QUERY; }, null, TYPE_END);
+
+          // 4) The sacred pause (9.4 → 10.3s): only the caret blinks.
+
+          // 5) Recognition fires: shell grows to fit; hint materializes, answer rises.
+          tl.to(shell, { height: H_ANSWER, duration: 0.42, ease: "power3.out" }, T_RECOG);
+          tl.to(hint, { opacity: 1, filter: "blur(0px)", duration: 0.42, ease: "power2.out", overwrite: "auto" }, T_RECOG);
+          tl.to(answer, { opacity: 1, y: 0, duration: 0.42, ease: "power2.out", overwrite: "auto" }, T_RECOG + 0.12);
+
+          // 6) Hold the read (11.0 → 12.0s) — still.
+
+          // 7) Close: content fades out first, then shell retracts.
+          tl.to([body, glass], { opacity: 0, duration: 0.26, ease: "power2.in" }, T_CLOSE);
+          tl.to(shell,
+            { width: 192, height: H_CLOSED, borderRadius: "0px 0px 9px 9px", duration: CLOSE_DUR, ease: "power3.inOut" },
+            T_CLOSE + 0.12);
+          // Body out of layout again once the panel has shut.
+          tl.set(body, { display: "none" }, T_CLOSE + 0.12 + CLOSE_DUR);
+
+          window.__timelines = window.__timelines || {};
+          window.__timelines["01-ask"] = tl;
+        })();
+      </script>
+    </template>
+  </body>
+</html>
