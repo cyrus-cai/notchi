@@ -137,7 +137,7 @@ enum Strings {
         "settings.back": "Back to prompt",
         "sidebar.model": "Model",
         "sidebar.search": "Search",
-        "sidebar.translation": "Translation",
+        "sidebar.tools": "Tools",
         "sidebar.general": "General",
         "sidebar.about": "About",
 
@@ -189,9 +189,10 @@ enum Strings {
         "conn.unavailable": "Test unavailable for this provider",
         "conn.unexpected": "Unexpected response",
 
-        // Translation section
+        // Tools section (translation prefs)
         "translation.pref1": "Primary language",
         "translation.pref2": "Secondary language",
+        "translation.hint": "Translate renders copied text in the primary language — or in the secondary when it's already in the primary.",
 
         // General section
         "general.showOn": "Show on",
@@ -326,7 +327,11 @@ enum Strings {
         "result.basedOnCopied": "Based on what you copied",
         "result.you": "You",
         "result.newConversation": "New conversation (←)",
+        "result.pin": "Pin — stays open when the cursor leaves (⌘P)",
+        "result.unpin": "Unpin (⌘P)",
         "result.copiedToClipboard": "Copied to clipboard",
+        "result.copyAnswer": "Copy answer",
+        "result.regenerate": "Regenerate",
         "result.copyToContinue": "Copy chat to continue in ChatGPT or Claude",
         "result.followUp": "Ask a follow-up…",
 
@@ -399,7 +404,7 @@ enum Strings {
         "settings.back": "返回输入",
         "sidebar.model": "模型",
         "sidebar.search": "搜索",
-        "sidebar.translation": "翻译",
+        "sidebar.tools": "工具",
         "sidebar.general": "通用",
         "sidebar.about": "关于",
 
@@ -451,6 +456,7 @@ enum Strings {
 
         "translation.pref1": "首选语言一",
         "translation.pref2": "首选语言二",
+        "translation.hint": "翻译时译成首选语言一；原文已是语言一时，译成语言二。",
 
         "general.showOn": "显示于",
         "general.placement.footer": "外接显示器会得到一个菜单栏高度的小岛。",
@@ -574,7 +580,11 @@ enum Strings {
         "result.basedOnCopied": "结合了你复制的内容",
         "result.you": "你",
         "result.newConversation": "新对话（←）",
+        "result.pin": "固定 —— 鼠标移开也不收起（⌘P）",
+        "result.unpin": "取消固定（⌘P）",
         "result.copiedToClipboard": "已复制到剪贴板",
+        "result.copyAnswer": "复制回答",
+        "result.regenerate": "重新回答",
         "result.copyToContinue": "复制对话，去 ChatGPT 或 Claude 接着聊",
         "result.followUp": "继续追问…",
 
@@ -639,7 +649,7 @@ enum Strings {
         "settings.back": "返回輸入",
         "sidebar.model": "模型",
         "sidebar.search": "搜尋",
-        "sidebar.translation": "翻譯",
+        "sidebar.tools": "工具",
         "sidebar.general": "一般",
         "sidebar.about": "關於",
 
@@ -691,6 +701,7 @@ enum Strings {
 
         "translation.pref1": "首選語言一",
         "translation.pref2": "首選語言二",
+        "translation.hint": "翻譯時譯成首選語言一；原文已是語言一時，譯成語言二。",
 
         "general.showOn": "顯示於",
         "general.placement.footer": "外接螢幕會得到一個選單列高度的小島。",
@@ -814,7 +825,11 @@ enum Strings {
         "result.basedOnCopied": "結合了你複製的內容",
         "result.you": "你",
         "result.newConversation": "新對話（←）",
+        "result.pin": "固定 —— 滑鼠移開也不收起（⌘P）",
+        "result.unpin": "取消固定（⌘P）",
         "result.copiedToClipboard": "已複製到剪貼簿",
+        "result.copyAnswer": "複製回答",
+        "result.regenerate": "重新回答",
         "result.copyToContinue": "複製對話，去 ChatGPT 或 Claude 接著聊",
         "result.followUp": "繼續追問…",
 

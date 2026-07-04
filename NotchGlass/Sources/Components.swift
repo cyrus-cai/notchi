@@ -1218,6 +1218,15 @@ struct AssistantTurnView: View {
     var baseFont: CGFloat = 15
     var color: Color = Tokens.text1
     var onInAppCopy: (() -> Void)? = nil
+    /// Re-run this answer's question for a fresh take. Non-nil only on the LAST
+    /// assistant turn — regenerating a mid-thread answer would orphan everything
+    /// after it, so earlier turns never offer it.
+    var onRegenerate: (() -> Void)? = nil
+    /// Copy the whole thread as portable context for ChatGPT/Claude. Non-nil only
+    /// on the last assistant turn: the handoff always carries the full thread, so
+    /// it's one button at the thread's tail, not one per turn. (It used to sit
+    /// beside the follow-up input; it lives here with the other answer actions now.)
+    var onContinueElsewhere: (() -> Void)? = nil
     /// A clarifying question the model posed via the `ask_user` tool, still
     /// waiting on the user — renders as an option card under the (possibly still
     /// empty) answer. Non-nil only while this turn streams.
@@ -1228,6 +1237,12 @@ struct AssistantTurnView: View {
     /// One opacity beat, shared by the wait-overlay fade so the handoff reads as
     /// part of the same calm rhythm rather than a separate flourish.
     private static let fade: Double = 0.18
+
+    /// True while the cursor is anywhere over this turn (answer text or footer).
+    /// Drives the footer's island-hover: the action icons rest nearly invisible
+    /// and surface together as one toolbar when the cursor enters the answer,
+    /// instead of each icon lighting up on its own.
+    @State private var turnHovered = false
 
     /// While the "Reading the results…" cue is up, the page titles are walked one
     /// at a time on a timer rather than snapping to the latest. A search round
@@ -1368,16 +1383,55 @@ struct AssistantTurnView: View {
                 .transition(.opacity)
             }
 
-            // Source badge: when this answer was grounded by a web search, show a
-            // compact, clickable "site + N" badge beneath it (XII-118). Only once
-            // settled — a mid-stream badge would jump as rounds add sources.
-            if !streaming && !sources.isEmpty {
-                SourceBadge(sources: sources,
-                            hoveredID: $hoveredSourceID,
-                            pendingClose: $sourceCloseWork)
-                    .padding(.top, 2)
+            // Settled footer: the source badge (when web-grounded, XII-118) plus a
+            // quiet toolbar of answer actions — copy · regenerate · continue in
+            // ChatGPT/Claude — in one row under the answer. Info on the left,
+            // actions in escalating order (take it → redo it → leave with it).
+            // Only once settled — a mid-stream badge would jump as rounds add
+            // sources, and copying/regenerating half an answer isn't useful. The
+            // action icons share `turnHovered` so they surface together (see
+            // `AnswerFooterButton`).
+            if !streaming && (hasText || !sources.isEmpty) {
+                HStack(spacing: 2) {
+                    if !sources.isEmpty {
+                        SourceBadge(sources: sources,
+                                    hoveredID: $hoveredSourceID,
+                                    pendingClose: $sourceCloseWork)
+                            .padding(.trailing, 6)
+                    }
+                    if hasText {
+                        AnswerFooterButton(icon: "doc.on.doc",
+                                           help: L("result.copyAnswer"),
+                                           rowHovered: turnHovered,
+                                           confirms: true) {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(
+                                text.trimmingCharacters(in: .whitespacesAndNewlines),
+                                forType: .string
+                            )
+                            onInAppCopy?()
+                        }
+                    }
+                    if let onRegenerate {
+                        AnswerFooterButton(icon: "arrow.clockwise",
+                                           help: L("result.regenerate"),
+                                           rowHovered: turnHovered) {
+                            onRegenerate()
+                        }
+                    }
+                    if let onContinueElsewhere {
+                        AnswerFooterButton(icon: "square.on.square.dashed",
+                                           help: L("result.copyToContinue"),
+                                           rowHovered: turnHovered,
+                                           confirms: true) {
+                            onContinueElsewhere()
+                        }
+                    }
+                }
+                .padding(.top, 2)
             }
         }
+        .onHover { turnHovered = $0 }
         .animation(.easeInOut(duration: Self.fade), value: showWait)
         .animation(.easeInOut(duration: 0.12), value: activity != nil)
         // The question card fades in when the model asks and out when the pick (or
@@ -2030,6 +2084,57 @@ private struct CodeBlockView: View {
                 .animation(.easeOut(duration: 0.15), value: copied)
             }
             .onHover { hovering = $0 }
+    }
+}
+
+/// One ghost icon in a settled answer's footer toolbar — copy, regenerate, and
+/// continue-elsewhere all share this recipe. The copy affordance exists because
+/// SwiftUI selection can't cross the per-block `Text` views the answer renders
+/// through — a drag stops at every block edge, so multi-line copy needs one tap.
+///
+/// Island-hover in three levels: nearly invisible at rest, the whole row
+/// surfaces together when the cursor enters the owning turn (`rowHovered`), and
+/// the pointed-at button alone goes full — so the toolbar reads as one unit on
+/// approach, not scattered dots that light up one by one. `confirms` flips the
+/// icon to a checkmark for a beat after the tap, for copy-style actions whose
+/// effect is otherwise invisible; regenerate skips it (the answer visibly
+/// re-streaming IS the feedback).
+private struct AnswerFooterButton: View {
+    let icon: String
+    let help: String
+    /// True while the cursor is anywhere over the owning turn — brightens the
+    /// whole footer as one unit (owned by `AssistantTurnView`).
+    let rowHovered: Bool
+    var confirms: Bool = false
+    let action: () -> Void
+
+    @State private var hovering = false
+    @State private var confirmed = false
+
+    var body: some View {
+        Button {
+            action()
+            guard confirms else { return }
+            withAnimation(.easeOut(duration: 0.15)) { confirmed = true }
+            Task {
+                try? await Task.sleep(for: .seconds(1.5))
+                withAnimation(.easeOut(duration: 0.25)) { confirmed = false }
+            }
+        } label: {
+            Image(systemName: confirmed ? "checkmark" : icon)
+                .font(.system(size: 11, weight: .regular))
+                .foregroundStyle(confirmed ? Tokens.text2 : Tokens.text3)
+                .frame(width: 22, height: 22)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        // Rest → row hover → direct hover/checkmark: 0.25 → 0.7 → 1.
+        .opacity(confirmed || hovering ? 1.0 : rowHovered ? 0.7 : 0.25)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.18), value: hovering)
+        .animation(.easeOut(duration: 0.18), value: rowHovered)
+        .animation(.easeOut(duration: 0.15), value: confirmed)
+        .help(help)
     }
 }
 

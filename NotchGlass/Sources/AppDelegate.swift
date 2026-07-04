@@ -436,7 +436,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let id = screen.displayID else { continue }
             live.insert(id)
             if let existing = panels[id] {
-                position(existing, on: screen)
+                position(existing, on: screen, id: id)
             } else {
                 panels[id] = makePanel(on: screen, id: id)
             }
@@ -492,7 +492,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // only the glass form itself is interactive.
         panel.contentView = hosting
 
-        position(panel, on: screen)
+        position(panel, on: screen, id: id)
         panel.orderFrontRegardless()
         return panel
     }
@@ -500,14 +500,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Center the canvas horizontally and flush its top edge to the very top of
     /// the screen, so the SwiftUI notch sits exactly where the hardware notch
     /// (or the menu bar, on external screens) is.
-    private func position(_ panel: NSPanel, on screen: NSScreen) {
+    private func position(_ panel: NSPanel, on screen: NSScreen, id: CGDirectDisplayID) {
         let full = screen.frame
         let x = full.midX - canvasWidth / 2
         // AppKit's origin is bottom-left; place the canvas so its top aligns
         // with the screen's top edge.
         let y = full.maxY - canvasHeight
-        panel.setFrame(NSRect(x: x, y: y, width: canvasWidth, height: canvasHeight),
-                       display: true)
+        let frame = NSRect(x: x, y: y, width: canvasWidth, height: canvasHeight)
+        panel.setFrame(frame, display: true)
+        // Tell the model where this canvas sits on screen and how tall its
+        // resting notch is — the ground-truth pointer test that filters
+        // synthetic hover enter/exit events needs both (see
+        // `NotchModel.pointerInsideIsland`). Same formula as the metrics
+        // injection in `makePanel`.
+        let hasNotch = screen.safeAreaInsets.top > 0
+        model.registerPanelFrame(
+            frame,
+            restHeight: hasNotch ? screen.safeAreaInsets.top + 1 : Self.menuBarHeight(of: screen),
+            for: id)
     }
 
     /// The resting-zone height for a notch-less screen: match the menu bar so

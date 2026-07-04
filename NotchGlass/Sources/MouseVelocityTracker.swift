@@ -60,6 +60,22 @@ final class MouseVelocityTracker {
         }
     }
 
+    /// Whether the cursor has genuinely moved within the last `window` seconds
+    /// (net displacement above `threshold` points). This is what tells a hover
+    /// EXIT apart by cause: "the pointer crossed the boundary" (it was moving —
+    /// fold the panel) versus "the boundary shrank away from a parked pointer"
+    /// (⌘N folding a tall thread back to the short idle prompt, a list
+    /// collapsing — the user didn't leave; don't fold). Move monitors only fire
+    /// on movement, so a parked cursor simply has no recent samples.
+    func cursorMoved(within window: TimeInterval, threshold: CGFloat = 3) -> Bool {
+        let now = CACurrentMediaTime()
+        let recent = samples.filter { now - $0.t <= window }
+        guard let first = recent.first, let last = recent.last else { return false }
+        let dx = last.p.x - first.p.x
+        let dy = last.p.y - first.p.y
+        return (dx * dx + dy * dy).squareRoot() >= threshold
+    }
+
     /// The cursor's velocity over the last ~120ms, in *SwiftUI* orientation
     /// (+x right, +y down), points/second. `.zero` when there isn't enough
     /// recent movement to read a direction — which downstream renders as the

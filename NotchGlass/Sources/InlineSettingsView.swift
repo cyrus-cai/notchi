@@ -132,22 +132,22 @@ struct InlineSettingsView: View {
     /// The left-hand category list — the point of the column is that the next
     /// setting gets a home without redesigning the panel.
     enum Section: String, CaseIterable, Identifiable {
-        case model = "Model"             // provider, API key, model override
-        case search = "Search"           // optional Exa web-search key
-        case translation = "Translation" // preferred target language for Translate
-        case general = "General"         // app-level toggles (display placement, Dock icon)
-        case about = "About"             // version + self-update
+        case model = "Model"     // provider, API key, model override
+        case search = "Search"   // search backend + its key
+        case tools = "Tools"     // quick-tool chips + per-tool prefs (translation languages)
+        case general = "General" // app-level toggles (shortcut, placement, Dock icon…)
+        case about = "About"     // version + self-update
         var id: String { rawValue }
 
         /// The sidebar label, localized. The raw value stays English (a stable
         /// identity); this is what the user actually reads.
         var title: String {
             switch self {
-            case .model:       return L("sidebar.model")
-            case .search:      return L("sidebar.search")
-            case .translation: return L("sidebar.translation")
-            case .general:     return L("sidebar.general")
-            case .about:       return L("sidebar.about")
+            case .model:   return L("sidebar.model")
+            case .search:  return L("sidebar.search")
+            case .tools:   return L("sidebar.tools")
+            case .general: return L("sidebar.general")
+            case .about:   return L("sidebar.about")
             }
         }
     }
@@ -237,13 +237,17 @@ struct InlineSettingsView: View {
                         case .keenable: keenableKeyRow
                         case .exa:      exaKeyRow
                         }
-                    case .translation:
+                    case .tools:
+                        // Which quick tools appear at all, then the knobs of the
+                        // individual tools (today: Translate's language pair).
+                        quickToolsRow
                         translationLanguageRow
                     case .general:
-                        appLanguageRow
+                        // How you summon it → where it appears → what language it
+                        // speaks → how it sits in the system.
                         shortcutRow
-                        quickToolsRow
                         placementRow
+                        appLanguageRow
                         dockIconRow
                         launchAtLoginRow
                     case .about:
@@ -445,8 +449,10 @@ struct InlineSettingsView: View {
                             .disabled(envOverride)
                             // A freshly-pasted key unlocks the live model list.
                             .onSubmit { Task { await refreshModels() } }
-                            // Editing the key invalidates the last connectivity verdict.
-                            .onChange(of: apiKey) { testResult = nil }
+                            // Editing the key invalidates the last connectivity verdict —
+                            // and counts as typing, so a pointer that drifted off the
+                            // island can't fold the panel mid-paste.
+                            .onChange(of: apiKey) { testResult = nil; model.noteUserTyping() }
                     } else {
                         // Saved state: a masked, read-only summary — the full key
                         // never sits on screen where a screenshot would catch it.
@@ -580,6 +586,8 @@ struct InlineSettingsView: View {
                             .foregroundStyle(Tokens.text1)
                             .disabled(keenableEnvOverride)
                             .onSubmit { saveKeenableKey() }
+                            // Typing here must hold off the hover-leave fold too.
+                            .onChange(of: keenableKey) { model.noteUserTyping() }
                     } else {
                         Text(maskedKeenableKey)
                             .font(.sf(13))
@@ -674,6 +682,8 @@ struct InlineSettingsView: View {
                             .foregroundStyle(Tokens.text1)
                             .disabled(exaEnvOverride)
                             .onSubmit { saveExaKey() }
+                            // Typing here must hold off the hover-leave fold too.
+                            .onChange(of: exaKey) { model.noteUserTyping() }
                     } else {
                         Text(maskedExaKey)
                             .font(.sf(13))
@@ -1083,75 +1093,6 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// Which clipboard quick-tools (Summarize / Translate / Proofread …) appear as
-    /// one-tap chips when text is copied (XII-111). A compact dropdown matching the
-    /// other General rows: the pill shows a summary ("3 enabled"); opening it lists
-    /// every tool with a checkmark on the enabled ones. Selecting toggles a tool;
-    /// the last enabled one can't be turned off (an empty row would strip the
-    /// feature with no way back from here). Changes apply to the next copied clip.
-    private var quickToolsRow: some View {
-        settingRow(label: L("general.quickTools")) {
-            Button {
-                quickToolsOpen.toggle()
-            } label: {
-                HStack(spacing: 7) {
-                    Text(L("general.quickTools.count", model.enabledClipboardPresets.count))
-                        .font(.sf(13))
-                        .foregroundStyle(Tokens.text1)
-                        .lineLimit(1)
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(Tokens.text3)
-                }
-                .padding(.leading, 11)
-                .padding(.trailing, 9)
-                .frame(height: 30)
-                .background(
-                    RoundedRectangle(cornerRadius: 9)
-                        .fill(.white.opacity(quickToolsOpen ? 0.10 : 0.06))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 9)
-                        .strokeBorder(.white.opacity(quickToolsOpen ? 0.20 : 0.12), lineWidth: 0.5)
-                )
-                .contentShape(RoundedRectangle(cornerRadius: 9))
-            }
-            .buttonStyle(.plain)
-            .fixedSize()
-            // A popover (not a native Menu) so checking a tool keeps the list open —
-            // the user can toggle several in a row; clicking outside dismisses it.
-            .popover(isPresented: $quickToolsOpen, arrowEdge: .bottom) {
-                quickToolsChecklist
-            }
-        }
-    }
-
-    /// The checklist shown inside the quick-tools popover: one row per tool, a leading
-    /// checkmark on the enabled ones, the whole row tappable to toggle in place (the
-    /// popover stays open). The last enabled tool is disabled so the set can't be
-    /// emptied with no way back.
-    private var quickToolsChecklist: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ForEach(NotchModel.ClipboardPreset.allCases) { preset in
-                let on = model.enabledClipboardPresets.contains(preset)
-                let isLast = on && model.enabledClipboardPresets.count == 1
-                QuickToolRow(label: preset.label, on: on, disabled: isLast) {
-                    model.setClipboardPreset(preset, enabled: !on)
-                }
-            }
-        }
-        .padding(.vertical, 6)
-        .preferredColorScheme(.dark)
-        // Replace the popover's OWN window backing — not just paint a layer inside
-        // it — so no light system chrome shows around the edges (that was the white
-        // rim on the earlier opaque version). The presentation background uses the
-        // SAME glass the panel uses (`nativeGlass`) over a soft dark veil for text
-        // legibility, so the popover reads as a piece of the same surface floated
-        // out. `.presentationBackground` needs macOS 13.3+; older systems fall back
-        // to the in-content glass layer.
-        .modifier(GlassPopoverBackground())
-    }
-
     /// The global summon shortcut. The chip shows the current trigger — the
     /// default reads as ⌥⌥ (double-tap ⌥). Click it to record a chord instead; the
     /// adjacent menu toggles it off (hover-only summon) or resets to double-tap ⌥.
@@ -1285,7 +1226,76 @@ struct InlineSettingsView: View {
         Localization.shared.language = newValue
     }
 
-    // MARK: - Translation
+    // MARK: - Tools
+
+    /// Which clipboard quick-tools (Summarize / Translate / Proofread …) appear as
+    /// one-tap chips when text is copied (XII-111). A compact dropdown matching the
+    /// other rows: the pill shows a summary ("3 enabled"); opening it lists
+    /// every tool with a checkmark on the enabled ones. Selecting toggles a tool;
+    /// the last enabled one can't be turned off (an empty row would strip the
+    /// feature with no way back from here). Changes apply to the next copied clip.
+    private var quickToolsRow: some View {
+        settingRow(label: L("general.quickTools")) {
+            Button {
+                quickToolsOpen.toggle()
+            } label: {
+                HStack(spacing: 7) {
+                    Text(L("general.quickTools.count", model.enabledClipboardPresets.count))
+                        .font(.sf(13))
+                        .foregroundStyle(Tokens.text1)
+                        .lineLimit(1)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Tokens.text3)
+                }
+                .padding(.leading, 11)
+                .padding(.trailing, 9)
+                .frame(height: 30)
+                .background(
+                    RoundedRectangle(cornerRadius: 9)
+                        .fill(.white.opacity(quickToolsOpen ? 0.10 : 0.06))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 9)
+                        .strokeBorder(.white.opacity(quickToolsOpen ? 0.20 : 0.12), lineWidth: 0.5)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 9))
+            }
+            .buttonStyle(.plain)
+            .fixedSize()
+            // A popover (not a native Menu) so checking a tool keeps the list open —
+            // the user can toggle several in a row; clicking outside dismisses it.
+            .popover(isPresented: $quickToolsOpen, arrowEdge: .bottom) {
+                quickToolsChecklist
+            }
+        }
+    }
+
+    /// The checklist shown inside the quick-tools popover: one row per tool, a leading
+    /// checkmark on the enabled ones, the whole row tappable to toggle in place (the
+    /// popover stays open). The last enabled tool is disabled so the set can't be
+    /// emptied with no way back.
+    private var quickToolsChecklist: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(NotchModel.ClipboardPreset.allCases) { preset in
+                let on = model.enabledClipboardPresets.contains(preset)
+                let isLast = on && model.enabledClipboardPresets.count == 1
+                QuickToolRow(label: preset.label, on: on, disabled: isLast) {
+                    model.setClipboardPreset(preset, enabled: !on)
+                }
+            }
+        }
+        .padding(.vertical, 6)
+        .preferredColorScheme(.dark)
+        // Replace the popover's OWN window backing — not just paint a layer inside
+        // it — so no light system chrome shows around the edges (that was the white
+        // rim on the earlier opaque version). The presentation background uses the
+        // SAME glass the panel uses (`nativeGlass`) over a soft dark veil for text
+        // legibility, so the popover reads as a piece of the same surface floated
+        // out. `.presentationBackground` needs macOS 13.3+; older systems fall back
+        // to the in-content glass layer.
+        .modifier(GlassPopoverBackground())
+    }
 
     /// Pref1 picker — the primary language. Writing through `model.translationPref1`
     /// publishes the change so the chip label re-renders immediately.
@@ -1321,6 +1331,13 @@ struct InlineSettingsView: View {
                     }
                 }
             }
+            // The direction rule in one line — without it two language pickers
+            // read as a mystery (when does the secondary ever apply?).
+            Text(L("translation.hint"))
+                .font(.sf(11))
+                .foregroundStyle(Tokens.text4)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 2)
         }
     }
 
@@ -1457,7 +1474,7 @@ struct InlineSettingsView: View {
             }
         }
         .font(.sf(11))
-        .foregroundStyle(Tokens.text4)
+        .foregroundStyle(Tokens.text3)
         .fixedSize(horizontal: false, vertical: true)
         .padding(.top, 2)
     }

@@ -64,6 +64,18 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.1.8",
+            date: "2026-07-04",
+            features: [
+                "Pin an answer to keep it open when your cursor leaves — click the pin, or press ⌘P.",
+                "Copy answer and Regenerate buttons now sit in the answer's footer.",
+            ],
+            improvements: [
+                "Reopening the notch returns you to the page you left, not a blank prompt.",
+                "Typing in Settings no longer folds the panel when the pointer drifts off the island.",
+            ]
+        ),
+        Entry(
             version: "0.1.7",
             date: "2026-07-03",
             features: [

@@ -19,27 +19,11 @@ struct ContentView: View {
 
     var body: some View {
         ZStack(alignment: .top) {
-            // Transparent backdrop. While the panel is open, a faint scrim over
-            // the whole canvas catches outside-clicks to dismiss (like the web
-            // "click outside to close"); while closed it's fully click-through.
-            if model.isOpen(on: metrics.displayID) {
-                Color.black.opacity(0.001)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        // A tap outside the island while the Clear confirmation is
-                        // armed cancels just the dialog — it shouldn't also blow the
-                        // whole panel shut. Closing mid-request is fine: the answer
-                        // keeps streaming detached and lands in Recent.
-                        if model.confirmingClear {
-                            withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
-                                model.confirmingClear = false
-                            }
-                        } else {
-                            model.beginClose(sequenced: !reduceMotion)
-                        }
-                    }
-            }
-
+            // No click-outside scrim anymore: leaving the island already folds the
+            // panel (see `collapseOnLeave` — leave = fold, restored on re-hover),
+            // so by the time the pointer reaches anything outside, the panel is
+            // gone. Removing the scrim also stops it swallowing the first click
+            // on whatever sits under the canvas.
             NotchIsland(model: model)
                 // Rebuild the island's subtree on an App Language switch so every
                 // localized string re-evaluates at once. The island is collapsed
@@ -113,6 +97,18 @@ struct ContentView: View {
                model.mode != .idle {
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                     model.newChat()
+                }
+                return true
+            }
+            // ⌘P pins/unpins the answer on screen — the keyboard twin of the
+            // top-right pin button. A pinned answer stays open when the pointer
+            // leaves (see NotchModel.collapseOnLeave). Only over a result (there's
+            // nothing to pin on the idle prompt / settings), so ⌘P falls through to
+            // the system everywhere else. keyCode 35 is P.
+            if event.keyCode == 35, event.modifierFlags.contains(.command),
+               model.mode == .result, !model.showSettings, !model.showWhatsNew {
+                withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                    model.toggleAnswerPin()
                 }
                 return true
             }
@@ -479,10 +475,23 @@ struct NotchIsland: View {
         // the height, and it should ride the same coherent motion.
         .animation(.spring(response: 0.42, dampingFraction: 0.78), value: model.showHistory)
         .animation(.spring(response: 0.42, dampingFraction: 0.78), value: model.showHistoryFilter)
+        // Publish the island's live frame (canvas-window space) so the model can
+        // verify hover events against the pointer's real position — the raw
+        // enter/exit stream includes artifacts synthesized by this very frame
+        // animating (see `NotchModel.pointerInsideIsland`). A plain var write on
+        // the model, deliberately not @Published: this fires per frame during
+        // the open/close springs.
+        .background(GeometryReader { proxy in
+            Color.clear
+                .onAppear { model.registerIslandFrame(proxy.frame(in: .global), for: metrics.displayID) }
+                .onChange(of: proxy.frame(in: .global)) { _, frame in
+                    model.registerIslandFrame(frame, for: metrics.displayID)
+                }
+        })
         .onHover { inside in
             if inside {
-                model.openPanel(on: metrics.displayID,
-                                velocity: MouseVelocityTracker.shared.entryVelocity())
+                model.hoverEntered(on: metrics.displayID,
+                                   velocity: MouseVelocityTracker.shared.entryVelocity())
             } else {
                 model.collapseOnLeave(from: metrics.displayID, sequenced: !reduceMotion)
             }
@@ -525,12 +534,16 @@ struct NotchIsland: View {
 
     /// The retract animation (XII-108): instead of a flat ease-out, the shell
     /// settles on a slightly-underdamped spring so it reads as an object dropping
-    /// back into the bezel with a touch of gravity/rebound, not a clean clamp. The
-    /// damping is below 1 (a little overshoot) but high enough that it's one soft
-    /// settle, not a visible bob. Reduce-motion keeps the old flat, motionless ease.
+    /// back into the bezel with a touch of gravity/rebound, not a clean clamp.
+    /// Paced to breathe with the open (response 0.50): the original 0.34 retract
+    /// was nearly twice as fast as the unfurl, and with leave-to-fold making the
+    /// close a constant companion it read as a harsh clamp — too few frames for
+    /// the motion to be legible at all. The slower period also lets the rebound
+    /// actually READ as physics; damping comes up a touch so the longer spring
+    /// stays one soft settle, not a wobble. Reduce-motion keeps the flat ease.
     private var closeSpring: Animation {
         guard !reduceMotion else { return .easeOut(duration: 0.30) }
-        return .spring(response: 0.34, dampingFraction: 0.68)
+        return .spring(response: 0.46, dampingFraction: 0.76)
     }
 
     /// Seed the kick from the entry vector, then release it. Two writes on

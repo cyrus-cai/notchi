@@ -222,6 +222,13 @@ final class NotchModel: ObservableObject {
     @Published var activeDisplay: CGDirectDisplayID? = nil
     @Published var mode: Mode = .idle
 
+    /// The user pinned the current answer's card (the pin button in `resultHeader`).
+    /// While set, `collapseOnLeave` bails: the pointer leaving no longer folds the
+    /// panel, so the answer stays parked open for reading. Scoped to the answer on
+    /// screen — cleared whenever the page changes underneath it (`newChat`, a fresh
+    /// `submit`, a `fullClose`), so a pin never leaks onto the next conversation.
+    @Published var isAnswerPinned = false
+
     /// True while the AI is in its pre-stream *thinking* phase — from the moment a
     /// question is submitted until the first answer token lands (or the round ends).
     /// Drives the 3 thinking dots shown beside the physical notch. Deliberately
@@ -288,6 +295,20 @@ final class NotchModel: ObservableObject {
             // from the newest item. `isRecallingText` shields the recall's own
             // fill from tripping this (it writes `text` too).
             if !isRecallingText { historyRecallIndex = nil }
+            // The recent list only renders over an empty prompt, so text arriving
+            // — typed OR an ↑ recall fill — folds it visually. Close it for REAL
+            // (state, not just the render gate): a hidden-but-true `showHistory`
+            // with a stale highlight would otherwise steal Enter from the visible
+            // text (`historyConfirmHighlighted`) and pop the list back open,
+            // highlight intact, the moment the box empties again.
+            if showHistory, hasText {
+                showHistory = false
+                highlightedHistoryIndex = nil
+            }
+            // Feed the "actively typing" signal that holds off hover-leave folding
+            // (the one exception to leave-collapses). Empty writes don't count —
+            // submit/clear set "" programmatically and mustn't read as typing.
+            if !isRecallingText, !text.isEmpty { noteUserTyping() }
             scheduleDueDetection()
             scheduleClassification()
         }
@@ -301,6 +322,177 @@ final class NotchModel: ObservableObject {
     /// paths (`newChat`) never fill this, so backing out still lands on a blank
     /// prompt. Consumed on restore so it hands back exactly once.
     private var savedIdleDraft: String = ""
+
+    // MARK: - Parked session (close = park, reopen soon = restore)
+
+    /// The page the user was on when the panel last folded, parked so a return
+    /// within `parkedSessionTTL` lands exactly where they left — the thread they
+    /// were reading, the follow-up they'd half-typed, the settings page mid-key.
+    /// The interaction rule this implements: **closing gestures navigate, they
+    /// never destroy** — only ← / ⌘N (`newChat`) and time throw a session away.
+    /// After the TTL the context has likely moved on, so a late reopen falls back
+    /// to the fresh idle prompt (the conversation stays one tap away in Recent).
+    private struct ParkedSession {
+        var mode: Mode
+        var turns: [Turn]
+        var text: String
+        var threadHistoryID: UUID
+        var showSettings: Bool
+        var showWhatsNew: Bool
+        var showHistory: Bool
+        var closedAt: Date
+    }
+
+    private var parkedSession: ParkedSession? = nil
+
+    /// How long a parked session stays restorable. "A few minutes" — long enough
+    /// to answer a Slack message and come back, short enough that a reopen after
+    /// real absence reads as a fresh start, not a haunting.
+    static let parkedSessionTTL: TimeInterval = 300
+
+    /// When the user last actually typed (prompt, follow-up, ⌘F filter, or a
+    /// settings key field). This is the ONE exception to leave-collapses: while
+    /// the keyboard is engaged, the pointer's position isn't an attention signal,
+    /// so hover-leave defers folding until `typingGrace` after the last keystroke.
+    private var lastEditAt: Date = .distantPast
+
+    /// How long after the last keystroke the user still counts as "typing".
+    static let typingGrace: TimeInterval = 3.0
+
+    /// The armed "leave watch" — one small state machine covering every case
+    /// where a fold is warranted but not NOW:
+    ///   · the pointer left mid-typing → fold once the keystrokes stop;
+    ///   · an exit event was spurious (pointer still on the island) → re-verify
+    ///     after the animation settles;
+    ///   · the island SHRANK away from a parked pointer (⌘N folding a tall
+    ///     thread to the short idle prompt, a list collapsing…) → the user
+    ///     didn't leave; fold only once the pointer genuinely moves off.
+    /// It polls rather than waiting for events because AppKit's tracking state
+    /// is desynced in exactly these situations — the event that would have
+    /// told us may never come. Cancelled by every open path (a hover re-entry
+    /// or keyboard summon supersedes any pending fold).
+    private struct LeaveWatch {
+        var display: CGDirectDisplayID?
+        var sequenced: Bool
+        /// Where the mouse was when the watch was armed. A boundary-shrink
+        /// leave folds only after real displacement from here.
+        var armedMouse: CGPoint
+        /// True when the pointer genuinely crossed out (a moving-cursor exit):
+        /// fold as soon as the typing grace clears, no displacement required.
+        var movedOut: Bool
+    }
+    private var leaveWatch: LeaveWatch?
+    private var leaveRecheckTask: Task<Void, Never>?
+
+    private func cancelLeaveWatch() {
+        leaveRecheckTask?.cancel()
+        leaveRecheckTask = nil
+        leaveWatch = nil
+    }
+
+    /// (Re-)arm the watch and schedule its next re-check.
+    private func armLeaveWatch(_ watch: LeaveWatch, after delay: TimeInterval) {
+        leaveWatch = watch
+        leaveRecheckTask?.cancel()
+        leaveRecheckTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(max(0, delay) * 1_000_000_000) + 50_000_000)
+            guard !Task.isCancelled, let self else { return }
+            self.recheckLeaveWatch()
+        }
+    }
+
+    /// Mark the user as actively typing. Called from `text`/`historySearchQuery`
+    /// didSets and from view-local fields (settings API keys) via their onChange.
+    func noteUserTyping() {
+        lastEditAt = Date()
+    }
+
+    // MARK: - Hover ground truth
+
+    /// AppKit synthesizes tracking-area enter/exit events for a STATIONARY
+    /// pointer whenever the tracked view's geometry changes underneath it — and
+    /// the island's geometry animates on every open/close. Trusting those raw
+    /// events produced a feedback loop: a spurious exit during the open spring
+    /// folds the panel, the collapse sweeps the boundary back under the pointer
+    /// and fires an enter, which re-opens it — the island visibly flaps. So
+    /// hover events are treated as *hints* and verified against the pointer's
+    /// real position before acting: `panelScreenFrames` (registered by
+    /// AppDelegate, screen coords, bottom-left origin) plus `islandFrames`
+    /// (published by the view, SwiftUI window space, top-left origin) locate
+    /// the island on screen; `NSEvent.mouseLocation` is the ground truth.
+    private var panelScreenFrames: [CGDirectDisplayID: CGRect] = [:]
+    private var islandFrames: [CGDirectDisplayID: CGRect] = [:]
+    /// Per-display resting-notch height (the screen's safe-area inset, or the
+    /// menu-bar height on notch-less screens) — registered alongside the panel
+    /// frame so the resting notch rect can be computed without live layout.
+    private var restHeights: [CGDirectDisplayID: CGFloat] = [:]
+
+    func registerPanelFrame(_ frame: CGRect, restHeight: CGFloat, for display: CGDirectDisplayID) {
+        panelScreenFrames[display] = frame
+        restHeights[display] = restHeight
+    }
+
+    /// Deliberately a plain var write — this fires per frame during the island's
+    /// springs, and publishing it would invalidate the whole tree each frame.
+    func registerIslandFrame(_ frame: CGRect, for display: CGDirectDisplayID?) {
+        guard let display else { return }
+        islandFrames[display] = frame
+    }
+
+    /// Whether the pointer is really over `display`'s island right now.
+    /// `slop` pads the test outward, absorbing measurement/animation slack.
+    /// Returns nil when the geometry isn't known (yet) — callers then fall back
+    /// to trusting the event, which is the pre-verification behavior.
+    private func pointerInsideIsland(on display: CGDirectDisplayID?, slop: CGFloat) -> Bool? {
+        guard let display,
+              let panel = panelScreenFrames[display],
+              let island = islandFrames[display] else { return nil }
+        // SwiftUI global space (top-left origin, relative to the borderless
+        // canvas window) → screen space (bottom-left origin).
+        let screenIsland = CGRect(x: panel.minX + island.minX,
+                                  y: panel.maxY - island.maxY,
+                                  width: island.width, height: island.height)
+        return screenIsland.insetBy(dx: -slop, dy: -slop).contains(NSEvent.mouseLocation)
+    }
+
+    /// Where the RESTING notch sits on `display`, in screen coordinates —
+    /// computed from the registered canvas frame and rest height, NOT from the
+    /// live layout, so it holds still while the island animates. This is the
+    /// reference for enter events on a closed panel: during the collapse the
+    /// live frame is mid-sweep and would validate exactly the synthetic enters
+    /// the sweep generates.
+    private func pointerInsideRestingNotch(on display: CGDirectDisplayID?, slop: CGFloat) -> Bool? {
+        guard let display,
+              let panel = panelScreenFrames[display],
+              let restHeight = restHeights[display] else { return nil }
+        var rect = CGRect(x: panel.midX - Tokens.notchWidth / 2,
+                          y: panel.maxY - restHeight,
+                          width: Tokens.notchWidth,
+                          height: restHeight)
+        // While a detached round streams, the resting notch flexes 48pt left
+        // (the busy extension) — that strip is hoverable too.
+        if !open, roundsInFlight > 0 {
+            rect.origin.x -= 48
+            rect.size.width += 48
+        }
+        return rect.insetBy(dx: -slop, dy: -slop).contains(NSEvent.mouseLocation)
+    }
+
+    /// The hover-enter entry point (the view calls this, not `openPanel`,
+    /// so keyboard summons and notification taps stay ungated): drop enters
+    /// whose pointer isn't actually over the island — synthetic events fired
+    /// by the animating boundary sweeping under a parked pointer.
+    ///   · Panel closed → test against the STATIC resting-notch rect (the live
+    ///     frame is mid-collapse and would validate its own sweep artifacts).
+    ///   · Panel open → test against the live island frame with generous slop
+    ///     (an honest re-entry during the close dissolve must still cancel it).
+    /// Unknown geometry (nil) falls back to trusting the event.
+    func hoverEntered(on display: CGDirectDisplayID?, velocity: CGVector) {
+        let inside = open ? pointerInsideIsland(on: display, slop: 16)
+                          : pointerInsideRestingNotch(on: display, slop: 8)
+        if inside == false { return }
+        openPanel(on: display, velocity: velocity)
+    }
 
     /// In-flight date detection for the current text — superseded by every
     /// keystroke so only the read of what's actually in the box lands.
@@ -809,7 +1001,10 @@ final class NotchModel: ObservableObject {
         // Filtering reshuffles which rows exist, so a stale keyboard highlight could
         // point at a now-hidden (or shifted) row. Release it on every query change;
         // the next ↓ re-selects row 0 of the freshly filtered slice.
-        didSet { if historySearchQuery != oldValue { highlightedHistoryIndex = nil } }
+        didSet {
+            if historySearchQuery != oldValue { highlightedHistoryIndex = nil }
+            if !historySearchQuery.isEmpty { noteUserTyping() }
+        }
     }
     /// Whether the inline settings panel is showing in place of the recent list.
     /// Replaces the old native Settings window — the gear (and ⌘,) flip this, and
@@ -1061,9 +1256,20 @@ final class NotchModel: ObservableObject {
                 // several are in flight (older ones stay reachable through
                 // their pending Recent rows). The parked idle draft is
                 // deliberately NOT consumed on this path: it stays parked and
-                // hands back on the next plain idle open.
+                // hands back on the next plain idle open. Any parked page IS
+                // dropped: the live round is newer activity than the snapshot.
                 attachInFlightRound(round)
+                parkedSession = nil
             } else {
+                // A return within the TTL lands back on the parked page — the
+                // thread being read, the half-typed follow-up, the settings form.
+                // Past the TTL the snapshot is stale context: drop it and open
+                // fresh (the conversation is still one tap away in Recent).
+                if let parked = parkedSession,
+                   Date().timeIntervalSince(parked.closedAt) <= Self.parkedSessionTTL {
+                    restoreParkedSession(parked)
+                }
+                parkedSession = nil
                 // Hand back an unsent idle draft parked at the last close, so folding
                 // the notch away and re-opening it doesn't drop what the user was
                 // typing. Only into a fresh, empty idle prompt — never clobber a line
@@ -1076,6 +1282,8 @@ final class NotchModel: ObservableObject {
                 savedIdleDraft = ""
             }
         }
+        // A hover re-entry supersedes any pending leave watch.
+        cancelLeaveWatch()
         // Re-entering during the close dissolve cancels it: clear the flag so the
         // content (held mounted while `open` is true) springs back to full opacity
         // instead of completing its fade, and the pending `beginClose` timer no-ops.
@@ -1124,8 +1332,10 @@ final class NotchModel: ObservableObject {
         if !open {
             pasteboardChangeCountAtOpen = pasteboardChangeCountAtRest
         }
-        // Cancel any in-flight close dissolve (see `openPanel`).
+        // Cancel any in-flight close dissolve (see `openPanel`), and any pending
+        // leave watch — this keyboard summon supersedes it.
         closing = false
+        cancelLeaveWatch()
         open = true
         refreshPendingClipboard()
         mode = .idle
@@ -1152,8 +1362,10 @@ final class NotchModel: ObservableObject {
         if !open {
             pasteboardChangeCountAtOpen = pasteboardChangeCountAtRest
         }
-        // Cancel any in-flight close dissolve (see `openPanel`).
+        // Cancel any in-flight close dissolve (see `openPanel`), and any pending
+        // leave watch — this keyboard summon supersedes it.
         closing = false
+        cancelLeaveWatch()
         open = true
         refreshPendingClipboard()
         mode = .idle
@@ -1179,6 +1391,7 @@ final class NotchModel: ObservableObject {
             pasteboardChangeCountAtOpen = pasteboardChangeCountAtRest
         }
         closing = false
+        cancelLeaveWatch()
         open = true
         mode = .idle
         showOnboarding = true
@@ -1195,48 +1408,122 @@ final class NotchModel: ObservableObject {
         showOnboarding = false
     }
 
-    /// Auto-retract once the pointer leaves — but ONLY when nothing has been
-    /// asked and nothing is on screen (the rule the user settled on):
-    ///   · keep open while an answer is showing (`.result`)
-    ///   · keep open while the AI is working (`.load`)
-    ///   · keep open while the user is mid-way through typing
-    ///   · keep open while the Recent list is expanded — moving the mouse away
-    ///     must never fold a notch that has recent content on screen
+    /// Toggle the pin on the answer currently on screen. Pinned → the pointer can
+    /// leave without folding the panel (see `collapseOnLeave`). Unpinning while the
+    /// pointer is already off the island re-arms the normal leave-fold immediately,
+    /// so an un-pin doesn't strand a panel open until the next hover.
+    func toggleAnswerPin() {
+        isAnswerPinned.toggle()
+        if !isAnswerPinned { collapseOnLeave(from: activeDisplay) }
+    }
+
+    /// Auto-retract once the pointer leaves — for EVERY page (the rule the user
+    /// settled on: leave = fold, always). Closing is cheap now: the page is
+    /// parked by `fullClose` and a hover within `parkedSessionTTL` restores it
+    /// exactly, so the panel no longer needs to cling open to protect content.
+    ///
+    /// The single exception: **actively typing**. While the keyboard is engaged
+    /// the pointer isn't an attention signal — folding mid-keystroke would yank
+    /// focus, a real interruption no restore compensates. So a leave during
+    /// typing defers the fold until `typingGrace` after the last keystroke
+    /// (the deferred fold re-checks, so continued typing keeps deferring; a
+    /// hover re-entry or keyboard summon cancels it via `leaveRecheckTask`).
     func collapseOnLeave(from display: CGDirectDisplayID? = nil, sequenced: Bool = true) {
+        // Nothing to fold on a resting notch — and a stale deferred fold must
+        // never fire `fullClose` on an already-closed panel (that would wipe a
+        // freshly parked session).
+        guard open else { return }
+        // The user pinned this answer: leaving is no longer a fold signal. Drop any
+        // watch that was already armed (a leave-during-typing may have scheduled
+        // one before the pin) so it can't fire behind the pin's back.
+        if isAnswerPinned {
+            cancelLeaveWatch()
+            return
+        }
         // The pointer leaving a *resting* notch on a screen that isn't hosting
         // the open panel has nothing to fold — and must never close the island
         // that's actually in use on another display.
         if let display, let active = activeDisplay, display != active { return }
-        // A finished/streaming answer (`.result`) stays open as before. But during the
-        // pre-stream *thinking* wait (`.load`, nothing readable on screen yet), letting
-        // the cursor leave folds the panel back to the resting notch — the round keeps
-        // running detached and the thinking dots stay lit beside the notch until it
-        // produces text or finishes. So `.load` falls through to `beginClose` below.
-        if mode == .result { return }
-        if hasText { return }
-        // Mid-confirmation of a destructive clear — don't fold the panel out from
-        // under the dialog if the cursor slips off the island.
-        if confirmingClear { return }
-        if showHistory { return }
-        // Never fold while settings are open — the user may be mid-way through
-        // pasting a key or picking a model.
-        if showSettings { return }
-        // Likewise keep the panel open while the user is reading What's New — a
-        // cursor that slips off the island shouldn't snatch the notes away.
-        if showWhatsNew { return }
-        // And keep it open through the guided first run — the user may be mid-way
-        // through connecting a model; a stray cursor must not fold the guide away.
-        if showOnboarding { return }
-        // Hover-leave folds an empty idle prompt — exactly the case that read as a
-        // clamp before. Route through the two-beat dissolve so the (admittedly
-        // minimal) content fades before the shell retracts, matching Esc/click-out.
+        // Verify the exit against the pointer's real position: the open/close
+        // springs update the tracking area per frame, and AppKit synthesizes
+        // exit events for a stationary pointer when the boundary moves under
+        // it. Folding on those made the island flap (see `pointerInsideIsland`).
+        // Tight slop: a real leave should fold even from just past the edge.
+        let mouse = NSEvent.mouseLocation
+        let inside = pointerInsideIsland(on: display ?? activeDisplay, slop: 2)
+        if inside == true {
+            armLeaveWatch(LeaveWatch(display: display, sequenced: sequenced,
+                                     armedMouse: mouse, movedOut: false), after: 0.35)
+            return
+        }
+        // The pointer really is outside. But WHY: did it cross the boundary, or
+        // did the boundary shrink away from a parked pointer (⌘N folding a tall
+        // thread to the short idle prompt, a list collapsing)? A genuine leave
+        // has the cursor in motion; a UI shrink arrives with a cursor that
+        // hasn't moved at all — that one is NOT the user leaving, so hold the
+        // panel and fold only once the pointer really moves off (the watch).
+        // Unknown geometry (nil) falls back to trusting the event, as before.
+        let movedOut = inside == nil
+            || MouseVelocityTracker.shared.cursorMoved(within: 0.25)
+        if !movedOut {
+            armLeaveWatch(LeaveWatch(display: display, sequenced: sequenced,
+                                     armedMouse: mouse, movedOut: false), after: 0.35)
+            return
+        }
+        let sinceEdit = Date().timeIntervalSince(lastEditAt)
+        if sinceEdit < Self.typingGrace {
+            armLeaveWatch(LeaveWatch(display: display, sequenced: sequenced,
+                                     armedMouse: mouse, movedOut: true),
+                          after: Self.typingGrace - sinceEdit)
+            return
+        }
+        // Route through the two-beat dissolve so the content fades before the
+        // shell retracts, matching Esc.
         beginClose(sequenced: sequenced)
+    }
+
+    /// One poll tick of the armed leave watch. Ends in exactly one of: fold
+    /// (pointer verifiably off the island, displaced or genuinely crossed out,
+    /// keyboard quiet), re-arm (still undecided), or dissolve (panel no longer
+    /// open / answer pinned / watch cancelled elsewhere).
+    private func recheckLeaveWatch() {
+        guard let watch = leaveWatch else { return }
+        guard open else { leaveWatch = nil; return }
+        if isAnswerPinned { cancelLeaveWatch(); return }
+        // Parked back over (or still over) the island: nothing to fold, but keep
+        // watching — AppKit's tracking state may be desynced, so the exit that
+        // would restart this conversation might never arrive.
+        if pointerInsideIsland(on: watch.display ?? activeDisplay, slop: 2) == true {
+            armLeaveWatch(watch, after: 0.35)
+            return
+        }
+        let mouse = NSEvent.mouseLocation
+        let dx = mouse.x - watch.armedMouse.x
+        let dy = mouse.y - watch.armedMouse.y
+        let displaced = (dx * dx + dy * dy).squareRoot() > 6
+        // A boundary-shrink leave holds until the pointer actually goes
+        // somewhere. Displacement is measured against the ORIGINAL armed
+        // position, so slow drift accumulates instead of resetting each tick.
+        if !watch.movedOut, !displaced {
+            armLeaveWatch(watch, after: 0.35)
+            return
+        }
+        let sinceEdit = Date().timeIntervalSince(lastEditAt)
+        if sinceEdit < Self.typingGrace {
+            var held = watch
+            held.movedOut = true
+            armLeaveWatch(held, after: Self.typingGrace - sinceEdit)
+            return
+        }
+        leaveWatch = nil
+        beginClose(sequenced: watch.sequenced)
     }
 
     /// How long the content lingers, fading, before the shell retracts. Kept short
     /// — this is a dissolve to soften the snap, not a second animation the user
-    /// waits through; the shell's own `easeOut(0.30)` collapse picks up right after.
-    static let closeContentFade: TimeInterval = 0.13
+    /// waits through; the shell's own retract spring picks up right after. Paced
+    /// with the calmer `closeSpring` so the two beats read as one motion.
+    static let closeContentFade: TimeInterval = 0.16
 
     /// The two-beat close. The first beat fades the content out while the shell
     /// holds its expanded size (`closing = true`, `open` still true); the second,
@@ -1268,6 +1555,20 @@ final class NotchModel: ObservableObject {
     /// The task keeps streaming on its own snapshot (see `submit`) and files the
     /// finished round into Recent, so closing never loses a conversation.
     func fullClose() {
+        // A pending leave watch is moot once the panel actually closes.
+        cancelLeaveWatch()
+        // Park the page the user was on, so a reopen within the TTL lands right
+        // back here (closing gestures navigate, they never destroy). A bare idle
+        // prompt has nothing worth parking — its unsent draft rides the separate,
+        // un-expiring `savedIdleDraft` below. Unconditional overwrite is safe:
+        // every close is preceded by an open, and every open consumed or cleared
+        // the previous snapshot.
+        parkedSession = (mode != .idle || showSettings || showWhatsNew || showHistory)
+            ? ParkedSession(mode: mode, turns: turns, text: text,
+                            threadHistoryID: threadHistoryID,
+                            showSettings: showSettings, showWhatsNew: showWhatsNew,
+                            showHistory: showHistory, closedAt: Date())
+            : nil
         // Detach, don't cancel: dropping the reference leaves the Task running
         // (deinit doesn't cancel it) and frees the slot so the next submit's
         // supersede-cancel can't reach the detached round.
@@ -1285,6 +1586,7 @@ final class NotchModel: ObservableObject {
         // without routing through here, so "start fresh" still lands blank.
         savedIdleDraft = (mode == .idle && hasText) ? text : ""
         mode = .idle
+        isAnswerPinned = false
         text = ""; turns = []
         showHistory = false
         showSettings = false
@@ -1315,7 +1617,12 @@ final class NotchModel: ObservableObject {
     /// and lands in Recent, so backing out while waiting never loses the round.
     func newChat() {
         task = nil
+        // ← / ⌘N is the one gesture that DESTROYS a session (closing only parks).
+        // Drop any parked page too, so "start fresh" can't be haunted by a
+        // snapshot from before the reset.
+        parkedSession = nil
         mode = .idle
+        isAnswerPinned = false
         text = ""; turns = []
         showHistory = false
         showSettings = false
@@ -1929,6 +2236,9 @@ final class NotchModel: ObservableObject {
         // (only a first turn pulls in the clipboard).
         let firstTurn = turns.isEmpty
         if firstTurn { threadHistoryID = UUID() }
+        // A brand-new conversation starts unpinned; a follow-up keeps the pin the
+        // user set to read the thread (asking on doesn't fold it).
+        if firstTurn { isAnswerPinned = false }
 
         // A follow-up sent while the previous answer is still streaming supersedes
         // it: settle any stale streaming flag now, because the superseded task is
@@ -2247,6 +2557,23 @@ final class NotchModel: ObservableObject {
     func retryLastAsk() {
         guard askError != nil else { return }
         askError = nil
+        resubmitLastQuestion()
+    }
+
+    /// Re-run the newest settled answer's question for a fresh take — the answer
+    /// footer's regenerate button. Same drop-and-resubmit dance as `retryLastAsk`,
+    /// but for a turn that *succeeded*: only ever offered on the last assistant
+    /// turn (regenerating mid-thread would orphan everything after it), and gated
+    /// on the stream being settled so a tap can't tear down an answer mid-flight.
+    func regenerateLastAnswer() {
+        guard let last = turns.last, last.role == "assistant", !last.streaming else { return }
+        resubmitLastQuestion()
+    }
+
+    /// Shared tail of retry/regenerate: drop the newest Q/A pair, lift the question
+    /// back into the input, and re-run `submit()` so a fresh answer streams into a
+    /// clean pair. No-op when there's no question to re-run.
+    private func resubmitLastQuestion() {
         guard let lastUser = turns.last(where: { $0.role == "user" }) else { return }
         let question = lastUser.text
         if turns.last?.role == "assistant" { turns.removeLast() }
@@ -2506,6 +2833,46 @@ final class NotchModel: ObservableObject {
         threadHistoryID = round.threadID
         let hasAnswer = round.thread.contains { $0.id == round.answerID && !$0.text.isEmpty }
         mode = hasAnswer ? .result : .load
+    }
+
+    /// Land a reopening panel back on the page parked at the last close. Page
+    /// flags restore verbatim; the thread needs care, because a round that was
+    /// still streaming when the panel folded has since finished (or died)
+    /// detached — a live one never reaches here, `attachInFlightRound` wins
+    /// first. So for a non-idle snapshot: prefer the thread persisted to
+    /// history under the same id (it carries the completed answer), fall back
+    /// to the snapshot's own turns if they contain readable answer text, and
+    /// give up to the idle prompt when the round died wordless — never restore
+    /// `.load`, nothing would ever feed those thinking dots again.
+    private func restoreParkedSession(_ parked: ParkedSession) {
+        showSettings = parked.showSettings
+        showWhatsNew = parked.showWhatsNew
+        showHistory = parked.showHistory
+        guard parked.mode != .idle else {
+            text = parked.text
+            return
+        }
+        let persisted = history.first(where: { $0.id == parked.threadHistoryID })?.turns
+        var restored: [Turn]
+        if let persisted, !persisted.isEmpty {
+            restored = persisted
+        } else if parked.turns.contains(where: { $0.role == "assistant" && !$0.text.isEmpty }) {
+            restored = parked.turns
+        } else {
+            text = parked.text
+            return
+        }
+        // A snapshot taken mid-stream may carry live-only flags; the stream is
+        // over now, so a restored turn must not show a frozen caret or a stale
+        // "searching…" line.
+        for i in restored.indices {
+            restored[i].streaming = false
+            restored[i].toolActivity = nil
+        }
+        turns = restored
+        threadHistoryID = parked.threadHistoryID
+        text = parked.text
+        mode = .result
     }
 
     /// Replace the streaming assistant turn's text as chunks arrive. Looked up by
@@ -2931,10 +3298,13 @@ final class NotchModel: ObservableObject {
     }
 
     /// Enter while a recent row is highlighted: open it. Returns `false` when
-    /// nothing is highlighted, so a normal Enter still submits the prompt.
+    /// nothing is highlighted, so a normal Enter still submits the prompt. Also
+    /// bails whenever the box has text — visible text always owns Enter, so a
+    /// stale highlight can never swallow a real submit (backstop to
+    /// `text.didSet`, which already closes the list the moment text arrives).
     @discardableResult
     func historyConfirmHighlighted() -> Bool {
-        guard showHistory, let i = highlightedHistoryIndex else { return false }
+        guard !hasText, showHistory, let i = highlightedHistoryIndex else { return false }
         let items = recentVisible
         guard items.indices.contains(i) else { return false }
         openHistory(items[i])

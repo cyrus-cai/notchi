@@ -24,20 +24,6 @@ struct NotchBody: View {
     /// content with no measure→frame feedback loop, so it grows smoothly in the same
     /// frame the text lands.)
     @State private var measuredAnswerHeight: CGFloat = 0
-    /// Phase (0→1) of the light that sweeps *across the confirmation text* after a
-    /// copy. The follow-up field's placeholder momentarily becomes "Copied to
-    /// clipboard", and a soft highlight glides over those glyphs once — the shimmer
-    /// decorates the words rather than scanning a band across the whole box. Animated
-    /// 0→1 to run a single pass.
-    @State private var handoffSweep = false
-    /// Whether the copy confirmation is currently showing. While true, the input's
-    /// placeholder reads "Copied to clipboard" (shimmered) instead of "Ask a
-    /// follow-up…", and the trailing icon shows a check. Flips back after ~2s.
-    @State private var handoffCopied = false
-    /// Whether the cursor is over the "continue elsewhere" copy button. While true
-    /// (and the field is empty), the placeholder swaps to a one-line hint describing
-    /// what that button does — an in-field stand-in for a hover tooltip.
-    @State private var hoveringContinue = false
     /// Width (pt) of everything the prompt field is currently showing — committed
     /// text plus any in-progress IME composition (pinyin) — reported live by the
     /// field via `onCaretWidth`. Drives where the inline "— Ask"/"— Note" hint sits,
@@ -1451,6 +1437,11 @@ struct NotchBody: View {
             // thinking/activity overlay on top while the text is still empty; the
             // overlay never participates in the answer's layout, so it can't shift
             // it, and `textSelection` just toggles on the unchanged tree.
+            // Footer actions that only make sense at the thread's tail: regenerate
+            // re-runs THIS question (and would orphan any later turns), and the
+            // ChatGPT/Claude handoff always copies the whole thread — so both ride
+            // only the last turn's footer, never mid-thread ones.
+            let isLastTurn = model.turns.last?.id == turn.id
             AssistantTurnView(
                 text: turn.text,
                 streaming: turn.streaming,
@@ -1460,6 +1451,13 @@ struct NotchBody: View {
                 hoveredSourceID: $hoveredSourceID,
                 sourceCloseWork: $sourceCloseWork,
                 onInAppCopy: { model.rebaselineClipboardAfterInAppWrite() },
+                onRegenerate: isLastTurn ? { model.regenerateLastAnswer() } : nil,
+                onContinueElsewhere: isLastTurn ? {
+                    model.copyHandoffContext()
+                    // Re-baseline so the handoff block isn't treated as "what the
+                    // user copied" and injected into the next Ask.
+                    model.rebaselineClipboardAfterInAppWrite()
+                } : nil,
                 // The `ask_user` question card, when the model has paused this
                 // still-streaming answer on a choice only the user can make.
                 pendingQuestion: turn.streaming ? model.pendingQuestion(for: turn.id) : nil,
@@ -1470,13 +1468,38 @@ struct NotchBody: View {
         }
     }
 
-    // Just the back chevron — the question itself already leads the thread below
-    // as the "You" turn, so a title here would only repeat it.
+    // Back chevron leads (the question itself is the "You" turn below, so no title
+    // here); a pin button trails top-right. Pinning holds the panel open when the
+    // pointer leaves, so the answer can be read without hovering it (see
+    // `NotchModel.collapseOnLeave`).
     private var resultHeader: some View {
         HStack(spacing: 10) {
             backButton
             Spacer(minLength: 0)
+            pinButton
         }
+    }
+
+    /// Top-right pin. Filled + accent-tinted when engaged; a bare outline otherwise.
+    /// Toggling routes through the model so an un-pin can immediately re-arm the
+    /// leave-fold if the pointer is already gone.
+    private var pinButton: some View {
+        Button {
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                model.toggleAnswerPin()
+            }
+        } label: {
+            Image(systemName: model.isAnswerPinned ? "pin.fill" : "pin")
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(model.isAnswerPinned ? Tokens.accent : Tokens.text2)
+                // A pinned pin tips slightly, the way a pushed-in tack sits — a small
+                // physical cue that it's engaged, on top of the fill + tint.
+                .rotationEffect(.degrees(model.isAnswerPinned ? 0 : 32))
+                .frame(width: 26, height: 26)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(RecentEntryStyle())
+        .help(L(model.isAnswerPinned ? "result.unpin" : "result.pin"))
     }
 
     /// Back to a fresh conversation: clears this Q&A off the screen and returns to
@@ -1535,21 +1558,31 @@ struct NotchBody: View {
                     // defensive path if `inputRow` is ever reused with `followUp: true`,
                     // and it keeps the plain-ask behaviour for that unused case.
                     onSubmit: { followUp ? model.submit() : model.submitCurrent() },
-                    // Idle prompt only: ↑ recalls the previous question straight into
-                    // the box (shell-style; press again to step older). ↓ first steps
-                    // that recall back toward the newest (clearing past the newest),
-                    // and only when no recall is in flight does it open/step the recent
-                    // list. Enter opens a keyboard-highlighted row instead of
-                    // submitting. The follow-up field leaves these at their no-op
-                    // defaults.
+                    // Idle prompt only: ↑/↓ are shared between shell-style recall
+                    // (fill the box with a past question) and the recent list, with
+                    // a fixed precedence — an open, highlighted list owns the keys;
+                    // recall gets them otherwise. ↓ first steps a live recall back
+                    // toward the newest (clearing past the newest), and only when no
+                    // recall is in flight does it open/step the recent list. Enter
+                    // opens a keyboard-highlighted row instead of submitting. The
+                    // follow-up field leaves these at their no-op defaults.
                     onDown: followUp ? { false } : {
                         if model.recallNextQuestion() { return true }
                         return withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                             model.historyNavigateDown()
                         }
                     },
+                    // ↑ mirrors ↓'s split, list side first: while a recent row is
+                    // keyboard-highlighted, ↑ steps the highlight up (and past the
+                    // top row folds the list back to the input — the exact inverse
+                    // of the ↓ that opened it). Only with no highlight to walk does
+                    // ↑ fall through to shell-style recall.
                     onUp: followUp ? { false } : {
-                        model.recallPreviousQuestion()
+                        let steppedList = withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                            model.historyNavigateUp()
+                        }
+                        if steppedList { return true }
+                        return model.recallPreviousQuestion()
                     },
                     // Keep ↑/↓ routed to recall even after the box fills with a
                     // recalled question, so pressing ↑ again steps further back
@@ -1730,40 +1763,24 @@ struct NotchBody: View {
                 // label so short labels don't leave a dead strip on the right.
                 .padding(.trailing, InlineSendHint.reservedTrailingWidth(label: model.submitLabel, fontSize: 14.5))
                 .animation(.smooth(duration: 0.25), value: model.submitLabel)
-                // The placeholder slot does double duty while the field is empty, and
-                // every change of copy moves through a fade rather than a hard string
-                // swap:
-                //  • copy confirmation up → "Copied to clipboard", shimmered, with a
-                //    light gliding across the glyphs, then fades back;
-                //  • hovering the continue-elsewhere button → a one-line hint for
-                //    what that button does, in place of a tooltip;
-                //  • otherwise → the usual "Ask a follow-up…" prompt.
+                // The placeholder, shown only while the editor is truly empty —
+                // committed text AND in-progress pinyin both hide it.
                 if !model.hasText && followUpCaretWidth == 0 {
-                    Group {
-                        if handoffCopied {
-                            copiedShimmerLabel
-                        } else {
-                            followUpPlaceholderLabel
-                        }
-                    }
-                    // Nudge to sit on the NSTextField cell's own ~2pt left inset
-                    // so the labels land where the placeholder was, not 2pt left.
-                    .padding(.leading, 2)
-                    .allowsHitTesting(false)
-                    .transition(.opacity)
+                    followUpPlaceholderLabel
+                        // Nudge to sit on the NSTextField cell's own ~2pt left inset
+                        // so the label lands where the placeholder was, not 2pt left.
+                        .padding(.leading, 2)
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
                 }
             }
 
-            // Light "take this elsewhere" affordance — copies the whole thread as
-            // portable context so it can be pasted into ChatGPT/Claude. Kept faint
-            // and icon-only so it sits quietly beside the input; it steps aside for
-            // the send button the moment the user starts typing a follow-up.
+            // The send button appears the moment the user starts typing a
+            // follow-up. (The "continue in ChatGPT/Claude" handoff used to rest
+            // here while the field was empty; it now lives in the answer footer
+            // with the other per-answer actions — see `AssistantTurnView`.)
             if model.hasText {
                 SendButton(compact: true) { model.submitCurrent() }
-                    .transition(.scale(scale: 0.6).combined(with: .opacity))
-            } else {
-                // The input row keeps only the "continue elsewhere" escape hatch.
-                continueElsewhereButton
                     .transition(.scale(scale: 0.6).combined(with: .opacity))
             }
         }
@@ -1790,102 +1807,16 @@ struct NotchBody: View {
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: model.hasText)
     }
 
-    /// The copy confirmation that lives in the placeholder slot: the words "Copied
-    /// to clipboard" sitting exactly where "Ask a follow-up…" sits, with a soft
-    /// highlight gliding once across the glyphs. The base text reads at the same
-    /// quiet placeholder weight; over it, a narrow brighter band is *masked to the
-    /// text itself* (not the box) and swept left→right by `handoffSweep`, so the
-    /// light catches the letters rather than scanning the field. One pass, then it
-    /// settles, then the whole label fades back out (see `runHandoffCopy`).
-    private var copiedShimmerLabel: some View { shimmerLabel(L("result.copiedToClipboard"), sweep: handoffSweep) }
-
-    /// The shared shimmer confirmation that lives in the placeholder slot: `copy`
-    /// sitting exactly where "Ask a follow-up…" sits, with a soft highlight gliding
-    /// once across the glyphs when `sweep` flips true. Parameterized so the copy and
-    /// save confirmations share one recipe instead of two near-identical copies.
-    private func shimmerLabel(_ copy: String, sweep: Bool) -> some View {
-        Text(copy)
-            .font(.sf(14.5))
-            .foregroundStyle(Tokens.placeholder)
-            // The travelling highlight, drawn only where the glyphs are.
-            .overlay(
-                GeometryReader { geo in
-                    let w = geo.size.width
-                    let band = max(w * 0.5, 70)
-                    LinearGradient(
-                        stops: [
-                            .init(color: .white.opacity(0),    location: 0),
-                            .init(color: .white.opacity(0.85), location: 0.5),
-                            .init(color: .white.opacity(0),    location: 1),
-                        ],
-                        startPoint: .leading, endPoint: .trailing
-                    )
-                    .frame(width: band)
-                    .offset(x: sweep ? w + band : -band)
-                    .blendMode(.screen)
-                }
-                .mask(Text(copy).font(.sf(14.5)))
-                .allowsHitTesting(false)
-            )
-    }
-
     /// The follow-up field's placeholder, drawn as a SwiftUI label in the slot the
-    /// native placeholder would occupy (same font, colour and inset — the recipe the
-    /// shimmer label already proved out). SwiftUI ownership is what buys the motion:
-    /// hovering the continue-elsewhere button swaps the wording to a hint for what
-    /// that button does — our in-place stand-in for a tooltip — through the same
-    /// quiet in-place cross-fade as the inline Ask⇄Note hint, where an NSTextField
-    /// placeholder could only hard-cut between strings.
+    /// native placeholder would occupy (same font, colour and inset). SwiftUI
+    /// ownership (rather than the NSTextField's own placeholder) is what lets it
+    /// hide the instant the field shows anything — including still-composing
+    /// pinyin, which the native placeholder wouldn't yield to.
     private var followUpPlaceholderLabel: some View {
-        Text(hoveringContinue ? L("result.copyToContinue")
-             : L("result.followUp"))
+        Text(L("result.followUp"))
             .font(.sf(14.5))
             .foregroundStyle(Tokens.placeholder)
             .lineLimit(1)
-            .contentTransition(.opacity)
-            .animation(.smooth(duration: 0.25), value: hoveringContinue)
-    }
-
-    /// A small, faint icon button that copies the conversation to the clipboard so
-    /// the user can continue it in a full chat (ChatGPT / Claude). No hard round
-    /// limit — this is always available as an escape hatch, sitting quietly at the
-    /// trailing edge of the follow-up field. Flips to a check for a beat on copy.
-    /// Hovering it turns the field's placeholder into a one-line "what this does"
-    /// hint (see `followUpPlaceholderLabel`), so the affordance explains itself
-    /// without a tooltip.
-    private var continueElsewhereButton: some View {
-        Button { runHandoffCopy() } label: {
-            // The icon briefly snaps to a check; the "Copied to clipboard" label in
-            // the field is the real confirmation, so the button itself stays quiet.
-            Image(systemName: handoffCopied ? "checkmark" : "square.on.square.dashed")
-                .font(.system(size: 12.5, weight: .semibold))
-                .foregroundStyle(handoffCopied ? Tokens.text2 : Tokens.text3)
-                .frame(width: 27, height: 27)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(RecentEntryStyle())
-        .onHover { hoveringContinue = $0 }
-    }
-
-    /// Copy the conversation and play the in-field confirmation: the placeholder
-    /// becomes "Copied to clipboard", a light sweeps once across those glyphs, the
-    /// message holds for a beat, then the whole label fades back to "Ask a
-    /// follow-up…". The trailing icon shows a check for the same window. Sequence:
-    /// reveal → one ~0.9s sweep → hold → ~2s after the start, fade out.
-    private func runHandoffCopy() {
-        model.copyHandoffContext()
-        handoffSweep = false                       // park the highlight off the left
-        withAnimation(.easeOut(duration: 0.18)) { handoffCopied = true }
-        // Kick the sweep on the next runloop so the reveal and the highlight don't
-        // collide into one frame.
-        Task {
-            try? await Task.sleep(nanoseconds: 120_000_000)
-            withAnimation(.easeInOut(duration: 0.9)) { handoffSweep = true }
-            try? await Task.sleep(nanoseconds: 1_880_000_000)
-            withAnimation(.easeOut(duration: 0.35)) { handoffCopied = false }
-            try? await Task.sleep(nanoseconds: 400_000_000)
-            handoffSweep = false                   // reset for the next copy
-        }
     }
 
 }
