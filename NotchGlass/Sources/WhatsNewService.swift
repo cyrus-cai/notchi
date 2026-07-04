@@ -64,6 +64,19 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.1.9",
+            date: "2026-07-04",
+            features: [
+                "Copy a screenshot and ask about it directly — vision-capable models can now see the image.",
+                "Save an answer straight to Apple Notes from the footer, right beside Copy.",
+            ],
+            improvements: [
+                "Model shortlists and defaults now update automatically without an app update.",
+                "Fixed an intermittent issue where the prompt field could briefly show system text-completion suggestions.",
+                "Multi-turn follow-ups are more robust against malformed context.",
+            ]
+        ),
+        Entry(
             version: "0.1.8",
             date: "2026-07-04",
             features: [

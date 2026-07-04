@@ -10,6 +10,25 @@ import Combine
 /// SwiftUI gives no hook to turn it off, so we wrap `NSTextField` directly and
 /// disable `isAutomaticTextCompletionEnabled` (plus all the other "smart"
 /// substitutions that don't belong in a prompt box).
+/// The prompt's backing field. One job: strip the field editor's completion /
+/// prediction magic the moment focus arrives by ANY route. The focusTrigger
+/// path in `updateNSView` disables it after its programmatic
+/// `makeFirstResponder`, but a direct CLICK into the field creates the editor
+/// without that block ever running (its `currentEditor() == nil` guard skips),
+/// and `controlTextDidBeginEditing` waits for the first *committed* change — an
+/// entire IME composition can play out before that. A click-focused session
+/// could therefore reach its first keystrokes with the system completion panel
+/// still armed: the intermittent big empty glass box flashing over the panel.
+/// Hooking `becomeFirstResponder` covers click, Tab and programmatic focus
+/// alike, synchronously, before any keystroke can reach the editor.
+final class MagiclessTextField: NSTextField {
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted { PromptField.disableEditorMagic(currentEditor()) }
+        return accepted
+    }
+}
+
 struct PromptField: NSViewRepresentable {
     @Binding var text: String
     var placeholder: String
@@ -54,7 +73,7 @@ struct PromptField: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> NSTextField {
-        let field = NSTextField()
+        let field = MagiclessTextField()
         field.delegate = context.coordinator
         field.isBordered = false
         field.drawsBackground = false
@@ -138,8 +157,13 @@ struct PromptField: NSViewRepresentable {
         }
         // Belt-and-suspenders for click-to-focus and editor swaps: whenever this
         // field currently owns the field editor, make sure the caret-width observers
-        // are attached (idempotent — re-attaching the same editor is a no-op).
+        // are attached (idempotent — re-attaching the same editor is a no-op) and
+        // the editor's completion/prediction magic stays off. The authoritative
+        // kill for click-focus is MagiclessTextField.becomeFirstResponder (a render
+        // isn't guaranteed between a click and the first keystroke); this pass just
+        // re-asserts it, since macOS can re-arm traits on a live editor.
         if let editor = field.currentEditor() {
+            Self.disableEditorMagic(editor)
             coord.attachEditorObservers(editor)
         }
     }
@@ -162,6 +186,14 @@ struct PromptField: NSViewRepresentable {
         tv.isContinuousSpellCheckingEnabled = false
         tv.isGrammarCheckingEnabled = false
         tv.smartInsertDeleteEnabled = false
+        // Inline predictions (macOS 14+) ride their own NSTextInputTraits switch
+        // — none of the flags above turn them off.
+        tv.inlinePredictionType = .no
+        // Writing Tools (macOS 15.2+) brings its own floating affordance/panel;
+        // keep it out of the prompt box entirely.
+        if #available(macOS 15.2, *) {
+            tv.writingToolsBehavior = .none
+        }
     }
 
     /// Only writes a property when its value actually changed. AppKit setters like
@@ -401,7 +433,11 @@ struct HistorySearchField: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> NSTextField {
-        let field = NSTextField()
+        // MagiclessTextField matters MOST here: this field is deliberately not
+        // auto-focused (see above) — a click is its normal way in, which is
+        // exactly the path where editor magic used to stay armed until the
+        // first committed keystroke.
+        let field = MagiclessTextField()
         field.delegate = context.coordinator
         field.isBordered = false
         field.isBezeled = false
@@ -1227,6 +1263,12 @@ struct AssistantTurnView: View {
     /// it's one button at the thread's tail, not one per turn. (It used to sit
     /// beside the follow-up input; it lives here with the other answer actions now.)
     var onContinueElsewhere: (() -> Void)? = nil
+    /// File this settled answer (with its question) into Apple Notes (XII-123).
+    var onSaveToNotes: (() -> Void)? = nil
+    /// The save-to-Notes progress/outcome line for THIS answer ("Saving…" /
+    /// "Added to Notes" / an error), `nil` when there's nothing to say. Rendered
+    /// at the footer's tail so the confirmation lands in place, not in a toast.
+    var noteCue: String? = nil
     /// A clarifying question the model posed via the `ask_user` tool, still
     /// waiting on the user — renders as an option card under the (possibly still
     /// empty) answer. Non-nil only while this turn streams.
@@ -1412,6 +1454,16 @@ struct AssistantTurnView: View {
                             onInAppCopy?()
                         }
                     }
+                    // Save to Apple Notes (XII-123), right beside copy — the
+                    // "keep this" pair. The cue at the row's tail carries the
+                    // outcome, so no confirm-checkmark here.
+                    if hasText, let onSaveToNotes {
+                        AnswerFooterButton(icon: "note.text",
+                                           help: L("result.saveToNotes"),
+                                           rowHovered: turnHovered) {
+                            onSaveToNotes()
+                        }
+                    }
                     if let onRegenerate {
                         AnswerFooterButton(icon: "arrow.clockwise",
                                            help: L("result.regenerate"),
@@ -1427,8 +1479,21 @@ struct AssistantTurnView: View {
                             onContinueElsewhere()
                         }
                     }
+                    // The save-to-Notes outcome, in the same quiet grey whisper
+                    // as the input-box save cue — confirmation in place, no toast.
+                    if let noteCue {
+                        Text(noteCue)
+                            .font(.sf(11))
+                            .tracking(0.2)
+                            .foregroundStyle(Tokens.text4)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .padding(.leading, 6)
+                            .transition(.opacity)
+                    }
                 }
                 .padding(.top, 2)
+                .animation(.easeInOut(duration: 0.2), value: noteCue)
             }
         }
         .onHover { turnHovered = $0 }
@@ -1569,16 +1634,23 @@ struct InlineMarkdownText: View {
 // MARK: - Block-level markdown
 
 /// One parsed block of an answer. We intentionally support only the block kinds
-/// an in-notch assistant actually produces — headings, lists, fenced code blocks,
+/// an in-notch assistant actually produces — headings, lists (nested via
+/// `indent`, including GFM task items), block quotes, fenced code blocks,
 /// GFM tables, and horizontal rules — plus plain paragraphs. Everything else
-/// (quotes, etc.) falls through to a paragraph, so unknown syntax still reads
-/// cleanly rather than breaking. Inline `**bold**` / `*italic*` / `code` is
-/// handled per-line by `InlineMarkdownText`; code blocks render verbatim without
-/// inline parsing.
+/// falls through to a paragraph, so unknown syntax still reads cleanly rather
+/// than breaking. Inline `**bold**` / `*italic*` / `code` is handled per-line by
+/// `InlineMarkdownText`; code blocks render verbatim without inline parsing.
 enum MarkdownBlock {
     case heading(level: Int, text: String)
-    case bullet(text: String)
-    case ordered(number: Int, text: String)
+    /// `indent` is the nesting depth (0 = top level) of a list item, derived
+    /// from the line's leading whitespace.
+    case bullet(text: String, indent: Int)
+    case ordered(number: Int, text: String, indent: Int)
+    /// A GFM task item — `- [ ] text` / `- [x] text`.
+    case task(done: Bool, text: String, indent: Int)
+    /// A `>` block quote. Contiguous quoted lines collapse into one block;
+    /// `text` keeps their newlines so the quote reads as a single island.
+    case quote(text: String)
     case paragraph(text: String)
     case code(language: String?, text: String)
     /// A GitHub-flavoured pipe table. `header` is the first row; `rows` are the
@@ -1591,11 +1663,14 @@ enum MarkdownBlock {
 
 /// A line-based markdown parser. Deliberately tiny: it walks the answer line by
 /// line and classifies each non-empty line as a heading (`#`…`######`), an
-/// unordered item (`-`, `*`, `+`), an ordered item (`1.`, `2)`), a horizontal
-/// rule (`---` / `***` / `___`), or a paragraph. Fenced code blocks (``` `…` ```)
-/// span multiple lines and capture their content verbatim — including blank
-/// lines — until the closing fence. No nesting beyond that, in keeping with the
-/// app's minimalism (no markdown library).
+/// unordered item (`-`, `*`, `+`, with `- [ ]`/`- [x]` task variants), an
+/// ordered item (`1.`, `2)`), a block-quote line (`>`), a horizontal rule
+/// (`---` / `***` / `___`), or a paragraph. List items keep a nesting depth
+/// derived from their leading whitespace; contiguous `>` lines merge into one
+/// quote block. Fenced code blocks (``` `…` ```) span multiple lines and capture
+/// their content verbatim — including blank lines — until the closing fence.
+/// No nesting beyond that, in keeping with the app's minimalism (no markdown
+/// library).
 enum MarkdownParser {
     static func parse(_ source: String) -> [MarkdownBlock] {
         var blocks: [MarkdownBlock] = []
@@ -1624,6 +1699,26 @@ enum MarkdownParser {
 
             if line.isEmpty {
                 i += 1
+                continue
+            }
+
+            // Block quote — merge every contiguous `>` line into one block so a
+            // multi-line quote renders as a single island (a bare `>` spacer
+            // becomes a blank line inside it). Checked before table detection so
+            // a quoted `|` line can't be mistaken for a table header.
+            if line.hasPrefix(">") {
+                var quoteLines: [String] = []
+                while i < lines.count {
+                    let inner = lines[i].trimmingCharacters(in: .whitespaces)
+                    guard inner.hasPrefix(">") else { break }
+                    quoteLines.append(quoteContent(inner))
+                    i += 1
+                }
+                while quoteLines.first?.isEmpty == true { quoteLines.removeFirst() }
+                while quoteLines.last?.isEmpty == true { quoteLines.removeLast() }
+                if !quoteLines.isEmpty {
+                    blocks.append(.quote(text: quoteLines.joined(separator: "\n")))
+                }
                 continue
             }
 
@@ -1660,9 +1755,14 @@ enum MarkdownParser {
             } else if let (level, text) = heading(line) {
                 blocks.append(.heading(level: level, text: text))
             } else if let text = bullet(line) {
-                blocks.append(.bullet(text: text))
+                let indent = listIndent(of: rawLine)
+                if let (done, rest) = taskItem(text) {
+                    blocks.append(.task(done: done, text: rest, indent: indent))
+                } else {
+                    blocks.append(.bullet(text: text, indent: indent))
+                }
             } else if let (number, text) = ordered(line) {
-                blocks.append(.ordered(number: number, text: text))
+                blocks.append(.ordered(number: number, text: text, indent: listIndent(of: rawLine)))
             } else {
                 blocks.append(.paragraph(text: line))
             }
@@ -1714,6 +1814,42 @@ enum MarkdownParser {
             return String(line.dropFirst(marker.count)).trimmingCharacters(in: .whitespaces)
         }
         return nil
+    }
+
+    /// `[ ] buy milk` / `[x] done thing` (the text of an already-matched bullet)
+    /// → (done, rest). The space after the bracket is required, so `[link]`-style
+    /// text at the start of a bullet isn't mistaken for a checkbox.
+    private static func taskItem(_ text: String) -> (Bool, String)? {
+        for (marker, done) in [("[ ] ", false), ("[x] ", true), ("[X] ", true)] where text.hasPrefix(marker) {
+            let rest = String(text.dropFirst(marker.count)).trimmingCharacters(in: .whitespaces)
+            if !rest.isEmpty { return (done, rest) }
+        }
+        return nil
+    }
+
+    /// Nesting depth of a list line from its leading whitespace (tab = 4 cols).
+    /// Both common LLM conventions land on the same depth: 2 *or* 4 columns →
+    /// level 1, 6 or 8 → level 2, … Capped so runaway indentation can't push
+    /// text off the narrow panel.
+    private static func listIndent(of rawLine: String) -> Int {
+        var width = 0
+        for ch in rawLine {
+            if ch == " " { width += 1 }
+            else if ch == "\t" { width += 4 }
+            else { break }
+        }
+        return width < 2 ? 0 : min(1 + (width - 2) / 4, 4)
+    }
+
+    /// Strip the `>` marker(s) — plus the conventional space after each — from a
+    /// quoted line. Nested `> >` quotes flatten into the same block.
+    private static func quoteContent(_ line: String) -> String {
+        var content = Substring(line)
+        while content.hasPrefix(">") {
+            content = content.dropFirst()
+            if content.hasPrefix(" ") { content = content.dropFirst() }
+        }
+        return String(content)
     }
 
     /// A GFM table separator row: `|---|---|`, `| :--- | ---: |`, `--- | ---`,
@@ -1858,7 +1994,8 @@ struct StreamingMarkdown: View {
     /// the whole `source` so head edits never re-trigger the tail's fade.
     private func tailToken(for block: MarkdownBlock) -> Int {
         switch block {
-        case .heading(_, let t), .bullet(let t), .ordered(_, let t), .paragraph(let t):
+        case .heading(_, let t), .bullet(let t, _), .ordered(_, let t, _),
+             .task(_, let t, _), .quote(let t), .paragraph(let t):
             return t.count
         case .code(_, let t):
             return t.count
@@ -1908,11 +2045,38 @@ struct MarkdownBlockRow: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
 
-        case .bullet(let text):
-            listRow(marker: "•", text: text)
+        case .bullet(let text, let indent):
+            listRow(marker: Text(bulletGlyph(for: indent)), text: text, indent: indent)
 
-        case .ordered(let number, let text):
-            listRow(marker: "\(number).", text: text)
+        case .ordered(let number, let text, let indent):
+            listRow(marker: Text("\(number)."), text: text, indent: indent)
+
+        case .task(let done, let text, let indent):
+            // A checked-off item dims: the checkbox already says "done", the
+            // fade just keeps open items visually in front.
+            listRow(
+                marker: Text(Image(systemName: done ? "checkmark.square" : "square")),
+                text: text,
+                indent: indent,
+                textOpacity: done ? 0.55 : 1
+            )
+
+        case .quote(let text):
+            InlineMarkdownText(text, linkColor: color.opacity(0.8))
+                .font(.sf(baseFont))
+                .tracking(-0.05)
+                .lineSpacing(baseFont * 0.45)
+                .foregroundStyle(color.opacity(0.8))
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+                .padding(.leading, 13)
+                .overlay(alignment: .leading) {
+                    // The accent bar that marks the island as quoted speech.
+                    RoundedRectangle(cornerRadius: 1.5)
+                        .fill(color.opacity(0.25))
+                        .frame(width: 3)
+                }
+                .padding(.vertical, 2)
 
         case .paragraph(let text):
             InlineMarkdownText(text, linkColor: color)
@@ -1938,21 +2102,33 @@ struct MarkdownBlockRow: View {
     }
 
     /// A list item: a fixed-width gutter holds the marker so wrapped lines hang
-    /// neatly under the text, not under the bullet.
-    private func listRow(marker: String, text: String) -> some View {
+    /// neatly under the text, not under the bullet. `indent` steps the whole row
+    /// right for nested items; `textOpacity` lets done tasks read as settled.
+    private func listRow(marker: Text, text: String, indent: Int = 0, textOpacity: Double = 1) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(marker)
+            marker
                 .font(.sf(baseFont, weight: .medium).monospacedDigit())
                 .foregroundStyle(color.opacity(0.7))
                 .frame(minWidth: 16, alignment: .trailing)
-            InlineMarkdownText(text, linkColor: color)
+            InlineMarkdownText(text, linkColor: color.opacity(textOpacity))
                 .font(.sf(baseFont))
                 .tracking(-0.05)
                 .lineSpacing(baseFont * 0.5)
-                .foregroundStyle(color)
+                .foregroundStyle(color.opacity(textOpacity))
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.leading, CGFloat(indent) * 16)
+    }
+
+    /// Bullet glyph by nesting depth — the standard •/◦/▪ ladder, so levels read
+    /// apart even when the indent step is subtle on the narrow panel.
+    private func bulletGlyph(for indent: Int) -> String {
+        switch indent {
+        case 0: return "•"
+        case 1: return "◦"
+        default: return "▪"
         }
     }
 }
@@ -2180,7 +2356,17 @@ struct SourceBadge: View {
     /// shut before the cursor can cross it.
     @Binding var pendingClose: DispatchWorkItem?
 
-    private let id = UUID()
+    /// Identity for "this badge is the open one". MUST be `@State`, not a plain
+    /// `let`: the parent turn re-runs its body whenever its own `turnHovered`
+    /// flips — which happens the instant the cursor moves onto the floating
+    /// panel, because the panel (an overlay above the ScrollView) steals the
+    /// hit test from the turn underneath. A plain `let UUID()` would be
+    /// regenerated by that re-init, so `hoveredID` (holding the old UUID) no
+    /// longer matches, `isOpen` flips false, the anchor unpublishes, and the
+    /// panel tears itself down one frame after the cursor reaches it. `@State`
+    /// storage survives struct re-inits, keeping the badge's identity stable
+    /// for as long as it exists in the hierarchy.
+    @State private var id = UUID()
     private var isOpen: Bool { hoveredID == id }
 
     var body: some View {
@@ -2253,6 +2439,15 @@ struct SourcePopoverPanel: View {
     private static let rowHeight: CGFloat = 18
     private static let rowSpacing: CGFloat = 7
 
+    /// Transparent hover bridge below the card, spanning the gap down to the
+    /// badge's top edge. Without it the cursor crosses a dead strip on its way
+    /// from pill → panel, and both `.onHover`s read "not hovering" during the
+    /// crossing — which fires the pill's deferred close before the panel can
+    /// cancel it, snapping the popup shut mid-reach. The bridge is part of the
+    /// panel's hover region, so hover stays continuous the whole way across.
+    /// Must match the gap the caller leaves in `NotchBody` (`bridgeGap`).
+    static let bridgeGap: CGFloat = 6
+
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
         // Cap the visible height at `visibleRows` rows; shorter lists size down to
@@ -2297,8 +2492,14 @@ struct SourcePopoverPanel: View {
         )
         .clipShape(shape)
         .shadow(color: .black.opacity(0.5), radius: 18, y: 6)
-        // Hovering the panel keeps the badge open; leaving it dismisses — so the
-        // round-trip pill → row works, and moving away closes.
+        // Extend the hover region downward by `bridgeGap` with a transparent
+        // strip so the pill → panel crossing is never un-hovered (see comment
+        // on `bridgeGap`). The card keeps its visual position; only the
+        // hit-testable area grows down to meet the badge.
+        .padding(.bottom, Self.bridgeGap)
+        .background(Color.clear.contentShape(Rectangle()))
+        // Hovering the panel (card + bridge) keeps the badge open; leaving it
+        // dismisses — so the round-trip pill → row works, and moving away closes.
         .onHover { $0 ? keepOpen() : dismiss() }
     }
 }

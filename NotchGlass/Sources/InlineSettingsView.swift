@@ -1025,14 +1025,60 @@ struct InlineSettingsView: View {
     /// Which screens carry a notch island. External monitors get a virtual
     /// notch that nests inside their menu bar; the choice applies immediately
     /// (AppDelegate listens and rebuilds the per-screen panels).
+    ///
+    /// Drawn as a two-card picker rather than a dropdown: "which screens" is a
+    /// spatial choice, so each card shows a miniature laptop + external monitor
+    /// with a bright pill on every screen that gets an island.
     private var placementRow: some View {
-        settingRow(label: L("general.showOn")) {
-            GlassMenu(title: placement.label) {
-                ForEach(DisplayPlacement.allCases) { p in
-                    Button(p.label) { selectPlacement(p) }
-                }
+        HStack(alignment: .top, spacing: 12) {
+            Text(L("general.showOn"))
+                .font(.sf(13, weight: .medium))
+                .foregroundStyle(Tokens.text2)
+                .lineLimit(1)
+                .fixedSize()
+                .frame(minWidth: 64, alignment: .leading)
+                // Sit on the cards' first inner line, roughly where the other
+                // rows' baseline lands, instead of the cards' outer top edge.
+                .padding(.top, 8)
+            ForEach(DisplayPlacement.allCases) { p in
+                placementCard(p)
             }
+            Spacer(minLength: 0)
         }
+    }
+
+    private func placementCard(_ p: DisplayPlacement) -> some View {
+        let selected = placement == p
+        return Button {
+            selectPlacement(p)
+        } label: {
+            VStack(spacing: 7) {
+                HStack(alignment: .bottom, spacing: 8) {
+                    MiniDisplay(kind: .laptop, hasIsland: true)
+                    MiniDisplay(kind: .external, hasIsland: p == .all)
+                }
+                // The unselected diagram dims as a whole so the bright pills
+                // read as "what you'd get", not as a second active choice.
+                .opacity(selected ? 1 : 0.55)
+                Text(p.label)
+                    .font(.sf(11, weight: selected ? .semibold : .regular))
+                    .foregroundStyle(selected ? Tokens.text1 : Tokens.text3)
+                    .lineLimit(1)
+            }
+            .padding(.vertical, 8)
+            .frame(width: 108)
+            .background(
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(.white.opacity(selected ? 0.10 : 0.04))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 9)
+                    .strokeBorder(.white.opacity(selected ? 0.40 : 0.10),
+                                  lineWidth: selected ? 1 : 0.5)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 9))
+        }
+        .buttonStyle(.plain)
     }
 
     private func selectPlacement(_ newValue: DisplayPlacement) {
@@ -1532,6 +1578,14 @@ struct InlineSettingsView: View {
     @MainActor
     private func refreshModels() async {
         let target = provider
+        // Curated manifest first (no-op when fresh): `availableModels` below reads
+        // through it, so keyless providers get the hot-updated shortlist too. The
+        // menu is already populated by the callers' synchronous fallback, so
+        // awaiting the fetch here never leaves it empty.
+        await RemoteModelManifest.refreshIfDue()
+        // Same stale-response guard as below: the user may have switched
+        // providers while the manifest fetch was in flight.
+        guard target == provider else { return }
         guard let key = APIKeyStore.current(for: target) else {
             modelOptions = target.availableModels
             return
@@ -1717,6 +1771,62 @@ struct GlassMenu<Content: View>: View {
 /// flags to `onCapture`. Swallowing the event while recording keeps Esc/Space
 /// from leaking into the panel underneath. The monitor is torn down the moment
 /// `active` flips false or the view disappears — no global tap, no leak.
+/// A miniature display glyph for the placement picker: a screen with a bright
+/// pill on its top edge when it carries a notch island, over a laptop deck or a
+/// monitor stand so the pair reads as built-in vs. external at a glance.
+private struct MiniDisplay: View {
+    enum Kind { case laptop, external }
+    let kind: Kind
+    /// Whether this screen gets an island under the option being drawn — the
+    /// pill and the brighter screen are the whole point of the diagram.
+    let hasIsland: Bool
+
+    var body: some View {
+        VStack(spacing: kind == .laptop ? 1 : 0) {
+            screen
+            base
+        }
+    }
+
+    private var screen: some View {
+        ZStack(alignment: .top) {
+            RoundedRectangle(cornerRadius: 3)
+                .fill(.white.opacity(hasIsland ? 0.16 : 0.05))
+            RoundedRectangle(cornerRadius: 3)
+                .strokeBorder(.white.opacity(hasIsland ? 0.55 : 0.20), lineWidth: 1)
+            if hasIsland {
+                Capsule()
+                    .fill(.white.opacity(0.95))
+                    .frame(width: 10, height: 3)
+                    .padding(.top, 2)
+            }
+        }
+        .frame(width: kind == .laptop ? 30 : 34,
+               height: kind == .laptop ? 19 : 21)
+    }
+
+    @ViewBuilder private var base: some View {
+        let tint = Color.white.opacity(hasIsland ? 0.45 : 0.18)
+        switch kind {
+        case .laptop:
+            // The hinge-forward deck, a touch wider than the lid.
+            RoundedRectangle(cornerRadius: 1)
+                .fill(tint)
+                .frame(width: 36, height: 2)
+        case .external:
+            // Monitor neck + foot.
+            VStack(spacing: 0) {
+                Rectangle()
+                    .fill(tint)
+                    .frame(width: 2, height: 3)
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(tint)
+                    .frame(width: 12, height: 2)
+            }
+        }
+    }
+}
+
 private struct HotKeyRecorder: NSViewRepresentable {
     var active: Bool
     var onCapture: (UInt32, NSEvent.ModifierFlags) -> Void

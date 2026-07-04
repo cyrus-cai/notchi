@@ -7,6 +7,19 @@ import Foundation
 struct ChatMessage: Sendable, Equatable {
     let role: String   // "user" | "assistant"
     let content: String
+    /// A copied image riding this turn (XII-121), already downsampled and
+    /// base64-encoded for the wire; `nil` for the ordinary text-only turn. Each
+    /// client encodes it in its own vendor shape (Anthropic `source` block /
+    /// OpenAI-style `image_url` data URI).
+    var image: ChatImage? = nil
+}
+
+/// A wire-ready image attachment: the base64 payload plus its mime type. Built
+/// once in `NotchModel.encodeForVision` (long side capped, JPEG) and carried
+/// opaquely from there to whichever client sends it.
+struct ChatImage: Sendable, Equatable {
+    let base64: String
+    let mediaType: String   // e.g. "image/jpeg"
 }
 
 /// The seam where the notch talks to an AI. In the web prototype this was
@@ -225,9 +238,10 @@ struct ProviderSpec {
     let defaultModel: String
     /// The models offered in the Settings model picker. These are the current,
     /// commonly-used model ids per vendor — a curated shortlist, not an exhaustive
-    /// catalog; vendors add/retire models over time, so treat this as a sensible
-    /// default set rather than the source of truth (the live `/models` fetch in
-    /// `ModelCatalog` supersedes it when a key is present).
+    /// catalog; vendors add/retire models over time, so this bundled set is only
+    /// the offline fallback: the remote manifest (`RemoteModelManifest`) overrides
+    /// it without an app release, and the live `/models` fetch in `ModelCatalog`
+    /// supersedes both in the picker when a key is present.
     let availableModels: [String]
     /// Short host shown in the Settings footer ("get a key at …").
     let signupHost: String
@@ -372,8 +386,12 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     // (`provider.displayName`, `provider.endpoint`, …) keep working unchanged.
     var displayName: String     { spec.displayName }
     var endpoint: URL           { spec.endpoint }
-    var defaultModel: String    { spec.defaultModel }
-    var availableModels: [String] { spec.availableModels }
+    // Models go through the remote curated manifest first (hot-updated from the
+    // website, see `RemoteModelManifest`), so the shortlist and the default a
+    // fresh install uses can move without an app release; the bundled spec is
+    // the offline fallback.
+    var defaultModel: String    { RemoteModelManifest.models(for: self)?.first ?? spec.defaultModel }
+    var availableModels: [String] { RemoteModelManifest.models(for: self) ?? spec.availableModels }
     var signupHost: String      { spec.signupHost }
     var signupURL: URL          { spec.signupURL }
     var envVarName: String      { spec.envVarName }
@@ -421,6 +439,30 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     /// harness reads that as a normal `end_turn`. The gate exists so a future
     /// known-toolless provider can be excluded cleanly without touching the harness.
     var supportsTools: Bool { true }
+
+    /// Whether `model` accepts image input (XII-121) — the gate for the
+    /// clipboard-image thumbnail: a text-only model never shows a preview it
+    /// can't consume. Judged from the id string alone, because Settings lets the
+    /// user type any id and OpenRouter serves `vendor/slug` ids, so there's no
+    /// enum to switch on. Curated vision families plus the generic markers
+    /// vendors put in vision-model names; an unrecognized id (including the
+    /// `openrouter/free` auto-router, whose routed model is undisclosed until
+    /// request time) reads as text-only — only a model known to read images
+    /// earns the thumbnail.
+    static func modelSupportsVision(_ model: String) -> Bool {
+        let m = model.lowercased()
+        // Families whose current lineup takes images end to end.
+        let visionFamilies = ["claude", "gemini", "gpt-4o", "gpt-4.1", "gpt-4-turbo",
+                              "gpt-5", "grok-4", "llama-4", "pixtral", "llava", "internvl"]
+        if visionFamilies.contains(where: m.contains) { return true }
+        // Vendor-agnostic markers vision variants carry in the id itself
+        // (qwen3-vl, mimo-vl, minimax-vl-01, moonshot-v1-…-vision-preview, …).
+        let markers = ["vision", "-vl", "vl-", "omni"]
+        if markers.contains(where: m.contains) { return true }
+        // GLM's vision line is the trailing v (glm-4v, glm-4.5v, glm-4.6v).
+        if m.hasPrefix("glm"), m.hasSuffix("v") { return true }
+        return false
+    }
 
     // MARK: Server-side web search (XII-118)
 
@@ -639,7 +681,7 @@ struct OpenAICompatAIService: AIService {
                 // System prompt first, then the running conversation verbatim —
                 // so a follow-up is answered with every prior turn in context.
                 let chat = [Message(role: "system", content: system)]
-                    + messages.map { Message(role: $0.role, content: $0.content) }
+                    + messages.map { Message(role: $0.role, content: $0.content, image: $0.image) }
 
                 // Retry the connect/first-token phase on a transient blip (network
                 // drop, timeout, 429, 5xx, or a stream that finishes with zero
@@ -771,6 +813,34 @@ struct OpenAICompatAIService: AIService {
     private struct Message: Encodable {
         let role: String
         let content: String
+        var image: ChatImage? = nil
+
+        private enum CodingKeys: String, CodingKey { case role, content }
+        private enum PartKeys: String, CodingKey {
+            case type, text, url
+            case imageUrl = "image_url"
+        }
+
+        /// A text-only turn keeps `content` as the plain string every backend
+        /// accepts. A vision turn (XII-121) switches `content` to the OpenAI
+        /// parts array — the text plus the image as an `image_url` data URI —
+        /// which OpenAI/OpenRouter/compatible vendors all speak.
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(role, forKey: .role)
+            guard let image else {
+                try c.encode(content, forKey: .content)
+                return
+            }
+            var parts = c.nestedUnkeyedContainer(forKey: .content)
+            var textPart = parts.nestedContainer(keyedBy: PartKeys.self)
+            try textPart.encode("text", forKey: .type)
+            try textPart.encode(content, forKey: .text)
+            var imagePart = parts.nestedContainer(keyedBy: PartKeys.self)
+            try imagePart.encode("image_url", forKey: .type)
+            var url = imagePart.nestedContainer(keyedBy: PartKeys.self, forKey: .imageUrl)
+            try url.encode("data:\(image.mediaType);base64,\(image.base64)", forKey: .url)
+        }
     }
     /// One `chat.completion.chunk` event. `delta.content` is the incremental
     /// answer text; it's `null` on role-only and reasoning-only chunks, hence
@@ -835,7 +905,7 @@ struct AnthropicAIService: AIService {
                         let body = RequestBody(
                             model: model,
                             system: system,
-                            messages: messages.map { .init(role: $0.role, content: $0.content) },
+                            messages: messages.map { .init(role: $0.role, content: $0.content, image: $0.image) },
                             maxTokens: ReplyTokens.budget(forSystem: system),
                             stream: true
                         )
@@ -918,6 +988,37 @@ struct AnthropicAIService: AIService {
     private struct Message: Encodable {
         let role: String
         let content: String
+        var image: ChatImage? = nil
+
+        private enum CodingKeys: String, CodingKey { case role, content }
+        private enum PartKeys: String, CodingKey { case type, text, source }
+        private enum SourceKeys: String, CodingKey {
+            case type, data
+            case mediaType = "media_type"
+        }
+
+        /// A text-only turn keeps `content` as the plain string. A vision turn
+        /// (XII-121) switches it to Anthropic's content-block array — the image
+        /// as a base64 `source` block first (the recommended image-then-text
+        /// order), then the text block.
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(role, forKey: .role)
+            guard let image else {
+                try c.encode(content, forKey: .content)
+                return
+            }
+            var parts = c.nestedUnkeyedContainer(forKey: .content)
+            var imagePart = parts.nestedContainer(keyedBy: PartKeys.self)
+            try imagePart.encode("image", forKey: .type)
+            var source = imagePart.nestedContainer(keyedBy: SourceKeys.self, forKey: .source)
+            try source.encode("base64", forKey: .type)
+            try source.encode(image.mediaType, forKey: .mediaType)
+            try source.encode(image.base64, forKey: .data)
+            var textPart = parts.nestedContainer(keyedBy: PartKeys.self)
+            try textPart.encode("text", forKey: .type)
+            try textPart.encode(content, forKey: .text)
+        }
     }
     /// One SSE event. We only read `content_block_delta`, whose `delta.text` holds
     /// the incremental answer; on other event types `delta`/`text` are absent.
@@ -925,6 +1026,107 @@ struct AnthropicAIService: AIService {
         let type: String
         let delta: Delta?
         struct Delta: Decodable { let text: String? }
+    }
+}
+
+// MARK: - Remote curated manifest (hot-updated shortlists + defaults, no app release needed)
+
+/// The curated per-provider model shortlist and default, maintained as a static
+/// JSON on the website (`https://notch.website/models.json`, deployed with the
+/// landing page) instead of baked into the binary. This is what lets the
+/// *recommended* lineup — and crucially the default model a fresh install uses —
+/// move without shipping an app release: edit the JSON, `vercel deploy --prod`,
+/// and every installed copy picks it up on its next refresh.
+///
+/// Layering: this manifest overrides the bundled `ProviderSpec` lists;
+/// `ModelCatalog`'s live `/v1/models` fetch (the vendor's own, exhaustive
+/// catalog) still supersedes both in the Settings picker when a key is present.
+/// On any failure — never fetched, offline, malformed JSON — callers fall back
+/// to the bundled lists, so this can only improve on the shipped defaults,
+/// never break them.
+///
+/// Manifest shape (provider keys are `Provider.rawValue`; the first id in each
+/// array doubles as the default model, same convention as `ProviderSpec`):
+///
+///     { "version": 1, "providers": { "openai": ["gpt-5.5", …], … } }
+enum RemoteModelManifest {
+    /// Baked into every shipped version — must never move. Schema evolution goes
+    /// through the JSON's `version` field, not a new URL.
+    private static let manifestURL = URL(string: "https://notch.website/models.json")!
+    private static let dataKey = "remoteModelManifest.json"
+    private static let fetchedAtKey = "remoteModelManifest.fetchedAt"
+    /// Re-fetch at most this often. Launch and Settings-open both call
+    /// `refreshIfDue`, so a shorter TTL just means more no-op wakeups.
+    private static let ttl: TimeInterval = 6 * 60 * 60
+
+    /// Parsed manifest (provider rawValue → model ids), seeded from the persisted
+    /// copy so the very first read after launch already reflects the last fetch.
+    /// Guarded by `lock`: read from any thread via `Provider.availableModels`,
+    /// replaced on a background task after a successful fetch.
+    private static let lock = NSLock()
+    private static var cached: [String: [String]]? = loadPersisted()
+    private static var fetching = false
+
+    /// Synchronous critical section — NSLock's lock/unlock can't be called
+    /// directly from async code (Swift 6 rule), so the async `refreshIfDue`
+    /// funnels its state touches through here.
+    private static func withLock<T>(_ body: () -> T) -> T {
+        lock.lock(); defer { lock.unlock() }
+        return body()
+    }
+
+    /// The curated list for `provider`, or `nil` when the manifest has never been
+    /// fetched (or doesn't cover this provider) — callers fall back to the
+    /// bundled `ProviderSpec` list. First entry doubles as the default model.
+    static func models(for provider: Provider) -> [String]? {
+        withLock { cached?[provider.rawValue] }
+    }
+
+    /// Fetch the manifest when the cached copy is older than `ttl` (or absent).
+    /// Cheap no-op otherwise, so callers can invoke it opportunistically. Any
+    /// failure leaves the previous cache in place.
+    static func refreshIfDue() async {
+        let due: Bool = withLock {
+            guard !fetching, cached == nil || isStale else { return false }
+            fetching = true
+            return true
+        }
+        guard due else { return }
+        defer { withLock { fetching = false } }
+
+        var req = URLRequest(url: manifestURL)
+        req.timeoutInterval = 10
+        guard let (data, response) = try? await URLSession.shared.data(for: req),
+              let http = response as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode),
+              let lists = decode(data) else { return }
+        withLock { cached = lists }
+        UserDefaults.standard.set(data, forKey: dataKey)
+        UserDefaults.standard.set(Date(), forKey: fetchedAtKey)
+    }
+
+    private static var isStale: Bool {
+        guard let last = UserDefaults.standard.object(forKey: fetchedAtKey) as? Date
+        else { return true }
+        return Date().timeIntervalSince(last) >= ttl
+    }
+
+    private static func loadPersisted() -> [String: [String]]? {
+        guard let data = UserDefaults.standard.data(forKey: dataKey) else { return nil }
+        return decode(data)
+    }
+
+    /// Decode + sanitize: drop empty ids and empty lists, and reject a manifest
+    /// with no usable providers at all, so a bad deploy can't blank the pickers —
+    /// `models(for:)` returning `nil` keeps the bundled fallback in charge.
+    private static func decode(_ data: Data) -> [String: [String]]? {
+        struct Manifest: Decodable { let providers: [String: [String]] }
+        guard let manifest = try? JSONDecoder().decode(Manifest.self, from: data)
+        else { return nil }
+        let cleaned = manifest.providers
+            .mapValues { $0.filter { !$0.isEmpty } }
+            .filter { !$0.value.isEmpty }
+        return cleaned.isEmpty ? nil : cleaned
     }
 }
 

@@ -105,6 +105,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // cue (and records the first-launch baseline) off the launch path.
             // Notes are bundled into the app — there's nothing to fetch.
             _ = WhatsNewService.shared
+            // Refresh the curated model manifest (shortlists + default models,
+            // hot-updated from the website) on the same quiet cadence.
+            await RemoteModelManifest.refreshIfDue()
         }
 
         rebuildPanels()

@@ -82,6 +82,12 @@ final class NotchModel: ObservableObject {
         /// search tool (GLM today). Drives the clickable source badge under the
         /// answer. Persisted, so reopening a recent item keeps its sources.
         var sources: [WebSource] = []
+        /// True on an *assistant* turn whose text is a failure reason written by the
+        /// error path (the XII-85 error card), not model output. Persisted, because a
+        /// later successful round snapshots the whole thread into history — and the
+        /// wire context must keep filtering the error turn out after a reopen, so the
+        /// model never sees "Anthropic · HTTP 401" as something it once said.
+        var isError: Bool = false
 
         init(id: UUID = UUID(), role: String, text: String,
              streaming: Bool = false, usedClipboard: Bool = false) {
@@ -96,7 +102,7 @@ final class NotchModel: ObservableObject {
         // it. `decodeIfPresent` + defaults is what keeps old saved conversations
         // loadable. `role`/`text` are required — every saved turn has them.
         // `toolActivity` is deliberately absent: it's runtime-only UI state.
-        enum CodingKeys: String, CodingKey { case id, role, text, streaming, usedClipboard, sources }
+        enum CodingKeys: String, CodingKey { case id, role, text, streaming, usedClipboard, sources, isError }
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -106,6 +112,7 @@ final class NotchModel: ObservableObject {
             streaming    = try c.decodeIfPresent(Bool.self, forKey: .streaming) ?? false
             usedClipboard = try c.decodeIfPresent(Bool.self, forKey: .usedClipboard) ?? false
             sources      = try c.decodeIfPresent([WebSource].self, forKey: .sources) ?? []
+            isError      = try c.decodeIfPresent(Bool.self, forKey: .isError) ?? false
         }
     }
 
@@ -929,6 +936,22 @@ final class NotchModel: ObservableObject {
     /// an unsupported type.
     @Published var pendingClipboard: String? = nil
 
+    /// The clipboard IMAGE available to attach to an Ask (XII-121) — a screenshot
+    /// (⇧⌘⌃4) or any copied bitmap. Non-nil only when the ACTIVE MODEL reads
+    /// images (`Provider.modelSupportsVision` — a text-only model never shows the
+    /// thumbnail), the clipboard is fresh (same changeCount gate as the text
+    /// path), and it holds NO eligible text — a copied string keeps today's text
+    /// behaviour untouched. Drives the thumbnail preview above the idle prompt;
+    /// the first-turn submit re-reads the pasteboard itself.
+    @Published var pendingClipboardImage: NSImage? = nil
+
+    /// The encoded image riding the current thread (XII-121), so follow-ups
+    /// re-attach it and "how do I fix it?" still sees the screenshot the thread
+    /// started from. Keyed by thread id — a new chat's fresh id simply stops
+    /// matching, so this never leaks across conversations. Session-only (not
+    /// persisted with history).
+    private var threadImage: (threadID: UUID, image: ChatImage)? = nil
+
     /// What the *copied text itself* reads as, when it leans note/reminder rather than
     /// something to ask about — `.note` or `.reminder`, never `.chat`, and `nil` while
     /// it reads as an Ask, is ambiguous, or the classifier hasn't landed yet. Computed
@@ -1180,6 +1203,9 @@ final class NotchModel: ObservableObject {
             classifyPendingClipboard(next)
         }
         pendingClipboard = next
+        // The image preview (XII-121) only exists when no text clip took the slot;
+        // a stale/text clipboard clears it so a thumbnail never lingers.
+        pendingClipboardImage = (next == nil) ? clipboardImageIfEligible() : nil
     }
 
     /// Read whether the *copied text* is itself a note/reminder, and publish the verdict
@@ -1314,6 +1340,11 @@ final class NotchModel: ObservableObject {
             showWhatsNew = false
             showHistory = false
             highlightedHistoryIndex = nil
+        } else {
+            // The provider/model may have changed in there — recompute the
+            // clipboard-image eligibility (XII-121) so the thumbnail appears or
+            // disappears to match the model the next Ask will actually hit.
+            refreshPendingClipboard()
         }
     }
 
@@ -1348,6 +1379,8 @@ final class NotchModel: ObservableObject {
     /// Leave settings and return to the idle prompt (panel stays open).
     func closeSettings() {
         showSettings = false
+        // Same model-gate recompute as `toggleSettings` (XII-121).
+        refreshPendingClipboard()
     }
 
     /// Open the panel straight into the "What's New" release notes — the path ⌘↵,
@@ -1692,6 +1725,69 @@ final class NotchModel: ObservableObject {
         let clip = s.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clip.isEmpty, clip.count <= 1500 else { return nil }
         return clip
+    }
+
+    /// The clipboard image available to attach to an Ask (XII-121), or `nil`.
+    /// Gated on the ACTIVE MODEL first: only a model known to read images (see
+    /// `Provider.modelSupportsVision`) gets the thumbnail at all — a text-only
+    /// model shows no preview rather than promising an attach that would fail.
+    /// Then the same freshness gate as the text path (the changeCount must have
+    /// moved past the pre-open baseline), and only consulted when NO eligible
+    /// text clip exists — a copied string always wins, so nothing about the text
+    /// flow changes. `NSImage(pasteboard:)` reads PNG/TIFF (the screenshot
+    /// formats) and returns nil for a text-only pasteboard.
+    private func clipboardImageIfEligible() -> NSImage? {
+        let provider = APIKeyStore.selectedProvider
+        let model = APIKeyStore.effectiveModel(for: provider) ?? provider.defaultModel
+        guard Provider.modelSupportsVision(model) else { return nil }
+        let pb = NSPasteboard.general
+        guard pb.changeCount != pasteboardChangeCountAtOpen else { return nil }
+        guard clipboardContextIfEligible() == nil else { return nil }
+        guard let image = NSImage(pasteboard: pb), image.isValid else { return nil }
+        return image
+    }
+
+    /// Downsample + encode a clipboard image for the wire (XII-121): long side
+    /// capped at 1568px (Anthropic's documented vision sweet spot; also keeps any
+    /// provider's payload sane), JPEG at 0.82 — a full-screen Retina screenshot
+    /// lands in the hundreds-of-KB range instead of many MB. Returns `nil` when
+    /// the bitmap can't be read or encoded, in which case the turn just goes out
+    /// as plain text.
+    static func encodeForVision(_ image: NSImage) -> ChatImage? {
+        guard let tiff = image.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff) else { return nil }
+        let w = rep.pixelsWide, h = rep.pixelsHigh
+        guard w > 0, h > 0 else { return nil }
+        let maxSide = 1568
+        let scale = min(1.0, Double(maxSide) / Double(max(w, h)))
+        let finalRep: NSBitmapImageRep
+        if scale < 1.0 {
+            let outW = max(1, Int(Double(w) * scale))
+            let outH = max(1, Int(Double(h) * scale))
+            guard let resized = NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: outW, pixelsHigh: outH,
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+            ) else { return nil }
+            // Draw in pixel space: pin the rep's point size to its pixel size so
+            // the NSImage draw isn't rescaled by a Retina points-vs-pixels factor.
+            resized.size = NSSize(width: outW, height: outH)
+            NSGraphicsContext.saveGraphicsState()
+            if let ctx = NSGraphicsContext(bitmapImageRep: resized) {
+                NSGraphicsContext.current = ctx
+                image.draw(in: NSRect(x: 0, y: 0, width: outW, height: outH),
+                           from: .zero, operation: .copy, fraction: 1.0)
+                ctx.flushGraphics()
+            }
+            NSGraphicsContext.restoreGraphicsState()
+            finalRep = resized
+        } else {
+            finalRep = rep
+        }
+        guard let jpeg = finalRep.representation(using: .jpeg,
+                                                 properties: [.compressionFactor: 0.82])
+        else { return nil }
+        return ChatImage(base64: jpeg.base64EncodedString(), mediaType: "image/jpeg")
     }
 
     /// Does this query *refer to* something the user has on hand — i.e. is it the
@@ -2210,6 +2306,35 @@ final class NotchModel: ObservableObject {
         }
     }
 
+    /// The wire copy of the thread for `submit()` (XII-88). Drops, besides the new
+    /// round's placeholder, the assistant turns that never became a real answer:
+    ///   - an *empty* turn left behind when a follow-up superseded a round before
+    ///     its first token (Anthropic 400s on empty assistant content);
+    ///   - an *error* turn holding the failure reason the XII-85 card wrote (the
+    ///     model would read "Anthropic · HTTP 401" as its own prior reply).
+    /// Dropping a turn can leave two user messages adjacent, which Anthropic also
+    /// rejects (roles must alternate) — so consecutive same-role messages are
+    /// merged. Only this wire copy is filtered; the visible thread keeps every turn.
+    private static func wireContext(from turns: [Turn], excluding answerID: UUID)
+        -> [ChatMessage]
+    {
+        var messages: [ChatMessage] = []
+        for turn in turns {
+            if turn.id == answerID { continue }
+            if turn.role == "assistant" {
+                let body = turn.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if body.isEmpty || turn.isError { continue }
+            }
+            if let last = messages.last, last.role == turn.role {
+                messages[messages.count - 1] = ChatMessage(
+                    role: turn.role, content: last.content + "\n\n" + turn.text)
+            } else {
+                messages.append(ChatMessage(role: turn.role, content: turn.text))
+            }
+        }
+        return messages
+    }
+
     func submit() {
         let q = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty else { return }
@@ -2253,10 +2378,11 @@ final class NotchModel: ObservableObject {
         turns.append(Turn(id: answerID, role: "assistant", text: "", streaming: true))
 
         // The history sent to the model: every completed turn, plus the new
-        // question — but NOT the empty assistant placeholder we just appended.
-        var context: [ChatMessage] = turns
-            .filter { $0.id != answerID }
-            .map { ChatMessage(role: $0.role, content: $0.text) }
+        // question — but NOT the empty assistant placeholder we just appended,
+        // and minus the hygiene cases `wireContext` filters (XII-88): a superseded
+        // round's still-empty assistant turn and an error card's reason text, both
+        // of which providers either reject outright or misread as model speech.
+        var context: [ChatMessage] = Self.wireContext(from: turns, excluding: answerID)
 
         // Clipboard-context injection — first turn only. If the user copied text
         // before invoking Notch and then typed a referential query ("summarize
@@ -2319,6 +2445,27 @@ final class NotchModel: ObservableObject {
                     role: "user",
                     content: "I have the following text on my clipboard — use it only if it's relevant to my question, otherwise ignore it completely:\n\n\(clip)\n\nMy question: \(instruction)")
             }
+        }
+
+        // Clipboard IMAGE injection (XII-121). A first turn with a fresh copied
+        // image (and no text clip — text always wins the slot) attaches it to the
+        // wire message so vision models can see it; the on-screen bubble keeps just
+        // the question. The encoded image is also parked on the thread so
+        // follow-ups re-attach it — "how do I fix it?" still sees the screenshot
+        // the thread started from. Image rounds skip the agent harness below (the
+        // tool wire doesn't carry image blocks), taking the plain stream instead.
+        var imageAttached = false
+        if firstTurn, clipForTurn == nil, let image = clipboardImageIfEligible(),
+           let encoded = Self.encodeForVision(image) {
+            context[context.count - 1].image = encoded
+            threadImage = (threadID: threadHistoryID, image: encoded)
+            imageAttached = true
+            // Same permanent "based on what you copied" trace the text clip gets.
+            if turns.count >= 2 { turns[turns.count - 2].usedClipboard = true }
+        } else if !firstTurn, let parked = threadImage, parked.threadID == threadHistoryID,
+                  let firstUser = context.firstIndex(where: { $0.role == "user" }) {
+            context[firstUser].image = parked.image
+            imageAttached = true
         }
 
         // Fresh thinking word for this answer's pre-stream wait, rotating slowly
@@ -2427,7 +2574,8 @@ final class NotchModel: ObservableObject {
                                                           options: options)
                 })
                 let registry = ToolRegistry(agentTools)
-                if let agent = self.ai as? AgentCapableService,
+                if !imageAttached,
+                   let agent = self.ai as? AgentCapableService,
                    APIKeyStore.selectedProvider.supportsTools,
                    !registry.isEmpty {
                     let harness = AgentHarness(service: agent, registry: registry)
@@ -2525,9 +2673,17 @@ final class NotchModel: ObservableObject {
                         // Surface the REAL reason (XII-85) — `ServiceError` already
                         // localizes to e.g. "Anthropic · HTTP 401" — and raise an
                         // actionable error state (retry, or open Settings when no key
-                        // is set) instead of a dead generic line.
+                        // is set) instead of a dead generic line. An image round adds
+                        // the vision hint (XII-121): the most likely cause of a
+                        // rejected image payload is a model without vision support,
+                        // and the raw provider error rarely says so legibly.
                         let reason = error.localizedDescription
+                            + (imageAttached ? "\n" + L("ask.visionHint") : "")
                         self.updateAnswer(id: answerID, text: reason)
+                        // Flag the turn so `wireContext` keeps this reason out of the
+                        // next round's wire copy — a follow-up typed instead of a
+                        // retry must not send the error text as model speech (XII-88).
+                        self.markTurnError(id: answerID)
                         self.markFinished(id: answerID)
                         self.askError = AskError(message: reason, needsSetup: !self.isConfigured)
                         self.mode = .result
@@ -2547,6 +2703,51 @@ final class NotchModel: ObservableObject {
     /// response body. Nil for non-HTTP failures (timeout, offline, malformed).
     private static func httpStatus(from error: Error) -> Int? {
         (error as? OpenAICompatAIService.ServiceError)?.httpStatus
+    }
+
+    /// True while an ask round is streaming on THIS screen — the stop
+    /// affordance's gate (XII-122). A round detached by `newChat`/`fullClose`
+    /// keeps streaming into its snapshot but is no longer on-screen, so it
+    /// doesn't count (there's nothing visible to stop).
+    var isStreaming: Bool { turns.contains { $0.streaming } }
+
+    /// Stop the in-flight ask (XII-122) — the streaming answer's stop button and
+    /// Esc both land here. Cancels the current task but KEEPS whatever already
+    /// streamed: a partial answer settles in place (and persists to Recent, like
+    /// the mid-stream-drop path) so the thread stays followable and follow-ups
+    /// work on it. A stop before the first token has nothing to keep — the empty
+    /// pair is dropped and the question lifted back into the input instead, so
+    /// the words aren't lost either way. No-op when nothing is streaming.
+    func stopStreaming() {
+        guard isStreaming else { return }
+        task?.cancel()
+        task = nil
+        stopThinkingWordRotation()
+        thinking = false
+        thinkingAnswerID = nil
+        setThinkingActivity(nil)
+        // Settle the on-screen streaming flag(s), reading back the partial text.
+        var partial = ""
+        for i in turns.indices where turns[i].streaming {
+            turns[i].streaming = false
+            if turns[i].role == "assistant" { partial = turns[i].text }
+        }
+        if partial.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // Nothing streamed yet: an empty assistant bubble is dead weight —
+            // drop the pair, put the question back (ready to edit or resend), and
+            // clear the parked "answering…" placeholder from Recent.
+            if let lastUser = turns.last(where: { $0.role == "user" }) {
+                let question = lastUser.text
+                if turns.last?.role == "assistant" { turns.removeLast() }
+                if turns.last?.role == "user" { turns.removeLast() }
+                if text.isEmpty { text = question }
+            }
+            settlePending(threadHistoryID)
+            mode = turns.isEmpty ? .idle : .result
+        } else {
+            mode = .result
+            persistThread(turns, threadID: threadHistoryID, answer: partial)
+        }
     }
 
     /// Retry the Ask that just failed (XII-85). The failed turn pair (the question
@@ -2673,6 +2874,69 @@ final class NotchModel: ObservableObject {
             case .failure(let err):
                 self.reportCaptureFailure(line, message: err.errorDescription ?? L("feedback.notesFailed"))
             }
+        }
+    }
+
+    // MARK: - Save answer to Notes (XII-123)
+
+    /// The per-answer cue for the "save to Notes" footer action: which answer
+    /// it's about plus the line to show ("Saving…" / "Added to Notes" / error).
+    /// Deliberately SEPARATE from `noteSaving`/`lastSavedNote` — those belong to
+    /// the input-box capture pipeline, and sharing that single flag across
+    /// concurrent writers is exactly the overlap XII-117 flags. One cue at a
+    /// time is enough: saving a second answer just moves the cue to it.
+    struct AnswerNoteCue: Equatable {
+        let answerID: UUID
+        let text: String
+    }
+    @Published var answerNoteCue: AnswerNoteCue? = nil
+    private var answerNoteCueTask: Task<Void, Never>? = nil
+
+    /// Save a settled answer into Apple Notes (XII-123): first line = the
+    /// thread's generated title (Notes titles a note from its first line),
+    /// falling back to the question; body = question + answer, markdown as-is.
+    /// Reuses the NotesService write pipeline; feedback renders inline in the
+    /// answer's own footer so the thread is never interrupted.
+    func saveAnswerToNotes(answerID: UUID) {
+        guard let i = turns.firstIndex(where: { $0.id == answerID }),
+              turns[i].role == "assistant", !turns[i].streaming else { return }
+        let answer = turns[i].text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !answer.isEmpty else { return }
+        let question = turns[..<i].last(where: { $0.role == "user" })?
+            .text.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let title = history.first(where: { $0.id == threadHistoryID })?.title ?? question
+        var body = title
+        if !question.isEmpty, question != title { body += "\n\n" + question }
+        body += "\n\n" + answer
+
+        answerNoteCueTask?.cancel()
+        answerNoteCue = AnswerNoteCue(answerID: answerID, text: L("input.saving"))
+        NotesService.writeNote(body) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                self.flashAnswerNoteCue(
+                    AnswerNoteCue(answerID: answerID, text: L("feedback.addedNotes")))
+            case .failure(let err):
+                // Errors linger longer — usually "grant Automation access", which
+                // takes more than a glance to read.
+                self.flashAnswerNoteCue(
+                    AnswerNoteCue(answerID: answerID,
+                                  text: err.errorDescription ?? L("feedback.notesFailed")),
+                    seconds: 5)
+            }
+        }
+    }
+
+    /// Show a terminal save cue for a beat, then fade it — the same rhythm as
+    /// `flashSavedCue`, scoped to the answer footer instead of the input box.
+    private func flashAnswerNoteCue(_ cue: AnswerNoteCue, seconds: Double = 1.7) {
+        answerNoteCueTask?.cancel()
+        answerNoteCue = cue
+        answerNoteCueTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeInOut(duration: 0.25)) { self?.answerNoteCue = nil }
         }
     }
 
@@ -2882,6 +3146,13 @@ final class NotchModel: ObservableObject {
         turns[i].text = text
     }
 
+    /// Mark a turn as holding an error reason rather than model output, so
+    /// `wireContext` filters it from every later request (XII-88).
+    private func markTurnError(id: UUID) {
+        guard let i = turns.firstIndex(where: { $0.id == id }) else { return }
+        turns[i].isError = true
+    }
+
     /// End the thinking-dots phase for `id` — but only if `id` is the round that
     /// currently owns the flag, so a superseded round finishing can't switch the dots
     /// off under a newer one. Called on the first token and at every round terminus
@@ -2996,13 +3267,14 @@ final class NotchModel: ObservableObject {
         // blocked; if it fails (offline, no key, timeout) the row falls back to
         // the first question.
         //
-        // Regenerate on follow-ups too: the first title is made from the opening
-        // exchange, but a thread that drifts to a new topic would otherwise stay
-        // frozen on the original subject. Once the conversation has grown past the
-        // first round (>2 turns), re-title from the full transcript so the row
-        // reflects where the chat actually went, not just how it started.
-        let isFollowUp = thread.count > 2
-        if existingTitle == nil || isFollowUp {
+        // Regenerate as the thread drifts, but only at milestone rounds (every
+        // other round, XII-88) — re-titling on EVERY follow-up fired one extra
+        // full request per round, which doubles traffic on low-RPM free tiers
+        // (Kimi/GLM/MiniMax) and can 429 the next real answer. A thread that
+        // drifts to a new topic still gets re-titled within a round or two;
+        // a missing title is always generated regardless of round parity.
+        let atMilestone = thread.count > 2 && thread.count % 4 == 0
+        if existingTitle == nil || atMilestone {
             Task { [weak self] in
                 guard let self, let title = await self.generateTitle(for: thread) else { return }
                 await MainActor.run {
@@ -3033,12 +3305,20 @@ final class NotchModel: ObservableObject {
     private func generateTitle(for thread: [Turn]) async -> String? {
         guard !(ai is StubAIService) else { return nil }
 
+        // Only the tail of the conversation, size-capped (XII-88): a title should
+        // reflect where the chat *went*, so the last few rounds are the right
+        // input anyway — and the cap keeps a long thread from ballooning this
+        // side request. Skips turns that never became real answers (a superseded
+        // round's empty turn, an error card's reason text).
         var transcript = ""
-        for turn in thread {
+        for turn in thread.suffix(6) {
+            let body = turn.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if body.isEmpty || turn.isError { continue }
             let label = turn.role == "user" ? "User" : "Assistant"
-            transcript += "\(label): \(turn.text)\n"
+            transcript += "\(label): \(body)\n"
         }
-        let prompt = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prompt = String(transcript.suffix(4000))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else { return nil }
 
         do {

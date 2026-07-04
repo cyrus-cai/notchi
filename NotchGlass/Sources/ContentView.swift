@@ -170,6 +170,16 @@ struct ContentView: View {
                     }
                     return true
                 }
+                // Streaming → first Esc STOPS generation (XII-122), keeping the
+                // partial answer on screen; a second Esc (now settled) closes the
+                // panel as before. Stepping out one level at a time, same as the
+                // history/settings unwinds above.
+                if model.isStreaming {
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                        model.stopStreaming()
+                    }
+                    return true
+                }
                 model.beginClose(sequenced: !reduceMotion)
                 return true
             }

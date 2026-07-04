@@ -194,6 +194,9 @@ struct NotchBody: View {
                 } else if let clip = model.pendingClipboard {
                     clipboardPreviewLine(clip)
                         .transition(moduleTransition)
+                } else if let image = model.pendingClipboardImage {
+                    clipboardImagePreviewLine(image)
+                        .transition(moduleTransition)
                 }
 
                 idleInputRow
@@ -299,6 +302,8 @@ struct NotchBody: View {
                     // header's real height) grows to keep the first row clear.
                     if let clip = model.pendingClipboard {
                         clipboardPreviewLine(clip)
+                    } else if let image = model.pendingClipboardImage {
+                        clipboardImagePreviewLine(image)
                     }
                     idleInputRow
                     // No preset chips here: this IS the expanded Recent state, and
@@ -420,6 +425,31 @@ struct NotchBody: View {
                 .lineLimit(1)
         }
         .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.bottom, 8)
+    }
+
+    /// The copied-IMAGE preview (XII-121): a small thumbnail + caption in the
+    /// text quote's slot, shown when the clipboard holds pixels instead of words
+    /// (a screenshot, a copied bitmap). The first-turn Ask attaches this image to
+    /// the wire message, so the preview is exactly "what the model will see".
+    private func clipboardImagePreviewLine(_ image: NSImage) -> some View {
+        HStack(spacing: 6) {
+            Image(nsImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(width: 34, height: 24)
+                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
+                )
+            Text(L("clip.imageCopied"))
+                .font(.sf(11))
+                .tracking(0.2)
+                .foregroundStyle(Tokens.text4)
+                .lineLimit(1)
+        }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.bottom, 8)
     }
@@ -1162,13 +1192,17 @@ struct NotchBody: View {
                     // vertical flexible so the panel's own maxHeight cap applies and
                     // overflowing rows scroll instead of growing the card.
                     .fixedSize(horizontal: true, vertical: false)
-                    // Anchor the panel's BOTTOM-leading just above the badge's top,
+                    // Anchor the panel's BOTTOM-leading right at the badge's top,
                     // so it pops up over the answer. `.bottomLeading` alignment +
                     // an offset of (badge.minX, badge.minY) positions the panel's
-                    // bottom-left at the badge's top-left, minus a 6pt gap.
+                    // bottom-left at the badge's top-left. No visual gap is
+                    // subtracted here: the panel carries its own transparent
+                    // `bridgeGap` strip at its bottom (see `SourcePopoverPanel`),
+                    // which spans the gap as a continuous hover region so the
+                    // pill → panel crossing never falls into a dead zone.
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
                     .offset(x: max(0, rect.minX),
-                            y: rect.minY - geo.size.height - 6)
+                            y: rect.minY - geo.size.height)
                     .transition(.opacity)
                 }
             }
@@ -1458,6 +1492,11 @@ struct NotchBody: View {
                     // user copied" and injected into the next Ask.
                     model.rebaselineClipboardAfterInAppWrite()
                 } : nil,
+                // File this answer into Apple Notes (XII-123); the cue below the
+                // footer reports the outcome for exactly this turn.
+                onSaveToNotes: { model.saveAnswerToNotes(answerID: turn.id) },
+                noteCue: model.answerNoteCue?.answerID == turn.id
+                    ? model.answerNoteCue?.text : nil,
                 // The `ask_user` question card, when the model has paused this
                 // still-streaming answer on a choice only the user can make.
                 pendingQuestion: turn.streaming ? model.pendingQuestion(for: turn.id) : nil,

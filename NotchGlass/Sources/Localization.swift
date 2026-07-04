@@ -333,7 +333,10 @@ enum Strings {
         "result.copyAnswer": "Copy answer",
         "result.regenerate": "Regenerate",
         "result.copyToContinue": "Copy chat to continue in ChatGPT or Claude",
+        "result.saveToNotes": "Save to Notes",
         "result.followUp": "Ask a follow-up…",
+        "clip.imageCopied": "Copied image — ask about it",
+        "ask.visionHint": "The selected model may not support images — try a vision-capable model.",
 
         // Feedback / errors
         "feedback.addedNotesClip": "Added to Notes · with clipboard",
@@ -586,7 +589,10 @@ enum Strings {
         "result.copyAnswer": "复制回答",
         "result.regenerate": "重新回答",
         "result.copyToContinue": "复制对话，去 ChatGPT 或 Claude 接着聊",
+        "result.saveToNotes": "存入备忘录",
         "result.followUp": "继续追问…",
+        "clip.imageCopied": "已复制图片——可直接提问",
+        "ask.visionHint": "当前模型可能不支持图片输入——请换用支持视觉的模型。",
 
         "feedback.addedNotesClip": "已存入备忘录 · 含剪贴板内容",
         "feedback.addedNotes": "已存入备忘录",
@@ -831,7 +837,10 @@ enum Strings {
         "result.copyAnswer": "複製回答",
         "result.regenerate": "重新回答",
         "result.copyToContinue": "複製對話，去 ChatGPT 或 Claude 接著聊",
+        "result.saveToNotes": "存入備忘錄",
         "result.followUp": "繼續追問…",
+        "clip.imageCopied": "已複製圖片——可直接提問",
+        "ask.visionHint": "目前模型可能不支援圖片輸入——請換用支援視覺的模型。",
 
         "feedback.addedNotesClip": "已存入備忘錄 · 含剪貼簿內容",
         "feedback.addedNotes": "已存入備忘錄",
