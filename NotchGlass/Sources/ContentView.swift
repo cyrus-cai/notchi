@@ -58,20 +58,15 @@ struct ContentView: View {
         // panel opens for the first time and `markPanelOpened()` retires it.
         .animation(.easeInOut(duration: 0.3), value: onboarding.showGestureHint)
         .background(KeyEventCatcher { event in
-            // ⌘↵ opens (or toggles shut) the What's New release-notes panel — the
-            // keyboard path that matches the input-row cue. keyCode 36 is Return.
-            // Only over the idle prompt: mid-thread (result/load) ⌘↵ has no meaning
-            // here and shouldn't snatch a streaming answer away. Settings yields to
-            // it (opening What's New folds settings, like the gear folds the list).
+            // ⌘↵ submits the current line to the *other family* — Ask ⇄ Capture
+            // (Note/Remind) — the one-key correction for when the inline hint reads
+            // the line wrong (see NotchModel.submitOtherFamily; Tab remains the
+            // precise three-way pick). Fresh prompt only: intent routing never
+            // applies to follow-ups, and it needs text to send. keyCode 36 is Return.
             if event.keyCode == 36, event.modifierFlags.contains(.command),
-               model.mode == .idle, !model.showOnboarding {
-                withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
-                    if model.showWhatsNew {
-                        model.closeWhatsNew()
-                    } else {
-                        model.openWhatsNew(on: metrics.displayID)
-                    }
-                }
+               model.mode == .idle, model.hasText,
+               !model.showOnboarding, !model.showSettings, !model.showWhatsNew {
+                model.submitOtherFamily()
                 return true
             }
             // ⌘F summons the recent-list filter. The chip is gone — this is the only
@@ -100,12 +95,45 @@ struct ContentView: View {
                 }
                 return true
             }
-            // ⌘P pins/unpins the answer on screen — the keyboard twin of the
-            // top-right pin button. A pinned answer stays open when the pointer
+            // Answer-state action keys (XII-131): the hover toolbar's actions, put
+            // on the keyboard so the whole flow stays hands-on-keys. Only in a
+            // settled result (not idle/settings/what's-new, not mid-stream) — the
+            // toolbar they mirror only exists there. Guarded so a follow-up being
+            // typed keeps normal editing: when the prompt field editor is first
+            // responder, ⌘C/⌘S/⌘R fall through to the system (⌘C copies the
+            // selection/line, etc.). ⌘P/⌘D handle their own state below.
+            //   ⌘C (8)  = copy the whole answer      ⌘S (1) = save to Notes
+            //   ⌘R (15) = regenerate
+            if event.modifierFlags.contains(.command),
+               model.mode == .result, !model.showSettings, !model.showWhatsNew,
+               !model.isStreaming, !fieldEditorIsFirstResponder() {
+                switch event.keyCode {
+                case 8:   // C — copy the whole answer (no manual selection to honour;
+                          // the field editor guard above already ceded ⌘C while typing)
+                    if let answer = model.lastAnswerText {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(answer, forType: .string)
+                        model.rebaselineClipboardAfterInAppWrite()
+                        return true
+                    }
+                case 1:   // S — save the answer to Apple Notes (XII-123 pipeline)
+                    if let id = model.lastAnswerID {
+                        model.saveAnswerToNotes(answerID: id)
+                        return true
+                    }
+                case 15:  // R — regenerate the last answer
+                    model.regenerateLastAnswer()
+                    return true
+                default:
+                    break
+                }
+            }
+            // ⌘P (and ⌘D) pins/unpins the answer on screen — the keyboard twin of
+            // the top-right pin button. A pinned answer stays open when the pointer
             // leaves (see NotchModel.collapseOnLeave). Only over a result (there's
-            // nothing to pin on the idle prompt / settings), so ⌘P falls through to
-            // the system everywhere else. keyCode 35 is P.
-            if event.keyCode == 35, event.modifierFlags.contains(.command),
+            // nothing to pin on the idle prompt / settings), so both fall through to
+            // the system everywhere else. keyCode 35 is P, 2 is D.
+            if event.keyCode == 35 || event.keyCode == 2, event.modifierFlags.contains(.command),
                model.mode == .result, !model.showSettings, !model.showWhatsNew {
                 withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
                     model.toggleAnswerPin()
@@ -197,6 +225,17 @@ struct ContentView: View {
             return false
         })
     }
+
+    /// True when the key window's first responder is a text field editor — i.e. the
+    /// user is typing in the prompt / follow-up / history-filter field. The
+    /// answer-state action keys (XII-131) defer to it so ⌘C/⌘S/⌘R keep their normal
+    /// editing meaning while a field is focused; only when nothing is being edited
+    /// do they act on the answer. An `NSText` field editor is what AppKit installs
+    /// as first responder for a focused `NSTextField`/`TextEditor`.
+    private func fieldEditorIsFirstResponder() -> Bool {
+        guard let responder = NSApp.keyWindow?.firstResponder else { return false }
+        return responder is NSText
+    }
 }
 
 /// The first-run gesture hint: a slow breathing glow centered under the resting
@@ -254,6 +293,129 @@ private struct NotchGestureHint: View {
     }
 }
 
+/// The measured natural widths of the copy-sense EARS — the content on each
+/// side of the hardware notch. Reported up to `NotchIsland`, which adds the ear
+/// insets and sizes/slides the island so each shoulder hugs its own content
+/// (a different length in every language and stage) while the black center
+/// stays fused to the physical camera housing.
+struct SenseEarWidths: Equatable {
+    var left: CGFloat = 0
+    var right: CGFloat = 0
+}
+
+private struct SenseEarWidthsKey: PreferenceKey {
+    static let defaultValue = SenseEarWidths()
+    static func reduce(value: inout SenseEarWidths, nextValue: () -> SenseEarWidths) {
+        let next = nextValue()
+        value = SenseEarWidths(left: max(value.left, next.left),
+                               right: max(value.right, next.right))
+    }
+}
+
+/// The copy-sense rest content, in the two-eared compact idiom (the Dynamic
+/// Island's): nothing can sit ON the camera housing — on a notched Mac those
+/// pixels physically don't exist — so the hint splits across the shoulders the
+/// flex opens on each side of it. Left ear: what will happen ("设提醒" / "Set
+/// Reminder"), then the write's dots, then the one-word verdict — the same slot
+/// the busy dots use, so "working" always lives left of the notch. Right ear:
+/// the key to press ("⌘C"), following the macOS menu convention of label left,
+/// shortcut right; it folds shut the moment the offer is consumed. Each ear is
+/// a pinned slot — content can never slide under the camera by construction.
+private struct ClipboardSenseEars: View {
+    let sense: NotchModel.ClipboardSense
+    /// The drawn hardware-notch width the ears flank (content-free gap).
+    let notchWidth: CGFloat
+    /// The island's current ear slots (content + insets, animated by the
+    /// island's own settle) — the ears lay out inside exactly these.
+    let earLeft: CGFloat
+    let earRight: CGFloat
+
+    private var isHinting: Bool {
+        if case .hinting = sense { return true }
+        return false
+    }
+
+    /// A stable identity per visual stage, so SwiftUI transitions between stages
+    /// (and not between, say, a note hint and a reminder hint's shared text).
+    private var stageKey: String {
+        switch sense {
+        case .idle: return "idle"
+        case .hinting(let p): return "hint-\(p.rawValue)"
+        case .saving: return "saving"
+        case .saved: return "saved"
+        case .failed: return "failed"
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            // Left ear — the outcome phrase, then the dots, then the verdict.
+            ZStack {
+                leftStage
+                    .id(stageKey)
+                    .transition(.opacity.combined(with: .scale(scale: 0.85)))
+            }
+            .animation(.easeInOut(duration: 0.22), value: stageKey)
+            .frame(width: earLeft)
+
+            // The camera gap — content-free by construction.
+            Color.clear.frame(width: notchWidth)
+
+            // Right ear — the key to press, only while the offer stands.
+            ZStack {
+                if isHinting {
+                    earText("⌘C", color: Tokens.text3)
+                        .background(GeometryReader { proxy in
+                            Color.clear.preference(
+                                key: SenseEarWidthsKey.self,
+                                value: SenseEarWidths(right: proxy.size.width))
+                        })
+                        .transition(.opacity)
+                }
+            }
+            .animation(.easeInOut(duration: 0.22), value: isHinting)
+            .frame(width: earRight)
+        }
+        .frame(minHeight: 22)
+    }
+
+    @ViewBuilder
+    private var leftStage: some View {
+        Group {
+            switch sense {
+            case .hinting(let panel):
+                earText(panel == .reminder ? L("sense.reminder") : L("sense.note"),
+                        color: Tokens.text3)
+            case .saving:
+                ThinkingDots(dot: 4, spacing: 5)
+                    .fixedSize()
+            case .saved:
+                earText(L("sense.saved"), color: Tokens.text4)
+            case .failed:
+                earText(L("sense.failed"), color: Tokens.text4)
+            case .idle:
+                EmptyView()
+            }
+        }
+        .background(GeometryReader { proxy in
+            Color.clear.preference(key: SenseEarWidthsKey.self,
+                                   value: SenseEarWidths(left: proxy.size.width))
+        })
+    }
+
+    /// Deliberately faint — a hint, not an announcement. `fixedSize` so the
+    /// text NEVER truncates: while its slot is still settling it overflows
+    /// (hidden by the island's clip) instead of drawing half a line.
+    private func earText(_ text: String, color: Color) -> some View {
+        Text(text)
+            .font(.sf(11.5, weight: .regular))
+            .tracking(0.3)
+            .foregroundStyle(color)
+            .lineLimit(1)
+            .fixedSize()
+    }
+}
+
 /// The continuous black→glass island that grows out of the notch.
 struct NotchIsland: View {
     @ObservedObject var model: NotchModel
@@ -268,6 +430,15 @@ struct NotchIsland: View {
     /// dots. Wide enough for the three-dot wave to breathe, narrow enough to
     /// read as the notch itself flexing, never as a second island.
     private let busyExtension: CGFloat = 48
+
+    /// The copy-sense ears' measured content widths (via `SenseEarWidthsKey`),
+    /// so each shoulder of the flex fits its own content — the phrase/dots/
+    /// verdict on the left, the ⌘C key on the right — in whatever language and
+    /// stage is showing.
+    @State private var senseEarContent = SenseEarWidths()
+
+    /// Breathing room on each side of an ear's content.
+    private let senseEarPad: CGFloat = 11
 
     /// The transient "entry kick" — the cursor's momentum, absorbed by the
     /// glass. Set to a small displacement in the direction of approach the
@@ -295,9 +466,35 @@ struct NotchIsland: View {
         !model.open && model.roundsInFlight > 0
     }
 
+    /// True when the resting notch is offering (or narrating) a clipboard
+    /// capture. Gated on the GLOBAL `open` like `busy`, and yields to the busy
+    /// dots — an in-flight answer outranks a copy hint for the one strip.
+    private var sensing: Bool {
+        !model.open && !busy && model.clipboardSense != .idle
+    }
+
+    /// The resting notch's LEFT flex — the busy dots' strip, or the copy-sense
+    /// left ear (phrase → dots → verdict), sized to its measured content. The
+    /// two occupants never coexist (`sensing` yields to `busy`).
+    private var earLeft: CGFloat {
+        if busy { return busyExtension }
+        if sensing, senseEarContent.left > 0 {
+            return senseEarContent.left + senseEarPad * 2
+        }
+        return 0
+    }
+
+    /// The resting notch's RIGHT flex — the copy-sense ⌘C ear, present only
+    /// while the offer stands (it folds shut on confirm). Busy never extends
+    /// right: its strip stays pinned to the bezel exactly as before.
+    private var earRight: CGFloat {
+        guard sensing, senseEarContent.right > 0 else { return 0 }
+        return senseEarContent.right + senseEarPad * 2
+    }
+
     private var width: CGFloat {
         if isOpen { return model.openWidth }
-        return Tokens.notchWidth + (busy ? busyExtension : 0)
+        return Tokens.notchWidth + earLeft + earRight
     }
 
     private var bottomRadius: CGFloat {
@@ -327,10 +524,11 @@ struct NotchIsland: View {
                             )
                         )
                         .frame(width: 7, height: 7)
-                        // The busy extension shifts the island's center left by
-                        // half its width; push the lens dot back right so it
-                        // never drifts off the physical camera.
-                        .offset(x: busy ? busyExtension / 2 : 0, y: topBleed / 2)
+                        // Uneven ears shift the island's center off the notch
+                        // zone's center by (L−R)/2 — push the lens dot back by
+                        // exactly that so it never drifts off the physical
+                        // camera. (Busy: L=48, R=0 → the familiar +24pt.)
+                        .offset(x: (earLeft - earRight) / 2, y: topBleed / 2)
                 }
 
                 // Background-activity dots, centered in the strip the busy
@@ -344,6 +542,21 @@ struct NotchIsland: View {
                     ThinkingDots(dot: 4, spacing: 5)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.leading, 13)
+                        .offset(y: topBleed / 2)
+                        .transition(.opacity)
+                }
+
+                // The copy-sense ears: the copied text read as a note/reminder,
+                // and the notch is offering to file it. Both shoulders extend at
+                // once — the outcome phrase on the left, the ⌘C key on the right
+                // (menu convention: label left, shortcut right) — and the camera
+                // gap between them is content-free by construction, so text can
+                // never slide under the housing and render half-hidden.
+                if sensing {
+                    ClipboardSenseEars(sense: model.clipboardSense,
+                                       notchWidth: Tokens.notchWidth,
+                                       earLeft: earLeft,
+                                       earRight: earRight)
                         .offset(y: topBleed / 2)
                         .transition(.opacity)
                 }
@@ -424,13 +637,15 @@ struct NotchIsland: View {
         // top of the open spring's own per-frame layout work.
         .modifier(EntryKickEffect(tx: kick.tx, shear: kick.shear, squash: kick.squash).ignoredByLayout())
         .contentShape(NotchShape(bottomRadius: bottomRadius))
-        // Pin the right edge while the busy extension is out: the island stays
-        // centered in the canvas, so the extra width would otherwise grow half
-        // out of each side — pushing the whole form back left by half the
-        // extension keeps the right edge fused with the hardware notch and puts
-        // all the growth on the left. Sits BEFORE the isOpen animation so an
-        // open/close morph carries the slide on the same spring as the width.
-        .offset(x: busy ? -busyExtension / 2 : 0)
+        // Slide the whole form so its black CENTER (not its geometric center)
+        // stays fused to the hardware notch: the island is centered in the
+        // canvas, so uneven ears would otherwise drag the camera zone off the
+        // physical housing. (R−L)/2 is exactly that correction — for busy
+        // (L=48, R=0) it reduces to the familiar −24pt right-edge pin; for even
+        // ears it's zero and the form blooms symmetrically. Sits BEFORE the
+        // isOpen animation so an open/close morph carries the slide on the
+        // same spring as the width.
+        .offset(x: (earRight - earLeft) / 2)
         // Spring expand (eased by how hard the cursor arrived — see `openSpring`);
         // the collapse settles on `closeSpring` (XII-108) so the shell drops back
         // with a touch of gravity/rebound instead of a flat clamp — EXCEPT when
@@ -440,23 +655,29 @@ struct NotchIsland: View {
         // black cutout, but the busy extension sits over visible screen, so the
         // same dip reads as the "notch" shrinking away from the bezel. A busy
         // close takes the overshoot-free settle instead.
-        .animation(isOpen ? openSpring : (busy ? busySettle : closeSpring), value: isOpen)
-        // The busy extension's own grow/retract (no open/close involved — e.g.
-        // the detached answer lands while the notch rests) must NOT bounce: an
-        // underdamped settle undershoots the rest width, and for a beat the
+        .animation(isOpen ? openSpring : (earLeft + earRight > 0 ? busySettle : closeSpring), value: isOpen)
+        // The busy/sense extension's own grow/retract (no open/close involved —
+        // e.g. the detached answer lands while the notch rests) must NOT bounce:
+        // an underdamped settle undershoots the rest width, and for a beat the
         // drawn island is NARROWER than the hardware notch it's impersonating —
         // physically impossible, and exactly the tell that breaks the illusion.
         // A near-critically-damped, unhurried ease reads as the notch quietly
         // relaxing back into the bezel. (A close that lands ON the extended
         // rest still rides `closeSpring` via the isOpen animation above — its
-        // target there is 48pt wider than the notch, so its rebound never dips
+        // target there is wider than the notch, so its rebound never dips
         // below the hardware width.)
-        .animation(busySettle, value: busy)
+        .animation(busySettle, value: earLeft)
+        .animation(busySettle, value: earRight)
         // The kick fires on the open *edge*, reading the entry vector the hover
         // just recorded. Closing lets any residual kick decay on its own.
         .onChange(of: isOpen) { _, nowOpen in
             if nowOpen { applyEntryKick() }
         }
+        // The ears' measured content widths feed `earLeft`/`earRight`; the flex
+        // then re-settles (on the same `busySettle` keyed below) whenever a
+        // stage's content changes size — hint phrase → dots → verdict, and the
+        // ⌘C ear folding shut on confirm.
+        .onPreferenceChange(SenseEarWidthsKey.self) { senseEarContent = $0 }
         .animation(.spring(response: 0.42, dampingFraction: 0.72), value: model.openWidth)
         .animation(.spring(response: 0.42, dampingFraction: 0.78), value: model.mode)
         // The note-save feedback line (Saving… → Added to Notes → gone) changes the

@@ -572,11 +572,12 @@ struct InlineSendHint: View {
     /// Left inset of the NSTextField's text (its cell draws ~2pt in from the edge),
     /// so the ghost lands flush after the glyphs, not 2pt early.
     var leadingInset: CGFloat = 2
-
-    /// The faint connector + word, e.g. "— Ask". An em dash leads into it, echoing
-    /// Siri's "— Ask Siri" framing; no ⏎ glyph (it rendered as an ugly box beside the
-    /// text). Just the destination, spelled out.
-    private var hintString: String { "— \(label)" }
+    /// The destination's colour (Ask blue / Note amber / Remind orange — the same
+    /// palette the filter chips and capture chips wear), painted on the WORD only;
+    /// the leading em dash stays placeholder-grey so the connector reads as
+    /// punctuation and the colour lands on the destination itself. `nil` keeps the
+    /// whole hint in the classic placeholder grey.
+    var tint: Color? = nil
 
     /// Breathing room between the last glyph and the ghost.
     private static let gap: CGFloat = 8
@@ -631,10 +632,13 @@ struct InlineSendHint: View {
                 // Match the body text exactly — same size, same (regular) weight as
                 // the field's own glyphs — so the hint reads as a quiet continuation
                 // of the line rather than a smaller label. Only the colour sets it
-                // apart (placeholder grey vs. near-white typed text).
-                Text(hintString)
+                // apart: the whole hint wears the destination's tint — the em dash
+                // in a softer cut of the SAME hue (a grey dash next to a coloured
+                // word read as two disjoint pieces), the word carrying the full
+                // ghost strength. Typed text stays near-white.
+                (Text("— ").foregroundColor(tint.map { $0.opacity(0.5) } ?? Tokens.placeholder)
+                    + Text(label).foregroundColor(tint.map { $0.opacity(0.78) } ?? Tokens.placeholder))
                     .font(.system(size: fontSize, weight: .regular))
-                    .foregroundStyle(Tokens.placeholder)
                     .lineLimit(1)
                     .fixedSize()
                     .contentTransition(.opacity)
@@ -825,8 +829,9 @@ struct GlassTextButton: View {
 }
 
 /// Scales the glass capsule down a touch on press for a tactile, physical feel —
-/// the glass "gives" under the cursor like the rest of the island.
-private struct GlassPressStyle: ButtonStyle {
+/// the glass "gives" under the cursor like the rest of the island. Internal so
+/// other glass chips (e.g. the manage menu's filter capsules) share the feel.
+struct GlassPressStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .scaleEffect(configuration.isPressed ? 0.92 : 1)
@@ -849,13 +854,17 @@ private struct GlassPressStyle: ButtonStyle {
 private struct IntentChangePulse<Trigger: Equatable, S: InsettableShape>: ViewModifier {
     var trigger: Trigger
     var shape: S
+    /// The colour of the flash — the NEW destination's tint (read live from the
+    /// call site, so the rim strikes in the colour the field just switched TO).
+    /// Defaults to the original white for callers without a destination colour.
+    var tint: Color = .white
     @State private var glow: Double = 0
 
     func body(content: Content) -> some View {
         content
             .overlay(
                 shape
-                    .strokeBorder(Color.white.opacity(0.5 * glow), lineWidth: 1)
+                    .strokeBorder(tint.opacity(0.55 * glow), lineWidth: 1)
                     .blur(radius: 1.5)
                     .allowsHitTesting(false)
             )
@@ -872,9 +881,12 @@ private struct IntentChangePulse<Trigger: Equatable, S: InsettableShape>: ViewMo
 extension View {
     /// Pulse a soft rim glow on `shape` each time `trigger` changes — see
     /// `IntentChangePulse`. Used on the prompt field to flash its border when the
-    /// Ask/Note/Remind destination flips.
-    func intentChangePulse<T: Equatable, S: InsettableShape>(on trigger: T, shape: S) -> some View {
-        modifier(IntentChangePulse(trigger: trigger, shape: shape))
+    /// Ask/Note/Remind destination flips; `tint` colours the flash with the new
+    /// destination's hue (defaults to the original white).
+    func intentChangePulse<T: Equatable, S: InsettableShape>(
+        on trigger: T, shape: S, tint: Color = .white
+    ) -> some View {
+        modifier(IntentChangePulse(trigger: trigger, shape: shape, tint: tint))
     }
 }
 
@@ -1258,11 +1270,15 @@ struct AssistantTurnView: View {
     /// assistant turn — regenerating a mid-thread answer would orphan everything
     /// after it, so earlier turns never offer it.
     var onRegenerate: (() -> Void)? = nil
-    /// Copy the whole thread as portable context for ChatGPT/Claude. Non-nil only
-    /// on the last assistant turn: the handoff always carries the full thread, so
-    /// it's one button at the thread's tail, not one per turn. (It used to sit
-    /// beside the follow-up input; it lives here with the other answer actions now.)
-    var onContinueElsewhere: (() -> Void)? = nil
+    /// The models offered by the regenerate button's right-click menu (XII-135) —
+    /// each with whether it's the one currently in effect (greyed as "current").
+    /// Empty ⇒ no menu (just the plain left-click regenerate).
+    var regenerateModels: [(model: String, isCurrent: Bool)] = []
+    /// Regenerate this answer with a specific model, once (XII-135).
+    var onRegenerateWith: ((String) -> Void)? = nil
+    /// The model this answer was regenerated with, when it wasn't the default
+    /// (XII-135) — shown as a small caption so the answer says which model made it.
+    var regenModel: String? = nil
     /// File this settled answer (with its question) into Apple Notes (XII-123).
     var onSaveToNotes: (() -> Void)? = nil
     /// The save-to-Notes progress/outcome line for THIS answer ("Saving…" /
@@ -1466,18 +1482,44 @@ struct AssistantTurnView: View {
                     }
                     if let onRegenerate {
                         AnswerFooterButton(icon: "arrow.clockwise",
-                                           help: L("result.regenerate"),
+                                           help: regenerateModels.isEmpty
+                                               ? L("result.regenerate")
+                                               : L("result.regenerate.menu"),
                                            rowHovered: turnHovered) {
                             onRegenerate()
                         }
-                    }
-                    if let onContinueElsewhere {
-                        AnswerFooterButton(icon: "square.on.square.dashed",
-                                           help: L("result.copyToContinue"),
-                                           rowHovered: turnHovered,
-                                           confirms: true) {
-                            onContinueElsewhere()
+                        // Right-click → pick a model for a one-shot regenerate
+                        // (XII-135). Left-click stays "regenerate with the same
+                        // model". The current model is shown greyed + disabled.
+                        .contextMenu {
+                            if !regenerateModels.isEmpty, let onRegenerateWith {
+                                Text(L("result.regenerate.with"))
+                                ForEach(regenerateModels, id: \.model) { option in
+                                    Button {
+                                        onRegenerateWith(option.model)
+                                    } label: {
+                                        if option.isCurrent {
+                                            Text(L("result.regenerate.current", option.model))
+                                        } else {
+                                            Text(option.model)
+                                        }
+                                    }
+                                    .disabled(option.isCurrent)
+                                }
+                            }
                         }
+                    }
+                    // The model that produced this answer, when it wasn't the
+                    // default (XII-135) — a quiet trailing caption, same whisper as
+                    // the note-save cue.
+                    if let regenModel {
+                        Text(regenModel)
+                            .font(.sf(11))
+                            .tracking(0.2)
+                            .foregroundStyle(Tokens.text4)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .padding(.leading, 6)
                     }
                     // The save-to-Notes outcome, in the same quiet grey whisper
                     // as the input-box save cue — confirmation in place, no toast.

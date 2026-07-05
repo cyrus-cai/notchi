@@ -70,6 +70,23 @@ struct NotchBody: View {
     /// right. Local presentational state — collapses on selection or a second tap.
     @State private var manageExpanded = false
 
+    /// Seed `measuredAnswerHeight` from the model's parked measurement, so a
+    /// hover-reopen into a long answer mounts DIRECTLY in the clipped layout.
+    /// NotchBody unmounts on every close (`if isOpen` in ContentView), resetting
+    /// all @State — without the seed the thread re-mounted unclipped at full
+    /// intrinsic height and flipped to the clipped scroller one preference pass
+    /// later, mid-open-spring: a structural swap (new ScrollView, header →
+    /// overlay, follow-up → float, scroll snapped to bottom) stacked on top of
+    /// the unfurl, which is what made reopening an answer visibly rougher than
+    /// opening the idle prompt. Seeded, the first frame is already the final
+    /// layout and the open rides one clean spring — same as idle. The model zeros
+    /// the seed on every close after parking it, so a non-restore open (fresh
+    /// idle, settings, another thread) still mounts "unmeasured" as before.
+    init(model: NotchModel) {
+        self.model = model
+        _measuredAnswerHeight = State(initialValue: model.lastMeasuredAnswerHeight)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             switch model.mode {
@@ -245,6 +262,13 @@ struct NotchBody: View {
         .animation(.spring(response: 0.42, dampingFraction: 0.82), value: model.noteSaving)
         .animation(.spring(response: 0.42, dampingFraction: 0.82), value: model.lastSavedNote)
         .animation(.spring(response: 0.42, dampingFraction: 0.82), value: model.noteError)
+        // Typing folds the recent list from `text.didSet` (showHistory = false) —
+        // a model-side write with NO withAnimation around it, so without these keys
+        // the fold (and the immersive⇄flat layout swap that rides on hasText /
+        // showHistory) was a hard pop instead of the module spring every *other*
+        // open/close path plays. Same spring as those withAnimation call sites.
+        .animation(.spring(response: 0.42, dampingFraction: 0.78), value: model.showHistory)
+        .animation(.spring(response: 0.42, dampingFraction: 0.78), value: model.hasText)
     }
 
     /// The idle prompt field, with the live note-error reset wired in. Shared by
@@ -495,7 +519,11 @@ struct NotchBody: View {
             // about it, so it sits ahead of the Ask presets. The verdict lands
             // asynchronously (~15ms after the row is up); the chip fades+scales in (and
             // the presets glide right) via the `.animation(value:)` on the row below.
-            if let capture = model.pendingClipboardCapture {
+            // Only while the prompt is empty: once there's typed text, Enter belongs to
+            // that line (confirmClipboardCaptureIfIdle guards !hasText), so the whole
+            // chip retires — scaling out to the leading edge while the Ask presets glide
+            // left into its place — and returns the same way if the text is cleared.
+            if let capture = model.pendingClipboardCapture, !model.hasText {
                 ClipboardPresetChip(title: captureChipTitle(capture),
                                     tint: captureChipTint(capture),
                                     keyHint: true) {
@@ -550,6 +578,10 @@ struct NotchBody: View {
         // their new positions while new ones scale in beside them.
         .animation(.spring(response: 0.42, dampingFraction: 0.82), value: model.visibleClipboardPresets.count)
         .animation(.spring(response: 0.34, dampingFraction: 0.82), value: model.pendingClipboardCapture)
+        // The capture chip's retire/return as typing starts/clears rides the same
+        // spring: the chip scales out through its `.transition` while the presets
+        // glide left to close the gap (and the reverse on clearing the text).
+        .animation(.spring(response: 0.34, dampingFraction: 0.82), value: model.hasText)
     }
 
     /// One clipboard-preset chip, with the Translate chip getting special treatment:
@@ -637,66 +669,54 @@ struct NotchBody: View {
         )
     }
 
-    /// The gear entry that swaps the recent list for the inline settings panel
-    /// (same view ⌘, opens). Rendered as a Liquid Glass chip so it reads as part
-    /// of the glass island. Lives one level in — revealed from the ⋯ chip alongside
-    /// Clear. (The passive update dot rides on ⋯ itself, not on this gear.)
-    private var settingsEntry: some View {
-        GlassIconButton(systemName: "gearshape", help: L("recent.settings"), size: 30) {
-            withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
-                manageExpanded = false
-                model.toggleSettings()
-            }
-        }
-        // Slides in from the ⋯ chip on its left, matching the Clear pill's reveal.
-        .transition(
-            .move(edge: .leading)
-                .combined(with: .opacity)
-                .combined(with: .scale(scale: 0.9, anchor: .leading))
-        )
-    }
-
     /// The manage bar, pinned to the BOTTOM-LEFT of the recent panel in both the
-    /// compact and immersive layouts. The first level is a single ⋯ (more) chip,
-    /// a touch larger than the secondary chips; tapping it unfurls the two actions
-    /// — Settings then Clear — to its right. Tapping ⋯ again, or selecting either
-    /// action, collapses the row back to just the ⋯. Always visible — no scroll-state
-    /// gate; it's fixed chrome below the list, not part of the floating header.
+    /// compact and immersive layouts. A single ⋯ chip that pops the manage MENU
+    /// upward (filter by source, Settings, Clear) — see `manageMenu`. While a
+    /// source filter is active and the menu is closed, a small tinted chip beside
+    /// the ⋯ names the filter and clears it on tap, so the narrowed list never
+    /// reads as "history lost". Always visible — fixed chrome below the list.
     ///
     /// Used by `historySection` (compact) as a VStack sibling below the list, and by
     /// `immersiveHistoryView` as an overlay over the bottom-left of the scroll frame.
     private var manageBar: some View {
         HStack(spacing: 6) {
-            // First level: a single, slightly larger ⋯ chip. It toggles the secondary
-            // controls rather than doing anything itself. The passive update dot rides
-            // on it (the update action lives behind Settings, one level down).
+            // The single ⋯ chip. It only toggles the menu. The passive update dot
+            // rides on it (the update action lives behind Settings, one level down).
             moreEntry
 
-            // Second level: Settings + Clear, revealed to the RIGHT of ⋯ on tap. They
-            // slide in from the left edge (anchored at ⋯) and fade, so the row reads as
-            // unfurling out of the ⋯ chip rather than popping in place.
-            if manageExpanded {
-                settingsEntry
-                // Clear is destructive, so it arms a confirmation rather than wiping
-                // history on first tap. The card itself is rendered centered over the
-                // whole island (see NotchIsland) — not anchored here — so it lands in
-                // the middle of the panel instead of down by the pill.
-                GlassTextButton(title: L("recent.clear"), fontSize: 12) {
-                    withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
-                        manageExpanded = false
-                        model.confirmingClear = true
-                    }
-                }
-                .transition(
-                    .move(edge: .leading)
-                        .combined(with: .opacity)
-                        .combined(with: .scale(scale: 0.9, anchor: .leading))
-                )
+            // Active-filter chip: visible while a source filter narrows the list
+            // and the menu is folded away. Tinted with the source's colour; the ×
+            // makes "tap to clear" legible without a tooltip.
+            if !manageExpanded, let source = model.historySourceFilter {
+                activeFilterChip(source)
+                    .transition(
+                        .move(edge: .leading)
+                            .combined(with: .opacity)
+                            .combined(with: .scale(scale: 0.9, anchor: .leading))
+                    )
             }
             Spacer()   // push the controls to the LEFT; Spacer sits at the trailing end
         }
-        // Collapse the secondary controls whenever the panel itself closes, so the
-        // next open starts back at the bare ⋯ rather than a stale expanded row.
+        // The menu floats ABOVE the chip, anchored to its bottom-left, and grows
+        // upward out of it. An overlay (not a sibling) so opening it never
+        // relayouts the list — it draws over the rows like a real popup menu.
+        .overlay(alignment: .bottomLeading) {
+            if manageExpanded {
+                manageMenu
+                    // Lift the menu's bottom edge just above the 34pt ⋯ chip.
+                    .offset(y: -(34 + 8))
+                    // Unfurl UP and OUT of the ⋯ chip: grow from its top-left
+                    // corner with a small rise, rather than popping in place —
+                    // the upward mirror of how the island's other modules move.
+                    .transition(
+                        .scale(scale: 0.86, anchor: .bottomLeading)
+                            .combined(with: .offset(y: 6))
+                            .combined(with: .opacity)
+                    )
+            }
+        }
+        // Collapse the menu whenever the panel itself closes, so the next open
+        // starts back at the bare ⋯ rather than a stale open menu.
         .onChange(of: model.showHistory) { _, showing in
             if !showing { manageExpanded = false }
         }
@@ -707,14 +727,14 @@ struct NotchBody: View {
         .padding(.trailing, 8)
     }
 
-    /// The first-level ⋯ entry: a single Liquid Glass chip, a touch larger than the
-    /// secondary chips, that toggles the Settings/Clear row. Carries the passive
-    /// update dot (the update action itself sits behind Settings, one level in).
+    /// The ⋯ entry: a single Liquid Glass chip that pops the manage menu up above
+    /// itself. Carries the passive update dot (the update action itself sits
+    /// behind Settings, one level in).
     private var moreEntry: some View {
-        // ⋯ when collapsed; a left chevron (back) once the actions are unfurled, so
-        // the chip reads as "go back / close" rather than "open" while expanded.
+        // ⋯ when closed; × once the menu is up, so the chip reads as "dismiss"
+        // while the popup is showing.
         GlassIconButton(
-            systemName: manageExpanded ? "chevron.left" : "ellipsis",
+            systemName: manageExpanded ? "xmark" : "ellipsis",
             help: L(manageExpanded ? "recent.collapse" : "recent.manage"),
             size: 34
         ) {
@@ -730,6 +750,137 @@ struct NotchBody: View {
                     .offset(x: -1, y: 1)
             }
         }
+    }
+
+    /// The upward manage menu: one small glass card holding everything the old
+    /// horizontal unfurl carried, plus the source filter. Top to bottom: a row of
+    /// three filter chips (Note / Remind / Ask), then Settings, then Clear — the
+    /// destructive action last, in the standard menu position.
+    private var manageMenu: some View {
+        let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
+        return VStack(alignment: .leading, spacing: 2) {
+            // Filter — one chip per history source, in each source's app colour
+            // (Notes amber, Reminders orange, Ask a cool blue). Tap to narrow the
+            // list to that source; tap the active one again to show everything.
+            HStack(spacing: 5) {
+                Image(systemName: "line.3.horizontal.decrease")
+                    .font(.sf(10, weight: .medium))
+                    .foregroundStyle(Tokens.text4)
+                    .padding(.trailing, 1)
+                ManageFilterChip(model: model, source: .note) { manageExpanded = false }
+                ManageFilterChip(model: model, source: .reminder) { manageExpanded = false }
+                ManageFilterChip(model: model, source: .ask) { manageExpanded = false }
+            }
+            .padding(.horizontal, 8)
+            .padding(.top, 3)
+            .padding(.bottom, 9)
+
+            // Hairline between filter and actions — fades out at both ends like a
+            // light caught across the glass, not a flat printed rule.
+            Rectangle()
+                .fill(
+                    LinearGradient(
+                        colors: [.white.opacity(0), .white.opacity(0.14), .white.opacity(0)],
+                        startPoint: .leading, endPoint: .trailing
+                    )
+                )
+                .frame(height: 0.5)
+                .padding(.horizontal, 2)
+                .padding(.bottom, 4)
+
+            manageMenuRow(icon: "gearshape", title: L("recent.menu.settings"), shortcut: "⌘,") {
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                    manageExpanded = false
+                    model.toggleSettings()
+                }
+            }
+            // Clear is destructive, so it arms a confirmation rather than wiping
+            // history on first tap. The card itself is rendered centered over the
+            // whole island (see NotchIsland) — not anchored here — so it lands in
+            // the middle of the panel instead of down by the menu.
+            manageMenuRow(icon: "trash", title: L("recent.clear"), destructive: true) {
+                withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                    manageExpanded = false
+                    model.confirmingClear = true
+                }
+            }
+        }
+        .padding(6)
+        .frame(minWidth: 176, alignment: .leading)
+        .fixedSize()
+        // REAL Liquid Glass, same recipe as the source popover: the `.clear`
+        // material refracts whatever sits behind the card (list rows, wallpaper
+        // through the island), with a soft dark veil over it for text contrast —
+        // not a flat material approximation.
+        .background {
+            shape.fill(.clear).nativeGlass(in: shape)
+                .overlay(shape.fill(Color.black.opacity(0.38)))
+        }
+        // A soft top-down sheen, like light catching the card's upper edge.
+        .overlay(
+            shape.fill(
+                LinearGradient(
+                    colors: [.white.opacity(0.09), .clear],
+                    startPoint: .top, endPoint: .center
+                )
+            )
+            .blendMode(.plusLighter)
+            .allowsHitTesting(false)
+        )
+        // Specular hairline rim — top-bright fading down the sides, the same
+        // bevel language as the island's chips and the source popover.
+        .overlay(
+            shape.strokeBorder(
+                LinearGradient(
+                    colors: [.white.opacity(0.30), .white.opacity(0.07)],
+                    startPoint: .top, endPoint: .bottom
+                ),
+                lineWidth: 0.75
+            )
+            .allowsHitTesting(false)
+        )
+        .clipShape(shape)
+        // Two shadows seat the floating card: a tight contact shadow that keys it
+        // to the chip it grew from, and a wide soft one lifting it off the rows.
+        .shadow(color: .black.opacity(0.30), radius: 3, y: 1)
+        .shadow(color: .black.opacity(0.35), radius: 16, y: 8)
+    }
+
+    /// One full-width action row of the manage menu — icon, label, optional
+    /// trailing shortcut hint — with the same gentle hover wash the history rows
+    /// use, so the menu reads as part of the same surface.
+    private func manageMenuRow(
+        icon: String, title: String, shortcut: String? = nil,
+        destructive: Bool = false, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.sf(11, weight: .medium))
+                    .foregroundStyle(destructive ? Color.red.opacity(0.75) : Tokens.text3)
+                    .frame(width: 14)
+                Text(title)
+                    .font(.sf(12, weight: .medium))
+                    .foregroundStyle(destructive ? Color.red.opacity(0.85) : Tokens.text2)
+                Spacer(minLength: 16)
+                if let shortcut {
+                    Text(shortcut)
+                        .font(.sf(10))
+                        .foregroundStyle(Tokens.text4)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 7)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(HistoryRowStyle())
+    }
+
+    /// The collapsed-state reminder that a source filter is narrowing the list:
+    /// a small tinted capsule beside the ⋯ naming the filter, with an × — tap
+    /// anywhere on it to clear the filter and show everything again.
+    private func activeFilterChip(_ source: NotchModel.HistoryItem.Source) -> some View {
+        ActiveFilterChip(model: model, source: source)
     }
 
     /// The compact recent list (≤6 visible rows) with the manage bar (gear + Clear)
@@ -787,6 +938,9 @@ struct NotchBody: View {
             // room, and this keeps the bar low like the immersive variant.
             manageBar
                 .padding(.top, 6)
+                // Keep the popped-up manage menu (an overlay reaching UP over the
+                // rows) drawing above the ScrollView sibling during transitions.
+                .zIndex(1)
         }
     }
 
@@ -1042,6 +1196,23 @@ struct NotchBody: View {
     /// correct without needing to account for the shift.
     private let clippedAnswerMaxHeight: CGFloat = 363
 
+    /// Height of the floating header block the clipped thread reaches UP behind:
+    /// the 26pt back/pin row plus the 18pt gap the short layout keeps below it.
+    /// When clipped, that block leaves the VStack flow and floats over the scroll's
+    /// top, and the scroll frame grows by exactly this much — so the panel's total
+    /// height never changes at the crossover, and the header renders at the same
+    /// spot in both layouts. It doubles as the top runway: the fade taper length
+    /// and the first row's resting inset when scrolled fully up (the result-view
+    /// mirror of `immersiveTopReach`).
+    private let resultHeaderReach: CGFloat = 44
+
+    /// Height of the top frost band — kept 4pt SHORTER than the top runway, the
+    /// same convention as `immersiveBlurReach` / `clippedBottomBlurReach`, so the
+    /// band tapers fully to clear at the runway's lower edge. Text scrolling up
+    /// behind the back/pin chrome frosts + fades on its way out instead of ending
+    /// on a hard cut under the header.
+    private var clippedTopBlurReach: CGFloat { max(resultHeaderReach - 4, 0) }
+
     /// Bottom runway inside `clippedConversation`: empty scroll space the last turn
     /// scrolls DOWN into, behind the floating follow-up input. = followUpRow box
     /// height (39pt) + dissolve headroom above the box top (41pt) = 80pt. It lives
@@ -1066,11 +1237,17 @@ struct NotchBody: View {
 
     private var resultView: some View {
         VStack(alignment: .leading, spacing: 0) {
-            resultHeader
-            // No drawn rule between the chevron and the thread — a quiet gap does
-            // the separating instead. Matches the rhythm the old Divider held (its
-            // 9pt top/bottom pad plus the hairline) so the layout doesn't shift.
-            Spacer().frame(height: 18)
+            // Short layout only: the header sits as a sibling above the thread.
+            // When clipped, it FLOATS over the scroll's top instead (the overlay on
+            // the ZStack below), so the thread can travel up behind it and dissolve
+            // — mirroring how the immersive recent list runs under the input header.
+            if !isAnswerClipped {
+                resultHeader
+                // No drawn rule between the chevron and the thread — a quiet gap does
+                // the separating instead. Matches the rhythm the old Divider held (its
+                // 9pt top/bottom pad plus the hairline) so the layout doesn't shift.
+                Spacer().frame(height: 18)
+            }
 
             // When the answer is clipped (long, scrolling), the follow-up input
             // FLOATS over the scroll's bottom (ZStack child, alignment .bottom)
@@ -1097,6 +1274,18 @@ struct NotchBody: View {
                         // Lift off the viewport bottom so a sliver of dissolved
                         // content shows beneath the box rather than it sitting flush.
                         .padding(.bottom, 12)
+                        .transition(.opacity)
+                }
+            }
+            // Clipped layout: the header floats over the scroll's TOP as fixed
+            // chrome (no background of its own — legibility of the text passing
+            // behind comes from the thread's top fade + frost, exactly like the
+            // immersive input header). The scroll frame absorbed the header block's
+            // 44pt (see `resultHeaderReach`), so the panel height is unchanged and
+            // the header renders at the same spot as the sibling it replaces.
+            .overlay(alignment: .top) {
+                if isAnswerClipped {
+                    resultHeader
                         .transition(.opacity)
                 }
             }
@@ -1320,7 +1509,13 @@ struct NotchBody: View {
                     }
                 )
         }
-        .onPreferenceChange(AnswerHeightKey.self) { measuredAnswerHeight = $0 }
+        .onPreferenceChange(AnswerHeightKey.self) {
+            measuredAnswerHeight = $0
+            // Mirror to the model (a plain var — no invalidation) so `fullClose`
+            // can park the measurement with the session; the next mount seeds its
+            // layout decision from it (see `init`).
+            model.lastMeasuredAnswerHeight = $0
+        }
         // The ONE place a height change is animated: the cross-over between the two
         // layouts (a short answer growing past the 300pt ceiling into the clipped
         // scroller). Critically damped (1.0) so it settles without the overshoot that
@@ -1382,15 +1577,20 @@ struct NotchBody: View {
                     Color.clear.frame(height: 2).id(scrollBottomID)
                 }
                 .padding(.trailing, 8)
-                // Top breathing room so the first line dissolves into the top edge fade
-                // rather than ending on a hard cut. The bottom has its own runway Spacer
-                // inside the VStack (above), so no matching .padding(.bottom) is needed.
-                .padding(.top, edgeFade)
+                // Top runway: the inset the first line rests at when scrolled fully
+                // up, sized to the floating header block (`resultHeaderReach`) so it
+                // sits just clear of the back/pin chrome — and the space mid-thread
+                // text travels up into, dissolving (fade + frost) behind the header
+                // instead of hard-cutting below it. The bottom has its own runway
+                // Spacer inside the VStack (above), so no .padding(.bottom) is needed.
+                .padding(.top, resultHeaderReach)
             }
             // Taller than `answerMaxHeight` (300): absorbs the 24pt gap + 39pt
-            // follow-up row that no longer sit as VStack siblings, keeping the panel
-            // the same total height. The `isAnswerClipped` threshold stays at 300.
-            .frame(height: clippedAnswerMaxHeight)
+            // follow-up row that no longer sit as VStack siblings, PLUS the floating
+            // header block (`resultHeaderReach`, 44pt) the clipped layout lifts out
+            // of the VStack flow — keeping the panel the same total height. The
+            // `isAnswerClipped` threshold stays at 300.
+            .frame(height: clippedAnswerMaxHeight + resultHeaderReach)
             .scrollIndicators(.never)
             // Submitting a follow-up appends two turns and flips mode
             // result→load→result, which rebuilds the ScrollView and resets its
@@ -1411,10 +1611,18 @@ struct NotchBody: View {
             // by default; pin to the bottom so the newest text stays in view.
             .onAppear { proxy.scrollTo(scrollBottomID, anchor: .bottom) }
         }
-        // Per-edge fades: the top keeps `edgeFade` (64pt); the bottom matches the
-        // runway (80pt) so the taper falls entirely across the runway empty space,
-        // dissolving content to nothing before it reaches the opaque input box.
-        .scrollEdgeFade(top: true, bottom: true, topFade: edgeFade, bottomFade: clippedBottomRunway)
+        // Per-edge fades: each taper tracks its own runway. The top matches the
+        // floating header block (`resultHeaderReach`, 44pt) so text dissolves to
+        // nothing across the back/pin zone; the bottom matches its runway (80pt)
+        // so the taper falls entirely across the empty space above the input box.
+        .scrollEdgeFade(top: true, bottom: true, topFade: resultHeaderReach, bottomFade: clippedBottomRunway)
+        // Progressive blur on the top runway, mirroring the immersive input header:
+        // text scrolling up behind the back/pin chrome frosts out as it goes, so the
+        // header zone reads as one continuous surface, not a hard cut. Band kept 4pt
+        // shorter than the runway (`clippedTopBlurReach` = 40pt); maxRadius 22
+        // matches the bottom band (comparably thin chrome, unlike the deep 36 the
+        // immersive input header needs).
+        .modifier(ConditionalTopBlur(active: true, height: clippedTopBlurReach, maxRadius: 22))
         // Progressive blur on the bottom runway, mirroring the immersive manage bar's
         // ConditionalBottomBlur: rows scrolling down into the runway frost out as they
         // go behind the input. Kept 4pt shorter than the runway (`clippedBottomBlurReach`
@@ -1486,12 +1694,12 @@ struct NotchBody: View {
                 sourceCloseWork: $sourceCloseWork,
                 onInAppCopy: { model.rebaselineClipboardAfterInAppWrite() },
                 onRegenerate: isLastTurn ? { model.regenerateLastAnswer() } : nil,
-                onContinueElsewhere: isLastTurn ? {
-                    model.copyHandoffContext()
-                    // Re-baseline so the handoff block isn't treated as "what the
-                    // user copied" and injected into the next Ask.
-                    model.rebaselineClipboardAfterInAppWrite()
-                } : nil,
+                // Right-click the regenerate button to re-run this answer with a
+                // different model, once (XII-135). Only on the last turn (same gate
+                // as plain regenerate).
+                regenerateModels: isLastTurn ? model.regenerateModelOptions : [],
+                onRegenerateWith: isLastTurn ? { model.regenerateLastAnswer(model: $0) } : nil,
+                regenModel: turn.regenModel,
                 // File this answer into Apple Notes (XII-123); the cue below the
                 // footer reports the outcome for exactly this turn.
                 onSaveToNotes: { model.saveAnswerToNotes(answerID: turn.id) },
@@ -1515,30 +1723,15 @@ struct NotchBody: View {
         HStack(spacing: 10) {
             backButton
             Spacer(minLength: 0)
-            pinButton
+            ResultPinButton(
+                pinned: model.isAnswerPinned,
+                toggle: {
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                        model.toggleAnswerPin()
+                    }
+                }
+            )
         }
-    }
-
-    /// Top-right pin. Filled + accent-tinted when engaged; a bare outline otherwise.
-    /// Toggling routes through the model so an un-pin can immediately re-arm the
-    /// leave-fold if the pointer is already gone.
-    private var pinButton: some View {
-        Button {
-            withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
-                model.toggleAnswerPin()
-            }
-        } label: {
-            Image(systemName: model.isAnswerPinned ? "pin.fill" : "pin")
-                .font(.system(size: 12.5, weight: .semibold))
-                .foregroundStyle(model.isAnswerPinned ? Tokens.accent : Tokens.text2)
-                // A pinned pin tips slightly, the way a pushed-in tack sits — a small
-                // physical cue that it's engaged, on top of the fill + tint.
-                .rotationEffect(.degrees(model.isAnswerPinned ? 0 : 32))
-                .frame(width: 26, height: 26)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(RecentEntryStyle())
-        .help(L(model.isAnswerPinned ? "result.unpin" : "result.pin"))
     }
 
     /// Back to a fresh conversation: clears this Q&A off the screen and returns to
@@ -1579,7 +1772,8 @@ struct NotchBody: View {
                             label: model.submitLabel,
                             fontSize: fontSize,
                             caretWidth: caretWidth,
-                            availableWidth: geo.size.width
+                            availableWidth: geo.size.width,
+                            tint: model.effectiveSubmitPanel.intentInk
                         )
                         .frame(height: geo.size.height, alignment: .center)
                     }
@@ -1588,7 +1782,13 @@ struct NotchBody: View {
 
                 PromptField(
                     text: $model.text,
-                    placeholder: placeholder,
+                    // Idle prompt: the native NSTextField placeholder HARD-SWAPS
+                    // (zero animation) — deleting the last character popped
+                    // "Type anything…" in on a cut. Keep it empty and draw the
+                    // placeholder as the SwiftUI label below, which fades — the
+                    // same ownership trick `followUpRow` uses. The defensive
+                    // followUp branch keeps the native one (that path is unused).
+                    placeholder: followUp ? placeholder : "",
                     fontSize: fontSize,
                     focusTrigger: focused,
                     // Enter routes by intent (ask / note / remind) from the idle
@@ -1654,7 +1854,27 @@ struct NotchBody: View {
                 // waste space; the ZStack animation keeps the resize smooth.
                 .padding(.trailing, followUp ? 0 : InlineSendHint.reservedTrailingWidth(label: model.submitLabel, fontSize: fontSize))
                 .animation(.smooth(duration: 0.25), value: model.submitLabel)
+
+                // The placeholder, drawn as a SwiftUI label over the (natively
+                // placeholder-less) field so its appearance can FADE — on emptying
+                // the field the native swap was an instant pop. Gated on the caret
+                // width, not just `hasText`, so in-progress pinyin hides it too.
+                if !followUp && !model.hasText && caretWidth == 0 {
+                    Text(placeholder)
+                        .font(.system(size: fontSize))
+                        .foregroundStyle(Tokens.placeholder)
+                        .lineLimit(1)
+                        // Sit on the NSTextField cell's own ~2pt left inset so the
+                        // label lands exactly where the native placeholder drew.
+                        .padding(.leading, 2)
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
+                }
             }
+            // Drives the placeholder fade in BOTH directions (first character in,
+            // last character out — including pinyin pre-composition, which flips
+            // `caretWidth` while `hasText` is still false).
+            .animation(.easeOut(duration: 0.16), value: caretWidth == 0)
             // ↑/↓ history recall: as each recalled question swaps in, slide the text
             // in from the step's direction (↑ from above, ↓ from below) and fade it
             // up. Idle prompt only. We snap `recallSlide` to the start offset the
@@ -1675,7 +1895,7 @@ struct NotchBody: View {
             // inline hint owns that job and the trailing slot stays empty. When the
             // field is empty the faint clock entry tucks in there to toggle Recent,
             // and — on the first launch after an update — a "what's new" cue leads
-            // it, the one-tap (or ⌘↵) way into the release notes.
+            // it, the one-tap way into the release notes.
             if !model.hasText && !followUp {
                 HStack(spacing: 8) {
                     if whatsNew.unseenVersion != nil {
@@ -1694,8 +1914,8 @@ struct NotchBody: View {
     }
 
     /// The first-launch-after-update cue: a quiet "what's new" pill in the idle
-    /// input's trailing slot. Tapping it (or ⌘↵) opens the release-notes panel;
-    /// either way `openWhatsNew` marks this version seen, so the cue shows once.
+    /// input's trailing slot. Tapping it opens the release-notes panel, and
+    /// `openWhatsNew` marks this version seen, so the cue shows once.
     private var whatsNewCue: some View {
         Button {
             withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
@@ -1747,19 +1967,20 @@ struct NotchBody: View {
                 // mid-thread field too: "— Ask"/"— Note"/"— Remind" trailing the caret
                 // so a routed-by-intent follow-up shows its destination, and Tab's
                 // correction step is finally visible here. Rendered behind the field
-                // and hit-transparent. Gated on `followUpCaretWidth > 0` (not
-                // `model.hasText`) so it appears during CJK/IME pre-composition —
-                // before pinyin commits to `model.text` — matching the idle row.
+                // and hit-transparent. Mounted unconditionally, exactly like the idle
+                // row: the hint's OWN `visible` gate (caretWidth > 0, so it covers
+                // CJK/IME pre-composition) drives its materialize in/out. An outer
+                // structural `if` here would bypass that dissolve and hard-pop the
+                // ghost on the first/last character.
                 GeometryReader { geo in
-                    if followUpCaretWidth > 0 {
-                        InlineSendHint(
-                            label: model.submitLabel,
-                            fontSize: 14.5,
-                            caretWidth: followUpCaretWidth,
-                            availableWidth: geo.size.width
-                        )
-                        .frame(height: geo.size.height, alignment: .center)
-                    }
+                    InlineSendHint(
+                        label: model.submitLabel,
+                        fontSize: 14.5,
+                        caretWidth: followUpCaretWidth,
+                        availableWidth: geo.size.width,
+                        tint: model.effectiveSubmitPanel.intentInk
+                    )
+                    .frame(height: geo.size.height, alignment: .center)
                 }
                 .allowsHitTesting(false)
 
@@ -1813,6 +2034,11 @@ struct NotchBody: View {
                         .transition(.opacity)
                 }
             }
+            // Drives the placeholder's fade during IME pre-composition: pinyin
+            // showing in the editor flips `followUpCaretWidth` while `hasText` is
+            // still false, and the row-level hasText animation never fires — so
+            // without this key the placeholder would hard-pop instead of fading.
+            .animation(.easeOut(duration: 0.16), value: followUpCaretWidth == 0)
 
             // The send button appears the moment the user starts typing a
             // follow-up. (The "continue in ChatGPT/Claude" handoff used to rest
@@ -1832,6 +2058,15 @@ struct NotchBody: View {
         .background(
             RoundedRectangle(cornerRadius: 12)
                 .fill(.white.opacity(focused ? 0.08 : 0.05))
+                // A whisper of the destination's colour washed over the box while
+                // there's text — the background twin of the tinted "— Note" ghost,
+                // so the field itself leans toward where Enter will send the line.
+                // Fades out on an empty field (destination is just the default).
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(model.effectiveSubmitPanel.intentTint
+                            .opacity(model.hasText ? 0.045 : 0))
+                )
         )
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .overlay(
@@ -1839,9 +2074,13 @@ struct NotchBody: View {
                 .strokeBorder(.white.opacity(focused ? 0.20 : 0.10), lineWidth: 0.5)
         )
         // Flash the field's rim when the destination flips (Ask⇄Note⇄Remind) — the
-        // peripheral twin of the inline "— Ask"/"— Note" word swap. Keyed on the
-        // intent *category* so a recurrence-suffix edit doesn't pulse.
-        .intentChangePulse(on: model.effectiveSubmitPanel, shape: RoundedRectangle(cornerRadius: 12))
+        // peripheral twin of the inline "— Ask"/"— Note" word swap, in the NEW
+        // destination's colour. Keyed on the intent *category* so a
+        // recurrence-suffix edit doesn't pulse.
+        .intentChangePulse(on: model.effectiveSubmitPanel,
+                           shape: RoundedRectangle(cornerRadius: 12),
+                           tint: model.effectiveSubmitPanel.intentInk)
+        .animation(.smooth(duration: 0.25), value: model.effectiveSubmitPanel)
         .animation(.easeOut(duration: 0.2), value: focused)
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: model.hasText)
     }
@@ -1892,6 +2131,130 @@ struct HistoryRowStyle: ButtonStyle {
             .onHover { hovering = $0 }
             .animation(.easeOut(duration: 0.16), value: selected)
             .animation(.easeOut(duration: 0.16), value: hovering)
+    }
+}
+
+/// The destination colour of an intent — the SAME palette everywhere a
+/// destination shows its face: Ask a cool blue, Note the Notes amber, Remind
+/// the Reminders orange. Read by the inline "— Ask/— Note/— Remind" ghost, the
+/// follow-up field's background wash, and the intent-change rim pulse, so the
+/// input's colour story always matches the filter chips and capture chips.
+extension NotchModel.Panel {
+    /// Saturated body colour — right for low-opacity WASHES over the dark glass
+    /// (the follow-up box's background lean), where saturation survives dilution.
+    var intentTint: Color {
+        switch self {
+        case .chat:     return .blue
+        case .note:     return .yellow
+        case .reminder: return .orange
+        }
+    }
+
+    /// The same hue lifted toward white — for TEXT and glows on the dark glass.
+    /// A fully saturated colour used as ink sinks into the dark background (blue
+    /// especially reads as a murky shadow); these luminous pastels read as
+    /// coloured *light* instead, keeping the hue legible and the ghost elegant.
+    var intentInk: Color {
+        switch self {
+        case .chat:     return Color(red: 0.66, green: 0.80, blue: 1.00)
+        case .note:     return Color(red: 1.00, green: 0.89, blue: 0.58)
+        case .reminder: return Color(red: 1.00, green: 0.78, blue: 0.56)
+        }
+    }
+}
+
+/// The one place a history source maps to its filter-chip face: the label key
+/// and the source's app colour (Notes amber, Reminders orange, Ask a cool blue).
+/// Shared by the manage menu's chips and the collapsed active-filter chip so the
+/// two can never drift apart.
+extension NotchModel.HistoryItem.Source {
+    fileprivate var filterTitle: String {
+        switch self {
+        case .note:     return L("recent.filter.note")
+        case .reminder: return L("recent.filter.remind")
+        case .ask:      return L("recent.filter.ask")
+        }
+    }
+    fileprivate var filterTint: Color {
+        switch self {
+        case .note:     return .yellow
+        case .reminder: return .orange
+        case .ask:      return .blue
+        }
+    }
+}
+
+/// One source-filter chip inside the manage menu. The active chip wears its
+/// source's tint (the same wash the capture chips use); inactive chips are
+/// plain glass that brightens on hover. Tapping the active chip again clears
+/// the filter. Selecting one folds the menu so the narrowed list is
+/// immediately visible underneath.
+private struct ManageFilterChip: View {
+    @ObservedObject var model: NotchModel
+    var source: NotchModel.HistoryItem.Source
+    var collapse: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        let active = model.historySourceFilter == source
+        Button {
+            withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
+                model.historySourceFilter = active ? nil : source
+                collapse()
+            }
+        } label: {
+            Text(source.filterTitle)
+                .font(.sf(11, weight: .medium))
+                .foregroundStyle(active ? Tokens.text1 : (hovering ? Tokens.text2 : Tokens.text3))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+            .glassCapsule(in: Capsule(), brighter: active || hovering,
+                          tint: active ? source.filterTint : nil)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(GlassPressStyle())
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.18), value: hovering)
+    }
+}
+
+/// The collapsed-state reminder that a source filter is narrowing the list: a
+/// small tinted capsule beside the ⋯ naming the filter, with an × — tap anywhere
+/// on it to clear the filter and show everything again. Brightens on hover like
+/// every other glass chip.
+private struct ActiveFilterChip: View {
+    @ObservedObject var model: NotchModel
+    var source: NotchModel.HistoryItem.Source
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button {
+            withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
+                model.historySourceFilter = nil
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Text(source.filterTitle)
+                    .font(.sf(11, weight: .medium))
+                    .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
+                Image(systemName: "xmark")
+                    .font(.sf(8, weight: .semibold))
+                    .foregroundStyle(hovering ? Tokens.text2 : Tokens.text4)
+            }
+            .padding(.horizontal, 12)
+            // Match the ⋯ chip beside it exactly (GlassIconButton size 34), so the
+            // pair reads as one bar of same-height controls, not a big circle with
+            // a smaller tag hanging off it.
+            .frame(height: 34)
+            .glassCapsule(in: Capsule(), brighter: hovering, tint: source.filterTint)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(GlassPressStyle())
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.18), value: hovering)
+        .help(L("recent.filter.clear"))
     }
 }
 
@@ -1996,6 +2359,46 @@ struct SetupModelButtonStyle: ButtonStyle {
 }
 
 /// The faint clock entry: brightens slightly on hover, dims on press.
+/// Top-right pin, sitting on a real Liquid Glass circle — the same native
+/// `.glassEffect` chip the settings icon uses (`glassCapsule` on macOS 26+, blur
+/// fallback below), so it reads as a piece of the glass island rather than a bare
+/// glyph. Filled + accent-tinted when engaged; a bare outline otherwise, and the
+/// glass itself washes accent when pinned so the whole chip lights up. Toggling
+/// routes back through the model so an un-pin can immediately re-arm the
+/// leave-fold if the pointer is already gone.
+struct ResultPinButton: View {
+    var pinned: Bool
+    var toggle: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: toggle) {
+            Image(systemName: pinned ? "pin.fill" : "pin")
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(pinned ? Tokens.accent : Tokens.text2)
+                // A pinned pin tips slightly, the way a pushed-in tack sits — a small
+                // physical cue that it's engaged, on top of the fill + tint.
+                .rotationEffect(.degrees(pinned ? 0 : 32))
+                .frame(width: 26, height: 26)
+                // When pinned, tint the glass itself accent so the chip reads as
+                // "on"; otherwise plain glass that brightens on hover.
+                .glassCapsule(in: Circle(), brighter: pinned || hovering,
+                              tint: pinned ? Tokens.accent : nil)
+                // Resting-unpinned, the glass is deliberately faint — a quiet
+                // whisper of a chip rather than a full glass button, so it doesn't
+                // pull the eye off the answer. Hovering or pinning brings the glass
+                // (rim + specular) to full strength.
+                .opacity(pinned || hovering ? 1 : 0.55)
+                .contentShape(Circle())
+        }
+        .buttonStyle(GlassPressStyle())
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.18), value: hovering)
+        .help(L(pinned ? "result.unpin" : "result.pin"))
+    }
+}
+
 struct RecentEntryStyle: ButtonStyle {
     @State private var hovering = false
     func makeBody(configuration: Configuration) -> some View {

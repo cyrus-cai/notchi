@@ -187,7 +187,7 @@ English sources are thin. Then answer in the user's language as usual.
 /// has. The single-shot `complete` path and the agent path both build the prompt
 /// through here. Rendered in the user's interface language to match the answer,
 /// mirroring `DateTimeTool`'s locale handling.
-func notchSystemPromptDated() -> String {
+func notchSystemPromptDated(customInstructions: String? = nil) -> String {
     let fmt = DateFormatter()
     fmt.dateStyle = .full
     fmt.timeStyle = .none
@@ -196,7 +196,22 @@ func notchSystemPromptDated() -> String {
     case .zhHans: fmt.locale = Foundation.Locale(identifier: "zh_Hans")
     case .zhHant: fmt.locale = Foundation.Locale(identifier: "zh_Hant")
     }
-    return "Today is \(fmt.string(from: Date())).\n\n" + notchSystemPrompt
+    var prompt = "Today is \(fmt.string(from: Date())).\n\n" + notchSystemPrompt
+    // The user's own preferences (XII-137), appended AFTER the built-in persona so
+    // the core rules — concise, search-first, honest — are stated first and the
+    // preference is a trailing refinement, not an override. Framed as "the user's
+    // standing preferences" and explicitly subordinate to the rules above, so a
+    // one-liner like "always answer in English" is honoured without letting it
+    // dislodge search-first / honesty. Only appended on the Ask path with a
+    // non-empty value; presets and title generation pass nil (they carry their own
+    // precise instructions and must not be polluted).
+    if let custom = customInstructions?.trimmingCharacters(in: .whitespacesAndNewlines),
+       !custom.isEmpty {
+        prompt += "\n\nThe user has set these standing preferences. Honour them where "
+            + "they don't conflict with the rules above (search-first, honesty, and "
+            + "concision still apply):\n\(custom)"
+    }
+    return prompt
 }
 
 /// System prompt for summarizing a conversation into a short recent-list title.
@@ -395,6 +410,43 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     var signupHost: String      { spec.signupHost }
     var signupURL: URL          { spec.signupURL }
     var envVarName: String      { spec.envVarName }
+
+    /// The provider's cheap/fast tier for mechanical tasks — translate/summarize
+    /// chips and `generateTitle` (XII-132). Picked from the provider's OWN live
+    /// model list (`availableModels`, which rides the hot-updated manifest) by
+    /// name pattern, so it tracks the current lineup instead of hard-coding a
+    /// model that may be renamed/retired. Returns `nil` when this provider exposes
+    /// no distinct light tier (or its only model IS the light one) — the caller
+    /// then just keeps the main model, so routing can never make a task fail.
+    ///
+    /// The match order per provider is most-preferred-light first; the first name
+    /// in `availableModels` that contains a light marker wins. Never returns the
+    /// user's currently-selected model (routing to "light" that equals the main is
+    /// a no-op the caller detects, but we avoid it here for clarity).
+    var lightModel: String? {
+        let models = availableModels
+        // Vendor-specific light markers, in the order we'd prefer them. Lowercased
+        // substring match against each candidate id.
+        let markers: [String]
+        switch self {
+        case .anthropic:  markers = ["haiku"]
+        case .openai:     markers = ["mini", "nano"]
+        case .gemini:     markers = ["flash-lite", "flash"]
+        case .deepseek:   markers = ["flash"]
+        case .qwen:       markers = ["flash"]
+        case .glm:        markers = ["turbo", "flash"]
+        case .kimi:       markers = ["32k", "8k"]           // smaller-context = cheaper tier
+        case .minimax:    markers = ["highspeed"]
+        case .mimo:       markers = []                       // single tier — no light split
+        case .openrouter: markers = []                       // auto-router already picks cheap
+        }
+        for marker in markers {
+            if let hit = models.first(where: { $0.lowercased().contains(marker) }) {
+                return hit
+            }
+        }
+        return nil
+    }
 
     // MARK: Behavioral traits (grouped by client behavior, not by vendor)
 

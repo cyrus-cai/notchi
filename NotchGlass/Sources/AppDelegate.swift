@@ -27,11 +27,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return StubAIService()
         }
         let model = APIKeyStore.effectiveModel(for: provider)
-        // Anthropic speaks its own protocol; everyone else is OpenAI-compatible.
+        return makeService(provider: provider, apiKey: key, model: model)
+    }
+
+    /// Build the concrete client for `provider` at an explicit `model` (nil ⇒ the
+    /// provider default). Factored out of `makeService()` so the light-task router
+    /// (XII-132) can build a second service pinned to the provider's light model
+    /// without duplicating the Anthropic-vs-OpenAI client selection. Same protocol
+    /// split as the main path — nothing else about a request changes.
+    static func makeService(provider: Provider, apiKey: String, model: String?) -> AIService {
         if provider.isOpenAICompatible {
-            return OpenAICompatAIService(provider: provider, apiKey: key, model: model)
+            return OpenAICompatAIService(provider: provider, apiKey: apiKey, model: model)
         } else {
-            return AnthropicAIService(provider: provider, apiKey: key, model: model)
+            return AnthropicAIService(provider: provider, apiKey: apiKey, model: model)
         }
     }
 
@@ -109,6 +117,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // hot-updated from the website) on the same quiet cadence.
             await RemoteModelManifest.refreshIfDue()
         }
+
+        // Slot a "Check for Updates…" item into the standard app menu, right
+        // under "About Notch". The menu only exists in `.regular` mode (Dock icon
+        // shown) — in the default `.accessory` overlay there's no app menu at all,
+        // so this is a no-op then and re-runs when the Dock icon is switched on.
+        installCheckForUpdatesMenuItem()
 
         rebuildPanels()
 
@@ -415,7 +429,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(visibility.activationPolicy)
         if visibility == .shown {
             NSApp.activate(ignoringOtherApps: true)
+            // Switching to `.regular` builds the app menu fresh (it doesn't
+            // exist under `.accessory`), so re-slot our item — deferred a runloop
+            // turn so AppKit has finished assembling the standard menu first.
+            DispatchQueue.main.async { [weak self] in
+                self?.installCheckForUpdatesMenuItem()
+            }
         }
+    }
+
+    // MARK: - App menu
+
+    /// Insert a "Check for Updates…" item into the standard app menu, just below
+    /// "About Notch". Idempotent (tagged so a re-run finds and skips it), and a
+    /// no-op when there's no app menu — the default `.accessory` overlay has none.
+    private func installCheckForUpdatesMenuItem() {
+        let tag = 0x4E4F5443  // "NOTC" — our marker so we never add it twice.
+        // The app menu is the first submenu of the main menu.
+        guard let appMenu = NSApp.mainMenu?.items.first?.submenu else { return }
+        if appMenu.item(withTag: tag) != nil { return }
+
+        let item = NSMenuItem(
+            title: L("about.checkForUpdates") + "…",
+            action: #selector(checkForUpdatesFromMenu),
+            keyEquivalent: "")
+        item.target = self
+        item.tag = tag
+
+        // Place it right after "About Notch" (index 0) when present, else on top.
+        let insertAt = appMenu.items.isEmpty ? 0 : 1
+        appMenu.insertItem(item, at: insertAt)
+        // Keep the visual grouping tidy: a separator after our item so it reads
+        // as its own line, matching the About/Settings separators around it.
+        appMenu.insertItem(.separator(), at: insertAt + 1)
+    }
+
+    /// The "Check for Updates…" menu action: open the in-panel settings straight
+    /// to the About pane (where the update UI lives) and kick off a user-initiated
+    /// check, so the result — a spinner, an "up to date" note, or the Update
+    /// button — shows right there.
+    @objc private func checkForUpdatesFromMenu() {
+        model.settingsSection = "About"
+        UpdaterService.shared.checkManually()
+        NotificationCenter.default.post(name: .openSettingsRequested, object: nil)
     }
 
     // MARK: - Panel management

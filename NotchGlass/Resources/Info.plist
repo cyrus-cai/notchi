@@ -31,7 +31,7 @@
 	<key>NSAppleEventsUsageDescription</key>
 	<string>Notch saves the lines you type in record mode into the Notes app.</string>
 	<key>NSHumanReadableCopyright</key>
-	<string>Notch — Liquid Glass</string>
+	<string>Copyright © 2026 Lofi-Lab</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSRemindersFullAccessUsageDescription</key>

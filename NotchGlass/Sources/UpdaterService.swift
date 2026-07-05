@@ -28,6 +28,18 @@ final class UpdaterService: ObservableObject {
 
     @Published private(set) var phase: Phase = .unknown
 
+    /// A user-initiated "Check for updates" in flight, and its momentary result.
+    /// Separate from `phase` so the manual button can show a spinner and a brief
+    /// "up to date" confirmation without touching the silent auto-check contract
+    /// (which stays quiet — no "up to date" chrome unless the user asked).
+    enum ManualCheck: Equatable {
+        case idle       // no manual check happening; show the plain "Check for updates" link
+        case checking   // request in flight — show a spinner
+        case upToDate   // just confirmed current — show a fading "You're up to date"
+    }
+
+    @Published private(set) var manualCheck: ManualCheck = .idle
+
     static let repo = "cyrus-cai/notch"
     static var releasesPage: URL { URL(string: "https://github.com/\(repo)/releases/latest")! }
 
@@ -90,6 +102,43 @@ final class UpdaterService: ObservableObject {
                 ? .available(latest)
                 : .upToDate
         }
+    }
+
+    /// User-initiated check — the "Check for updates" button. Same request as
+    /// `check()`, but surfaces feedback the silent path deliberately hides: a
+    /// spinner while it runs, and a momentary "up to date" when this is already
+    /// the latest. If a newer version turns up, `phase` flips to `.available` and
+    /// the normal Update button takes over (no separate confirmation needed).
+    func checkManually() {
+        guard manualCheck != .checking, phase != .updating else { return }
+        manualCheck = .checking
+        Task {
+            let release = try? await Self.fetchLatest()
+            // A real update superseding the check mid-flight wins.
+            guard phase != .updating else { manualCheck = .idle; return }
+            guard let release else {
+                // Network/API failure: no confirmation to show, just stop the
+                // spinner. Failures stay quiet, same as the silent path.
+                manualCheck = .idle
+                return
+            }
+            UserDefaults.standard.set(Date(), forKey: lastCheckKey)
+            let latest = release.version
+            if Self.isNewer(latest, than: Self.currentVersion) {
+                phase = .available(latest)
+                manualCheck = .idle       // the Update button now carries the signal
+            } else {
+                phase = .upToDate
+                manualCheck = .upToDate    // the UI clears this back to .idle after a beat
+            }
+        }
+    }
+
+    /// Dismiss the momentary "up to date" confirmation, returning the button to
+    /// its resting "Check for updates" label. The view schedules this after a
+    /// short delay so the reassurance shows, then quietly recedes.
+    func clearManualConfirmation() {
+        if manualCheck == .upToDate { manualCheck = .idle }
     }
 
     /// Numeric dot-component comparison: "1.0.10" beats "1.0.9", "1.1" beats "1.0.2".

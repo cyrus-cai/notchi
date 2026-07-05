@@ -223,6 +223,7 @@ struct InlineSettingsView: View {
                             keyRow
                         }
                         modelRow
+                        lightTasksRow
                         footer
                     case .search:
                         searchBackendRow
@@ -239,15 +240,18 @@ struct InlineSettingsView: View {
                         }
                     case .tools:
                         // Which quick tools appear at all, then the knobs of the
-                        // individual tools (today: Translate's language pair).
+                        // individual tools (today: Translate's language pair),
+                        // then the closed-notch copy sensing.
                         quickToolsRow
                         translationLanguageRow
+                        copySenseRow
                     case .general:
                         // How you summon it → where it appears → what language it
                         // speaks → how it sits in the system.
                         shortcutRow
                         placementRow
                         appLanguageRow
+                        customInstructionsRow
                         dockIconRow
                         launchAtLoginRow
                     case .about:
@@ -1112,6 +1116,51 @@ struct InlineSettingsView: View {
     /// Whether Notch launches itself when you log in. Off by default; flipping it
     /// on registers a login item via `SMAppService` so the notch is there from the
     /// first hover after every restart, with no manual relaunch.
+    /// Custom instructions (XII-137): one short line of personal preference the
+    /// model gets appended after its built-in persona on the Ask path — "always
+    /// answer in English", "prefer code", "metric units". Capped at
+    /// `NotchModel.customInstructionsLimit` chars (the binding truncates), empty by
+    /// default. Deliberately understated: the hint says it refines, never that it
+    /// overrides the core rules.
+    private var customInstructionsRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(L("general.customInstructions"))
+                .font(.sf(13))
+                .foregroundStyle(Tokens.text1)
+            ZStack(alignment: .topLeading) {
+                if model.customInstructions.isEmpty {
+                    Text(L("general.customInstructions.placeholder"))
+                        .font(.sf(13))
+                        .foregroundStyle(Tokens.text3)
+                        .allowsHitTesting(false)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                }
+                TextField("", text: Binding(
+                    get: { model.customInstructions },
+                    set: { model.customInstructions = $0 }
+                ), axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .lineLimit(1...3)
+                    .font(.sf(13))
+                    .foregroundStyle(Tokens.text1)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    // Typing here counts as activity so a drifting pointer can't fold
+                    // the panel mid-edit (same guard the API-key field uses).
+                    .onChange(of: model.customInstructions) { model.noteUserTyping() }
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(.white.opacity(0.06))
+            )
+            Text(L("general.customInstructions.hint"))
+                .font(.sf(11))
+                .foregroundStyle(Tokens.text4)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     private var launchAtLoginRow: some View {
         settingRow(label: L("general.launchAtLogin")) {
             Toggle("", isOn: Binding(
@@ -1343,6 +1392,60 @@ struct InlineSettingsView: View {
         .modifier(GlassPopoverBackground())
     }
 
+    /// Light-task routing (XII-132): whether translate/summarize chips and title
+    /// generation use the provider's lightweight model (cheaper + faster first
+    /// token) instead of the main Ask model. Main Ask always uses the chosen model.
+    private var lightTasksRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            settingRow(label: L("general.lightTasks")) {
+                Toggle("", isOn: Binding(
+                    get: { model.lightTasksEnabled },
+                    set: { model.lightTasksEnabled = $0 }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .tint(Tokens.text2)
+            }
+            Text(lightTasksHint)
+                .font(.sf(11))
+                .foregroundStyle(Tokens.text4)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// Hint under the light-model toggle. When the current provider has a light
+    /// tier, name the exact model it routes to; otherwise say it kicks in only
+    /// where a lighter tier exists.
+    private var lightTasksHint: String {
+        if let light = provider.lightModel {
+            return L("general.lightTasks.hint", light)
+        }
+        return L("general.lightTasks.hint.none")
+    }
+
+    /// Copy sensing: whether the *closed* notch watches ⌘C and offers to file a
+    /// copied note/reminder (press ⌘C again to confirm). The in-panel capture
+    /// chip is independent of this switch.
+    private var copySenseRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            settingRow(label: L("general.copySense")) {
+                Toggle("", isOn: Binding(
+                    get: { model.copySenseEnabled },
+                    set: { model.copySenseEnabled = $0 }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .tint(Tokens.text2)
+            }
+            Text(L("general.copySense.hint"))
+                .font(.sf(11))
+                .foregroundStyle(Tokens.text4)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     /// Pref1 picker — the primary language. Writing through `model.translationPref1`
     /// publishes the change so the chip label re-renders immediately.
     private var translationLanguageRow: some View {
@@ -1423,55 +1526,108 @@ struct InlineSettingsView: View {
                 Spacer(minLength: 0)
             }
 
-            updateRow
+            updateArea
 
             aboutLinks
         }
     }
 
-    /// The update affordance, shown only when there's something to act on — an
-    /// "Update to X" button, an in-flight spinner, or the failure pill. When the
-    /// build is current this collapses to nothing; the version under the app name
-    /// already says all there is to say.
-    private var updateRow: some View {
-        Group {
-            switch updater.phase {
-            case .available(let v):
-                Button(L("about.update.to", v)) { updater.update() }
-                    .buttonStyle(.plain)
-                    .font(.sf(12, weight: .semibold))
-                    .foregroundStyle(Tokens.text1)
-            case .updating:
-                HStack(spacing: 7) {
-                    ProgressView().controlSize(.small)
-                    Text(L("about.updating"))
-                        .font(.sf(12, weight: .semibold))
-                        .foregroundStyle(Tokens.text2)
-                }
-            case .failed:
-                Button {
-                    NSWorkspace.shared.open(UpdaterService.releasesPage)
-                } label: {
-                    HStack(spacing: 7) {
-                        Circle()
-                            .fill(Tokens.danger)
-                            .frame(width: 6, height: 6)
-                        Text(L("about.updateFailed"))
-                            .font(.sf(11.5, weight: .medium))
-                            .foregroundStyle(Tokens.danger.opacity(0.92))
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(Capsule(style: .continuous).fill(Tokens.danger.opacity(0.12)))
-                    .overlay(Capsule(style: .continuous).strokeBorder(Tokens.danger.opacity(0.22), lineWidth: 0.5))
-                    .contentShape(Capsule(style: .continuous))
-                }
-                .buttonStyle(.plain)
-            default:
-                EmptyView()
+    /// The whole update story in one slot, right under the version number where
+    /// it belongs: at rest a quiet "Check for updates" link, and every state that
+    /// follows — checking, "up to date", "Update to X", updating, failed — swaps
+    /// through this same spot rather than scattering across the panel. Because a
+    /// newer version and the manual-check confirmation share the slot, they read
+    /// as one continuous action instead of two unrelated controls.
+    ///
+    /// The faces differ in width, weight, and height (the failure pill especially),
+    /// so any positional transition makes them jump. Deliberately plain: one face
+    /// cross-fades into the next in place — opacity only, no drift, no spring — so
+    /// switching states never shifts anything around it.
+    private var updateArea: some View {
+        ZStack(alignment: .leading) {
+            updateContent
+                .id(updateSlot)
+                .transition(.opacity)
+        }
+        .animation(.easeInOut(duration: 0.18), value: updateSlot)
+    }
+
+    /// Which face the update slot is showing. Collapsing phase + manualCheck into
+    /// one enum gives `updateArea` a single value to key the cross-fade on, so
+    /// SwiftUI treats each face as a distinct view that fades in and out.
+    private enum UpdateSlot: Hashable {
+        case rest, checking, upToDate, available(String), updating, failed
+    }
+
+    private var updateSlot: UpdateSlot {
+        switch updater.phase {
+        case .available(let v): return .available(v)
+        case .updating:         return .updating
+        case .failed:           return .failed
+        case .unknown, .upToDate:
+            switch updater.manualCheck {
+            case .checking: return .checking
+            case .upToDate: return .upToDate
+            case .idle:     return .rest
             }
         }
-        .animation(.easeOut(duration: 0.2), value: updater.phase)
+    }
+
+    @ViewBuilder
+    private var updateContent: some View {
+        switch updateSlot {
+        case .available(let v):
+            Button(L("about.update.to", v)) { updater.update() }
+                .buttonStyle(.plain)
+                .font(.sf(12, weight: .semibold))
+                .foregroundStyle(Tokens.text1)
+        case .updating:
+            HStack(spacing: 7) {
+                ProgressView().controlSize(.small)
+                Text(L("about.updating"))
+                    .font(.sf(12, weight: .semibold))
+                    .foregroundStyle(Tokens.text2)
+            }
+        case .failed:
+            Button {
+                NSWorkspace.shared.open(UpdaterService.releasesPage)
+            } label: {
+                HStack(spacing: 7) {
+                    Circle()
+                        .fill(Tokens.danger)
+                        .frame(width: 6, height: 6)
+                    Text(L("about.updateFailed"))
+                        .font(.sf(11.5, weight: .medium))
+                        .foregroundStyle(Tokens.danger.opacity(0.92))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Capsule(style: .continuous).fill(Tokens.danger.opacity(0.12)))
+                .overlay(Capsule(style: .continuous).strokeBorder(Tokens.danger.opacity(0.22), lineWidth: 0.5))
+                .contentShape(Capsule(style: .continuous))
+            }
+            .buttonStyle(.plain)
+        case .checking:
+            HStack(spacing: 7) {
+                ProgressView().controlSize(.small)
+                Text(L("about.checking"))
+                    .font(.sf(11.5, weight: .medium))
+                    .foregroundStyle(Tokens.text3)
+            }
+        case .upToDate:
+            Text(L("about.upToDate"))
+                .font(.sf(11.5, weight: .medium))
+                .foregroundStyle(Tokens.text2)
+                .task {
+                    // Let the confirmation linger, then recede to the link.
+                    try? await Task.sleep(nanoseconds: 2_500_000_000)
+                    updater.clearManualConfirmation()
+                }
+        case .rest:
+            aboutLink(L("about.checkForUpdates")) {
+                updater.checkManually()
+            }
+        }
     }
 
     /// Quiet text-button links, grouped two-to-a-row by what they're about:

@@ -64,6 +64,20 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.1.10",
+            date: "2026-07-05",
+            features: [
+                "Copy something that reads as a note or reminder, and the closed notch quietly offers to save it — press ⌘C again to file it.",
+                "Filter Recent to just Notes, Reminders, or Ask from the menu.",
+            ],
+            improvements: [
+                "Keyboard shortcuts for a finished answer: ⌘C copy, ⌘S save to Notes, ⌘R regenerate.",
+                "Translate, summarize, and titles can now route to a lighter, faster model — configurable in Settings.",
+                "Check for updates on demand from Settings → About.",
+                "Smoother placeholder text and recent-list animations.",
+            ]
+        ),
+        Entry(
             version: "0.1.9",
             date: "2026-07-04",
             features: [

@@ -88,6 +88,12 @@ final class NotchModel: ObservableObject {
         /// wire context must keep filtering the error turn out after a reopen, so the
         /// model never sees "Anthropic · HTTP 401" as something it once said.
         var isError: Bool = false
+        /// The model this assistant turn was regenerated with (XII-135), when it
+        /// differs from the user's default — set by a one-shot "regenerate with…"
+        /// pick so the answer can show which model produced it. `nil` for the normal
+        /// case (default model), so a plain answer carries no annotation. Persisted,
+        /// so a reopened thread still shows the badge.
+        var regenModel: String? = nil
 
         init(id: UUID = UUID(), role: String, text: String,
              streaming: Bool = false, usedClipboard: Bool = false) {
@@ -102,7 +108,7 @@ final class NotchModel: ObservableObject {
         // it. `decodeIfPresent` + defaults is what keeps old saved conversations
         // loadable. `role`/`text` are required — every saved turn has them.
         // `toolActivity` is deliberately absent: it's runtime-only UI state.
-        enum CodingKeys: String, CodingKey { case id, role, text, streaming, usedClipboard, sources, isError }
+        enum CodingKeys: String, CodingKey { case id, role, text, streaming, usedClipboard, sources, isError, regenModel }
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -113,6 +119,7 @@ final class NotchModel: ObservableObject {
             usedClipboard = try c.decodeIfPresent(Bool.self, forKey: .usedClipboard) ?? false
             sources      = try c.decodeIfPresent([WebSource].self, forKey: .sources) ?? []
             isError      = try c.decodeIfPresent(Bool.self, forKey: .isError) ?? false
+            regenModel   = try c.decodeIfPresent(String.self, forKey: .regenModel)
         }
     }
 
@@ -348,9 +355,33 @@ final class NotchModel: ObservableObject {
         var showWhatsNew: Bool
         var showHistory: Bool
         var closedAt: Date
+        /// The thread's measured intrinsic height at close time — see
+        /// `lastMeasuredAnswerHeight`. Restored before the reopened panel mounts
+        /// so the result view lands in the right (short vs clipped) layout on
+        /// its very first frame.
+        var measuredAnswerHeight: CGFloat
     }
 
     private var parkedSession: ParkedSession? = nil
+
+    /// The answer thread's last measured intrinsic height, mirrored here live by
+    /// NotchBody's `AnswerHeightKey` probe. A plain var, deliberately not
+    /// @Published — it's layout telemetry for the next mount, never something a
+    /// mounted view re-reads.
+    ///
+    /// Why it exists: NotchBody unmounts on every close (`if isOpen` in
+    /// ContentView), which resets its measurement @State to 0 — so a hover-reopen
+    /// into a parked answer always mounted in the WRONG layout first (unclipped,
+    /// the whole thread at full intrinsic height) and flipped to the clipped
+    /// scroller one preference pass later, mid-open-spring. That structural swap
+    /// (new ScrollView, header → floating overlay, follow-up → float, scroll
+    /// snapped to bottom) stacked onto the unfurl is exactly what made reopening
+    /// an answer visibly rougher than opening the idle prompt. Parking the
+    /// measurement with the session and seeding the next mount from it means the
+    /// first frame is already the final layout, and the open rides one clean
+    /// spring — same as idle. Zeroed on every close after parking, so only a
+    /// genuine parked-session restore ever hands a seed to a fresh mount.
+    var lastMeasuredAnswerHeight: CGFloat = 0
 
     /// How long a parked session stays restorable. "A few minutes" — long enough
     /// to answer a Slack message and come back, short enough that a reopen after
@@ -889,6 +920,19 @@ final class NotchModel: ObservableObject {
     /// "Saving…" cue instead of looking like nothing happened on Enter.
     @Published var noteSaving = false
 
+    /// Monotonic id for the *current* capture write (XII-117). `submitNote` /
+    /// `submitReminder` bump this and capture the new value; their async callback
+    /// only owns the shared UI state (`noteSaving`, `text`, `lastSavedNote`,
+    /// `noteError`, the cue) when its captured id still equals this — i.e. it's
+    /// the write that's actually in flight. A second capture fired inside the
+    /// first's ~600ms AppleScript retry window supersedes it, so the first's
+    /// late-arriving callback no longer clears the gate early, nor overwrites the
+    /// second's success with its own (possibly failed) outcome, nor bounces an
+    /// already-filed line back into the input via `reportCaptureFailure`. The
+    /// superseded callback still persists its OWN Recent row (idempotent, its own
+    /// data), so a successful write is never lost — only the shared cue is ceded.
+    private var captureToken = 0
+
     /// A failed Ask, surfaced as an actionable error state instead of a blank spinner
     /// or a generic line (XII-85). Carries the real, human-readable reason (e.g.
     /// "Anthropic · HTTP 401") and whether the likely fix is to set up a key (no key
@@ -975,6 +1019,13 @@ final class NotchModel: ObservableObject {
     /// clears it, so it never leaks into a follow-up.
     private var forceClipboardInjection = false
 
+    /// Set for exactly one `submit()` when a light-task preset chip fires
+    /// (translate/summarize/…), so that turn routes to the provider's lightweight
+    /// model and takes the plain single-shot stream (no agent/tool harness — a
+    /// mechanical transform never needs web search). Read once and cleared in
+    /// `submit()`, so it can never carry into a later typed Ask (XII-132).
+    private var presetLightTask = false
+
     /// When a chip's on-screen wording differs from the instruction sent to the
     /// model (currently only Translate, whose verbose detect-and-route rule must
     /// not leak into the "You" bubble), `runClipboardPreset` stashes the full
@@ -1010,6 +1061,7 @@ final class NotchModel: ObservableObject {
             if !showHistory {
                 historySearchQuery = ""
                 showHistoryFilter = false
+                historySourceFilter = nil
             }
         }
     }
@@ -1027,6 +1079,16 @@ final class NotchModel: ObservableObject {
         didSet {
             if historySearchQuery != oldValue { highlightedHistoryIndex = nil }
             if !historySearchQuery.isEmpty { noteUserTyping() }
+        }
+    }
+    /// Source filter for the recent list — `nil` shows everything. Set from the
+    /// manage menu's filter chips (Note / Remind / Ask); cleared automatically
+    /// when the list closes (see `showHistory`).
+    @Published var historySourceFilter: HistoryItem.Source? = nil {
+        // Same reasoning as `historySearchQuery`: filtering reshuffles which rows
+        // exist, so a stale keyboard highlight could point at a hidden row.
+        didSet {
+            if historySourceFilter != oldValue { highlightedHistoryIndex = nil }
         }
     }
     /// Whether the inline settings panel is showing in place of the recent list.
@@ -1115,8 +1177,14 @@ final class NotchModel: ObservableObject {
     /// is reachable. Keyboard navigation indexes into THIS, so highlight bounds and
     /// the rendered rows can never drift apart.
     var recentVisible: [HistoryItem] {
-        guard !historySearchQuery.isEmpty else { return history }
-        return history.filter {
+        // Source filter (from the manage menu) narrows first, then the live
+        // substring search refines within that slice — the two compose.
+        var items = history
+        if let source = historySourceFilter {
+            items = items.filter { $0.source == source }
+        }
+        guard !historySearchQuery.isEmpty else { return items }
+        return items.filter {
             $0.displayTitle.localizedCaseInsensitiveContains(historySearchQuery)
         }
     }
@@ -1136,12 +1204,38 @@ final class NotchModel: ObservableObject {
     init(ai: AIService = StubAIService()) {
         self.ai = ai
         history = loadHistory()
+        startClipboardSense()
+    }
+
+    deinit {
+        senseTimer?.invalidate()
     }
 
     /// Swap the backend at runtime — used when the user saves an API key in
     /// Settings, so the next question goes live without an app restart.
     func setService(_ service: AIService) {
         ai = service
+        // The light-task service is derived from the main provider/key; a provider
+        // or key change invalidates it. Rebuilt lazily on next use (XII-132).
+        cachedLightService = nil
+    }
+
+    /// A service pinned to the provider's lightweight model for mechanical tasks
+    /// (translate/summarize chips, title generation) — XII-132. `nil` when routing
+    /// is off, the provider has no distinct light tier, or the backend is the
+    /// offline stub / unconfigured; callers then just use the main `ai`, so a task
+    /// never fails for lack of a light model. Cached until `setService` swaps it.
+    private var cachedLightService: AIService?
+    private var lightService: AIService? {
+        // Stub / unconfigured → no routing (the caller's own stub guards still fire).
+        guard !(ai is StubAIService) else { return nil }
+        if let cached = cachedLightService { return cached }
+        let provider = APIKeyStore.selectedProvider
+        guard let key = APIKeyStore.current(for: provider),
+              let lightModel = APIKeyStore.lightTaskModel(for: provider) else { return nil }
+        let service = AppDelegate.makeService(provider: provider, apiKey: key, model: lightModel)
+        cachedLightService = service
+        return service
     }
 
     var hasText: Bool { !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
@@ -1182,6 +1276,7 @@ final class NotchModel: ObservableObject {
     /// next Ask. Same one-line re-baseline `newChat()` uses after a handoff copy.
     func rebaselineClipboardAfterInAppWrite() {
         pasteboardChangeCountAtOpen = NSPasteboard.general.changeCount
+        senseLastChangeCount = pasteboardChangeCountAtOpen
         refreshPendingClipboard()
     }
 
@@ -1224,6 +1319,12 @@ final class NotchModel: ObservableObject {
             pendingClipboardCapture = nil
             return
         }
+        // A clip the sense confirm already filed (or is filing right now) never
+        // re-offers as a chip — tapping it would file the same text twice.
+        guard clip != senseCapturedClip else {
+            pendingClipboardCapture = nil
+            return
+        }
         clipboardClassifyTask = Task { [weak self] in
             let reading = await IntentEngine.shared.classify(clip)
             guard !Task.isCancelled, let self, self.pendingClipboard == clip else { return }
@@ -1243,6 +1344,336 @@ final class NotchModel: ObservableObject {
             // FlowLayout reflow and the chip's own transition on one transaction.
             self.pendingClipboardCapture = verdict
         }
+    }
+
+    // MARK: - Clipboard sense (copy → hint on the resting notch → ⌘C again to file)
+
+    /// The copy-sense lifecycle, rendered by the resting notch's left extension
+    /// (the same strip the busy dots use). `hinting` = the copied text read as a
+    /// note/reminder and the notch is offering it — press ⌘C again to file it.
+    /// `saving`/`saved`/`failed` narrate the write after a confirm. Every stage is
+    /// only *visible* while the panel is closed; opening the panel hands the same
+    /// clip to the in-panel capture chip instead.
+    enum ClipboardSense: Equatable {
+        case idle
+        case hinting(panel: Panel)
+        case saving(panel: Panel)
+        case saved(panel: Panel)
+        case failed
+    }
+    @Published private(set) var clipboardSense: ClipboardSense = .idle
+
+    /// Whether the resting notch watches the clipboard at all (Settings → Tools).
+    /// On by default; turning it off tears down any visible hint immediately. The
+    /// in-panel capture chip is unaffected — this only governs the closed-notch
+    /// pre-sensing.
+    @Published var copySenseEnabled: Bool =
+        UserDefaults.standard.object(forKey: NotchModel.copySenseKey) as? Bool ?? true
+    {
+        didSet {
+            UserDefaults.standard.set(copySenseEnabled, forKey: NotchModel.copySenseKey)
+            if !copySenseEnabled { senseReset() }
+        }
+    }
+    private static let copySenseKey = "copySenseEnabled"
+
+    /// Whether mechanical side-tasks (translate/summarize chips, title generation)
+    /// use the provider's lightweight model instead of the main Ask model (XII-132).
+    /// Published mirror of `APIKeyStore.lightTasksEnabled` so the Settings toggle
+    /// drives it live; a change invalidates the cached light service so the next
+    /// task re-derives it (or falls back to main when turned off).
+    @Published var lightTasksEnabled: Bool = APIKeyStore.lightTasksEnabled {
+        didSet {
+            APIKeyStore.lightTasksEnabled = lightTasksEnabled
+            cachedLightService = nil
+        }
+    }
+
+    /// A one-line personal preference the user set in Settings (XII-137), appended
+    /// after the built-in persona on the Ask path — "always answer in English",
+    /// "I'm a developer, prefer code", "use metric units". Empty = zero behaviour
+    /// change (the default). Capped at `customInstructionsLimit` chars so it can't
+    /// bloat the prompt and slow first token. Persisted in UserDefaults.
+    static let customInstructionsLimit = 200
+    @Published var customInstructions: String =
+        UserDefaults.standard.string(forKey: NotchModel.customInstructionsKey) ?? ""
+    {
+        didSet {
+            // Enforce the cap defensively (the field also limits input) and persist.
+            if customInstructions.count > NotchModel.customInstructionsLimit {
+                customInstructions = String(customInstructions.prefix(NotchModel.customInstructionsLimit))
+                return   // the reassignment re-enters didSet, which persists
+            }
+            UserDefaults.standard.set(customInstructions, forKey: NotchModel.customInstructionsKey)
+        }
+    }
+    private static let customInstructionsKey = "customInstructions"
+
+    /// Background sensing must earn its interruption: the in-panel chip fires at
+    /// `intentActionFloor` (the user is already looking at the panel), but a hint
+    /// that lights up the closed notch on every copy needs a stronger read. Below
+    /// this the background default is *nothing* — the opposite of the input box,
+    /// whose default is Ask.
+    static let senseActionFloor = 0.55
+
+    /// How long a hint stays up with no response before it fades on its own.
+    private static let senseHintTimeout: TimeInterval = 5.0
+
+    /// The minimum gap between the hint appearing and a re-copy that counts as a
+    /// confirm. People habitually double-tap ⌘C "to make sure it copied" — those
+    /// land well under this; a real "saw the hint, pressed again" can't. A re-copy
+    /// faster than this refreshes the hint instead of firing it.
+    private static let senseMinReaction: TimeInterval = 0.6
+
+    /// Poll cadence for the resting watcher. Each tick is one `changeCount` read
+    /// (an Int, no content access) unless the count actually moved.
+    private static let senseTickInterval: TimeInterval = 0.3
+
+    private var senseTimer: Timer?
+    /// The last `changeCount` the watcher has accounted for. While the panel is
+    /// open every tick just re-syncs this, so copies made in-session (including
+    /// Notch's own pasteboard writes) can never read as new once the panel closes.
+    private var senseLastChangeCount = NSPasteboard.general.changeCount
+    /// The clip the current hint is about — a re-copy must match it exactly.
+    private var senseClip: String?
+    /// When the current hint appeared (the `senseMinReaction` anchor).
+    private var senseHintShownAt: Date?
+    /// The clip a sense confirm has (or is currently) filing — suppresses both a
+    /// re-hint and the in-panel capture chip for the same text, so one copied line
+    /// can't be filed twice. Cleared if the write fails (the chip then returns as
+    /// the retry path — the text is still safe in the clipboard).
+    private var senseCapturedClip: String?
+    /// True once a read was attempted while the system's pasteboard-privacy state
+    /// is `ask`/`default` (macOS 15.4+). One attempt lets the system surface its
+    /// access alert so the user can decide; after that the watcher stays quiet
+    /// until Settings says always-allow, instead of prompting on every copy.
+    private var senseAskAttempted = false
+    private var senseClassifyTask: Task<Void, Never>?
+    private var senseDismissTask: Task<Void, Never>?
+
+    /// Start the resting watcher (called once from `init`). `.common` mode so a
+    /// tracked menu or drag doesn't starve the tick; generous tolerance because
+    /// nothing here needs frame accuracy.
+    private func startClipboardSense() {
+        let t = Timer(timeInterval: Self.senseTickInterval, repeats: true) { [weak self] _ in
+            // Scheduled on RunLoop.main, so the fire is always on the main
+            // thread — assume (not hop to) the actor to keep the tick synchronous.
+            MainActor.assumeIsolated { self?.senseTick() }
+        }
+        t.tolerance = Self.senseTickInterval / 2
+        RunLoop.main.add(t, forMode: .common)
+        senseTimer = t
+    }
+
+    private func senseTick() {
+        let pb = NSPasteboard.general
+        // Panel open: the in-panel clipboard flow owns the pasteboard. Track the
+        // count so nothing copied (or written by us) in-session triggers a hint
+        // after close.
+        guard !open else {
+            senseLastChangeCount = pb.changeCount
+            return
+        }
+        // Disabled still tracks the count, so re-enabling can't hint on some
+        // long-stale copy made while the switch was off.
+        guard copySenseEnabled else {
+            senseLastChangeCount = pb.changeCount
+            return
+        }
+        let count = pb.changeCount
+        guard count != senseLastChangeCount else {
+            senseExpireHintIfStale()
+            return
+        }
+        senseLastChangeCount = count
+
+        guard let clip = senseReadClipboard() else {
+            // The clipboard moved to something we won't touch (empty, oversized,
+            // concealed, denied…) — any hint about the previous clip is stale.
+            senseCancelHint()
+            return
+        }
+        // A write is narrating (saving/saved/failed) — the strip is spoken for.
+        // New copies during that beat just pass through unsensed.
+        switch clipboardSense {
+        case .saving, .saved, .failed:
+            return
+        case .hinting(let panel) where clip == senseClip:
+            // The same text copied again while its hint is up. Fast enough to be a
+            // habitual double-tap → refresh the hint; a beat later → the confirm.
+            if let shown = senseHintShownAt,
+               Date().timeIntervalSince(shown) >= Self.senseMinReaction {
+                senseConfirm(clip: clip, panel: panel)
+            } else {
+                senseHintShownAt = Date()
+            }
+        default:
+            senseClassify(clip)
+        }
+    }
+
+    /// Read the pasteboard for sensing, or `nil` for anything the background
+    /// watcher must not touch. Stricter than `clipboardContextIfEligible`: only a
+    /// plain string (a bare URL or file path is never a note), never anything a
+    /// password manager marked concealed/transient, and never while the system's
+    /// pasteboard-privacy setting denies programmatic reads.
+    private func senseReadClipboard() -> String? {
+        guard senseClipboardAccessAllowed() else { return nil }
+        let pb = NSPasteboard.general
+        let types = pb.types ?? []
+        let offLimits = ["org.nspasteboard.ConcealedType",
+                         "org.nspasteboard.TransientType",
+                         "org.nspasteboard.AutoGeneratedType"]
+        guard !offLimits.contains(where: { types.contains(NSPasteboard.PasteboardType($0)) })
+        else { return nil }
+        guard let raw = pb.string(forType: .string) else { return nil }
+        let clip = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard clip.count >= 2, clip.count <= 1500 else { return nil }
+        // Text this app itself produced (a parked draft, a copied answer) is not
+        // a jot the user wants filed back at them.
+        guard !isCurrentSessionText(clip) else { return nil }
+        return clip
+    }
+
+    /// Gate content reads on the system pasteboard-privacy state (macOS 15.4+).
+    /// `alwaysAllow` senses freely; `alwaysDeny` never reads; `ask`/`default` get
+    /// exactly one attempt per app session — enough for the system to show its
+    /// consent alert once, never a prompt-per-copy drip.
+    private func senseClipboardAccessAllowed() -> Bool {
+        if #available(macOS 15.4, *) {
+            switch NSPasteboard.general.accessBehavior {
+            case .alwaysAllow:
+                return true
+            case .alwaysDeny:
+                return false
+            case .default, .ask:
+                if senseAskAttempted { return false }
+                senseAskAttempted = true
+                return true
+            @unknown default:
+                return false
+            }
+        }
+        return true
+    }
+
+    /// Classify a fresh copy and raise (or decline to raise) the hint. Same
+    /// engine and note→reminder split as the in-panel chip, but at the higher
+    /// `senseActionFloor` — an unsure read means no hint, not a default.
+    private func senseClassify(_ clip: String) {
+        guard clip != senseCapturedClip else { return }   // already filed this text
+        // The busy dots own the strip while a detached answer streams; a hint on
+        // top would be two voices in one mouth. The copy simply goes unsensed.
+        guard roundsInFlight == 0, !noteSaving else { return }
+        senseClassifyTask?.cancel()
+        senseClassifyTask = Task { [weak self] in
+            let reading = await IntentEngine.shared.classify(clip)
+            guard !Task.isCancelled, let self, !self.open, self.copySenseEnabled else { return }
+            guard reading.intent == .note, reading.confidence >= Self.senseActionFloor else {
+                self.senseCancelHint()
+                return
+            }
+            let due = RemindersService.futureDate(in: clip)
+                ?? RemindersService.recurrenceDate(in: clip)
+            self.senseClip = clip
+            self.senseHintShownAt = Date()
+            self.clipboardSense = .hinting(panel: due != nil ? .reminder : .note)
+        }
+    }
+
+    /// The confirm: file the clip where the hint said it would go, narrating
+    /// saving → saved (or failed) in the strip. Writes go straight to the
+    /// services — the submit-path plumbing (input-box state, saved cues) belongs
+    /// to the open panel. The Recent row still lands via `persistCapture`, so a
+    /// background capture shows up in history exactly like a chip capture.
+    private func senseConfirm(clip: String, panel: Panel) {
+        senseClassifyTask?.cancel()
+        senseHintShownAt = nil
+        // Claim the clip now, not on success — an open-panel chip tapped during
+        // the in-flight write must not file a duplicate. Released on failure.
+        senseCapturedClip = clip
+        clipboardSense = .saving(panel: panel)
+        switch panel {
+        case .reminder:
+            // Same past-due guard as `submitReminder`: better a reminder with no
+            // time than one that silently never rings.
+            var due = RemindersService.futureDate(in: clip)
+                ?? RemindersService.recurrenceDate(in: clip)
+            if let d = due, d <= Date() { due = nil }
+            RemindersService.createReminder(clip, due: due) { [weak self] result in
+                switch result {
+                case .success(let link):
+                    self?.senseWriteLanded(clip: clip, panel: panel, source: .reminder, link: link)
+                case .failure:
+                    self?.senseWriteFailed()
+                }
+            }
+        case .note, .chat:
+            NotesService.writeNote(clip) { [weak self] result in
+                switch result {
+                case .success(let noteID):
+                    self?.senseWriteLanded(clip: clip, panel: panel, source: .note, link: noteID)
+                case .failure:
+                    self?.senseWriteFailed()
+                }
+            }
+        }
+    }
+
+    private func senseWriteLanded(clip: String, panel: Panel, source: HistoryItem.Source, link: String?) {
+        persistCapture(clip, source: source, link: link)
+        senseClip = nil
+        // If the switch was flipped off while the write was in flight, the work
+        // still landed (and Recent shows it) — just skip the cue.
+        clipboardSense = copySenseEnabled ? .saved(panel: panel) : .idle
+        senseDismiss(after: 1.4)
+    }
+
+    private func senseWriteFailed() {
+        // Release the claim: the text is still safe in the clipboard, and the
+        // in-panel capture chip becomes the retry path.
+        senseCapturedClip = nil
+        senseClip = nil
+        clipboardSense = copySenseEnabled ? .failed : .idle
+        senseDismiss(after: 2.4)
+    }
+
+    /// Retract the strip after a terminal cue has had its beat.
+    private func senseDismiss(after seconds: TimeInterval) {
+        senseDismissTask?.cancel()
+        senseDismissTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            switch self.clipboardSense {
+            case .saved, .failed: self.clipboardSense = .idle
+            default: break
+            }
+        }
+    }
+
+    /// Fade an unanswered hint once it has outstayed `senseHintTimeout`.
+    private func senseExpireHintIfStale() {
+        guard case .hinting = clipboardSense, let shown = senseHintShownAt,
+              Date().timeIntervalSince(shown) > Self.senseHintTimeout else { return }
+        senseCancelHint()
+    }
+
+    /// Drop a visible hint (never a saving/saved narration — those settle on
+    /// their own via `senseDismiss`).
+    private func senseCancelHint() {
+        senseClassifyTask?.cancel()
+        if case .hinting = clipboardSense { clipboardSense = .idle }
+        senseClip = nil
+        senseHintShownAt = nil
+    }
+
+    /// Tear the whole sense state down (setting toggled off, panel opened).
+    private func senseReset() {
+        senseClassifyTask?.cancel()
+        senseDismissTask?.cancel()
+        clipboardSense = .idle
+        senseClip = nil
+        senseHintShownAt = nil
     }
 
     // MARK: - Open / collapse
@@ -1315,6 +1746,10 @@ final class NotchModel: ObservableObject {
         // instead of completing its fade, and the pending `beginClose` timer no-ops.
         closing = false
         open = true
+        // An open hands the clipboard to the in-panel flow: a visible sense hint
+        // retires (its clip re-surfaces as the capture chip via the refresh below),
+        // while a saving/saved narration settles on its own timer, just unseen.
+        if case .hinting = clipboardSense { senseCancelHint() }
         refreshPendingClipboard()
     }
 
@@ -1600,8 +2035,13 @@ final class NotchModel: ObservableObject {
             ? ParkedSession(mode: mode, turns: turns, text: text,
                             threadHistoryID: threadHistoryID,
                             showSettings: showSettings, showWhatsNew: showWhatsNew,
-                            showHistory: showHistory, closedAt: Date())
+                            showHistory: showHistory, closedAt: Date(),
+                            measuredAnswerHeight: lastMeasuredAnswerHeight)
             : nil
+        // The measurement now lives in the park (if any). Zero the live mirror so
+        // every non-restore open (fresh idle, settings, a different thread) seeds
+        // the next NotchBody mount with "unmeasured", exactly as before.
+        lastMeasuredAnswerHeight = 0
         // Detach, don't cancel: dropping the reference leaves the Task running
         // (deinit doesn't cancel it) and frees the slot so the next submit's
         // supersede-cancel can't reach the detached round.
@@ -1631,10 +2071,18 @@ final class NotchModel: ObservableObject {
         lastSavedNote = nil
         noteError = nil
         noteSaving = false
+        // Retire any in-flight capture write's claim (XII-117): bumping the token
+        // means a late callback from a write still in its AppleScript retry window
+        // won't touch the state we just reset (it still saves its own Recent row).
+        captureToken += 1
         // Snapshot the resting clipboard count: the next open baselines against this
         // (the count from *before* the user's next copy-then-open), so a copy made
         // while the notch is closed still reads as fresh context on the next Ask.
         pasteboardChangeCountAtRest = NSPasteboard.general.changeCount
+        // The sense watcher resumes from here too: anything written or copied
+        // during the session (handoff copy, code-block copy, in-panel ⌘C) is
+        // already accounted for and can never hint on the way out.
+        senseLastChangeCount = pasteboardChangeCountAtRest
         // Drop the preview so the resting panel stays minimal; the next open will
         // re-evaluate and surface anything fresh.
         pendingClipboard = nil
@@ -1670,6 +2118,8 @@ final class NotchModel: ObservableObject {
         lastSavedNote = nil
         noteError = nil
         noteSaving = false
+        // Retire any in-flight capture write's claim (XII-117) — see fullClose.
+        captureToken += 1
         // Re-baseline the clipboard against NOW. The handoff-copy button writes the
         // transcript to the pasteboard (bumping changeCount past the open baseline);
         // without this reset, the next first-turn Ask would mistake our own handoff
@@ -1697,6 +2147,23 @@ final class NotchModel: ObservableObject {
         }
     }
 
+    /// ⌘↵: submit the current line to the *other family* — the one-key flip for
+    /// when the effective destination reads the line wrong. There are two families:
+    /// **Ask** (send to the AI) and **Capture** (keep for yourself). Flipping
+    /// ask→capture picks the leaf by the same structural rule auto-routing uses —
+    /// a named future time makes it a Reminder, otherwise a Note — so a manual
+    /// flip can never file differently than the classifier would have. Either
+    /// capture leaf flips back to Ask. Tab stays the precise three-way pick
+    /// (`toggleSubmitPanel`); this is the coarse, no-look correction.
+    func submitOtherFamily() {
+        switch effectiveSubmitPanel {
+        case .chat:
+            if detectedDue != nil { submitReminder() } else { submitNote() }
+        case .note, .reminder:
+            submit()
+        }
+    }
+
     /// The clipboard string that's *available* to fold into an Ask, or `nil` when
     /// the clipboard itself isn't a candidate. This is only the clipboard-state half
     /// of the gate — whether the *query* actually refers to it is `isReferentialQuery`,
@@ -1705,7 +2172,9 @@ final class NotchModel: ObservableObject {
     /// covers the intended copy-THEN-open flow (the baseline is the count from before
     /// the open; see `pasteboardChangeCountAtOpen`) as well as a copy made while the
     /// panel is open; the clipboard holds a non-empty string, URL, or file URL; and
-    /// it's short enough (≤ 1500 chars) to inject without blowing up the prompt.
+    /// it's short enough (≤ 1500 chars) to inject without blowing up the prompt;
+    /// and it isn't text this session is itself displaying (see
+    /// `isCurrentSessionText` — an in-panel copy never becomes a quote).
     /// Anything longer than 1500 chars, an image, or a stale clipboard returns nil.
     /// Read once per submit; never mutates the pasteboard.
     private func clipboardContextIfEligible() -> String? {
@@ -1724,7 +2193,26 @@ final class NotchModel: ObservableObject {
         guard let s = raw else { return nil }
         let clip = s.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clip.isEmpty, clip.count <= 1500 else { return nil }
+        // Text already visible inside this session is an *in-app* copy, not outside
+        // context — quoting it back adds nothing. This catches the copies our code
+        // never sees (⌘C in the input field, selecting answer text), which bypass
+        // `rebaselineClipboardAfterInAppWrite` because the system performs them.
+        guard !isCurrentSessionText(clip) else { return nil }
         return clip
+    }
+
+    /// True when `clip` (already trimmed) is text the current session itself is
+    /// showing: the input-box draft, the parked idle draft, or a turn of the
+    /// on-screen conversation. Turns also match on *containment* for clips of
+    /// ≥ 40 chars, so a partial selection copied out of an answer still counts as
+    /// in-app; short clips must match a whole turn exactly, so a word copied from
+    /// another app that merely appears somewhere in the answer isn't swallowed.
+    private func isCurrentSessionText(_ clip: String) -> Bool {
+        func matches(_ s: String) -> Bool {
+            let body = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            return clip == body || (clip.count >= 40 && body.contains(clip))
+        }
+        return matches(text) || matches(savedIdleDraft) || turns.contains { matches($0.text) }
     }
 
     /// The clipboard image available to attach to an Ask (XII-121), or `nil`.
@@ -2277,6 +2765,10 @@ final class NotchModel: ObservableObject {
         // than re-deriving it from the phrase's wording (which `isReferentialQuery`
         // can misjudge). `submit()` reads and clears the flag this turn.
         forceClipboardInjection = true
+        // This turn is a mechanical light task (translate/summarize/…) — route it to
+        // the provider's light model when available (XII-132). Consumed once in
+        // `submit()`, so it never leaks into a later typed Ask.
+        presetLightTask = true
         submit()
     }
 
@@ -2350,6 +2842,25 @@ final class NotchModel: ObservableObject {
         // typed turn. Only honoured on a forced-clip turn, paired with the clipboard.
         let wireOverride = forcedWirePhrase
         forcedWirePhrase = nil
+        // One-shot: this turn is a light-task preset (translate/summarize) → route to
+        // the provider's light model and skip the tool harness (XII-132). Consumed
+        // here so a later typed Ask always uses the main model. Resolve the light
+        // service now (main-actor state) so the streaming task can capture it; nil
+        // when routing is off / no light tier, and the task falls back to `self.ai`.
+        let lightTask = presetLightTask
+        presetLightTask = false
+        let lightAIService = lightTask ? lightService : nil
+        // One-shot regenerate-with-model override (XII-135): build a service pinned
+        // to the picked model for THIS turn only, without touching the saved
+        // default. Consumed + cleared here. `regenModel` is stamped onto the answer
+        // turn below so the result shows which model produced it.
+        let overrideModel = regenOverrideModel
+        regenOverrideModel = nil
+        let overrideService: AIService? = overrideModel.flatMap { m in
+            let provider = APIKeyStore.selectedProvider
+            guard let key = APIKeyStore.current(for: provider) else { return nil }
+            return AppDelegate.makeService(provider: provider, apiKey: key, model: m)
+        }
         text = ""
         showHistory = false
         highlightedHistoryIndex = nil
@@ -2375,7 +2886,11 @@ final class NotchModel: ObservableObject {
         // turns are already here, so the new pair just extends the conversation.
         turns.append(Turn(role: "user", text: q))
         let answerID = UUID()
-        turns.append(Turn(id: answerID, role: "assistant", text: "", streaming: true))
+        var answerTurn = Turn(id: answerID, role: "assistant", text: "", streaming: true)
+        // Stamp the one-shot regenerate model (XII-135) so the answer shows which
+        // model produced it; rides into the saved snapshot below.
+        answerTurn.regenModel = overrideModel
+        turns.append(answerTurn)
 
         // The history sent to the model: every completed turn, plus the new
         // question — but NOT the empty assistant placeholder we just appended,
@@ -2394,7 +2909,11 @@ final class NotchModel: ObservableObject {
         // visible `turns` and the saved snapshot still hold the raw `q`). Only the
         // wire copy in `context` carries the clipboard. Skipped on follow-ups: a
         // mid-conversation clipboard change is almost never "about" the new turn.
-        var system = notchSystemPromptDated()
+        // Custom instructions ride the Ask path only (XII-137): a preset
+        // (translate/summarize — a `lightTask`) carries its own precise instruction
+        // and must not be polluted by "always answer in English"-style preferences.
+        let customForTurn = lightTask ? nil : customInstructions
+        var system = notchSystemPromptDated(customInstructions: customForTurn)
         // Clipboard injection — first turn only. We no longer gate on a lexical
         // "is this referential?" guess: whenever a clip is eligible we hand the model
         // the FULL copied text and let *it* decide whether the text is relevant to the
@@ -2435,7 +2954,7 @@ final class NotchModel: ObservableObject {
                 // client raises the wire `max_tokens` to match (XII-91) — at the default
                 // ceiling a long clip + question + 200-word answer was truncated. Single
                 // source for the marker string lives in `ReplyTokens`.
-                system = notchSystemPromptDated() + ReplyTokens.enrichedMarker
+                system = notchSystemPromptDated(customInstructions: customForTurn) + ReplyTokens.enrichedMarker
             } else {
                 // Optional-context framing: the model gets the full clip but is told to
                 // use it only if it's actually relevant to the question, otherwise to
@@ -2574,8 +3093,16 @@ final class NotchModel: ObservableObject {
                                                           options: options)
                 })
                 let registry = ToolRegistry(agentTools)
-                if !imageAttached,
-                   let agent = self.ai as? AgentCapableService,
+                // The service for THIS turn: a one-shot regenerate override (XII-135)
+                // wins, else the main service. An upgraded model still gets the tool
+                // harness below (search etc.), so the override rides both paths.
+                let askService: AIService = overrideService ?? self.ai
+                // A light-task turn (translate/summarize preset) takes the plain
+                // stream on the light service and skips the tool harness — a
+                // mechanical transform never needs web search (XII-132).
+                if !lightTask,
+                   !imageAttached,
+                   let agent = askService as? AgentCapableService,
                    APIKeyStore.selectedProvider.supportsTools,
                    !registry.isEmpty {
                     let harness = AgentHarness(service: agent, registry: registry)
@@ -2609,7 +3136,11 @@ final class NotchModel: ObservableObject {
                             }
                         })
                 } else {
-                    for try await chunk in self.ai.stream(system: system, messages: context) {
+                    // Light-task turns stream from the light service; a regenerate
+                    // override (XII-135) streams from its pinned service; everything
+                    // else uses the main model.
+                    let service = (lightTask ? lightAIService : nil) ?? askService
+                    for try await chunk in service.stream(system: system, messages: context) {
                         if Task.isCancelled { return }
                         appendChunk(chunk)
                     }
@@ -2761,24 +3292,61 @@ final class NotchModel: ObservableObject {
         resubmitLastQuestion()
     }
 
+    /// The newest SETTLED assistant answer's text, trimmed — the target of the
+    /// keyboard copy/save actions (XII-131). `nil` when there's no answer or the
+    /// last one is still streaming (nothing final to act on yet).
+    var lastAnswerText: String? {
+        guard let last = turns.last, last.role == "assistant", !last.streaming else { return nil }
+        let text = last.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
+    }
+
+    /// The id of the newest settled assistant answer — the argument the keyboard
+    /// "save to Notes" action passes to `saveAnswerToNotes` (XII-131). Same
+    /// settled/non-empty gate as `lastAnswerText`.
+    var lastAnswerID: UUID? {
+        guard let last = turns.last, last.role == "assistant", !last.streaming,
+              !last.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return last.id
+    }
+
     /// Re-run the newest settled answer's question for a fresh take — the answer
     /// footer's regenerate button. Same drop-and-resubmit dance as `retryLastAsk`,
     /// but for a turn that *succeeded*: only ever offered on the last assistant
     /// turn (regenerating mid-thread would orphan everything after it), and gated
     /// on the stream being settled so a tap can't tear down an answer mid-flight.
-    func regenerateLastAnswer() {
+    func regenerateLastAnswer(model: String? = nil) {
         guard let last = turns.last, last.role == "assistant", !last.streaming else { return }
-        resubmitLastQuestion()
+        resubmitLastQuestion(model: model)
     }
+
+    /// The models offered by the "regenerate with…" menu (XII-135): the current
+    /// provider's available models, with the one currently in effect flagged so the
+    /// menu can grey it out ("current"). Only meaningful when configured (a live
+    /// backend); empty for the stub so the menu simply doesn't appear.
+    var regenerateModelOptions: [(model: String, isCurrent: Bool)] {
+        guard !(ai is StubAIService) else { return [] }
+        let provider = APIKeyStore.selectedProvider
+        let current = APIKeyStore.effectiveModel(for: provider) ?? provider.defaultModel
+        return provider.availableModels.map { ($0, $0 == current) }
+    }
+
+    /// One-shot model override for the NEXT `submit()` (XII-135): a "regenerate
+    /// with X" pick sets this, `submit()` reads and clears it, builds a service
+    /// pinned to X for just that turn, and stamps the answer with X — without ever
+    /// touching the user's saved default. Nil for every normal submit.
+    private var regenOverrideModel: String?
 
     /// Shared tail of retry/regenerate: drop the newest Q/A pair, lift the question
     /// back into the input, and re-run `submit()` so a fresh answer streams into a
-    /// clean pair. No-op when there's no question to re-run.
-    private func resubmitLastQuestion() {
+    /// clean pair. No-op when there's no question to re-run. A non-nil `model` runs
+    /// this one regeneration on that model only (XII-135).
+    private func resubmitLastQuestion(model: String? = nil) {
         guard let lastUser = turns.last(where: { $0.role == "user" }) else { return }
         let question = lastUser.text
         if turns.last?.role == "assistant" { turns.removeLast() }
         if turns.last?.role == "user" { turns.removeLast() }
+        regenOverrideModel = model
         text = question
         submit()
     }
@@ -2862,17 +3430,33 @@ final class NotchModel: ObservableObject {
         noteCueTask?.cancel()
         lastSavedNote = nil
         noteSaving = true
+        // Claim the in-flight slot for THIS write (XII-117), so a later capture
+        // fired inside our AppleScript retry window can supersede us.
+        captureToken += 1
+        let token = captureToken
 
         NotesService.writeNote(noteBody) { [weak self] result in
             guard let self else { return }
-            self.noteSaving = false
+            // This write always persists its own Recent row (idempotent, its own
+            // data) so a success is never dropped. But the shared UI state is only
+            // ours to touch while we're still the current in-flight write — a newer
+            // capture that superseded us owns the gate and cue now.
+            let current = self.captureToken == token
+            if current { self.noteSaving = false }
             switch result {
             case .success(let noteID):
-                self.lastSavedToReminders = false
+                if current { self.lastSavedToReminders = false }
                 self.persistCapture(line, source: .note, link: noteID)
-                self.flashSavedCue(usedClip ? L("feedback.addedNotesClip") : L("feedback.addedNotes"))
+                if current {
+                    self.flashSavedCue(usedClip ? L("feedback.addedNotesClip") : L("feedback.addedNotes"))
+                }
             case .failure(let err):
-                self.reportCaptureFailure(line, message: err.errorDescription ?? L("feedback.notesFailed"))
+                // Only bounce the line back into the input / raise the error when
+                // we still own the shared state; a superseded failure must not
+                // clobber the newer write's success or restore an already-filed line.
+                if current {
+                    self.reportCaptureFailure(line, message: err.errorDescription ?? L("feedback.notesFailed"))
+                }
             }
         }
     }
@@ -2976,13 +3560,19 @@ final class NotchModel: ObservableObject {
         noteCueTask?.cancel()
         lastSavedNote = nil
         noteSaving = true
+        // Claim the in-flight slot for THIS write (XII-117) — see submitNote.
+        captureToken += 1
+        let token = captureToken
 
         RemindersService.createReminder(line, due: due) { [weak self] result in
             guard let self else { return }
-            self.noteSaving = false
+            // Shared UI state is only ours while we're still the current write;
+            // the Recent row always persists (its own data). See submitNote.
+            let current = self.captureToken == token
+            if current { self.noteSaving = false }
             switch result {
             case .success(let link):
-                self.lastSavedToReminders = true
+                if current { self.lastSavedToReminders = true }
                 self.persistCapture(line, source: .reminder, link: link)
                 // Echo the recurrence kind write() applied, resolving a bare
                 // "weekly" line's day from `due` exactly as write() does so the
@@ -3011,9 +3601,14 @@ final class NotchModel: ObservableObject {
                 case nil:
                     suffix = ""
                 }
-                self.flashSavedCue(L("feedback.addedReminders", suffix))
+                if current { self.flashSavedCue(L("feedback.addedReminders", suffix)) }
             case .failure(let err):
-                self.reportCaptureFailure(line, message: err.errorDescription ?? L("feedback.remindersFailed"))
+                // Only bounce the line back / raise the error when we still own the
+                // shared state — a superseded failure must not clobber the newer
+                // write's success or restore an already-filed line (XII-117).
+                if current {
+                    self.reportCaptureFailure(line, message: err.errorDescription ?? L("feedback.remindersFailed"))
+                }
             }
         }
     }
@@ -3136,6 +3731,14 @@ final class NotchModel: ObservableObject {
         turns = restored
         threadHistoryID = parked.threadHistoryID
         text = parked.text
+        // Hand the parked height measurement back BEFORE `open` flips and the
+        // body mounts, so NotchBody's first frame already renders the correct
+        // short-vs-clipped layout (see `lastMeasuredAnswerHeight`). A thread that
+        // grew while closed (a detached round finishing) may exceed the parked
+        // value — harmless: clipping is monotonic with height, so a parked
+        // "clipped" stays clipped, and the rare short→long race just re-measures
+        // one pass later, exactly like today.
+        lastMeasuredAnswerHeight = parked.measuredAnswerHeight
         mode = .result
     }
 
@@ -3321,9 +3924,13 @@ final class NotchModel: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else { return nil }
 
+        // Route the title to the provider's light model when available (XII-132) —
+        // it's a mechanical summary a cheap/fast tier does just as well. Falls back
+        // to the main service when routing is off or there's no light tier.
+        let service = lightService ?? ai
         do {
             var title = ""
-            for try await chunk in ai.stream(
+            for try await chunk in service.stream(
                 system: titleSystemPrompt,
                 messages: [ChatMessage(role: "user", content: prompt)]
             ) {
