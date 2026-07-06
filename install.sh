@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 #
-# Notch — one-line installer.
+# Notchi — one-line installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/cyrus-cai/notch/master/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/cyrus-cai/notchi/master/install.sh | bash
 #
-# Downloads the latest release, installs Notch.app into /Applications, and
+# Downloads the latest release, installs Notchi.app into /Applications, and
 # clears the macOS quarantine flag so it opens without a Gatekeeper prompt.
 #
 set -euo pipefail
 
-REPO="cyrus-cai/notch"
-APP_NAME="Notch.app"
+REPO="cyrus-cai/notchi"
+APP_NAME="Notchi.app"
 INSTALL_DIR="/Applications"
 
 # --- pretty output ---------------------------------------------------------
@@ -20,7 +20,7 @@ ok()    { printf '%s✓%s %s\n' "$green" "$reset" "$*"; }
 die()   { printf '%s✗%s %s\n' "$red" "$reset" "$*" >&2; exit 1; }
 
 # --- preflight -------------------------------------------------------------
-[ "$(uname -s)" = "Darwin" ] || die "Notch is a macOS app — this installer only runs on macOS."
+[ "$(uname -s)" = "Darwin" ] || die "Notchi is a macOS app — this installer only runs on macOS."
 command -v curl >/dev/null 2>&1 || die "curl is required but not found."
 
 # --- find the latest release asset -----------------------------------------
@@ -53,25 +53,26 @@ curl -fsSL "$asset_url" -o "$zip" || die "Download failed."
 info "Unpacking…"
 ditto -x -k "$zip" "$tmp/extracted" || die "Could not unzip the archive."
 
-# Accept either the current bundle name or the legacy "NotchGlass.app" so this
-# installer keeps working against older releases published before the rename.
-src="$(/usr/bin/find "$tmp/extracted" -maxdepth 2 \( -name "$APP_NAME" -o -name "NotchGlass.app" \) -type d | head -n1)"
+# Accept the current bundle name or the legacy "Notch.app" / "NotchGlass.app"
+# so this installer keeps working against releases published before the renames.
+src="$(/usr/bin/find "$tmp/extracted" -maxdepth 2 \( -name "$APP_NAME" -o -name "Notch.app" -o -name "NotchGlass.app" \) -type d | head -n1)"
 [ -n "$src" ] || die "Could not find ${APP_NAME} inside the archive."
 
 # --- install ---------------------------------------------------------------
 # `ditto "$src" "$dest"` copies the bundle's contents to $dest, so the installed
-# bundle takes the $dest name (Notch.app) regardless of the archive's name.
+# bundle takes the $dest name (Notchi.app) regardless of the archive's name.
 dest="$INSTALL_DIR/$APP_NAME"
 if [ -d "$dest" ]; then
   info "Replacing existing ${APP_NAME}…"
   rm -rf "$dest" 2>/dev/null || die "Could not remove old ${dest} (try: sudo rm -rf \"$dest\")."
 fi
-# Remove any leftover bundle from before the rename so we don't leave two copies.
-legacy="$INSTALL_DIR/NotchGlass.app"
-if [ -d "$legacy" ]; then
-  info "Removing legacy NotchGlass.app…"
-  rm -rf "$legacy" 2>/dev/null || true
-fi
+# Remove any leftover bundles from before the renames so we don't leave two copies.
+for legacy in "$INSTALL_DIR/Notch.app" "$INSTALL_DIR/NotchGlass.app"; do
+  if [ -d "$legacy" ]; then
+    info "Removing legacy $(basename "$legacy")…"
+    rm -rf "$legacy" 2>/dev/null || true
+  fi
+done
 
 info "Installing to ${INSTALL_DIR}…"
 ditto "$src" "$dest" || die "Could not copy into ${INSTALL_DIR} (you may need write permission)."
@@ -81,8 +82,8 @@ ditto "$src" "$dest" || die "Could not copy into ${INSTALL_DIR} (you may need wr
 # macOS refuse to open them. Strip it, the same way Homebrew cask does.
 xattr -dr com.apple.quarantine "$dest" 2>/dev/null || true
 
-ok "Notch installed to ${dest}"
+ok "Notchi installed to ${dest}"
 info "Launching…"
 open "$dest" || true
-printf '\n%sDone.%s Hover your notch to wake it. Quit with: %spkill -f Notch.app%s\n' \
+printf '\n%sDone.%s Hover your notch to wake it. Quit with: %spkill -f Notchi.app%s\n' \
   "$bold" "$reset" "$dim" "$reset"

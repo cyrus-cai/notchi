@@ -40,7 +40,7 @@ final class UpdaterService: ObservableObject {
 
     @Published private(set) var manualCheck: ManualCheck = .idle
 
-    static let repo = "cyrus-cai/notch"
+    static let repo = "cyrus-cai/notchi"
     static var releasesPage: URL { URL(string: "https://github.com/\(repo)/releases/latest")! }
 
     /// The running app's marketing version. CI stamps the release tag into
@@ -113,7 +113,11 @@ final class UpdaterService: ObservableObject {
         guard manualCheck != .checking, phase != .updating else { return }
         manualCheck = .checking
         Task {
+            // Keep the spinner up for a beat even on a cached/instant response,
+            // so the check reads as an action that happened rather than a flash.
+            async let minDwell: () = Self.sleep(nanoseconds: 650_000_000)
             let release = try? await Self.fetchLatest()
+            await minDwell
             // A real update superseding the check mid-flight wins.
             guard phase != .updating else { manualCheck = .idle; return }
             guard let release else {
@@ -139,6 +143,12 @@ final class UpdaterService: ObservableObject {
     /// short delay so the reassurance shows, then quietly recedes.
     func clearManualConfirmation() {
         if manualCheck == .upToDate { manualCheck = .idle }
+    }
+
+    /// Non-throwing sleep — swallows the cancellation error so callers can
+    /// `await` it as plain `Void` (used to floor the manual-check spinner time).
+    private static func sleep(nanoseconds: UInt64) async {
+        try? await Task.sleep(nanoseconds: nanoseconds)
     }
 
     /// Numeric dot-component comparison: "1.0.10" beats "1.0.9", "1.1" beats "1.0.2".
@@ -268,14 +278,20 @@ final class UpdaterService: ObservableObject {
     /// The app bundle inside the extracted archive — at the root (CI zips with
     /// `--keepParent`) or one folder down, same tolerance as `install.sh`.
     private nonisolated static func findApp(in dir: URL, fm: FileManager) -> URL? {
-        let name = "Notch.app"
-        let direct = dir.appendingPathComponent(name)
-        if fm.fileExists(atPath: direct.path) { return direct }
+        // Current name first, then pre-rename bundle names, so an update keeps
+        // working across the Notch → Notchi rename — same tolerance as `install.sh`.
+        let names = ["Notchi.app", "Notch.app", "NotchGlass.app"]
+        for name in names {
+            let direct = dir.appendingPathComponent(name)
+            if fm.fileExists(atPath: direct.path) { return direct }
+        }
         let kids = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
         for kid in kids {
-            if kid.lastPathComponent == name { return kid }
-            let nested = kid.appendingPathComponent(name)
-            if fm.fileExists(atPath: nested.path) { return nested }
+            if names.contains(kid.lastPathComponent) { return kid }
+            for name in names {
+                let nested = kid.appendingPathComponent(name)
+                if fm.fileExists(atPath: nested.path) { return nested }
+            }
         }
         return nil
     }

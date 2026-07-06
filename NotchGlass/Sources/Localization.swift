@@ -174,8 +174,8 @@ enum Strings {
         "model.default": "Default (%@)",
         "model.footer.openrouter.pre": "Free to use — Connect signs you in to ",
         "model.footer.openrouter.host": "openrouter.ai",
-        "model.footer.openrouter.post": " and stores a key for your own account on this Mac. Free models have a daily request cap; adding credits there raises it.",
-        "model.footer.byok.pre": "Stored on this Mac. Without a key the app uses an offline stub. Get a key at ",
+        "model.footer.openrouter.post": " and stores a key on this Mac. Free models have a daily cap; add credits there to raise it.",
+        "model.footer.byok.pre": "Stored on this Mac. Get a key at ",
         "model.footer.byok.post": ".",
         "model.footer.env": "A key from the %@ environment variable is in use; it overrides these fields.",
 
@@ -192,7 +192,7 @@ enum Strings {
         // Tools section (translation prefs)
         "translation.pref1": "Primary language",
         "translation.pref2": "Secondary language",
-        "translation.hint": "Translate renders copied text in the primary language — or in the secondary when it's already in the primary.",
+        "translation.hint": "Translates to the primary language, or the secondary when already primary.",
 
         // General section
         "general.showOn": "Show on",
@@ -202,14 +202,14 @@ enum Strings {
         "general.launchAtLogin": "Launch at login",
         "general.customInstructions": "Custom instructions",
         "general.customInstructions.placeholder": "e.g. Always answer in English",
-        "general.customInstructions.hint": "A short preference added to every Ask — like \"prefer code\" or \"use metric\". Refines the answer; search-first and honesty still apply.",
+        "general.customInstructions.hint": "A short preference added to every Ask — like \"prefer code\" or \"use metric\".",
         "general.quickTools": "Quick tools",
         "general.quickTools.count": "%lld enabled",
         "general.copySense": "Copy sensing",
-        "general.copySense.hint": "When copied text reads as a note or reminder, the notch offers it — press ⌘C again to file it.",
+        "general.copySense.hint": "Copy a note or reminder, press ⌘C again to file it.",
         "general.lightTasks": "Light model for quick tasks",
-        "general.lightTasks.hint": "Translate, summarize, and titles run on %@. Your main Ask always uses your chosen model.",
-        "general.lightTasks.hint.none": "Translate, summarize, and titles use the provider's lighter, faster model when it has one. Your main Ask always uses your chosen model.",
+        "general.lightTasks.hint": "Translate, summarize, and titles run on %@. Ask keeps your chosen model.",
+        "general.lightTasks.hint.none": "Translate, summarize, and titles use a lighter model where the provider has one. Ask keeps your chosen model.",
         "sense.note": "To Save",
         "sense.reminder": "To Save",
         "sense.saved": "Saved",
@@ -235,6 +235,8 @@ enum Strings {
         "about.releases": "Releases",
         "about.privacy": "Privacy",
         "about.whatsNew": "What's New",
+        "about.group.updates": "Updates",
+        "about.group.more": "More",
         "about.checkForUpdates": "Check for updates",
         "about.checking": "Checking…",
         "about.upToDate": "You're up to date",
@@ -268,7 +270,7 @@ enum Strings {
         "onboarding.skip": "Skip",
         // Step 1 — welcome
         "onboarding.welcome.headline": "You type. It sorts.",
-        "onboarding.welcome.sub": "Type a half-formed thought — Notch routes it three ways:",
+        "onboarding.welcome.sub": "Type a half-formed thought — Notchi routes it three ways:",
         "onboarding.welcome.ask": "A question goes to AI.",
         "onboarding.welcome.note": "Anything to keep goes to Apple Notes.",
         "onboarding.welcome.remind": "Anything with a time goes to Apple Reminders.",
@@ -294,7 +296,7 @@ enum Strings {
         "onboarding.paste.invalid": "That doesn't look like a valid key.",
         // Step 3 — try it
         "onboarding.try.title": "You're set",
-        "onboarding.try.lead": "Hover the notch any time to summon Notch. Here's your first question:",
+        "onboarding.try.lead": "Hover the notch any time to summon Notchi. Here's your first question:",
         "onboarding.try.example": "How long does caffeine take to kick in?",
         "onboarding.try.ask": "Ask it",
         "recur.daily": " · Daily",
@@ -359,6 +361,8 @@ enum Strings {
         "result.saveToNotes": "Save to Notes (⌘S)",
         "result.followUp": "Ask a follow-up…",
         "clip.imageCopied": "Copied image — ask about it",
+        "bubble.showMore": "Show more",
+        "bubble.showLess": "Show less",
         "ask.visionHint": "The selected model may not support images — try a vision-capable model.",
 
         // Feedback / errors
@@ -400,9 +404,9 @@ enum Strings {
 
         // OpenRouter browser-redirect pages (shown in the user's browser)
         "or.page.connected.title": "Connected",
-        "or.page.connected.line": "Notch is connected — you can close this tab.",
+        "or.page.connected.line": "Notchi is connected — you can close this tab.",
         "or.page.cancelled.title": "Cancelled",
-        "or.page.cancelled.line": "Sign-in was cancelled. You can close this tab and try again from Notch.",
+        "or.page.cancelled.line": "Sign-in was cancelled. You can close this tab and try again from Notchi.",
 
         // Agent tool activity (shown on the streaming turn while a tool runs)
         "agent.activity.search": "Searching the web…",
@@ -466,8 +470,8 @@ enum Strings {
         "model.default": "默认（%@）",
         "model.footer.openrouter.pre": "免费使用——点「连接」会带你登录 ",
         "model.footer.openrouter.host": "openrouter.ai",
-        "model.footer.openrouter.post": "，并把密钥存在这台 Mac 上、归你自己的账号所有。免费模型每天有请求上限；在那边充点额度就能提高。",
-        "model.footer.byok.pre": "只存在这台 Mac 上。没有密钥时，App 会用离线占位回复。去这里拿密钥：",
+        "model.footer.openrouter.post": "，密钥存在这台 Mac 上。免费模型每天有上限，充点额度就能提高。",
+        "model.footer.byok.pre": "只存在这台 Mac 上。去这里拿密钥：",
         "model.footer.byok.post": "。",
         "model.footer.env": "正在使用来自 %@ 环境变量的密钥，它会覆盖这里的设置。",
 
@@ -482,7 +486,7 @@ enum Strings {
 
         "translation.pref1": "首选语言一",
         "translation.pref2": "首选语言二",
-        "translation.hint": "翻译时译成首选语言一；原文已是语言一时，译成语言二。",
+        "translation.hint": "译成语言一；原文已是语言一时译成语言二。",
 
         "general.showOn": "显示于",
         "general.placement.footer": "外接显示器会得到一个菜单栏高度的小岛。",
@@ -491,14 +495,14 @@ enum Strings {
         "general.launchAtLogin": "开机时启动",
         "general.customInstructions": "自定义指令",
         "general.customInstructions.placeholder": "例如：始终用简体中文回答",
-        "general.customInstructions.hint": "一句会拼进每次提问的个人偏好，比如「优先给代码」「用公制单位」。只是微调，搜索优先与诚实原则不变。",
+        "general.customInstructions.hint": "拼进每次提问的一句偏好，比如「优先给代码」「用公制单位」。",
         "general.quickTools": "快捷工具",
         "general.quickTools.count": "已选 %lld 个",
         "general.copySense": "复制感知",
-        "general.copySense.hint": "复制的内容像笔记或提醒时，刘海会轻轻示意——再按一次 ⌘C 直接存好。",
+        "general.copySense.hint": "复制笔记或提醒后，再按一次 ⌘C 直接存好。",
         "general.lightTasks": "快速任务用轻量模型",
-        "general.lightTasks.hint": "翻译、摘要、生成标题走 %@，主提问始终用你选的模型。",
-        "general.lightTasks.hint.none": "翻译、摘要、生成标题在该 provider 有更轻更快的模型时走它，主提问始终用你选的模型。",
+        "general.lightTasks.hint": "翻译、摘要、生成标题走 %@，提问仍用你选的模型。",
+        "general.lightTasks.hint.none": "翻译、摘要、生成标题在有更轻的模型时走它，提问仍用你选的模型。",
         "sense.note": "To Save",
         "sense.reminder": "To Save",
         "sense.saved": "已存入",
@@ -523,6 +527,8 @@ enum Strings {
         "about.releases": "发布页",
         "about.privacy": "隐私政策",
         "about.whatsNew": "新功能",
+        "about.group.updates": "更新",
+        "about.group.more": "更多",
         "about.checkForUpdates": "检查更新",
         "about.checking": "检查中…",
         "about.upToDate": "已是最新版本",
@@ -552,7 +558,7 @@ enum Strings {
         "onboarding.skip": "跳过",
         // Step 1 — welcome
         "onboarding.welcome.headline": "你只管打字，它来分拣。",
-        "onboarding.welcome.sub": "随手打出脑子里的想法，Notch 替你分到三处：",
+        "onboarding.welcome.sub": "随手打出脑子里的想法，Notchi 替你分到三处：",
         "onboarding.welcome.ask": "问题交给 AI。",
         "onboarding.welcome.note": "想记下的，进备忘录。",
         "onboarding.welcome.remind": "带时间的，进提醒事项。",
@@ -578,7 +584,7 @@ enum Strings {
         "onboarding.paste.invalid": "这看起来不是一个有效的密钥。",
         // Step 3 — try it
         "onboarding.try.title": "搞定",
-        "onboarding.try.lead": "随时悬停刘海就能唤出 Notch。这是你的第一个问题：",
+        "onboarding.try.lead": "随时悬停刘海就能唤出 Notchi。这是你的第一个问题：",
         "onboarding.try.example": "咖啡因要多久才起效？",
         "onboarding.try.ask": "问它",
         "recur.daily": " · 每天",
@@ -638,6 +644,8 @@ enum Strings {
         "result.saveToNotes": "存入备忘录（⌘S）",
         "result.followUp": "继续追问…",
         "clip.imageCopied": "已复制图片——可直接提问",
+        "bubble.showMore": "展开",
+        "bubble.showLess": "收起",
         "ask.visionHint": "当前模型可能不支持图片输入——请换用支持视觉的模型。",
 
         "feedback.addedNotesClip": "已存入备忘录 · 含剪贴板内容",
@@ -673,9 +681,9 @@ enum Strings {
         "or.error.unreachable": "无法连接 OpenRouter——请检查网络后重试",
 
         "or.page.connected.title": "已连接",
-        "or.page.connected.line": "Notch 已连接——可以关掉这个标签页了。",
+        "or.page.connected.line": "Notchi 已连接——可以关掉这个标签页了。",
         "or.page.cancelled.title": "已取消",
-        "or.page.cancelled.line": "登录已取消。关掉这个标签页，回 Notch 再试一次就好。",
+        "or.page.cancelled.line": "登录已取消。关掉这个标签页，回 Notchi 再试一次就好。",
 
         // 智能体工具活动（工具运行时显示在流式回答上方）
         "agent.activity.search": "正在联网搜索…",
@@ -737,8 +745,8 @@ enum Strings {
         "model.default": "預設（%@）",
         "model.footer.openrouter.pre": "免費使用——點「連接」會帶你登入 ",
         "model.footer.openrouter.host": "openrouter.ai",
-        "model.footer.openrouter.post": "，並把金鑰存在這台 Mac 上、歸你自己的帳號所有。免費模型每天有請求上限；在那邊儲值一點額度就能提高。",
-        "model.footer.byok.pre": "只存在這台 Mac 上。沒有金鑰時，App 會用離線佔位回覆。去這裡拿金鑰：",
+        "model.footer.openrouter.post": "，金鑰存在這台 Mac 上。免費模型每天有上限，儲值一點額度就能提高。",
+        "model.footer.byok.pre": "只存在這台 Mac 上。去這裡拿金鑰：",
         "model.footer.byok.post": "。",
         "model.footer.env": "正在使用來自 %@ 環境變數的金鑰，它會覆蓋這裡的設定。",
 
@@ -753,7 +761,7 @@ enum Strings {
 
         "translation.pref1": "首選語言一",
         "translation.pref2": "首選語言二",
-        "translation.hint": "翻譯時譯成首選語言一；原文已是語言一時，譯成語言二。",
+        "translation.hint": "譯成語言一；原文已是語言一時譯成語言二。",
 
         "general.showOn": "顯示於",
         "general.placement.footer": "外接螢幕會得到一個選單列高度的小島。",
@@ -762,14 +770,14 @@ enum Strings {
         "general.launchAtLogin": "開機時啟動",
         "general.customInstructions": "自訂指令",
         "general.customInstructions.placeholder": "例如：始終用繁體中文回答",
-        "general.customInstructions.hint": "一句會拼進每次提問的個人偏好，比如「優先給程式碼」「用公制單位」。只是微調，搜尋優先與誠實原則不變。",
+        "general.customInstructions.hint": "拼進每次提問的一句偏好，比如「優先給程式碼」「用公制單位」。",
         "general.quickTools": "快捷工具",
         "general.quickTools.count": "已選 %lld 個",
         "general.copySense": "複製感知",
-        "general.copySense.hint": "複製的內容像筆記或提醒時，瀏海會輕輕示意——再按一次 ⌘C 直接存好。",
+        "general.copySense.hint": "複製筆記或提醒後，再按一次 ⌘C 直接存好。",
         "general.lightTasks": "快速任務用輕量模型",
-        "general.lightTasks.hint": "翻譯、摘要、產生標題走 %@，主提問始終用你選的模型。",
-        "general.lightTasks.hint.none": "翻譯、摘要、產生標題在該 provider 有更輕更快的模型時走它，主提問始終用你選的模型。",
+        "general.lightTasks.hint": "翻譯、摘要、產生標題走 %@，提問仍用你選的模型。",
+        "general.lightTasks.hint.none": "翻譯、摘要、產生標題在有更輕的模型時走它，提問仍用你選的模型。",
         "sense.note": "To Save",
         "sense.reminder": "To Save",
         "sense.saved": "已存入",
@@ -794,6 +802,8 @@ enum Strings {
         "about.releases": "發佈頁",
         "about.privacy": "隱私政策",
         "about.whatsNew": "新功能",
+        "about.group.updates": "更新",
+        "about.group.more": "更多",
         "about.checkForUpdates": "檢查更新",
         "about.checking": "檢查中…",
         "about.upToDate": "已是最新版本",
@@ -823,7 +833,7 @@ enum Strings {
         "onboarding.skip": "跳過",
         // Step 1 — welcome
         "onboarding.welcome.headline": "你只管打字，它來分揀。",
-        "onboarding.welcome.sub": "隨手打出腦中的想法，Notch 替你分到三處：",
+        "onboarding.welcome.sub": "隨手打出腦中的想法，Notchi 替你分到三處：",
         "onboarding.welcome.ask": "問題交給 AI。",
         "onboarding.welcome.note": "想記下的，進備忘錄。",
         "onboarding.welcome.remind": "帶時間的，進提醒事項。",
@@ -849,7 +859,7 @@ enum Strings {
         "onboarding.paste.invalid": "這看起來不是一個有效的密鑰。",
         // Step 3 — try it
         "onboarding.try.title": "搞定",
-        "onboarding.try.lead": "隨時懸停瀏海就能喚出 Notch。這是你的第一個問題：",
+        "onboarding.try.lead": "隨時懸停瀏海就能喚出 Notchi。這是你的第一個問題：",
         "onboarding.try.example": "咖啡因要多久才起效？",
         "onboarding.try.ask": "問它",
         "recur.daily": " · 每天",
@@ -909,6 +919,8 @@ enum Strings {
         "result.saveToNotes": "存入備忘錄（⌘S）",
         "result.followUp": "繼續追問…",
         "clip.imageCopied": "已複製圖片——可直接提問",
+        "bubble.showMore": "展開",
+        "bubble.showLess": "收起",
         "ask.visionHint": "目前模型可能不支援圖片輸入——請換用支援視覺的模型。",
 
         "feedback.addedNotesClip": "已存入備忘錄 · 含剪貼簿內容",
@@ -944,9 +956,9 @@ enum Strings {
         "or.error.unreachable": "無法連接 OpenRouter——請檢查網路後重試",
 
         "or.page.connected.title": "已連接",
-        "or.page.connected.line": "Notch 已連接——可以關掉這個分頁了。",
+        "or.page.connected.line": "Notchi 已連接——可以關掉這個分頁了。",
         "or.page.cancelled.title": "已取消",
-        "or.page.cancelled.line": "登入已取消。關掉這個分頁，回 Notch 再試一次就好。",
+        "or.page.cancelled.line": "登入已取消。關掉這個分頁，回 Notchi 再試一次就好。",
 
         // 智慧代理工具活動（工具執行時顯示在串流回答上方）
         "agent.activity.search": "正在聯網搜尋…",

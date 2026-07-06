@@ -477,7 +477,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .openrouter:
             return ["HTTP-Referer": "https://github.com/\(UpdaterService.repo)",
-                    "X-Title": "Notch"]
+                    "X-Title": "Notchi"]
         default:
             return [:]
         }

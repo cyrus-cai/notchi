@@ -2427,56 +2427,97 @@ struct RecentEntryStyle: ButtonStyle {
 private struct UserQuestionBubble: View {
     let text: String
 
-    /// Measured height of the bubble, so the corner radius can follow it. Seeded to
-    /// the single-line height so the first frame (before the measurement lands) is
-    /// already a proper pill, not a hard-cornered box that then rounds in.
-    @State private var height: CGFloat = 33
+    /// Whether the user tapped to expand a truncated question. Starts collapsed so a
+    /// pasted wall of text never dominates the thread on first render.
+    @State private var expanded = false
 
-    /// Above this height the bubble is multi-line (a single line is ~33pt; a second
-    /// line adds ~17pt, so ~42 sits safely between one and two lines).
-    private let singleLineCeiling: CGFloat = 42
+    /// Collapsed cap: a long pasted question folds to this many lines, keeping the
+    /// bubble a tidy card instead of a scroll-eating slab. Tapping expands to full.
+    private let collapsedLineLimit = 6
 
-    /// Corner radius for the multi-line state — a modest rounded card instead of the
-    /// half-height pill a tall box would otherwise round to.
+    /// Ceiling for the EXPANDED bubble. A very long question doesn't grow without
+    /// bound — past this the text scrolls INSIDE the bubble. This is the fix for the
+    /// freeze: an unbounded expanded height fed back into the result view's
+    /// `AnswerHeightKey` measurement (which flips the clip/scroll layout at 300pt),
+    /// and the two height feedbacks drove an endless relayout. Capping the bubble
+    /// keeps its contribution bounded, so that loop can't form.
+    private let expandedMaxHeight: CGFloat = 240
+
+    /// Corner radius — a fixed modest card once the bubble is clearly multi-line, a
+    /// pill when it's a short single/double line. Derived purely from the text (no
+    /// geometry read), so there's no measurement feeding back into layout.
     private let multiLineRadius: CGFloat = 16
+    private let pillRadius: CGFloat = 16.5   // ~half a single-line bubble height
 
-    /// Single line → a true pill (radius = half the height, exactly the old
-    /// `Capsule`). Multi-line → pull the radius back to a fixed, smaller value so a
-    /// tall quote reads as a tidy card rather than a bloated, over-round blob.
-    private var radius: CGFloat {
-        height <= singleLineCeiling ? height / 2 : multiLineRadius
+    /// Cheap, allocation-light estimate of whether the collapsed text is truncated —
+    /// purely from the string, NO GeometryReader (a height probe here is exactly what
+    /// caused the relayout freeze). Counts hard newlines, plus an approximate wrap
+    /// count for long unbroken lines (~48 chars/line at this width/font). If that
+    /// exceeds the collapsed cap, the question is being clipped, so show the toggle.
+    private var isTruncated: Bool {
+        var lines = 0
+        for segment in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            lines += 1 + segment.count / 48
+            if lines > collapsedLineLimit { return true }
+        }
+        return false
     }
 
-    var body: some View {
+    /// Pill only for a genuinely short question; anything that could wrap past a line
+    /// or two reads better as a rounded card.
+    private var radius: CGFloat { isTruncated || text.count > 44 ? multiLineRadius : pillRadius }
+
+    private var questionText: some View {
         Text(text)
             .font(.sf(14.5, weight: .medium))
             .tracking(-0.1)
             .foregroundStyle(Tokens.text2)
+            // Collapsed to a fixed cap until the user expands; nil = unlimited.
+            .lineLimit(expanded ? nil : collapsedLineLimit)
             .fixedSize(horizontal: false, vertical: true)
             // The question itself is selectable too — drag to highlight and
             // copy it, same as the answer below. (It's a settled user turn,
             // never streaming, so there's no tail-follow scroll to fight.)
             .textSelection(.enabled)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .background(
-                RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .fill(Color.white.opacity(0.06))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: radius, style: .continuous)
-                            .strokeBorder(Tokens.hairline, lineWidth: 1)
-                    )
-                    // Read the rendered bubble height and feed it back so `radius`
-                    // tracks single- vs multi-line without a fixed guess.
-                    .background(
-                        GeometryReader { geo in
-                            Color.clear
-                                .onAppear { height = geo.size.height }
-                                .onChange(of: geo.size.height) { _, h in height = h }
-                        }
-                    )
-            )
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .animation(.easeOut(duration: 0.15), value: radius)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            // Expanded: the full text can be tall, so it scrolls WITHIN a capped
+            // frame instead of pushing the bubble (and the whole result view) past
+            // any height. Collapsed: the plain clamped text, no scroll container.
+            if expanded {
+                ScrollView(.vertical, showsIndicators: false) {
+                    questionText
+                }
+                .frame(maxHeight: expandedMaxHeight)
+            } else {
+                questionText
+            }
+
+            // Only shown when the collapsed text is actually cut off. A quiet grey
+            // toggle in the same `text4` as the timestamps — never shouts.
+            if isTruncated {
+                Button {
+                    withAnimation(.easeOut(duration: 0.18)) { expanded.toggle() }
+                } label: {
+                    Text(expanded ? L("bubble.showLess") : L("bubble.showMore"))
+                        .font(.sf(11, weight: .medium))
+                        .tracking(0.2)
+                        .foregroundStyle(Tokens.text4)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: radius, style: .continuous)
+                .fill(Color.white.opacity(0.06))
+                .overlay(
+                    RoundedRectangle(cornerRadius: radius, style: .continuous)
+                        .strokeBorder(Tokens.hairline, lineWidth: 1)
+                )
+        )
     }
 }

@@ -64,6 +64,23 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.1.11",
+            date: "2026-07-07",
+            features: [
+                "Notch is now Notchi — new name, same app.",
+            ],
+            improvements: [
+                "Long questions collapse to a short preview — Show more expands, and very long text scrolls inside the bubble.",
+                "Custom instructions now live in Settings → AI.",
+                "The copy-sensing setting shows a small diagram of the ⌘C gesture.",
+                "About panel regrouped: version and update check beside the name, links under Updates and More.",
+                "Tighter hint copy across Settings.",
+            ],
+            fixes: [
+                "Pasting a very long question no longer freezes the panel.",
+            ]
+        ),
+        Entry(
             version: "0.1.10",
             date: "2026-07-05",
             features: [

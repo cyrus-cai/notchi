@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src=".github/icon.png" width="96" alt="Notch" />
+<img src=".github/icon.png" width="96" alt="Notchi" />
 
-# Notch
+# Notchi
 
 Ask AI, take a note, or set a reminder right from your Mac's notch —
 without opening an app. **5× faster**, and **design-first**.
@@ -14,7 +14,7 @@ without opening an app. **5× faster**, and **design-first**.
 
 ## You type. It sorts.
 
-Type the thought the way it arrived — half-formed is fine. Notch reads it and
+Type the thought the way it arrived — half-formed is fine. Notchi reads it and
 routes it:
 
 - **Ask** — a question goes to AI; the answer appears in the panel, without
@@ -25,7 +25,7 @@ routes it:
 
 ## Native, not bolted on
 
-Notch is drawn with the same Liquid Glass material as the rest of macOS — same
+Notchi is drawn with the same Liquid Glass material as the rest of macOS — same
 blur, same edge light, same spring — so it reads as part of the system, not
 stuck on top of it.
 
@@ -39,15 +39,15 @@ OpenAI · Anthropic · Google Gemini · DeepSeek · Qwen · Kimi · GLM · MiniM
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/cyrus-cai/notch/master/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/cyrus-cai/notchi/master/install.sh | bash
 ```
 
 Or hand it to your coding agent — paste this into **Claude Code / Codex**:
 
-> Please install Notch for macOS for me. Run this in my terminal:
-> `curl -fsSL https://raw.githubusercontent.com/cyrus-cai/notch/master/install.sh | bash`
-> It is a free, open-source menu-bar app (https://github.com/cyrus-cai/notch).
-> After it finishes, confirm Notch is installed in /Applications and launch it.
+> Please install Notchi for macOS for me. Run this in my terminal:
+> `curl -fsSL https://raw.githubusercontent.com/cyrus-cai/notchi/master/install.sh | bash`
+> It is a free, open-source menu-bar app (https://github.com/cyrus-cai/notchi).
+> After it finishes, confirm Notchi is installed in /Applications and launch it.
 
 macOS only · free and open source · no account · no sign-up · no telemetry
 

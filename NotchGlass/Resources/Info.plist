@@ -13,9 +13,9 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>Notch</string>
+	<string>Notchi</string>
 	<key>CFBundleDisplayName</key>
-	<string>Notch</string>
+	<string>Notchi</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>ATSApplicationFontsPath</key>
@@ -29,12 +29,12 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>Notch saves the lines you type in record mode into the Notes app.</string>
+	<string>Notchi saves the lines you type in record mode into the Notes app.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 Lofi-Lab</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSRemindersFullAccessUsageDescription</key>
-	<string>Notch files time-bound lines you type as reminders in the Reminders app.</string>
+	<string>Notchi files time-bound lines you type as reminders in the Reminders app.</string>
 </dict>
 </plist>

@@ -224,6 +224,7 @@ struct InlineSettingsView: View {
                         }
                         modelRow
                         lightTasksRow
+                        customInstructionsRow
                         footer
                     case .search:
                         searchBackendRow
@@ -251,7 +252,6 @@ struct InlineSettingsView: View {
                         shortcutRow
                         placementRow
                         appLanguageRow
-                        customInstructionsRow
                         dockIconRow
                         launchAtLoginRow
                     case .about:
@@ -1426,9 +1426,12 @@ struct InlineSettingsView: View {
 
     /// Copy sensing: whether the *closed* notch watches ⌘C and offers to file a
     /// copied note/reminder (press ⌘C again to confirm). The in-panel capture
-    /// chip is independent of this switch.
+    /// chip is independent of this switch. A little diagram — a copied card
+    /// sliding up into the notch on a ⌘C — carries the idea the way the
+    /// placement cards carry "which screen"; it brightens with the toggle so the
+    /// on-state reads at a glance.
     private var copySenseRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 10) {
             settingRow(label: L("general.copySense")) {
                 Toggle("", isOn: Binding(
                     get: { model.copySenseEnabled },
@@ -1439,10 +1442,14 @@ struct InlineSettingsView: View {
                 .controlSize(.mini)
                 .tint(Tokens.text2)
             }
-            Text(L("general.copySense.hint"))
-                .font(.sf(11))
-                .foregroundStyle(Tokens.text4)
-                .fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .center, spacing: 12) {
+                CopySenseDiagram(active: model.copySenseEnabled)
+                Text(L("general.copySense.hint"))
+                    .font(.sf(11))
+                    .foregroundStyle(Tokens.text4)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
     }
 
@@ -1497,8 +1504,11 @@ struct InlineSettingsView: View {
     /// the panel reads as more than a build number, then a quiet links row hands
     /// off to the source and release pages.
     private var aboutSection: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .top, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
+            // 1 — Identity: who the app is, with the version and its update
+            // action right beside the name so "what you're running / is it
+            // current" reads as one thought instead of three scattered lines.
+            HStack(alignment: .center, spacing: 12) {
                 // App icon, if the bundle carries one — falls back gracefully.
                 // The icon ships with the standard macOS ~10% transparent margin
                 // (so the Dock renders it correctly), which would otherwise make it
@@ -1513,21 +1523,29 @@ struct InlineSettingsView: View {
                         .clipped()
                 }
 
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Notch")
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Notchi")
                         .font(.brand(18))
                         .foregroundStyle(Tokens.text1)
 
-                    Text(UpdaterService.currentVersion)
-                        .font(.sf(12, weight: .medium))
-                        .foregroundStyle(Tokens.text4)
+                    HStack(spacing: 8) {
+                        Text(UpdaterService.currentVersion)
+                            .font(.sf(12, weight: .medium))
+                            .foregroundStyle(Tokens.text4)
+                        // Hairline between the version and its update action, so
+                        // the two sit as one row without running together.
+                        Rectangle()
+                            .fill(.white.opacity(0.12))
+                            .frame(width: 0.5, height: 11)
+                        updateArea
+                    }
                 }
 
                 Spacer(minLength: 0)
             }
 
-            updateArea
-
+            // 2 — Links, grouped inside a card so they read as one "more about
+            // Notch" block rather than four bare buttons loose on the panel.
             aboutLinks
         }
     }
@@ -1609,7 +1627,10 @@ struct InlineSettingsView: View {
             .buttonStyle(.plain)
         case .checking:
             HStack(spacing: 7) {
-                ProgressView().controlSize(.small)
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .controlSize(.small)
+                    .tint(Tokens.text3)
                 Text(L("about.checking"))
                     .font(.sf(11.5, weight: .medium))
                     .foregroundStyle(Tokens.text3)
@@ -1630,31 +1651,62 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// Quiet text-button links, grouped two-to-a-row by what they're about:
-    /// the top row is this app's own version trail (What's New / Releases), the
-    /// bottom row points outward (source on GitHub, the privacy policy). Same
-    /// understated language as the Model footer's signup host. "What's New"
-    /// lives here as the fixed, always-available way into the notes, independent
-    /// of the once-per-version idle cue.
+    /// Quiet text-button links inside one card, split into two labelled groups
+    /// so they read as structure rather than four bare buttons: the release
+    /// trail (What's New / Releases) up top, the outward links (source on
+    /// GitHub, the privacy policy) below a hairline. Same understated language
+    /// as the Model footer's signup host. "What's New" lives here as the fixed,
+    /// always-available way into the notes, independent of the once-per-version
+    /// idle cue.
     private var aboutLinks: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(spacing: 14) {
-                aboutLink(L("about.whatsNew")) {
+        VStack(alignment: .leading, spacing: 0) {
+            aboutLinkGroup(L("about.group.updates"), [
+                (L("about.whatsNew"), {
                     withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                         model.openWhatsNew(on: nil)
                     }
-                }
-                aboutLink(L("about.releases")) {
+                }),
+                (L("about.releases"), {
                     NSWorkspace.shared.open(UpdaterService.releasesPage)
-                }
-            }
+                }),
+            ])
 
-            HStack(spacing: 14) {
-                aboutLink(L("about.github")) {
+            Divider()
+                .overlay(.white.opacity(0.08))
+                .padding(.vertical, 10)
+
+            aboutLinkGroup(L("about.group.more"), [
+                (L("about.github"), {
                     NSWorkspace.shared.open(URL(string: "https://github.com/\(UpdaterService.repo)")!)
-                }
-                aboutLink(L("about.privacy")) {
+                }),
+                (L("about.privacy"), {
                     NSWorkspace.shared.open(URL(string: "https://www.notch.website/privacy")!)
+                }),
+            ])
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 13)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(.white.opacity(0.04))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(.white.opacity(0.08), lineWidth: 0.5)
+        )
+    }
+
+    /// One captioned group inside the About links card: a faint section label
+    /// over its row of links, so each pair announces what it's for.
+    private func aboutLinkGroup(_ caption: String, _ links: [(String, () -> Void)]) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(caption)
+                .font(.sf(10.5))
+                .foregroundStyle(Tokens.text4)
+            HStack(spacing: 16) {
+                ForEach(Array(links.enumerated()), id: \.offset) { _, link in
+                    aboutLink(link.0, action: link.1)
                 }
             }
         }
@@ -1663,7 +1715,7 @@ struct InlineSettingsView: View {
     private func aboutLink(_ title: String, action: @escaping () -> Void) -> some View {
         Button(title, action: action)
             .buttonStyle(.plain)
-            .font(.sf(11.5, weight: .medium))
+            .font(.sf(12, weight: .medium))
             .foregroundStyle(Tokens.text2)
     }
 
@@ -1980,6 +2032,59 @@ private struct MiniDisplay: View {
                     .frame(width: 12, height: 2)
             }
         }
+    }
+}
+
+/// The copy-sensing diagram: a small notch bar with a copied card tucked just
+/// under it and a ⌘C tag alongside — the "press ⌘C and the notch offers it"
+/// gesture frozen into one picture, in the same monochrome line-art idiom as
+/// `MiniDisplay`. Brightens as a whole when the feature is on, dims when off, so
+/// it reads as "what's happening" rather than a second control.
+private struct CopySenseDiagram: View {
+    /// Whether copy sensing is enabled — drives the same bright/dim split the
+    /// placement diagram uses for selected/unselected.
+    let active: Bool
+
+    var body: some View {
+        let line = Color.white.opacity(active ? 0.55 : 0.20)
+        let fill = Color.white.opacity(active ? 0.14 : 0.05)
+        let ink  = Color.white.opacity(active ? 0.95 : 0.35)
+
+        VStack(spacing: 5) {
+            ZStack(alignment: .top) {
+                // Copied card, peeking up into the notch from below.
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(fill)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 3)
+                            .strokeBorder(line, lineWidth: 1)
+                    )
+                    .overlay(alignment: .top) {
+                        // Two text lines on the card — a note, not an image.
+                        VStack(spacing: 2.5) {
+                            Capsule().fill(ink).frame(width: 18, height: 1.5)
+                            Capsule().fill(ink.opacity(0.6)).frame(width: 12, height: 1.5)
+                        }
+                        .padding(.top, 9)
+                    }
+                    .frame(width: 34, height: 22)
+                    .padding(.top, 5)
+
+                // The notch bar itself, a black island biting into the top edge.
+                Capsule()
+                    .fill(.black.opacity(active ? 0.9 : 0.5))
+                    .overlay(Capsule().strokeBorder(line, lineWidth: 1))
+                    .frame(width: 22, height: 7)
+            }
+            .frame(width: 40, height: 30)
+
+            // ⌘C caption, the keystroke that files it.
+            Text("⌘C")
+                .font(.sf(9, weight: .semibold))
+                .foregroundStyle(ink)
+        }
+        .frame(width: 44)
+        .animation(.easeOut(duration: 0.16), value: active)
     }
 }
 

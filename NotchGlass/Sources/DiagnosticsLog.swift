@@ -42,7 +42,7 @@ final class DiagnosticsLog: @unchecked Sendable {
         guard let dir = FileManager.default.urls(for: .applicationSupportDirectory,
                                                  in: .userDomainMask).first
         else { return nil }
-        let appDir = dir.appendingPathComponent("Notch", isDirectory: true)
+        let appDir = dir.appendingPathComponent("Notchi", isDirectory: true)
         try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
         return appDir.appendingPathComponent("diagnostics.json")
     }()

@@ -279,7 +279,7 @@ final class OpenRouterAuth: ObservableObject {
 
     private static func page(title: String, line: String) -> String {
         """
-        <!doctype html><html><head><meta charset="utf-8"><title>Notch — \(title)</title></head>
+        <!doctype html><html><head><meta charset="utf-8"><title>Notchi — \(title)</title></head>
         <body style="margin:0;display:flex;align-items:center;justify-content:center;height:100vh;\
         background:#101014;color:rgba(255,255,255,.85);\
         font:15px/1.5 -apple-system,BlinkMacSystemFont,sans-serif">

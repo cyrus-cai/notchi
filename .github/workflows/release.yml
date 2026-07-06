@@ -63,18 +63,18 @@ jobs:
 
       - name: Package
         run: |
-          APP="build/Build/Products/Release/Notch.app"
+          APP="build/Build/Products/Release/Notchi.app"
           test -d "$APP" || { echo "::error::App not found at $APP"; exit 1; }
           # Ad-hoc sign so the app has a stable signature (still not notarized).
           codesign --force --deep --sign - "$APP" || true
           # Zip preserving the bundle (ditto, not zip, for correct macOS metadata).
-          ditto -c -k --keepParent "$APP" "Notch-${GITHUB_REF_NAME}.zip"
-          ls -la Notch-*.zip
+          ditto -c -k --keepParent "$APP" "Notchi-${GITHUB_REF_NAME}.zip"
+          ls -la Notchi-*.zip
 
       - name: Publish Release
         uses: softprops/action-gh-release@v2
         with:
-          files: Notch-*.zip
+          files: Notchi-*.zip
           generate_release_notes: true
           body: |
             ### Install
@@ -83,7 +83,7 @@ jobs:
             curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/master/install.sh | bash
             ```
 
-            Or download the `.zip` below, unzip, and drag **Notch.app** into Applications.
+            Or download the `.zip` below, unzip, and drag **Notchi.app** into Applications.
 
             > The app is not notarized. The installer clears the quarantine flag for you;
-            > if you install manually, run `xattr -dr com.apple.quarantine /Applications/Notch.app`.
+            > if you install manually, run `xattr -dr com.apple.quarantine /Applications/Notchi.app`.
