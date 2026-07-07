@@ -434,3 +434,128 @@ extension View {
         background(ScrollOffsetObserver(onChange: action))
     }
 }
+
+// MARK: - Tooltip
+
+/// A hover tooltip drawn in the notch's own visual language instead of AppKit's
+/// stock yellow `.help()` bubble — the flat OS tooltip that hasn't changed in
+/// decades and reads as a foreign chip on the dark glass. This one is a small
+/// dark capsule (a whisper of glass, a hairline rim, a soft drop shadow) with the
+/// label in the same SF/text-token scale as the rest of the island, so a hover
+/// hint over the answer's action icons feels like part of the surface.
+///
+/// Behaviour matches a real tooltip: it waits a beat (`delay`) after the cursor
+/// settles before fading in — so brushing past an icon doesn't flash it — and
+/// dismisses the instant the cursor leaves. It floats ABOVE the anchor (the
+/// action icons live at the panel's bottom edge, so up is where the room is),
+/// centred on it, as a zero-footprint overlay that never disturbs layout and
+/// never intercepts the click underneath.
+private struct NotchTooltip: ViewModifier {
+    let text: String
+    /// Which side of the control the tip floats on. Footer icons live at the
+    /// panel's bottom, so `.top` (up, into the answer) is the default; controls
+    /// pinned near the top edge pass `.bottom` so the tip drops down instead of
+    /// running off the panel.
+    var edge: VerticalEdge = .top
+    /// Seconds the cursor must rest on the control before the tip appears.
+    var delay: TimeInterval = 0.45
+
+    @State private var hovering = false
+    @State private var shown = false
+    /// Measured height of the capsule, so the offset clears the control exactly.
+    @State private var tipHeight: CGFloat = 24
+    /// Cancels a pending show if the cursor leaves before `delay` elapses.
+    @State private var showTask: Task<Void, Never>?
+
+    func body(content: Content) -> some View {
+        content
+            .onHover { inside in
+                hovering = inside
+                showTask?.cancel()
+                if inside {
+                    let d = delay
+                    showTask = Task {
+                        try? await Task.sleep(for: .seconds(d))
+                        if !Task.isCancelled, hovering {
+                            withAnimation(.easeOut(duration: 0.14)) { shown = true }
+                        }
+                    }
+                } else {
+                    withAnimation(.easeOut(duration: 0.10)) { shown = false }
+                }
+            }
+            // Anchor the tip's near edge to the control's matching edge, then push
+            // it fully CLEAR of the control by its own measured height plus a gap —
+            // so the capsule sits above (or below) the icon, never on top of it.
+            // `.top` alignment pins their top edges together; the negative offset
+            // then lifts the whole capsule up past the icon. (Mirror for `.bottom`.)
+            .overlay(alignment: edge == .top ? .top : .bottom) {
+                if shown {
+                    TooltipLabel(text: text)
+                        // Let it size to its text without being clipped to the
+                        // anchor's width, and measure that height for the offset.
+                        .fixedSize()
+                        .background(
+                            GeometryReader { g in
+                                Color.clear.preference(key: TooltipHeightKey.self,
+                                                        value: g.size.height)
+                            }
+                        )
+                        .onPreferenceChange(TooltipHeightKey.self) { tipHeight = $0 }
+                        // Clear the control entirely: shift by the full capsule
+                        // height + a 6pt breathing gap, in the away direction.
+                        .offset(y: edge == .top ? -(tipHeight + 6) : (tipHeight + 6))
+                        .transition(.opacity)
+                        .allowsHitTesting(false)
+                        // Sit above sibling chrome so a neighbouring icon never
+                        // paints over the tip.
+                        .zIndex(1000)
+                }
+            }
+    }
+}
+
+/// Carries the measured tooltip capsule height up so the offset can clear the
+/// control by its exact height rather than a guessed constant.
+private struct TooltipHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+/// The capsule itself — factored out so the shadow/rim/material live in one place.
+private struct TooltipLabel: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.sf(11, weight: .medium))
+            .tracking(0.1)
+            .foregroundStyle(Tokens.text2)
+            .lineLimit(1)
+            .fixedSize()
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .background(
+                ZStack {
+                    // A near-black glass wafer, not the stock yellow bubble.
+                    Capsule(style: .continuous)
+                        .fill(Color.black.opacity(0.62))
+                        .background(.ultraThinMaterial, in: Capsule(style: .continuous))
+                    Capsule(style: .continuous)
+                        .strokeBorder(Tokens.hairline, lineWidth: 0.5)
+                }
+            )
+            .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
+    }
+}
+
+extension View {
+    /// Attach a `NotchTooltip` — the in-house replacement for `.help()`. Use it on
+    /// the answer-footer action icons (copy / save / regenerate / info / pin) and
+    /// any other island control that wants a hover hint in the panel's own voice.
+    func notchTooltip(_ text: String, edge: VerticalEdge = .top, delay: TimeInterval = 0.45) -> some View {
+        modifier(NotchTooltip(text: text, edge: edge, delay: delay))
+    }
+}

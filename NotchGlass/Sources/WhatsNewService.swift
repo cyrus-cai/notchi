@@ -64,6 +64,26 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.1.12",
+            date: "2026-07-07",
+            features: [
+                "Ask can now read a web page, not just search — it opens a result to dig deeper.",
+                "Shows which model actually answered when using OpenRouter's free auto-router.",
+                "Free OpenRouter models are ranked by popularity — top picks up front, the rest in a submenu.",
+                "Copy an answer as plain text or as Markdown — both from the footer.",
+            ],
+            improvements: [
+                "Cut-off answers now say so instead of trailing off silently.",
+                "Very long conversations no longer hit a hard context error — oldest turns trim first.",
+                "Settings hints tuck behind a small ⓘ, and tooltips match the app's dark glass look.",
+                "Recent captures: tap the row safely; jumping out to Notes or Reminders is its own button now.",
+            ],
+            fixes: [
+                "Removed \"Save to Notes\" (and ⌘S) from answers.",
+                "Removed the \"light model for quick tasks\" setting — everything uses your main model now.",
+            ]
+        ),
+        Entry(
             version: "0.1.11",
             date: "2026-07-07",
             features: [

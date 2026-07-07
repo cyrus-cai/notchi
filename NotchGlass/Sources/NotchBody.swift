@@ -202,17 +202,12 @@ struct NotchBody: View {
                 immersiveHistoryView
             } else {
                 // While ↑/↓ recall is walking the history, the slot above the input
-                // shows a "which of how many" counter instead of the clipboard quote
-                // — the quote is irrelevant to a recalled question, and the counter
-                // tells you how far back you've stepped.
+                // shows a "which of how many" counter. The clipboard-quote preview
+                // that used to share this slot has been removed — a copied clip no
+                // longer echoes back above the prompt; its one-tap chips below the
+                // input remain the way to act on it.
                 if let recall = model.recallPosition {
                     recallCounterLine(recall)
-                        .transition(moduleTransition)
-                } else if let clip = model.pendingClipboard {
-                    clipboardPreviewLine(clip)
-                        .transition(moduleTransition)
-                } else if let image = model.pendingClipboardImage {
-                    clipboardImagePreviewLine(image)
                         .transition(moduleTransition)
                 }
 
@@ -320,15 +315,10 @@ struct NotchBody: View {
                 // behind comes entirely from the list's own top fade + blur (see
                 // `historyList(immersive:)`).
                 VStack(alignment: .leading, spacing: 0) {
-                    // A pending clipboard quote rides INSIDE the floating header:
-                    // the preview line above the prompt (the context the query folds
-                    // in). The runway (`immersiveTopReach`, measured from this
-                    // header's real height) grows to keep the first row clear.
-                    if let clip = model.pendingClipboard {
-                        clipboardPreviewLine(clip)
-                    } else if let image = model.pendingClipboardImage {
-                        clipboardImagePreviewLine(image)
-                    }
+                    // The clipboard-quote preview that used to ride inside this
+                    // floating header has been removed — a pending clip no longer
+                    // echoes above the prompt. The header is now just the input; the
+                    // runway shrinks back to the bare-input baseline accordingly.
                     idleInputRow
                     // No preset chips here: this IS the expanded Recent state, and
                     // the list owns the space below the prompt. Chips fold away to
@@ -426,68 +416,16 @@ struct NotchBody: View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// The copied-clip preview shown above the prompt when there's eligible
-    /// clipboard content — context for the input below, so the user can see what a
-    /// referential query ("summarize this") will fold in. Rendered as a *quote*: a
-    /// leading curly quotation mark precedes the copied text, so it reads as the
-    /// lifted, referenced material rather than a status line. The one-tap action
-    /// chips that act on this clip live *below* the input, in `clipboardPresetChips`.
-    private func clipboardPreviewLine(_ clip: String) -> some View {
-        let preview = clip.count > 40 ? String(clip.prefix(40)) + "…" : clip
-        return HStack(alignment: .firstTextBaseline, spacing: 4) {
-            // A leading curly opening quotation mark — the standard typographic cue
-            // that what follows is lifted, quoted material. Sits slightly larger and
-            // baseline-aligned with the preview text.
-            Text("\u{201C}")
-                .font(.system(size: 18, weight: .semibold, design: .serif))
-                .foregroundStyle(Tokens.text3.opacity(0.6))
-                .baselineOffset(-3)
-            Text(preview)
-                .font(.sf(11))
-                .tracking(0.2)
-                .foregroundStyle(Tokens.text4)
-                .lineLimit(1)
-        }
-        .fixedSize(horizontal: false, vertical: true)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.bottom, 8)
-    }
-
-    /// The copied-IMAGE preview (XII-121): a small thumbnail + caption in the
-    /// text quote's slot, shown when the clipboard holds pixels instead of words
-    /// (a screenshot, a copied bitmap). The first-turn Ask attaches this image to
-    /// the wire message, so the preview is exactly "what the model will see".
-    private func clipboardImagePreviewLine(_ image: NSImage) -> some View {
-        HStack(spacing: 6) {
-            Image(nsImage: image)
-                .resizable()
-                .aspectRatio(contentMode: .fill)
-                .frame(width: 34, height: 24)
-                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
-                )
-            Text(L("clip.imageCopied"))
-                .font(.sf(11))
-                .tracking(0.2)
-                .foregroundStyle(Tokens.text4)
-                .lineLimit(1)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.bottom, 8)
-    }
-
-    /// The ↑/↓ recall counter that takes the clipboard quote's slot while walking
-    /// history: a small clock glyph + "pos / total" (newest = 1), so you can see
-    /// how far back the current recalled question sits. Same slot metrics as
-    /// `clipboardPreviewLine` so swapping one for the other doesn't jump the input.
+    /// The ↑/↓ recall counter shown above the input while walking history: a small
+    /// "History" label + "pos / total" (newest = 1), so you can see how far back the
+    /// current recalled question sits. (The clipboard-quote preview that once shared
+    /// this slot has been removed — a copied clip no longer echoes above the prompt.)
     private func recallCounterLine(_ recall: (pos: Int, total: Int)) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 5) {
-            Image(systemName: "clock.arrow.circlepath")
-                .font(.system(size: 10, weight: .semibold))
+            Text("History")
+                .font(.sf(10, weight: .semibold))
+                .tracking(0.4)
                 .foregroundStyle(Tokens.text4)
-                .baselineOffset(-1)
             Text("\(recall.pos) / \(recall.total)")
                 .font(.sf(11, weight: .medium))
                 .monospacedDigit()
@@ -1044,14 +982,31 @@ struct NotchBody: View {
                                     .tracking(0.2)
                                     .foregroundStyle(Tokens.text4)
                             } else {
-                                HStack(spacing: 3) {
-                                    Text(item.source == .note ? L("recent.badge.notes") : L("recent.badge.reminders"))
-                                        .font(.sf(11).weight(.medium))
-                                        .tracking(0.2)
-                                    Image(systemName: "arrow.up.right")
-                                        .font(.sf(9, weight: .semibold))
+                                // The jump to Notes/Reminders lives on its OWN button,
+                                // not the row body — tapping the row must never yank the
+                                // user out to another app they didn't ask to open. Only
+                                // this trailing pill switches apps. `.plain` + its own
+                                // `contentShape` isolate the hit region so a tap here
+                                // fires the jump and doesn't bubble to the row's Ask path.
+                                Button { model.openCaptureInApp(item) } label: {
+                                    HStack(spacing: 3) {
+                                        Text(item.source == .note ? L("recent.badge.notes") : L("recent.badge.reminders"))
+                                            .font(.sf(11).weight(.medium))
+                                            .tracking(0.2)
+                                        Image(systemName: "arrow.up.right")
+                                            .font(.sf(9, weight: .semibold))
+                                    }
+                                    .foregroundStyle(Tokens.text4)
+                                    .padding(.vertical, 3)
+                                    .padding(.horizontal, 6)
+                                    .contentShape(Rectangle())
                                 }
-                                .foregroundStyle(Tokens.text4)
+                                .buttonStyle(CaptureJumpButtonStyle())
+                                // VoiceOver: this control is the jump; name it by
+                                // destination so it reads distinctly from the row.
+                                .accessibilityLabel(
+                                    item.source == .note ? L("recent.hint.note") : L("recent.hint.reminder")
+                                )
                             }
                         }
                         .padding(.vertical, 9)
@@ -1059,17 +1014,13 @@ struct NotchBody: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(HistoryRowStyle(selected: model.highlightedHistoryIndex == index))
-                    // VoiceOver: name the row by its title, and spell out what
-                    // activating it does — a capture jumps out to Notes/Reminders
-                    // (the up-right arrow glyph isn't announced), an Ask row reopens
-                    // the conversation in place.
-                    .accessibilityElement(children: .combine)
-                    .accessibilityLabel(item.displayTitle)
-                    .accessibilityHint(
-                        item.source == .note ? L("recent.hint.note")
-                        : item.source == .reminder ? L("recent.hint.reminder")
-                        : L("recent.hint.ask")
-                    )
+                    // VoiceOver: an Ask row IS its action — combine title + timestamp
+                    // into one element that reopens the thread. A capture row's action
+                    // now lives on the SEPARATE trailing jump button (the row body no
+                    // longer switches apps), so keep it a container (`.contain`) whose
+                    // jump button stays independently focusable rather than folding it
+                    // into the row.
+                    .modifier(RecentRowAccessibility(item: item))
                     // A deleted row collapses up and fades rather than vanishing on a
                     // hard cut — the rows below slide into the gap on the same spring
                     // that drives the list's other module motion. Paired with the
@@ -1700,11 +1651,7 @@ struct NotchBody: View {
                 regenerateModels: isLastTurn ? model.regenerateModelOptions : [],
                 onRegenerateWith: isLastTurn ? { model.regenerateLastAnswer(model: $0) } : nil,
                 regenModel: turn.regenModel,
-                // File this answer into Apple Notes (XII-123); the cue below the
-                // footer reports the outcome for exactly this turn.
-                onSaveToNotes: { model.saveAnswerToNotes(answerID: turn.id) },
-                noteCue: model.answerNoteCue?.answerID == turn.id
-                    ? model.answerNoteCue?.text : nil,
+                answerModel: turn.answerModel,
                 // The `ask_user` question card, when the model has paused this
                 // still-streaming answer on a choice only the user can make.
                 pendingQuestion: turn.streaming ? model.pendingQuestion(for: turn.id) : nil,
@@ -1752,7 +1699,6 @@ struct NotchBody: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(RecentEntryStyle())
-        .help(L("result.newConversation"))
     }
 
     // MARK: - Inputs
@@ -2134,6 +2080,52 @@ struct HistoryRowStyle: ButtonStyle {
     }
 }
 
+/// The trailing "open in Notes/Reminders" pill on a capture row. A quiet chip at
+/// rest that firms up on hover — enough to read as a tappable target distinct
+/// from the row, so the user knows *this* is what jumps them out to the app (the
+/// row body no longer does). Kept low-key so it doesn't shout over the row title.
+struct CaptureJumpButtonStyle: ButtonStyle {
+    @State private var hovering = false
+    func makeBody(configuration: Configuration) -> some View {
+        let on = hovering || configuration.isPressed
+        return configuration.label
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(.white.opacity(on ? 0.08 : 0))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(.thinMaterial)
+                            .opacity(on ? 0.28 : 0)
+                    )
+            )
+            .opacity(configuration.isPressed ? 0.7 : 1)
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: 0.14), value: hovering)
+            .animation(.easeOut(duration: 0.14), value: configuration.isPressed)
+    }
+}
+
+/// Recent-row VoiceOver wiring, split by kind. An Ask row combines its children
+/// into one element that reopens the thread. A capture row stays a *container*
+/// so its separate trailing jump button remains an independently-focusable
+/// control — folding it in (`.combine`) would hide the one control that jumps.
+private struct RecentRowAccessibility: ViewModifier {
+    let item: NotchModel.HistoryItem
+    func body(content: Content) -> some View {
+        if item.source == .ask {
+            content
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(item.displayTitle)
+                .accessibilityHint(L("recent.hint.ask"))
+        } else {
+            content
+                .accessibilityElement(children: .contain)
+                .accessibilityLabel(item.displayTitle)
+        }
+    }
+}
+
 /// The destination colour of an intent — the SAME palette everywhere a
 /// destination shows its face: Ask a cool blue, Note the Notes amber, Remind
 /// the Reminders orange. Read by the inline "— Ask/— Note/— Remind" ghost, the
@@ -2362,10 +2354,10 @@ struct SetupModelButtonStyle: ButtonStyle {
 /// Top-right pin, sitting on a real Liquid Glass circle — the same native
 /// `.glassEffect` chip the settings icon uses (`glassCapsule` on macOS 26+, blur
 /// fallback below), so it reads as a piece of the glass island rather than a bare
-/// glyph. Filled + accent-tinted when engaged; a bare outline otherwise, and the
-/// glass itself washes accent when pinned so the whole chip lights up. Toggling
-/// routes back through the model so an un-pin can immediately re-arm the
-/// leave-fold if the pointer is already gone.
+/// glyph. The glyph stays pure white in both states — engaged reads through the
+/// filled glyph, the upright tilt, and a white glass wash, never a colour tint.
+/// Toggling routes back through the model so an un-pin can immediately re-arm
+/// the leave-fold if the pointer is already gone.
 struct ResultPinButton: View {
     var pinned: Bool
     var toggle: () -> Void
@@ -2376,26 +2368,28 @@ struct ResultPinButton: View {
         Button(action: toggle) {
             Image(systemName: pinned ? "pin.fill" : "pin")
                 .font(.system(size: 12.5, weight: .semibold))
-                .foregroundStyle(pinned ? Tokens.accent : Tokens.text2)
+                .foregroundStyle(.white)
                 // A pinned pin tips slightly, the way a pushed-in tack sits — a small
-                // physical cue that it's engaged, on top of the fill + tint.
+                // physical cue that it's engaged, on top of the fill.
                 .rotationEffect(.degrees(pinned ? 0 : 32))
                 .frame(width: 26, height: 26)
-                // When pinned, tint the glass itself accent so the chip reads as
-                // "on"; otherwise plain glass that brightens on hover.
-                .glassCapsule(in: Circle(), brighter: pinned || hovering,
-                              tint: pinned ? Tokens.accent : nil)
-                // Resting-unpinned, the glass is deliberately faint — a quiet
-                // whisper of a chip rather than a full glass button, so it doesn't
-                // pull the eye off the answer. Hovering or pinning brings the glass
-                // (rim + specular) to full strength.
-                .opacity(pinned || hovering ? 1 : 0.55)
+                // The glass renders behind the glyph and carries ALL the resting
+                // dimming, so the pin itself stays pure white even at rest — only
+                // the glass is a quiet whisper of a chip until hovering or pinning
+                // brings it (rim + specular + white wash when pinned) to full
+                // strength.
+                .background {
+                    Color.clear
+                        .glassCapsule(in: Circle(), brighter: pinned || hovering,
+                                      tint: pinned ? .white : nil)
+                        .opacity(pinned || hovering ? 1 : 0.55)
+                }
                 .contentShape(Circle())
         }
         .buttonStyle(GlassPressStyle())
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.18), value: hovering)
-        .help(L(pinned ? "result.unpin" : "result.pin"))
+        .notchTooltip(L(pinned ? "result.unpin" : "result.pin"))
     }
 }
 

@@ -257,34 +257,6 @@ enum APIKeyStore {
         return stored.isEmpty ? nil : stored
     }
 
-    // MARK: - Task-level model routing (XII-132)
-
-    private static let lightTasksKey = "light_tasks_enabled"
-
-    /// Whether mechanical side-tasks (translate/summarize chips, title
-    /// generation) route to the provider's lightweight model instead of the main
-    /// Ask model (XII-132). Default ON — it's cheaper and faster with no quality
-    /// cost on those tasks. The main Ask always uses the user's chosen model
-    /// regardless. Absent key ⇒ true (opt-out, not opt-in).
-    static var lightTasksEnabled: Bool {
-        get {
-            UserDefaults.standard.object(forKey: lightTasksKey) as? Bool ?? true
-        }
-        set {
-            UserDefaults.standard.set(newValue, forKey: lightTasksKey)
-        }
-    }
-
-    /// The model a light/mechanical task should use for `provider` (XII-132):
-    /// the provider's `lightModel` when routing is enabled AND such a tier exists,
-    /// otherwise `nil` so the caller falls back to the main effective model. Never
-    /// returns a model equal to the main one (that would be a pointless re-route).
-    static func lightTaskModel(for provider: Provider) -> String? {
-        guard lightTasksEnabled, let light = provider.lightModel else { return nil }
-        let main = effectiveModel(for: provider) ?? provider.defaultModel
-        return light == main ? nil : light
-    }
-
     // MARK: - UserDefaults plumbing
 
     private static func defaultsKey(for provider: Provider) -> String {

@@ -20,6 +20,11 @@ enum TurnEvent: Sendable {
     /// A chunk of visible answer text to append (same semantics as the plain
     /// `stream`'s yielded String).
     case text(String)
+    /// The concrete model the provider actually ran, echoed back in the stream's
+    /// `model` field. For OpenRouter's `openrouter/free` auto-router this is the
+    /// only place the real model surfaces (the request only names the router);
+    /// the UI shows it under the answer. Emitted at most once per turn.
+    case model(String)
     /// The model finished a tool-call request: it wants `name(input)` run, keyed
     /// by `id` so the result can be matched back. Emitted once per tool call after
     /// its arguments have fully streamed in.
@@ -256,6 +261,11 @@ struct AgentHarness {
     /// for the source badge. Called with the round's sources (accumulated across
     /// rounds is the caller's job). Main-actor.
     typealias SourcesSink = @MainActor ([WebSource]) -> Void
+    /// The concrete model the provider ran → stamp it on the answer turn so the
+    /// footer can show which model produced this reply (esp. for the
+    /// `openrouter/free` auto-router). Fires once, on the first turn that reports
+    /// a model. Main-actor.
+    typealias ModelSink = @MainActor (String) -> Void
 
     /// Run the loop to completion. `onText` receives answer chunks; `onActivity`
     /// receives tool-progress labels; `onSources` receives any web sources a search
@@ -273,7 +283,8 @@ struct AgentHarness {
              messages: [AgentMessage],
              onText: @escaping TextSink,
              onActivity: @escaping ActivitySink,
-             onSources: @escaping SourcesSink) async throws {
+             onSources: @escaping SourcesSink,
+             onModel: ModelSink? = nil) async throws {
         var convo = messages
         var iteration = 0
         // True once the model has run at least one tool round. It changes what the
@@ -283,6 +294,9 @@ struct AgentHarness {
         // back to generic dots (the empty state Cyrus flagged). It also tells a
         // second-or-later tool round to say "refining" rather than "searching".
         var didTool = false
+        // The concrete model is reported to `onModel` at most once across the whole
+        // answer (a multi-turn tool answer keeps the model of its first turn).
+        var reportedModel = false
         // How many *search* rounds (not generic tool rounds) have completed. Drives
         // the escalating "stop searching, answer now" nudge that breaks the runaway
         // re-search loop on queries the web can't cleanly answer — see
@@ -323,6 +337,14 @@ struct AgentHarness {
                     }
                     assistantText += visible
                     onText(visible)
+                case .model(let ran):
+                    // Report the concrete model once for the whole answer — the
+                    // first turn that names it wins (a multi-tool answer keeps the
+                    // model it started on).
+                    if !reportedModel {
+                        reportedModel = true
+                        onModel?(ran)
+                    }
                 case .toolCall(let id, let name, let input):
                     pendingCalls.append(ToolInvocation(id: id, name: name, input: input))
                 case .finished(let reason):
@@ -336,10 +358,53 @@ struct AgentHarness {
                 onText(tail)
             }
 
+            // Whether the provider stopped because it hit the token limit (OpenAI
+            // `"length"` / Anthropic `"max_tokens"`) rather than finishing cleanly.
+            // Two very different failure modes ride this flag, handled below.
+            let truncated = stopReason == "length" || stopReason == "max_tokens"
+
             // No tool calls (or we suppressed them at the cap) → the model is done.
             if pendingCalls.isEmpty {
                 onActivity(nil)
+                // A clean stop → done. But if the model ran out of budget mid-answer,
+                // the visible text is cut off mid-sentence with no sign to the user.
+                // Append a short marker so the reply doesn't just trail off as if
+                // complete. (Only when we actually streamed something — a truncated
+                // *empty* turn is the malformed-response case the stream layer already
+                // retries, not ours to annotate.)
+                if truncated && !assistantText.isEmpty {
+                    onText(L("error.truncated"))
+                }
                 return
+            }
+
+            // Truncated *while emitting a tool call*: the arguments JSON was very
+            // likely cut off mid-object, so `decodeArgs` fell back to an empty/partial
+            // input dict — executing on that runs the tool with garbage (an empty
+            // `url`, a blank `query`) and confuses the model with a spurious error.
+            // Don't run it. Instead push the assistant text we did get plus a system
+            // note telling the model its output was too long, and loop so it retries
+            // more concisely. Count the round so a model that keeps overshooting still
+            // hits the cap and is forced to a final answer rather than spinning.
+            if truncated && iteration < maxIterations {
+                // ALWAYS append the assistant turn, even with no prose (the common
+                // case — models usually emit tool calls without preamble). Skipping
+                // it would leave the note adjacent to the previous user-role message
+                // (the question, or tool results — which lower to role "user" on
+                // Anthropic), breaking the strict user/assistant alternation. An
+                // *empty* assistant turn is equally rejected, so stand in a marker
+                // the model reads as its own cut-off output.
+                let replay = assistantText.isEmpty ? "[output truncated]" : assistantText
+                convo.append(AgentMessage(kind: .text(role: "assistant", text: replay)))
+                convo.append(AgentMessage(kind: .text(role: "user", text:
+                    "[System note] Your previous message was cut off because it "
+                    + "exceeded the length limit before the tool call finished, so it "
+                    + "could not be run. Issue fewer tool calls at once and keep each "
+                    + "one's arguments short, or answer directly if you already have "
+                    + "enough to respond.")))
+                onActivity(nil)
+                iteration += 1
+                continue
             }
 
             // Surface what's running, then execute every call concurrently. The
@@ -371,9 +436,13 @@ struct AgentHarness {
             // results and composing the answer, which takes a real round-trip. Carry
             // a "composing…" cue through that gap so the wait stays narrated; the
             // next turn's first token (or its next tool round) replaces it. Only the
-            // search-style tools warrant this — a clipboard/time read composes
-            // instantly, so for those we just clear.
-            if pendingCalls.contains(where: { Self.isSearchTool($0.name) }) {
+            // fetch-style tools warrant this — a clipboard/time read composes
+            // instantly, so for those we just clear. `read_page` gets the cue too
+            // (the model chews on up to ~8k chars of page text) but deliberately
+            // stays out of `isSearchTool`: it must not count as a search round or
+            // draw the stop-searching nudge — reading a page is how the model
+            // *escapes* the re-search loop, not another lap of it.
+            if pendingCalls.contains(where: { Self.isSearchTool($0.name) || $0.name == "read_page" }) {
                 onActivity(L("agent.activity.composing"))
             } else {
                 onActivity(nil)
@@ -490,6 +559,15 @@ struct AgentHarness {
             case "read_clipboard": return L("agent.activity.clipboard")
             case "current_datetime": return L("agent.activity.time")
             case "calculate": return L("agent.activity.calc")
+            case "read_page":
+                // Read the host out of the url argument so it reads as an address
+                // ("Reading tmtpost.com"); fall back to the generic line if absent.
+                if let raw = first.input["url"] as? String,
+                   var host = URL(string: raw)?.host {
+                    if host.hasPrefix("www.") { host.removeFirst(4) }
+                    return L("agent.activity.readingPage", host)
+                }
+                return L("agent.activity.working")
             default: break
             }
         }

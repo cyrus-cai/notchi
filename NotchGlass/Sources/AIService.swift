@@ -411,43 +411,6 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     var signupURL: URL          { spec.signupURL }
     var envVarName: String      { spec.envVarName }
 
-    /// The provider's cheap/fast tier for mechanical tasks — translate/summarize
-    /// chips and `generateTitle` (XII-132). Picked from the provider's OWN live
-    /// model list (`availableModels`, which rides the hot-updated manifest) by
-    /// name pattern, so it tracks the current lineup instead of hard-coding a
-    /// model that may be renamed/retired. Returns `nil` when this provider exposes
-    /// no distinct light tier (or its only model IS the light one) — the caller
-    /// then just keeps the main model, so routing can never make a task fail.
-    ///
-    /// The match order per provider is most-preferred-light first; the first name
-    /// in `availableModels` that contains a light marker wins. Never returns the
-    /// user's currently-selected model (routing to "light" that equals the main is
-    /// a no-op the caller detects, but we avoid it here for clarity).
-    var lightModel: String? {
-        let models = availableModels
-        // Vendor-specific light markers, in the order we'd prefer them. Lowercased
-        // substring match against each candidate id.
-        let markers: [String]
-        switch self {
-        case .anthropic:  markers = ["haiku"]
-        case .openai:     markers = ["mini", "nano"]
-        case .gemini:     markers = ["flash-lite", "flash"]
-        case .deepseek:   markers = ["flash"]
-        case .qwen:       markers = ["flash"]
-        case .glm:        markers = ["turbo", "flash"]
-        case .kimi:       markers = ["32k", "8k"]           // smaller-context = cheaper tier
-        case .minimax:    markers = ["highspeed"]
-        case .mimo:       markers = []                       // single tier — no light split
-        case .openrouter: markers = []                       // auto-router already picks cheap
-        }
-        for marker in markers {
-            if let hit = models.first(where: { $0.lowercased().contains(marker) }) {
-                return hit
-            }
-        }
-        return nil
-    }
-
     // MARK: Behavioral traits (grouped by client behavior, not by vendor)
 
     /// Whether this provider speaks the OpenAI-compatible `/v1/chat/completions`
@@ -1196,9 +1159,17 @@ enum RemoteModelManifest {
 /// falls back to `Provider.availableModels` — the built-in shortlist — so the
 /// picker is never empty.
 enum ModelCatalog {
+    /// A fetched model list plus, for OpenRouter, which of its free models are
+    /// flagship-class (see `OpenRouterFreeModels`) — the Settings menu uses the
+    /// membership to draw its grouped sections. Empty for other providers.
+    struct Result {
+        let models: [String]
+        let openRouterFeatured: Set<String>
+    }
+
     /// Fetch the provider's current model ids. Returns `nil` on any error so the
     /// caller can fall back to the bundled `availableModels` list.
-    static func fetch(for provider: Provider, apiKey: String) async -> [String]? {
+    static func fetch(for provider: Provider, apiKey: String) async -> Result? {
         guard let url = modelsURL(for: provider) else { return nil }
         var req = URLRequest(url: url)
         req.httpMethod = "GET"
@@ -1216,16 +1187,26 @@ enum ModelCatalog {
             guard let http = response as? HTTPURLResponse,
                   (200..<300).contains(http.statusCode) else { return nil }
             let list = try JSONDecoder().decode(ModelList.self, from: data)
-            let ids = list.data.map(\.id).filter { !$0.isEmpty }
+            let entries = list.data.filter { !$0.id.isEmpty }
             // OpenRouter's catalog is its FULL marketplace — hundreds of ids, most
             // of them paid, which a freshly-connected $0 account can't call. Offer
-            // only what actually works free: the auto-router plus the current
-            // `:free` variants.
+            // only what actually works free: the auto-router, then the flagship-
+            // class free models (biggest first), then the rest alphabetically.
             if provider == .openrouter {
-                let free = ids.filter { $0.hasSuffix(":free") }.sorted()
-                return ["openrouter/free"] + free
+                // Real usage ranks the free lineup; fetched with the same key,
+                // in parallel with nothing (models is already in hand). A nil
+                // result (offline / niche key / endpoint down) degrades to
+                // size-only ordering — the empty map does exactly that.
+                let usage = await UsageRankings.fetch(apiKey: apiKey) ?? [:]
+                let (featured, rest) = OpenRouterFreeModels.split(
+                    entries.filter { $0.id.hasSuffix(":free") }
+                        .map { (id: $0.id, description: $0.description) },
+                    usage: usage)
+                return Result(models: ["openrouter/free"] + featured + rest,
+                              openRouterFeatured: Set(featured))
             }
-            return ids.isEmpty ? nil : ids
+            let ids = entries.map(\.id)
+            return ids.isEmpty ? nil : Result(models: ids, openRouterFeatured: [])
         } catch {
             return nil
         }
@@ -1246,10 +1227,265 @@ enum ModelCatalog {
 
     /// OpenAI-style `{ "data": [ { "id": "..." }, ... ] }`. Anthropic's
     /// `/v1/models` returns the same `data: [{ id }]` shape, so one decoder fits
-    /// both.
+    /// both. `description` (OpenRouter-only) feeds the free-model size ranking.
     private struct ModelList: Decodable {
         let data: [Entry]
-        struct Entry: Decodable { let id: String }
+        struct Entry: Decodable {
+            let id: String
+            let description: String?
+        }
+    }
+}
+
+/// Ranks OpenRouter's rotating `:free` lineup so the genuinely good models
+/// surface above the small/experimental ones instead of drowning in one
+/// alphabetical list.
+///
+/// The primary signal is **real usage** — OpenRouter's own `rankings-daily`
+/// dataset (total tokens per model over the last week), which is millions of
+/// users voting with their feet. A model people actually run a lot is a far
+/// truer "is this good" signal than any spec: hy3 leads the free lineup by 4×,
+/// while nominally-huge models (llama-3.3-70b, hermes-405b) don't crack the
+/// top-50 at all. Featured = has real usage, ordered most-used first.
+///
+/// Usage needs the user's key (and a fetch that can fail), so **parameter
+/// count is the fallback**: a model with no usage row is ranked by total
+/// params parsed from the catalog metadata (id, else description), and only
+/// those ≥ `featuredThresholdB` are featured. So a brand-new free model that
+/// hasn't accumulated usage yet still gets a fair shot on size, and if the
+/// usage fetch fails entirely the menu degrades cleanly to size-only ordering.
+enum OpenRouterFreeModels {
+    /// Total-parameter floor (in billions) for the *fallback* (size-only)
+    /// featured test. 70B sits in the natural gap of the free lineup: flagships
+    /// are 70B–550B+, the long tail of nano/mini/safety models is ≤33B.
+    static let featuredThresholdB: Double = 70
+
+    /// Any `<number>B` token: `550b`, `1.2b`, `295B-parameter`. The lookahead
+    /// keeps it from matching inside a longer alphanumeric run (`a4b-it` still
+    /// matches `4b` at its own end, `12bit` would not) — deliberately not `\b`,
+    /// whose Unicode word-boundary semantics in Swift Regex fail on ids like
+    /// `…-405b:free`. MoE ids like `550b-a55b` yield both numbers and `max`
+    /// picks the total.
+    private static let sizeToken = #/(\d+(?:\.\d+)?)\s*[bB](?![A-Za-z0-9])/#
+
+    /// Best guess at total parameters, in billions; 0 when nothing is stated.
+    /// The id wins over the description when both carry sizes — descriptions
+    /// love comparisons ("beats Llama 405B"), which would inflate small models.
+    static func paramBillions(id: String, description: String?) -> Double {
+        let fromID = sizes(in: id)
+        if let m = fromID.max() { return m }
+        // Only the description's opening — later paragraphs drift into
+        // benchmark comparisons against *other* (bigger) models.
+        return sizes(in: String((description ?? "").prefix(400))).max() ?? 0
+    }
+
+    private static func sizes(in text: String) -> [Double] {
+        text.matches(of: sizeToken).compactMap { Double($0.output.1) }
+    }
+
+    /// Total recent-usage tokens for a free `:free` id, or `nil` if that model
+    /// has no ranking row. Both sides are reduced to a family stem
+    /// (`UsageRankings.stem`) and matched by **prefix**, not equality: the
+    /// ranking key may carry extra size chunks the id lacks
+    /// (`qwen3-coder-480b-a35b` vs the id's `qwen3-coder`), so we credit a
+    /// ranking key to this id when either stem is a prefix of the other. Sums
+    /// across every matching key so a model split over multiple dated variants
+    /// keeps its full total.
+    private static func usageTokens(for id: String, in map: [String: Double]) -> Double? {
+        let idStem = UsageRankings.stem(id)
+        var total = 0.0
+        var matched = false
+        for (key, tokens) in map where stemsMatch(idStem, key) {
+            total += tokens
+            matched = true
+        }
+        return matched ? total : nil
+    }
+
+    /// Two stems refer to the same model family if one is a prefix of the other
+    /// at a component (`/` or `-`) boundary — so `tencent/hy3` matches
+    /// `tencent/hy3` and `qwen/qwen3-coder` matches `qwen/qwen3-coder-480b-a35b`,
+    /// but `qwen/qwen3` would not spill into `qwen/qwen3-coder` (guarded by the
+    /// boundary check).
+    private static func stemsMatch(_ a: String, _ b: String) -> Bool {
+        if a == b { return true }
+        func prefixAtBoundary(_ shorter: String, _ longer: String) -> Bool {
+            guard longer.hasPrefix(shorter), longer.count > shorter.count else { return false }
+            let next = longer[longer.index(longer.startIndex, offsetBy: shorter.count)]
+            return next == "-" || next == "/"
+        }
+        return a.count < b.count ? prefixAtBoundary(a, b) : prefixAtBoundary(b, a)
+    }
+
+    /// Split free-model entries into (featured, rest).
+    ///
+    /// A model is **featured** if it has real last-week usage (`usage` non-nil),
+    /// OR — when no usage is known for it — its parameter count clears the
+    /// fallback threshold. Featured order: usage first (most-used → least),
+    /// then the size-only models below them (biggest → smallest); the rest go
+    /// alphabetical. Pass an empty `usage` map to get pure size-based ordering
+    /// (the degraded path when the rankings fetch failed).
+    static func split(
+        _ entries: [(id: String, description: String?)],
+        usage: [String: Double] = [:]
+    ) -> (featured: [String], rest: [String]) {
+        // (byUsage: token count if ranked else nil, size: params, id)
+        var featured: [(byUsage: Double?, size: Double, id: String)] = []
+        var rest: [String] = []
+        for e in entries {
+            let used = usageTokens(for: e.id, in: usage)
+            let size = paramBillions(id: e.id, description: e.description)
+            if used != nil || size >= featuredThresholdB {
+                featured.append((byUsage: used, size: size, id: e.id))
+            } else {
+                rest.append(e.id)
+            }
+        }
+        // Usage-ranked models sort above size-only ones; within each cohort,
+        // by the cohort's own metric descending, ties broken by id.
+        featured.sort { a, b in
+            switch (a.byUsage, b.byUsage) {
+            case let (ua?, ub?): return ua == ub ? a.id < b.id : ua > ub
+            case (_?, nil):      return true      // any usage beats no usage
+            case (nil, _?):      return false
+            case (nil, nil):     return a.size == b.size ? a.id < b.id : a.size > b.size
+            }
+        }
+        return (featured.map(\.id), rest.sorted())
+    }
+
+    /// How many models the "Best free models" section shows. The rest of the
+    /// featured cohort spills into "More free models" — the header is meant to
+    /// be a short, confident shortlist, not the whole flagship list.
+    static let featuredLimit = 3
+
+    /// Grouping for the Settings menu: ids that aren't `:free` variants (the
+    /// auto-router, a hand-typed custom id) keep their original order up top,
+    /// then the top `featuredLimit` featured models, then everything else.
+    /// Buckets preserve the incoming order — the catalog fetch already ranked
+    /// featured most-used-first, so "top N" is the N most-used. `featured`
+    /// membership comes from that same fetch.
+    static func group(
+        _ ids: [String], featured featuredIDs: Set<String>, limit: Int = featuredLimit
+    ) -> (head: [String], featured: [String], rest: [String]) {
+        var head: [String] = [], featured: [String] = [], rest: [String] = []
+        for id in ids {
+            if !id.hasSuffix(":free") {
+                head.append(id)
+            } else if featuredIDs.contains(id), featured.count < limit {
+                featured.append(id)
+            } else {
+                // Overflow featured models fall in with the rest; they keep
+                // their fetch order (most-used first), so they lead the tail.
+                rest.append(id)
+            }
+        }
+        return (head, featured, rest)
+    }
+}
+
+/// Fetches OpenRouter's `rankings-daily` dataset — real per-model token totals
+/// over a recent window — and folds it into a base-name → total-tokens map that
+/// `OpenRouterFreeModels.split` ranks by. This is the "millions of users voting"
+/// signal; everything about matching it to our `:free` ids is handled here.
+///
+/// The dataset reports per *model version* (`model_permaslug`, dated, e.g.
+/// `tencent/hy3-preview-20260421`) and mixes free+paid usage, so we key by the
+/// undated base name and sum every permaslug that starts with it. A missing
+/// row (model too niche for the top-50) simply yields no entry — the caller
+/// treats "no usage" as a fallback-to-size case, not zero.
+enum UsageRankings {
+    /// A short recent window is what we want (fresh popularity, not a month-old
+    /// average); the dataset defaults to 30 days, so we pass an explicit 3-day
+    /// `start_date`. Auth is the same key used for `/models`.
+    static func fetch(apiKey: String, days: Int = 3) async -> [String: Double]? {
+        var comps = URLComponents(string: "https://openrouter.ai/api/v1/datasets/rankings-daily")
+        // start_date only; end_date defaults to the most recent completed UTC day.
+        if let start = Self.startDate(daysAgo: days) {
+            comps?.queryItems = [URLQueryItem(name: "start_date", value: start)]
+        }
+        guard let url = comps?.url else { return nil }
+        var req = URLRequest(url: url)
+        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        req.timeoutInterval = 10
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
+            guard let http = response as? HTTPURLResponse,
+                  (200..<300).contains(http.statusCode) else { return nil }
+            let payload = try JSONDecoder().decode(Payload.self, from: data)
+            return byBaseName(payload.data)
+        } catch {
+            return nil
+        }
+    }
+
+    /// Sum `total_tokens` per model **stem** — the family name with dated /
+    /// `preview` version tails removed (`tencent/hy3-preview-20260421` and
+    /// `tencent/hy3-20260706:free` both → `tencent/hy3`). Keying on the stem,
+    /// then matching a free id's stem against it by *prefix* (see
+    /// `OpenRouterFreeModels`), collapses every version of a model onto one
+    /// total. This is deliberately looser than exact-key equality: an earlier
+    /// version tried to reduce both sides to an identical string and silently
+    /// dropped hy3's bulk, because a `-preview` tail on the ranking side has no
+    /// counterpart on the `:free` id side and the two keys never met.
+    static func byBaseName(_ rows: [Row]) -> [String: Double] {
+        var totals: [String: Double] = [:]
+        for r in rows {
+            guard let tokens = Double(r.total_tokens) else { continue }
+            totals[stem(r.model_permaslug), default: 0] += tokens
+        }
+        return totals
+    }
+
+    /// A model's family stem: drop `:free`, then peel a trailing dated /
+    /// `-preview` version tail so all variants of one model share it.
+    /// `tencent/hy3-preview-20260421` → `tencent/hy3`;
+    /// `qwen/qwen3-coder-480b-a35b-07-25` → `qwen/qwen3-coder-480b-a35b`
+    /// (size chunks are name parts, kept). Applied to *both* the ranking
+    /// permaslug and the `:free` id so the two sides meet.
+    static func stem(_ raw: String) -> String {
+        var s = raw
+        if s.hasSuffix(":free") { s = String(s.dropLast(":free".count)) }
+        // Peel trailing "-<version-ish>" chunks: an 8-digit date, a `MM-DD`
+        // fragment, a bare version number, a `v2`-style token, or the literal
+        // `preview`. Everything else (including `-480b`, `-a35b`, `-instruct`)
+        // is a name part and stays.
+        func isVersionish(_ c: Substring) -> Bool {
+            if c == "preview" { return true }
+            if c.allSatisfy({ $0.isNumber }) { return true }          // 20260421, 2509, 25
+            if c.first == "v", c.dropFirst().allSatisfy({ $0.isNumber || $0 == "." }) {
+                return c.count > 1                                     // v2, v2.5
+            }
+            return false
+        }
+        while let dash = s.lastIndex(of: "-") {
+            let chunk = s[s.index(after: dash)...]
+            guard !chunk.isEmpty, isVersionish(chunk) else { break }
+            s = String(s[..<dash])
+        }
+        return s
+    }
+
+    /// `YYYY-MM-DD` for `daysAgo` days before today (UTC). `nil` on the (never,
+    /// in practice) chance the date math fails — the caller then omits the
+    /// param and takes the dataset's 30-day default.
+    private static func startDate(daysAgo: Int) -> String? {
+        var cal = Calendar(identifier: .gregorian)
+        guard let utc = TimeZone(identifier: "UTC") else { return nil }
+        cal.timeZone = utc
+        guard let day = cal.date(byAdding: .day, value: -daysAgo, to: Date()) else { return nil }
+        let f = DateFormatter()
+        f.calendar = cal
+        f.timeZone = utc
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: day)
+    }
+
+    struct Payload: Decodable { let data: [Row] }
+    struct Row: Decodable {
+        let model_permaslug: String
+        let total_tokens: String
     }
 }
 
@@ -1466,6 +1702,7 @@ extension OpenAICompatAIService: AgentCapableService {
                         var callsByIndex: [Int: (id: String, name: String, args: String)] = [:]
                         var finishReason: String? = nil
                         var yieldedText = false
+                        var reportedModel = false
 
                         for try await line in bytes.lines {
                             if Task.isCancelled { break }
@@ -1478,6 +1715,16 @@ extension OpenAICompatAIService: AgentCapableService {
                                   let choices = obj["choices"] as? [[String: Any]],
                                   let choice = choices.first
                             else { continue }
+
+                            // The provider echoes the concrete model it ran in every
+                            // chunk's top-level `model`; report it once. For the
+                            // `openrouter/free` auto-router this is the only place the
+                            // real model (e.g. `openai/gpt-oss-20b:free`) is revealed.
+                            if !reportedModel,
+                               let ran = obj["model"] as? String, !ran.isEmpty {
+                                reportedModel = true
+                                continuation.yield(.model(ran))
+                            }
 
                             if let fr = choice["finish_reason"] as? String { finishReason = fr }
                             guard let delta = choice["delta"] as? [String: Any] else { continue }

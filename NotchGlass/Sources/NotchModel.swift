@@ -94,6 +94,15 @@ final class NotchModel: ObservableObject {
         /// case (default model), so a plain answer carries no annotation. Persisted,
         /// so a reopened thread still shows the badge.
         var regenModel: String? = nil
+        /// The concrete model the provider actually ran for this assistant answer,
+        /// as echoed back in the stream's `model` field. Its whole reason to exist
+        /// is the `openrouter/free` auto-router: the request only names the router,
+        /// so this is the sole record of which model really replied (e.g.
+        /// `openai/gpt-oss-20b:free`). The footer strips the vendor prefix and
+        /// `:free` suffix to show a bare model name. `nil` when the provider didn't
+        /// report one (or on the plain non-agent path). Persisted, so a reopened
+        /// thread still shows it.
+        var answerModel: String? = nil
 
         init(id: UUID = UUID(), role: String, text: String,
              streaming: Bool = false, usedClipboard: Bool = false) {
@@ -108,7 +117,7 @@ final class NotchModel: ObservableObject {
         // it. `decodeIfPresent` + defaults is what keeps old saved conversations
         // loadable. `role`/`text` are required — every saved turn has them.
         // `toolActivity` is deliberately absent: it's runtime-only UI state.
-        enum CodingKeys: String, CodingKey { case id, role, text, streaming, usedClipboard, sources, isError, regenModel }
+        enum CodingKeys: String, CodingKey { case id, role, text, streaming, usedClipboard, sources, isError, regenModel, answerModel }
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -120,6 +129,7 @@ final class NotchModel: ObservableObject {
             sources      = try c.decodeIfPresent([WebSource].self, forKey: .sources) ?? []
             isError      = try c.decodeIfPresent(Bool.self, forKey: .isError) ?? false
             regenModel   = try c.decodeIfPresent(String.self, forKey: .regenModel)
+            answerModel  = try c.decodeIfPresent(String.self, forKey: .answerModel)
         }
     }
 
@@ -1019,12 +1029,12 @@ final class NotchModel: ObservableObject {
     /// clears it, so it never leaks into a follow-up.
     private var forceClipboardInjection = false
 
-    /// Set for exactly one `submit()` when a light-task preset chip fires
-    /// (translate/summarize/…), so that turn routes to the provider's lightweight
-    /// model and takes the plain single-shot stream (no agent/tool harness — a
-    /// mechanical transform never needs web search). Read once and cleared in
-    /// `submit()`, so it can never carry into a later typed Ask (XII-132).
-    private var presetLightTask = false
+    /// Set for exactly one `submit()` when a preset chip fires
+    /// (translate/summarize/…), so that turn takes the plain single-shot stream
+    /// (no agent/tool harness — a mechanical transform never needs web search)
+    /// and skips custom instructions (XII-137). Read once and cleared in
+    /// `submit()`, so it can never carry into a later typed Ask.
+    private var presetTurn = false
 
     /// When a chip's on-screen wording differs from the instruction sent to the
     /// model (currently only Translate, whose verbose detect-and-route rule must
@@ -1215,27 +1225,6 @@ final class NotchModel: ObservableObject {
     /// Settings, so the next question goes live without an app restart.
     func setService(_ service: AIService) {
         ai = service
-        // The light-task service is derived from the main provider/key; a provider
-        // or key change invalidates it. Rebuilt lazily on next use (XII-132).
-        cachedLightService = nil
-    }
-
-    /// A service pinned to the provider's lightweight model for mechanical tasks
-    /// (translate/summarize chips, title generation) — XII-132. `nil` when routing
-    /// is off, the provider has no distinct light tier, or the backend is the
-    /// offline stub / unconfigured; callers then just use the main `ai`, so a task
-    /// never fails for lack of a light model. Cached until `setService` swaps it.
-    private var cachedLightService: AIService?
-    private var lightService: AIService? {
-        // Stub / unconfigured → no routing (the caller's own stub guards still fire).
-        guard !(ai is StubAIService) else { return nil }
-        if let cached = cachedLightService { return cached }
-        let provider = APIKeyStore.selectedProvider
-        guard let key = APIKeyStore.current(for: provider),
-              let lightModel = APIKeyStore.lightTaskModel(for: provider) else { return nil }
-        let service = AppDelegate.makeService(provider: provider, apiKey: key, model: lightModel)
-        cachedLightService = service
-        return service
     }
 
     var hasText: Bool { !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
@@ -1376,18 +1365,6 @@ final class NotchModel: ObservableObject {
         }
     }
     private static let copySenseKey = "copySenseEnabled"
-
-    /// Whether mechanical side-tasks (translate/summarize chips, title generation)
-    /// use the provider's lightweight model instead of the main Ask model (XII-132).
-    /// Published mirror of `APIKeyStore.lightTasksEnabled` so the Settings toggle
-    /// drives it live; a change invalidates the cached light service so the next
-    /// task re-derives it (or falls back to main when turned off).
-    @Published var lightTasksEnabled: Bool = APIKeyStore.lightTasksEnabled {
-        didSet {
-            APIKeyStore.lightTasksEnabled = lightTasksEnabled
-            cachedLightService = nil
-        }
-    }
 
     /// A one-line personal preference the user set in Settings (XII-137), appended
     /// after the built-in persona on the Ask path — "always answer in English",
@@ -2765,10 +2742,10 @@ final class NotchModel: ObservableObject {
         // than re-deriving it from the phrase's wording (which `isReferentialQuery`
         // can misjudge). `submit()` reads and clears the flag this turn.
         forceClipboardInjection = true
-        // This turn is a mechanical light task (translate/summarize/…) — route it to
-        // the provider's light model when available (XII-132). Consumed once in
-        // `submit()`, so it never leaks into a later typed Ask.
-        presetLightTask = true
+        // This turn is a mechanical preset (translate/summarize/…) — it takes the
+        // plain stream and skips custom instructions. Consumed once in `submit()`,
+        // so it never leaks into a later typed Ask.
+        presetTurn = true
         submit()
     }
 
@@ -2798,6 +2775,16 @@ final class NotchModel: ObservableObject {
         }
     }
 
+    /// Rough char budget for the wired conversation history. A long thread grows
+    /// unbounded turn by turn; left uncapped it eventually overruns the provider's
+    /// context window, which comes back as a non-retryable 400 that kills the turn
+    /// outright (not a graceful "too long"). We trim the OLDEST turns first, keeping
+    /// the tail — the current question and its recent lead-up, which is what the
+    /// answer actually depends on. ~48k characters is a conservative few-k-token
+    /// slice that leaves ample room for the system prompt, tools, and the reply on
+    /// every provider we ship, while still holding many turns of normal chat.
+    private static let wireContextCharBudget = 48_000
+
     /// The wire copy of the thread for `submit()` (XII-88). Drops, besides the new
     /// round's placeholder, the assistant turns that never became a real answer:
     ///   - an *empty* turn left behind when a follow-up superseded a round before
@@ -2807,16 +2794,41 @@ final class NotchModel: ObservableObject {
     /// Dropping a turn can leave two user messages adjacent, which Anthropic also
     /// rejects (roles must alternate) — so consecutive same-role messages are
     /// merged. Only this wire copy is filtered; the visible thread keeps every turn.
+    /// Also trims the oldest turns past `wireContextCharBudget` — see there.
     private static func wireContext(from turns: [Turn], excluding answerID: UUID)
         -> [ChatMessage]
     {
-        var messages: [ChatMessage] = []
-        for turn in turns {
-            if turn.id == answerID { continue }
+        // Keep only the turns that will actually be wired (same hygiene filter as
+        // below), then walk from the newest backwards, admitting turns until the
+        // char budget is spent. The current question is the last kept turn, so it is
+        // always admitted first — a single turn is never dropped for being too big,
+        // it's just the only one that fits. Older turns beyond the budget fall off.
+        let wirable = turns.filter { turn in
+            if turn.id == answerID { return false }
             if turn.role == "assistant" {
                 let body = turn.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                if body.isEmpty || turn.isError { continue }
+                if body.isEmpty || turn.isError { return false }
             }
+            return true
+        }
+        var kept: [Turn] = []
+        var used = 0
+        for turn in wirable.reversed() {
+            // Admit the newest turn unconditionally; after that, stop once adding the
+            // next-older turn would blow the budget (older history just drops off).
+            if !kept.isEmpty && used + turn.text.count > wireContextCharBudget { break }
+            used += turn.text.count
+            kept.insert(turn, at: 0)
+        }
+        // The untrimmed list always opened with the thread's first user question;
+        // the budget cut can land between a question and its answer, leaving an
+        // assistant turn first — which Anthropic rejects (the conversation must
+        // open with a user turn). Drop any leading assistant turns so the trimmed
+        // window still starts on a user message.
+        while kept.first?.role == "assistant" { kept.removeFirst() }
+
+        var messages: [ChatMessage] = []
+        for turn in kept {
             if let last = messages.last, last.role == turn.role {
                 messages[messages.count - 1] = ChatMessage(
                     role: turn.role, content: last.content + "\n\n" + turn.text)
@@ -2842,14 +2854,11 @@ final class NotchModel: ObservableObject {
         // typed turn. Only honoured on a forced-clip turn, paired with the clipboard.
         let wireOverride = forcedWirePhrase
         forcedWirePhrase = nil
-        // One-shot: this turn is a light-task preset (translate/summarize) → route to
-        // the provider's light model and skip the tool harness (XII-132). Consumed
-        // here so a later typed Ask always uses the main model. Resolve the light
-        // service now (main-actor state) so the streaming task can capture it; nil
-        // when routing is off / no light tier, and the task falls back to `self.ai`.
-        let lightTask = presetLightTask
-        presetLightTask = false
-        let lightAIService = lightTask ? lightService : nil
+        // One-shot: this turn is a preset (translate/summarize) → skip the tool
+        // harness and custom instructions. Consumed here so it never carries into
+        // a later typed Ask.
+        let presetTurn = self.presetTurn
+        self.presetTurn = false
         // One-shot regenerate-with-model override (XII-135): build a service pinned
         // to the picked model for THIS turn only, without touching the saved
         // default. Consumed + cleared here. `regenModel` is stamped onto the answer
@@ -2910,9 +2919,9 @@ final class NotchModel: ObservableObject {
         // wire copy in `context` carries the clipboard. Skipped on follow-ups: a
         // mid-conversation clipboard change is almost never "about" the new turn.
         // Custom instructions ride the Ask path only (XII-137): a preset
-        // (translate/summarize — a `lightTask`) carries its own precise instruction
+        // (translate/summarize) carries its own precise instruction
         // and must not be polluted by "always answer in English"-style preferences.
-        let customForTurn = lightTask ? nil : customInstructions
+        let customForTurn = presetTurn ? nil : customInstructions
         var system = notchSystemPromptDated(customInstructions: customForTurn)
         // Clipboard injection — first turn only. We no longer gate on a lexical
         // "is this referential?" guess: whenever a clip is eligible we hand the model
@@ -3097,10 +3106,10 @@ final class NotchModel: ObservableObject {
                 // wins, else the main service. An upgraded model still gets the tool
                 // harness below (search etc.), so the override rides both paths.
                 let askService: AIService = overrideService ?? self.ai
-                // A light-task turn (translate/summarize preset) takes the plain
-                // stream on the light service and skips the tool harness — a
-                // mechanical transform never needs web search (XII-132).
-                if !lightTask,
+                // A preset turn (translate/summarize) takes the plain stream and
+                // skips the tool harness — a mechanical transform never needs web
+                // search.
+                if !presetTurn,
                    !imageAttached,
                    let agent = askService as? AgentCapableService,
                    APIKeyStore.selectedProvider.supportsTools,
@@ -3134,12 +3143,25 @@ final class NotchModel: ObservableObject {
                             if self.isOnScreen(answerID: answerID) {
                                 self.appendSources(id: answerID, roundSources)
                             }
+                        },
+                        onModel: { [weak self] ran in
+                            guard let self else { return }
+                            // Stamp the concrete model on both the persisted snapshot
+                            // and the on-screen turn, mirroring `onSources`, so the
+                            // footer shows which model actually replied.
+                            if let i = thread.firstIndex(where: { $0.id == answerID }) {
+                                thread[i].answerModel = ran
+                                self.syncInFlight(answerID, thread)
+                            }
+                            if self.isOnScreen(answerID: answerID),
+                               let i = self.turns.firstIndex(where: { $0.id == answerID }) {
+                                self.turns[i].answerModel = ran
+                            }
                         })
                 } else {
-                    // Light-task turns stream from the light service; a regenerate
-                    // override (XII-135) streams from its pinned service; everything
-                    // else uses the main model.
-                    let service = (lightTask ? lightAIService : nil) ?? askService
+                    // A regenerate override (XII-135) streams from its pinned
+                    // service; everything else uses the main model.
+                    let service = askService
                     for try await chunk in service.stream(system: system, messages: context) {
                         if Task.isCancelled { return }
                         appendChunk(chunk)
@@ -3301,14 +3323,6 @@ final class NotchModel: ObservableObject {
         return text.isEmpty ? nil : text
     }
 
-    /// The id of the newest settled assistant answer — the argument the keyboard
-    /// "save to Notes" action passes to `saveAnswerToNotes` (XII-131). Same
-    /// settled/non-empty gate as `lastAnswerText`.
-    var lastAnswerID: UUID? {
-        guard let last = turns.last, last.role == "assistant", !last.streaming,
-              !last.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        return last.id
-    }
 
     /// Re-run the newest settled answer's question for a fresh take — the answer
     /// footer's regenerate button. Same drop-and-resubmit dance as `retryLastAsk`,
@@ -3461,69 +3475,6 @@ final class NotchModel: ObservableObject {
         }
     }
 
-    // MARK: - Save answer to Notes (XII-123)
-
-    /// The per-answer cue for the "save to Notes" footer action: which answer
-    /// it's about plus the line to show ("Saving…" / "Added to Notes" / error).
-    /// Deliberately SEPARATE from `noteSaving`/`lastSavedNote` — those belong to
-    /// the input-box capture pipeline, and sharing that single flag across
-    /// concurrent writers is exactly the overlap XII-117 flags. One cue at a
-    /// time is enough: saving a second answer just moves the cue to it.
-    struct AnswerNoteCue: Equatable {
-        let answerID: UUID
-        let text: String
-    }
-    @Published var answerNoteCue: AnswerNoteCue? = nil
-    private var answerNoteCueTask: Task<Void, Never>? = nil
-
-    /// Save a settled answer into Apple Notes (XII-123): first line = the
-    /// thread's generated title (Notes titles a note from its first line),
-    /// falling back to the question; body = question + answer, markdown as-is.
-    /// Reuses the NotesService write pipeline; feedback renders inline in the
-    /// answer's own footer so the thread is never interrupted.
-    func saveAnswerToNotes(answerID: UUID) {
-        guard let i = turns.firstIndex(where: { $0.id == answerID }),
-              turns[i].role == "assistant", !turns[i].streaming else { return }
-        let answer = turns[i].text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !answer.isEmpty else { return }
-        let question = turns[..<i].last(where: { $0.role == "user" })?
-            .text.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let title = history.first(where: { $0.id == threadHistoryID })?.title ?? question
-        var body = title
-        if !question.isEmpty, question != title { body += "\n\n" + question }
-        body += "\n\n" + answer
-
-        answerNoteCueTask?.cancel()
-        answerNoteCue = AnswerNoteCue(answerID: answerID, text: L("input.saving"))
-        NotesService.writeNote(body) { [weak self] result in
-            guard let self else { return }
-            switch result {
-            case .success:
-                self.flashAnswerNoteCue(
-                    AnswerNoteCue(answerID: answerID, text: L("feedback.addedNotes")))
-            case .failure(let err):
-                // Errors linger longer — usually "grant Automation access", which
-                // takes more than a glance to read.
-                self.flashAnswerNoteCue(
-                    AnswerNoteCue(answerID: answerID,
-                                  text: err.errorDescription ?? L("feedback.notesFailed")),
-                    seconds: 5)
-            }
-        }
-    }
-
-    /// Show a terminal save cue for a beat, then fade it — the same rhythm as
-    /// `flashSavedCue`, scoped to the answer footer instead of the input box.
-    private func flashAnswerNoteCue(_ cue: AnswerNoteCue, seconds: Double = 1.7) {
-        answerNoteCueTask?.cancel()
-        answerNoteCue = cue
-        answerNoteCueTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-            guard !Task.isCancelled else { return }
-            withAnimation(.easeInOut(duration: 0.25)) { self?.answerNoteCue = nil }
-        }
-    }
-
     // MARK: - Reminder submit
 
     /// Route a time-bound line into Apple Reminders, due (and ringing) at the
@@ -3631,9 +3582,9 @@ final class NotchModel: ObservableObject {
     /// File a successful Note/Reminder capture into the same Recent history the AI
     /// Q&A uses, so a jotted line leaves a visible trace instead of vanishing with
     /// the 1.7s toast. Stored with its `source` (→ Notes / → Reminders tag), the
-    /// `link` back to the exact note/reminder so the row jumps there, and an
-    /// explicit empty `turns`, so reopening it can never synthesize a ghost answer
-    /// bubble — `openHistory` opens the capture in its app instead.
+    /// `link` back to the exact note/reminder the row's trailing button jumps to,
+    /// and an explicit empty `turns`, so reopening it can never synthesize a ghost
+    /// answer bubble — a capture has no thread to reopen.
     private func persistCapture(_ line: String, source: HistoryItem.Source, link: String?) {
         var item = HistoryItem(q: line, a: "", t: Date(), turns: [])
         item.source = source
@@ -3924,10 +3875,7 @@ final class NotchModel: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else { return nil }
 
-        // Route the title to the provider's light model when available (XII-132) —
-        // it's a mechanical summary a cheap/fast tier does just as well. Falls back
-        // to the main service when routing is off or there's no light tier.
-        let service = lightService ?? ai
+        let service = ai
         do {
             var title = ""
             for try await chunk in service.stream(
@@ -4013,22 +3961,17 @@ final class NotchModel: ObservableObject {
             return
         }
 
+        // A Note/Reminder capture has no AI answer to reopen — it lives in Apple
+        // Notes/Reminders. Tapping the ROW body must NOT switch the user out to
+        // another app: they opened the notch expecting to stay here, and a silent
+        // jump to Notes/Reminders yanks them somewhere they didn't ask to go. The
+        // jump lives on a dedicated trailing button instead (`openCaptureInApp`),
+        // so leaving the app is always a deliberate, separate tap. Here the row
+        // body is a no-op for captures — the list stays open, nothing switches.
+        guard item.source == .ask else { return }
+
         showHistory = false
         highlightedHistoryIndex = nil
-
-        // A Note/Reminder capture has no AI answer to reopen — it lives in Apple
-        // Notes/Reminders, so tapping the row jumps straight *there*, to the exact
-        // note/reminder it created. This is the single choke point for BOTH the
-        // click path and the keyboard-Enter path (`historyConfirmHighlighted`
-        // calls straight through here), so handling it once here covers both.
-        guard item.source == .ask else {
-            openCapture(item)
-            // Close the panel after launching — the user's attention is moving to
-            // Notes/Reminders, so leaving the notch unfurled behind it is noise.
-            // Same hard-close Esc/click-outside use.
-            fullClose()
-            return
-        }
 
         text = ""
         // Restore the whole thread, and adopt this item's id so a follow-up on the
@@ -4037,6 +3980,18 @@ final class NotchModel: ObservableObject {
         turns = item.conversation
         threadHistoryID = item.id
         mode = .result
+    }
+
+    /// Jump a Note/Reminder capture out to its app — the DELIBERATE exit, fired
+    /// only by the row's trailing "open in app" button, never by tapping the row
+    /// body (which stays put; see `openHistory`). Switching apps is a decision the
+    /// user makes on purpose, so it has its own control. No-op for `.ask` rows.
+    func openCaptureInApp(_ item: HistoryItem) {
+        guard item.source != .ask else { return }
+        openCapture(item)
+        // Attention is moving to Notes/Reminders — hard-close the panel behind it
+        // so the notch doesn't hang unfurled over the app the user just jumped to.
+        fullClose()
     }
 
     /// Jump from a Recent row straight to the note/reminder it created.
@@ -4194,7 +4149,16 @@ final class NotchModel: ObservableObject {
         guard !hasText, showHistory, let i = highlightedHistoryIndex else { return false }
         let items = recentVisible
         guard items.indices.contains(i) else { return false }
-        openHistory(items[i])
+        let item = items[i]
+        // Enter is a deliberate confirm, not an accidental body tap — so on a
+        // highlighted capture it fires the jump (the keyboard twin of clicking the
+        // trailing button), while a mouse click on the row body stays put. Ask
+        // rows reopen the thread as before.
+        if item.source == .ask {
+            openHistory(item)
+        } else {
+            openCaptureInApp(item)
+        }
         return true
     }
 

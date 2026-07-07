@@ -1279,12 +1279,11 @@ struct AssistantTurnView: View {
     /// The model this answer was regenerated with, when it wasn't the default
     /// (XII-135) — shown as a small caption so the answer says which model made it.
     var regenModel: String? = nil
-    /// File this settled answer (with its question) into Apple Notes (XII-123).
-    var onSaveToNotes: (() -> Void)? = nil
-    /// The save-to-Notes progress/outcome line for THIS answer ("Saving…" /
-    /// "Added to Notes" / an error), `nil` when there's nothing to say. Rendered
-    /// at the footer's tail so the confirmation lands in place, not in a toast.
-    var noteCue: String? = nil
+    /// The concrete model the provider actually ran, echoed back in the stream —
+    /// the real reply behind the `openrouter/free` auto-router. When present it
+    /// takes precedence over `regenModel` in the footer caption, shown as a bare
+    /// model name (vendor prefix and `:free` suffix stripped).
+    var answerModel: String? = nil
     /// A clarifying question the model posed via the `ask_user` tool, still
     /// waiting on the user — renders as an option card under the (possibly still
     /// empty) answer. Non-nil only while this turn streams.
@@ -1295,6 +1294,26 @@ struct AssistantTurnView: View {
     /// One opacity beat, shared by the wait-overlay fade so the handoff reads as
     /// part of the same calm rhythm rather than a separate flourish.
     private static let fade: Double = 0.18
+
+    /// The footer's "which model made this" caption. Prefers the concrete model
+    /// the provider actually ran (`answerModel`, shown as a bare name), and falls
+    /// back to the regenerate-with pick (`regenModel`, shown verbatim — it's the
+    /// user's own choice). `nil` when neither is set, so a plain default answer
+    /// carries no caption.
+    static func footerModelCaption(answerModel: String?, regenModel: String?) -> String? {
+        if let answerModel, !answerModel.isEmpty { return bareModelName(answerModel) }
+        return regenModel
+    }
+
+    /// A model id reduced to its bare name for display: drop the vendor prefix
+    /// (everything up to and including the last `/`) and the `:free` suffix.
+    /// `openai/gpt-oss-20b:free` → `gpt-oss-20b`, `openrouter/free` → `free`.
+    static func bareModelName(_ id: String) -> String {
+        var s = id
+        if let slash = s.lastIndex(of: "/") { s = String(s[s.index(after: slash)...]) }
+        if s.hasSuffix(":free") { s = String(s.dropLast(":free".count)) }
+        return s.isEmpty ? id : s
+    }
 
     /// True while the cursor is anywhere over this turn (answer text or footer).
     /// Drives the footer's island-hover: the action icons rest nearly invisible
@@ -1458,8 +1477,11 @@ struct AssistantTurnView: View {
                             .padding(.trailing, 6)
                     }
                     if hasText {
+                        // Copy the answer verbatim — markdown syntax intact
+                        // (headings, `**bold**`, lists, code fences). The paired
+                        // plain-text button below strips that formatting.
                         AnswerFooterButton(icon: "doc.on.doc",
-                                           help: L("result.copyAnswer"),
+                                           help: L("result.copyMarkdown"),
                                            rowHovered: turnHovered,
                                            confirms: true) {
                             NSPasteboard.general.clearContents()
@@ -1469,15 +1491,19 @@ struct AssistantTurnView: View {
                             )
                             onInAppCopy?()
                         }
-                    }
-                    // Save to Apple Notes (XII-123), right beside copy — the
-                    // "keep this" pair. The cue at the row's tail carries the
-                    // outcome, so no confirm-checkmark here.
-                    if hasText, let onSaveToNotes {
-                        AnswerFooterButton(icon: "note.text",
-                                           help: L("result.saveToNotes"),
-                                           rowHovered: turnHovered) {
-                            onSaveToNotes()
+                        // Copy with every markdown mark removed — plain prose for
+                        // pasting into fields that don't render markdown.
+                        AnswerFooterButton(icon: "text.alignleft",
+                                           help: L("result.copyPlainText"),
+                                           rowHovered: turnHovered,
+                                           confirms: true) {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(
+                                MarkdownParser.plainText(text)
+                                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                                forType: .string
+                            )
+                            onInAppCopy?()
                         }
                     }
                     if let onRegenerate {
@@ -1509,33 +1535,20 @@ struct AssistantTurnView: View {
                             }
                         }
                     }
-                    // The model that produced this answer, when it wasn't the
-                    // default (XII-135) — a quiet trailing caption, same whisper as
-                    // the note-save cue.
-                    if let regenModel {
-                        Text(regenModel)
-                            .font(.sf(11))
-                            .tracking(0.2)
-                            .foregroundStyle(Tokens.text4)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .padding(.leading, 6)
-                    }
-                    // The save-to-Notes outcome, in the same quiet grey whisper
-                    // as the input-box save cue — confirmation in place, no toast.
-                    if let noteCue {
-                        Text(noteCue)
-                            .font(.sf(11))
-                            .tracking(0.2)
-                            .foregroundStyle(Tokens.text4)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                            .padding(.leading, 6)
-                            .transition(.opacity)
+                    // The model that produced this answer — an ⓘ glyph whose
+                    // tooltip *is* the model name, so hovering it just shows the
+                    // name (no click, no popover, no inline unfurl). Prefer the
+                    // concrete model the provider actually ran (the real reply
+                    // behind `openrouter/free`), shown as a bare name; fall back
+                    // to the regenerate-with pick (XII-135) when none was reported.
+                    if let caption = Self.footerModelCaption(answerModel: answerModel,
+                                                             regenModel: regenModel) {
+                        AnswerFooterButton(icon: "info.circle",
+                                           help: caption,
+                                           rowHovered: turnHovered) {}
                     }
                 }
                 .padding(.top, 2)
-                .animation(.easeInOut(duration: 0.2), value: noteCue)
             }
         }
         .onHover { turnHovered = $0 }
@@ -1951,6 +1964,70 @@ enum MarkdownParser {
         let text = String(line[afterSep...]).trimmingCharacters(in: .whitespaces)
         return text.isEmpty ? nil : (number, text)
     }
+
+    // MARK: - Plain-text flattening
+
+    /// Flatten an answer's markdown into clean plain text — the "copy without
+    /// formatting" path. Reuses `parse` so every block kind we render is handled,
+    /// then drops the structural syntax: heading hashes, list markers, block-quote
+    /// `>`, code fences, table pipes. Inline `**bold**` / `*italic*` / `` `code` ``
+    /// / `[label](url)` is stripped per line via `stripInline`. Blocks are joined
+    /// with blank lines so paragraphs still read as paragraphs.
+    static func plainText(_ source: String) -> String {
+        var out: [String] = []
+        for block in parse(source) {
+            switch block {
+            case let .heading(_, text):
+                out.append(stripInline(text))
+            case let .bullet(text, indent):
+                out.append(indentPad(indent) + "• " + stripInline(text))
+            case let .ordered(number, text, indent):
+                out.append(indentPad(indent) + "\(number). " + stripInline(text))
+            case let .task(done, text, indent):
+                out.append(indentPad(indent) + (done ? "[x] " : "[ ] ") + stripInline(text))
+            case let .quote(text):
+                // Keep the quote's own line breaks; strip inline markup per line.
+                let lines = text.components(separatedBy: "\n").map { stripInline($0) }
+                out.append(lines.joined(separator: "\n"))
+            case let .paragraph(text):
+                out.append(stripInline(text))
+            case let .code(_, text):
+                // Code is verbatim — no inline stripping (a `*` in code is a `*`).
+                out.append(text)
+            case let .table(header, rows):
+                // Render as tab-separated rows so columns survive a paste into a
+                // plain-text field or spreadsheet.
+                var lines = [header.map { stripInline($0) }.joined(separator: "\t")]
+                for row in rows {
+                    lines.append(row.map { stripInline($0) }.joined(separator: "\t"))
+                }
+                out.append(lines.joined(separator: "\n"))
+            case .divider:
+                // A rule carries no text; drop it (the blank-line join keeps the
+                // visual break between the blocks it separated).
+                break
+            }
+        }
+        return out.joined(separator: "\n\n")
+    }
+
+    private static func indentPad(_ indent: Int) -> String {
+        String(repeating: "  ", count: max(0, indent))
+    }
+
+    /// Strip inline markdown (`**bold**`, `*italic*`, `` `code` ``, `[label](url)`)
+    /// from one line, leaving the visible text. Uses the same SwiftUI markdown
+    /// parser as `InlineMarkdownText` so the two stay consistent; falls back to the
+    /// raw line if parsing fails.
+    private static func stripInline(_ line: String) -> String {
+        if let parsed = try? AttributedString(
+            markdown: line,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        ) {
+            return String(parsed.characters)
+        }
+        return line
+    }
 }
 
 /// Renders a parsed answer as stacked block-level markdown — headings and lists
@@ -2352,7 +2429,7 @@ private struct AnswerFooterButton: View {
         .animation(.easeOut(duration: 0.18), value: hovering)
         .animation(.easeOut(duration: 0.18), value: rowHovered)
         .animation(.easeOut(duration: 0.15), value: confirmed)
-        .help(help)
+        .notchTooltip(help)
     }
 }
 
@@ -2438,7 +2515,7 @@ struct SourceBadge: View {
                     scheduleClose()             // grace period to reach the panel
                 }
             }
-            .help(L("source.badge.help"))
+            .notchTooltip(L("source.badge.help"))
     }
 
     /// Close after a short grace period, unless something (the panel's hover, or

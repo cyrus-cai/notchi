@@ -36,6 +36,11 @@ struct InlineSettingsView: View {
     @State private var modelOptions: [String] = APIKeyStore.selectedProvider.availableModels
     @State private var loadingModels = false
 
+    /// OpenRouter only: which of `modelOptions`' free models are flagship-class,
+    /// per the size ranking done at fetch time (`OpenRouterFreeModels`). Drives
+    /// the menu's featured/rest sections; empty until the live list loads.
+    @State private var featuredFreeModels: Set<String> = []
+
     /// Connectivity-test state. `testing` drives the spinner; `testResult` is the
     /// last verdict shown under the key field (nil = nothing tested yet).
     @State private var testing = false
@@ -223,7 +228,6 @@ struct InlineSettingsView: View {
                             keyRow
                         }
                         modelRow
-                        lightTasksRow
                         customInstructionsRow
                         footer
                     case .search:
@@ -415,6 +419,7 @@ struct InlineSettingsView: View {
         apiKey = APIKeyStore.stored(for: newValue)
         modelID = APIKeyStore.storedModel(for: newValue)
         modelOptions = newValue.availableModels
+        featuredFreeModels = []   // stale ranking belonged to the old provider
         saved = false
         testResult = nil   // last verdict belonged to the old provider/key
         editingKey = apiKey.isEmpty && !APIKeyStore.hasEnvOverride(for: newValue)
@@ -569,12 +574,18 @@ struct InlineSettingsView: View {
     /// grid/edit/mask lifecycle as the Exa row; the hint says where to get a key.
     private var keenableKeyRow: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 12) {
-                Text(L("model.keenableApiKey"))
-                    .font(.sf(13, weight: .medium))
-                    .foregroundStyle(Tokens.text2)
-                    .lineLimit(1)
-                    .frame(width: 76, alignment: .leading)
+            HStack(spacing: 8) {
+                HStack(spacing: 3) {
+                    Text(L("model.keenableApiKey"))
+                        .font(.sf(13, weight: .medium))
+                        .foregroundStyle(Tokens.text2)
+                        .lineLimit(1)
+                    // "Where to get a key" note, folded into an ⓘ beside the title.
+                    if !keenableEnvOverride {
+                        SettingInfo(keenableHintText)
+                    }
+                }
+                .frame(width: 100, alignment: .leading)
 
                 ZStack(alignment: .leading) {
                     if editingKeenableKey {
@@ -635,17 +646,15 @@ struct InlineSettingsView: View {
                 }
             }
 
-            Group {
-                if keenableEnvOverride {
-                    Text(L("model.footer.env", "KEENABLE_API_KEY"))
-                } else {
-                    Text(keenableHintText)
-                }
+            // Only the live env-override status stays inline (it explains why the
+            // field is locked); the how-to note moved into the ⓘ above.
+            if keenableEnvOverride {
+                Text(L("model.footer.env", "KEENABLE_API_KEY"))
+                    .font(.sf(11))
+                    .foregroundStyle(Tokens.text4)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 88)
             }
-            .font(.sf(11))
-            .foregroundStyle(Tokens.text4)
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(.leading, 88)
         }
     }
 
@@ -665,12 +674,18 @@ struct InlineSettingsView: View {
     /// key. Hidden field stays masked once saved, like the provider key.
     private var exaKeyRow: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 12) {
-                Text(L("model.exaApiKey"))
-                    .font(.sf(13, weight: .medium))
-                    .foregroundStyle(Tokens.text2)
-                    .lineLimit(1)
-                    .frame(width: 76, alignment: .leading)
+            HStack(spacing: 8) {
+                HStack(spacing: 3) {
+                    Text(L("model.exaApiKey"))
+                        .font(.sf(13, weight: .medium))
+                        .foregroundStyle(Tokens.text2)
+                        .lineLimit(1)
+                    // "Where to get a key" note, folded into an ⓘ beside the title.
+                    if !exaEnvOverride {
+                        SettingInfo(exaHintText)
+                    }
+                }
+                .frame(width: 100, alignment: .leading)
 
                 ZStack(alignment: .leading) {
                     if editingExaKey {
@@ -732,18 +747,15 @@ struct InlineSettingsView: View {
                 }
             }
 
-            // Hint hangs under the control column (matching the test-verdict indent).
-            Group {
-                if exaEnvOverride {
-                    Text(L("model.footer.env", "EXA_API_KEY"))
-                } else {
-                    Text(exaHintText)
-                }
+            // Only the live env-override status stays inline; the how-to note
+            // moved into the ⓘ above.
+            if exaEnvOverride {
+                Text(L("model.footer.env", "EXA_API_KEY"))
+                    .font(.sf(11))
+                    .foregroundStyle(Tokens.text4)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 88)
             }
-            .font(.sf(11))
-            .foregroundStyle(Tokens.text4)
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(.leading, 88)
         }
     }
 
@@ -1010,8 +1022,12 @@ struct InlineSettingsView: View {
                 GlassMenu(title: modelLabel) {
                     Button(L("model.default", provider.defaultModel)) { selectModel("") }
                     Divider()
-                    ForEach(modelRows, id: \.self) { id in
-                        Button(id) { selectModel(id) }
+                    if provider == .openrouter {
+                        openRouterModelMenuItems
+                    } else {
+                        ForEach(modelRows, id: \.self) { id in
+                            Button(id) { selectModel(id) }
+                        }
                     }
                 }
                 .disabled(envOverride)
@@ -1019,6 +1035,42 @@ struct InlineSettingsView: View {
                 if loadingModels {
                     ProgressView()
                         .controlSize(.small)
+                }
+            }
+        }
+    }
+
+    /// OpenRouter's rotating free lineup, grouped instead of one flat list: the
+    /// auto-router (plus any hand-typed id) up top, then the top few free models
+    /// ("Best free models", capped at `OpenRouterFreeModels.featuredLimit`),
+    /// then the long tail collapsed behind a "More free models ▸" submenu.
+    /// Ranking comes from real usage fetched with the live list;
+    /// `featuredFreeModels` carries the membership.
+    @ViewBuilder
+    private var openRouterModelMenuItems: some View {
+        let groups = OpenRouterFreeModels.group(modelRows, featured: featuredFreeModels)
+        // Drop the id that equals the provider default (the auto-router,
+        // `openrouter/free`): the "Default (…)" row above already is it, so
+        // listing it here too just reads as a duplicate.
+        ForEach(groups.head.filter { $0 != provider.defaultModel }, id: \.self) { id in
+            Button(id) { selectModel(id) }
+        }
+        // `SwiftUI.Section` spelled out — this view's own `Section` enum (the
+        // sidebar categories) shadows the SwiftUI type here.
+        if !groups.featured.isEmpty {
+            SwiftUI.Section(L("model.freeFeatured")) {
+                ForEach(groups.featured, id: \.self) { id in
+                    Button(id) { selectModel(id) }
+                }
+            }
+        }
+        // The long tail is genuinely collapsed: a nested `Menu` in a native
+        // menu renders as one "More free models ▸" row that only expands its
+        // items when opened — not a flat, always-visible section.
+        if !groups.rest.isEmpty {
+            Menu(L("model.freeMore")) {
+                ForEach(groups.rest, id: \.self) { id in
+                    Button(id) { selectModel(id) }
                 }
             }
         }
@@ -1124,9 +1176,13 @@ struct InlineSettingsView: View {
     /// overrides the core rules.
     private var customInstructionsRow: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(L("general.customInstructions"))
-                .font(.sf(13))
-                .foregroundStyle(Tokens.text1)
+            HStack(spacing: 3) {
+                Text(L("general.customInstructions"))
+                    .font(.sf(13))
+                    .foregroundStyle(Tokens.text1)
+                // What this field does, collapsed behind an ⓘ beside its title.
+                SettingInfo(L("general.customInstructions.hint"))
+            }
             ZStack(alignment: .topLeading) {
                 if model.customInstructions.isEmpty {
                     Text(L("general.customInstructions.placeholder"))
@@ -1154,10 +1210,6 @@ struct InlineSettingsView: View {
                 RoundedRectangle(cornerRadius: 9)
                     .fill(.white.opacity(0.06))
             )
-            Text(L("general.customInstructions.hint"))
-                .font(.sf(11))
-                .foregroundStyle(Tokens.text4)
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -1392,38 +1444,6 @@ struct InlineSettingsView: View {
         .modifier(GlassPopoverBackground())
     }
 
-    /// Light-task routing (XII-132): whether translate/summarize chips and title
-    /// generation use the provider's lightweight model (cheaper + faster first
-    /// token) instead of the main Ask model. Main Ask always uses the chosen model.
-    private var lightTasksRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            settingRow(label: L("general.lightTasks")) {
-                Toggle("", isOn: Binding(
-                    get: { model.lightTasksEnabled },
-                    set: { model.lightTasksEnabled = $0 }
-                ))
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .controlSize(.mini)
-                .tint(Tokens.text2)
-            }
-            Text(lightTasksHint)
-                .font(.sf(11))
-                .foregroundStyle(Tokens.text4)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    /// Hint under the light-model toggle. When the current provider has a light
-    /// tier, name the exact model it routes to; otherwise say it kicks in only
-    /// where a lighter tier exists.
-    private var lightTasksHint: String {
-        if let light = provider.lightModel {
-            return L("general.lightTasks.hint", light)
-        }
-        return L("general.lightTasks.hint.none")
-    }
-
     /// Copy sensing: whether the *closed* notch watches ⌘C and offers to file a
     /// copied note/reminder (press ⌘C again to confirm). The in-panel capture
     /// chip is independent of this switch. A little diagram — a copied card
@@ -1432,7 +1452,9 @@ struct InlineSettingsView: View {
     /// on-state reads at a glance.
     private var copySenseRow: some View {
         VStack(alignment: .leading, spacing: 10) {
-            settingRow(label: L("general.copySense")) {
+            // The prose ("press ⌘C again to confirm") folds into the ⓘ beside the
+            // title; the diagram below stays, carrying the idea on its own.
+            settingRow(label: L("general.copySense"), info: L("general.copySense.hint")) {
                 Toggle("", isOn: Binding(
                     get: { model.copySenseEnabled },
                     set: { model.copySenseEnabled = $0 }
@@ -1442,14 +1464,7 @@ struct InlineSettingsView: View {
                 .controlSize(.mini)
                 .tint(Tokens.text2)
             }
-            HStack(alignment: .center, spacing: 12) {
-                CopySenseDiagram(active: model.copySenseEnabled)
-                Text(L("general.copySense.hint"))
-                    .font(.sf(11))
-                    .foregroundStyle(Tokens.text4)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
+            CopySenseDiagram(active: model.copySenseEnabled)
         }
     }
 
@@ -1472,7 +1487,9 @@ struct InlineSettingsView: View {
                     }
                 }
             }
-            settingRow(label: L("translation.pref2")) {
+            // The direction rule — when does the secondary ever apply? — collapsed
+            // behind the ⓘ beside the second-language title it explains.
+            settingRow(label: L("translation.pref2"), info: L("translation.hint")) {
                 GlassMenu(title: model.translationPref2.label) {
                     ForEach(TranslationLanguage.allCases) { lang in
                         Button {
@@ -1487,13 +1504,6 @@ struct InlineSettingsView: View {
                     }
                 }
             }
-            // The direction rule in one line — without it two language pickers
-            // read as a mystery (when does the secondary ever apply?).
-            Text(L("translation.hint"))
-                .font(.sf(11))
-                .foregroundStyle(Tokens.text4)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, 2)
         }
     }
 
@@ -1761,18 +1771,25 @@ struct InlineSettingsView: View {
     // MARK: - Row scaffold
 
     /// A label-on-the-left, control-on-the-right row, sized so the provider and
-    /// model menus line up.
+    /// model menus line up. Pass `info` to hang a collapsed ⓘ note right after the
+    /// label — the same mark the answer footer uses for the model that replied.
     private func settingRow<Content: View>(
         label: String,
+        info: String? = nil,
         @ViewBuilder _ content: () -> Content
     ) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Text(label)
-                .font(.sf(13, weight: .medium))
-                .foregroundStyle(Tokens.text2)
-                .lineLimit(1)
-                .fixedSize()
-                .frame(minWidth: 64, alignment: .leading)
+            HStack(spacing: 3) {
+                Text(label)
+                    .font(.sf(13, weight: .medium))
+                    .foregroundStyle(Tokens.text2)
+                    .lineLimit(1)
+                    .fixedSize()
+                if let info {
+                    SettingInfo(info)
+                }
+            }
+            .frame(minWidth: 64, alignment: .leading)
             content()
             Spacer(minLength: 0)
         }
@@ -1796,6 +1813,7 @@ struct InlineSettingsView: View {
         guard target == provider else { return }
         guard let key = APIKeyStore.current(for: target) else {
             modelOptions = target.availableModels
+            featuredFreeModels = []
             return
         }
         loadingModels = true
@@ -1803,7 +1821,8 @@ struct InlineSettingsView: View {
         // Guard against a stale response after the user switched providers.
         guard target == provider else { return }
         loadingModels = false
-        modelOptions = live ?? target.availableModels
+        modelOptions = live?.models ?? target.availableModels
+        featuredFreeModels = live?.openRouterFeatured ?? []
     }
 
     /// Probe the *stored* key against the current provider and surface the verdict.
@@ -1870,6 +1889,50 @@ private struct GlassPopoverBackground: ViewModifier {
                 shape.fill(.clear).nativeGlass(in: shape)
                     .overlay(shape.strokeBorder(.white.opacity(0.10), lineWidth: 0.5))
             }
+        }
+    }
+}
+
+/// A collapsed explanatory note: a quiet ⓘ that reveals its text in a popover on
+/// click, so the settings rows stay a clean stack instead of carrying an always-on
+/// caption under each one. Same register as the answer footer's model-info ⓘ — a
+/// faint `info.circle` that brightens on hover, over the panel's own glass.
+///
+/// Takes either a plain string or a pre-built `AttributedString` (for hints with an
+/// inline link), so both the terse captions and the "get a key at …" hints collapse
+/// behind the same mark.
+struct SettingInfo: View {
+    private let plain: String?
+    private let rich: AttributedString?
+
+    @State private var showing = false
+    @State private var hovering = false
+
+    init(_ text: String) { plain = text; rich = nil }
+    init(_ text: AttributedString) { plain = nil; rich = text }
+
+    var body: some View {
+        Button { showing.toggle() } label: {
+            Image(systemName: "info.circle")
+                .font(.system(size: 12, weight: .regular))
+                .foregroundStyle(hovering ? Tokens.text2 : Tokens.text4)
+                .frame(width: 20, height: 20)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.16), value: hovering)
+        .popover(isPresented: $showing, arrowEdge: .bottom) {
+            Group {
+                if let rich { Text(rich) } else { Text(plain ?? "") }
+            }
+            .font(.sf(12))
+            .foregroundStyle(Tokens.text2)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: 240, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .modifier(GlassPopoverBackground())
         }
     }
 }

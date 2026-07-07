@@ -3,13 +3,12 @@ import AppKit
 
 // MARK: - Built-in agent tools
 //
-// The first, deliberately small tool surface. Every tool here is low-risk and
-// local: read what the user already copied, tell the time, open a URL the user
-// can see, or run a web search. No file-system writes, no shell, no computer-use
-// — those high-blast-radius surfaces are intentionally out of scope for this
-// pass. The harness advertises exactly this set; growing it is a matter of adding
-// a `NotchTool` and registering it (see `ToolRegistry` construction in
-// `NotchModel`).
+// The deliberately small tool surface: read what the user already copied, tell
+// the time, do exact arithmetic, ask the user a clarifying question, run a web
+// search, and read a web page's text. All read-only — no file-system writes, no
+// shell, no computer-use; those high-blast-radius surfaces are intentionally out
+// of scope. The harness advertises exactly this set; growing it is a matter of
+// adding a `NotchTool` and registering it (see `ToolRegistry.standard(for:)`).
 
 /// Current local date and time. The notch assistant has no clock of its own
 /// (the model's knowledge has a cutoff), so any "what day is it / how long until
@@ -369,6 +368,28 @@ struct AskUserTool: NotchTool {
     }
 }
 
+/// The description every client-side web-search tool advertises. One shared
+/// string so the three backends (GLM / Exa / Keenable) never drift apart: the
+/// model's search behavior should not change with the backend. Beyond the
+/// when-to-search trigger it teaches the two habits that cut rounds and break
+/// the re-search loop: batch independent queries into ONE turn (the harness
+/// runs them concurrently — each extra round costs a full model round-trip),
+/// and when snippets are close-but-not-quite, `read_page` the best result
+/// instead of rewording the same query again.
+let webSearchToolDescription = """
+Searches the web for current, real-time information and returns the top \
+results with sources and dates. Call this whenever the answer depends on \
+information that may have changed or is past your knowledge cutoff — news, \
+current events, today's prices or rates, the latest version of something, or \
+anything time-sensitive. Prefer a focused query. When you need several \
+independent facts, issue multiple search calls with different queries in the \
+SAME turn — they run in parallel and save a round-trip. If the results look \
+relevant but the snippets don't contain the specific fact you need, call \
+read_page on the most promising result instead of searching again with a \
+reworded query. If the results don't contain the answer, say so rather than \
+guessing.
+"""
+
 /// Kimi's `$web_search` is a *builtin* server tool with an unusual contract
 /// (XII-118): the model emits a tool call, and the client must echo the call's
 /// arguments back **unchanged** for Moonshot to actually run the search
@@ -414,14 +435,7 @@ struct GLMWebSearchTool: SourcedTool {
     // answers Cyrus saw). A distinct name makes the model treat it as an ordinary
     // function: it reads the fed-back results and answers from them. Verified live.
     let name = "lookup_web"
-    let description = """
-    Searches the web for current, real-time information and returns the top \
-    results with sources and dates. Call this whenever the answer depends on \
-    information that may have changed or is past your knowledge cutoff — news, \
-    current events, today's prices or rates, the latest version of something, or \
-    anything time-sensitive. Prefer a focused query. If the results don't contain \
-    the answer, say so rather than guessing.
-    """
+    let description = webSearchToolDescription
     let schema: [String: Any] = [
         "type": "object",
         "properties": [
@@ -529,14 +543,7 @@ struct GLMWebSearchTool: SourcedTool {
 /// as a fallback when a result has no highlights).
 struct ExaWebSearchTool: SourcedTool {
     let name = "exa_search"
-    let description = """
-    Searches the web for current, real-time information and returns the top \
-    results with sources and dates. Call this whenever the answer depends on \
-    information that may have changed or is past your knowledge cutoff — news, \
-    current events, today's prices or rates, the latest version of something, or \
-    anything time-sensitive. Prefer a focused query. If the results don't contain \
-    the answer, say so rather than guessing.
-    """
+    let description = webSearchToolDescription
     let schema: [String: Any] = [
         "type": "object",
         "properties": [
@@ -655,14 +662,7 @@ struct ExaWebSearchTool: SourcedTool {
 /// `description`), and `published_at` (ISO 8601).
 struct KeenableWebSearchTool: SourcedTool {
     let name = "keenable_search"
-    let description = """
-    Searches the web for current, real-time information and returns the top \
-    results with sources and dates. Call this whenever the answer depends on \
-    information that may have changed or is past your knowledge cutoff — news, \
-    current events, today's prices or rates, the latest version of something, or \
-    anything time-sensitive. Prefer a focused query. If the results don't contain \
-    the answer, say so rather than guessing.
-    """
+    let description = webSearchToolDescription
     let schema: [String: Any] = [
         "type": "object",
         "properties": [
@@ -785,6 +785,176 @@ struct KeenableWebSearchTool: SourcedTool {
     }
 }
 
+/// Fetches one web page and returns its readable text. The companion to web
+/// search: search surfaces *which* page has the answer (title + short snippet),
+/// but the snippet often doesn't contain the specific fact the user asked for.
+/// Rather than re-search with a reworded query (the runaway loop `searchStopNudge`
+/// fights), the model calls `read_page` on the most promising result and reads the
+/// actual page. Input is a single `url` string — normally one the model just saw
+/// in a search result. HTML is stripped to plain text and truncated to a few KB so
+/// a long article doesn't blow the reply budget.
+///
+/// Read-only and same-shape as the rest of the surface: no cookies, no JS, a hard
+/// timeout, and it only follows `http(s)` — a bad/blocked/oversized page comes back
+/// as a short error string the model can adapt to, never a thrown turn-killer.
+struct ReadPageTool: NotchTool {
+    let name = "read_page"
+    let description = """
+    Fetches a web page and returns its readable text. Use this after a web search \
+    when a result looks like it has the answer but its snippet is too short to be \
+    sure — call read_page on that result's URL to read the actual page instead of \
+    searching again with a different query. Input is the page URL (typically one \
+    from a search result). Returns the page's main text, trimmed; if the page \
+    can't be fetched, say so rather than guessing.
+    """
+    let schema: [String: Any] = [
+        "type": "object",
+        "properties": [
+            "url": ["type": "string", "description": "The full http(s) URL of the page to read."]
+        ],
+        "required": ["url"],
+    ]
+
+    private static let timeout: TimeInterval = 15
+    /// Cap the extracted text so one long article can't swallow the reply budget.
+    /// ~8k characters is a few pages of prose — enough to hold the answer, small
+    /// enough to leave the model room to actually respond.
+    private static let maxChars = 8000
+    /// Refuse to download an enormous body (a media file, a huge page) — we only
+    /// want text, and streaming megabytes just to throw them away wastes time.
+    private static let maxBytes = 2_000_000
+
+    func execute(_ input: [String: Any]) async throws -> String {
+        guard let raw = (input["url"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return "Error: no url provided."
+        }
+        guard let url = URL(string: raw),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else {
+            return "Error: \"\(raw)\" is not a valid http(s) URL."
+        }
+
+        var req = URLRequest(url: url)
+        req.timeoutInterval = Self.timeout
+        // A real UA — some sites 403 the default URLSession agent.
+        req.setValue(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+            + "(KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+            forHTTPHeaderField: "User-Agent")
+        req.setValue("text/html,application/xhtml+xml", forHTTPHeaderField: "Accept")
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
+            guard let http = response as? HTTPURLResponse else {
+                return "Error: no response from \(url.host ?? raw)."
+            }
+            guard (200..<300).contains(http.statusCode) else {
+                return "Error: \(url.host ?? raw) returned HTTP \(http.statusCode)."
+            }
+            if data.count > Self.maxBytes {
+                return "Error: \(url.host ?? raw) is too large to read (\(data.count / 1000) KB)."
+            }
+            // Decode as UTF-8, falling back to Latin-1 so a mis-declared page still
+            // yields *something* readable rather than an empty string.
+            let html = String(data: data, encoding: .utf8)
+                ?? String(data: data, encoding: .isoLatin1)
+                ?? ""
+            let text = Self.extractText(from: html)
+            guard !text.isEmpty else {
+                return "The page at \(url.host ?? raw) had no readable text (it may be a "
+                     + "media file or rendered entirely by JavaScript). Do not fabricate its "
+                     + "contents."
+            }
+            let clipped = text.count > Self.maxChars
+                ? String(text.prefix(Self.maxChars)) + "\n\n[…page truncated…]"
+                : text
+            return "Content of \(raw):\n\n\(clipped)"
+        } catch {
+            return "Error fetching \(url.host ?? raw): \(error.localizedDescription)"
+        }
+    }
+
+    /// Strip HTML to readable plain text. Not a full parser — a pragmatic cleaner:
+    /// drop `<script>`/`<style>`/`<head>` wholesale (their contents are never
+    /// prose), turn block-level tags into newlines so paragraphs survive, remove the
+    /// remaining tags, decode the handful of entities that actually show up, then
+    /// collapse the runaway whitespace that stripping leaves behind.
+    static func extractText(from html: String) -> String {
+        var s = html
+        // Remove whole non-content elements, contents and all. `(?s)` (dotall) is
+        // load-bearing: these blocks span newlines in every real page, and without
+        // it `.` stops at line breaks and the script/style innards leak into the
+        // extracted text (verified against NSRegularExpression's default).
+        for tag in ["script", "style", "head", "noscript", "svg", "template"] {
+            s = s.replacingOccurrences(
+                of: "(?s)<\(tag)\\b[^>]*>.*?</\(tag)>",
+                with: " ",
+                options: [.regularExpression, .caseInsensitive])
+        }
+        // Block-level tags → newline, so paragraph/heading/list structure survives
+        // as line breaks instead of words running together.
+        s = s.replacingOccurrences(
+            of: "<(br|/p|/div|/li|/h[1-6]|/tr|/table|/section|/article|p|div|li|h[1-6]|tr)\\b[^>]*>",
+            with: "\n",
+            options: [.regularExpression, .caseInsensitive])
+        // Strip every remaining tag.
+        s = s.replacingOccurrences(
+            of: "<[^>]+>", with: " ", options: .regularExpression)
+        // Decode the entities that actually appear in prose. Ordered array, not a
+        // dictionary: `&amp;` must decode LAST or a literal `&amp;lt;` (a page
+        // displaying the text "&lt;") double-decodes into `<` — and a dictionary's
+        // iteration order would make that a coin flip per run.
+        let entities: [(String, String)] = [
+            ("&nbsp;", " "), ("&lt;", "<"), ("&gt;", ">"),
+            ("&quot;", "\""), ("&#39;", "'"), ("&apos;", "'"), ("&mdash;", "—"),
+            ("&ndash;", "–"), ("&hellip;", "…"), ("&rsquo;", "'"), ("&lsquo;", "'"),
+            ("&ldquo;", "\u{201C}"), ("&rdquo;", "\u{201D}"),
+            ("&amp;", "&"),
+        ]
+        for (ent, ch) in entities { s = s.replacingOccurrences(of: ent, with: ch) }
+        // Numeric entities (&#123; / &#x1F600;) → their scalar.
+        s = decodeNumericEntities(s)
+        // Collapse whitespace: many spaces/tabs → one space; 3+ newlines → two
+        // (keep a paragraph break, drop the rest). Trim each line's edges.
+        s = s.replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression)
+        let lines = s.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        s = lines.joined(separator: "\n")
+        s = s.replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression)
+        return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Replace `&#NNN;` / `&#xHHH;` numeric character references with their scalar.
+    private static func decodeNumericEntities(_ s: String) -> String {
+        guard s.contains("&#") else { return s }
+        var out = ""
+        var rest = Substring(s)
+        while let amp = rest.range(of: "&#") {
+            out += rest[..<amp.lowerBound]
+            let after = rest[amp.upperBound...]
+            guard let semi = after.firstIndex(of: ";") else {
+                out += rest[amp.lowerBound...]; return out
+            }
+            let body = after[..<semi]
+            let scalarValue: UInt32?
+            if let f = body.first, f == "x" || f == "X" {
+                scalarValue = UInt32(body.dropFirst(), radix: 16)
+            } else {
+                scalarValue = UInt32(body, radix: 10)
+            }
+            if let v = scalarValue, let scalar = Unicode.Scalar(v) {
+                out.append(Character(scalar))
+            } else {
+                out += "&#\(body);"  // not a valid ref — leave it be
+            }
+            rest = after[after.index(after: semi)...]
+        }
+        out += rest
+        return out
+    }
+}
+
 // MARK: - Default registry
 
 extension ToolRegistry {
@@ -816,6 +986,7 @@ extension ToolRegistry {
             DateTimeTool(),
             ReadClipboardTool(),
             CalculateTool(),
+            ReadPageTool(),
         ]
         switch APIKeyStore.resolvedSearchBackend() {
         case .exa:
@@ -838,6 +1009,6 @@ extension ToolRegistry {
     /// Provider-agnostic default, kept for call sites that don't yet thread a
     /// provider through (it omits any provider-specific builtin like Kimi's echo).
     static var standard: ToolRegistry { ToolRegistry([
-        DateTimeTool(), ReadClipboardTool(), CalculateTool(),
+        DateTimeTool(), ReadClipboardTool(), CalculateTool(), ReadPageTool(),
     ]) }
 }

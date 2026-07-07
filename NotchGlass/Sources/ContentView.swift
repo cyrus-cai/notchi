@@ -102,8 +102,7 @@ struct ContentView: View {
             // typed keeps normal editing: when the prompt field editor is first
             // responder, ⌘C/⌘S/⌘R fall through to the system (⌘C copies the
             // selection/line, etc.). ⌘P/⌘D handle their own state below.
-            //   ⌘C (8)  = copy the whole answer      ⌘S (1) = save to Notes
-            //   ⌘R (15) = regenerate
+            //   ⌘C (8)  = copy the whole answer     ⌘R (15) = regenerate
             if event.modifierFlags.contains(.command),
                model.mode == .result, !model.showSettings, !model.showWhatsNew,
                !model.isStreaming, !fieldEditorIsFirstResponder() {
@@ -114,11 +113,6 @@ struct ContentView: View {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(answer, forType: .string)
                         model.rebaselineClipboardAfterInAppWrite()
-                        return true
-                    }
-                case 1:   // S — save the answer to Apple Notes (XII-123 pipeline)
-                    if let id = model.lastAnswerID {
-                        model.saveAnswerToNotes(answerID: id)
                         return true
                     }
                 case 15:  // R — regenerate the last answer
