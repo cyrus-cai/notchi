@@ -18,10 +18,17 @@ struct InlineSettingsView: View {
     /// its phases (waiting on the browser, exchanging, failed) live.
     @ObservedObject private var orAuth = OpenRouterAuth.shared
 
+    /// The provider whose model is in effect — the backend that answers. Changed
+    /// only by picking a model; key management never touches it.
     @State private var provider: Provider = APIKeyStore.selectedProvider
+    /// The provider whose key the key section is viewing/editing. Follows
+    /// `provider` while the section is closed; retargeted by the picker's
+    /// "Add key" flow and by the section's own provider menu. All key-editor
+    /// state below (apiKey / editingKey / saved / testResult) is scoped to this,
+    /// so managing a key never hijacks the active backend.
+    @State private var keyScope: Provider = APIKeyStore.selectedProvider
     @State private var apiKey: String = APIKeyStore.stored(for: APIKeyStore.selectedProvider)
-    /// Empty string = "use the provider's default" (the sentinel the model menu's
-    /// "Default (…)" row binds to).
+    /// Empty string = "use the provider's default".
     @State private var modelID: String = APIKeyStore.storedModel(for: APIKeyStore.selectedProvider)
     @State private var saved = false
     /// False once a key is saved: the row shows a masked, read-only summary of
@@ -31,24 +38,43 @@ struct InlineSettingsView: View {
         APIKeyStore.stored(for: APIKeyStore.selectedProvider).isEmpty
             && !APIKeyStore.hasEnvOverride(for: APIKeyStore.selectedProvider)
 
-    /// Model ids offered in the menu. Seeded from the provider's bundled shortlist,
-    /// then replaced by the live `/v1/models` list once it loads (see `refreshModels`).
-    @State private var modelOptions: [String] = APIKeyStore.selectedProvider.availableModels
     @State private var loadingModels = false
 
-    /// OpenRouter only: which of `modelOptions`' free models are flagship-class,
-    /// per the size ranking done at fetch time (`OpenRouterFreeModels`). Drives
-    /// the menu's featured/rest sections; empty until the live list loads.
-    @State private var featuredFreeModels: Set<String> = []
+    /// A model waiting on a key: set when the user taps a keyless model in the
+    /// picker. The key section opens on that provider, and the moment a key
+    /// lands (paste-save or OpenRouter connect) this exact model is selected and
+    /// the pending state clears — the "configure only when the pick needs it"
+    /// flow. Until the key exists, nothing about the active backend changes.
+    private struct PendingModel { let provider: Provider; let id: String }
+    @State private var pendingModel: PendingModel?
+    /// Whether the "Provider & API key" section is expanded by hand. A required
+    /// setup (keyless active provider, or a pending model) forces it open
+    /// regardless — see `keySection`.
+    @State private var keySectionOpen = false
+
+    /// Live model lists fetched per provider, for the cross-provider picker — keyed
+    /// by provider. Only providers with a key get a live fetch; the rest fall back
+    /// to their bundled `availableModels`. Filled lazily when the picker opens.
+    @State private var liveByProvider: [Provider: [ModelInfo]] = [:]
+
+    /// Which of a provider's live ids are "featured" — today only OpenRouter reports
+    /// this: its `:free` lineup ranked by real last-week usage (see `UsageRankings`).
+    /// This is what lets the picker fold a 60-model marketplace down to the handful
+    /// the world actually runs. Empty for providers that carry no usage signal; they
+    /// fold against their curated shortlist instead.
+    @State private var featuredByProvider: [Provider: Set<String>] = [:]
+
+    /// Whether the custom cross-provider model picker overlay is open.
+    @State private var modelPickerOpen = false
 
     /// Connectivity-test state. `testing` drives the spinner; `testResult` is the
     /// last verdict shown under the key field (nil = nothing tested yet).
     @State private var testing = false
     @State private var testResult: ConnectivityTest.Result?
 
-    /// True while an env var forces a key for the current provider — then the field
-    /// is informational only, since the env override wins over what's typed.
-    private var envOverride: Bool { APIKeyStore.hasEnvOverride(for: provider) }
+    /// True while an env var forces a key for the key section's provider — then
+    /// the field is informational only, since the env override wins over typing.
+    private var envOverride: Bool { APIKeyStore.hasEnvOverride(for: keyScope) }
 
     /// Exa search key state — a separate, provider-agnostic key (Exa is a search
     /// backend, not an LLM provider). When set, it replaces every model's built-in
@@ -110,28 +136,20 @@ struct InlineSettingsView: View {
 
     private var canSave: Bool {
         guard !envOverride else { return false }
-        // Only the API key needs an explicit Save — a model switch auto-persists
-        // (see `selectModel`), so it never lights up this button.
+        // Only the API key needs an explicit Save — a model switch auto-persists,
+        // so it never lights up this button.
         return editingKey
             && !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && apiKey != APIKeyStore.stored(for: provider)
+            && apiKey != APIKeyStore.stored(for: keyScope)
     }
 
     /// The stored key rendered safe for display: enough of the head and tail to
     /// recognize which key it is, bullets for everything in between. Short keys
     /// mask entirely rather than leak most of their characters.
     private var maskedKey: String {
-        let key = APIKeyStore.current(for: provider) ?? APIKeyStore.stored(for: provider)
+        let key = APIKeyStore.current(for: keyScope) ?? APIKeyStore.stored(for: keyScope)
         guard key.count > 12 else { return String(repeating: "•", count: max(key.count, 8)) }
         return "\(key.prefix(4))••••••••\(key.suffix(4))"
-    }
-
-    /// Every option plus, if the saved model isn't in the live/bundled list (a
-    /// custom or newly-renamed one), that value too — so selecting it round-trips.
-    private var modelRows: [String] {
-        var rows = modelOptions
-        if !modelID.isEmpty, !rows.contains(modelID) { rows.insert(modelID, at: 0) }
-        return rows
     }
 
     /// The left-hand category list — the point of the column is that the next
@@ -218,18 +236,13 @@ struct InlineSettingsView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     switch section {
                     case .model:
-                        providerRow
-                        // OpenRouter gets the one-click Connect row instead of a
-                        // paste field — unless the user asked to paste by hand, or
-                        // an env var forces a key (the standard row displays that).
-                        if provider == .openrouter && !manualKeyEntry && !envOverride {
-                            openRouterAccountRow
-                        } else {
-                            keyRow
-                        }
+                        // The model is the protagonist: the pane leads with the
+                        // picker chip. Provider and API key are supporting cast —
+                        // folded into `keySection`, which only unfolds when a pick
+                        // actually needs a key (or the user opens it by hand).
                         modelRow
+                        keySection
                         customInstructionsRow
-                        footer
                     case .search:
                         searchBackendRow
                             // No stored pick yet → commit the shown default so the
@@ -279,12 +292,17 @@ struct InlineSettingsView: View {
             // The OAuth flow just wrote a key from outside this view — sync the
             // cached state, prove the key live (green pill), and load the free
             // model list it unlocks.
-            guard orAuth.phase == .connected, provider == .openrouter else { return }
+            guard orAuth.phase == .connected, keyScope == .openrouter else { return }
             apiKey = APIKeyStore.stored(for: .openrouter)
-            modelID = APIKeyStore.storedModel(for: .openrouter)
             editingKey = false
             manualKeyEntry = false
             orAuth.acknowledge()
+            // A connect that was blocking a picked model commits that pick now.
+            if let pending = pendingModel, pending.provider == .openrouter {
+                selectAcrossProviders(provider: .openrouter, model: pending.id)
+            } else if provider == .openrouter {
+                modelID = APIKeyStore.storedModel(for: .openrouter)
+            }
             test()
             Task { await refreshModels() }
         }
@@ -387,44 +405,118 @@ struct InlineSettingsView: View {
 
     // MARK: - Rows
 
-    private var providerRow: some View {
-        settingRow(label: L("model.provider")) {
-            GlassMenu(title: provider.displayName) {
-                // Recommended providers (real web search available) sit at the top
-                // level. The vendors with no search are demoted into a submenu so the
-                // primary list only shows the ones we'd steer a new user toward.
-                ForEach(Provider.allCases.filter(\.supportsWebSearch)) { p in
-                    Button(p.displayName) { selectProvider(p) }
-                }
-                Divider()
-                Menu(L("model.provider.noSearchGroup")) {
-                    // A non-actionable caption row explaining why these are tucked
-                    // away, then the providers themselves.
-                    Text(L("model.provider.noSearchReason"))
-                    Divider()
-                    ForEach(Provider.allCases.filter { !$0.supportsWebSearch }) { p in
-                        Button(p.displayName) { selectProvider(p) }
-                    }
-                }
-            }
-        }
+    // MARK: - Provider & API key (supporting cast)
+
+    /// Whether the pane must surface key setup right now: a picked model is
+    /// waiting on a key, or the active provider itself has none (nothing can
+    /// answer). Only then does key UI appear unbidden.
+    private var setupRequired: Bool {
+        pendingModel != nil || APIKeyStore.current(for: provider) == nil
     }
 
-    /// Persist a provider switch and reload that provider's saved key + model, so
-    /// each provider keeps its own settings.
+    /// The collapsed-by-default key management block. At rest it's one quiet
+    /// disclosure line; expanded it shows which provider's key is on the bench
+    /// (a menu scoped to key editing only — it never switches the backend), the
+    /// key/account row, and the where-to-get-a-key footer. A required setup
+    /// (see `setupRequired`) forces it open with a one-line reason on top.
+    @ViewBuilder
+    private var keySection: some View {
+        let expanded = keySectionOpen || setupRequired
+        VStack(alignment: .leading, spacing: 12) {
+            Button {
+                withAnimation(.easeOut(duration: 0.16)) {
+                    if expanded {
+                        keySectionOpen = false
+                        pendingModel = nil     // folding away dismisses the pending ask
+                        setKeyScope(provider)  // …and the section re-tracks the backend
+                    } else {
+                        keySectionOpen = true
+                    }
+                }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                    Text(L("model.keys.section"))
+                        .font(.sf(12, weight: .medium))
+                }
+                .foregroundStyle(Tokens.text3)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if expanded {
+                // Why the section opened by itself, when it did.
+                if let pending = pendingModel {
+                    Text(L("model.pending.hint", pending.provider.displayName,
+                           ModelRatings.prettyName(for: pending.id)))
+                        .font(.sf(12))
+                        .foregroundStyle(Tokens.text2)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else if APIKeyStore.current(for: provider) == nil {
+                    Text(L("model.setup.needed", provider.displayName))
+                        .font(.sf(12))
+                        .foregroundStyle(Tokens.text2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                // Which provider's key is on the bench. A key icon marks the
+                // providers that already have one.
+                settingRow(label: L("model.provider")) {
+                    GlassMenu(title: keyScope.displayName) {
+                        ForEach(Provider.allCases) { p in
+                            Button {
+                                setKeyScope(p)
+                            } label: {
+                                if APIKeyStore.current(for: p) != nil {
+                                    Label(p.displayName, systemImage: "key.fill")
+                                } else {
+                                    Text(p.displayName)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // OpenRouter gets the one-click Connect row instead of a paste
+                // field — unless the user asked to paste by hand, or an env var
+                // forces a key (the standard row displays that).
+                if keyScope == .openrouter && !manualKeyEntry && !envOverride {
+                    openRouterAccountRow
+                } else {
+                    keyRow
+                }
+
+                footer
+            }
+        }
+        .animation(.easeOut(duration: 0.16), value: expanded)
+    }
+
+    /// Retarget the key section onto `p`, reloading its stored key and edit
+    /// state. Touches only key-editor state — never the active backend.
+    private func setKeyScope(_ p: Provider) {
+        guard p != keyScope else { return }
+        keyScope = p
+        apiKey = APIKeyStore.stored(for: p)
+        saved = false
+        testResult = nil   // last verdict belonged to the old provider/key
+        manualKeyEntry = false   // back to the Connect row next time OpenRouter shows
+        editingKey = apiKey.isEmpty && !APIKeyStore.hasEnvOverride(for: p)
+    }
+
+    /// Switch the active backend — the provider whose model answers. Reached only
+    /// through model selection now (the pane has no standalone provider control).
+    /// The key section follows along unless the user has it pinned open on
+    /// another provider's key.
     private func selectProvider(_ newValue: Provider) {
         guard newValue != provider else { return }
         provider = newValue
         APIKeyStore.selectedProvider = newValue
-        apiKey = APIKeyStore.stored(for: newValue)
         modelID = APIKeyStore.storedModel(for: newValue)
-        modelOptions = newValue.availableModels
-        featuredFreeModels = []   // stale ranking belonged to the old provider
-        saved = false
-        testResult = nil   // last verdict belonged to the old provider/key
-        editingKey = apiKey.isEmpty && !APIKeyStore.hasEnvOverride(for: newValue)
-        manualKeyEntry = false   // back to the Connect row next time OpenRouter shows
         NotificationCenter.default.post(name: .aiBackendChanged, object: nil)
+        if !keySectionOpen, pendingModel == nil { setKeyScope(newValue) }
         Task { await refreshModels() }
     }
 
@@ -456,8 +548,9 @@ struct InlineSettingsView: View {
                             .font(.sf(13))
                             .foregroundStyle(Tokens.text1)
                             .disabled(envOverride)
-                            // A freshly-pasted key unlocks the live model list.
-                            .onSubmit { Task { await refreshModels() } }
+                            // Return commits the paste — same as the Save button
+                            // (which also unlocks the live model list).
+                            .onSubmit { save() }
                             // Editing the key invalidates the last connectivity verdict —
                             // and counts as typing, so a pointer that drifted off the
                             // island can't fold the panel mid-paste.
@@ -490,7 +583,7 @@ struct InlineSettingsView: View {
                     // probes the *stored* key, never an unsaved draft.
                     // Back out of editing without touching the stored key — only
                     // offered when there is a stored key to fall back to.
-                    if !APIKeyStore.stored(for: provider).isEmpty {
+                    if !APIKeyStore.stored(for: keyScope).isEmpty {
                         Button(L("model.cancel")) { stopEditingKey() }
                             .buttonStyle(.plain)
                             .font(.sf(11, weight: .semibold))
@@ -942,7 +1035,7 @@ struct InlineSettingsView: View {
     /// so it probes what's on disk, never an unsaved draft.
     private var canTest: Bool {
         !testing && !envOverride
-            && !APIKeyStore.stored(for: provider).isEmpty
+            && !APIKeyStore.stored(for: keyScope).isEmpty
     }
 
     /// Swap the masked summary for an empty field ready for a fresh paste —
@@ -955,7 +1048,7 @@ struct InlineSettingsView: View {
 
     /// Abandon the edit and fall back to the stored key's masked summary.
     private func stopEditingKey() {
-        apiKey = APIKeyStore.stored(for: provider)
+        apiKey = APIKeyStore.stored(for: keyScope)
         testResult = nil
         withAnimation(.easeOut(duration: 0.16)) { editingKey = false }
     }
@@ -1000,77 +1093,86 @@ struct InlineSettingsView: View {
         withAnimation(.easeOut(duration: 0.16)) { editingKeenableKey = false }
     }
 
-    /// What the model chip shows: the saved id, or the resolved default when the
-    /// sentinel empty string is selected.
-    private var modelLabel: String {
-        modelID.isEmpty ? L("model.default", provider.defaultModel) : modelID
-    }
-
-    /// Picking a model from the menu persists it on the spot — no Save step. Only
-    /// the model is written (the key is left untouched), then the backend is told
-    /// to pick up the new id so the next turn uses it immediately.
-    private func selectModel(_ id: String) {
-        guard id != modelID else { return }
-        modelID = id
-        APIKeyStore.saveModel(id, for: provider)
-        NotificationCenter.default.post(name: .aiBackendChanged, object: nil)
+    /// The wire id in effect: the saved override, or the provider's default when
+    /// the sentinel empty string is stored.
+    private var effectiveModelID: String {
+        modelID.isEmpty ? provider.defaultModel : modelID
     }
 
     private var modelRow: some View {
         settingRow(label: L("model.label")) {
             HStack(spacing: 6) {
-                GlassMenu(title: modelLabel) {
-                    Button(L("model.default", provider.defaultModel)) { selectModel("") }
-                    Divider()
-                    if provider == .openrouter {
-                        openRouterModelMenuItems
-                    } else {
-                        ForEach(modelRows, id: \.self) { id in
-                            Button(id) { selectModel(id) }
-                        }
+                // The chip anchors the cross-provider picker as a native popover.
+                // A popover opens in its own window outside the island's tracking
+                // area, so `model.isModelPickerOpen` suspends the panel's
+                // leave-collapse for as long as it's up (see NotchModel).
+                Button {
+                    modelPickerOpen = true
+                } label: {
+                    HStack(spacing: 7) {
+                        // The model wears its vendor mark and reads by name — the
+                        // chip is about the model, not the plumbing behind it.
+                        VendorLogo(vendor: ModelRatings.vendor(for: effectiveModelID),
+                                   fallback: effectiveModelID)
+                            .frame(width: 15, height: 15)
+                        Text(ModelRatings.prettyName(for: effectiveModelID))
+                            .font(.sf(13))
+                            .foregroundStyle(Tokens.text1)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(Tokens.text3)
                     }
+                    .padding(.leading, 10)
+                    .padding(.trailing, 9)
+                    .frame(height: 30)
+                    .background(RoundedRectangle(cornerRadius: 9).fill(.white.opacity(0.06)))
+                    .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(.white.opacity(0.12), lineWidth: 0.5))
+                    .contentShape(RoundedRectangle(cornerRadius: 9))
                 }
-                .disabled(envOverride)
-                .opacity(envOverride ? 0.5 : 1)
+                .buttonStyle(.plain)
+                .fixedSize()
+                .popover(isPresented: $modelPickerOpen, arrowEdge: .bottom) {
+                    ModelPickerView(
+                        models: pickerModels,
+                        selectedProvider: provider,
+                        selectedID: effectiveModelID,
+                        onSelect: { prov, id in
+                            selectAcrossProviders(provider: prov, model: id)
+                            modelPickerOpen = false
+                        },
+                        onConfigure: { m in
+                            // "Add key" on a greyed model: remember the pick, open
+                            // the key section on that provider, and select the
+                            // model the moment its key lands. The active backend
+                            // stays untouched until then.
+                            pendingModel = PendingModel(provider: m.provider, id: m.info.id)
+                            setKeyScope(m.provider)
+                            withAnimation(.easeOut(duration: 0.16)) { keySectionOpen = true }
+                            modelPickerOpen = false
+                        })
+                    .task {
+                        // Fill the list with each keyed provider's live models the
+                        // moment the picker opens (bundled lists show instantly).
+                        await loadAllProviderModels()
+                    }
+                    .preferredColorScheme(.dark)
+                    // Back the popover with the panel's Liquid Glass (the airy `.clear`
+                    // variant, same recipe as the quick-tools popover) so the card is
+                    // one refracting glass slab, not an opaque block — radius 14 to
+                    // match the picker card.
+                    .modifier(GlassPopoverBackground(cornerRadius: 14))
+                }
+                .onChange(of: modelPickerOpen) {
+                    // Suspend the panel's leave-collapse while the popover is up so
+                    // moving the pointer into it (a separate window) never folds the
+                    // settings out from under it.
+                    model.isModelPickerOpen = modelPickerOpen
+                }
                 if loadingModels {
                     ProgressView()
                         .controlSize(.small)
-                }
-            }
-        }
-    }
-
-    /// OpenRouter's rotating free lineup, grouped instead of one flat list: the
-    /// auto-router (plus any hand-typed id) up top, then the top few free models
-    /// ("Best free models", capped at `OpenRouterFreeModels.featuredLimit`),
-    /// then the long tail collapsed behind a "More free models ▸" submenu.
-    /// Ranking comes from real usage fetched with the live list;
-    /// `featuredFreeModels` carries the membership.
-    @ViewBuilder
-    private var openRouterModelMenuItems: some View {
-        let groups = OpenRouterFreeModels.group(modelRows, featured: featuredFreeModels)
-        // Drop the id that equals the provider default (the auto-router,
-        // `openrouter/free`): the "Default (…)" row above already is it, so
-        // listing it here too just reads as a duplicate.
-        ForEach(groups.head.filter { $0 != provider.defaultModel }, id: \.self) { id in
-            Button(id) { selectModel(id) }
-        }
-        // `SwiftUI.Section` spelled out — this view's own `Section` enum (the
-        // sidebar categories) shadows the SwiftUI type here.
-        if !groups.featured.isEmpty {
-            SwiftUI.Section(L("model.freeFeatured")) {
-                ForEach(groups.featured, id: \.self) { id in
-                    Button(id) { selectModel(id) }
-                }
-            }
-        }
-        // The long tail is genuinely collapsed: a nested `Menu` in a native
-        // menu renders as one "More free models ▸" row that only expands its
-        // items when opened — not a flat, always-visible section.
-        if !groups.rest.isEmpty {
-            Menu(L("model.freeMore")) {
-                ForEach(groups.rest, id: \.self) { id in
-                    Button(id) { selectModel(id) }
                 }
             }
         }
@@ -1446,25 +1548,18 @@ struct InlineSettingsView: View {
 
     /// Copy sensing: whether the *closed* notch watches ⌘C and offers to file a
     /// copied note/reminder (press ⌘C again to confirm). The in-panel capture
-    /// chip is independent of this switch. A little diagram — a copied card
-    /// sliding up into the notch on a ⌘C — carries the idea the way the
-    /// placement cards carry "which screen"; it brightens with the toggle so the
-    /// on-state reads at a glance.
+    /// chip is independent of this switch. The prose ("press ⌘C again to
+    /// confirm") lives in the ⓘ beside the title.
     private var copySenseRow: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            // The prose ("press ⌘C again to confirm") folds into the ⓘ beside the
-            // title; the diagram below stays, carrying the idea on its own.
-            settingRow(label: L("general.copySense"), info: L("general.copySense.hint")) {
-                Toggle("", isOn: Binding(
-                    get: { model.copySenseEnabled },
-                    set: { model.copySenseEnabled = $0 }
-                ))
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .controlSize(.mini)
-                .tint(Tokens.text2)
-            }
-            CopySenseDiagram(active: model.copySenseEnabled)
+        settingRow(label: L("general.copySense"), info: L("general.copySense.hint")) {
+            Toggle("", isOn: Binding(
+                get: { model.copySenseEnabled },
+                set: { model.copySenseEnabled = $0 }
+            ))
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .tint(Tokens.text2)
         }
     }
 
@@ -1732,7 +1827,7 @@ struct InlineSettingsView: View {
     private var footer: some View {
         Group {
             if envOverride {
-                Text(L("model.footer.env", provider.envVarName))
+                Text(L("model.footer.env", keyScope.envVarName))
             } else {
                 Text(footerText)
             }
@@ -1745,10 +1840,11 @@ struct InlineSettingsView: View {
 
     /// Footer help with the signup host as a clickable link, built as an
     /// `AttributedString` so the sentence stays one `Text` while only the host
-    /// opens `provider.signupURL`. The pre/post fragments are localized; the host
+    /// opens the signup page. Scoped to the key section's provider — it explains
+    /// the key field above it. The pre/post fragments are localized; the host
     /// itself is the literal domain, so it stays the same in every language.
     private var footerText: AttributedString {
-        if provider == .openrouter {
+        if keyScope == .openrouter {
             // The free-by-default story: connect once, the key lives in the
             // user's own account, and the daily cap is theirs alone.
             var text = AttributedString(L("model.footer.openrouter.pre"))
@@ -1760,8 +1856,8 @@ struct InlineSettingsView: View {
             return text
         }
         var text = AttributedString(L("model.footer.byok.pre"))
-        var host = AttributedString(provider.signupHost)
-        host.link = provider.signupURL
+        var host = AttributedString(keyScope.signupHost)
+        host.link = keyScope.signupURL
         host.foregroundColor = Tokens.text2
         text.append(host)
         text.append(AttributedString(L("model.footer.byok.post")))
@@ -1797,68 +1893,184 @@ struct InlineSettingsView: View {
 
     // MARK: - Logic (mirrors the old SettingsView)
 
-    /// Replace `modelOptions` with the provider's *live* model list when a key is
-    /// available, so the menu reflects what the vendor serves right now. Falls back
-    /// to the bundled shortlist on any failure, so the menu is never empty.
+    /// Fetch the *current* provider's live model list and cache it into
+    /// `liveByProvider`, so the picker shows what the vendor serves right now for
+    /// the provider in effect. Keyless providers keep their bundled shortlist (the
+    /// picker falls back to `availableModels`). Cheap and cancel-safe.
     @MainActor
     private func refreshModels() async {
         let target = provider
-        // Curated manifest first (no-op when fresh): `availableModels` below reads
-        // through it, so keyless providers get the hot-updated shortlist too. The
-        // menu is already populated by the callers' synchronous fallback, so
-        // awaiting the fetch here never leaves it empty.
+        // Curated manifest first (no-op when fresh): keyless providers still get
+        // the hot-updated bundled shortlist through `availableModels`.
         await RemoteModelManifest.refreshIfDue()
-        // Same stale-response guard as below: the user may have switched
-        // providers while the manifest fetch was in flight.
         guard target == provider else { return }
-        guard let key = APIKeyStore.current(for: target) else {
-            modelOptions = target.availableModels
-            featuredFreeModels = []
-            return
-        }
+        guard let key = APIKeyStore.current(for: target) else { return }
         loadingModels = true
         let live = await ModelCatalog.fetch(for: target, apiKey: key)
+        // Stop the spinner unconditionally — an early return on the staleness
+        // guard below used to strand it spinning forever after a mid-fetch
+        // provider switch.
+        loadingModels = false
         // Guard against a stale response after the user switched providers.
         guard target == provider else { return }
-        loadingModels = false
-        modelOptions = live?.models ?? target.availableModels
-        featuredFreeModels = live?.openRouterFeatured ?? []
+        if let live, !live.infos.isEmpty {
+            liveByProvider[target] = live.infos
+            featuredByProvider[target] = live.openRouterFeatured
+        }
     }
 
-    /// Probe the *stored* key against the current provider and surface the verdict.
-    /// Test is only offered once a key is saved, so it always checks what's on disk
-    /// — never an unsaved draft. Guarded against overlapping runs via `canTest`.
+    // MARK: - Cross-provider picker
+
+    /// How many of OpenRouter's usage-ranked free models ride in the picker's
+    /// unfolded view. The auto-router sits above them, outside the cap, so the
+    /// collapsed OpenRouter block is this + 1 rows.
+    private static let openRouterShortlistLimit = 4
+
+    /// The ids provider `p` contributes to the picker's **collapsed** list — the fold
+    /// that keeps a hundred-model catalog from landing as one undifferentiated wall.
+    ///
+    ///  · **Keyless** providers contribute exactly one row (their default model):
+    ///    enough to advertise what a key would unlock, without ten rows you can't call.
+    ///  · **OpenRouter** contributes the auto-router plus the top few of its free
+    ///    lineup ranked by real usage — millions of users voting with their feet
+    ///    (`ModelCatalog` fetches the ranking; `OpenRouterFreeModels.group` cuts it).
+    ///  · **Everyone else** contributes their curated shortlist (`availableModels`,
+    ///    hot-updated by the remote manifest), intersected with what the live catalog
+    ///    actually serves — so an 80-id `/v1/models` dump (embeddings, TTS, whisper…)
+    ///    collapses to the handful of chat models we vouch for.
+    ///
+    /// Everything outside this set still exists in the list — it just lives behind
+    /// the picker's "Show all N models" row, and search always reaches it.
+    private func shortlistIDs(for p: Provider, infos: [ModelInfo], hasKey: Bool) -> Set<String> {
+        guard hasKey else { return Set([infos.first?.id].compactMap { $0 }) }
+        if let featured = featuredByProvider[p], !featured.isEmpty {
+            let g = OpenRouterFreeModels.group(infos.map(\.id), featured: featured,
+                                               limit: Self.openRouterShortlistLimit)
+            return Set(g.head + g.featured)
+        }
+        let live = Set(infos.map(\.id))
+        let curated = p.availableModels.filter(live.contains)
+        // A curated id the vendor no longer serves means the intersection is empty —
+        // fall back to the curated list itself rather than folding the whole provider
+        // away to nothing.
+        return Set(curated.isEmpty ? p.availableModels : curated)
+    }
+
+    /// The model list the cross-provider picker shows: every provider's models in one
+    /// flat list, ordered as the provider menu is, each tagged with whether it has a
+    /// usable key and whether it survives the fold (`featured`). Providers with a key
+    /// list their live models (once fetched) or their bundled shortlist; providers
+    /// without a key still appear — greyed — so the user sees what a key would unlock
+    /// and can jump straight to configuring it.
+    private var pickerModels: [PickerModel] {
+        var rows: [PickerModel] = []
+        for p in Provider.allCases {
+            let hasKey = APIKeyStore.current(for: p) != nil
+            let infos: [ModelInfo]
+            if let live = liveByProvider[p], !live.isEmpty {
+                infos = live
+            } else {
+                infos = p.availableModels.map {
+                    ModelInfo(id: $0, vendor: ModelRatings.vendor(for: $0))
+                }
+            }
+            let short = shortlistIDs(for: p, infos: infos, hasKey: hasKey)
+            // Shortlisted models lead their provider's block, so expanding the fold
+            // appends rows below what was already on screen instead of reshuffling it.
+            let ordered = infos.enumerated().sorted { a, b in
+                let af = short.contains(a.element.id), bf = short.contains(b.element.id)
+                return af == bf ? a.offset < b.offset : af
+            }.map(\.element)
+            for info in ordered {
+                rows.append(PickerModel(
+                    provider: p, providerName: p.displayName, hasKey: hasKey,
+                    featured: short.contains(info.id), info: info))
+            }
+        }
+        // Usable models first (the current provider's leading), greyed ones after —
+        // the list reads as "what you can pick now" above "what a key would unlock".
+        // A stable secondary sort keeps rows from reshuffling as live lists load.
+        return rows.enumerated().sorted { a, b in
+            if a.element.hasKey != b.element.hasKey { return a.element.hasKey }
+            let aCur = a.element.provider == provider
+            let bCur = b.element.provider == provider
+            if aCur != bCur { return aCur }
+            return a.offset < b.offset
+        }.map(\.element)
+    }
+
+    /// Fetch every keyed provider's live model list once, when the picker opens, so
+    /// the groups fill in with real names/metadata. Keyless providers are skipped
+    /// (they show their bundled list). Cheap and cancel-safe: results just overwrite
+    /// the cache, and a provider already cached this session is not re-fetched.
+    @MainActor
+    private func loadAllProviderModels() async {
+        await RemoteModelManifest.refreshIfDue()
+        await withTaskGroup(of: (Provider, ModelCatalog.Result?).self) { group in
+            for p in Provider.allCases where liveByProvider[p] == nil {
+                guard let key = APIKeyStore.current(for: p) else { continue }
+                group.addTask { (p, await ModelCatalog.fetch(for: p, apiKey: key)) }
+            }
+            for await (p, live) in group {
+                if let live, !live.infos.isEmpty {
+                    liveByProvider[p] = live.infos
+                    featuredByProvider[p] = live.openRouterFeatured
+                }
+            }
+        }
+    }
+
+    /// Pick a model from the cross-provider picker: switch the selected provider
+    /// (reusing `selectProvider`, which re-syncs every provider-scoped row), then
+    /// save the chosen model under it. Selecting a model within the *current*
+    /// provider skips the switch and just persists the model.
+    private func selectAcrossProviders(provider newProvider: Provider, model id: String) {
+        pendingModel = nil   // any committed pick settles the pending ask
+        if newProvider != provider {
+            // `selectProvider` resets `modelID` to that provider's stored model;
+            // override it with the id the user actually clicked.
+            selectProvider(newProvider)
+        }
+        modelID = id
+        APIKeyStore.saveModel(id, for: newProvider)
+        NotificationCenter.default.post(name: .aiBackendChanged, object: nil)
+    }
+
+    /// Probe the *stored* key of the key section's provider and surface the
+    /// verdict. Test is only offered once a key is saved, so it always checks
+    /// what's on disk — never an unsaved draft. Guarded via `canTest`.
     private func test() {
         guard canTest else { return }
-        let target = provider
+        let target = keyScope
         let key = APIKeyStore.current(for: target) ?? APIKeyStore.stored(for: target)
         testing = true
         testResult = nil
         Task {
             let result = await ConnectivityTest.run(provider: target, apiKey: key)
             await MainActor.run {
-                // Drop a stale result if the user switched providers mid-flight.
-                guard target == provider else { return }
+                // Drop a stale result if the user retargeted the section mid-flight.
+                guard target == keyScope else { return }
                 testing = false
                 withAnimation(.easeOut(duration: 0.2)) { testResult = result }
             }
         }
     }
 
+    /// Persist the key being edited for the key section's provider. When that key
+    /// was blocking a picked model (the pending flow), the pick commits here —
+    /// paste, save, and the model you asked for is live.
     private func save() {
-        // Only an explicit non-blank edit replaces the stored key — a model-only
-        // change saved mid-edit must not wipe it with the empty field.
-        if editingKey, !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            APIKeyStore.save(apiKey, for: provider)
-        }
-        APIKeyStore.saveModel(modelID, for: provider)
-        apiKey = APIKeyStore.stored(for: provider)
-        modelID = APIKeyStore.storedModel(for: provider)
-        if !apiKey.isEmpty {
-            withAnimation(.easeOut(duration: 0.16)) { editingKey = false }
-        }
-        NotificationCenter.default.post(name: .aiBackendChanged, object: nil)
+        let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard editingKey, !trimmed.isEmpty else { return }
+        APIKeyStore.save(apiKey, for: keyScope)
+        apiKey = APIKeyStore.stored(for: keyScope)
+        withAnimation(.easeOut(duration: 0.16)) { editingKey = false }
         withAnimation(.easeOut(duration: 0.18)) { saved = true }
+        if let pending = pendingModel, pending.provider == keyScope {
+            selectAcrossProviders(provider: pending.provider, model: pending.id)
+        } else {
+            NotificationCenter.default.post(name: .aiBackendChanged, object: nil)
+        }
         // A newly-saved key may unlock the live model list — refresh it.
         Task { await refreshModels() }
         Task {
@@ -1873,8 +2085,12 @@ struct InlineSettingsView: View {
 /// (so no light rim shows around the edges); older systems get the glass painted
 /// behind the content as a graceful fallback.
 private struct GlassPopoverBackground: ViewModifier {
+    /// Corner radius of the glass slab — matches the content it wraps (small list
+    /// popovers use 10; the larger model-picker card uses 14).
+    var cornerRadius: CGFloat = 10
+
     func body(content: Content) -> some View {
-        let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         // No dark veil — let `nativeGlass` (the high-transparency `.clear` Liquid
         // Glass variant) show at full strength so the wallpaper refracts through and
         // the popover reads as airy glass, not a dark block. Just a faint hairline
@@ -2095,59 +2311,6 @@ private struct MiniDisplay: View {
                     .frame(width: 12, height: 2)
             }
         }
-    }
-}
-
-/// The copy-sensing diagram: a small notch bar with a copied card tucked just
-/// under it and a ⌘C tag alongside — the "press ⌘C and the notch offers it"
-/// gesture frozen into one picture, in the same monochrome line-art idiom as
-/// `MiniDisplay`. Brightens as a whole when the feature is on, dims when off, so
-/// it reads as "what's happening" rather than a second control.
-private struct CopySenseDiagram: View {
-    /// Whether copy sensing is enabled — drives the same bright/dim split the
-    /// placement diagram uses for selected/unselected.
-    let active: Bool
-
-    var body: some View {
-        let line = Color.white.opacity(active ? 0.55 : 0.20)
-        let fill = Color.white.opacity(active ? 0.14 : 0.05)
-        let ink  = Color.white.opacity(active ? 0.95 : 0.35)
-
-        VStack(spacing: 5) {
-            ZStack(alignment: .top) {
-                // Copied card, peeking up into the notch from below.
-                RoundedRectangle(cornerRadius: 3)
-                    .fill(fill)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 3)
-                            .strokeBorder(line, lineWidth: 1)
-                    )
-                    .overlay(alignment: .top) {
-                        // Two text lines on the card — a note, not an image.
-                        VStack(spacing: 2.5) {
-                            Capsule().fill(ink).frame(width: 18, height: 1.5)
-                            Capsule().fill(ink.opacity(0.6)).frame(width: 12, height: 1.5)
-                        }
-                        .padding(.top, 9)
-                    }
-                    .frame(width: 34, height: 22)
-                    .padding(.top, 5)
-
-                // The notch bar itself, a black island biting into the top edge.
-                Capsule()
-                    .fill(.black.opacity(active ? 0.9 : 0.5))
-                    .overlay(Capsule().strokeBorder(line, lineWidth: 1))
-                    .frame(width: 22, height: 7)
-            }
-            .frame(width: 40, height: 30)
-
-            // ⌘C caption, the keystroke that files it.
-            Text("⌘C")
-                .font(.sf(9, weight: .semibold))
-                .foregroundStyle(ink)
-        }
-        .frame(width: 44)
-        .animation(.easeOut(duration: 0.16), value: active)
     }
 }
 

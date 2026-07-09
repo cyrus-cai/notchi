@@ -24,4 +24,7 @@ extension Notification.Name {
     /// Posted after the user changes the global summon shortcut (Settings →
     /// General), so `AppDelegate` re-registers the Carbon hot key immediately.
     static let summonHotKeyChanged = Notification.Name("summonHotKeyChanged")
+    /// Posted by the Recent list's "See all" action, so `AppDelegate` can open the
+    /// standalone History window showing the complete, uncapped archive.
+    static let openHistoryArchiveRequested = Notification.Name("openHistoryArchiveRequested")
 }

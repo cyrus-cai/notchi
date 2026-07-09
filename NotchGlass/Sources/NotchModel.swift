@@ -253,6 +253,13 @@ final class NotchModel: ObservableObject {
     /// `submit`, a `fullClose`), so a pin never leaks onto the next conversation.
     @Published var isAnswerPinned = false
 
+    /// The model picker popover (anchored to the model chip in settings) is open.
+    /// While set, `collapseOnLeave` bails exactly as it does for a pinned answer: the
+    /// popover is a separate window outside the island's tracking area, so moving the
+    /// pointer into it reads as "left the island" and would otherwise fold the panel
+    /// out from under the open picker. Set true while the popover shows, false on close.
+    @Published var isModelPickerOpen = false
+
     /// True while the AI is in its pre-stream *thinking* phase — from the moment a
     /// question is submitted until the first answer token lands (or the round ends).
     /// Drives the 3 thinking dots shown beside the physical notch. Deliberately
@@ -1181,14 +1188,29 @@ final class NotchModel: ObservableObject {
         recallPulse = (recallPulse.n + 1, dir)
     }
 
-    /// The recent items rendered in the list — now the FULL stored history (up to
-    /// the 50-item persistence cap), not a clipped top-8. The list scrolls, and
-    /// keyboard nav auto-scrolls the highlight into view, so every captured item
-    /// is reachable. Keyboard navigation indexes into THIS, so highlight bounds and
-    /// the rendered rows can never drift apart.
+    /// How many recent rows the *notch* list keeps — the compact quick-access slice.
+    /// The full archive is retained on disk without limit (see `saveHistory`); the
+    /// notch stays light by rendering only the newest `notchRecentCap`. Everything
+    /// older is one click away in the standalone History window (`archiveVisible`).
+    static let notchRecentCap = 50
+
+    /// The recent items rendered in the *notch* list — the newest `notchRecentCap`
+    /// of the (filtered) history, not the whole archive. The list scrolls, and
+    /// keyboard nav auto-scrolls the highlight into view, so every visible item is
+    /// reachable. Keyboard navigation indexes into THIS, so highlight bounds and the
+    /// rendered rows can never drift apart. Older items live in the History window.
     var recentVisible: [HistoryItem] {
-        // Source filter (from the manage menu) narrows first, then the live
-        // substring search refines within that slice — the two compose.
+        Array(filteredHistory.prefix(NotchModel.notchRecentCap))
+    }
+
+    /// The FULL filtered history, newest-first — every retained item, uncapped.
+    /// Backs the standalone History window so nothing captured is ever out of reach.
+    var archiveVisible: [HistoryItem] { filteredHistory }
+
+    /// Shared filter pipeline for both the notch list and the archive window: the
+    /// source filter (from the manage menu) narrows first, then the live substring
+    /// search refines within that slice — the two compose.
+    private var filteredHistory: [HistoryItem] {
         var items = history
         if let source = historySourceFilter {
             items = items.filter { $0.source == source }
@@ -1881,7 +1903,7 @@ final class NotchModel: ObservableObject {
         // The user pinned this answer: leaving is no longer a fold signal. Drop any
         // watch that was already armed (a leave-during-typing may have scheduled
         // one before the pin) so it can't fire behind the pin's back.
-        if isAnswerPinned {
+        if isAnswerPinned || isModelPickerOpen {
             cancelLeaveWatch()
             return
         }
@@ -1934,7 +1956,7 @@ final class NotchModel: ObservableObject {
     private func recheckLeaveWatch() {
         guard let watch = leaveWatch else { return }
         guard open else { leaveWatch = nil; return }
-        if isAnswerPinned { cancelLeaveWatch(); return }
+        if isAnswerPinned || isModelPickerOpen { cancelLeaveWatch(); return }
         // Parked back over (or still over) the island: nothing to fold, but keep
         // watching — AppKit's tracking state may be desynced, so the exit that
         // would restart this conversation might never arrive.
@@ -2037,6 +2059,7 @@ final class NotchModel: ObservableObject {
         savedIdleDraft = (mode == .idle && hasText) ? text : ""
         mode = .idle
         isAnswerPinned = false
+        isModelPickerOpen = false
         text = ""; turns = []
         showHistory = false
         showSettings = false
@@ -2881,9 +2904,11 @@ final class NotchModel: ObservableObject {
         // (only a first turn pulls in the clipboard).
         let firstTurn = turns.isEmpty
         if firstTurn { threadHistoryID = UUID() }
-        // A brand-new conversation starts unpinned; a follow-up keeps the pin the
-        // user set to read the thread (asking on doesn't fold it).
-        if firstTurn { isAnswerPinned = false }
+        // Submitting never touches the pin. A follow-up keeps the pin the user set
+        // to read the thread (asking on doesn't fold it), and a first question keeps
+        // the pin set on the idle prompt — the only way one can be armed here, since
+        // `newChat` / `fullClose` both clear it as they empty `turns`. Dropping it on
+        // a first turn would fold the panel on leave exactly when the answer arrives.
 
         // A follow-up sent while the previous answer is still streaming supersedes
         // it: settle any stale streaming flag now, because the superseded task is
@@ -3052,27 +3077,44 @@ final class NotchModel: ObservableObject {
             // before the failure — a mid-stream drop that already produced text must
             // persist that partial round, not discard it (see the catch below).
             var acc = ""
+            // Throttle state for the streamed-text sink below. Providers deliver
+            // deltas far faster than the display refreshes (some near
+            // per-character), and every write to `turns` re-evaluates the whole
+            // observed view tree and re-parses the answer's markdown — so the
+            // per-chunk work is limited to accumulating into `acc`, and one
+            // shared flush pushes to the model at most ~30 times a second.
+            // Hoisted with `acc` so the catch paths can settle the throttle (a
+            // trailing scheduled flush must never overwrite their final text).
+            var pendingFlush: DispatchWorkItem? = nil
+            var lastFlushAt: TimeInterval = 0
+            var streamSettled = false
             do {
-                // One sink for streamed text, shared by the plain and agent paths so
-                // the snapshot threading, first-chunk mode-flip, and on-screen guard
-                // live in exactly one place. Main-actor (the task inherits it), so it
-                // can mutate the task-local `acc`/`thread` and touch UI directly.
-                // `[weak self]` mirrors the task; on a detached round `self` is gone
-                // and the closure is a no-op.
-                let appendChunk: @MainActor (String) -> Void = { [weak self] piece in
-                    guard let self else { return }
-                    acc += piece
+                // Push everything accumulated so far into the model/UI — the one
+                // place the streamed text performs @Published writes. Shared by
+                // the plain and agent paths so the snapshot threading, first-
+                // chunk mode-flip, and on-screen guard live in exactly one place.
+                // Main-actor (the task inherits it), so it can mutate the
+                // task-local `acc`/`thread` and touch UI directly. `[weak self]`
+                // mirrors the task; on a detached round `self` is gone and the
+                // closure is a no-op.
+                let flushInterval: TimeInterval = 1.0 / 30.0
+                let flushChunks: @MainActor () -> Void = { [weak self] in
+                    guard let self, !streamSettled else { return }
+                    pendingFlush?.cancel()
+                    pendingFlush = nil
+                    lastFlushAt = ProcessInfo.processInfo.systemUptime
                     if let i = thread.firstIndex(where: { $0.id == answerID }) {
                         thread[i].text = acc
                     }
                     // Keep the reattach mirror current, so an open mid-stream
                     // restores everything written so far, not a stale snapshot.
                     self.syncInFlight(answerID, thread)
-                    // First real text for this round ends the thinking phase — clear the
-                    // dots even if the panel folded away (the round is detached but still
-                    // ours). Idempotent: only the round that owns the flag clears it.
-                    self.endThinking(for: answerID)
-                    if self.isOnScreen(answerID: answerID) {
+                    // The on-screen turn must still be live: a stop (Esc) settles
+                    // it synchronously while this task is still being cancelled,
+                    // and a trailing scheduled flush must not grow a turn the
+                    // user already froze (what they saw at stop is what persists).
+                    if self.isOnScreen(answerID: answerID),
+                       self.turns.first(where: { $0.id == answerID })?.streaming == true {
                         // First real token ends the pre-stream wait: freeze the
                         // rotating thinking word (the dots/word fade out now anyway).
                         self.stopThinkingWordRotation()
@@ -3080,6 +3122,29 @@ final class NotchModel: ObservableObject {
                         // to grow in place out of the thinking state.
                         if self.mode == .load { self.mode = .result }
                         self.updateAnswer(id: answerID, text: acc)
+                    }
+                }
+                // The per-chunk sink: accumulate, then flush now if the throttle
+                // window has passed (the first chunk always has — `lastFlushAt`
+                // starts at 0 — so time-to-first-paint is untouched), else make
+                // sure ONE trailing flush is scheduled for the window's end so
+                // the last piece of a burst never waits on the next burst.
+                let appendChunk: @MainActor (String) -> Void = { [weak self] piece in
+                    guard let self else { return }
+                    acc += piece
+                    // First real text for this round ends the thinking phase — clear the
+                    // dots even if the panel folded away (the round is detached but still
+                    // ours). Idempotent: only the round that owns the flag clears it.
+                    self.endThinking(for: answerID)
+                    let now = ProcessInfo.processInfo.systemUptime
+                    if now - lastFlushAt >= flushInterval {
+                        flushChunks()
+                    } else if pendingFlush == nil {
+                        let work = DispatchWorkItem { MainActor.assumeIsolated { flushChunks() } }
+                        pendingFlush = work
+                        DispatchQueue.main.asyncAfter(
+                            deadline: .now() + (flushInterval - (now - lastFlushAt)),
+                            execute: work)
                     }
                 }
 
@@ -3168,6 +3233,12 @@ final class NotchModel: ObservableObject {
                     }
                 }
                 if Task.isCancelled { return }
+                // Final flush: the terminal writes below must see the complete
+                // text (pieces may still be buffered inside the throttle window),
+                // and settling the flag keeps a trailing scheduled flush from
+                // firing after them.
+                flushChunks()
+                streamSettled = true
                 self.stopThinkingWordRotation()
                 self.endThinking(for: answerID)
                 if let i = thread.firstIndex(where: { $0.id == answerID }) {
@@ -3185,8 +3256,16 @@ final class NotchModel: ObservableObject {
                 }
             } catch is CancellationError {
                 // superseded by a newer round on the same screen; nothing to persist
+                pendingFlush?.cancel()
+                streamSettled = true
             } catch {
                 if Task.isCancelled { return }
+                // Settle the throttle before the terminal writes below: they own
+                // the final text (partial + interrupted suffix, or the error
+                // reason), and a trailing scheduled flush firing after them would
+                // overwrite it with the bare partial.
+                pendingFlush?.cancel()
+                streamSettled = true
                 self.stopThinkingWordRotation()
                 self.endThinking(for: answerID)
                 let partial = acc.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3590,7 +3669,8 @@ final class NotchModel: ObservableObject {
         item.source = source
         item.link = link
         history.insert(item, at: 0)
-        history = Array(history.prefix(50))
+        // No cap: the full archive is retained (the notch list shows only the
+        // newest `notchRecentCap`; the History window shows everything).
         saveHistory()
     }
 
@@ -3770,7 +3850,6 @@ final class NotchModel: ObservableObject {
         var item = HistoryItem(id: threadID, q: question, a: "", t: Date())
         item.pending = true
         history.insert(item, at: 0)
-        history = Array(history.prefix(50))
         // Not saved to disk — a pending row carries no answer and must never
         // survive a relaunch. `persistThread` is what writes the settled row.
     }
@@ -3812,7 +3891,7 @@ final class NotchModel: ObservableObject {
             history.remove(at: existing)
         }
         history.insert(item, at: 0)
-        history = Array(history.prefix(50))
+        // No cap: the full archive is retained (see `persistCapture`).
         saveHistory()
 
         // Derive a title from the actual conversation content so the recent list

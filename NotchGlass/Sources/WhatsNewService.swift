@@ -64,6 +64,27 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.1.13",
+            date: "2026-07-09",
+            features: [
+                "One searchable model picker across every provider — speed, context, and capabilities at a glance.",
+                "Vercel AI Gateway added as a provider.",
+                "A History window holds the full archive — search it, filter by Ask, Notes, or Reminders.",
+                "Copy an image and it previews above the prompt.",
+                "Pin from the idle prompt — ⌘P no longer needs an answer on screen.",
+            ],
+            improvements: [
+                "Copied text previews above the prompt again.",
+                "Provider and API key fold into a collapsed section; picking a model without a key jumps to its setup.",
+                "Clear and See all history moved to the end of Recent, out of the ⋯ menu.",
+                "Long answers stream more smoothly.",
+            ],
+            fixes: [
+                "Stop freezes exactly the text on screen — a late chunk can no longer overwrite it.",
+                "Items past the newest 50 move to History instead of being dropped.",
+            ]
+        ),
+        Entry(
             version: "0.1.12",
             date: "2026-07-07",
             features: [

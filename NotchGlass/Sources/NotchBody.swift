@@ -202,12 +202,17 @@ struct NotchBody: View {
                 immersiveHistoryView
             } else {
                 // While ↑/↓ recall is walking the history, the slot above the input
-                // shows a "which of how many" counter. The clipboard-quote preview
-                // that used to share this slot has been removed — a copied clip no
-                // longer echoes back above the prompt; its one-tap chips below the
-                // input remain the way to act on it.
+                // shows a "which of how many" counter instead of the clipboard quote
+                // — the quote is irrelevant to a recalled question, and the counter
+                // tells you how far back you've stepped.
                 if let recall = model.recallPosition {
                     recallCounterLine(recall)
+                        .transition(moduleTransition)
+                } else if let clip = model.pendingClipboard {
+                    clipboardPreviewLine(clip)
+                        .transition(moduleTransition)
+                } else if let image = model.pendingClipboardImage {
+                    clipboardImagePreviewLine(image)
                         .transition(moduleTransition)
                 }
 
@@ -300,7 +305,7 @@ struct NotchBody: View {
     /// over its top as a translucent header. The list's content reaches up behind
     /// the header (`immersiveTopReach`), so rows scroll under the input and frost +
     /// fade out rather than ending on a hard cut — the panel reads as one
-    /// continuous surface. The manage bar (gear + Clear) FLOATS over the bottom-left
+    /// continuous surface. The manage bar (the ⋯ chip) FLOATS over the bottom-left
     /// as fixed chrome: the list runs full-height *behind* it, so rows can scroll
     /// down past the buttons and stay partly visible through/around the glass.
     private var immersiveHistoryView: some View {
@@ -315,10 +320,15 @@ struct NotchBody: View {
                 // behind comes entirely from the list's own top fade + blur (see
                 // `historyList(immersive:)`).
                 VStack(alignment: .leading, spacing: 0) {
-                    // The clipboard-quote preview that used to ride inside this
-                    // floating header has been removed — a pending clip no longer
-                    // echoes above the prompt. The header is now just the input; the
-                    // runway shrinks back to the bare-input baseline accordingly.
+                    // A pending clipboard quote rides INSIDE the floating header:
+                    // the preview line above the prompt (the context the query folds
+                    // in). The runway (`immersiveTopReach`, measured from this
+                    // header's real height) grows to keep the first row clear.
+                    if let clip = model.pendingClipboard {
+                        clipboardPreviewLine(clip)
+                    } else if let image = model.pendingClipboardImage {
+                        clipboardImagePreviewLine(image)
+                    }
                     idleInputRow
                     // No preset chips here: this IS the expanded Recent state, and
                     // the list owns the space below the prompt. Chips fold away to
@@ -353,7 +363,7 @@ struct NotchBody: View {
                     measuredImmersiveHeaderHeight = measured
                 }
             }
-            // Fixed bottom chrome: gear + Clear, FLOATING over the bottom-left of the
+            // Fixed bottom chrome: the ⋯ chip, FLOATING over the bottom-left of the
             // full-height list. Because it's an overlay (not a sibling), the list runs
             // its whole height behind it — rows scroll down past the buttons and stay
             // partly visible through/around the translucent glass capsules. The glass
@@ -416,16 +426,68 @@ struct NotchBody: View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// The ↑/↓ recall counter shown above the input while walking history: a small
-    /// "History" label + "pos / total" (newest = 1), so you can see how far back the
-    /// current recalled question sits. (The clipboard-quote preview that once shared
-    /// this slot has been removed — a copied clip no longer echoes above the prompt.)
+    /// The copied-clip preview shown above the prompt when there's eligible
+    /// clipboard content — context for the input below, so the user can see what a
+    /// referential query ("summarize this") will fold in. Rendered as a *quote*: a
+    /// leading curly quotation mark precedes the copied text, so it reads as the
+    /// lifted, referenced material rather than a status line. The one-tap action
+    /// chips that act on this clip live *below* the input, in `clipboardPresetChips`.
+    private func clipboardPreviewLine(_ clip: String) -> some View {
+        let preview = clip.count > 40 ? String(clip.prefix(40)) + "…" : clip
+        return HStack(alignment: .firstTextBaseline, spacing: 4) {
+            // A leading curly opening quotation mark — the standard typographic cue
+            // that what follows is lifted, quoted material. Sits slightly larger and
+            // baseline-aligned with the preview text.
+            Text("\u{201C}")
+                .font(.system(size: 18, weight: .semibold, design: .serif))
+                .foregroundStyle(Tokens.text3.opacity(0.6))
+                .baselineOffset(-3)
+            Text(preview)
+                .font(.sf(11))
+                .tracking(0.2)
+                .foregroundStyle(Tokens.text4)
+                .lineLimit(1)
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.bottom, 8)
+    }
+
+    /// The copied-IMAGE preview (XII-121): a small thumbnail + caption in the
+    /// text quote's slot, shown when the clipboard holds pixels instead of words
+    /// (a screenshot, a copied bitmap). The first-turn Ask attaches this image to
+    /// the wire message, so the preview is exactly "what the model will see".
+    private func clipboardImagePreviewLine(_ image: NSImage) -> some View {
+        HStack(spacing: 6) {
+            Image(nsImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(width: 34, height: 24)
+                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
+                )
+            Text(L("clip.imageCopied"))
+                .font(.sf(11))
+                .tracking(0.2)
+                .foregroundStyle(Tokens.text4)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.bottom, 8)
+    }
+
+    /// The ↑/↓ recall counter that takes the clipboard quote's slot while walking
+    /// history: a small clock glyph + "pos / total" (newest = 1), so you can see
+    /// how far back the current recalled question sits. Same slot metrics as
+    /// `clipboardPreviewLine` so swapping one for the other doesn't jump the input.
     private func recallCounterLine(_ recall: (pos: Int, total: Int)) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 5) {
-            Text("History")
-                .font(.sf(10, weight: .semibold))
-                .tracking(0.4)
+            Image(systemName: "clock.arrow.circlepath")
+                .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(Tokens.text4)
+                .baselineOffset(-1)
             Text("\(recall.pos) / \(recall.total)")
                 .font(.sf(11, weight: .medium))
                 .monospacedDigit()
@@ -609,7 +671,7 @@ struct NotchBody: View {
 
     /// The manage bar, pinned to the BOTTOM-LEFT of the recent panel in both the
     /// compact and immersive layouts. A single ⋯ chip that pops the manage MENU
-    /// upward (filter by source, Settings, Clear) — see `manageMenu`. While a
+    /// upward (filter by source, Settings) — see `manageMenu`. While a
     /// source filter is active and the menu is closed, a small tinted chip beside
     /// the ⋯ names the filter and clears it on tap, so the narrowed list never
     /// reads as "history lost". Always visible — fixed chrome below the list.
@@ -690,10 +752,11 @@ struct NotchBody: View {
         }
     }
 
-    /// The upward manage menu: one small glass card holding everything the old
-    /// horizontal unfurl carried, plus the source filter. Top to bottom: a row of
-    /// three filter chips (Note / Remind / Ask), then Settings, then Clear — the
-    /// destructive action last, in the standard menu position.
+    /// The upward manage menu: one small glass card holding the source filter and
+    /// Settings. Top to bottom: a row of three filter chips (Note / Remind / Ask),
+    /// then Settings. "See all history" and Clear deliberately do NOT live here —
+    /// they sit at the very END of the recent list (see `historyFooterActions`), so
+    /// they're reached by scrolling the list to its bottom.
     private var manageMenu: some View {
         let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
         return VStack(alignment: .leading, spacing: 2) {
@@ -730,16 +793,6 @@ struct NotchBody: View {
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                     manageExpanded = false
                     model.toggleSettings()
-                }
-            }
-            // Clear is destructive, so it arms a confirmation rather than wiping
-            // history on first tap. The card itself is rendered centered over the
-            // whole island (see NotchIsland) — not anchored here — so it lands in
-            // the middle of the panel instead of down by the menu.
-            manageMenuRow(icon: "trash", title: L("recent.clear"), destructive: true) {
-                withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
-                    manageExpanded = false
-                    model.confirmingClear = true
                 }
             }
         }
@@ -789,17 +842,17 @@ struct NotchBody: View {
     /// use, so the menu reads as part of the same surface.
     private func manageMenuRow(
         icon: String, title: String, shortcut: String? = nil,
-        destructive: Bool = false, action: @escaping () -> Void
+        action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             HStack(spacing: 8) {
                 Image(systemName: icon)
                     .font(.sf(11, weight: .medium))
-                    .foregroundStyle(destructive ? Color.red.opacity(0.75) : Tokens.text3)
+                    .foregroundStyle(Tokens.text3)
                     .frame(width: 14)
                 Text(title)
                     .font(.sf(12, weight: .medium))
-                    .foregroundStyle(destructive ? Color.red.opacity(0.85) : Tokens.text2)
+                    .foregroundStyle(Tokens.text2)
                 Spacer(minLength: 16)
                 if let shortcut {
                     Text(shortcut)
@@ -821,7 +874,50 @@ struct NotchBody: View {
         ActiveFilterChip(model: model, source: source)
     }
 
-    /// The compact recent list (≤6 visible rows) with the manage bar (gear + Clear)
+    /// The two end-of-list actions — "See all history" (the standalone archive
+    /// window, holding everything past `NotchModel.notchRecentCap`) and the
+    /// destructive Clear. They live at the tail of the scroll content, not in the ⋯
+    /// menu: you meet them only after scrolling past the oldest row, which is
+    /// precisely the moment "show me everything" or "wipe this" becomes the next
+    /// move. A fading hairline above them marks where the list ends.
+    private var historyFooterActions: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Rectangle()
+                .fill(
+                    LinearGradient(
+                        colors: [.white.opacity(0), .white.opacity(0.12), .white.opacity(0)],
+                        startPoint: .leading, endPoint: .trailing
+                    )
+                )
+                .frame(height: 0.5)
+
+            HStack(spacing: 8) {
+                HistoryFooterButton(
+                    icon: "clock.arrow.circlepath",
+                    title: L("recent.menu.seeAll")
+                ) {
+                    NotificationCenter.default.post(name: .openHistoryArchiveRequested, object: nil)
+                }
+                // Destructive, so it arms the confirmation instead of wiping on the
+                // first tap. The confirm card renders centered over the whole island
+                // (see NotchIsland), not anchored to this pill.
+                HistoryFooterButton(
+                    icon: "trash",
+                    title: L("recent.clear"),
+                    destructive: true
+                ) {
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                        model.confirmingClear = true
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .padding(.top, 10)
+        .padding(.horizontal, 8)
+    }
+
+    /// The compact recent list (≤6 visible rows) with the manage bar (the ⋯ chip)
     /// pinned at the BOTTOM-LEFT below the list rows — matching the immersive layout.
     /// The open animation moves the whole block together via the moduleTransition at
     /// the call site (which also supplies the 12pt gap above the list).
@@ -916,7 +1012,7 @@ struct NotchBody: View {
 
     /// How far the immersive list's content reaches DOWN behind the floating manage
     /// bar — the bottom mirror of `immersiveTopReach`. It's the runway the last rows
-    /// scroll down into and dissolve (fade + frost) behind the gear/Clear chrome, so
+    /// scroll down into and dissolve (fade + frost) behind the ⋯ chrome, so
     /// reaching the very bottom of the list reads as rows sliding under the buttons,
     /// not stopping above them. Sized to clear the bar (gear 30 + 4pt bottom pad ≈
     /// 34) plus a little headroom so a row can travel fully behind it.
@@ -934,20 +1030,34 @@ struct NotchBody: View {
     /// rows run their whole height behind it. Older rows are a scroll (or ↓) away.
     private let immersiveListHeight: CGFloat = 320
 
+    /// Height of the compact scroll region, and the two content measurements the
+    /// compact overflow test weighs against it: one recent row (9pt padding on each
+    /// side of a 14pt line) and the end-of-list footer (hairline + gap + one 25pt
+    /// glass pill, plus its 10pt lead-in). Estimates, not measurements — they only
+    /// decide whether the bottom taper is worth drawing.
+    private let compactListHeight: CGFloat = 220
+    private let compactRowHeight: CGFloat = 35
+    private let historyFooterHeight: CGFloat = 50
+
     /// The recent list. `immersive` swaps the compact, below-the-header list for
     /// the tall variant whose content scrolls UP behind the floating input —
     /// frosting and fading as it goes (see `immersiveTopReach`). Only used once
     /// the list overflows; a short list stays compact under the header.
     private func historyList(immersive: Bool = false) -> some View {
-        // More rows than fit the window → the list scrolls. In the compact layout
+        // More content than fits the window → the list scrolls. In the compact layout
         // the first row sits right under the (non-scrolling) RECENT header, so the
         // TOP never needs a fade — a fixed top pad there would just open a dead gap
         // below the header. The immersive layout is the opposite: its top reaches
         // up behind the floating input, so it DOES taper (fade + frost) there.
-        // The compact frame holds ~6 rows (~35pt each in 220pt); the fade + scroll
-        // only earn their keep past that. Calibrated to the current height so the
-        // bottom taper turns on right when the list actually overflows.
-        let overflowing = model.recentVisible.count > 6
+        //
+        // The compact bottom taper turns on exactly when the content outgrows the
+        // 220pt frame. `historyFooterActions` rides at the tail of that content, so
+        // its height counts here too — otherwise a 5-row list would quietly scroll
+        // its footer off a hard, un-faded edge.
+        let contentHeight =
+            CGFloat(model.recentVisible.count) * compactRowHeight
+            + (model.recentVisible.isEmpty ? 0 : historyFooterHeight)
+        let overflowing = contentHeight > compactListHeight
         return ScrollViewReader { proxy in
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
@@ -1045,6 +1155,15 @@ struct NotchBody: View {
                     // and the onChange below scrolls that row's id into view.
                     .id(item.id)
                 }
+
+                // End-of-list actions. They ride at the BOTTOM of the scroll content,
+                // so a long list only reveals them once it's dragged all the way down —
+                // past the oldest row, where "see everything" and "wipe everything"
+                // are what's left to do. A short list that doesn't scroll shows them
+                // right away, since it's already at its bottom.
+                if !model.recentVisible.isEmpty {
+                    historyFooterActions
+                }
             }
             // In the immersive layout the TOP gets an inset (`immersiveTopReach`):
             // the runway rows scroll up into, behind the floating input, so the first
@@ -1064,13 +1183,13 @@ struct NotchBody: View {
         // Immersive: a tall surface that fills the whole panel; the manage bar floats
         // over its bottom-left. Compact: ~6 rows before the list scrolls, so a short
         // Recent list doesn't reserve a tall empty band. Older rows are a scroll away.
-        .frame(maxHeight: immersive ? immersiveListHeight : 220)
+        .frame(maxHeight: immersive ? immersiveListHeight : compactListHeight)
         .scrollIndicators(.never)
         // Compact: only the bottom fades (the RECENT header caps the top), at the
         // shared 64pt. Immersive: BOTH edges taper — the top dissolves rows sliding
         // up behind the input, the bottom dissolves rows sliding DOWN behind the
         // floating manage bar (so reaching the end reads as rows sliding under the
-        // gear/Clear, mirroring the top). Each edge's taper length tracks its own
+        // ⋯ chip, mirroring the top). Each edge's taper length tracks its own
         // runway (`immersiveTopReach` / `immersiveBottomReach`).
         .scrollEdgeFade(
             top: immersive,
@@ -1445,22 +1564,38 @@ struct NotchBody: View {
             // it sits in a `.background` collapsed to this view's own frame, so however
             // tall the probe wants to be it can't push this view taller — a background
             // takes the primary content's size, overflow just isn't drawn.
-            growingConversation
-                // Take the thread's full intrinsic height regardless of the height
-                // this background slot proposes (300 when the visible layout is the
-                // clipped scroller) — otherwise the probe would cap at 300 and the
-                // `clipped` switch couldn't tell 300 from 1000, so it'd flip-flop on
-                // the boundary. `fixedSize(vertical:)` makes it report its true height.
-                .fixedSize(horizontal: false, vertical: true)
-                .hidden()
-                .allowsHitTesting(false)
-                .background(
-                    GeometryReader { geo in
-                        Color.clear.preference(key: AnswerHeightKey.self, value: geo.size.height)
-                    }
-                )
+            //
+            // SUSPENDED while a clipped thread is still streaming: within one round
+            // the content only grows, so once past the ceiling the probe can't change
+            // the layout decision — it would only double every flush's text-layout
+            // work (a second full lay-out of the whole thread, per update, feeding a
+            // boolean that's already true). It re-mounts when the stream settles, so
+            // the next content change that CAN shrink the thread (a regenerate
+            // replacing a long answer, opening a shorter history thread) re-measures
+            // as before. While unclipped it stays live — that's the state where
+            // streaming growth must be able to flip the layout.
+            if !(clipped && model.isStreaming) {
+                growingConversation
+                    // Take the thread's full intrinsic height regardless of the height
+                    // this background slot proposes (300 when the visible layout is the
+                    // clipped scroller) — otherwise the probe would cap at 300 and the
+                    // `clipped` switch couldn't tell 300 from 1000, so it'd flip-flop on
+                    // the boundary. `fixedSize(vertical:)` makes it report its true height.
+                    .fixedSize(horizontal: false, vertical: true)
+                    .hidden()
+                    .allowsHitTesting(false)
+                    .background(
+                        GeometryReader { geo in
+                            Color.clear.preference(key: AnswerHeightKey.self, value: geo.size.height)
+                        }
+                    )
+            }
         }
         .onPreferenceChange(AnswerHeightKey.self) {
+            // 0 means "the probe is unmounted" (suspended above, or a transient
+            // empty pass) — never "the content shrank to nothing". Keep the last
+            // real measurement so the clipped layout holds while suspended.
+            guard $0 > 0 else { return }
             measuredAnswerHeight = $0
             // Mirror to the model (a plain var — no invalidation) so `fullClose`
             // can park the measurement with the session; the next mount seeds its
@@ -1573,14 +1708,24 @@ struct NotchBody: View {
         // shorter than the runway (`clippedTopBlurReach` = 40pt); maxRadius 22
         // matches the bottom band (comparably thin chrome, unlike the deep 36 the
         // immersive input header needs).
-        .modifier(ConditionalTopBlur(active: true, height: clippedTopBlurReach, maxRadius: 22))
+        //
+        // Both bands rest while the answer is still STREAMING: each is a full
+        // `drawingGroup`-flattened copy of the scroll viewport, re-rasterized
+        // whenever its content changes — and a streaming thread changes on every
+        // ~33ms flush AND every frame of the tail-follow scroll, so the two frost
+        // copies were the bulk of the per-update render cost of a long answer.
+        // The `scrollEdgeFade` opacity taper above stays on throughout, so text
+        // still dissolves at both runways; the frost simply joins when the stream
+        // settles and the content goes static.
+        .modifier(ConditionalTopBlur(active: !model.isStreaming, height: clippedTopBlurReach, maxRadius: 22))
         // Progressive blur on the bottom runway, mirroring the immersive manage bar's
         // ConditionalBottomBlur: rows scrolling down into the runway frost out as they
         // go behind the input. Kept 4pt shorter than the runway (`clippedBottomBlurReach`
         // = 76pt) so the band clears the last resting row (~82pt up) — no halo at rest.
-        // maxRadius 22 matches the manage bar (comparable chrome). Always active —
-        // clippedConversation is only ever mounted when `isAnswerClipped`.
-        .modifier(ConditionalBottomBlur(active: true, height: clippedBottomBlurReach, maxRadius: 22))
+        // maxRadius 22 matches the manage bar (comparable chrome). Active whenever the
+        // answer is settled — clippedConversation is only ever mounted when
+        // `isAnswerClipped` — and resting during the stream, same as the top band.
+        .modifier(ConditionalBottomBlur(active: !model.isStreaming, height: clippedBottomBlurReach, maxRadius: 22))
     }
 
     /// Height of the taper at each scroll edge, in points. Generous on purpose so
@@ -1839,19 +1984,34 @@ struct NotchBody: View {
             // With the destination now spelled out inline beside the caret, the
             // trailing send pill would just repeat it — so while there's text the
             // inline hint owns that job and the trailing slot stays empty. When the
-            // field is empty the faint clock entry tucks in there to toggle Recent,
-            // and — on the first launch after an update — a "what's new" cue leads
-            // it, the one-tap way into the release notes.
+            // field is empty the pin + Recent cluster tucks in there — hold the panel
+            // open, toggle Recent — and, on the first launch after an update, a
+            // "what's new" cue leads it, the one-tap way into the release notes.
             if !model.hasText && !followUp {
                 HStack(spacing: 8) {
                     if whatsNew.unseenVersion != nil {
                         whatsNewCue
                             .transition(.opacity)
                     }
-                    if !model.history.isEmpty {
-                        recentEntry
-                            .transition(.opacity)
-                    }
+                    IdleTrailingCluster(
+                        pinned: model.isAnswerPinned,
+                        recentOpen: model.showHistory,
+                        showsRecent: !model.history.isEmpty,
+                        togglePin: {
+                            withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                                model.toggleAnswerPin()
+                            }
+                        },
+                        toggleRecent: {
+                            withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                                model.showHistory.toggle()
+                                // Closing via the chevron drops any keyboard highlight;
+                                // opening starts un-highlighted (the caret stays in the
+                                // input).
+                                model.highlightedHistoryIndex = nil
+                            }
+                        }
+                    )
                 }
             }
         }
@@ -1878,32 +2038,6 @@ struct NotchBody: View {
         }
         .buttonStyle(.plain)
         .help(L("whatsnew.title"))
-    }
-
-    /// The minimal clock entry that opens / closes the recent list.
-    private var recentEntry: some View {
-        Button {
-            withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
-                model.showHistory.toggle()
-                // Closing via the clock drops any keyboard highlight; opening via
-                // the clock starts un-highlighted (the caret stays in the input).
-                model.highlightedHistoryIndex = nil
-            }
-        } label: {
-            // A downward chevron reads as "pull the recent list down"; it flips to
-            // point up once the list is open, so the same control says "close" on
-            // the way back — the natural disclosure direction for a panel that
-            // unfurls below the prompt.
-            Image(systemName: "chevron.down")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(model.showHistory ? Tokens.text2 : Tokens.text4)
-                .rotationEffect(.degrees(model.showHistory ? 180 : 0))
-                .frame(width: 26, height: 26)
-                .contentShape(Rectangle())
-                .animation(.spring(response: 0.32, dampingFraction: 0.8), value: model.showHistory)
-        }
-        .buttonStyle(RecentEntryStyle())
-        .help(L("recent.recent"))
     }
 
     private var followUpRow: some View {
@@ -2155,6 +2289,43 @@ extension NotchModel.Panel {
     }
 }
 
+/// A glass pill carrying an icon and a word, used for the two actions parked at the
+/// bottom of the recent list. Same Liquid Glass language as `GlassTextButton` — it
+/// brightens on hover and gives under a press — with a `destructive` face that reads
+/// soft red so Clear can never be mistaken for the archive link beside it.
+private struct HistoryFooterButton: View {
+    var icon: String
+    var title: String
+    var destructive: Bool = false
+    var action: () -> Void
+
+    @State private var hovering = false
+
+    private var tint: Color {
+        if destructive { return Color.red.opacity(hovering ? 0.95 : 0.75) }
+        return hovering ? Tokens.text2 : Tokens.text4
+    }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: icon)
+                    .font(.sf(10, weight: .medium))
+                Text(title)
+                    .font(.sf(11, weight: .medium))
+            }
+            .foregroundStyle(tint)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .glassCapsule(in: Capsule(), brighter: hovering)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(GlassPressStyle())
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.18), value: hovering)
+    }
+}
+
 /// The one place a history source maps to its filter-chip face: the label key
 /// and the source's app colour (Notes amber, Reminders orange, Ask a cool blue).
 /// Shared by the manage menu's chips and the collapsed active-filter chip so the
@@ -2347,6 +2518,115 @@ struct SetupModelButtonStyle: ButtonStyle {
             .onHover { hovering = $0 }
             .animation(.easeOut(duration: 0.18), value: hovering)
             .animation(.spring(response: 0.25, dampingFraction: 0.7), value: pressed)
+    }
+}
+
+/// The idle prompt's trailing controls — the pin and the Recent disclosure — fused
+/// into ONE capsule: a single glass pill holding two glyphs, rather than two chips
+/// competing beside each other. Nothing divides them; the hover fill alone shows
+/// which half the pointer is over.
+///
+/// Pitched deliberately fainter than the result header's standalone
+/// `ResultPinButton`. That pin sits over an answer the user is already reading; this
+/// one sits next to an empty "Type anything…" prompt, where the eye belongs on the
+/// caret — so at rest the glass is a whisper and both glyphs sit at the meta level
+/// of the ink scale. Hovering the pill brings the glass up; hovering one segment
+/// lifts just that glyph. Engaged state (pinned, or Recent open) reads through the
+/// glyph alone — the filled, upright tack and the flipped chevron — never a wash.
+struct IdleTrailingCluster: View {
+    var pinned: Bool
+    var recentOpen: Bool
+    /// Recent has nothing to show on a first run — the pill then carries the pin
+    /// alone and shrinks to a single round segment.
+    var showsRecent: Bool
+    var togglePin: () -> Void
+    var toggleRecent: () -> Void
+
+    private enum Segment { case pin, recent }
+
+    @State private var hovering = false
+    @State private var hovered: Segment? = nil
+
+    /// Square segments, so each hover circle sits concentric with the capsule's end
+    /// cap and keeps the same inset on every side.
+    private let segmentWidth: CGFloat = 26
+    private let segmentHeight: CGFloat = 26
+    /// The hover circle is inset 3pt inside the pill — flush to the glass would read
+    /// as an overflowing blob rather than a target sitting in it.
+    private let hoverDiameter: CGFloat = 20
+
+    var body: some View {
+        HStack(spacing: 0) {
+            segment(.pin, engaged: pinned, action: togglePin,
+                    tooltip: L(pinned ? "result.unpin" : "result.pin")) {
+                // A pinned pin tips upright, the way a pushed-in tack sits.
+                Image(systemName: pinned ? "pin.fill" : "pin")
+                    .rotationEffect(.degrees(pinned ? 0 : 32))
+                    .animation(.spring(response: 0.32, dampingFraction: 0.8), value: pinned)
+            }
+            if showsRecent {
+                segment(.recent, engaged: recentOpen, action: toggleRecent,
+                        tooltip: L("recent.recent")) {
+                    // A downward chevron reads as "pull the recent list down"; it flips
+                    // to point up once the list is open, so the same control says
+                    // "close" on the way back.
+                    Image(systemName: "chevron.down")
+                        .rotationEffect(.degrees(recentOpen ? 180 : 0))
+                        .animation(.spring(response: 0.32, dampingFraction: 0.8), value: recentOpen)
+                }
+            }
+        }
+        // The glass renders behind both segments and carries all the resting
+        // dimming, so the glyphs keep their own ink. At rest it's barely there.
+        .background {
+            Color.clear
+                .glassCapsule(in: Capsule(), brighter: hovering)
+                .opacity(hovering ? 0.72 : 0.34)
+        }
+        .clipShape(Capsule())
+        .onHover { inside in
+            hovering = inside
+            if !inside { hovered = nil }
+        }
+        .animation(.easeOut(duration: 0.18), value: hovering)
+        .animation(.spring(response: 0.34, dampingFraction: 0.82), value: showsRecent)
+    }
+
+    private func segment<Glyph: View>(
+        _ segment: Segment, engaged: Bool, action: @escaping () -> Void,
+        tooltip: String, @ViewBuilder glyph: () -> Glyph
+    ) -> some View {
+        Button(action: action) {
+            glyph()
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(engaged || hovered == segment ? Tokens.text2 : Tokens.text4)
+                .frame(width: segmentWidth, height: segmentHeight)
+                // A round fill that sits inside the segment rather than filling it —
+                // no straight seam down the middle of the pill.
+                .background(
+                    Circle()
+                        .fill(.white.opacity(hovered == segment ? 0.08 : 0))
+                        .frame(width: hoverDiameter, height: hoverDiameter)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(SegmentPressStyle())
+        .onHover { inside in
+            if inside { hovered = segment }
+            else if hovered == segment { hovered = nil }
+        }
+        .animation(.easeOut(duration: 0.18), value: hovered)
+        .notchTooltip(tooltip)
+    }
+}
+
+/// Dims a cluster segment on press. No scale: a segment can't shrink away from its
+/// neighbour without breaking the pill it shares with it.
+private struct SegmentPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.5 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 

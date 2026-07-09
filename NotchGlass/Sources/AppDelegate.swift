@@ -209,8 +209,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // Hand activation back to the app the user came from (recorded
                     // at open). Skipped when we're no longer active — the user
                     // already switched into another app themselves, and re-activating
-                    // the recorded one would fight that choice.
+                    // the recorded one would fight that choice. ALSO skipped while the
+                    // standalone History window is open: yielding activation would push
+                    // this whole `.accessory` app to the background and drag that
+                    // window down with it (it would look like it closed itself). The
+                    // History window is independent of the notch panel — folding the
+                    // notch must not disturb it.
                     if NSApp.isActive,
+                       !HistoryArchiveWindowController.shared.isVisible,
                        let prev = self.appToRestoreOnClose, !prev.isTerminated {
                         NSApp.yieldActivation(to: prev)
                         prev.activate()
@@ -320,6 +326,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // actually on (mouse position), not wherever the notch lives.
                     self.model.openSettings(on: self.displayForSummon())
                 }
+            }
+        }
+
+        // The Recent list's "See all" action opens the standalone History window
+        // showing the complete, uncapped archive (the notch keeps only the newest
+        // slice). A real top-level window, managed by its own controller.
+        NotificationCenter.default.addObserver(
+            forName: .openHistoryArchiveRequested,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                HistoryArchiveWindowController.shared.present(model: self.model)
             }
         }
 

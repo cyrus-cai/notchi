@@ -122,13 +122,13 @@ struct ContentView: View {
                     break
                 }
             }
-            // ⌘P (and ⌘D) pins/unpins the answer on screen — the keyboard twin of
-            // the top-right pin button. A pinned answer stays open when the pointer
-            // leaves (see NotchModel.collapseOnLeave). Only over a result (there's
-            // nothing to pin on the idle prompt / settings), so both fall through to
-            // the system everywhere else. keyCode 35 is P, 2 is D.
+            // ⌘P (and ⌘D) pins/unpins the panel — the keyboard twin of the pin
+            // button, which the result header and the idle prompt both carry. Pinned
+            // → the panel stays open when the pointer leaves (see
+            // NotchModel.collapseOnLeave). Not over settings / what's new (those own
+            // no pin), so both fall through to the system there. keyCode 35 is P, 2 is D.
             if event.keyCode == 35 || event.keyCode == 2, event.modifierFlags.contains(.command),
-               model.mode == .result, !model.showSettings, !model.showWhatsNew {
+               model.mode != .load, !model.showSettings, !model.showWhatsNew {
                 withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
                     model.toggleAnswerPin()
                 }

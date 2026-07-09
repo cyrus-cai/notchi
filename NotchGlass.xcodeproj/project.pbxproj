@@ -19,6 +19,8 @@
 		A100001A /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000A /* ContentView.swift */; };
 		A100001B /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000C /* SettingsView.swift */; };
 		A1000051 /* InlineSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000050 /* InlineSettingsView.swift */; };
+		A1000731 /* ModelPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000730 /* ModelPickerView.swift */; };
+		A1000741 /* VendorLogos.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000740 /* VendorLogos.swift */; };
 		A100001C /* HotKey.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000D /* HotKey.swift */; };
 		A100001D /* APIKeyStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000E /* APIKeyStore.swift */; };
 		A1000060 /* NotesService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000061 /* NotesService.swift */; };
@@ -34,6 +36,7 @@
 		A10000C2 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000C3 /* OnboardingView.swift */; };
 		A10000C4 /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000C5 /* NotificationService.swift */; };
 		A1000082 /* WhatsNewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000083 /* WhatsNewView.swift */; };
+		A10003AA /* HistoryArchiveWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10003BB /* HistoryArchiveWindow.swift */; };
 		A1000066 /* IntentExamples.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000067 /* IntentExamples.swift */; };
 		A1000071 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1000070 /* Assets.xcassets */; };
 		A10004A1 /* Fonts in Resources */ = {isa = PBXBuildFile; fileRef = A10004A0 /* Fonts */; };
@@ -63,6 +66,7 @@
 		A10000C3 /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
 		A10000C5 /* NotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationService.swift; sourceTree = "<group>"; };
 		A1000083 /* WhatsNewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhatsNewView.swift; sourceTree = "<group>"; };
+		A10003BB /* HistoryArchiveWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryArchiveWindow.swift; sourceTree = "<group>"; };
 		A1000067 /* IntentExamples.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntentExamples.swift; sourceTree = "<group>"; };
 		A1000007 /* GlassBackground.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassBackground.swift; sourceTree = "<group>"; };
 		A1000008 /* NotchBody.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotchBody.swift; sourceTree = "<group>"; };
@@ -70,6 +74,8 @@
 		A100000A /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		A100000C /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		A1000050 /* InlineSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlineSettingsView.swift; sourceTree = "<group>"; };
+		A1000730 /* ModelPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelPickerView.swift; sourceTree = "<group>"; };
+		A1000740 /* VendorLogos.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VendorLogos.swift; sourceTree = "<group>"; };
 		A100000D /* HotKey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HotKey.swift; sourceTree = "<group>"; };
 		A100000E /* APIKeyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIKeyStore.swift; sourceTree = "<group>"; };
 		A100000B /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -129,6 +135,7 @@
 				A10000C3 /* OnboardingView.swift */,
 				A10000C5 /* NotificationService.swift */,
 				A1000083 /* WhatsNewView.swift */,
+				A10003BB /* HistoryArchiveWindow.swift */,
 				A1000065 /* IntentEngine.swift */,
 				A1000067 /* IntentExamples.swift */,
 				A1000007 /* GlassBackground.swift */,
@@ -137,6 +144,8 @@
 				A100000A /* ContentView.swift */,
 				A100000C /* SettingsView.swift */,
 				A1000050 /* InlineSettingsView.swift */,
+				A1000730 /* ModelPickerView.swift */,
+				A1000740 /* VendorLogos.swift */,
 				A100000D /* HotKey.swift */,
 				A100000E /* APIKeyStore.swift */,
 			);
@@ -251,6 +260,7 @@
 				A10000C2 /* OnboardingView.swift in Sources */,
 				A10000C4 /* NotificationService.swift in Sources */,
 				A1000082 /* WhatsNewView.swift in Sources */,
+				A10003AA /* HistoryArchiveWindow.swift in Sources */,
 				A1000064 /* IntentEngine.swift in Sources */,
 				A1000066 /* IntentExamples.swift in Sources */,
 				A1000016 /* GlassBackground.swift in Sources */,
@@ -259,6 +269,8 @@
 				A100001A /* ContentView.swift in Sources */,
 				A100001B /* SettingsView.swift in Sources */,
 				A1000051 /* InlineSettingsView.swift in Sources */,
+				A1000731 /* ModelPickerView.swift in Sources */,
+				A1000741 /* VendorLogos.swift in Sources */,
 				A100001C /* HotKey.swift in Sources */,
 				A100001D /* APIKeyStore.swift in Sources */,
 			);
@@ -318,7 +330,7 @@
 				CODE_SIGN_ENTITLEMENTS = NotchGlass/Resources/NotchGlass.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 6;
+				CURRENT_PROJECT_VERSION = 7;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = NotchGlass/Resources/Info.plist;
@@ -326,7 +338,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.12;
+				MARKETING_VERSION = 0.1.13;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -341,7 +353,7 @@
 				CODE_SIGN_ENTITLEMENTS = NotchGlass/Resources/NotchGlass.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 6;
+				CURRENT_PROJECT_VERSION = 7;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = NotchGlass/Resources/Info.plist;
@@ -349,7 +361,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.12;
+				MARKETING_VERSION = 0.1.13;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;

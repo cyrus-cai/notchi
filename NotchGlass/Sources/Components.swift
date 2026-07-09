@@ -1727,6 +1727,35 @@ enum MarkdownBlock {
 /// No nesting beyond that, in keeping with the app's minimalism (no markdown
 /// library).
 enum MarkdownParser {
+    /// Memoized `parse`. A streaming answer's growing source is rendered by
+    /// several sibling copies of the same turn at once — the visible thread,
+    /// NotchBody's hidden height probe, the progressive-blur overlay copies —
+    /// and SwiftUI can re-evaluate each body more than once per update; every
+    /// evaluation used to re-run the full line-by-line parse of the whole
+    /// accumulated answer. One cache entry per distinct source collapses all
+    /// of that to a single parse. NSCache is thread-safe and purges under
+    /// memory pressure; the count limit bounds the streaming case, where each
+    /// ~33ms flush is a new (one chunk longer) key that's never seen again.
+    private static let parseCache: NSCache<NSString, ParsedBlocks> = {
+        let cache = NSCache<NSString, ParsedBlocks>()
+        cache.countLimit = 32
+        return cache
+    }()
+
+    /// NSCache values must be objects; a one-field box over the parsed blocks.
+    private final class ParsedBlocks {
+        let blocks: [MarkdownBlock]
+        init(_ blocks: [MarkdownBlock]) { self.blocks = blocks }
+    }
+
+    static func parseCached(_ source: String) -> [MarkdownBlock] {
+        let key = source as NSString
+        if let hit = parseCache.object(forKey: key) { return hit.blocks }
+        let blocks = parse(source)
+        parseCache.setObject(ParsedBlocks(blocks), forKey: key)
+        return blocks
+    }
+
     static func parse(_ source: String) -> [MarkdownBlock] {
         var blocks: [MarkdownBlock] = []
         let lines = source.components(separatedBy: "\n")
@@ -2044,7 +2073,12 @@ struct MarkdownBlocks: View {
     /// (non-result) contexts that don't care.
     var onInAppCopy: (() -> Void)? = nil
 
-    private var blocks: [MarkdownBlock] { MarkdownParser.parse(source) }
+    // `parseCached`, not `parse`: this computed property re-runs on every body
+    // evaluation, which during streaming happens for every ~33ms flush times
+    // every mounted copy of the turn (visible thread, height probe, blur
+    // overlays). The cache makes all but the first evaluation of a given
+    // source free.
+    private var blocks: [MarkdownBlock] { MarkdownParser.parseCached(source) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -2082,7 +2116,7 @@ struct StreamingMarkdown: View {
     var color: Color = Tokens.text1
     var onInAppCopy: (() -> Void)? = nil
 
-    private var blocks: [MarkdownBlock] { MarkdownParser.parse(source) }
+    private var blocks: [MarkdownBlock] { MarkdownParser.parseCached(source) }
 
     var body: some View {
         let parsed = blocks

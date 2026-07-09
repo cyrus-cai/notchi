@@ -291,6 +291,10 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     /// pasting a key (one-click OAuth connect, free models) — the default for
     /// fresh installs.
     case openrouter
+    // Vercel AI Gateway is the other aggregator — one key fronts hundreds of
+    // models across OpenAI/Anthropic/Google/xAI/… with automatic provider
+    // fallback. Sits right after OpenRouter, its keyless sibling in kind.
+    case vercel
     // International majors first, then domestic providers by familiarity —
     // OpenRouter stays at the top as the keyless default for fresh installs.
     case openai
@@ -322,6 +326,20 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
                 signupHost: "openrouter.ai",
                 signupURL: "https://openrouter.ai/settings/keys",
                 envVarName: "OPENROUTER_API_KEY")
+        case .vercel:
+            return ProviderSpec(
+                displayName: "Vercel AI Gateway",
+                // OpenAI-compatible chat/completions; one key fronts every
+                // provider. Models are `creator/model` slugs. The live
+                // `/v1/models` fetch (no auth needed) fills the full catalog;
+                // this shortlist is only the offline fallback.
+                endpoint: "https://ai-gateway.vercel.sh/v1/chat/completions",
+                models: ["anthropic/claude-sonnet-4.6", "openai/gpt-5.5",
+                         "google/gemini-3.1-pro", "anthropic/claude-opus-4.8",
+                         "openai/gpt-5-mini", "xai/grok-4.3"],
+                signupHost: "vercel.com",
+                signupURL: "https://vercel.com/d?to=%2F%5Bteam%5D%2F~%2Fai%2Fapi-keys",
+                envVarName: "VERCEL_AI_GATEWAY_API_KEY")
         case .mimo:
             return ProviderSpec(
                 displayName: "MiMo",
@@ -1165,6 +1183,16 @@ enum ModelCatalog {
     struct Result {
         let models: [String]
         let openRouterFeatured: Set<String>
+        /// Rich metadata for each id in `models` (same order), for the custom
+        /// picker's detail panel. Empty for providers whose `/v1/models` gave no
+        /// per-model fields — the picker then builds `ModelInfo` from the bare id.
+        let infos: [ModelInfo]
+
+        init(models: [String], openRouterFeatured: Set<String>, infos: [ModelInfo] = []) {
+            self.models = models
+            self.openRouterFeatured = openRouterFeatured
+            self.infos = infos
+        }
     }
 
     /// Fetch the provider's current model ids. Returns `nil` on any error so the
@@ -1187,7 +1215,17 @@ enum ModelCatalog {
             guard let http = response as? HTTPURLResponse,
                   (200..<300).contains(http.statusCode) else { return nil }
             let list = try JSONDecoder().decode(ModelList.self, from: data)
-            let entries = list.data.filter { !$0.id.isEmpty }
+            // Drop the non-chat modalities before anything else looks at the catalog
+            // (see `Entry.isChatModel`) — the picker, the featured split and the
+            // shortlist all inherit the filter from this one place.
+            let entries = list.data.filter { !$0.id.isEmpty && $0.isChatModel }
+            // id → rich metadata, so the reordered/​filtered id lists below can
+            // carry their `ModelInfo` along without re-decoding.
+            let byID = Dictionary(entries.map { ($0.id, ModelInfo(entry: $0)) },
+                                  uniquingKeysWith: { a, _ in a })
+            func infos(for ids: [String]) -> [ModelInfo] {
+                ids.map { byID[$0] ?? ModelInfo(id: $0, vendor: ModelRatings.vendor(for: $0)) }
+            }
             // OpenRouter's catalog is its FULL marketplace — hundreds of ids, most
             // of them paid, which a freshly-connected $0 account can't call. Offer
             // only what actually works free: the auto-router, then the flagship-
@@ -1202,11 +1240,13 @@ enum ModelCatalog {
                     entries.filter { $0.id.hasSuffix(":free") }
                         .map { (id: $0.id, description: $0.description) },
                     usage: usage)
-                return Result(models: ["openrouter/free"] + featured + rest,
-                              openRouterFeatured: Set(featured))
+                let ids = ["openrouter/free"] + featured + rest
+                return Result(models: ids, openRouterFeatured: Set(featured),
+                              infos: infos(for: ids))
             }
             let ids = entries.map(\.id)
-            return ids.isEmpty ? nil : Result(models: ids, openRouterFeatured: [])
+            return ids.isEmpty ? nil : Result(models: ids, openRouterFeatured: [],
+                                              infos: infos(for: ids))
         } catch {
             return nil
         }
@@ -1228,12 +1268,508 @@ enum ModelCatalog {
     /// OpenAI-style `{ "data": [ { "id": "..." }, ... ] }`. Anthropic's
     /// `/v1/models` returns the same `data: [{ id }]` shape, so one decoder fits
     /// both. `description` (OpenRouter-only) feeds the free-model size ranking.
-    private struct ModelList: Decodable {
+    /// OpenRouter's `/v1/models` also carries the rich per-model metadata the
+    /// custom picker's detail panel shows — human name, context window, input
+    /// modalities (→ Vision), supported parameters (→ Tool Use / Reasoning), and
+    /// pricing (→ tier badge). Every field is optional so a leaner vendor payload
+    /// (or Anthropic's own `/v1/models`) still decodes; the picker simply shows
+    /// less for those.
+    struct ModelList: Decodable {
         let data: [Entry]
         struct Entry: Decodable {
             let id: String
+            let name: String?
             let description: String?
+            let contextLength: Int?
+            let architecture: Architecture?
+            let supportedParameters: [String]?
+            let pricing: Pricing?
+            let reasoning: Reasoning?
+            /// The model's modality class, as Vercel AI Gateway reports it:
+            /// `language` (chat), or one of `image` / `video` / `embedding` /
+            /// `reranking` / `transcription` / `speech` / `realtime`. Absent for
+            /// every other vendor's `/v1/models`, which lists chat models only.
+            /// See `isChatModel`.
+            let type: String?
+
+            /// Whether this entry can actually be called through `chat/completions`.
+            ///
+            /// Vercel's gateway serves its **whole** catalog from one endpoint — of
+            /// its ~300 entries only ~200 are `language` models; the rest are image,
+            /// video, embedding, reranking, transcription, speech and realtime models
+            /// that no chat request can reach, on any plan. They have no business in a
+            /// model picker, so they never enter the list.
+            ///
+            /// A missing `type` means the vendor doesn't classify its models (every
+            /// provider but Vercel) — those catalogs are chat-only already, so the
+            /// absence must read as "keep", never as "drop".
+            var isChatModel: Bool { type == nil || type == "language" }
+
+            struct Architecture: Decodable {
+                let inputModalities: [String]?
+                enum CodingKeys: String, CodingKey { case inputModalities = "input_modalities" }
+            }
+            struct Pricing: Decodable {
+                let prompt: String?
+                let completion: String?
+            }
+            struct Reasoning: Decodable {
+                let mandatory: Bool?
+            }
+
+            enum CodingKeys: String, CodingKey {
+                case id, name, description, architecture, pricing, reasoning, type
+                case contextLength = "context_length"
+                case supportedParameters = "supported_parameters"
+            }
         }
+    }
+}
+
+// MARK: - Model metadata (custom picker detail panel)
+
+/// The per-model facts the custom picker's detail panel renders: a human name,
+/// context window, capability flags, a tier badge, and the two 0–5 meters (Speed
+/// / Intelligence). Built from a `ModelCatalog.ModelList.Entry` when the vendor
+/// ships the rich payload (OpenRouter), or from the bare id alone (every other
+/// provider) — in which case the metadata is inferred from the id and the meters
+/// come from `ModelRatings`.
+struct ModelInfo: Identifiable, Equatable, Sendable {
+    /// The wire id passed to the API — the picker's selection value and dictionary key.
+    let id: String
+    /// Human-readable name for the row/header; the id when no `name` was given.
+    let name: String
+    /// The vendor label shown on the trailing edge of each row ("OpenAI", "Anthropic").
+    let vendor: String
+    /// Context window in tokens, or `nil` when unknown (hidden in the panel).
+    let contextTokens: Int?
+    let vision: Bool
+    let toolUse: Bool
+    let reasoning: Bool
+    /// A short tier tag ("Adv. AI" / "Pro") or `nil` for the plain rows.
+    let tier: Tier?
+    /// 0–5 filled bars each, curated where known and heuristic otherwise.
+    let speed: Int
+    let intelligence: Int
+
+    /// The two badge tiers the reference draws — the blue "Adv. AI" (advanced,
+    /// flagship-class) and "Pro" (paid/premium tier). Plain rows carry no badge.
+    enum Tier: Sendable { case advanced, pro
+        var label: String { self == .advanced ? "Adv. AI" : "Pro" }
+    }
+
+    /// Human context, e.g. "200k". `nil` context → `nil`.
+    var contextLabel: String? {
+        guard let t = contextTokens, t > 0 else { return nil }
+        if t >= 1_000_000 { return String(format: "%.1fM", Double(t) / 1_000_000).replacingOccurrences(of: ".0M", with: "M") }
+        if t >= 1_000 { return "\(t / 1_000)k" }
+        return "\(t)"
+    }
+
+    /// Build from a rich OpenRouter entry: capabilities and context come straight
+    /// off the payload; the meters and tier are curated/heuristic via `ModelRatings`.
+    init(entry: ModelCatalog.ModelList.Entry) {
+        let params = entry.supportedParameters ?? []
+        let modalities = entry.architecture?.inputModalities ?? []
+        self.id = entry.id
+        self.name = entry.name?.isEmpty == false ? entry.name! : ModelRatings.prettyName(for: entry.id)
+        self.vendor = ModelRatings.vendor(for: entry.id)
+        self.contextTokens = entry.contextLength
+        self.vision = modalities.contains("image")
+        self.toolUse = params.contains("tools") || params.contains("tool_choice")
+        self.reasoning = entry.reasoning != nil || params.contains("reasoning") || params.contains("include_reasoning")
+        let rating = ModelRatings.rating(id: entry.id, reasoning: self.reasoning,
+                                         promptPrice: Double(entry.pricing?.prompt ?? ""))
+        self.speed = rating.speed
+        self.intelligence = rating.intelligence
+        self.tier = rating.tier
+    }
+
+    /// Build from a bare id (providers whose `/v1/models` gives no metadata, or the
+    /// bundled shortlist). Capabilities are inferred from the id; the meters come
+    /// wholly from `ModelRatings`.
+    init(id: String, vendor: String) {
+        let rating = ModelRatings.rating(id: id, reasoning: ModelRatings.looksReasoning(id),
+                                         promptPrice: nil)
+        self.id = id
+        self.name = ModelRatings.prettyName(for: id)
+        self.vendor = vendor
+        self.contextTokens = nil
+        self.vision = ModelRatings.looksVision(id)
+        self.toolUse = true   // every provider we ship speaks tools; assume yes when unstated
+        self.reasoning = ModelRatings.looksReasoning(id)
+        self.speed = rating.speed
+        self.intelligence = rating.intelligence
+        self.tier = rating.tier
+    }
+}
+
+/// The Speed / Intelligence meters and tier badge — the two things OpenRouter's
+/// API does *not* carry. A hand-maintained table pins the well-known families
+/// (kept short and honest); anything it misses falls back to a heuristic read of
+/// the id (flagship vs. mini/nano/flash), whether it reasons, and its price. So a
+/// brand-new model still gets a plausible read the day it ships, and the ones
+/// users actually reach for get an accurate one.
+enum ModelRatings {
+    /// (speed, intelligence) on the reference's 0–5 scale, plus the tier badge.
+    struct Rating { let speed: Int; let intelligence: Int; let tier: ModelInfo.Tier? }
+
+    /// Fold a vendor's spelling variants onto one canonical id, so a single needle
+    /// covers every route to the same model. Two folds, both load-bearing:
+    ///
+    ///  · **Claude versions.** Anthropic's own API dashes them (`claude-opus-4-8`,
+    ///    plus a date tail); both gateways dot them (`anthropic/claude-opus-4.8`).
+    ///    Dashes between two digits become dots — scoped to Claude ids, because for
+    ///    everyone else a digit-dash-digit is a size or a date (`llama-3-8b`).
+    ///  · **Qwen.** OpenRouter says `qwen3-14b`, Vercel says `qwen-3-14b`.
+    ///
+    /// It also guarantees a leading `/`, so a needle can anchor to the start of the
+    /// model slug. OpenAI's o-series is why: the bare needle `o1` is a substring of
+    /// `sao10k/l3-lunaris-8b`, and `/o1` is not.
+    private static func canonical(_ id: String) -> String {
+        var lower = id.lowercased()
+        lower = lower.replacingOccurrences(of: "qwen-2.5", with: "qwen2.5")
+        lower = lower.replacingOccurrences(of: "qwen-3", with: "qwen3")
+        if !lower.contains("/") { lower = "/" + lower }
+        guard lower.contains("claude") else { return lower }
+        let ch = Array(lower)
+        return String(ch.indices.map { i -> Character in
+            (ch[i] == "-" && i > 0 && i + 1 < ch.count
+             && ch[i - 1].isNumber && ch[i + 1].isNumber) ? "." : ch[i]
+        })
+    }
+
+    /// Curated ratings, keyed by a substring of the canonical id. **First match wins**,
+    /// so every block runs most-specific → most-generic: a family's variants before the
+    /// family, the family before the vendor catch-all, vendor entries before the generic
+    /// size markers at the bottom. (`gpt-5.1-codex-mini` must precede `gpt-5.1-codex`,
+    /// which must precede `gpt-5.1`, which must precede `gpt-5` — every one of those is
+    /// a substring of the one before it.)
+    ///
+    /// The scale, so the numbers mean the same thing in every block:
+    ///  · intelligence 5 = the vendor's current flagship · 4 = strong mainline or a
+    ///    superseded flagship · 3 = the fast mid tier · 2 = mini/nano · 1 = legacy.
+    ///  · speed 1 = deliberately slow (`-pro`, deep-research) · 2 = big flagship ·
+    ///    3 = mainline · 4 = light · 5 = mini/flash.
+    ///
+    /// Latency/deliberation suffixes (`-fast`, `-thinking`, …) are **not** listed here —
+    /// they ride on the family's row via `variantAdjust`.
+    ///
+    /// Written against the catalogs as they stand today. It does not try to predict a
+    /// model that doesn't exist yet: an unlisted id falls to `heuristic`, which is now
+    /// only expected to be *plausible*, not right.
+    private static let table: [(needle: String, speed: Int, intelligence: Int, tier: ModelInfo.Tier?)] = [
+        // ── OpenAI ────────────────────────────────────────────────────────────────
+        // `-pro` is the slow deliberating variant, not merely a pricier one.
+        ("gpt-5.5-pro",        1, 5, .advanced),
+        ("gpt-5.5",            2, 5, .advanced),
+        ("gpt-5.4-pro",        1, 5, .advanced),
+        ("gpt-5.4-nano",       5, 2, nil),
+        ("gpt-5.4-mini",       5, 3, nil),
+        ("gpt-5.4",            2, 5, .advanced),
+        ("gpt-5.3",            3, 5, .advanced),   // -chat / -codex
+        ("gpt-5.2-pro",        1, 5, .advanced),
+        ("gpt-5.2",            3, 4, .advanced),   // -chat / -codex
+        ("gpt-5.1-codex-mini", 5, 3, nil),
+        ("gpt-5.1-codex",      3, 4, nil),         // …-codex-max too
+        ("gpt-5.1",            3, 4, .advanced),   // -chat / -instant / -thinking
+        ("gpt-5-pro",          1, 5, .advanced),
+        ("gpt-5-nano",         5, 2, nil),
+        ("gpt-5-mini",         5, 3, nil),
+        ("gpt-5-codex",        3, 4, nil),
+        ("gpt-5",              3, 4, .advanced),   // …-chat
+        ("gpt-4.1-nano",       5, 2, nil),
+        ("gpt-4.1-mini",       4, 3, nil),
+        ("gpt-4.1",            3, 4, nil),
+        ("gpt-4o-mini",        5, 3, nil),
+        ("gpt-4o",             4, 3, nil),
+        ("gpt-4-turbo",        3, 3, nil),         // was 5/2: "turbo" read as a mini
+        ("gpt-4",              2, 3, nil),         // the 2023 original; slow and dear
+        ("gpt-3.5-turbo",      5, 1, nil),
+        ("gpt-oss-120b",       4, 3, nil),
+        ("gpt-oss",            5, 2, nil),         // …-20b, …-safeguard-20b
+        // The o-series needles carry the slug-boundary `/` (see `canonical`): bare
+        // `o1` is a substring of `sao10k/l3-lunaris-8b`, which is not an OpenAI model.
+        ("/o4-mini",           3, 4, nil),         // …-high, …-deep-research
+        ("/o3-deep-research",  1, 5, .advanced),
+        ("/o3-mini",           4, 4, nil),         // …-high — NOT o3's 1/5
+        ("/o3-pro",            1, 5, .advanced),
+        ("/o3",                1, 5, .advanced),
+        ("/o1-pro",            1, 5, .advanced),
+        ("/o1",                1, 4, nil),
+        // ── Anthropic ─────────────────────────────────────────────────────────────
+        // Keyed by version, not by tier name. The old `opus`/`sonnet`/`haiku` needles
+        // gave claude-3-haiku and claude-haiku-4.5 the same numbers, and dropped
+        // claude-fable-5 (a flagship — 1M ctx, priced above opus-4.8) on the floor.
+        ("claude-fable-5",     2, 5, .advanced),
+        ("claude-opus-4.8",    2, 5, .advanced),   // …-fast via variantAdjust
+        ("claude-opus-4.7",    2, 5, .advanced),
+        ("claude-opus-4.6",    2, 5, .advanced),
+        ("claude-opus-4.5",    2, 5, .advanced),
+        ("claude-opus-4.1",    1, 4, .advanced),   // 2025 flagship, since superseded
+        ("claude-opus-4",      1, 4, .advanced),
+        ("claude-sonnet-5",    3, 5, .advanced),
+        ("claude-sonnet-4.6",  3, 4, .advanced),
+        ("claude-sonnet-4.5",  3, 4, .advanced),
+        ("claude-sonnet-4",    3, 4, nil),
+        ("claude-haiku-4.5",   5, 3, nil),
+        ("claude-3.5-haiku",   5, 2, nil),
+        ("claude-3-haiku",     5, 1, nil),
+        ("opus",               2, 5, .advanced),   // catch-alls for ids we don't list
+        ("sonnet",             3, 4, nil),
+        ("haiku",              5, 3, nil),
+        // ── Google ────────────────────────────────────────────────────────────────
+        ("gemini-3.5-flash",      5, 4, nil),
+        ("gemini-3.1-flash-lite", 5, 2, nil),
+        ("gemini-3.1-flash",      5, 3, nil),
+        ("gemini-3.1-pro",        2, 5, .advanced),
+        ("gemini-3-flash",        5, 3, nil),
+        ("gemini-3-pro",          2, 5, .advanced),
+        ("gemini-omni-flash",     5, 3, nil),
+        ("gemini-2.5-pro",        3, 4, nil),
+        ("gemini-2.5-flash",      5, 3, nil),
+        ("gemini-2.0-flash",      5, 2, nil),
+        ("gemma",                 4, 2, nil),
+        // ── xAI ───────────────────────────────────────────────────────────────────
+        ("grok-4.5",           2, 5, .advanced),
+        ("grok-4.3",           2, 5, .advanced),
+        ("grok-4.20",          3, 5, .advanced),   // -reasoning / -non-reasoning / -multi-agent
+        ("grok-4.1-fast",      5, 3, nil),
+        ("grok-build",         3, 3, nil),
+        ("grok-4",             2, 4, nil),
+        ("grok",               3, 3, nil),
+        // ── DeepSeek ──────────────────────────────────────────────────────────────
+        ("deepseek-v4-flash",  5, 3, nil),
+        ("deepseek-v4-pro",    2, 5, .advanced),
+        ("deepseek-v4",        3, 5, .advanced),
+        ("deepseek-r1",        1, 4, nil),
+        ("deepseek-v3.2",      3, 4, nil),
+        ("deepseek-v3.1",      3, 4, nil),
+        ("deepseek-v3",        3, 4, nil),
+        ("deepseek",           3, 3, nil),
+        // ── Zhipu GLM ─────────────────────────────────────────────────────────────
+        ("glm-5v-turbo",       5, 3, nil),
+        ("glm-5-turbo",        5, 3, nil),
+        ("glm-5.2",            3, 5, .advanced),   // …-fast via variantAdjust
+        ("glm-5.1",            3, 5, .advanced),
+        ("glm-5",              2, 5, .advanced),
+        ("glm-4.7-flash",      5, 2, nil),         // …-flashx
+        ("glm-4.7",            3, 4, nil),
+        ("glm-4.6",            3, 4, nil),
+        ("glm-4.5-air",        5, 2, nil),
+        ("glm-4.5",            3, 4, nil),
+        ("glm",                3, 3, nil),
+        // ── Qwen (canonicalized: `qwen-3-…` → `qwen3-…`) ──────────────────────────
+        ("qwen3.7-max",        2, 5, .advanced),
+        ("qwen3.7-plus",       3, 4, nil),
+        ("qwen3.6-max",        2, 5, .advanced),
+        ("qwen3.6-plus",       3, 4, nil),
+        ("qwen3.6-27b",        4, 3, nil),
+        ("qwen3.5-flash",      5, 3, nil),
+        ("qwen3.5-plus",       3, 4, nil),
+        ("qwen3.5-397b",       2, 5, .advanced),
+        ("qwen3.5-122b",       3, 4, nil),
+        ("qwen3.5",            3, 4, nil),
+        ("qwen3-max",          2, 5, .advanced),
+        ("qwen3-coder",        3, 4, nil),
+        ("qwen3-235b",         3, 4, nil),
+        ("qwen3-vl",           3, 4, nil),
+        ("qwen3-32b",          4, 3, nil),
+        ("qwen3-30b",          4, 3, nil),
+        ("qwen3-14b",          5, 2, nil),
+        ("qwen3-8b",           5, 2, nil),
+        ("qwen-flash",         5, 2, nil),
+        ("qwen-plus",          4, 3, nil),
+        ("qwen2.5",            3, 3, nil),
+        ("qwen",               3, 3, nil),         // was 3/4 for all 60 qwen ids
+        // ── Moonshot Kimi ─────────────────────────────────────────────────────────
+        ("kimi-k2.7-code",     3, 5, .advanced),   // …-highspeed via variantAdjust
+        ("kimi-k2.7",          3, 5, .advanced),
+        ("kimi-k2.6",          2, 5, .advanced),
+        ("kimi-k2.5",          3, 4, nil),
+        ("kimi-k2",            3, 4, nil),         // …-thinking via variantAdjust
+        ("kimi",               3, 4, nil),
+        ("moonshot-v1",        4, 2, nil),
+        // ── MiniMax ───────────────────────────────────────────────────────────────
+        ("minimax-m3",         2, 5, .advanced),
+        ("minimax-m2.7",       3, 4, nil),
+        ("minimax-m2.5",       3, 4, nil),
+        ("minimax-m2.1",       3, 4, nil),         // …-lightning via variantAdjust
+        ("minimax-m2",         3, 4, nil),
+        ("minimax-m1",         2, 3, nil),
+        ("minimax-01",         3, 2, nil),
+        ("minimax",            3, 3, nil),
+        // ── Xiaomi MiMo ───────────────────────────────────────────────────────────
+        ("mimo-v2.5-pro",      2, 4, nil),
+        ("mimo-v2.5",          3, 3, nil),
+        ("mimo-v2-pro",        2, 4, nil),
+        ("mimo-v2-flash",      5, 2, nil),
+        ("mimo",               4, 3, nil),
+        // ── Meta ──────────────────────────────────────────────────────────────────
+        ("llama-4",            4, 4, nil),
+        ("llama-3.3-70b",      3, 3, nil),
+        ("llama-3.1-405b",     2, 4, nil),
+        ("llama-3.1-70b",      3, 3, nil),
+        ("llama-3.1-8b",       5, 2, nil),
+        ("llama-3-8b",         5, 1, nil),
+        ("llama",              4, 3, nil),
+        // ── OpenRouter's free auto-router ─────────────────────────────────────────
+        // Routes to whatever solid free model is up right now — quick, mid, honest.
+        ("openrouter/free",    4, 3, nil),
+        // ── Generic size markers — last resort before the heuristic ───────────────
+        ("flash-lite",         5, 2, nil),
+        ("flash",              5, 3, nil),
+    ]
+
+    static func rating(id: String, reasoning: Bool, promptPrice: Double?) -> Rating {
+        let lower = canonical(id)
+        if let hit = table.first(where: { lower.contains($0.needle) }) {
+            return variantAdjust(Rating(speed: hit.speed, intelligence: hit.intelligence,
+                                        tier: hit.tier), lower)
+        }
+        return heuristic(lower: lower, reasoning: reasoning, promptPrice: promptPrice)
+    }
+
+    /// Vendors ship one family tuned two ways: for latency (`-fast`, `-instant`,
+    /// `-highspeed`, `-lightning`) or for deliberation (`-thinking`, `-reasoning`).
+    /// The table keys the *family*; this nudges the family's numbers onto the variant,
+    /// so `claude-opus-4.8-fast` no longer reads exactly as slow as `claude-opus-4.8`
+    /// and `kimi-k2-thinking` no longer reads exactly as quick as `kimi-k2`.
+    ///
+    /// Only table hits pass through here — `heuristic` already folds `reasoning` in
+    /// from the vendor's metadata, and running both would count it twice.
+    ///
+    /// `-non-reasoning` is the *negation* of the suffix, not an instance of it: xAI
+    /// ships `grok-4.20-reasoning` and `grok-4.20-non-reasoning` side by side, and a
+    /// bare `contains("-reasoning")` reads them identically.
+    private static func variantAdjust(_ r: Rating, _ lower: String) -> Rating {
+        var speed = r.speed, intelligence = r.intelligence
+        if ["-fast", "-instant", "-highspeed", "-lightning"].contains(where: lower.contains) {
+            speed += 1
+        }
+        if !lower.contains("non-reasoning"),
+           ["-thinking", "-reasoning"].contains(where: lower.contains) {
+            speed -= 1; intelligence += 1
+        }
+        return Rating(speed: min(5, max(1, speed)),
+                      intelligence: min(5, max(1, intelligence)), tier: r.tier)
+    }
+
+    /// The fallback read for an id the table doesn't name. Size class sets the
+    /// baseline (small = fast+dim, flagship = slow+bright); a reasoning model gains
+    /// intelligence and loses speed; a non-trivial prompt price marks it "Pro".
+    ///
+    /// Matching is on **dash-delimited tokens, never raw substrings**. That is the
+    /// whole point: `contains("1b")` fires inside `671b`, so a 671-billion-parameter
+    /// flagship used to come out 5/2 — read as a nano, the exact inverse of the signal.
+    /// `contains("pro")` likewise fired inside `inflection-3-productivity`.
+    private static func heuristic(lower: String, reasoning: Bool, promptPrice: Double?) -> Rating {
+        var speed = 3, intelligence = 3
+        let tokens = Set(lower.split { !$0.isLetter && !$0.isNumber }.map(String.init))
+        let small: Set<String> = ["nano", "mini", "flash", "lite", "small", "turbo",
+                                  "highspeed", "air", "1b", "2b", "3b", "4b", "7b", "8b", "9b"]
+        let big: Set<String> = ["opus", "large", "pro", "ultra", "max",
+                                "70b", "72b", "120b", "235b", "405b", "480b", "671b"]
+        if !tokens.isDisjoint(with: small) { speed += 2; intelligence -= 1 }
+        if !tokens.isDisjoint(with: big)   { speed -= 1; intelligence += 1 }
+        if reasoning { intelligence += 1; speed -= 1 }
+        speed = min(5, max(1, speed)); intelligence = min(5, max(1, intelligence))
+        var tier: ModelInfo.Tier? = nil
+        if intelligence >= 5 { tier = .advanced }
+        else if let p = promptPrice, p > 0.000002 { tier = .pro }
+        return Rating(speed: speed, intelligence: intelligence, tier: tier)
+    }
+
+    // MARK: id-shape inference (used when the vendor gives no metadata)
+
+    static func looksVision(_ id: String) -> Bool {
+        let l = id.lowercased()
+        return ["gpt-4o", "gpt-4.1", "gpt-5", "claude", "gemini", "vision", "-vl", "llava", "pixtral"]
+            .contains(where: l.contains)
+    }
+
+    /// Two traps here, both the same shape as the ones in `table`:
+    ///  · the o-series needs the slug-boundary `/` (bare `o1` lives inside `sao10k/…`,
+    ///    which would then claim a reasoning badge and a 1/5 heuristic read);
+    ///  · `-non-reasoning` contains `reasoning`, and xAI ships both variants.
+    static func looksReasoning(_ id: String) -> Bool {
+        let l = canonical(id)
+        if l.contains("non-reasoning") { return false }
+        return ["/o1", "/o3", "/o4", "-r1", "reasoning", "thinking", "-r-", "deepseek-r"]
+            .contains(where: l.contains)
+    }
+
+    /// The vendor label — the key `VendorLogos` looks marks up by. Gateway ids are
+    /// `vendor/slug`; bare ids are matched by family prefix. Every family we actually
+    /// ship resolves to a real vendor, so the picker never renders a blank tile for a
+    /// bundled model.
+    ///
+    /// The two gateways name the same vendor differently (`x-ai` on OpenRouter,
+    /// `xai` on Vercel; `qwen` vs `alibaba`; `z-ai` vs `zai`), so both spellings map
+    /// to one canonical label. An unlisted prefix — the community fine-tuners, mostly
+    /// — capitalizes into a monogram, which is the honest render for a vendor with no
+    /// brand mark.
+    static let vendorNames: [String: String] = [
+        // Notch's own providers.
+        "openai": "OpenAI", "anthropic": "Anthropic", "google": "Google",
+        "deepseek": "DeepSeek", "qwen": "Qwen", "alibaba": "Qwen",
+        "z-ai": "Zhipu", "zai": "Zhipu", "zhipuai": "Zhipu", "thudm": "Zhipu",
+        "moonshotai": "Moonshot", "moonshot": "Moonshot",
+        "minimax": "MiniMax", "xiaomi": "MiMo", "openrouter": "OpenRouter",
+        // Majors reachable through the gateways.
+        "meta-llama": "Meta", "meta": "Meta",
+        "mistralai": "Mistral", "mistral": "Mistral",
+        "x-ai": "xAI", "xai": "xAI",
+        "nvidia": "NVIDIA", "cohere": "Cohere", "perplexity": "Perplexity",
+        "microsoft": "Microsoft", "amazon": "Amazon",
+        "bytedance": "ByteDance", "bytedance-seed": "ByteDance",
+        "tencent": "Tencent", "baidu": "Baidu", "stepfun": "StepFun",
+        "liquid": "Liquid AI", "meituan": "Meituan", "inclusionai": "InclusionAI",
+        "kwaipilot": "Kwaipilot", "arcee-ai": "Arcee", "allenai": "Ai2",
+        "ai21": "AI21", "ibm-granite": "IBM", "inflection": "Inflection",
+        "inception": "Inception", "upstage": "Upstage", "deepcogito": "Deep Cogito",
+        "morph": "Morph", "relace": "Relace",
+        // No brand mark worth shrinking — named only so the monogram picks the right
+        // initial (`nousresearch` would otherwise capitalize to "Nousresearch").
+        "nousresearch": "Nous Research", "cognitivecomputations": "Dolphin",
+        "aion-labs": "Aion Labs", "rekaai": "Reka", "sakana": "Sakana AI",
+        "nex-agi": "Nex AGI", "anthracite-org": "Anthracite", "sao10k": "Sao10K",
+    ]
+
+    static func vendor(for id: String) -> String {
+        if let slash = id.firstIndex(of: "/") {
+            // OpenRouter prefixes a few ids with `~` (`~anthropic/…`); the tilde is
+            // routing metadata, not part of the vendor name.
+            let raw = String(id[..<slash]).lowercased()
+                .trimmingCharacters(in: CharacterSet(charactersIn: "~"))
+            return vendorNames[raw] ?? raw.capitalized
+        }
+        let l = id.lowercased()
+        if l.hasPrefix("gpt") || l.hasPrefix("o1") || l.hasPrefix("o3") || l.hasPrefix("o4") { return "OpenAI" }
+        if l.hasPrefix("claude") { return "Anthropic" }
+        if l.hasPrefix("gemini") { return "Google" }
+        if l.hasPrefix("deepseek") { return "DeepSeek" }
+        if l.hasPrefix("qwen") { return "Qwen" }
+        if l.hasPrefix("glm") || l.hasPrefix("chatglm") { return "Zhipu" }
+        if l.hasPrefix("kimi") || l.hasPrefix("moonshot") { return "Moonshot" }
+        if l.hasPrefix("minimax") || l.hasPrefix("abab") { return "MiniMax" }
+        if l.hasPrefix("mimo") { return "MiMo" }
+        if l.hasPrefix("grok") { return "xAI" }
+        if l.hasPrefix("mistral") || l.hasPrefix("pixtral") || l.hasPrefix("codestral") { return "Mistral" }
+        if l.hasPrefix("llama") { return "Meta" }
+        return ""
+    }
+
+    /// A tidy display name from an id: drop the `vendor/` prefix and the `:free`
+    /// suffix. `gpt-5.5` → "gpt-5.5" stays lower (model ids read better verbatim).
+    /// The one non-id entry — OpenRouter's free auto-router — gets its product
+    /// name instead of the bare slug remainder ("free").
+    static func prettyName(for id: String) -> String {
+        if id == "openrouter/free" { return "Auto Router (Free)" }
+        var s = id
+        if let slash = s.lastIndex(of: "/") { s = String(s[s.index(after: slash)...]) }
+        if let colon = s.firstIndex(of: ":") { s = String(s[..<colon]) }
+        return s
     }
 }
 
