@@ -64,6 +64,25 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.1.14",
+            date: "2026-07-10",
+            features: [
+                "Provider filter in the model picker, with configured providers listed first.",
+            ],
+            improvements: [
+                "Direct answers for stable questions; time-sensitive ones still search the web first.",
+                "Free OpenRouter models fail over to an alternate model when one is unavailable.",
+                "Model capabilities are shown as tags, and Show all models stays pinned while the list is expanded.",
+                "Faster rendering for streaming answers and the Recent list.",
+                "Large history archives no longer delay launch or saving.",
+                "Model lists are cached for an hour, avoiding a refetch each time Settings opens.",
+                "Larger click targets for the idle prompt's trailing icons.",
+            ],
+            fixes: [
+                "Notch controls no longer lose contrast in Light Mode.",
+            ]
+        ),
+        Entry(
             version: "0.1.13",
             date: "2026-07-09",
             features: [

@@ -145,7 +145,7 @@ private struct HistoryArchiveView: View {
     @State private var sourceFilter: NotchModel.HistoryItem.Source? = nil
     @State private var selection: UUID? = nil
 
-    private var items: [NotchModel.HistoryItem] {
+    private var filteredItems: [NotchModel.HistoryItem] {
         var items = model.history
         if let sourceFilter {
             items = items.filter { $0.source == sourceFilter }
@@ -160,8 +160,13 @@ private struct HistoryArchiveView: View {
     }
 
     var body: some View {
-        HSplitView {
-            master
+        // ONE filter pass per render. The filter walks the whole archive — which
+        // is unbounded — and as a computed property it used to re-run for every
+        // access in a single evaluation (the empty check, the list's rows, the
+        // header's count), tripling the per-keystroke cost of the search field.
+        let items = filteredItems
+        return HSplitView {
+            master(items: items)
                 .frame(minWidth: 240, idealWidth: 300, maxWidth: 420)
             detail
                 .frame(minWidth: 300, maxWidth: .infinity)
@@ -188,14 +193,14 @@ private struct HistoryArchiveView: View {
 
     // MARK: - Master (list)
 
-    private var master: some View {
+    private func master(items: [NotchModel.HistoryItem]) -> some View {
         VStack(spacing: 0) {
-            header
+            header(count: items.count)
             GlassHairline()
             if items.isEmpty {
                 emptyList
             } else {
-                list
+                list(items: items)
             }
         }
         // Transparent: the window glass shows through. A whisper-faint left-column
@@ -203,7 +208,7 @@ private struct HistoryArchiveView: View {
         .background(Color.white.opacity(0.02))
     }
 
-    private var header: some View {
+    private func header(count: Int) -> some View {
         VStack(spacing: 10) {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
@@ -237,7 +242,7 @@ private struct HistoryArchiveView: View {
                 filterPill(.note, L("history.window.filter.notes"))
                 filterPill(.reminder, L("history.window.filter.reminders"))
                 Spacer()
-                Text(L("history.window.count", items.count))
+                Text(L("history.window.count", count))
                     .font(.sf(11, weight: .medium))
                     .foregroundStyle(Tokens.text4)
                     .monospacedDigit()
@@ -255,7 +260,7 @@ private struct HistoryArchiveView: View {
         )
     }
 
-    private var list: some View {
+    private func list(items: [NotchModel.HistoryItem]) -> some View {
         ScrollView {
             LazyVStack(spacing: 4) {
                 ForEach(items) { item in
@@ -385,19 +390,11 @@ private struct HistoryArchiveRow: View {
                 .font(.sf(11, weight: .medium).monospacedDigit())
                 .foregroundStyle(Tokens.text4)
         } else {
-            Button(action: jump) {
-                HStack(spacing: 3) {
-                    Text(item.source == .note ? L("recent.badge.notes") : L("recent.badge.reminders"))
-                        .font(.sf(11, weight: .medium))
-                    Image(systemName: "arrow.up.right").font(.system(size: 8, weight: .semibold))
-                }
-                .foregroundStyle(Tokens.text3)
-                .padding(.vertical, 3)
-                .padding(.horizontal, 8)
-                .glassCapsule(in: Capsule(), brighter: false, tint: item.source.archiveTint)
-                .contentShape(Capsule())
-            }
-            .buttonStyle(GlassPressStyle())
+            CaptureJumpButton(
+                title: item.source == .note ? L("recent.badge.notes") : L("recent.badge.reminders"),
+                tint: item.source.archiveTint,
+                action: jump
+            )
         }
     }
 }

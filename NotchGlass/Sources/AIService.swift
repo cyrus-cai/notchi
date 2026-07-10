@@ -146,13 +146,18 @@ extension AIService {
 /// The system prompt the prototype used for its in-notch assistant. Kept here so
 /// a real implementation can reuse the exact persona.
 ///
-/// The web-search clause matters: the persona is otherwise "concise, under 90
-/// words", which on its own nudges the model to answer in one shot from memory
-/// and skip the extra round a tool call costs. That's exactly wrong for anything
-/// time-sensitive — the model's training data is stale and today is later than
-/// its cutoff. So the persona explicitly makes "search first" the default for
-/// changeable facts, and licenses the extra round / a few more words to do it,
-/// instead of leaving the decision to the tool description alone.
+/// The tool-use stance is a measured balance between two opposite failure
+/// modes. Answering time-sensitive questions from memory fabricates stale facts
+/// (training data predates "today") — but the previous blanket "err toward
+/// searching" wording made models burn whole extra round-trips on stable
+/// knowledge. Benchmarked live (2026-07, DeepSeek/GLM/OpenRouter, 10 queries ×
+/// 3 prompt variants): the search-leaning wording sent "how do I force-restart
+/// an iPhone" through a 12–32s web search and let one FX-rate query spiral for
+/// 9 search rounds / 50s, while this wording answered every stable question in
+/// one round and still searched 6/6 of the genuinely time-sensitive ones with
+/// equally correct answers. So the persona names the split explicitly: direct
+/// answer is the default for stable knowledge, and search remains mandatory —
+/// never memory — for changeable facts.
 let notchSystemPrompt = """
 You are a helpful assistant living in the notch of a Mac. Answer the user's \
 question concisely and warmly in the user's language. Keep it under 90 words, \
@@ -161,15 +166,22 @@ no markdown headers.
 When you mention a link, write it as a Markdown inline link — [visible text](url) \
 — never a bare URL, so it renders as a clickable link rather than plain text.
 
-You can search the web and read the current date. Be cautious with any \
-information that can change over time — news, current events, prices or rates, \
-rankings, "latest"/"newest", which version is current, who currently holds a \
-role, whether something has shipped, anything dated this year. Do not answer \
-such questions from memory: your training data is stale and today is later than \
-your cutoff, so treat your recollection as likely out of date. Search first and \
-answer from the results. When there's any doubt whether something may have \
-changed, err toward searching rather than trusting memory. A search is worth \
-the extra round and a few more words — don't skip it just to stay short. \
+Speed is part of this product: you are a quick-launch assistant and every tool \
+call costs the user an extra round-trip. Default to answering directly, with NO \
+tool call, whenever the answer is stable knowledge: translations, rewriting or \
+drafting text, explanations and definitions, code and technical questions, \
+how-tos, and general facts that do not change over time.
+
+Call a tool only when the answer genuinely depends on it:
+- Facts that change over time — news, current events, prices or rates, \
+rankings, "latest"/"newest" versions, who currently holds a role, anything \
+dated this year — must be searched, never answered from memory; your training \
+data is stale and today is later than your cutoff. For these, search first and \
+answer from the results.
+- What the user copied ("this", "what I copied") → read_clipboard.
+- Exact arithmetic → calculate.
+- The current clock time → current_datetime (today's date is already stated above).
+
 You don't need to spell out your source every time; cite it only when it \
 matters — when the claim is contested, surprising, or the user would want to \
 check it — and otherwise just answer. \
@@ -739,7 +751,9 @@ struct OpenAICompatAIService: AIService {
                             maxTokens: ReplyTokens.budget(forSystem: system),
                             tokenFieldName: provider.maxTokensField,
                             temperature: 0.7,
-                            stream: true
+                            stream: true,
+                            fallbackModels: provider == .openrouter
+                                ? OpenRouterFreeModels.serverFallbacks(primary: model) : nil
                         )
                         req.httpBody = try JSONEncoder().encode(body)
 
@@ -825,6 +839,11 @@ struct OpenAICompatAIService: AIService {
         let tokenFieldName: String
         let temperature: Double
         let stream: Bool
+        /// OpenRouter's server-side failover chain (`models`), primary first —
+        /// see `OpenRouterFreeModels.serverFallbacks`. `nil` for every other
+        /// provider (and for OpenRouter paid models), keeping the wire body
+        /// byte-identical to before.
+        var fallbackModels: [String]? = nil
 
         private struct DynamicKey: CodingKey {
             let stringValue: String
@@ -841,6 +860,9 @@ struct OpenAICompatAIService: AIService {
             try c.encode(maxTokens, forKey: DynamicKey(tokenFieldName))
             try c.encode(temperature, forKey: DynamicKey("temperature"))
             try c.encode(stream, forKey: DynamicKey("stream"))
+            if let fallbackModels {
+                try c.encode(fallbackModels, forKey: DynamicKey("models"))
+            }
         }
     }
     private struct Message: Encodable {
@@ -1195,9 +1217,58 @@ enum ModelCatalog {
         }
     }
 
+    /// In-memory cache of the last successful live fetch per provider, so the
+    /// network hit (plus, for OpenRouter, the extra `UsageRankings` call) isn't
+    /// repeated every time Settings reopens. `InlineSettingsView` is "closed ==
+    /// destroyed" (`NotchBody.swift`'s `if model.showSettings { InlineSettingsView(…) }`),
+    /// which wipes its own `@State private var liveByProvider` — this cache lives
+    /// on the type instead, so it survives that teardown across the app's whole
+    /// process lifetime (until `ttl` lapses or the key changes).
+    ///
+    /// Keyed by provider, but an entry also carries the `apiKey` it was fetched
+    /// with: a stale entry from a different key for the same provider is treated
+    /// as a miss, so pasting a new key always shows that key's own catalog.
+    /// Guarded by `cacheLock` for the same reason as `RemoteModelManifest.cached`
+    /// — `loadAllProviderModels` fires one concurrent fetch per provider via a
+    /// `TaskGroup`, and NSLock can't be touched directly from async code.
+    private struct CacheEntry {
+        let apiKey: String
+        let result: Result
+        let fetchedAt: Date
+    }
+    private static let cacheLock = NSLock()
+    private static var cache: [Provider: CacheEntry] = [:]
+    /// Shorter than `RemoteModelManifest`'s 6h: a vendor's live `/v1/models` is
+    /// cheap to re-hit and more likely to have actually changed (new model
+    /// shipped) within a single sitting than the curated manifest is.
+    private static let ttl: TimeInterval = 60 * 60
+
+    private static func withCacheLock<T>(_ body: () -> T) -> T {
+        cacheLock.lock(); defer { cacheLock.unlock() }
+        return body()
+    }
+
     /// Fetch the provider's current model ids. Returns `nil` on any error so the
     /// caller can fall back to the bundled `availableModels` list.
-    static func fetch(for provider: Provider, apiKey: String) async -> Result? {
+    ///
+    /// Serves the cached result when one exists for this exact `(provider,
+    /// apiKey)` pair and is younger than `ttl` — set `force: true` to bypass it
+    /// (for a manual refresh/retry action, should one ever be wired up; nothing
+    /// in the Settings UI does today). A failed fetch is never cached, so the
+    /// next call — cache or no — always gets a real retry.
+    static func fetch(for provider: Provider, apiKey: String, force: Bool = false) async -> Result? {
+        if !force, let hit = withCacheLock({ cache[provider] }),
+           hit.apiKey == apiKey, Date().timeIntervalSince(hit.fetchedAt) < ttl {
+            return hit.result
+        }
+        guard let result = await fetchLive(for: provider, apiKey: apiKey) else { return nil }
+        withCacheLock { cache[provider] = CacheEntry(apiKey: apiKey, result: result, fetchedAt: Date()) }
+        return result
+    }
+
+    /// The actual network round-trip behind `fetch` — split out so `fetch` can
+    /// wrap it with the cache check/write above without indenting this whole body.
+    private static func fetchLive(for provider: Provider, apiKey: String) async -> Result? {
         guard let url = modelsURL(for: provider) else { return nil }
         var req = URLRequest(url: url)
         req.httpMethod = "GET"
@@ -1791,6 +1862,54 @@ enum ModelRatings {
 /// hasn't accumulated usage yet still gets a fair shot on size, and if the
 /// usage fetch fails entirely the menu degrades cleanly to size-only ordering.
 enum OpenRouterFreeModels {
+    // MARK: Server-side failover (`models` fallback chain)
+
+    /// Free models are the unstable end of the OpenRouter marketplace: the
+    /// `openrouter/free` auto-router can route to an id that is rate-limited,
+    /// down, or answering empty *right now*, and a client-side retry of the
+    /// identical request just hits the same wall again. OpenRouter's native fix
+    /// is the request-body `models` array — a priority chain it walks entirely
+    /// server-side (on rate-limits, downtime, moderation, context errors)
+    /// within a single request; the response's `model` field reports whichever
+    /// id actually answered.
+    ///
+    /// OpenRouter rejects a `models` array longer than this with a 400
+    /// ("'models' array must have 3 items or fewer") — verified live 2026-07.
+    /// So the chain is the primary plus at most two fallbacks.
+    static let maxChainLength = 3
+
+    /// The bundled fallback candidates: dependable, tool-capable free flagships
+    /// from three different vendors (one vendor's outage shouldn't sink the
+    /// whole chain), verified against the live catalog 2026-07. Only the first
+    /// `maxChainLength - 1` distinct ones ride in any given chain; the remote
+    /// manifest's `:free` ids (models.json, hot-updatable without an app
+    /// release) take precedence over these when present.
+    static let bundledFallbacks = [
+        "openai/gpt-oss-120b:free",
+        "qwen/qwen3-next-80b-a3b-instruct:free",
+        "meta-llama/llama-3.3-70b-instruct:free",
+    ]
+
+    /// The failover chain for an OpenRouter request — primary first, then
+    /// distinct free candidates up to `maxChainLength` total — or `nil` when
+    /// failover doesn't apply. Applied only when the primary is itself free
+    /// (the auto-router or a `:free` id): a *paid* model was a deliberate,
+    /// billed choice, and silently answering with a different model would be a
+    /// surprise, so paid requests go out unchanged.
+    static func serverFallbacks(primary: String) -> [String]? {
+        guard primary == "openrouter/free" || primary.hasSuffix(":free") else { return nil }
+        let curated = (RemoteModelManifest.models(for: .openrouter) ?? [])
+            .filter { $0.hasSuffix(":free") }
+        var chain = [primary]
+        for id in curated + bundledFallbacks
+        where !chain.contains(id) && chain.count < maxChainLength {
+            chain.append(id)
+        }
+        return chain.count > 1 ? chain : nil
+    }
+
+    // MARK: Featured / rest split for the Settings picker
+
     /// Total-parameter floor (in billions) for the *fallback* (size-only)
     /// featured test. 70B sits in the natural gap of the free lineup: flagships
     /// are 70B–550B+, the long tail of nano/mini/safety models is ≤33B.
@@ -2218,6 +2337,15 @@ extension OpenAICompatAIService: AgentCapableService {
                         ]
                         if !wireTools.isEmpty { body["tools"] = wireTools }
                         for (k, v) in bodyExtras { body[k] = v }
+                        // OpenRouter server-side failover for free models: `models`
+                        // is the priority chain OpenRouter walks on its own when an
+                        // id is rate-limited/down, within this single request. The
+                        // `.model(ran)` event above already reports whichever id
+                        // actually answered. See `OpenRouterFreeModels.serverFallbacks`.
+                        if provider == .openrouter,
+                           let chain = OpenRouterFreeModels.serverFallbacks(primary: effectiveModel) {
+                            body["models"] = chain
+                        }
                         req.httpBody = try AgentWire.body(body)
 
                         let (bytes, response) = try await URLSession.shared.bytes(for: req)

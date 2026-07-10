@@ -4,6 +4,11 @@ import SwiftUI
 /// Switches between idle / load / result exactly like the prototype's modes.
 struct NotchBody: View {
     @ObservedObject var model: NotchModel
+    /// The conversation store, observed SEPARATELY from the model: `turns` no
+    /// longer publishes through `model.objectWillChange` (see `ConversationStore`),
+    /// so this wrapper is what re-evaluates this body as an answer streams in.
+    /// Reads stay `model.turns` — the model forwards to the same store.
+    @ObservedObject private var conversation: ConversationStore
     /// Self-update state — read here only to badge the settings gear with a dot
     /// when a newer release is available (the action itself lives in settings).
     @ObservedObject private var updater = UpdaterService.shared
@@ -84,6 +89,7 @@ struct NotchBody: View {
     /// idle, settings, another thread) still mounts "unmeasured" as before.
     init(model: NotchModel) {
         self.model = model
+        _conversation = ObservedObject(wrappedValue: model.conversation)
         _measuredAnswerHeight = State(initialValue: model.lastMeasuredAnswerHeight)
     }
 
@@ -1060,7 +1066,9 @@ struct NotchBody: View {
         let overflowing = contentHeight > compactListHeight
         return ScrollViewReader { proxy in
         ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
+            // Lazy: the data holds up to `notchRecentCap` (50) rows but only ~6–9
+            // fit the frame — no need to build and lay out the off-screen ones.
+            LazyVStack(alignment: .leading, spacing: 0) {
                 // Index into the SAME slice the model navigates (`recentVisible`),
                 // so the keyboard highlight and the rendered rows can't drift.
                 ForEach(Array(model.recentVisible.enumerated()), id: \.element.id) { index, item in
@@ -1098,20 +1106,10 @@ struct NotchBody: View {
                                 // this trailing pill switches apps. `.plain` + its own
                                 // `contentShape` isolate the hit region so a tap here
                                 // fires the jump and doesn't bubble to the row's Ask path.
-                                Button { model.openCaptureInApp(item) } label: {
-                                    HStack(spacing: 3) {
-                                        Text(item.source == .note ? L("recent.badge.notes") : L("recent.badge.reminders"))
-                                            .font(.sf(11).weight(.medium))
-                                            .tracking(0.2)
-                                        Image(systemName: "arrow.up.right")
-                                            .font(.sf(9, weight: .semibold))
-                                    }
-                                    .foregroundStyle(Tokens.text4)
-                                    .padding(.vertical, 3)
-                                    .padding(.horizontal, 6)
-                                    .contentShape(Rectangle())
-                                }
-                                .buttonStyle(CaptureJumpButtonStyle())
+                                CaptureJumpButton(
+                                    title: item.source == .note ? L("recent.badge.notes") : L("recent.badge.reminders"),
+                                    tint: item.source.captureJumpTint
+                                ) { model.openCaptureInApp(item) }
                                 // VoiceOver: this control is the jump; name it by
                                 // destination so it reads distinctly from the row.
                                 .accessibilityLabel(
@@ -1544,37 +1542,39 @@ struct NotchBody: View {
             if clipped {
                 clippedConversation
             } else {
+                // Unclipped, the thread IS its intrinsic height — this layout has
+                // no ceiling anywhere (see `growingConversation`) — so the visible
+                // tree doubles as the measurement and the hidden probe below stays
+                // unmounted. This is the common case (most answers fit under
+                // `answerMaxHeight`), and it used to pay a second full text layout
+                // of the whole thread on every streamed flush just to feed the
+                // `clipped` switch a number the visible layout already knew.
                 growingConversation
+                    .background(
+                        GeometryReader { geo in
+                            Color.clear.preference(key: AnswerHeightKey.self, value: geo.size.height)
+                        }
+                    )
             }
         }
         // Measure the thread's INTRINSIC height — what it wants to be with no ceiling
-        // — to drive ONLY the `clipped` switch above. This can't read the visible
-        // layout's height: the clipped layout is pinned to `answerMaxHeight` (300), so
-        // measuring it would report 300, which isn't > 300, and `clipped` would
-        // flip-flop on the boundary. Instead a hidden, unconstrained copy of the same
-        // turn stack reports its natural height. It's laid out but never drawn
-        // (`.hidden()`), and overlaid at zero size so it never affects this view's
-        // layout. The measurement lagging the content by a pass is harmless now — it
-        // feeds a boolean threshold, not a frame height, so it can't jump.
+        // — to drive ONLY the `clipped` switch above. While unclipped the visible
+        // layout reports it directly (above). Once CLIPPED the visible layout is
+        // pinned to `answerMaxHeight` (300), so measuring it would report 300, which
+        // isn't > 300, and `clipped` would flip-flop on the boundary — that state
+        // needs the hidden, unconstrained copy of the turn stack below. It's laid
+        // out but never drawn (`.hidden()`), and overlaid at zero size so it never
+        // affects this view's layout. The measurement lagging the content by a pass
+        // is harmless — it feeds a boolean threshold, not a frame height.
         .background(alignment: .top) {
-            // The hidden copy reports its NATURAL height via the GeometryReader in its
-            // background. The copy is given the same width as the real thread (matched
-            // through the enclosing layout) but left vertically unconstrained, so the
-            // reader sees the intrinsic content height. `.hidden()` keeps it invisible;
-            // it sits in a `.background` collapsed to this view's own frame, so however
-            // tall the probe wants to be it can't push this view taller — a background
-            // takes the primary content's size, overflow just isn't drawn.
-            //
-            // SUSPENDED while a clipped thread is still streaming: within one round
-            // the content only grows, so once past the ceiling the probe can't change
-            // the layout decision — it would only double every flush's text-layout
-            // work (a second full lay-out of the whole thread, per update, feeding a
-            // boolean that's already true). It re-mounts when the stream settles, so
-            // the next content change that CAN shrink the thread (a regenerate
-            // replacing a long answer, opening a shorter history thread) re-measures
-            // as before. While unclipped it stays live — that's the state where
-            // streaming growth must be able to flip the layout.
-            if !(clipped && model.isStreaming) {
+            // Mounted only while clipped AND settled. While a clipped thread still
+            // STREAMS the probe stays down: within one round the content only
+            // grows, so once past the ceiling it can't change the layout decision —
+            // it would only double every flush's text-layout work feeding a boolean
+            // that's already true. It mounts when the stream settles, so the next
+            // content change that CAN shrink the thread (a regenerate replacing a
+            // long answer, opening a shorter history thread) re-measures as before.
+            if clipped && !model.isStreaming {
                 growingConversation
                     // Take the thread's full intrinsic height regardless of the height
                     // this background slot proposes (300 when the visible layout is the
@@ -2214,29 +2214,17 @@ struct HistoryRowStyle: ButtonStyle {
     }
 }
 
-/// The trailing "open in Notes/Reminders" pill on a capture row. A quiet chip at
-/// rest that firms up on hover — enough to read as a tappable target distinct
-/// from the row, so the user knows *this* is what jumps them out to the app (the
-/// row body no longer does). Kept low-key so it doesn't shout over the row title.
-struct CaptureJumpButtonStyle: ButtonStyle {
-    @State private var hovering = false
-    func makeBody(configuration: Configuration) -> some View {
-        let on = hovering || configuration.isPressed
-        return configuration.label
-            .background(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(.white.opacity(on ? 0.08 : 0))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .fill(.thinMaterial)
-                            .opacity(on ? 0.28 : 0)
-                    )
-            )
-            .opacity(configuration.isPressed ? 0.7 : 1)
-            .contentShape(Rectangle())
-            .onHover { hovering = $0 }
-            .animation(.easeOut(duration: 0.14), value: hovering)
-            .animation(.easeOut(duration: 0.14), value: configuration.isPressed)
+/// The tint behind a capture row's trailing "open in Notes/Reminders" pill. Same
+/// palette the archive window gives the identical button, so the notch's jump and
+/// the standalone window's jump read as one control in two places: Note the Notes
+/// amber, Remind the Reminders orange, Ask a cool blue.
+fileprivate extension NotchModel.HistoryItem.Source {
+    var captureJumpTint: Color {
+        switch self {
+        case .ask:      return .blue
+        case .note:     return .yellow
+        case .reminder: return .orange
+        }
     }
 }
 
@@ -2549,11 +2537,11 @@ struct IdleTrailingCluster: View {
 
     /// Square segments, so each hover circle sits concentric with the capsule's end
     /// cap and keeps the same inset on every side.
-    private let segmentWidth: CGFloat = 26
-    private let segmentHeight: CGFloat = 26
+    private let segmentWidth: CGFloat = 32
+    private let segmentHeight: CGFloat = 32
     /// The hover circle is inset 3pt inside the pill — flush to the glass would read
     /// as an overflowing blob rather than a target sitting in it.
-    private let hoverDiameter: CGFloat = 20
+    private let hoverDiameter: CGFloat = 26
 
     var body: some View {
         HStack(spacing: 0) {

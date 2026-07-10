@@ -47,6 +47,12 @@ final class NotchPanel: NSPanel {
         isMovable = false
         isReleasedWhenClosed = false
 
+        // The island's surface is dark glass no matter what the Mac's appearance
+        // is, so pin the panel to dark: every AppKit-drawn control inside (the
+        // update spinner, switches, menus) then paints with its dark-mode ink
+        // instead of following the system into light mode and vanishing.
+        appearance = NSAppearance(named: .darkAqua)
+
         // Show on top of full-screen apps and follow the user across Spaces.
         collectionBehavior = [
             .canJoinAllSpaces,

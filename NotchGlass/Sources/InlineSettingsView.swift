@@ -1735,7 +1735,6 @@ struct InlineSettingsView: View {
                 ProgressView()
                     .progressViewStyle(.circular)
                     .controlSize(.small)
-                    .tint(Tokens.text3)
                 Text(L("about.checking"))
                     .font(.sf(11.5, weight: .medium))
                     .foregroundStyle(Tokens.text3)
@@ -1896,7 +1895,11 @@ struct InlineSettingsView: View {
     /// Fetch the *current* provider's live model list and cache it into
     /// `liveByProvider`, so the picker shows what the vendor serves right now for
     /// the provider in effect. Keyless providers keep their bundled shortlist (the
-    /// picker falls back to `availableModels`). Cheap and cancel-safe.
+    /// picker falls back to `availableModels`). Cheap and cancel-safe — and even
+    /// on the first call after Settings reopens (this view is destroyed on close,
+    /// so `liveByProvider` always starts empty), `ModelCatalog.fetch` itself
+    /// caches per provider+key for an hour, so this doesn't re-hit the network
+    /// unless the key changed or the cache actually expired.
     @MainActor
     private func refreshModels() async {
         let target = provider
@@ -2002,7 +2005,10 @@ struct InlineSettingsView: View {
     /// Fetch every keyed provider's live model list once, when the picker opens, so
     /// the groups fill in with real names/metadata. Keyless providers are skipped
     /// (they show their bundled list). Cheap and cancel-safe: results just overwrite
-    /// the cache, and a provider already cached this session is not re-fetched.
+    /// the cache, and a provider already cached this session is not re-fetched — nor,
+    /// thanks to `ModelCatalog`'s own per-provider+key cache, is one already fetched
+    /// in a *previous* Settings session (up to 11 providers' worth of `/v1/models` +
+    /// OpenRouter's `UsageRankings` calls, otherwise replayed on every popover open).
     @MainActor
     private func loadAllProviderModels() async {
         await RemoteModelManifest.refreshIfDue()

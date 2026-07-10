@@ -36,6 +36,19 @@ private struct LossyElement<T: Decodable>: Decodable {
     }
 }
 
+/// The live conversation's turns, split into their own ObservableObject so the
+/// ~30Hz streaming flushes invalidate ONLY the views that actually render the
+/// thread (NotchBody observes this store directly). Before the split `turns` was
+/// `@Published` on `NotchModel` itself, and — `@Published` granularity being the
+/// whole object — every streamed chunk re-evaluated the body of EVERY surface
+/// observing the model: the settings panel, onboarding, What's New, the History
+/// window, none of which render the conversation. The model still exposes a
+/// `turns` forwarder so its own logic reads/writes exactly as before.
+@MainActor
+final class ConversationStore: ObservableObject {
+    @Published var turns: [NotchModel.Turn] = []
+}
+
 /// The notch's interaction state. Mirrors the prototype's `mode` plus the
 /// open/closed state, and owns the history list + AI calls.
 @MainActor
@@ -1055,7 +1068,14 @@ final class NotchModel: ObservableObject {
     /// assistant `Turn`s. A follow-up appends to this rather than replacing it, so
     /// the whole thread stays on screen and (via `submit`) in the model's context.
     /// Empty while idle; the first submit seeds the first user + assistant turns.
-    @Published var turns: [Turn] = []
+    /// Backed by `conversation` (see `ConversationStore`): streaming writes
+    /// publish through the store, never through the model's `objectWillChange`,
+    /// so surfaces that don't render the thread are never invalidated by a chunk.
+    let conversation = ConversationStore()
+    var turns: [Turn] {
+        get { conversation.turns }
+        set { conversation.turns = newValue }
+    }
 
     /// The question shown in the result header — the *first* question of the
     /// thread, so the header labels the conversation as a whole. Empty when there's
@@ -1096,6 +1116,7 @@ final class NotchModel: ObservableObject {
         didSet {
             if historySearchQuery != oldValue { highlightedHistoryIndex = nil }
             if !historySearchQuery.isEmpty { noteUserTyping() }
+            filteredHistoryCache = nil
         }
     }
     /// Source filter for the recent list — `nil` shows everything. Set from the
@@ -1106,6 +1127,7 @@ final class NotchModel: ObservableObject {
         // exist, so a stale keyboard highlight could point at a hidden row.
         didSet {
             if historySourceFilter != oldValue { highlightedHistoryIndex = nil }
+            filteredHistoryCache = nil
         }
     }
     /// Whether the inline settings panel is showing in place of the recent list.
@@ -1136,7 +1158,11 @@ final class NotchModel: ObservableObject {
     /// (revealed by mouse) but the caret is still in the input. The first ↓
     /// promotes this to `0`. Indexes into the *visible* slice (`recentVisible`).
     @Published var highlightedHistoryIndex: Int? = nil
-    @Published private(set) var history: [HistoryItem] = []
+    @Published private(set) var history: [HistoryItem] = [] {
+        // The archive is one of the three inputs of `filteredHistory` — see the
+        // cache note there.
+        didSet { filteredHistoryCache = nil }
+    }
 
     /// Shell-style ↑/↓ history recall cursor for the idle prompt. `nil` means no
     /// recall session is in flight (the user is editing normally). Once ↑ pulls a
@@ -1207,18 +1233,29 @@ final class NotchModel: ObservableObject {
     /// Backs the standalone History window so nothing captured is ever out of reach.
     var archiveVisible: [HistoryItem] { filteredHistory }
 
+    /// Memoized `filteredHistory`, invalidated by the didSets of its only three
+    /// inputs (`history`, `historySourceFilter`, `historySearchQuery`). The filter
+    /// walks the whole archive — which is unbounded and grows with months of use —
+    /// while `recentVisible` is read several times per NotchBody body evaluation,
+    /// so without the memo every unrelated re-render re-filtered the full archive.
+    private var filteredHistoryCache: [HistoryItem]? = nil
+
     /// Shared filter pipeline for both the notch list and the archive window: the
     /// source filter (from the manage menu) narrows first, then the live substring
     /// search refines within that slice — the two compose.
     private var filteredHistory: [HistoryItem] {
+        if let cached = filteredHistoryCache { return cached }
         var items = history
         if let source = historySourceFilter {
             items = items.filter { $0.source == source }
         }
-        guard !historySearchQuery.isEmpty else { return items }
-        return items.filter {
-            $0.displayTitle.localizedCaseInsensitiveContains(historySearchQuery)
+        if !historySearchQuery.isEmpty {
+            items = items.filter {
+                $0.displayTitle.localizedCaseInsensitiveContains(historySearchQuery)
+            }
         }
+        filteredHistoryCache = items
+        return items
     }
 
     private var ai: AIService
@@ -1226,7 +1263,10 @@ final class NotchModel: ObservableObject {
     /// Holds the auto-dismiss timer for the "Saved to Notes" cue so a rapid second
     /// save cancels the first one's fade rather than letting them overlap.
     private var noteCueTask: Task<Void, Never>?
-    private let historyKey = "notch_history"
+    /// The legacy UserDefaults key the archive used to live under. Only read for
+    /// the one-time migration to the archive file (see `readHistoryFromDisk`);
+    /// never written anymore.
+    private static let historyKey = "notch_history"
 
     /// Stable id for the conversation currently on screen, so a follow-up updates
     /// the *same* recent-list row instead of inserting a new one each turn. Reset
@@ -1235,8 +1275,16 @@ final class NotchModel: ObservableObject {
 
     init(ai: AIService = StubAIService()) {
         self.ai = ai
-        history = loadHistory()
+        loadHistoryAsync()
         startClipboardSense()
+        // A debounced archive write may still be pending when the user quits;
+        // flush it synchronously so a ⌘Q moments after an answer can't lose the
+        // newest row.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.flushHistorySave() }
+        }
     }
 
     deinit {
@@ -2241,7 +2289,12 @@ final class NotchModel: ObservableObject {
     /// lands in the hundreds-of-KB range instead of many MB. Returns `nil` when
     /// the bitmap can't be read or encoded, in which case the turn just goes out
     /// as plain text.
-    static func encodeForVision(_ image: NSImage) -> ChatImage? {
+    /// `nonisolated`: the downscale + JPEG + base64 of a Retina screenshot is real
+    /// CPU, so `submit` runs it on a detached task (see the encode step at the top
+    /// of the round's task) instead of on the main actor at the moment of ⏎.
+    /// Everything here draws into an offscreen bitmap context, which is safe off
+    /// the main thread.
+    nonisolated static func encodeForVision(_ image: NSImage) -> ChatImage? {
         guard let tiff = image.tiffRepresentation,
               let rep = NSBitmapImageRep(data: tiff) else { return nil }
         let w = rep.pixelsWide, h = rep.pixelsHigh
@@ -3008,12 +3061,20 @@ final class NotchModel: ObservableObject {
         // the thread started from. Image rounds skip the agent harness below (the
         // tool wire doesn't carry image blocks), taking the plain stream instead.
         var imageAttached = false
-        if firstTurn, clipForTurn == nil, let image = clipboardImageIfEligible(),
-           let encoded = Self.encodeForVision(image) {
-            context[context.count - 1].image = encoded
-            threadImage = (threadID: threadHistoryID, image: encoded)
+        var pendingVisionImage: NSImage? = nil
+        if firstTurn, clipForTurn == nil, let image = clipboardImageIfEligible() {
+            // The actual encode is deferred into the round's task and runs on a
+            // detached (background) task there — it's real CPU that used to run
+            // synchronously right here, on the main thread, at the exact moment
+            // the user pressed ⏎. The harness choice below only needs to know an
+            // image is coming; the bytes land in `context` before anything streams.
+            // (If the encode then fails — unreadable bitmap — the round degrades
+            // to plain text, same as the old `encodeForVision(...) == nil` path.)
+            pendingVisionImage = image
             imageAttached = true
             // Same permanent "based on what you copied" trace the text clip gets.
+            // Stamped before `seedThread` is captured below, so it rides into the
+            // saved snapshot exactly like the text-clip stamp above.
             if turns.count >= 2 { turns[turns.count - 2].usedClipboard = true }
         } else if !firstTurn, let parked = threadImage, parked.threadID == threadHistoryID,
                   let firstUser = context.firstIndex(where: { $0.role == "user" }) {
@@ -3072,6 +3133,21 @@ final class NotchModel: ObservableObject {
                     self.resolveUserQuestion(q.id, with: .failure(CancellationError()))
                 }
             }
+            // The deferred vision encode (see `pendingVisionImage` above): produce
+            // the wire bytes off the main actor, then attach them to the outgoing
+            // context — nothing reads `context` until the stream starts below, so
+            // the suspension is invisible beyond the thinking dots it happens under.
+            if let image = pendingVisionImage {
+                let encoded = await Task.detached(priority: .userInitiated) {
+                    Self.encodeForVision(image)
+                }.value
+                if let encoded {
+                    context[context.count - 1].image = encoded
+                    // Park it on the thread so follow-ups re-attach it (unchanged
+                    // from the synchronous version).
+                    self.threadImage = (threadID: threadID, image: encoded)
+                }
+            }
             var thread = seedThread
             // Hoisted out of `do` so the error `catch` can read whatever streamed
             // before the failure — a mid-stream drop that already produced text must
@@ -3079,10 +3155,11 @@ final class NotchModel: ObservableObject {
             var acc = ""
             // Throttle state for the streamed-text sink below. Providers deliver
             // deltas far faster than the display refreshes (some near
-            // per-character), and every write to `turns` re-evaluates the whole
-            // observed view tree and re-parses the answer's markdown — so the
-            // per-chunk work is limited to accumulating into `acc`, and one
-            // shared flush pushes to the model at most ~30 times a second.
+            // per-character), and every write to `turns` re-evaluates NotchBody's
+            // whole tree (via `ConversationStore`) and re-parses the growing
+            // tail's markdown — so the per-chunk work is limited to accumulating
+            // into `acc`, and one shared flush pushes to the model at most ~30
+            // times a second.
             // Hoisted with `acc` so the catch paths can settle the throttle (a
             // trailing scheduled flush must never overwrite their final text).
             var pendingFlush: DispatchWorkItem? = nil
@@ -4264,6 +4341,9 @@ final class NotchModel: ObservableObject {
     }
 
     func clearHistory() {
+        // Clearing before the launch load lands must also veto the merge, or the
+        // archive would pop right back once the disk read finishes.
+        if !historyLoaded { historyClearedBeforeLoad = true }
         history = []
         saveHistory()
     }
@@ -4288,8 +4368,84 @@ final class NotchModel: ObservableObject {
         }
     }
 
-    private func loadHistory() -> [HistoryItem] {
+    // MARK: - History persistence
+    //
+    // The archive is unbounded (every retained item, full transcripts included),
+    // so both halves of its persistence are kept off the main actor:
+    //   • it lives in its own file under Application Support, not in UserDefaults
+    //     — a multi-MB blob in the defaults plist rides along on every cfprefsd
+    //     round-trip for the whole domain, and `set(_:forKey:)` of the full
+    //     archive ran synchronously on the main thread after EVERY answer;
+    //   • loads decode on a background task at launch (the archive merges in a
+    //     beat later), and saves encode+write on a serial utility queue behind a
+    //     short debounce (a finished answer saves once immediately and again when
+    //     its generated title lands — the debounce folds those into one write).
+
+    /// Serial queue that owns every write of the archive file, so two debounced
+    /// snapshots can never interleave their bytes.
+    private static let historyIO = DispatchQueue(label: "com.lofilab.notch.history-io",
+                                                 qos: .utility)
+
+    nonisolated private static var historyFileURL: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory,
+                                            in: .userDomainMask).first!
+        return base.appendingPathComponent("Notch", isDirectory: true)
+            .appendingPathComponent("history.json")
+    }
+
+    /// True once the launch load has merged the on-disk archive into `history`.
+    /// Saves that fire before that (a capture seconds into a launch) are deferred:
+    /// writing then would snapshot ONLY the new items, and a crash before the
+    /// merge would replace the whole archive with them.
+    private var historyLoaded = false
+    private var historySaveDeferred = false
+    /// Set when the user clears history before the launch load lands, so the merge
+    /// can't resurrect the archive it was just asked to destroy.
+    private var historyClearedBeforeLoad = false
+    /// The debounced pending save, so a burst of saves collapses to one write and
+    /// the terminate flush can run it early.
+    private var pendingHistorySave: DispatchWorkItem?
+
+    private func loadHistoryAsync() {
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let loaded = Self.readHistoryFromDisk()
+            await MainActor.run { [weak self] in
+                self?.mergeLoadedHistory(loaded)
+            }
+        }
+    }
+
+    private func mergeLoadedHistory(_ loaded: [HistoryItem]) {
+        defer {
+            historyLoaded = true
+            if historySaveDeferred {
+                historySaveDeferred = false
+                saveHistory()
+            }
+        }
+        guard !historyClearedBeforeLoad, !loaded.isEmpty else { return }
+        // Anything already in `history` arrived after launch — newer than
+        // everything on disk — so it stays in front (the list is newest-first).
+        history = history + loaded
+    }
+
+    nonisolated private static func readHistoryFromDisk() -> [HistoryItem] {
+        if let data = try? Data(contentsOf: historyFileURL) {
+            return decodeHistory(data)
+        }
+        // No archive file yet: migrate the legacy UserDefaults blob (where the
+        // archive lived through 0.1.13) into the file, and only then drop the
+        // defaults copy so the plist shrinks back to settings-sized. If the file
+        // write fails the blob stays put and the next launch retries.
         guard let data = UserDefaults.standard.data(forKey: historyKey) else { return [] }
+        let items = decodeHistory(data)
+        if writeHistoryToDisk(items) {
+            UserDefaults.standard.removeObject(forKey: historyKey)
+        }
+        return items
+    }
+
+    nonisolated private static func decodeHistory(_ data: Data) -> [HistoryItem] {
         let decoder = JSONDecoder()
         // Decode item-by-item rather than `decode([HistoryItem].self …)`. The array
         // decode is all-or-nothing — one element that throws (a corrupt blob, or a
@@ -4304,10 +4460,42 @@ final class NotchModel: ObservableObject {
         return (try? decoder.decode([HistoryItem].self, from: data)) ?? []
     }
 
+    @discardableResult
+    nonisolated private static func writeHistoryToDisk(_ items: [HistoryItem]) -> Bool {
+        guard let data = try? JSONEncoder().encode(items) else { return false }
+        let url = historyFileURL
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                 withIntermediateDirectories: true)
+        // Atomic, so a crash mid-write can never leave a truncated archive.
+        return (try? data.write(to: url, options: .atomic)) != nil
+    }
+
     private func saveHistory() {
-        if let data = try? JSONEncoder().encode(history) {
-            UserDefaults.standard.set(data, forKey: historyKey)
+        guard historyLoaded else { historySaveDeferred = true; return }
+        pendingHistorySave?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.pendingHistorySave = nil
+                // Value-type snapshot on the main actor; the encode + write of the
+                // full archive happens on the utility queue.
+                let snapshot = self.history
+                Self.historyIO.async { Self.writeHistoryToDisk(snapshot) }
+            }
         }
+        pendingHistorySave = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
+    }
+
+    /// Quit-time flush: run the debounced save NOW (synchronously through the IO
+    /// queue) so the newest rows survive a ⌘Q inside the debounce window.
+    private func flushHistorySave() {
+        guard pendingHistorySave != nil else { return }
+        pendingHistorySave?.cancel()
+        pendingHistorySave = nil
+        guard historyLoaded else { return }
+        let snapshot = history
+        Self.historyIO.sync { Self.writeHistoryToDisk(snapshot) }
     }
 
     // MARK: - Open width per state (matches the prototype's s-* widths)

@@ -1,5 +1,6 @@
 import SwiftUI
 import CoreGraphics
+import Foundation
 
 /// Official vendor brand marks, rendered as vector `Path`s from raw SVG path data so
 /// they stay crisp at any size and tint with the app palette — no bitmap assets, no
@@ -69,8 +70,36 @@ struct SVGPathShape: Shape {
     let pathData: String
     let viewBox: CGSize
 
+    /// Memoized `SVGPath.parse`. The model picker renders one `SVGPathShape` per row,
+    /// and SwiftUI re-asks a shape for `path(in:)` on every hover/keyboard-focus move
+    /// (each re-diffs the row), not just once per appearance — without a cache that
+    /// re-runs the hand-rolled parser (arc-to-Bézier trig included) against the same
+    /// unchanging `pathData` string on every call. Parsing is a pure function of
+    /// `pathData`, so the unit-space result is safe to reuse forever; only the
+    /// per-rect affine transform below still needs to run every time. Same rationale
+    /// as `MarkdownParser.parseCache`: NSCache is thread-safe and purges under memory
+    /// pressure, and the count limit comfortably covers the bundled mark table.
+    private static let parseCache: NSCache<NSString, ParsedPath> = {
+        let cache = NSCache<NSString, ParsedPath>()
+        cache.countLimit = 64
+        return cache
+    }()
+
+    /// NSCache values must be objects; a one-field box over the parsed, unit-space Path.
+    private final class ParsedPath {
+        let path: Path
+        init(_ path: Path) { self.path = path }
+    }
+
     func path(in rect: CGRect) -> Path {
-        let raw = SVGPath.parse(pathData)
+        let key = pathData as NSString
+        let raw: Path
+        if let hit = Self.parseCache.object(forKey: key) {
+            raw = hit.path
+        } else {
+            raw = SVGPath.parse(pathData)
+            Self.parseCache.setObject(ParsedPath(raw), forKey: key)
+        }
         guard viewBox.width > 0, viewBox.height > 0 else { return raw }
         let scale = min(rect.width / viewBox.width, rect.height / viewBox.height)
         let dx = (rect.width - viewBox.width * scale) / 2

@@ -49,6 +49,14 @@ struct ModelPickerView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var query = ""
+    /// The providers the list is narrowed to; empty = all of them. Unlike the fold, this
+    /// scopes *everything* — search included — so it reads as a filter, not a hint. It
+    /// lives in `@State`, so each time the popover opens it rests on "all".
+    @State private var providerFilter: Set<Provider> = []
+    /// Whether the filter's dropdown is showing. It's an in-card overlay rather than a
+    /// `Menu`, because an NSMenu closes on every click — unusable for ticking three
+    /// providers — and rather than a nested popover, which would fight the picker's own.
+    @State private var filterOpen = false
     /// False = the fold is on: only shortlisted models show (see `PickerModel.featured`).
     /// The user lifts it with the "Show all N models" row at the bottom of the list.
     /// A search bypasses it entirely, so a folded model is never unreachable.
@@ -88,6 +96,15 @@ struct ModelPickerView: View {
         m.provider == selectedProvider && m.info.id == selectedID
     }
 
+    /// The catalog the rest of the picker reasons about: every model, or only those from
+    /// the providers the filter names. Search, the fold, and the "Show all N" count all
+    /// read this rather than `models`, so a filtered picker behaves exactly like an
+    /// unfiltered one over a smaller catalog.
+    private var scoped: [PickerModel] {
+        guard !providerFilter.isEmpty else { return models }
+        return models.filter { providerFilter.contains($0.provider) }
+    }
+
     /// The rows the list actually draws, in the order handed in (usable first).
     ///
     /// A **search reaches every model**, folded or not — the fold is about the resting
@@ -95,20 +112,48 @@ struct ModelPickerView: View {
     /// the fold applies unless the user lifted it; the model currently in effect always
     /// survives the fold, or the picker would open with nothing selected on screen.
     private var visible: [PickerModel] {
+        let base = scoped
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         guard q.isEmpty else {
-            return models.filter {
+            return base.filter {
                 $0.info.name.lowercased().contains(q)
                 || $0.info.id.lowercased().contains(q)
                 || $0.providerName.lowercased().contains(q)
             }
         }
-        guard !expanded else { return models }
-        return models.filter { $0.featured || isSelected($0) }
+        guard !expanded else { return base }
+        return base.filter { $0.featured || isSelected($0) }
     }
 
     /// How many models the fold is currently keeping out of the list.
-    private var foldedCount: Int { models.count - visible.count }
+    private var foldedCount: Int { scoped.count - visible.count }
+
+    /// One entry of the provider filter menu. Providers arrive in `models`' own order —
+    /// keyed ones first — so the menu leads with what the user can actually call.
+    private struct ProviderOption: Identifiable {
+        let provider: Provider
+        let name: String
+        let count: Int
+        let hasKey: Bool
+        var id: Provider { provider }
+    }
+
+    private var providerOptions: [ProviderOption] {
+        var order: [Provider] = []
+        var counts: [Provider: Int] = [:]
+        var names: [Provider: String] = [:]
+        var keyed: [Provider: Bool] = [:]
+        for m in models {
+            if counts[m.provider] == nil { order.append(m.provider) }
+            counts[m.provider, default: 0] += 1
+            names[m.provider] = m.providerName
+            keyed[m.provider] = m.hasKey
+        }
+        return order.map {
+            ProviderOption(provider: $0, name: names[$0] ?? $0.rawValue,
+                           count: counts[$0] ?? 0, hasKey: keyed[$0] ?? false)
+        }
+    }
 
     /// The rows the keyboard cursor can land on — only usable (keyed) ones; arrow keys
     /// skip greyed models entirely.
@@ -123,13 +168,13 @@ struct ModelPickerView: View {
     }
 
     /// The model the detail pane shows: the hovered/keyboard-cursored one, else the
-    /// current selection, else the first usable model available.
+    /// current selection, else the first usable model available. Every fallback stays
+    /// inside `scoped`, so a filtered picker never describes a model the list doesn't
+    /// show — only an empty scope falls back to the whole catalog.
     private var detailModel: PickerModel? {
         if let f = focused, let m = row(for: f) { return m }
-        if let sel = models.first(where: { $0.provider == selectedProvider && $0.info.id == selectedID }) {
-            return sel
-        }
-        return models.first(where: \.hasKey) ?? models.first
+        if let sel = scoped.first(where: isSelected) { return sel }
+        return scoped.first(where: \.hasKey) ?? scoped.first ?? models.first
     }
 
     var body: some View {
@@ -147,6 +192,11 @@ struct ModelPickerView: View {
         // the call site (GlassPopoverBackground, radius 14). No fill/border here — the
         // content floats on the airy glass so the wallpaper refracts through the whole
         // card, matching the panel's LiquidGlass standard rather than a dark block.
+        //
+        // The filter dropdown floats over the whole card (not just the list column) so
+        // its click-catcher covers the detail pane too — clicking anywhere outside it
+        // closes it.
+        .overlay(alignment: .topLeading) { filterDropdownLayer }
         .onAppear {
             searchFocused = true
             navRowsMirror = navigableRows
@@ -154,9 +204,10 @@ struct ModelPickerView: View {
             installKeyMonitor()
         }
         .onDisappear(perform: removeKeyMonitor)
-        // Refresh the nav mirror whenever the visible list changes — either the query
-        // narrows it, or live models replace the bundled stubs (fingerprint changes).
+        // Refresh the nav mirror whenever the visible list changes — the query or the
+        // provider filter narrows it, or live models replace the bundled stubs.
         .onChange(of: query) { syncNav() }
+        .onChange(of: providerFilter) { syncNav() }
         .onChange(of: modelsFingerprint) { syncNav() }
     }
 
@@ -218,7 +269,11 @@ struct ModelPickerView: View {
             case 126: moveFocus(-1); return nil           // ↑
             case 125: moveFocus(1);  return nil           // ↓
             case 36, 76: commitFocused(); return nil      // Return / keypad Enter
-            case 53: dismiss(); return nil                // Esc
+            // Esc peels one layer at a time: the filter dropdown first, the picker only
+            // once nothing is open on top of it.
+            case 53:
+                if filterOpen { filterOpen = false } else { dismiss() }
+                return nil
             default: return event
             }
         }
@@ -233,7 +288,10 @@ struct ModelPickerView: View {
 
     private var listColumn: some View {
         VStack(spacing: 8) {
-            searchField
+            HStack(spacing: 6) {
+                searchField
+                providerFilterChip
+            }
             ScrollViewReader { proxy in
                 ScrollView(showsIndicators: false) {
                     LazyVStack(alignment: .leading, spacing: 2) {
@@ -248,10 +306,11 @@ struct ModelPickerView: View {
                                 .frame(maxWidth: .infinity)
                                 .padding(.top, 24)
                         }
-                        // The fold's handle. Only while resting — a search already
-                        // spans the whole catalog, so offering "show all" there
-                        // would be a no-op.
-                        if query.isEmpty, expanded || foldedCount > 0 {
+                        // The fold's handle, riding the list's tail while it's collapsed:
+                        // a shortlist is short, so the row sits in plain sight. Only
+                        // while resting — a search already spans the whole catalog, so
+                        // offering "show all" there would be a no-op.
+                        if query.isEmpty, !expanded, foldedCount > 0 {
                             foldToggle
                         }
                     }
@@ -265,20 +324,30 @@ struct ModelPickerView: View {
                     withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(f, anchor: .center) }
                 }
             }
+            // Expanded, the same handle leaves the list and pins to the column's floor.
+            // As a tail row it would sit sixty-odd models down — the only way out of the
+            // full catalog, parked behind a scroll marathon. Pinned, it's one click from
+            // anywhere in the list.
+            if query.isEmpty, expanded {
+                VStack(spacing: 0) {
+                    Rectangle().fill(.white.opacity(0.07)).frame(height: 0.5)
+                    foldToggle.padding(.top, 4)
+                }
+            }
         }
         .padding(10)
     }
 
-    /// The last row of the list: lift the fold ("Show all 63 models") or drop it back.
-    /// Deliberately quiet — a text row, not a button chrome — so it reads as the tail
-    /// of the list rather than a control competing with the models.
+    /// Lift the fold ("Show all 63 models") or drop it back. Deliberately quiet — a text
+    /// row, not a button chrome — so it reads as part of the list rather than a control
+    /// competing with the models, whether it rides the list's tail or the pinned floor.
     private var foldToggle: some View {
         HStack(spacing: 8) {
             Image(systemName: expanded ? "chevron.up" : "chevron.down")
                 .font(.system(size: 10, weight: .semibold))
                 .frame(width: 20)
             Text(expanded ? L("model.picker.showLess")
-                          : L("model.picker.showAll", models.count))
+                          : L("model.picker.showAll", scoped.count))
                 .font(.sf(12, weight: .medium))
             Spacer(minLength: 0)
         }
@@ -332,6 +401,199 @@ struct ModelPickerView: View {
         .frame(height: 34)
         .background(RoundedRectangle(cornerRadius: 9).fill(.white.opacity(0.06)))
         .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(.white.opacity(0.10), lineWidth: 0.5))
+    }
+
+    /// The provider filter: a chip riding beside the search field, resting on "All
+    /// providers". It scopes the list to the ticked providers — the coarse cut a text
+    /// search can't make cleanly, since a provider's name rarely appears in its models'
+    /// names (searching "OpenRouter" finds nothing called that).
+    ///
+    /// An active filter brightens the chip, so a narrowed list is never a mystery — and it
+    /// brightens into the exact wash a selected model row wears (0.14 fill / 0.20 rim), not
+    /// a tint of its own. Accent stays reserved for the "Add key" jump; this is a state,
+    /// not an action. At rest the chip is the search field's twin (0.06 / 0.10).
+    ///
+    /// The chip's width is fixed: provider names run from "GLM" to "Vercel AI Gateway", and
+    /// a chip that resized per selection would shove the search field around on every tick.
+    private var providerFilterChip: some View {
+        let on = !providerFilter.isEmpty
+        return Button {
+            withAnimation(.easeOut(duration: 0.12)) { filterOpen.toggle() }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "line.3.horizontal.decrease")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(on ? Tokens.text1 : Tokens.text3)
+                Text(filterTitle)
+                    .font(.sf(12, weight: on ? .semibold : .medium))
+                    .foregroundStyle(on ? Tokens.text1 : Tokens.text3)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 2)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(Tokens.text3)
+                    .rotationEffect(.degrees(filterOpen ? 180 : 0))
+            }
+            .padding(.horizontal, 8)
+            .frame(width: 118, height: 34)
+            .background(RoundedRectangle(cornerRadius: 9).fill(.white.opacity(on ? 0.14 : 0.06)))
+            .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(.white.opacity(on ? 0.20 : 0.10), lineWidth: 0.5))
+            .contentShape(RoundedRectangle(cornerRadius: 9))
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// What the chip says: the one provider by name, else a count — a chip 118pt wide
+    /// can't list three of them, and "3 providers" is the fact that matters.
+    private var filterTitle: String {
+        switch providerFilter.count {
+        case 0: return L("model.picker.allProviders")
+        case 1: return providerFilter.first?.displayName ?? ""
+        default: return L("model.picker.someProviders", providerFilter.count)
+        }
+    }
+
+    private static let filterMenuWidth: CGFloat = 200
+
+    /// The dropdown, plus the invisible sheet that closes it on an outside click. Both
+    /// float over the whole card; the panel is offset to hang under the chip's right
+    /// edge (the list column is 330 wide with a 10pt inset, so the chip's edge is at 320).
+    @ViewBuilder
+    private var filterDropdownLayer: some View {
+        if filterOpen {
+            ZStack(alignment: .topLeading) {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture { withAnimation(.easeOut(duration: 0.12)) { filterOpen = false } }
+                providerFilterMenu
+                    .frame(width: Self.filterMenuWidth)
+                    .offset(x: 320 - Self.filterMenuWidth, y: 10 + 34 + 6)
+            }
+            .transition(.opacity)
+        }
+    }
+
+    /// The rows themselves: "All providers" clears the filter, every other row ticks its
+    /// provider on or off and the panel stays put — that's the whole reason this isn't a
+    /// `Menu`. Unticking the last provider lands back on "all", which is the same thing.
+    ///
+    /// Two blocks, keyed above keyless: which providers you can actually call is the
+    /// first thing to know about the list, and burying a configured provider among nine
+    /// keyless ones makes the useful half hard to find. Keyless providers stay tickable —
+    /// filtering to one is how you browse what a key would unlock.
+    ///
+    /// The fold is deliberately left alone by all of this — narrowing to OpenRouter still
+    /// opens on its shortlist with "Show all N" below, now counting only what's in scope.
+    private var providerFilterMenu: some View {
+        let configured = providerOptions.filter(\.hasKey)
+        let unconfigured = providerOptions.filter { !$0.hasKey }
+        return VStack(alignment: .leading, spacing: 2) {
+            FilterRow(name: L("model.picker.allProviders"), count: models.count,
+                      checked: providerFilter.isEmpty) { providerFilter = [] }
+            Rectangle().fill(.white.opacity(0.07)).frame(height: 0.5).padding(.vertical, 3)
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 2) {
+                    section(L("model.picker.configured"), configured, isFirst: true)
+                    section(L("model.picker.unconfigured"), unconfigured, isFirst: configured.isEmpty)
+                }
+            }
+            .frame(maxHeight: 218)
+        }
+        .padding(6)
+        // The tooltip's wafer, verbatim (DesignSystem): near-black glass over a thin
+        // blur, a Tokens.hairline rim, the same lifted shadow. It has to occlude the
+        // rows it hangs over, so it can't be the card's airy `.clear` glass.
+        .background {
+            let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+            ZStack {
+                shape.fill(Color.black.opacity(0.62))
+                    .background(.ultraThinMaterial, in: shape)
+                shape.strokeBorder(Tokens.hairline, lineWidth: 0.5)
+            }
+        }
+        .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
+    }
+
+    /// One block of the dropdown: a quiet caption, then its providers. An empty block
+    /// draws nothing at all — a lone "Configured" header over no rows would read as a
+    /// bug, and a fresh install (no keys anywhere) has exactly that block empty.
+    @ViewBuilder
+    private func section(_ title: String, _ opts: [ProviderOption], isFirst: Bool) -> some View {
+        if !opts.isEmpty {
+            // The settings header's caption register, verbatim: 10pt semibold, tracked
+            // out, at meta weight.
+            Text(title)
+                .font(.sf(10, weight: .semibold))
+                .tracking(0.8)
+                .foregroundStyle(Tokens.text4)
+                .padding(.horizontal, 8)
+                .padding(.top, isFirst ? 2 : 8)
+                .padding(.bottom, 2)
+            ForEach(opts) { opt in
+                FilterRow(name: opt.name, count: opt.count,
+                          checked: providerFilter.contains(opt.provider),
+                          dimmed: !opt.hasKey) {
+                    toggleProvider(opt.provider)
+                }
+            }
+        }
+    }
+
+    private func toggleProvider(_ p: Provider) {
+        if providerFilter.contains(p) { providerFilter.remove(p) } else { providerFilter.insert(p) }
+    }
+}
+
+// MARK: - Filter row
+
+/// One tickable provider in the filter dropdown: a checkbox, the provider's name, and
+/// how many models it brings. `dimmed` marks a provider with no key — still tickable
+/// (its models show greyed, with "Add key"), just quieter than one you can call.
+/// Its own `View` so each row owns its hover state.
+///
+/// Ticked and hovered wear the model rows' own washes (0.14 + a 0.20 rim; 0.06), and the
+/// checkbox is plain ink — the picker spends its one accent on "Add key", and a blue tick
+/// here would out-shout it.
+private struct FilterRow: View {
+    let name: String
+    let count: Int
+    let checked: Bool
+    var dimmed: Bool = false
+    let action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: checked ? "checkmark.square.fill" : "square")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(checked ? Tokens.text1 : Tokens.text4)
+                .frame(width: 14)
+            Text(name)
+                .font(.sf(12, weight: checked ? .semibold : .regular))
+                .foregroundStyle(dimmed ? Tokens.text2 : Tokens.text1)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 6)
+            Text("\(count)")
+                .font(.sf(11))
+                .foregroundStyle(Tokens.text4)
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 28)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(checked ? .white.opacity(0.14) : hovering ? .white.opacity(0.06) : .clear)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(checked ? .white.opacity(0.20) : .clear, lineWidth: 0.5)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 8))
+        .onHover { hovering = $0 }
+        .onTapGesture(perform: action)
+        .animation(.easeOut(duration: 0.12), value: hovering)
     }
 }
 
@@ -427,19 +689,27 @@ private struct DetailPanel: View {
                 }
             }
 
-            // Capabilities — icon + label list in the same register as the facts.
-            VStack(alignment: .leading, spacing: 9) {
-                if info.vision    { Capability(icon: "eye", label: L("model.picker.vision")) }
-                if info.toolUse   { Capability(icon: "wrench.and.screwdriver", label: L("model.picker.tools")) }
-                if info.reasoning { Capability(icon: "brain", label: L("model.picker.reasoning")) }
+            // Capabilities — tags, not a list. A model often carries only one of these
+            // (a bundled stub knows nothing but its provider's web search), and a lone
+            // icon+label line reads as a stray sentence hanging off the facts above it;
+            // a pill reads as a deliberate tag at any count. Chips also share the
+            // panel's left edge, which an icon column does not.
+            FlowLayout(hSpacing: 6, vSpacing: 6) {
+                if info.vision    { CapabilityChip(icon: "eye", label: L("model.picker.vision")) }
+                if info.toolUse   { CapabilityChip(icon: "wrench.and.screwdriver", label: L("model.picker.tools")) }
+                if info.reasoning { CapabilityChip(icon: "brain", label: L("model.picker.reasoning")) }
                 if model.provider.supportsWebSearch {
-                    Capability(icon: "globe", label: L("model.picker.webSearch"))
+                    CapabilityChip(icon: "globe", label: L("model.picker.webSearch"))
                 } else {
                     // The one absence worth calling out: no provider-side web
-                    // search means answers come from training data only.
-                    Capability(icon: "globe.slash", label: L("model.picker.noWebSearch"), dimmed: true)
+                    // search means answers come from training data only. Vision /
+                    // tools / reasoning stay positives-only — the catalog reports
+                    // them as `false` until a model's live metadata lands, so an
+                    // absent chip there would assert something we don't know.
+                    CapabilityChip(icon: "network.slash", label: L("model.picker.noWebSearch"), dimmed: true)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.top, 14)
 
             Spacer(minLength: 0)
@@ -449,16 +719,17 @@ private struct DetailPanel: View {
     }
 
     /// A quiet label/value line (Provider, Context) in the panel's own register:
-    /// the label sits at meta-weight on the left, the value bright and right-aligned.
+    /// the label sits at meta-weight on the left, the value a shade brighter and
+    /// right-aligned — both well below the name and meters above.
     private func factRow(_ label: String, _ value: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(label)
                 .font(.sf(12))
-                .foregroundStyle(Tokens.text3)
+                .foregroundStyle(Tokens.text4)
             Spacer(minLength: 8)
             Text(value)
-                .font(.sf(12, weight: .semibold))
-                .foregroundStyle(Tokens.text1)
+                .font(.sf(12))
+                .foregroundStyle(Tokens.text3)
                 .lineLimit(1)
                 .truncationMode(.tail)
         }
@@ -487,23 +758,32 @@ private struct Meter: View {
     }
 }
 
-/// One capability line: icon + label, matching the reference's Vision / Tool Use /
-/// Supports Reasoning list. `dimmed` renders an *absent* capability (no web
-/// search) in the quiet register so it reads as a fact, not an alarm.
-private struct Capability: View {
+/// One capability tag: icon + label in a soft pill (Vision / Tool Use / Reasoning /
+/// Web search). `dimmed` renders an *absent* capability (no web search) in the quiet
+/// register so it reads as a fact, not an alarm.
+private struct CapabilityChip: View {
     let icon: String
     let label: String
     var dimmed: Bool = false
 
     var body: some View {
-        HStack(spacing: 9) {
+        HStack(spacing: 5) {
             Image(systemName: icon)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(dimmed ? Tokens.text4 : Tokens.text2)
-                .frame(width: 16)
+                .font(.system(size: 10, weight: .medium))
             Text(label)
-                .font(.sf(12))
-                .foregroundStyle(dimmed ? Tokens.text3 : Tokens.text1)
+                .font(.sf(11, weight: .medium))
+                .lineLimit(1)
         }
+        .foregroundStyle(dimmed ? Tokens.ink.opacity(0.32) : Tokens.text2)
+        .padding(.horizontal, 8)
+        .frame(height: 22)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(.white.opacity(dimmed ? 0.03 : 0.07))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .strokeBorder(.white.opacity(dimmed ? 0.05 : 0.10), lineWidth: 0.5)
+        )
     }
 }

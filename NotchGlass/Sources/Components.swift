@@ -839,6 +839,37 @@ struct GlassPressStyle: ButtonStyle {
     }
 }
 
+/// The trailing "open in Notes/Reminders" pill on a capture row — one control
+/// shared by the notch's Recent list and the standalone archive window, so the
+/// jump looks and feels identical wherever the row is read. A quiet tinted glass
+/// capsule at rest that brightens under the cursor, the same hover language the
+/// rows themselves speak, and gives on press like every other glass chip.
+struct CaptureJumpButton: View {
+    let title: String
+    let tint: Color
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 3) {
+                Text(title)
+                    .font(.sf(11, weight: .medium))
+                Image(systemName: "arrow.up.right")
+                    .font(.system(size: 8, weight: .semibold))
+            }
+            .foregroundStyle(hovering ? Tokens.text2 : Tokens.text3)
+            .padding(.vertical, 3)
+            .padding(.horizontal, 8)
+            .glassCapsule(in: Capsule(), brighter: hovering, tint: tint)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(GlassPressStyle())
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.14), value: hovering)
+    }
+}
+
 /// A one-shot **rim glow** that pulses whenever a watched value changes — the input
 /// field's outer acknowledgement that its *destination* just flipped (Ask → Note →
 /// Remind). The inline "— Ask"/"— Note" ghost already cross-fades the word beside the
@@ -1695,7 +1726,7 @@ struct InlineMarkdownText: View {
 /// falls through to a paragraph, so unknown syntax still reads cleanly rather
 /// than breaking. Inline `**bold**` / `*italic*` / `code` is handled per-line by
 /// `InlineMarkdownText`; code blocks render verbatim without inline parsing.
-enum MarkdownBlock {
+enum MarkdownBlock: Equatable {
     case heading(level: Int, text: String)
     /// `indent` is the nesting depth (0 = top level) of a list item, derived
     /// from the line's leading whitespace.
@@ -2087,7 +2118,9 @@ struct MarkdownBlocks: View {
                 // streaming renderer (`StreamingMarkdown`) so a settled answer and a
                 // live one are laid out identically — they differ only in the tail
                 // fade/selection wrapping, never in how a block kind looks.
+                // `.equatable()` — see the row's `Equatable` conformance for why.
                 MarkdownBlockRow(block: block, baseFont: baseFont, color: color, onInAppCopy: onInAppCopy)
+                    .equatable()
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
@@ -2131,11 +2164,13 @@ struct StreamingMarkdown: View {
                 // `source` prefix; cheap, and keeps inline/code handling identical.
                 ForEach(Array(parsed.prefix(headCount).enumerated()), id: \.offset) { _, block in
                     MarkdownBlockRow(block: block, baseFont: baseFont, color: color, onInAppCopy: onInAppCopy)
+                        .equatable()
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
             if let tail = parsed.last {
                 MarkdownBlockRow(block: tail, baseFont: baseFont, color: color, onInAppCopy: onInAppCopy)
+                    .equatable()
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .modifier(TailFadeIn(token: tailToken(for: tail)))
             }
@@ -2181,11 +2216,23 @@ private struct TailFadeIn: ViewModifier {
 /// settled renderer and the streaming renderer share identical block styling. The
 /// two callers differ only in animation/selection wrapping, never in how a given
 /// block kind looks.
-struct MarkdownBlockRow: View {
+struct MarkdownBlockRow: View, Equatable {
     let block: MarkdownBlock
     var baseFont: CGFloat = 15
     var color: Color = Tokens.text1
     var onInAppCopy: (() -> Void)? = nil
+
+    /// The row-level diff gate (used via `.equatable()` at every call site).
+    /// `onInAppCopy` is a closure, and a closure field defeats SwiftUI's
+    /// synthesized memberwise diff — without this, EVERY row of an answer
+    /// re-evaluated its body (re-running `InlineMarkdownText`'s AttributedString
+    /// parse) on every ~33ms streaming flush, so a flush's cost grew with the
+    /// length of the already-settled text above the tail. Comparing the visual
+    /// inputs only is safe: the closure is the same capture for the life of the
+    /// thread, so a row whose block/font/colour are unchanged renders identically.
+    static func == (lhs: MarkdownBlockRow, rhs: MarkdownBlockRow) -> Bool {
+        lhs.block == rhs.block && lhs.baseFont == rhs.baseFont && lhs.color == rhs.color
+    }
 
     var body: some View {
         switch block {
