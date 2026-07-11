@@ -558,6 +558,10 @@ struct HistorySearchField: NSViewRepresentable {
 struct InlineSendHint: View {
     /// "Ask" / "Note" — the destination the classifier currently reads.
     var label: String
+    /// A softer trailing detail after the destination word — the Ask model name
+    /// ("Ask gpt-4o") or the Remind recurrence ("Remind · Daily"). Rendered a shade
+    /// lighter than the word so it reads as a footnote, not a second destination.
+    var suffix: String = ""
     /// The field's font size, so the hint matches the body text size exactly.
     var fontSize: CGFloat
     /// Width (pt) of everything the field is currently showing — committed text PLUS
@@ -588,8 +592,8 @@ struct InlineSendHint: View {
     /// possible label, so the field uses all available width when the destination is
     /// short and no dead strip appears to the right of the ghost. The caller animates
     /// this padding alongside the hint so Ask→Note→Remind transitions stay smooth.
-    static func reservedTrailingWidth(label: String, fontSize: CGFloat) -> CGFloat {
-        return width(of: "— \(label)", fontSize: fontSize) + gap
+    static func reservedTrailingWidth(label: String, suffix: String = "", fontSize: CGFloat) -> CGFloat {
+        return width(of: "— \(label)\(suffix)", fontSize: fontSize) + gap
     }
 
     var body: some View {
@@ -606,7 +610,7 @@ struct InlineSendHint: View {
         // reserved width (now sized to the current label) so the ghost lands flush where
         // the text area ends — no gap, no overlap — while short labels reclaim the rest
         // of the row for the editable area.
-        let reserved = Self.reservedTrailingWidth(label: label, fontSize: fontSize)
+        let reserved = Self.reservedTrailingWidth(label: label, suffix: suffix, fontSize: fontSize)
         let dock = availableWidth - reserved + Self.gap
         let start = min(leadingInset + caretWidth + Self.gap, dock)
         let visible = caretWidth > 0
@@ -636,13 +640,18 @@ struct InlineSendHint: View {
                 // in a softer cut of the SAME hue (a grey dash next to a coloured
                 // word read as two disjoint pieces), the word carrying the full
                 // ghost strength. Typed text stays near-white.
-                (Text("— ").foregroundColor(tint.map { $0.opacity(0.5) } ?? Tokens.placeholder)
-                    + Text(label).foregroundColor(tint.map { $0.opacity(0.78) } ?? Tokens.placeholder))
+                // Three strengths of the SAME hue: the em dash softest (punctuation),
+                // the destination word full ghost-strength, and the trailing detail
+                // (model name / recurrence) a shade lighter than the word so it reads
+                // as a quiet footnote rather than a second destination.
+                (Text("— ").foregroundColor(tint.map { $0.opacity(0.42) } ?? Tokens.placeholder)
+                    + Text(label).foregroundColor(tint.map { $0.opacity(0.68) } ?? Tokens.placeholder)
+                    + Text(suffix).foregroundColor(tint.map { $0.opacity(0.42) } ?? Tokens.placeholder.opacity(0.6)))
                     .font(.system(size: fontSize, weight: .regular))
                     .lineLimit(1)
                     .fixedSize()
                     .contentTransition(.opacity)
-                    .animation(.smooth(duration: 0.25), value: label)
+                    .animation(.smooth(duration: 0.25), value: label + suffix)
                     .offset(x: start)
                     .animation(.smooth(duration: 0.25), value: start)
                     .transition(.materialize)

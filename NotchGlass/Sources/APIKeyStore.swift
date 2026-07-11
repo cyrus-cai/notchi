@@ -254,6 +254,13 @@ enum APIKeyStore {
     /// otherwise `nil` so the client falls back to `provider.defaultModel`.
     static func effectiveModel(for provider: Provider) -> String? {
         let stored = storedModel(for: provider)
+        // Codex: an empty override — or the legacy "codex" sentinel a pre-real-model
+        // selection stored — both mean "use the configured model", so resolve them to
+        // the real model read from ~/.codex/config.toml (keeps display and the `-m`
+        // actually run in sync).
+        if provider == .codex, stored.isEmpty || stored == "codex" {
+            return provider.defaultModel
+        }
         return stored.isEmpty ? nil : stored
     }
 

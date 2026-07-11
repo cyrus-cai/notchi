@@ -286,8 +286,29 @@ struct ModelPickerView: View {
 
     // MARK: - List
 
+    /// Model names sold by more than one provider in the catalog — only these rows
+    /// carry a provider subtitle, so the same model under two aggregators stops
+    /// being twin rows while unique models keep the clean name-only look. Computed
+    /// over the full `models` (not `visible`) so a row's subtitle never flickers
+    /// with search or the fold.
+    private var duplicatedNames: Set<String> {
+        var seen: [String: Provider] = [:]
+        var dups = Set<String>()
+        for m in models {
+            let k = m.info.name.lowercased()
+            if let p = seen[k] {
+                if p != m.provider { dups.insert(k) }
+            } else {
+                seen[k] = m.provider
+            }
+        }
+        return dups
+    }
+
     private var listColumn: some View {
-        VStack(spacing: 8) {
+        // Once per render, not per row — the set is O(catalog) to build.
+        let dups = duplicatedNames
+        return VStack(spacing: 8) {
             HStack(spacing: 6) {
                 searchField
                 providerFilterChip
@@ -296,7 +317,7 @@ struct ModelPickerView: View {
                 ScrollView(showsIndicators: false) {
                     LazyVStack(alignment: .leading, spacing: 2) {
                         ForEach(visible) { m in
-                            row(m)
+                            row(m, showsProvider: dups.contains(m.info.name.lowercased()))
                                 .id(key(m))
                         }
                         if visible.isEmpty {
@@ -361,11 +382,12 @@ struct ModelPickerView: View {
     }
 
     @ViewBuilder
-    private func row(_ m: PickerModel) -> some View {
+    private func row(_ m: PickerModel, showsProvider: Bool) -> some View {
         let k = key(m)
         let isSelected = m.provider == selectedProvider && m.info.id == selectedID
         let isFocused = focused == k
-        ModelRowView(model: m, selected: isSelected, focused: isFocused)
+        ModelRowView(model: m, selected: isSelected, focused: isFocused,
+                     showsProvider: showsProvider)
             // Hover updates the detail pane (and the row wash) but must NOT scroll —
             // scrollToFocused stays false, so `.onChange(of: focused)` is a no-op here.
             .onHover { if $0 { scrollToFocused = false; focused = k } }
@@ -445,10 +467,13 @@ struct ModelPickerView: View {
     }
 
     /// What the chip says: the one provider by name, else a count — a chip 118pt wide
-    /// can't list three of them, and "3 providers" is the fact that matters.
+    /// can't list three of them, and "3 providers" is the fact that matters. At rest
+    /// it's the short "Providers" (not "All providers", which truncates to
+    /// "All provi…" at this width — a default state must never show an ellipsis);
+    /// the dropdown's first row keeps the full "All providers" wording.
     private var filterTitle: String {
         switch providerFilter.count {
-        case 0: return L("model.picker.allProviders")
+        case 0: return L("model.picker.providers")
         case 1: return providerFilter.first?.displayName ?? ""
         default: return L("model.picker.someProviders", providerFilter.count)
         }
@@ -606,6 +631,10 @@ private struct ModelRowView: View {
     let model: PickerModel
     let selected: Bool
     let focused: Bool
+    /// True when the same model name appears under another provider too — only
+    /// then does the row name its provider, so twins are tellable apart at a
+    /// glance instead of only in the detail pane.
+    let showsProvider: Bool
 
     private var enabled: Bool { model.hasKey }
 
@@ -614,14 +643,24 @@ private struct ModelRowView: View {
             VendorLogo(vendor: model.info.vendor, fallback: model.info.name)
                 .frame(width: 20, height: 20)
                 .opacity(enabled ? 1 : 0.55)
-            // The model name is the whole row — no provider subtitle, no tier badge.
-            // The vendor lives only in the logo; the provider↔key mapping is managed
-            // elsewhere, surfaced here only when a model can't be picked (Add key).
+            // The model name is (almost) the whole row — no tier badge, vendor in
+            // the logo only. The provider surfaces just twice: as "Add key" when the
+            // model can't be picked, and as a quiet subtitle when the same name is
+            // sold by two providers and the rows would otherwise be twins.
             Text(model.info.id.isEmpty ? L("model.picker.default") : model.info.name)
                 .font(.sf(13, weight: selected ? .semibold : .regular))
                 .foregroundStyle(enabled ? Tokens.text1 : Tokens.text2)
                 .lineLimit(1)
                 .truncationMode(.middle)
+            if showsProvider {
+                // Meta register (text4), a step below the labels — it disambiguates,
+                // it doesn't compete with the model name.
+                Text(model.providerName)
+                    .font(.sf(11))
+                    .foregroundStyle(Tokens.text4)
+                    .lineLimit(1)
+                    .layoutPriority(-1)
+            }
             Spacer(minLength: 6)
             if !enabled {
                 Text(L("model.picker.addKey"))
@@ -727,11 +766,14 @@ private struct DetailPanel: View {
                 .font(.sf(12))
                 .foregroundStyle(Tokens.text4)
             Spacer(minLength: 8)
+            // Wrap, don't truncate — "Codex (ChatGPT)" doesn't fit the 200pt pane
+            // beside its label, and a fact that reads "Codex (ChatG…" isn't a fact.
             Text(value)
                 .font(.sf(12))
                 .foregroundStyle(Tokens.text3)
-                .lineLimit(1)
-                .truncationMode(.tail)
+                .lineLimit(2)
+                .multilineTextAlignment(.trailing)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

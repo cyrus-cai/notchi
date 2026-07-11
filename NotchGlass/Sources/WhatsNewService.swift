@@ -64,6 +64,14 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.1.15",
+            date: "2026-07-11",
+            features: [
+                "New Codex model — keyless: uses your ChatGPT sign-in, billed to your ChatGPT plan (needs the Codex CLI).",
+                "Notes can save to plain Markdown files in a folder you choose, instead of Apple Notes.",
+            ]
+        ),
+        Entry(
             version: "0.1.14",
             date: "2026-07-10",
             features: [

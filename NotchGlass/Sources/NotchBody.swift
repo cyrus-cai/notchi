@@ -902,6 +902,14 @@ struct NotchBody: View {
                     icon: "clock.arrow.circlepath",
                     title: L("recent.menu.seeAll")
                 ) {
+                    // Fold the expanded recent list back to the compact prompt as
+                    // the standalone archive takes over. Otherwise the still-open
+                    // list floats above the newly centered History window and its
+                    // top gets covered — and it's redundant, since the archive now
+                    // holds everything. Same spring as the list's open/close.
+                    withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
+                        model.collapseHistory()
+                    }
                     NotificationCenter.default.post(name: .openHistoryArchiveRequested, object: nil)
                 }
                 // Destructive, so it arms the confirmation instead of wiping on the
@@ -1861,6 +1869,7 @@ struct NotchBody: View {
                     if !followUp {
                         InlineSendHint(
                             label: model.submitLabel,
+                            suffix: model.submitLabelSuffix,
                             fontSize: fontSize,
                             caretWidth: caretWidth,
                             availableWidth: geo.size.width,
@@ -1943,8 +1952,8 @@ struct NotchBody: View {
                 // holds in the reserved strip beside it, never overlapped, never lost.
                 // The reserved width follows the current label so short labels don't
                 // waste space; the ZStack animation keeps the resize smooth.
-                .padding(.trailing, followUp ? 0 : InlineSendHint.reservedTrailingWidth(label: model.submitLabel, fontSize: fontSize))
-                .animation(.smooth(duration: 0.25), value: model.submitLabel)
+                .padding(.trailing, followUp ? 0 : InlineSendHint.reservedTrailingWidth(label: model.submitLabel, suffix: model.submitLabelSuffix, fontSize: fontSize))
+                .animation(.smooth(duration: 0.25), value: model.submitLabel + model.submitLabelSuffix)
 
                 // The placeholder, drawn as a SwiftUI label over the (natively
                 // placeholder-less) field so its appearance can FADE — on emptying
@@ -2055,6 +2064,7 @@ struct NotchBody: View {
                 GeometryReader { geo in
                     InlineSendHint(
                         label: model.submitLabel,
+                        suffix: model.submitLabelSuffix,
                         fontSize: 14.5,
                         caretWidth: followUpCaretWidth,
                         availableWidth: geo.size.width,
@@ -2101,8 +2111,8 @@ struct NotchBody: View {
                 // the idle row, so typed text scrolls within a narrower field and the
                 // "— Ask"/"— Remind" ghost never overlaps it. Width follows the current
                 // label so short labels don't leave a dead strip on the right.
-                .padding(.trailing, InlineSendHint.reservedTrailingWidth(label: model.submitLabel, fontSize: 14.5))
-                .animation(.smooth(duration: 0.25), value: model.submitLabel)
+                .padding(.trailing, InlineSendHint.reservedTrailingWidth(label: model.submitLabel, suffix: model.submitLabelSuffix, fontSize: 14.5))
+                .animation(.smooth(duration: 0.25), value: model.submitLabel + model.submitLabelSuffix)
                 // The placeholder, shown only while the editor is truly empty —
                 // committed text AND in-progress pinyin both hide it.
                 if !model.hasText && followUpCaretWidth == 0 {

@@ -157,6 +157,7 @@ struct InlineSettingsView: View {
     enum Section: String, CaseIterable, Identifiable {
         case model = "Model"     // provider, API key, model override
         case search = "Search"   // search backend + its key
+        case notes = "Notes"     // the capture pipeline: note destination + copy sensing
         case tools = "Tools"     // quick-tool chips + per-tool prefs (translation languages)
         case general = "General" // app-level toggles (shortcut, placement, Dock icon…)
         case about = "About"     // version + self-update
@@ -168,6 +169,7 @@ struct InlineSettingsView: View {
             switch self {
             case .model:   return L("sidebar.model")
             case .search:  return L("sidebar.search")
+            case .notes:   return L("sidebar.notes")
             case .tools:   return L("sidebar.tools")
             case .general: return L("sidebar.general")
             case .about:   return L("sidebar.about")
@@ -202,6 +204,14 @@ struct InlineSettingsView: View {
     /// `selectLaunchAtLogin`, which registers/unregisters the item and reverts
     /// this optimistic flag if the OS refuses.
     @State private var launchAtLogin: Bool = LaunchAtLogin.isEnabled
+
+    /// Where note captures land (Apple Notes / Markdown folder) — mirrors the
+    /// persisted value; writes go through `selectNoteDestination`. Consulted per
+    /// write, so the switch applies to the very next jot.
+    @State private var noteDestination: NoteDestination = .current
+    /// The Markdown folder as shown under the destination row (home-relative);
+    /// refreshed when the chooser commits a new pick.
+    @State private var notesFolderDisplay: String = FileNotesService.folderDisplayPath
 
     /// The global summon shortcut — mirrors the persisted value; writes go through
     /// `commitSummonHotKey` so `AppDelegate` re-registers the Carbon hot key.
@@ -256,13 +266,16 @@ struct InlineSettingsView: View {
                         case .keenable: keenableKeyRow
                         case .exa:      exaKeyRow
                         }
+                    case .notes:
+                        // The capture pipeline in one place: where a jot files,
+                        // then the closed-notch copy sensing that feeds it.
+                        noteDestinationRow
+                        copySenseRow
                     case .tools:
                         // Which quick tools appear at all, then the knobs of the
-                        // individual tools (today: Translate's language pair),
-                        // then the closed-notch copy sensing.
+                        // individual tools (today: Translate's language pair).
                         quickToolsRow
                         translationLanguageRow
-                        copySenseRow
                     case .general:
                         // How you summon it → where it appears → what language it
                         // speaks → how it sits in the system.
@@ -411,14 +424,23 @@ struct InlineSettingsView: View {
     /// waiting on a key, or the active provider itself has none (nothing can
     /// answer). Only then does key UI appear unbidden.
     private var setupRequired: Bool {
-        pendingModel != nil || APIKeyStore.current(for: provider) == nil
+        pendingModel != nil || !providerReady(provider)
+    }
+
+    /// Whether `p` can answer right now: a stored/env key for a normal provider, or
+    /// — for keyless Codex — the CLI being installed and signed in. Codex has no key,
+    /// so the plain `current(for:) != nil` check would wrongly read it as unconfigured.
+    private func providerReady(_ p: Provider) -> Bool {
+        p == .codex ? CodexCLIService.isAvailable : (APIKeyStore.current(for: p) != nil)
     }
 
     /// The collapsed-by-default key management block. At rest it's one quiet
-    /// disclosure line; expanded it shows which provider's key is on the bench
-    /// (a menu scoped to key editing only — it never switches the backend), the
-    /// key/account row, and the where-to-get-a-key footer. A required setup
-    /// (see `setupRequired`) forces it open with a one-line reason on top.
+    /// disclosure line; expanded it leads with the serving provider as a read-only
+    /// fact (the provider is picked *by picking a model*, never here), then that
+    /// provider's key/account row and the where-to-get-a-key footer. Other
+    /// providers' keys are reached the same way models are — through the picker
+    /// ("Add key" on a keyless model, or switch to a keyed one). A required
+    /// setup (see `setupRequired`) forces it open with a one-line reason on top.
     @ViewBuilder
     private var keySection: some View {
         let expanded = keySectionOpen || setupRequired
@@ -454,41 +476,42 @@ struct InlineSettingsView: View {
                         .font(.sf(12))
                         .foregroundStyle(Tokens.text2)
                         .fixedSize(horizontal: false, vertical: true)
-                } else if APIKeyStore.current(for: provider) == nil {
+                } else if !providerReady(provider) {
                     Text(L("model.setup.needed", provider.displayName))
                         .font(.sf(12))
                         .foregroundStyle(Tokens.text2)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                // Which provider's key is on the bench. A key icon marks the
-                // providers that already have one.
+                // The backend serving the current model — a fact, not a control.
+                // The provider is chosen by picking a model (each picker row is a
+                // one-to-one (provider, model) pair); nothing here can reroute it,
+                // so this row never dresses as a menu.
                 settingRow(label: L("model.provider")) {
-                    GlassMenu(title: keyScope.displayName) {
-                        ForEach(Provider.allCases) { p in
-                            Button {
-                                setKeyScope(p)
-                            } label: {
-                                if APIKeyStore.current(for: p) != nil {
-                                    Label(p.displayName, systemImage: "key.fill")
-                                } else {
-                                    Text(p.displayName)
-                                }
-                            }
-                        }
-                    }
+                    Text(provider.displayName)
+                        .font(.sf(13))
+                        .foregroundStyle(Tokens.text1)
+                        .lineLimit(1)
+                        .frame(height: 30)
                 }
 
-                // OpenRouter gets the one-click Connect row instead of a paste
-                // field — unless the user asked to paste by hand, or an env var
-                // forces a key (the standard row displays that).
-                if keyScope == .openrouter && !manualKeyEntry && !envOverride {
+                // Codex has no key to paste — it shows a sign-in status row. OpenRouter
+                // gets the one-click Connect row (unless the user asked to paste by
+                // hand, or an env var forces a key). Everyone else gets the key field.
+                if keyScope == .codex {
+                    codexAccountRow
+                } else if keyScope == .openrouter && !manualKeyEntry && !envOverride {
                     openRouterAccountRow
                 } else {
                     keyRow
                 }
 
-                footer
+                // Codex has no key to fetch — its own row carries the sign-in copy and
+                // re-authorize action, so the generic "get a key at …" footer is wrong
+                // for it and suppressed.
+                if keyScope != .codex {
+                    footer
+                }
             }
         }
         .animation(.easeOut(duration: 0.16), value: expanded)
@@ -508,15 +531,15 @@ struct InlineSettingsView: View {
 
     /// Switch the active backend — the provider whose model answers. Reached only
     /// through model selection now (the pane has no standalone provider control).
-    /// The key section follows along unless the user has it pinned open on
-    /// another provider's key.
+    /// The key section always follows the backend: the only state where it aims
+    /// elsewhere is a pending model (picker "Add key"), which retargets it itself.
     private func selectProvider(_ newValue: Provider) {
         guard newValue != provider else { return }
         provider = newValue
         APIKeyStore.selectedProvider = newValue
         modelID = APIKeyStore.storedModel(for: newValue)
         NotificationCenter.default.post(name: .aiBackendChanged, object: nil)
-        if !keySectionOpen, pendingModel == nil { setKeyScope(newValue) }
+        setKeyScope(newValue)
         Task { await refreshModels() }
     }
 
@@ -987,6 +1010,64 @@ struct InlineSettingsView: View {
         }
     }
 
+    // MARK: - Codex (ChatGPT) sign-in status
+
+    /// Codex is keyless — it reuses `codex login` (ChatGPT sign-in), so instead of a
+    /// paste field it shows whether the CLI is installed and signed in, with a link to
+    /// the install docs when it isn't. There's no in-app sign-in: `codex login` runs
+    /// the OAuth flow in Terminal itself, and Notch just uses the cached tokens.
+    @ViewBuilder
+    private var codexAccountRow: some View {
+        let installed = CodexCLIService.resolveBinary() != nil
+        let signedIn = CodexCLIService.authExists()
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Text(L("model.account"))
+                    .font(.sf(13, weight: .medium))
+                    .foregroundStyle(Tokens.text2)
+                    .frame(width: 64, alignment: .leading)
+
+                if !installed {
+                    // No CLI yet → link to install docs (there's nothing to sign into).
+                    codexPillButton(L("codex.status.getCodex")) {
+                        NSWorkspace.shared.open(Provider.codex.signupURL)
+                    }
+                } else if signedIn {
+                    // Signed in → status + Re-authorize (re-run `codex login`), NOT a
+                    // "get a key" link: Codex has no key, only the ChatGPT sign-in.
+                    statusPill(ok: true, message: L("codex.status.connected"))
+                    Spacer(minLength: 8)
+                    codexPillButton(L("codex.action.reauthorize")) { CodexCLIService.reauthorize() }
+                } else {
+                    // Installed but not signed in → sign in (same `codex login` flow).
+                    codexPillButton(L("codex.action.signIn")) { CodexCLIService.reauthorize() }
+                }
+            }
+
+            Text(installed
+                 ? (signedIn ? L("codex.status.hint.ready") : L("codex.status.hint.login"))
+                 : L("codex.status.hint.install"))
+                .font(.sf(12))
+                .foregroundStyle(Tokens.text3)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.leading, 76)
+        }
+    }
+
+    /// A quiet pill button in the account row's register (Get Codex / Sign in /
+    /// Re-authorize) — same chrome as the OpenRouter Connect button.
+    private func codexPillButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(title, action: action)
+            .buttonStyle(.plain)
+            .font(.sf(13, weight: .medium))
+            .foregroundStyle(Tokens.text1)
+            .padding(.horizontal, 12)
+            .frame(height: 30)
+            .background(RoundedRectangle(cornerRadius: 9).fill(.white.opacity(0.10)))
+            .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(.white.opacity(0.20), lineWidth: 0.5))
+            .contentShape(RoundedRectangle(cornerRadius: 9))
+    }
+
     /// The primary action of the whole onboarding: one click, sign in (or sign
     /// up, free) in the browser, and the key arrives by itself. Slightly brighter
     /// than the surrounding chips because it IS the setup.
@@ -1096,7 +1177,13 @@ struct InlineSettingsView: View {
     /// The wire id in effect: the saved override, or the provider's default when
     /// the sentinel empty string is stored.
     private var effectiveModelID: String {
-        modelID.isEmpty ? provider.defaultModel : modelID
+        // Codex's stored id may be the legacy "codex" sentinel — resolve it (and an
+        // empty override) to the provider's real configured model so the chip shows
+        // the actual model name and vendor mark, not a bare "codex".
+        if provider == .codex, modelID.isEmpty || modelID == "codex" {
+            return provider.defaultModel
+        }
+        return modelID.isEmpty ? provider.defaultModel : modelID
     }
 
     private var modelRow: some View {
@@ -1158,10 +1245,10 @@ struct InlineSettingsView: View {
                         await loadAllProviderModels()
                     }
                     .preferredColorScheme(.dark)
-                    // Back the popover with the panel's Liquid Glass (the airy `.clear`
-                    // variant, same recipe as the quick-tools popover) so the card is
-                    // one refracting glass slab, not an opaque block — radius 14 to
-                    // match the picker card.
+                    // Back the popover with the panel's smoked Liquid Glass (same
+                    // recipe as the quick-tools popover) so the card refracts like
+                    // the island while still occluding whatever it hangs over —
+                    // radius 14 to match the picker card.
                     .modifier(GlassPopoverBackground(cornerRadius: 14))
                 }
                 .onChange(of: modelPickerOpen) {
@@ -1265,6 +1352,62 @@ struct InlineSettingsView: View {
         dockIconVisibility = newValue
         DockIconVisibility.current = newValue
         NotificationCenter.default.post(name: .dockIconVisibilityChanged, object: nil)
+    }
+
+    /// Where a note-classified line files: Apple Notes (the default), or per-day
+    /// Markdown files in a folder the user owns — plain text they can grep, sync,
+    /// and summarize, with no Automation prompt. The folder sub-row (current path
+    /// + chooser) only appears while the Markdown destination is active.
+    private var noteDestinationRow: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            settingRow(label: L("general.noteDestination"),
+                       info: L("general.noteDestination.hint")) {
+                GlassMenu(title: noteDestination.label) {
+                    ForEach(NoteDestination.allCases) { d in
+                        Button(d.label) { selectNoteDestination(d) }
+                    }
+                }
+            }
+            if noteDestination == .markdownFolder {
+                HStack(spacing: 10) {
+                    Text(notesFolderDisplay)
+                        .font(.sf(12))
+                        .foregroundStyle(Tokens.text3)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Button(L("general.noteFolder.choose")) { chooseNotesFolder() }
+                        .buttonStyle(.plain)
+                        .font(.sf(11, weight: .semibold))
+                        .foregroundStyle(Tokens.text1)
+                }
+                // Clear the label column so the path hangs under the menu, not
+                // under the row title.
+                .padding(.leading, 76)
+            }
+        }
+    }
+
+    private func selectNoteDestination(_ newValue: NoteDestination) {
+        guard newValue != noteDestination else { return }
+        noteDestination = newValue
+        NoteDestination.current = newValue
+    }
+
+    /// Standard folder picker for the Markdown destination. The modal steals key
+    /// focus from the notch (the panel may fold behind it) — harmless: the pick
+    /// lands in `UserDefaults`, and the row shows it whenever Settings reopens.
+    private func chooseNotesFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(fileURLWithPath: FileNotesService.folderPath, isDirectory: true)
+        NSApp.activate(ignoringOtherApps: true)
+        if panel.runModal() == .OK, let url = panel.url {
+            FileNotesService.folderPath = url.path
+            notesFolderDisplay = FileNotesService.folderDisplayPath
+        }
     }
 
     /// Whether Notch launches itself when you log in. Off by default; flipping it
@@ -1968,13 +2111,17 @@ struct InlineSettingsView: View {
     private var pickerModels: [PickerModel] {
         var rows: [PickerModel] = []
         for p in Provider.allCases {
-            let hasKey = APIKeyStore.current(for: p) != nil
+            // Codex is selectable when the CLI is installed + signed in (it's
+            // keyless), not when a key is stored — so its rows aren't greyed out.
+            let hasKey = providerReady(p)
             let infos: [ModelInfo]
             if let live = liveByProvider[p], !live.isEmpty {
                 infos = live
             } else {
                 infos = p.availableModels.map {
-                    ModelInfo(id: $0, vendor: ModelRatings.vendor(for: $0))
+                    // Codex's "codex" id isn't a `gpt-*` string, so map its vendor
+                    // explicitly to keep the OpenAI mark on the row.
+                    ModelInfo(id: $0, vendor: p == .codex ? "OpenAI" : ModelRatings.vendor(for: $0))
                 }
             }
             let short = shortlistIDs(for: p, infos: infos, hasKey: hasKey)
@@ -1985,9 +2132,15 @@ struct InlineSettingsView: View {
                 return af == bf ? a.offset < b.offset : af
             }.map(\.element)
             for info in ordered {
+                // A model only earns the resting (unfolded) shortlist if its vendor has
+                // a real logo — a monogram letter-tile in the featured list reads as
+                // ugly/broken, so the long-tail vendors without a bundled mark fold away
+                // (still reachable via "Show all" and search, and a selected one always
+                // shows regardless).
+                let hasLogo = VendorLogos.mark(for: info.vendor) != nil
                 rows.append(PickerModel(
                     provider: p, providerName: p.displayName, hasKey: hasKey,
-                    featured: short.contains(info.id), info: info))
+                    featured: short.contains(info.id) && hasLogo, info: info))
             }
         }
         // Usable models first (the current provider's leading), greyed ones after —
@@ -2012,6 +2165,19 @@ struct InlineSettingsView: View {
     @MainActor
     private func loadAllProviderModels() async {
         await RemoteModelManifest.refreshIfDue()
+        // Codex is keyless, so the keyed loop below skips it. Fetch its real model
+        // list from the app-server off-main and publish it so the picker fills in
+        // reactively — even if the launch warm-up hasn't finished yet. Never publish
+        // the bare "codex" sentinel (that's the no-models-found fallback).
+        if liveByProvider[.codex] == nil {
+            let ids = await Task.detached(priority: .userInitiated) { () -> [String] in
+                CodexCLIService.refreshModels()
+                return CodexCLIService.availableModelIDs
+            }.value
+            if ids != ["codex"] {
+                liveByProvider[.codex] = ids.map { ModelInfo(id: $0, vendor: "OpenAI") }
+            }
+        }
         await withTaskGroup(of: (Provider, ModelCatalog.Result?).self) { group in
             for p in Provider.allCases where liveByProvider[p] == nil {
                 guard let key = APIKeyStore.current(for: p) else { continue }
@@ -2097,19 +2263,24 @@ private struct GlassPopoverBackground: ViewModifier {
 
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        // No dark veil — let `nativeGlass` (the high-transparency `.clear` Liquid
-        // Glass variant) show at full strength so the wallpaper refracts through and
-        // the popover reads as airy glass, not a dark block. Just a faint hairline
-        // rim so the edge stays defined.
+        // `nativeGlass` for the liquid refraction, PLUS a smoked veil bringing the
+        // composite to the panel's own dark register (~0.62, the same number the
+        // tooltip wafer and the panel's top band use). Bare glass composites to
+        // only ~0.34 — a popover hangs over arbitrary windows, and at 0.34 the
+        // text underneath stays legible *through* the card, reading as mud rather
+        // than material. The veil is what makes it occlude like every other
+        // floating layer in the app. (0.42 over the 0.34 baked tint ≈ 0.62.)
         if #available(macOS 13.3, *) {
             content.presentationBackground {
                 shape.fill(.clear).nativeGlass(in: shape)
-                    .overlay(shape.strokeBorder(.white.opacity(0.10), lineWidth: 0.5))
+                    .overlay(shape.fill(Color.black.opacity(0.42)))
+                    .overlay(shape.strokeBorder(Tokens.hairline, lineWidth: 0.5))
             }
         } else {
             content.background {
                 shape.fill(.clear).nativeGlass(in: shape)
-                    .overlay(shape.strokeBorder(.white.opacity(0.10), lineWidth: 0.5))
+                    .overlay(shape.fill(Color.black.opacity(0.42)))
+                    .overlay(shape.strokeBorder(Tokens.hairline, lineWidth: 0.5))
             }
         }
     }

@@ -708,8 +708,36 @@ final class NotchModel: ObservableObject {
         switch effectiveSubmitPanel {
         case .chat:     return L("hint.ask")
         case .note:     return L("hint.note")
-        case .reminder: return L("hint.remind") + submitHintSuffix
+        case .reminder: return L("hint.remind")
         }
+    }
+
+    /// The dimmer trailing detail rendered after `submitLabel` — the Ask model name
+    /// ("Ask gpt-4o"), the Remind recurrence ("Remind · Daily"), or nothing for Note.
+    /// Kept separate from the destination word so the inline hint can paint it a shade
+    /// lighter than the word: the word answers "where does Enter send this", the suffix
+    /// is the softer footnote "…and with which model / how often".
+    var submitLabelSuffix: String {
+        switch effectiveSubmitPanel {
+        case .chat:     return askModelHintSuffix
+        case .note:     return ""
+        case .reminder: return submitHintSuffix
+        }
+    }
+
+    /// The model this Ask will actually call, spelled out after the "Ask" hint —
+    /// "Ask gpt-4o" — so the inline hint says not just *where* Enter sends the line
+    /// but *which model* answers it. Resolved exactly the way `submit` resolves it:
+    /// the selected provider's effective model (Settings override → provider
+    /// default), then prettified (drops the vendor prefix and any `:free` suffix).
+    /// Just a space in front — the model name reads as a continuation of "Ask", not
+    /// a separate field. Only the Ask (`.chat`) label carries it — Note/Remind
+    /// don't call a model.
+    var askModelHintSuffix: String {
+        let provider = APIKeyStore.selectedProvider
+        let model = APIKeyStore.effectiveModel(for: provider) ?? provider.defaultModel
+        let pretty = ModelRatings.prettyName(for: model)
+        return pretty.isEmpty ? "" : " \(pretty)"
     }
 
     /// Present-progressive "thinking" words shown beside the dots while the AI is
@@ -1656,12 +1684,25 @@ final class NotchModel: ObservableObject {
                 }
             }
         case .note, .chat:
-            NotesService.writeNote(clip) { [weak self] result in
-                switch result {
-                case .success(let noteID):
-                    self?.senseWriteLanded(clip: clip, panel: panel, source: .note, link: noteID)
-                case .failure:
-                    self?.senseWriteFailed()
+            // Honor the note destination here too — a closed-notch capture is the
+            // same jot as a typed one, so it files to the same place.
+            if NoteDestination.current == .markdownFolder {
+                FileNotesService.writeNote(clip) { [weak self] result in
+                    switch result {
+                    case .success(let path):
+                        self?.senseWriteLanded(clip: clip, panel: panel, source: .note, link: path)
+                    case .failure:
+                        self?.senseWriteFailed()
+                    }
+                }
+            } else {
+                NotesService.writeNote(clip) { [weak self] result in
+                    switch result {
+                    case .success(let noteID):
+                        self?.senseWriteLanded(clip: clip, panel: panel, source: .note, link: noteID)
+                    case .failure:
+                        self?.senseWriteFailed()
+                    }
                 }
             }
         }
@@ -2275,7 +2316,10 @@ final class NotchModel: ObservableObject {
     private func clipboardImageIfEligible() -> NSImage? {
         let provider = APIKeyStore.selectedProvider
         let model = APIKeyStore.effectiveModel(for: provider) ?? provider.defaultModel
-        guard Provider.modelSupportsVision(model) else { return nil }
+        // Codex (CLI backend) is text-only here — its models report as vision-capable
+        // by id, but Notch doesn't forward the image to `codex exec`, so never offer
+        // a thumbnail it would silently drop.
+        guard provider != .codex, Provider.modelSupportsVision(model) else { return nil }
         let pb = NSPasteboard.general
         guard pb.changeCount != pasteboardChangeCountAtOpen else { return nil }
         guard clipboardContextIfEligible() == nil else { return nil }
@@ -3304,6 +3348,20 @@ final class NotchModel: ObservableObject {
                     // A regenerate override (XII-135) streams from its pinned
                     // service; everything else uses the main model.
                     let service = askService
+                    // Stamp the model that answered, so the reply footer shows it. The
+                    // harness path does this via `onModel`; this plain-stream path
+                    // (Codex and other non-tool turns) otherwise left the footer blank.
+                    let ranModel = overrideModel
+                        ?? APIKeyStore.effectiveModel(for: APIKeyStore.selectedProvider)
+                        ?? APIKeyStore.selectedProvider.defaultModel
+                    if let i = thread.firstIndex(where: { $0.id == answerID }) {
+                        thread[i].answerModel = ranModel
+                        self.syncInFlight(answerID, thread)
+                    }
+                    if self.isOnScreen(answerID: answerID),
+                       let i = self.turns.firstIndex(where: { $0.id == answerID }) {
+                        self.turns[i].answerModel = ranModel
+                    }
                     for try await chunk in service.stream(system: system, messages: context) {
                         if Task.isCancelled { return }
                         appendChunk(chunk)
@@ -3604,6 +3662,31 @@ final class NotchModel: ObservableObject {
         // fired inside our AppleScript retry window can supersede us.
         captureToken += 1
         let token = captureToken
+
+        // Same optimistic contract on both destinations; only the writer (and the
+        // cue wording) differs. The Markdown path appends to today's file in the
+        // user's folder — no TCC prompt, no AppleScript — and its `link` is the
+        // day file's path instead of an `x-coredata://` id (see `openCapture`).
+        if NoteDestination.current == .markdownFolder {
+            FileNotesService.writeNote(noteBody) { [weak self] result in
+                guard let self else { return }
+                let current = self.captureToken == token
+                if current { self.noteSaving = false }
+                switch result {
+                case .success(let path):
+                    if current { self.lastSavedToReminders = false }
+                    self.persistCapture(line, source: .note, link: path)
+                    if current {
+                        self.flashSavedCue(usedClip ? L("feedback.addedFileClip") : L("feedback.addedFile"))
+                    }
+                case .failure(let err):
+                    if current {
+                        self.reportCaptureFailure(line, message: err.errorDescription ?? L("feedback.fileFailed"))
+                    }
+                }
+            }
+            return
+        }
 
         NotesService.writeNote(noteBody) { [weak self] result in
             guard let self else { return }
@@ -4053,13 +4136,49 @@ final class NotchModel: ObservableObject {
 
     /// Debug-only: drop a finished Q/A onto the screen as a one-exchange thread,
     /// so the result view (and its markdown renderer) can be inspected at launch
-    /// without a live backend. Used by the `NOTCH_DEMO` env path in `AppDelegate`.
-    func seedDemo(question: String, answer: String) {
-        turns = [
-            Turn(role: "user", text: question),
-            Turn(role: "assistant", text: answer),
-        ]
+    /// without a live backend. `sources` decorates the answer with citation chips
+    /// and `usedClipboard` marks the question as clipboard-enriched, so those
+    /// real states can be screenshotted too. Used by the `NOTCH_DEMO` env path
+    /// in `AppDelegate`.
+    func seedDemo(question: String, answer: String,
+                  sources: [WebSource] = [], usedClipboard: Bool = false) {
+        var user = Turn(role: "user", text: question)
+        user.usedClipboard = usedClipboard
+        var ai = Turn(role: "assistant", text: answer)
+        ai.sources = sources
+        turns = [user, ai]
         mode = .result
+    }
+
+    /// Debug-only: put a line into the idle input exactly as if typed, so the
+    /// inline routing hint ("— Ask" / "— Note" / "— Remind") shows for
+    /// screenshots. `route` pins the destination via the same override Tab uses,
+    /// so the hint reads the intended verb regardless of the classifier's take.
+    /// The set is delayed a beat so the prompt field is mounted when the text
+    /// lands — pushing it during the first render drops the caret-width report
+    /// and the inline hint never materializes. Used by the `NOTCH_DEMO_INPUT`
+    /// env path.
+    func seedDemoInput(_ line: String, route: Panel? = nil) {
+        mode = .idle
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.text = line
+            if let route { self?.manualPanelOverride = route }
+            // A programmatic set while the field has focus leaves the whole line
+            // selected; park the caret at the end so the shot reads mid-typing.
+            DispatchQueue.main.async {
+                if let editor = NSApp.keyWindow?.firstResponder as? NSTextView {
+                    editor.setSelectedRange(NSRange(location: (line as NSString).length, length: 0))
+                }
+            }
+        }
+    }
+
+    /// Debug-only: show the "Added to Notes/Reminders" capture cue WITHOUT the
+    /// 1.7s auto-clear, so the post-capture state holds still for screenshots.
+    /// Used by the `NOTCH_DEMO_SAVED` env path.
+    func seedDemoSaved(toReminders: Bool) {
+        lastSavedToReminders = toReminders
+        lastSavedNote = toReminders ? L("feedback.addedReminders", "") : L("feedback.addedNotes")
     }
 
     /// Debug-only: seed a pending clipboard (bypassing the freshness/changeCount gate)
@@ -4166,15 +4285,32 @@ final class NotchModel: ObservableObject {
         switch item.source {
         case .note:
             if let id = item.link, !id.isEmpty {
-                // `show` can fail on a stale id (note deleted, or a Core Data id
-                // synced from another device) or revoked Automation access — when
-                // it does, don't dead-end: fall back to Notes' main window so the
-                // tap still lands the user *somewhere*.
-                NotesService.showNote(id: id) { [weak self] ok in
-                    if !ok { self?.openApp(bundleID: "com.apple.Notes") }
+                if id.hasPrefix("x-coredata://") {
+                    // Apple Notes capture. `show` can fail on a stale id (note
+                    // deleted, or a Core Data id synced from another device) or
+                    // revoked Automation access — when it does, don't dead-end:
+                    // fall back to Notes' main window so the tap still lands the
+                    // user *somewhere*.
+                    NotesService.showNote(id: id) { [weak self] ok in
+                        if !ok { self?.openApp(bundleID: "com.apple.Notes") }
+                    }
+                } else {
+                    // Markdown capture: the link is the day file's absolute path.
+                    // Open it in the default editor; if the file has been moved or
+                    // deleted, reveal the folder instead so the jump still lands.
+                    if FileManager.default.fileExists(atPath: id) {
+                        NSWorkspace.shared.open(URL(fileURLWithPath: id))
+                    } else {
+                        FileNotesService.revealFolder()
+                    }
                 }
             } else {
-                openApp(bundleID: "com.apple.Notes")
+                // Link-less legacy row: no way to know which destination filed it,
+                // so land on wherever notes go *now* — the least surprising target.
+                switch NoteDestination.current {
+                case .appleNotes:     openApp(bundleID: "com.apple.Notes")
+                case .markdownFolder: FileNotesService.revealFolder()
+                }
             }
         case .reminder:
             if let link = item.link, let url = URL(string: link) {

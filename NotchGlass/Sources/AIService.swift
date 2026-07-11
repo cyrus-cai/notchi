@@ -310,6 +310,11 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     // International majors first, then domestic providers by familiarity —
     // OpenRouter stays at the top as the keyless default for fresh installs.
     case openai
+    // OpenAI's Codex CLI, driven as a keyless backend: it reuses the user's
+    // `codex login` (ChatGPT sign-in) instead of an API key, so it sits right
+    // after OpenAI as its subscription-billed sibling. Not an HTTP endpoint — it
+    // shells out to the local `codex` binary (see `CodexCLIService`).
+    case codex
     case anthropic
     case gemini
     case deepseek
@@ -376,6 +381,19 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
                 signupHost: "platform.openai.com",
                 signupURL: "https://platform.openai.com/api-keys/api_key",
                 envVarName: "OPENAI_API_KEY")
+        case .codex:
+            // Not a real HTTP backend — `CodexCLIService` shells out to the local
+            // `codex` binary. `endpoint` is a placeholder (never used for a request);
+            // the single "codex" model id is a sentinel meaning "codex's own default
+            // model" (see `CodexCLIService.init`). `signupURL` points at install docs
+            // since there's no key to create — the user runs `codex login` instead.
+            return ProviderSpec(
+                displayName: "Codex (ChatGPT)",
+                endpoint: "https://chatgpt.com/backend-api/codex",
+                models: ["codex"],
+                signupHost: "developers.openai.com",
+                signupURL: "https://developers.openai.com/codex/cli",
+                envVarName: "CODEX_CLI_UNUSED")
         case .gemini:
             return ProviderSpec(
                 displayName: "Google Gemini",
@@ -435,8 +453,20 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     // website, see `RemoteModelManifest`), so the shortlist and the default a
     // fresh install uses can move without an app release; the bundled spec is
     // the offline fallback.
-    var defaultModel: String    { RemoteModelManifest.models(for: self)?.first ?? spec.defaultModel }
-    var availableModels: [String] { RemoteModelManifest.models(for: self) ?? spec.availableModels }
+    var defaultModel: String {
+        // Codex's model isn't a curated shortlist — it's whatever the user's own
+        // `codex` is configured to run (read from ~/.codex/config.toml), so the
+        // picker and answer footer show the real model name, not a generic "codex".
+        if self == .codex { return CodexCLIService.defaultModel }
+        return RemoteModelManifest.models(for: self)?.first ?? spec.defaultModel
+    }
+    var availableModels: [String] {
+        // Codex's list is the account's real models from the app-server `model/list`
+        // (see `CodexCLIService`), falling back to the single configured model until
+        // that fetch lands — never a curated/remote shortlist.
+        if self == .codex { return CodexCLIService.availableModelIDs }
+        return RemoteModelManifest.models(for: self) ?? spec.availableModels
+    }
     var signupHost: String      { spec.signupHost }
     var signupURL: URL          { spec.signupURL }
     var envVarName: String      { spec.envVarName }
@@ -448,8 +478,10 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     /// `/v1/messages`). `AppDelegate` uses this to pick the client implementation.
     var isOpenAICompatible: Bool {
         switch self {
-        case .anthropic: return false
-        default:         return true
+        // Anthropic speaks its native protocol; Codex isn't HTTP at all (it's a
+        // subprocess). Both are routed to their own client, never the shared one.
+        case .anthropic, .codex: return false
+        default:                 return true
         }
     }
 
@@ -483,7 +515,16 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     /// don't do tools, so an unsupported pick simply yields no tool calls and the
     /// harness reads that as a normal `end_turn`. The gate exists so a future
     /// known-toolless provider can be excluded cleanly without touching the harness.
-    var supportsTools: Bool { true }
+    var supportsTools: Bool {
+        // Codex runs its OWN agent loop inside the CLI (search, reasoning, file
+        // access), so Notch's tool harness must stay out of its way — the turn
+        // dispatcher takes the plain `stream` path for it. Every other provider
+        // exposes a function-calling API the harness can drive.
+        switch self {
+        case .codex: return false
+        default:     return true
+        }
+    }
 
     /// Whether `model` accepts image input (XII-121) — the gate for the
     /// clipboard-image thumbnail: a text-only model never shows a preview it
@@ -599,7 +640,9 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     /// data, with no way to reach current information. The Settings provider menu
     /// uses this to demote the no-search vendors into a "not recommended" submenu.
     var supportsWebSearch: Bool {
-        serverSearch != nil || self == .glm
+        // Codex searches the web itself as part of its agent loop, so it earns the
+        // "Web search" chip even though Notch injects nothing (`serverSearch == nil`).
+        serverSearch != nil || self == .glm || self == .codex
     }
 }
 
@@ -1257,6 +1300,9 @@ enum ModelCatalog {
     /// in the Settings UI does today). A failed fetch is never cached, so the
     /// next call — cache or no — always gets a real retry.
     static func fetch(for provider: Provider, apiKey: String, force: Bool = false) async -> Result? {
+        // Codex has no `/v1/models` endpoint (it's a local subprocess, not HTTP), so
+        // there's nothing to fetch — its single bundled "codex" id is the whole list.
+        if provider == .codex { return nil }
         if !force, let hit = withCacheLock({ cache[provider] }),
            hit.apiKey == apiKey, Date().timeIntervalSince(hit.fetchedAt) < ttl {
             return hit.result

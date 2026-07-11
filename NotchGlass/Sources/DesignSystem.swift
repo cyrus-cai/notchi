@@ -437,6 +437,14 @@ extension View {
 
 // MARK: - Tooltip
 
+/// Name of the panel-canvas coordinate space, published once at the SwiftUI root
+/// (`AppDelegate.makePanel`). A tooltip whose anchor isn't inside a ScrollView
+/// clamps its horizontal position to this space so the capsule never runs off
+/// the panel's edge.
+enum TooltipCoordinateSpace {
+    static let canvas = "notchCanvas"
+}
+
 /// A hover tooltip drawn in the notch's own visual language instead of AppKit's
 /// stock yellow `.help()` bubble — the flat OS tooltip that hasn't changed in
 /// decades and reads as a foreign chip on the dark glass. This one is a small
@@ -464,8 +472,36 @@ private struct NotchTooltip: ViewModifier {
     @State private var shown = false
     /// Measured height of the capsule, so the offset clears the control exactly.
     @State private var tipHeight: CGFloat = 24
+    /// Measured width of the capsule, so it can be nudged clear of a container wall.
+    @State private var tipWidth: CGFloat = 0
+    /// The anchor's own width, and the horizontal bounds of its clip container
+    /// (the answer ScrollView, or the panel canvas) — both in the anchor's local
+    /// space, so `horizontalNudge` can keep the centred capsule inside the walls.
+    @State private var anchorWidth: CGFloat = 0
+    @State private var boundMinX: CGFloat = -.greatestFiniteMagnitude
+    @State private var boundMaxX: CGFloat = .greatestFiniteMagnitude
     /// Cancels a pending show if the cursor leaves before `delay` elapses.
     @State private var showTask: Task<Void, Never>?
+
+    /// How far to shift the capsule horizontally so it never spills past its clip
+    /// container. Zero when the naturally-centred capsule already fits; positive =
+    /// nudge right (off the left wall), negative = nudge left (off the right wall).
+    /// This is what stops the left-most footer icon's tip from being cut off at the
+    /// panel edge — it slides right until it clears.
+    private var horizontalNudge: CGFloat {
+        guard tipWidth > 0, boundMaxX > boundMinX else { return 0 }
+        let margin: CGFloat = 6
+        let center = anchorWidth / 2            // the capsule is centred on the anchor
+        let tipMinX = center - tipWidth / 2
+        let tipMaxX = center + tipWidth / 2
+        let availMin = boundMinX + margin
+        let availMax = boundMaxX - margin
+        // Wider than the container even when clamped: centre it in what's available.
+        guard availMax - availMin >= tipWidth else { return (availMin + availMax) / 2 - center }
+        if tipMinX < availMin { return availMin - tipMinX }   // push right, off the left wall
+        if tipMaxX > availMax { return availMax - tipMaxX }   // push left, off the right wall
+        return 0
+    }
 
     func body(content: Content) -> some View {
         content
@@ -484,6 +520,25 @@ private struct NotchTooltip: ViewModifier {
                     withAnimation(.easeOut(duration: 0.10)) { shown = false }
                 }
             }
+            // Track the clip container the capsule must stay inside — the answer
+            // ScrollView when the anchor is in one, else the panel canvas — in the
+            // anchor's own coordinate space, so `horizontalNudge` can measure how
+            // close the anchor sits to each wall. Zero-footprint (a clear backdrop).
+            .background(
+                GeometryReader { g in
+                    let box = g.bounds(of: .scrollView)
+                        ?? g.bounds(of: .named(TooltipCoordinateSpace.canvas))
+                    Color.clear.preference(
+                        key: TooltipBoundsKey.self,
+                        value: TooltipBounds(
+                            minX: box?.minX ?? -.greatestFiniteMagnitude,
+                            maxX: box?.maxX ?? .greatestFiniteMagnitude,
+                            anchorWidth: g.size.width))
+                }
+            )
+            .onPreferenceChange(TooltipBoundsKey.self) { b in
+                boundMinX = b.minX; boundMaxX = b.maxX; anchorWidth = b.anchorWidth
+            }
             // Anchor the tip's near edge to the control's matching edge, then push
             // it fully CLEAR of the control by its own measured height plus a gap —
             // so the capsule sits above (or below) the icon, never on top of it.
@@ -493,18 +548,25 @@ private struct NotchTooltip: ViewModifier {
                 if shown {
                     TooltipLabel(text: text)
                         // Let it size to its text without being clipped to the
-                        // anchor's width, and measure that height for the offset.
+                        // anchor's width, and measure that height + width for the
+                        // vertical clearance and the horizontal clamp.
                         .fixedSize()
                         .background(
                             GeometryReader { g in
-                                Color.clear.preference(key: TooltipHeightKey.self,
-                                                        value: g.size.height)
+                                Color.clear
+                                    .preference(key: TooltipHeightKey.self,
+                                                value: g.size.height)
+                                    .preference(key: TooltipWidthKey.self,
+                                                value: g.size.width)
                             }
                         )
                         .onPreferenceChange(TooltipHeightKey.self) { tipHeight = $0 }
-                        // Clear the control entirely: shift by the full capsule
-                        // height + a 6pt breathing gap, in the away direction.
-                        .offset(y: edge == .top ? -(tipHeight + 6) : (tipHeight + 6))
+                        .onPreferenceChange(TooltipWidthKey.self) { tipWidth = $0 }
+                        // Clear the control entirely (height + a 6pt gap), and slide
+                        // sideways by `horizontalNudge` so a capsule centred on a
+                        // near-the-edge icon doesn't spill off the panel.
+                        .offset(x: horizontalNudge,
+                                y: edge == .top ? -(tipHeight + 6) : (tipHeight + 6))
                         .transition(.opacity)
                         .allowsHitTesting(false)
                         // Sit above sibling chrome so a neighbouring icon never
@@ -521,6 +583,29 @@ private struct TooltipHeightKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())
+    }
+}
+
+/// Carries the measured capsule width up so it can be nudged clear of a wall.
+private struct TooltipWidthKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+/// The anchor's width plus its clip-container walls (in the anchor's own space),
+/// carried up together so the horizontal clamp has everything it needs at once.
+private struct TooltipBounds: Equatable {
+    var minX: CGFloat = -.greatestFiniteMagnitude
+    var maxX: CGFloat = .greatestFiniteMagnitude
+    var anchorWidth: CGFloat = 0
+}
+
+private struct TooltipBoundsKey: PreferenceKey {
+    static let defaultValue = TooltipBounds()
+    static func reduce(value: inout TooltipBounds, nextValue: () -> TooltipBounds) {
+        value = nextValue()
     }
 }
 

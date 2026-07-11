@@ -23,6 +23,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// back to the offline stub so the UI still works out of the box.
     private static func makeService() -> AIService {
         let provider = APIKeyStore.selectedProvider
+        // Codex is keyless — it authenticates via the user's `codex login`, not an
+        // API key — so it bypasses the key guard entirely. If the CLI isn't installed
+        // / signed in, the service still builds and surfaces a helpful error on use
+        // (and `isConfigured` reports false so the UI prompts setup first).
+        if provider == .codex {
+            return CodexCLIService(model: APIKeyStore.effectiveModel(for: .codex))
+        }
         guard let key = APIKeyStore.current(for: provider) else {
             return StubAIService()
         }
@@ -36,6 +43,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// without duplicating the Anthropic-vs-OpenAI client selection. Same protocol
     /// split as the main path — nothing else about a request changes.
     static func makeService(provider: Provider, apiKey: String, model: String?) -> AIService {
+        // Codex is a subprocess backend, not HTTP — route it before the client split
+        // (the `apiKey` is ignored; it authenticates via `codex login`). Defensive:
+        // the no-arg `makeService` already special-cases it, but any other caller
+        // (regenerate-with-model) lands here too.
+        if provider == .codex {
+            return CodexCLIService(model: model)
+        }
         if provider.isOpenAICompatible {
             return OpenAICompatAIService(provider: provider, apiKey: apiKey, model: model)
         } else {
@@ -47,7 +61,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// backend `makeService` builds is live rather than the offline stub. Drives
     /// the result view's "set up your model" prompt when false.
     private static func isConfigured() -> Bool {
-        APIKeyStore.current(for: APIKeyStore.selectedProvider) != nil
+        let provider = APIKeyStore.selectedProvider
+        // Codex is "configured" when the CLI is installed and signed in, not when a
+        // key is stored (it has none).
+        if provider == .codex { return CodexCLIService.isAvailable }
+        return APIKeyStore.current(for: provider) != nil
     }
 
     /// Point the model at the right backend AND tell it whether that backend is
@@ -94,6 +112,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Start sampling mouse movement so a hover-open can read the cursor's
         // approach vector — the entry physics in `NotchIsland` feed on it.
         MouseVelocityTracker.shared.start()
+
+        // Resolve the `codex` binary off-main now, so the first time Settings asks
+        // `CodexCLIService.isAvailable` (a SwiftUI render) it reads a warm cache
+        // instead of paying the `--version` smoke-test spawn on the main thread.
+        CodexCLIService.warmUp()
 
         // Warm the ask/note intent engine off the main thread: fetch/load the
         // embedding model and restore (or fit, first run ~seconds) the per-language
@@ -234,11 +257,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if env["NOTCH_DEMO"] == "1" {
                 // NOTCH_DEMO_TEXT lets us seed arbitrary markdown for inspecting
                 // the answer renderer; falls back to the original one-liner.
+                // NOTCH_DEMO_SOURCES="host.com,other.com" decorates the answer
+                // with citation chips; NOTCH_DEMO_USED_CLIP=1 marks the question
+                // clipboard-enriched. Both for screenshotting those real states.
+                let sources: [WebSource] = (env["NOTCH_DEMO_SOURCES"] ?? "")
+                    .split(separator: ",")
+                    .map { WebSource(title: String($0), url: "https://\(String($0))", date: nil) }
                 model.seedDemo(
                     question: env["NOTCH_DEMO_Q"] ?? "Explain liquid glass in one line",
                     answer: env["NOTCH_DEMO_TEXT"]
-                        ?? "A material language built on translucency, refraction and flow — light passes **through** it, not just over it."
+                        ?? "A material language built on translucency, refraction and flow — light passes **through** it, not just over it.",
+                    sources: sources,
+                    usedClipboard: env["NOTCH_DEMO_USED_CLIP"] == "1"
                 )
+            }
+            // NOTCH_DEMO_INPUT=<line> types into the idle input (inline routing
+            // hint shows; NOTCH_DEMO_INPUT_ROUTE=ask|note|remind pins the verb
+            // via the Tab override); NOTCH_DEMO_SAVED=notes|reminders holds the
+            // "Added to …" capture cue on screen. Screenshot aids only.
+            if let line = env["NOTCH_DEMO_INPUT"], !line.isEmpty {
+                let route: NotchModel.Panel?
+                switch env["NOTCH_DEMO_INPUT_ROUTE"] {
+                case "note":   route = .note
+                case "remind": route = .reminder
+                case "ask":    route = .chat
+                default:       route = nil
+                }
+                model.seedDemoInput(line, route: route)
+            }
+            switch env["NOTCH_DEMO_SAVED"] {
+            case "notes":     model.seedDemoSaved(toReminders: false)
+            case "reminders": model.seedDemoSaved(toReminders: true)
+            default: break
             }
             // NOTCH_DEMO_THREAD=1 seeds a long multi-turn conversation so the
             // scrolling/edge-fade of the result view can be inspected at launch
@@ -542,6 +592,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let hasNotch = screen.safeAreaInsets.top > 0
         let root = ContentView(model: model)
             .frame(width: canvasWidth, height: canvasHeight, alignment: .top)
+            // The panel-canvas coordinate space a tooltip clamps to when its anchor
+            // isn't inside a ScrollView, so a hover capsule never runs off the edge.
+            .coordinateSpace(.named(TooltipCoordinateSpace.canvas))
             // The live string store — observed app-wide so an App Language switch
             // re-renders every panel's SwiftUI tree instantly, no relaunch.
             .environmentObject(Localization.shared)
