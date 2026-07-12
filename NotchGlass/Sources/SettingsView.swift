@@ -21,6 +21,9 @@ extension Notification.Name {
     /// Posted after the user toggles the Dock icon (Settings → General), so
     /// `AppDelegate` can switch the app's activation policy live.
     static let dockIconVisibilityChanged = Notification.Name("dockIconVisibilityChanged")
+    /// Posted after the user toggles "Hide in full screen" (Settings → General),
+    /// so `AppDelegate` re-evaluates which panels to hide right away.
+    static let hideNotchInFullscreenChanged = Notification.Name("hideNotchInFullscreenChanged")
     /// Posted after the user changes the global summon shortcut (Settings →
     /// General), so `AppDelegate` re-registers the Carbon hot key immediately.
     static let summonHotKeyChanged = Notification.Name("summonHotKeyChanged")

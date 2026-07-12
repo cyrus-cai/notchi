@@ -17,6 +17,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panels: [CGDirectDisplayID: NotchPanel] = [:]
     private let model = NotchModel(ai: AppDelegate.makeService())
     private var openObserver: AnyCancellable?
+    /// Debounces the full-screen re-evaluation: Space/app-activation events can
+    /// arrive in bursts, and the on-screen window list settles a beat after them,
+    /// so coalesce into one deferred `updateFullScreenHiding()`.
+    private var fullScreenUpdateWork: DispatchWorkItem?
 
     /// Pick the live backend for the selected provider when an API key is
     /// available (env var or the stored entry from Settings), otherwise fall
@@ -347,6 +351,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        // Auto-hide the island while a full-screen app covers its (virtual-notch)
+        // screen — see `HideNotchInFullscreen`. Entering/leaving native full screen
+        // is a Space switch, and a borderless full-screen window shows up as an app
+        // activation; watch both. The on-screen window list settles a beat after the
+        // event fires, so the actual evaluation is deferred a moment (see
+        // `scheduleFullScreenHidingUpdate`).
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        workspaceCenter.addObserver(
+            self,
+            selector: #selector(fullScreenStateMaybeChanged),
+            name: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil)
+        workspaceCenter.addObserver(
+            self,
+            selector: #selector(fullScreenStateMaybeChanged),
+            name: NSWorkspace.didActivateApplicationNotification,
+            object: nil)
+        // The Settings → General "Hide in full screen" toggle re-evaluates now.
+        NotificationCenter.default.addObserver(
+            forName: .hideNotchInFullscreenChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.updateFullScreenHiding()
+            }
+        }
+
         // When the user saves an API key or switches providers in Settings,
         // rebuild the AI service so the next question goes live immediately — no
         // restart needed.
@@ -580,6 +612,82 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let active = model.activeDisplay, panels[active] == nil {
             model.activeDisplay = preferredScreen()?.displayID
         }
+        // A rebuild orders every (re)created panel to the front, so re-apply the
+        // full-screen hiding on top of the fresh layout.
+        updateFullScreenHiding()
+    }
+
+    // MARK: - Full-screen hiding
+
+    /// A Space switch or app activation may mean an app just entered or left full
+    /// screen — re-evaluate, deferred a moment so the on-screen window list has
+    /// settled into its new state before we read it.
+    @objc private func fullScreenStateMaybeChanged() {
+        scheduleFullScreenHidingUpdate()
+    }
+
+    private func scheduleFullScreenHidingUpdate(delay: TimeInterval = 0.2) {
+        fullScreenUpdateWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.updateFullScreenHiding() }
+        fullScreenUpdateWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    /// Hide (order out) the panels whose screen is currently covered by a
+    /// full-screen app, and restore the rest — the behaviour behind the Settings →
+    /// General "Hide in full screen" toggle. Scoped to *virtual-notch* screens
+    /// (`safeAreaInsets.top <= 0`): the built-in display's hardware notch is
+    /// physical and always present, so its island never hides here; only the drawn
+    /// notch on external / non-notched screens, which would otherwise float over
+    /// full-screen video like a smudge, steps aside. Idempotent — it only touches a
+    /// panel whose visibility actually needs to change.
+    private func updateFullScreenHiding() {
+        let enabled = HideNotchInFullscreen.isEnabled
+        for (id, panel) in panels {
+            guard let screen = NSScreen.screens.first(where: { $0.displayID == id })
+            else { continue }
+            let isVirtualNotch = screen.safeAreaInsets.top <= 0
+            let shouldHide = enabled && isVirtualNotch && Self.hasFullScreenWindow(on: screen)
+            if shouldHide {
+                if panel.isVisible { panel.orderOut(nil) }
+            } else if !panel.isVisible {
+                panel.orderFrontRegardless()
+            }
+        }
+    }
+
+    /// True when an ordinary window is covering `screen` edge-to-edge on the space
+    /// that's visible right now — what we treat as "an app is full-screen here".
+    ///
+    /// Reads the public on-screen window list (no Screen Recording permission: we
+    /// only look at window bounds/owner/layer, never titles or pixels).
+    /// `.optionOnScreenOnly` lists only windows on currently-visible spaces, so a
+    /// full-screen app parked on its own hidden Space doesn't count — the island
+    /// only steps aside when the full-screen content is actually in front here.
+    private static func hasFullScreenWindow(on screen: NSScreen) -> Bool {
+        let target = screen.cgFrame
+        guard let list = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] else { return false }
+        let selfPID = ProcessInfo.processInfo.processIdentifier
+        for info in list {
+            // Ordinary app windows sit at layer 0; the menu bar, Dock and other
+            // chrome live above it. Skip our own overlay too.
+            guard (info[kCGWindowLayer as String] as? Int) == 0,
+                  (info[kCGWindowOwnerPID as String] as? pid_t) != selfPID,
+                  let boundsDict = info[kCGWindowBounds as String] as? NSDictionary,
+                  let bounds = CGRect(dictionaryRepresentation: boundsDict)
+            else { continue }
+            // Fills the display edge-to-edge (a couple points of slack for
+            // rounding) ⇒ full-screen on this screen.
+            if abs(bounds.minX - target.minX) < 3,
+               abs(bounds.minY - target.minY) < 3,
+               abs(bounds.width - target.width) < 3,
+               abs(bounds.height - target.height) < 3 {
+                return true
+            }
+        }
+        return false
     }
 
     /// Build the transparent canvas panel for one screen, injecting per-screen
@@ -711,6 +819,24 @@ enum DisplayPlacement: String, CaseIterable, Identifiable {
         set {
             UserDefaults.standard.set(newValue.rawValue, forKey: key)
         }
+    }
+}
+
+/// Whether the island auto-hides while a full-screen app covers the screen it
+/// sits on — persisted in `UserDefaults`, toggled in Settings → General,
+/// consumed by `AppDelegate`'s full-screen watcher. On by default: a virtual
+/// notch floating over full-screen video on an external display reads as a
+/// smudge, so it steps out of the way and returns when you leave full screen.
+/// (The built-in display's hardware notch is physical and always there, so this
+/// only governs the drawn island on external / non-notched screens.)
+enum HideNotchInFullscreen {
+    private static let key = "hideNotchInExternalFullscreen"
+
+    /// Default `true` (auto-hide). An absent key ⇒ the on-by-default; only an
+    /// explicit stored value overrides it.
+    static var isEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: key) as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: key) }
     }
 }
 
@@ -966,5 +1092,19 @@ extension NSScreen {
     var displayID: CGDirectDisplayID? {
         (deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?
             .uint32Value
+    }
+
+    /// This screen's frame in CoreGraphics global coordinates — top-left origin,
+    /// y growing *down* — the space `CGWindowListCopyWindowInfo` reports window
+    /// bounds in. `NSScreen.frame` is bottom-left with the primary display at the
+    /// origin, so flip about the primary display's top edge to compare a screen
+    /// against a full-screen window's bounds.
+    var cgFrame: CGRect {
+        let primaryHeight = NSScreen.screens
+            .first(where: { $0.frame.origin == .zero })?.frame.height ?? frame.height
+        return CGRect(x: frame.minX,
+                      y: primaryHeight - frame.maxY,
+                      width: frame.width,
+                      height: frame.height)
     }
 }

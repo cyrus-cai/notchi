@@ -636,16 +636,13 @@ struct InlineSendHint: View {
                 // Match the body text exactly — same size, same (regular) weight as
                 // the field's own glyphs — so the hint reads as a quiet continuation
                 // of the line rather than a smaller label. Only the colour sets it
-                // apart: the whole hint wears the destination's tint — the em dash
-                // in a softer cut of the SAME hue (a grey dash next to a coloured
-                // word read as two disjoint pieces), the word carrying the full
-                // ghost strength. Typed text stays near-white.
-                // Three strengths of the SAME hue: the em dash softest (punctuation),
-                // the destination word full ghost-strength, and the trailing detail
-                // (model name / recurrence) a shade lighter than the word so it reads
-                // as a quiet footnote rather than a second destination.
+                // apart: the whole hint wears the destination's tint at one soft,
+                // uniform strength (dash, word, and trailing detail all the same faded
+                // opacity) so "— Ask gpt-4o" reads as one quiet ghost rather than a
+                // bright destination word with dimmer punctuation around it. Typed
+                // text stays near-white.
                 (Text("— ").foregroundColor(tint.map { $0.opacity(0.42) } ?? Tokens.placeholder)
-                    + Text(label).foregroundColor(tint.map { $0.opacity(0.68) } ?? Tokens.placeholder)
+                    + Text(label).foregroundColor(tint.map { $0.opacity(0.42) } ?? Tokens.placeholder)
                     + Text(suffix).foregroundColor(tint.map { $0.opacity(0.42) } ?? Tokens.placeholder.opacity(0.6)))
                     .font(.system(size: fontSize, weight: .regular))
                     .lineLimit(1)
@@ -1212,62 +1209,170 @@ struct ThinkingDots: View {
     }
 }
 
-/// A single status-line slot that cross-fades whenever its `text` changes, so a
+/// A single status-line slot that dissolves whenever its `text` changes, so a
 /// rotating mood word ("Glowing" → "Drifting") or a status change ("Searching the
-/// web…" → "Reading the results…") dissolves rather than hard-cutting. The seam is
-/// the whole point: SwiftUI's default for a `Text` whose string changes is to swap
-/// the value with no transition, and keying it on `.id()` only re-inserts the view
-/// (which, without an enclosing animated transaction, blinks). Here two layers —
-/// the outgoing word and the incoming word — are stacked in the same leading slot
-/// and their opacities are animated in opposite directions over one easeInOut
-/// window, so one fades out exactly as the other fades in. The phase is flipped on
-/// a `.task(id:)` keyed to the incoming text, which also enforces a minimum dwell
-/// before the *caller* is allowed to rotate again (the caller's timer interval is
-/// the dwell; this view just guarantees the fade can't be cut short by a too-fast
-/// change — it always completes a full fade before showing the next).
+/// web…" → "Reading the results…") melts from one into the next rather than
+/// hard-cutting. Two things make the seam read soft instead of stiff:
+///
+/// 1. **True overlap.** The outgoing and incoming words are two live layers in the
+///    same leading slot, animated in opposite directions at once — the slot always
+///    has a word in it. (The previous implementation faded out, swapped, then
+///    faded in: sequential legs with a fully-blank beat in the middle.)
+/// 2. **Blur + drift.** A plain opacity crossover double-exposes the two words at
+///    the midpoint — both at half strength, glyph shapes fighting. So each layer
+///    also blurs slightly and drifts a few points vertically (out: up and away;
+///    in: settling up from below). The blur melts the overlap into one soft mass,
+///    and the shared upward direction makes it read as one word giving way to the
+///    next — the "blur replace" feel — instead of two ghosts stacked.
+///
+/// The word also carries the wait-line shimmer (`WaitShimmer`): a slow highlight
+/// sweeping the glyphs that marks "the AI is working on this right now". Both the
+/// dissolve and the shimmer collapse to a plain opacity swap / static text under
+/// Reduce Motion.
 struct CrossfadeText: View {
     let text: String
     var font: CGFloat = 15
     var color: Color = Tokens.text2
 
-    /// The word currently lit. Lags `text` by exactly one fade: when `text`
-    /// changes, the old `shown` fades out while the new `text` fades in, then
-    /// `shown` catches up.
-    @State private var shown: String = ""
-    @State private var visible = true
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    /// One fade leg (out, then in). 0.45s reads as a calm dissolve, not a blink,
-    /// and is short enough that back-to-back rotations never pile up.
+    /// The word currently lit; swapping it drives the transition below.
+    @State private var shown: String = ""
+
+    /// One dissolve. 0.45s reads as a calm melt, not a blink, and completes well
+    /// inside the caller's rotation dwell (4s mood words, 1.2s host walk).
     private static let fade: Double = 0.45
 
+    /// The out leg is a touch quicker than the in leg, so the incoming word owns
+    /// the second half of the window instead of meeting the outgoing one at a
+    /// muddy 50/50 midpoint.
+    private var removal: AnyTransition {
+        .modifier(
+            active: DissolvePhase(opacity: 0, blur: 2.5, y: -3),
+            identity: DissolvePhase(opacity: 1, blur: 0, y: 0)
+        )
+        .animation(.easeIn(duration: Self.fade * 0.7))
+    }
+
+    private var insertion: AnyTransition {
+        .modifier(
+            active: DissolvePhase(opacity: 0, blur: 2, y: 4),
+            identity: DissolvePhase(opacity: 1, blur: 0, y: 0)
+        )
+        .animation(.easeOut(duration: Self.fade))
+    }
+
     var body: some View {
-        // Always render `shown`; `visible` alone drives opacity. The incoming word
-        // is swapped into `shown` only after the out-leg finishes, so the slot never
-        // briefly shows the next word at full opacity (which would read as a flash
-        // of the next word before the current one has faded).
-        Text(shown)
-            .font(.system(size: font, weight: .regular))
-            .foregroundStyle(color)
-            .opacity(visible ? 1 : 0)
-            .animation(.easeInOut(duration: Self.fade), value: visible)
-            .onAppear {
-                // First appearance lights up immediately — no fade-from-blank that
-                // would read as a flicker on the very first word.
-                shown = text
-                visible = true
+        ZStack(alignment: .leading) {
+            Text(shown)
+                .font(.system(size: font, weight: .regular))
+                .foregroundStyle(color)
+                .modifier(WaitShimmer(active: !reduceMotion))
+                .id(shown)
+                .transition(reduceMotion
+                    ? .opacity
+                    : .asymmetric(insertion: insertion, removal: removal))
+        }
+        .onAppear {
+            // First appearance lights up immediately — no fade-from-blank that
+            // would read as a flicker on the very first word.
+            shown = text
+        }
+        .onChange(of: text) { _, newValue in
+            guard newValue != shown else { return }
+            withAnimation(.easeInOut(duration: Self.fade)) {
+                shown = newValue
             }
-            .onChange(of: text) { _, newValue in
-                guard newValue != shown else { return }
-                // Fade the old word out…
-                visible = false
-                // …then, after the out-leg completes, swap in the new word and
-                // fade it back. The delay matches `fade` so the two legs are
-                // sequential (out, in) rather than overlapping into a muddy blur.
-                DispatchQueue.main.asyncAfter(deadline: .now() + Self.fade) {
-                    shown = newValue
-                    visible = true
+        }
+    }
+}
+
+/// One frozen pose of the dissolve — the transition interpolates between the
+/// `active` (fully out / not yet in) and `identity` (at rest) poses.
+private struct DissolvePhase: ViewModifier {
+    var opacity: Double
+    var blur: CGFloat
+    var y: CGFloat
+    func body(content: Content) -> some View {
+        content
+            .opacity(opacity)
+            .blur(radius: blur)
+            .offset(y: y)
+    }
+}
+
+/// The slow highlight that sweeps across the wait line while the AI works — the
+/// shared visual convention for "generating right now" (ChatGPT's thinking label,
+/// Claude Code's spinner text, Gemini's status lines all carry one). Deliberately
+/// the most restrained cut: a soft white gleam over the existing grey, clipped to
+/// the glyphs themselves — no colour shift, no underlying band. One pass takes
+/// 2.6s (the ChatGPT/Claude ballpark); the band starts and ends fully off the
+/// text, so the loop restart is invisible. Static under Reduce Motion.
+struct WaitShimmer: ViewModifier {
+    var active: Bool = true
+
+    /// Horizontal position of the gleam band, in multiples of the text width:
+    /// −0.7 parks it fully off the left edge, 1.25 fully off the right.
+    @State private var phase: CGFloat = -0.7
+
+    func body(content: Content) -> some View {
+        if active {
+            content
+                .overlay(
+                    GeometryReader { geo in
+                        LinearGradient(
+                            gradient: Gradient(stops: [
+                                .init(color: .clear, location: 0),
+                                .init(color: .white.opacity(0.75), location: 0.5),
+                                .init(color: .clear, location: 1),
+                            ]),
+                            startPoint: .leading, endPoint: .trailing
+                        )
+                        .frame(width: max(geo.size.width * 0.45, 36))
+                        .offset(x: geo.size.width * phase)
+                    }
+                    .mask(content)
+                    .allowsHitTesting(false)
+                )
+                .onAppear {
+                    phase = -0.7
+                    withAnimation(.linear(duration: 2.6).repeatForever(autoreverses: false)) {
+                        phase = 1.25
+                    }
+                }
+        } else {
+            content
+        }
+    }
+}
+
+/// The quiet elapsed-time suffix at the end of the wait line — proof that a long
+/// agent round is alive, not hung. Appears only once the wait has crossed
+/// `threshold` (quick answers never see a timer), then ticks once a second in a
+/// smaller, fainter cut than the wait word so it reads as a footnote, not a
+/// stopwatch. The ChatGPT / Claude Code elapsed-time convention, reduced to its
+/// minimum.
+struct WaitElapsedSuffix: View {
+    /// When the round started thinking; nil hides the suffix entirely.
+    let since: Date?
+    var font: CGFloat = 15
+
+    /// How long the wait must run before the timer surfaces.
+    private static let threshold: TimeInterval = 6
+
+    var body: some View {
+        if let since {
+            TimelineView(.periodic(from: since, by: 1)) { context in
+                let s = Int(context.date.timeIntervalSince(since))
+                if s >= Int(Self.threshold) {
+                    Text("\(s)s")
+                        .font(.system(size: font - 2))
+                        .monospacedDigit()
+                        .foregroundStyle(Tokens.text4)
+                        .transition(.opacity)
                 }
             }
+        }
     }
 }
 
@@ -1300,6 +1405,9 @@ struct AssistantTurnView: View {
     var activity: String? = nil
     /// The present-progressive mood word for the pre-stream wait (e.g. "Gazing…").
     var thinkingWord: String = ""
+    /// When this round started thinking — drives the quiet elapsed-time suffix on
+    /// the wait line (only surfaces past its threshold; see `WaitElapsedSuffix`).
+    var thinkingSince: Date? = nil
     var sources: [WebSource] = []
     @Binding var hoveredSourceID: UUID?
     @Binding var sourceCloseWork: DispatchWorkItem?
@@ -1461,7 +1569,8 @@ struct AssistantTurnView: View {
             // to disable mid-stream — the tail-follow `scrollTo` collapsing a drag —
             // only bites in the long, clipped/scrolling layout; the jump-free guarantee
             // matters more, and most answers are short and never scroll.)
-            MarkdownBlocks(source: text, baseFont: baseFont, color: color, onInAppCopy: onInAppCopy)
+            MarkdownBlocks(source: text, baseFont: baseFont, color: color,
+                           onInAppCopy: onInAppCopy, streamingTail: streaming)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textSelection(.enabled)
                 // Reserve a line's worth of height while the answer is still empty
@@ -1479,9 +1588,17 @@ struct AssistantTurnView: View {
                     // so the slot just dissolves from one to the next.
                     Group {
                         if let waitLine {
-                            CrossfadeText(text: waitLine, font: baseFont, color: Tokens.text2)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
+                            // The elapsed suffix sits OUTSIDE the dissolving word
+                            // (a sibling, fixed size) so the ticking seconds never
+                            // ride the word-change transition, and a long activity
+                            // line truncates while the timer stays visible.
+                            HStack(spacing: 8) {
+                                CrossfadeText(text: waitLine, font: baseFont, color: Tokens.text2)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                                WaitElapsedSuffix(since: thinkingSince, font: baseFont)
+                                    .fixedSize()
+                            }
                         }
                     }
                     .opacity(showWait ? 1 : 0)
@@ -2112,6 +2229,13 @@ struct MarkdownBlocks: View {
     /// copy from poisoning the next Ask's clipboard-context injection. `nil` in the
     /// (non-result) contexts that don't care.
     var onInAppCopy: (() -> Void)? = nil
+    /// While the answer streams, the LAST block is the growing tail: its
+    /// newly-revealed glyphs fade in (macOS 15+, see `StreamTailRenderer`).
+    /// False everywhere else — settled answers and non-answer contexts render
+    /// plain.
+    var streamingTail: Bool = false
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     // `parseCached`, not `parse`: this computed property re-runs on every body
     // evaluation, which during streaming happens for every ~33ms flush times
@@ -2121,14 +2245,17 @@ struct MarkdownBlocks: View {
     private var blocks: [MarkdownBlock] { MarkdownParser.parseCached(source) }
 
     var body: some View {
+        let parsed = blocks
         VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+            ForEach(Array(parsed.enumerated()), id: \.offset) { i, block in
                 // Per-block styling lives in `MarkdownBlockRow`, shared with the
                 // streaming renderer (`StreamingMarkdown`) so a settled answer and a
                 // live one are laid out identically — they differ only in the tail
                 // fade/selection wrapping, never in how a block kind looks.
                 // `.equatable()` — see the row's `Equatable` conformance for why.
-                MarkdownBlockRow(block: block, baseFont: baseFont, color: color, onInAppCopy: onInAppCopy)
+                MarkdownBlockRow(block: block, baseFont: baseFont, color: color,
+                                 onInAppCopy: onInAppCopy,
+                                 fadeTail: streamingTail && !reduceMotion && i == parsed.count - 1)
                     .equatable()
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -2221,6 +2348,128 @@ private struct TailFadeIn: ViewModifier {
     func body(content: Content) -> some View { content }
 }
 
+// MARK: - Streaming tail glyph fade (macOS 15+)
+
+/// Which glyphs of the streaming tail are *fresh* — revealed within the last fade
+/// window — recorded as character-count milestones with timestamps. This is the
+/// per-NEW-CHARACTER fade the old `TailFadeIn` couldn't do: that one re-faded the
+/// whole tail block per chunk (a long paragraph visibly dimmed and re-lit on every
+/// token — why it was neutered to a no-op). Here only glyphs *beyond* the length
+/// already seen animate; everything already read never re-fades.
+struct GlyphBirths: Equatable {
+    struct Milestone: Equatable {
+        var count: Int
+        var at: TimeInterval
+    }
+
+    /// Glyph indices below this are settled — they always draw at full ink.
+    var settled = 0
+    /// Recent growth milestones, oldest first: a glyph at index i (settled ≤ i <
+    /// count) was born at the first milestone whose `count` exceeds i.
+    var fresh: [Milestone] = []
+
+    mutating func note(length: Int, at now: TimeInterval) {
+        // A shrink means the tail re-parsed into a different block shape (e.g. a
+        // list marker completing); settle to the new length rather than replaying
+        // a fade over text the reader has already seen.
+        if length < (fresh.last?.count ?? settled) {
+            settled = length
+            fresh.removeAll()
+            return
+        }
+        fresh.append(Milestone(count: length, at: now))
+        // Milestones past the fade window draw at full ink anyway — fold them
+        // into `settled` so the per-glyph lookup stays O(few) instead of growing
+        // with the stream (30 ticks/s over a long answer).
+        let horizon = now - 0.3
+        while let first = fresh.first, first.at < horizon {
+            settled = max(settled, first.count)
+            fresh.removeFirst()
+        }
+    }
+
+    func opacity(forGlyph index: Int, at now: TimeInterval, fade: TimeInterval) -> Double {
+        if index < settled { return 1 }
+        guard let birth = fresh.first(where: { index < $0.count })?.at else {
+            // Laid out before its growth milestone was noted (same frame):
+            // newborn. With no milestones at all, nothing is animating — full ink.
+            return fresh.isEmpty ? 1 : 0
+        }
+        let age = now - birth
+        return age >= fade ? 1 : max(0, age / fade)
+    }
+}
+
+/// Draws the tail block's glyphs with recency-based opacity: glyphs the pacer
+/// revealed within the last 180ms ramp from 0 → 1, everything older is plain
+/// ink. Glyph order stands in for character order (true for the linear text
+/// these rows hold), so no attribute plumbing through the markdown parser is
+/// needed. Redraw cadence comes for free while streaming: the paced reveal
+/// mutates the text ~30×/s, and each pass re-reads the clock here.
+@available(macOS 15.0, *)
+struct StreamTailRenderer: TextRenderer {
+    var births: GlyphBirths
+
+    /// How long one newly-revealed glyph takes to reach full ink.
+    static let fade: TimeInterval = 0.18
+
+    func draw(layout: Text.Layout, in ctx: inout GraphicsContext) {
+        let now = ProcessInfo.processInfo.systemUptime
+        var index = 0
+        for line in layout {
+            for run in line {
+                for slice in run {
+                    let opacity = births.opacity(forGlyph: index, at: now, fade: Self.fade)
+                    if opacity >= 1 {
+                        ctx.draw(slice)
+                    } else {
+                        var faded = ctx
+                        faded.opacity = opacity
+                        faded.draw(slice)
+                    }
+                    index += 1
+                }
+            }
+        }
+    }
+}
+
+/// Owns the birth history for one tail block and feeds it to the renderer.
+/// Mounted fresh when a block becomes the tail, so a brand-new block fades in
+/// whole (it IS entirely new text) and a block that graduates to the settled
+/// head simply drops the renderer — full ink, no re-fade.
+@available(macOS 15.0, *)
+private struct StreamTailFade: ViewModifier {
+    let textLength: Int
+    @State private var births = GlyphBirths()
+
+    func body(content: Content) -> some View {
+        content
+            .textRenderer(StreamTailRenderer(births: births))
+            .onAppear {
+                births.note(length: textLength, at: ProcessInfo.processInfo.systemUptime)
+            }
+            .onChange(of: textLength) { _, newValue in
+                births.note(length: newValue, at: ProcessInfo.processInfo.systemUptime)
+            }
+    }
+}
+
+/// Availability shim: the glyph fade needs macOS 15's `TextRenderer`; on the
+/// 14.0 deployment floor the streaming text falls back to the paced reveal
+/// alone (still smooth — just no per-glyph ramp).
+struct TailFadeIfAvailable: ViewModifier {
+    var active: Bool
+    var length: Int
+    func body(content: Content) -> some View {
+        if active, #available(macOS 15.0, *) {
+            content.modifier(StreamTailFade(textLength: length))
+        } else {
+            content
+        }
+    }
+}
+
 /// One block of an answer, extracted from `MarkdownBlocks.row(for:)` so both the
 /// settled renderer and the streaming renderer share identical block styling. The
 /// two callers differ only in animation/selection wrapping, never in how a given
@@ -2230,6 +2479,11 @@ struct MarkdownBlockRow: View, Equatable {
     var baseFont: CGFloat = 15
     var color: Color = Tokens.text1
     var onInAppCopy: (() -> Void)? = nil
+    /// True only on the growing tail block of a streaming answer: its fresh
+    /// glyphs fade in (macOS 15+). Must participate in `==` — when a new block
+    /// appends, the previous tail's content is unchanged but this flag flips,
+    /// and the row must re-evaluate to drop the fade renderer.
+    var fadeTail: Bool = false
 
     /// The row-level diff gate (used via `.equatable()` at every call site).
     /// `onInAppCopy` is a closure, and a closure field defeats SwiftUI's
@@ -2241,9 +2495,42 @@ struct MarkdownBlockRow: View, Equatable {
     /// thread, so a row whose block/font/colour are unchanged renders identically.
     static func == (lhs: MarkdownBlockRow, rhs: MarkdownBlockRow) -> Bool {
         lhs.block == rhs.block && lhs.baseFont == rhs.baseFont && lhs.color == rhs.color
+            && lhs.fadeTail == rhs.fadeTail
+    }
+
+    /// Only linear text rows fade; code and tables render whole (fading a code
+    /// block per-glyph reads as flicker over syntax, and both were excluded by
+    /// the industry implementations this follows), and a divider has no glyphs.
+    private static func fadeable(_ block: MarkdownBlock) -> Bool {
+        switch block {
+        case .code, .table, .divider: return false
+        default: return true
+        }
+    }
+
+    /// The fade's growth signal: the row's rendered-text character count. Raw
+    /// block text (markdown syntax included) slightly overshoots the laid-out
+    /// glyph count when inline `**`/`` ` `` markers get stripped — the error only
+    /// ever makes a glyph fade a beat early, never re-fade, so it's harmless.
+    private static func fadeLength(_ block: MarkdownBlock) -> Int {
+        switch block {
+        case .heading(_, let t), .bullet(let t, _), .ordered(_, let t, _),
+             .task(_, let t, _), .quote(let t), .paragraph(let t):
+            return t.count
+        case .code, .table, .divider:
+            return 0
+        }
     }
 
     var body: some View {
+        rowContent
+            .modifier(TailFadeIfAvailable(
+                active: fadeTail && Self.fadeable(block),
+                length: Self.fadeLength(block)))
+    }
+
+    @ViewBuilder
+    private var rowContent: some View {
         switch block {
         case .heading(let level, let text):
             let size = max(baseFont, baseFont + CGFloat(7 - min(level, 5)) * 1.5)

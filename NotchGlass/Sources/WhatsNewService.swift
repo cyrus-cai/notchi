@@ -64,6 +64,18 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.1.16",
+            date: "2026-07-12",
+            features: [
+                "Hide the virtual notch on external displays while an app is full-screen — new toggle in Settings → General.",
+            ],
+            improvements: [
+                "Streaming answers reveal at a smooth, even pace instead of in bursts.",
+                "Newly streamed text fades in as it appears.",
+                "The wait line shimmers while working, with elapsed time on longer waits.",
+            ]
+        ),
+        Entry(
             version: "0.1.15",
             date: "2026-07-11",
             features: [

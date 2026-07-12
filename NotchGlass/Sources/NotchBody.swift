@@ -1243,11 +1243,19 @@ struct NotchBody: View {
             // content below. Roughly the rhythm the old Divider held (its 9pt
             // top/bottom pad plus the hairline) so the spacing reads the same.
             Spacer().frame(height: 18)
-            // Text-only wait line — no animated dots. Before any tool runs the status
-            // is empty, so fall back to "Thinking…" rather than leaving the line blank.
-            Group {
-                let label = model.thinkingStatus.isEmpty ? L("agent.activity.thinking") : model.thinkingStatus
+            // Text-only wait line — no animated dots. Before any tool runs the
+            // status is empty, so fall back to the rotating mood word — the same
+            // opening a follow-up turn shows — instead of a static "Thinking…"
+            // (the first question and a follow-up used to start differently for
+            // no reason). The elapsed suffix is a sibling, not part of the
+            // dissolving word, so the ticking seconds never ride the word swap.
+            HStack(spacing: 8) {
+                let label = model.thinkingStatus.isEmpty ? model.currentThinkingWord : model.thinkingStatus
                 CrossfadeText(text: label, font: 15, color: Tokens.text2)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                WaitElapsedSuffix(since: model.thinkingStartedAt, font: 15)
+                    .fixedSize()
             }
             .padding(.vertical, 5)
             .padding(.horizontal, 2)
@@ -1793,6 +1801,7 @@ struct NotchBody: View {
                 streaming: turn.streaming,
                 activity: turn.streaming ? model.currentActivity : nil,
                 thinkingWord: model.currentThinkingWord,
+                thinkingSince: turn.streaming ? model.thinkingStartedAt : nil,
                 sources: turn.sources,
                 hoveredSourceID: $hoveredSourceID,
                 sourceCloseWork: $sourceCloseWork,

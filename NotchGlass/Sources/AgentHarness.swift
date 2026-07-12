@@ -568,7 +568,18 @@ struct AgentHarness {
                     return L("agent.activity.readingPage", host)
                 }
                 return L("agent.activity.working")
-            default: break
+            default:
+                // An unmapped tool still gets NAMED rather than hiding behind a
+                // bare "Working…" — the weakest wait line in the app. The raw id
+                // is prettified just enough to read as words ("fetch_weather" →
+                // "fetch weather").
+                let pretty = first.name
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "$"))
+                    .replacingOccurrences(of: "_", with: " ")
+                    .replacingOccurrences(of: "-", with: " ")
+                if !pretty.isEmpty {
+                    return L("agent.activity.runningTool", pretty)
+                }
             }
         }
         return L("agent.activity.working")

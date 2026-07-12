@@ -239,6 +239,8 @@ enum Strings {
         "general.dockIcon": "Dock icon",
         "general.dockIcon.footer": "Hidden keeps it a pure overlay — summon with ⌘, or by hovering the notch.",
         "general.launchAtLogin": "Launch at login",
+        "general.fullscreenAutoHide": "Hide in full screen",
+        "general.fullscreenAutoHide.hint": "Tuck the island away while a full-screen app covers its screen. Only affects the virtual notch on external displays.",
         "general.noteDestination": "Save notes to",
         "general.noteDestination.hint": "Apple Notes, or plain Markdown files (one per day) in a folder you choose.",
         "general.noteFolder.choose": "Choose…",
@@ -481,6 +483,7 @@ enum Strings {
         "agent.activity.calc": "Calculating…",
         "agent.activity.askUser": "Waiting for your choice…",
         "agent.activity.working": "Working…",
+        "agent.activity.runningTool": "Running %@…",
         "agent.activity.thinking": "Thinking…",
 
         // Source badge (under a search-grounded answer)
@@ -594,6 +597,8 @@ enum Strings {
         "general.dockIcon": "程序坞图标",
         "general.dockIcon.footer": "隐藏后它就是个纯浮层——用 ⌘, 或把鼠标移到刘海上来唤出。",
         "general.launchAtLogin": "开机时启动",
+        "general.fullscreenAutoHide": "全屏时隐藏",
+        "general.fullscreenAutoHide.hint": "当某个应用全屏占据它所在的屏幕时，把小岛收起来。仅影响外接显示器上的虚拟刘海。",
         "general.noteDestination": "笔记保存到",
         "general.noteDestination.hint": "存入 Apple 备忘录，或存成你指定文件夹里的 Markdown 纯文本（每天一个文件）。",
         "general.noteFolder.choose": "选择…",
@@ -819,6 +824,7 @@ enum Strings {
         "agent.activity.calc": "正在计算…",
         "agent.activity.askUser": "等你选一下…",
         "agent.activity.working": "处理中…",
+        "agent.activity.runningTool": "正在运行 %@…",
         "agent.activity.thinking": "思考中…",
 
         "source.badge.help": "来源",
@@ -931,6 +937,8 @@ enum Strings {
         "general.dockIcon": "Dock 圖示",
         "general.dockIcon.footer": "隱藏後它就是個純浮層——用 ⌘, 或把游標移到瀏海上來喚出。",
         "general.launchAtLogin": "開機時啟動",
+        "general.fullscreenAutoHide": "全螢幕時隱藏",
+        "general.fullscreenAutoHide.hint": "當某個應用全螢幕佔據它所在的螢幕時，把小島收起來。僅影響外接螢幕上的虛擬瀏海。",
         "general.noteDestination": "筆記保存到",
         "general.noteDestination.hint": "存入 Apple 備忘錄，或存成你指定資料夾裡的 Markdown 純文字（每天一個檔案）。",
         "general.noteFolder.choose": "選擇…",
@@ -1156,6 +1164,7 @@ enum Strings {
         "agent.activity.calc": "正在計算…",
         "agent.activity.askUser": "等你選一下…",
         "agent.activity.working": "處理中…",
+        "agent.activity.runningTool": "正在執行 %@…",
         "agent.activity.thinking": "思考中…",
 
         "source.badge.help": "來源",

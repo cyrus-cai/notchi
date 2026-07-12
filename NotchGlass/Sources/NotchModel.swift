@@ -762,6 +762,12 @@ final class NotchModel: ObservableObject {
     /// tool is running, else nil. Set by the harness via `updateActivity`.
     @Published private var thinkingActivity: String? = nil
 
+    /// When the current round's pre-stream wait began — the anchor for the quiet
+    /// "· 12s" elapsed suffix on the wait line (see `WaitElapsedSuffix`). Set when
+    /// the wait starts, cleared when the first token lands or the round ends, so
+    /// the timer can never tick over a streaming answer.
+    @Published private(set) var thinkingStartedAt: Date? = nil
+
     /// Latched true the first time a tool runs this round. Before any tool, the wait is
     /// the bare three dots (no word). Once the round has touched a tool, it stays in
     /// "word mode" for the rest of the wait — the activity line while a tool runs, then
@@ -812,6 +818,7 @@ final class NotchModel: ObservableObject {
     func startThinkingWordRotation() {
         thinkingWordTimer?.invalidate()
         thinkingActivity = nil
+        thinkingStartedAt = Date()
         // Each round starts in pure-dots mode; only a tool flips it into word mode.
         hasUsedToolThisRound = false
         rerollThinkingWord()
@@ -827,6 +834,7 @@ final class NotchModel: ObservableObject {
         thinkingWordTimer?.invalidate()
         thinkingWordTimer = nil
         thinkingActivity = nil
+        thinkingStartedAt = nil
         hasUsedToolThisRound = false
     }
 
@@ -3197,38 +3205,68 @@ final class NotchModel: ObservableObject {
             // before the failure — a mid-stream drop that already produced text must
             // persist that partial round, not discard it (see the catch below).
             var acc = ""
-            // Throttle state for the streamed-text sink below. Providers deliver
-            // deltas far faster than the display refreshes (some near
-            // per-character), and every write to `turns` re-evaluates NotchBody's
-            // whole tree (via `ConversationStore`) and re-parses the growing
-            // tail's markdown — so the per-chunk work is limited to accumulating
-            // into `acc`, and one shared flush pushes to the model at most ~30
-            // times a second.
+            // Throttle + pacing state for the streamed-text sink below. Providers
+            // deliver deltas far faster than the display refreshes (some near
+            // per-character) and in uneven bursts (a stall, then a slab), and
+            // every write to `turns` re-evaluates NotchBody's whole tree (via
+            // `ConversationStore`) and re-parses the growing tail's markdown — so
+            // the per-chunk work is limited to accumulating into `acc`, and one
+            // shared flush loop reveals the text at most ~30 times a second AND
+            // at a smoothed rate: a burst is smeared across up to `paceMaxLag`
+            // seconds instead of slamming in as one frame's slab.
             // Hoisted with `acc` so the catch paths can settle the throttle (a
             // trailing scheduled flush must never overwrite their final text).
             var pendingFlush: DispatchWorkItem? = nil
             var lastFlushAt: TimeInterval = 0
             var streamSettled = false
+            // Pacing: how many characters of `acc` the UI currently shows, plus
+            // the fractional remainder the integer step leaves behind each tick.
+            var released = 0
+            var releaseBudget: Double = 0
             do {
-                // Push everything accumulated so far into the model/UI — the one
-                // place the streamed text performs @Published writes. Shared by
-                // the plain and agent paths so the snapshot threading, first-
-                // chunk mode-flip, and on-screen guard live in exactly one place.
-                // Main-actor (the task inherits it), so it can mutate the
+                // Push the PACED prefix of what's accumulated into the model/UI —
+                // the one place the streamed text performs @Published writes.
+                // Shared by the plain and agent paths so the snapshot threading,
+                // first-chunk mode-flip, and on-screen guard live in exactly one
+                // place. Main-actor (the task inherits it), so it can mutate the
                 // task-local `acc`/`thread` and touch UI directly. `[weak self]`
                 // mirrors the task; on a detached round `self` is gone and the
                 // closure is a no-op.
                 let flushInterval: TimeInterval = 1.0 / 30.0
-                let flushChunks: @MainActor () -> Void = { [weak self] in
+                // The reveal rate self-regulates around one invariant: the display
+                // never trails what has arrived by more than `paceMaxLag` seconds
+                // (rate = backlog / maxLag, floored at `paceMinRate` so a trickle
+                // still types along). Small bursts get smeared into a calm walk;
+                // a giant slab still clears quickly — just smoothly.
+                let paceMaxLag: TimeInterval = 1.2
+                let paceMinRate: Double = 40   // characters per second
+                var flushChunks: @MainActor () -> Void = {}
+                flushChunks = { [weak self] in
                     guard let self, !streamSettled else { return }
                     pendingFlush?.cancel()
                     pendingFlush = nil
-                    lastFlushAt = ProcessInfo.processInfo.systemUptime
+                    let now = ProcessInfo.processInfo.systemUptime
+                    // First tick (lastFlushAt == 0) counts as one interval, so the
+                    // very first characters paint immediately — time-to-first-paint
+                    // is untouched by pacing.
+                    let dt = lastFlushAt == 0 ? flushInterval : min(now - lastFlushAt, 0.25)
+                    lastFlushAt = now
+                    let backlog = acc.count - released
+                    if backlog > 0 {
+                        let rate = max(paceMinRate, Double(backlog) / paceMaxLag)
+                        releaseBudget += rate * dt
+                        let step = min(backlog, Int(releaseBudget))
+                        if step > 0 {
+                            releaseBudget -= Double(step)
+                            released += step
+                        }
+                    }
+                    let shown = released >= acc.count ? acc : String(acc.prefix(released))
                     if let i = thread.firstIndex(where: { $0.id == answerID }) {
-                        thread[i].text = acc
+                        thread[i].text = shown
                     }
                     // Keep the reattach mirror current, so an open mid-stream
-                    // restores everything written so far, not a stale snapshot.
+                    // restores everything revealed so far, not a stale snapshot.
                     self.syncInFlight(answerID, thread)
                     // The on-screen turn must still be live: a stop (Esc) settles
                     // it synchronously while this task is still being cancelled,
@@ -3242,14 +3280,24 @@ final class NotchModel: ObservableObject {
                         // First chunk: flip to the result view so the answer appears
                         // to grow in place out of the thinking state.
                         if self.mode == .load { self.mode = .result }
-                        self.updateAnswer(id: answerID, text: acc)
+                        self.updateAnswer(id: answerID, text: shown)
+                    }
+                    // Keep draining: while revealed text still trails what has
+                    // arrived, the loop schedules its own next tick — a stall in
+                    // ARRIVALS must not stall the reveal (the old throttle only
+                    // ticked when chunks landed, which is exactly what let a
+                    // burst's slab sit until the next burst).
+                    if released < acc.count, pendingFlush == nil {
+                        let work = DispatchWorkItem { MainActor.assumeIsolated { flushChunks() } }
+                        pendingFlush = work
+                        DispatchQueue.main.asyncAfter(deadline: .now() + flushInterval, execute: work)
                     }
                 }
-                // The per-chunk sink: accumulate, then flush now if the throttle
+                // The per-chunk sink: accumulate, then tick now if the throttle
                 // window has passed (the first chunk always has — `lastFlushAt`
                 // starts at 0 — so time-to-first-paint is untouched), else make
-                // sure ONE trailing flush is scheduled for the window's end so
-                // the last piece of a burst never waits on the next burst.
+                // sure ONE trailing tick is scheduled for the window's end; from
+                // there the flush loop keeps itself alive until drained.
                 let appendChunk: @MainActor (String) -> Void = { [weak self] piece in
                     guard let self else { return }
                     acc += piece
@@ -3368,10 +3416,23 @@ final class NotchModel: ObservableObject {
                     }
                 }
                 if Task.isCancelled { return }
+                // Let the paced reveal finish walking what's still buffered before
+                // settling, so the tail types out instead of snapping in. Bounded
+                // twice over: the rate invariant keeps the remaining walk under
+                // ~`paceMaxLag` seconds, and a hard deadline covers any stall.
+                // Cancellation (Esc / superseded) breaks out — the catch paths
+                // settle instantly, and what the user saw at stop is what persists.
+                let drainDeadline = ProcessInfo.processInfo.systemUptime + 3
+                while released < acc.count, !Task.isCancelled,
+                      ProcessInfo.processInfo.systemUptime < drainDeadline {
+                    try? await Task.sleep(nanoseconds: 33_000_000)
+                }
+                if Task.isCancelled { return }
                 // Final flush: the terminal writes below must see the complete
-                // text (pieces may still be buffered inside the throttle window),
-                // and settling the flag keeps a trailing scheduled flush from
-                // firing after them.
+                // text (pieces may still be buffered inside the throttle window,
+                // or left by the drain deadline), and settling the flag keeps a
+                // trailing scheduled flush from firing after them.
+                released = acc.count
                 flushChunks()
                 streamSettled = true
                 self.stopThinkingWordRotation()

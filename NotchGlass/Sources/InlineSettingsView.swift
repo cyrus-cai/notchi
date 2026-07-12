@@ -205,6 +205,11 @@ struct InlineSettingsView: View {
     /// this optimistic flag if the OS refuses.
     @State private var launchAtLogin: Bool = LaunchAtLogin.isEnabled
 
+    /// Whether the island auto-hides while a full-screen app covers its screen —
+    /// mirrors the persisted value; writes go through `selectHideInFullscreen`,
+    /// which nudges `AppDelegate` to re-evaluate immediately.
+    @State private var hideInFullscreen: Bool = HideNotchInFullscreen.isEnabled
+
     /// Where note captures land (Apple Notes / Markdown folder) — mirrors the
     /// persisted value; writes go through `selectNoteDestination`. Consulted per
     /// write, so the switch applies to the very next jot.
@@ -281,6 +286,7 @@ struct InlineSettingsView: View {
                         // speaks → how it sits in the system.
                         shortcutRow
                         placementRow
+                        fullscreenAutoHideRow
                         appLanguageRow
                         dockIconRow
                         launchAtLoginRow
@@ -1469,6 +1475,31 @@ struct InlineSettingsView: View {
             .controlSize(.mini)
             .tint(Tokens.text2)
         }
+    }
+
+    /// Whether the island tucks away while a full-screen app covers its screen.
+    /// On by default; scoped to the virtual notch on external / non-notched
+    /// displays (the built-in hardware notch is physical and never hides). The
+    /// choice applies immediately — `AppDelegate` re-evaluates on the toggle.
+    private var fullscreenAutoHideRow: some View {
+        settingRow(label: L("general.fullscreenAutoHide"),
+                   info: L("general.fullscreenAutoHide.hint")) {
+            Toggle("", isOn: Binding(
+                get: { hideInFullscreen },
+                set: { selectHideInFullscreen($0) }
+            ))
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .tint(Tokens.text2)
+        }
+    }
+
+    private func selectHideInFullscreen(_ newValue: Bool) {
+        guard newValue != hideInFullscreen else { return }
+        hideInFullscreen = newValue
+        HideNotchInFullscreen.isEnabled = newValue
+        NotificationCenter.default.post(name: .hideNotchInFullscreenChanged, object: nil)
     }
 
     /// Register or unregister the login item, keeping the toggle in sync with the

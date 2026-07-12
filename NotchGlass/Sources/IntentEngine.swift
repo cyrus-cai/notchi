@@ -450,8 +450,10 @@ private final class IntentLLMResolver {
     private init() {
         session = LanguageModelSession(instructions: """
             You route single lines typed into a Mac quick-input bar.
-            Answer `ask` when the line is a question or a task the person wants \
-            an AI assistant to do (explain, write, translate, look up, compute).
+            Answer `ask` when the line is a question, a task the person wants \
+            an AI assistant to do (explain, write, translate, look up, compute), \
+            or a greeting / social / meta line addressed to the assistant \
+            (hello, thanks, who are you, continue).
             Answer `note` when the line is something the person is writing down \
             for themselves to keep: a todo, reminder, appointment, idea, \
             shopping item, password, measurement, or log entry.
