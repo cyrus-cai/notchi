@@ -30,6 +30,14 @@ final class NotificationService: NSObject {
     /// `AppDelegate` observes it, summons the panel, and reopens the thread.
     static let answerTapped = Notification.Name("notchAnswerNotificationTapped")
 
+    /// Category for a finished agent-Codex task's banner, so its tap routes
+    /// to the panel's idle view (where the result card lives) instead of a thread.
+    private static let agentCategory = "agentDone"
+
+    /// Posted when the user taps an agent-task banner. `AppDelegate` observes
+    /// it and summons the panel on its idle prompt, where the result card shows.
+    static let agentTapped = Notification.Name("notchAgentNotificationTapped")
+
     /// Whether we've already asked the system for authorization this launch — we
     /// request lazily on the first answer-ready post, never at launch (an
     /// accessory app popping a permission prompt the moment it starts is noise;
@@ -42,7 +50,7 @@ final class NotificationService: NSObject {
         super.init()
     }
 
-    /// Wire the delegate so taps route back into the app. Call once at launch.
+    /// Wire the agent so taps route back into the app. Call once at launch.
     func configure() {
         center.delegate = self
     }
@@ -80,6 +88,30 @@ final class NotificationService: NSObject {
         }
     }
 
+    /// Post a "agent task finished" banner (XII: agent-to-Codex). A
+    /// agent run takes minutes, so the user has almost certainly walked away;
+    /// this closes the loop the same way the answer-ready banner does. Tapping it
+    /// summons the panel and reopens the run's Recent record (`threadID` — the
+    /// history row `recordAgentHistory` filed just before this posts).
+    func postAgentFinished(engineName: String, folderName: String,
+                              success: Bool, threadID: UUID) {
+        ensureAuthorization { [weak self] granted in
+            guard granted, let self else { return }
+            let content = UNMutableNotificationContent()
+            content.title = L(success ? "notify.agent.done" : "notify.agent.failed",
+                              engineName)
+            content.body = folderName
+            content.categoryIdentifier = Self.agentCategory
+            content.userInfo = [Self.threadIDKey: threadID.uuidString]
+            content.sound = .default
+            // One agent task at a time → one stable id, so a rerun replaces
+            // its prior banner instead of stacking.
+            let request = UNNotificationRequest(
+                identifier: "agentTask", content: content, trigger: nil)
+            self.center.add(request, withCompletionHandler: nil)
+        }
+    }
+
     /// Request authorization the first time we need it, then run `completion`
     /// with whether we may post. On later calls we read the live settings instead
     /// of re-prompting (the system only shows the prompt once anyway).
@@ -108,8 +140,19 @@ extension NotificationService: UNUserNotificationCenterDelegate {
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
-        let info = response.notification.request.content.userInfo
-        if let raw = info[Self.threadIDKey] as? String, let id = UUID(uuidString: raw) {
+        let content = response.notification.request.content
+        if content.categoryIdentifier == Self.agentCategory {
+            // Agent-task banner: summon the panel and reopen the run's Recent
+            // record when one was filed (the id rides along like an answer tap's).
+            let userInfo: [String: Any] = (content.userInfo[Self.threadIDKey] as? String)
+                .flatMap(UUID.init(uuidString:))
+                .map { [Self.threadIDKey: $0] } ?? [:]
+            Task { @MainActor in
+                NotificationCenter.default.post(name: Self.agentTapped, object: nil,
+                                                userInfo: userInfo)
+            }
+        } else if let raw = content.userInfo[Self.threadIDKey] as? String,
+                  let id = UUID(uuidString: raw) {
             Task { @MainActor in
                 NotificationCenter.default.post(
                     name: Self.answerTapped,

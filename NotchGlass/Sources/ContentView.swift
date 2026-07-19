@@ -1,9 +1,14 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The full transparent canvas. The notch island is pinned to the top-center;
 /// everything else is empty space that lets clicks fall through to apps below.
 struct ContentView: View {
     @ObservedObject var model: NotchModel
+    /// A drag carrying a file URL is hovering the island. Drives open-on-drag:
+    /// hover-to-open never fires during a drag (the tracking area sees no
+    /// mouseEntered), so the drop target itself unfurls the panel.
+    @State private var agentDropTargeted = false
     /// First-run state — drives the breathing gesture hint under the resting notch
     /// on the very first launch (see `OnboardingService`).
     @ObservedObject private var onboarding = OnboardingService.shared
@@ -30,6 +35,38 @@ struct ContentView: View {
                 // (or being opened) when the user returns from a switch, so the
                 // identity change never interrupts a visible animation.
                 .id(loc.language)
+                // Drop a project folder on the island to start composing a
+                // agent task in it (XII: agent-to-Codex) — the folder is
+                // exactly the argument the mode needs, so one drop enters the
+                // compose with it in place. Dragging over the resting notch
+                // unfurls the panel (via `agentDropTargeted` below); the drop
+                // itself routes through the model, which validates it's really a
+                // directory and an agent CLI is signed in.
+                .onDrop(of: [.fileURL], isTargeted: $agentDropTargeted) { providers in
+                    guard let provider = providers.first else { return false }
+                    provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier,
+                                      options: nil) { item, _ in
+                        let url: URL? = switch item {
+                        case let data as Data: URL(dataRepresentation: data, relativeTo: nil)
+                        case let u as URL:     u
+                        default:               nil
+                        }
+                        guard let url else { return }
+                        Task { @MainActor in
+                            model.openPanel(on: metrics.displayID)
+                            model.handleAgentFolderDrop(url)
+                        }
+                    }
+                    return true
+                }
+                .onChange(of: agentDropTargeted) { _, targeted in
+                    // The drag reaching the island is the open gesture: unfurl so
+                    // the drop lands on the (visible) idle prompt, exactly like a
+                    // hover would have.
+                    if targeted, !model.isOpen(on: metrics.displayID) {
+                        model.openPanel(on: metrics.displayID)
+                    }
+                }
 
             // First-run gesture hint: a slow breathing glow under the resting notch
             // with one line ("hover — or ⌘,"). Like the thinking dots, it's a
@@ -79,6 +116,29 @@ struct ContentView: View {
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                     if !model.showHistory { model.showHistory = true }
                     model.showHistoryFilter = true
+                }
+                return true
+            }
+            // ⌘⇧I summons the agent's quick picker — model + reasoning effort, the
+            // compose chip's menu unfolded into a card. It is *not* the model-config
+            // card: this chord is the fast dial for the two knobs you actually turn
+            // between runs, wherever you are (idle prompt, a settled answer, bucket
+            // armed or not). In-app only: a global chord would take ⌘⇧I from every
+            // other app. Suppressed over onboarding / what's new / settings — the
+            // first two own the body, and settings already carries the chip.
+            // keyCode 34 is I.
+            //
+            // With no agent CLI installed there are no dials to show, so the chord
+            // falls back to the cross-provider chat picker rather than opening an
+            // empty card.
+            if event.keyCode == 34,
+               event.modifierFlags.contains(.command),
+               event.modifierFlags.contains(.shift),
+               !model.showOnboarding, !model.showSettings, !model.showWhatsNew {
+                if model.agentAvailable {
+                    model.showAgentPicker = true
+                } else {
+                    model.showModelPicker = true
                 }
                 return true
             }
@@ -410,19 +470,153 @@ private struct ClipboardSenseEars: View {
     }
 }
 
+/// Same two-shoulder measurement as `SenseEarWidthsKey`, on its own key so the
+/// background-work readout and the copy-sense hint can't smear widths into each
+/// other while one crossfades out and the other in.
+private struct WorkEarWidthsKey: PreferenceKey {
+    static let defaultValue = SenseEarWidths()
+    static func reduce(value: inout SenseEarWidths, nextValue: () -> SenseEarWidths) {
+        let next = nextValue()
+        value = SenseEarWidths(left: max(value.left, next.left),
+                               right: max(value.right, next.right))
+    }
+}
+
+/// The resting notch's background-work readout, in the same two-eared compact
+/// idiom as `ClipboardSenseEars`. Running: the live doing-word on the left
+/// shoulder — the chat round's actual tool line ("Searching the web…",
+/// "Reading github.com…"), or a per-action verb for an agent Codex run —
+/// and a once-a-second elapsed clock on the right, the collapsed twin of the
+/// agent card's clock, replacing the old three-dot wave (the ticking time
+/// is the "it's alive" signal; dots on top were dead weight).
+/// Finished: the left ear holds a small count badge — how many results landed
+/// while the notch was collapsed — so the notch doesn't fold flat over unseen
+/// work. Opening the panel clears it (`NotchModel.unseenFinishedCount`).
+private struct BackgroundWorkEars: View {
+    enum Stage: Equatable {
+        case running(verb: String, since: Date)
+        case finished(count: Int)
+    }
+    let stage: Stage
+    /// The drawn hardware-notch width the ears flank (content-free gap).
+    let notchWidth: CGFloat
+    /// The island's current ear slots (content + insets, animated by the
+    /// island's own settle) — the ears lay out inside exactly these.
+    let earLeft: CGFloat
+    let earRight: CGFloat
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// A stable identity per visual stage, so SwiftUI crossfades run → badge
+    /// (and re-pops the badge when its count steps up) instead of morphing text.
+    private var stageKey: String {
+        switch stage {
+        case .running(let verb, _): return "run-\(verb)"
+        case .finished(let count):  return "done-\(count)"
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            // Left ear — the verb while running, the count badge when settled.
+            ZStack {
+                leftStage
+                    .id(stageKey)
+                    .transition(.opacity.combined(with: .scale(scale: 0.85)))
+            }
+            .animation(.easeInOut(duration: 0.22), value: stageKey)
+            .frame(width: earLeft)
+
+            // The camera gap — content-free by construction.
+            Color.clear.frame(width: notchWidth)
+
+            // Right ear — the elapsed clock, only while running.
+            ZStack {
+                if case .running(_, let since) = stage {
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        // Each tick rolls the changed digits with the system's
+                        // numeric-text transition (the blurred flip Apple uses
+                        // for its own clocks) instead of hard-cutting: only the
+                        // digits that actually changed move.
+                        let seconds = max(0, Int(context.date.timeIntervalSince(since)))
+                        Text(NotchModel.formatAgentElapsed(TimeInterval(seconds)))
+                            .font(.sf(11))
+                            .monospacedDigit()
+                            .contentTransition(.numericText(value: Double(seconds)))
+                            .animation(reduceMotion ? nil : .snappy(duration: 0.3),
+                                       value: seconds)
+                            .foregroundStyle(Tokens.text4)
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
+                    .background(GeometryReader { proxy in
+                        Color.clear.preference(
+                            key: WorkEarWidthsKey.self,
+                            value: SenseEarWidths(right: proxy.size.width))
+                    })
+                    .transition(.opacity)
+                }
+            }
+            .animation(.easeInOut(duration: 0.22), value: stageKey)
+            .frame(width: earRight)
+        }
+        .frame(minHeight: 22)
+    }
+
+    @ViewBuilder
+    private var leftStage: some View {
+        Group {
+            switch stage {
+            case .running(let verb, _):
+                // Deliberately faint, matching the copy-sense ears — a status,
+                // not an announcement. `fixedSize` so the text never truncates:
+                // while its slot is still settling it overflows (hidden by the
+                // island's clip) instead of drawing half a line.
+                Text(verb)
+                    .font(.sf(11.5, weight: .regular))
+                    .tracking(0.3)
+                    .foregroundStyle(Tokens.text3)
+                    .lineLimit(1)
+                    .fixedSize()
+            case .finished(let count):
+                // The count badge: one quiet capsule, just the number — the
+                // notification banner already said *what* finished; this only
+                // has to say "N things are waiting for you in here".
+                Text("\(count)")
+                    .font(.sf(10.5, weight: .semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(Tokens.text2)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .frame(minWidth: 10)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2.5)
+                    .background(Capsule().fill(Color.white.opacity(0.14)))
+            }
+        }
+        .background(GeometryReader { proxy in
+            Color.clear.preference(key: WorkEarWidthsKey.self,
+                                   value: SenseEarWidths(left: proxy.size.width))
+        })
+    }
+}
+
 /// The continuous black→glass island that grows out of the notch.
 struct NotchIsland: View {
     @ObservedObject var model: NotchModel
+    /// The agent-Codex run — a minutes-long background task the collapsed
+    /// notch reports right alongside detached Ask rounds (same busy ears, same
+    /// finished-count badge).
+    @ObservedObject private var agentManager = AgentTaskManager.shared
     @Environment(\.notchMetrics) private var metrics
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// How far the black bleeds above the screen's top edge, guaranteeing no gap.
     private let topBleed: CGFloat = 6
 
-    /// How far the resting notch grows leftward while an answer is still
-    /// streaming in the background — the strip that hosts the small thinking
-    /// dots. Wide enough for the three-dot wave to breathe, narrow enough to
-    /// read as the notch itself flexing, never as a second island.
+    /// Fallback width for the busy left ear on the first frame, before the
+    /// verb's measured width lands (via `WorkEarWidthsKey`) — roughly what a
+    /// short verb needs, so the ear doesn't blink open from zero.
     private let busyExtension: CGFloat = 48
 
     /// The copy-sense ears' measured content widths (via `SenseEarWidthsKey`),
@@ -430,6 +624,12 @@ struct NotchIsland: View {
     /// verdict on the left, the ⌘C key on the right — in whatever language and
     /// stage is showing.
     @State private var senseEarContent = SenseEarWidths()
+
+    /// The background-work ears' measured content widths (via
+    /// `WorkEarWidthsKey`) — the verb / count badge on the left, the elapsed
+    /// clock on the right — kept apart from the copy-sense measurements so the
+    /// two occupants can't smear widths into each other mid-crossfade.
+    @State private var workEarContent = SenseEarWidths()
 
     /// Breathing room on each side of an ear's content.
     private let senseEarPad: CGFloat = 11
@@ -451,13 +651,79 @@ struct NotchIsland: View {
         model.isOpen(on: metrics.displayID)
     }
 
-    /// True when the panel is fully closed (on every display) but an Ask round
-    /// is still streaming detached — the resting notch shows the busy extension.
-    /// Gated on the GLOBAL `open`, not this display's `isOpen`: while the panel
-    /// is open anywhere the round is on screen there, and the other displays'
-    /// resting notches shouldn't claim background work.
+    /// True when the panel is fully closed (on every display) but background
+    /// work is still running — a detached Ask round streaming, or an agent
+    /// Codex run working in its folder. The resting notch flexes into the busy
+    /// ears: verb left, elapsed clock right. Gated on the GLOBAL `open`, not
+    /// this display's `isOpen`: while the panel is open anywhere the work is on
+    /// screen there, and the other displays' resting notches shouldn't claim it.
     private var busy: Bool {
-        !model.open && model.roundsInFlight > 0
+        !model.open && model.liveActivityEnabled
+            && (model.roundsInFlight > 0 || agentRunning)
+    }
+
+    /// An agent run the resting notch reports. Whether it shows AT ALL is
+    /// `busy`'s call — Settings → Appearance ("Live activity") mutes every
+    /// background flex globally; the run keeps going, the card and the finish
+    /// notification are untouched, the collapsed notch just doesn't flex.
+    private var agentRunning: Bool {
+        agentManager.isRunning
+    }
+
+    /// The busy left ear's label — what the work is ACTUALLY doing right now,
+    /// not a frozen verb. An agent Codex run outranks the chat line (the
+    /// longer, heavier task defines the notch's mood): its activity stream
+    /// maps to a verb per action kind. A chat round shows the same live
+    /// tool-activity line the panel's detail row would ("Searching the web…",
+    /// "Reading github.com…"), falling back to "Thinking" only between tools.
+    private var busyVerb: String {
+        if agentRunning {
+            // With parallel runs, the ear voices the freshest activity any of
+            // them reported — one verb for the whole fleet.
+            let running = agentManager.runningTasks
+            if let task = running.last(where: { $0.activity != nil }) ?? running.first {
+                return Self.agentVerb(for: task.activity)
+            }
+        }
+        if let activity = model.backgroundActivity, !activity.isEmpty {
+            return activity
+        }
+        return L(model.backgroundWriting ? "busy.writing" : "busy.thinking")
+    }
+
+    /// Map the agent's activity line to an ear-sized verb: the raw lines
+    /// ("$ npm test", "Editing Foo.swift") run long and jitter the ear's width,
+    /// so the ear names the *kind* of action and leaves the detail to the card.
+    private static func agentVerb(for activity: String?) -> String {
+        guard let activity, !activity.isEmpty else { return L("busy.working") }
+        if activity.hasPrefix("$ ")         { return L("busy.running") }
+        if activity.hasPrefix("Editing ")   { return L("busy.editing") }
+        if activity.hasPrefix("Searching ") { return L("busy.searching") }
+        if activity.hasPrefix("Reading ")   { return L("busy.searching") }
+        if activity == L("agent.thinking") { return L("busy.thinking") }
+        return L("busy.working")
+    }
+
+    /// When the oldest still-running background task started — the busy right
+    /// ear's clock counts from here, so it reads as total time under way (not
+    /// time since the panel folded).
+    private var busySince: Date {
+        var start = model.busySince ?? Date()
+        if agentRunning,
+           let earliest = agentManager.runningTasks.map(\.startedAt).min() {
+            start = min(start, earliest)
+        }
+        return start
+    }
+
+    /// True when everything settled while the notch was collapsed and the
+    /// results haven't been looked at: the notch keeps a small count badge in
+    /// the left ear instead of folding flat, until the panel opens (which
+    /// zeroes `unseenFinishedCount`). Yields to `busy` (running work outranks
+    /// a tally) and to the copy-sense hint (transient and actionable beats a
+    /// durable count for the one strip).
+    private var showsFinishedBadge: Bool {
+        !model.open && !busy && !sensing && model.unseenFinishedCount > 0
     }
 
     /// True when the resting notch is offering (or narrating) a clipboard
@@ -467,21 +733,32 @@ struct NotchIsland: View {
         !model.open && !busy && model.clipboardSense != .idle
     }
 
-    /// The resting notch's LEFT flex — the busy dots' strip, or the copy-sense
-    /// left ear (phrase → dots → verdict), sized to its measured content. The
-    /// two occupants never coexist (`sensing` yields to `busy`).
+    /// The resting notch's LEFT flex — the busy verb, the finished-count badge,
+    /// or the copy-sense left ear (phrase → dots → verdict), sized to its
+    /// measured content. The occupants never coexist (`sensing` yields to
+    /// `busy`; the badge yields to both).
     private var earLeft: CGFloat {
-        if busy { return busyExtension }
+        if busy {
+            return workEarContent.left > 0
+                ? workEarContent.left + senseEarPad * 2 : busyExtension
+        }
+        if showsFinishedBadge, workEarContent.left > 0 {
+            return workEarContent.left + senseEarPad * 2
+        }
         if sensing, senseEarContent.left > 0 {
             return senseEarContent.left + senseEarPad * 2
         }
         return 0
     }
 
-    /// The resting notch's RIGHT flex — the copy-sense ⌘C ear, present only
-    /// while the offer stands (it folds shut on confirm). Busy never extends
-    /// right: its strip stays pinned to the bezel exactly as before.
+    /// The resting notch's RIGHT flex — the busy elapsed clock while work runs,
+    /// or the copy-sense ⌘C ear while the offer stands (it folds shut on
+    /// confirm). The finished badge never extends right: one quiet count, left.
     private var earRight: CGFloat {
+        if busy {
+            return workEarContent.right > 0
+                ? workEarContent.right + senseEarPad * 2 : 0
+        }
         guard sensing, senseEarContent.right > 0 else { return 0 }
         return senseEarContent.right + senseEarPad * 2
     }
@@ -521,21 +798,27 @@ struct NotchIsland: View {
                         // Uneven ears shift the island's center off the notch
                         // zone's center by (L−R)/2 — push the lens dot back by
                         // exactly that so it never drifts off the physical
-                        // camera. (Busy: L=48, R=0 → the familiar +24pt.)
+                        // camera, whatever mix of ears is out.
                         .offset(x: (earLeft - earRight) / 2, y: topBleed / 2)
                 }
 
-                // Background-activity dots, centered in the strip the busy
-                // extension opens up on the left: the notch flexes out and the
-                // same calm wave that marks thinking in the panel keeps marking
-                // the detached round while it streams. They live inside the
-                // island's own black zone — one material, one form — which is
-                // what makes the extension read as the notch working, not as a
-                // badge stuck beside it.
-                if busy {
-                    ThinkingDots(dot: 4, spacing: 5)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.leading, 13)
+                // The background-work readout, in the two-eared idiom: while
+                // work runs, the verb on the left shoulder and a once-a-second
+                // elapsed clock on the right (the collapsed twin of the
+                // agent card's clock — no dots; ticking time IS the "it's
+                // alive" signal). When the last task settles, the left ear
+                // keeps a small count badge instead of folding flat, so
+                // finished background work doesn't silently vanish into the
+                // bezel. It all lives inside the island's own black zone — one
+                // material, one form — which is what makes the flex read as
+                // the notch working, not as a badge stuck beside it.
+                if busy || showsFinishedBadge {
+                    BackgroundWorkEars(
+                        stage: busy ? .running(verb: busyVerb, since: busySince)
+                                    : .finished(count: model.unseenFinishedCount),
+                        notchWidth: Tokens.notchWidth,
+                        earLeft: earLeft,
+                        earRight: earRight)
                         .offset(y: topBleed / 2)
                         .transition(.opacity)
                 }
@@ -569,6 +852,12 @@ struct NotchIsland: View {
                     // Ease the dissolve over the model's content-fade window so it
                     // completes just as `beginClose` fires the shell retract.
                     .animation(.easeOut(duration: NotchModel.closeContentFade), value: model.closing)
+                    // The pre-tear feel: the body gives a few points toward the
+                    // pull (tanh-saturated), so the glass reads as grabbed
+                    // before the window tears free. Release springs it home on
+                    // `detachDragEnded`'s transaction.
+                    .offset(detachLean)
+                    .opacity(model.detachDrag == nil ? 1 : 0.94)
                     .transition(.opacity)
             }
         }
@@ -616,6 +905,10 @@ struct NotchIsland: View {
         // sides, brightest at the rounded corners. Stamped on top of the composited
         // island so the highlight traces the edge crisply instead of being clipped.
         .overlay(IslandRim(shape: NotchShape(bottomRadius: bottomRadius)))
+        // A settled detached window dragged over the notch: the island swells a
+        // touch to say it'll take the session back on release.
+        .scaleEffect(model.detachMergeHint ? 1.02 : 1, anchor: .top)
+        .animation(.spring(response: 0.32, dampingFraction: 0.7), value: model.detachMergeHint)
         // The entry kick deforms the whole composited island — anchored at the
         // top edge so it hinges off the bezel. The system glass backdrop does
         // NOT ride along with SwiftUI render transforms, so the deform briefly
@@ -631,6 +924,9 @@ struct NotchIsland: View {
         // top of the open spring's own per-frame layout work.
         .modifier(EntryKickEffect(tx: kick.tx, shear: kick.shear, squash: kick.squash).ignoredByLayout())
         .contentShape(NotchShape(bottomRadius: bottomRadius))
+        // Tear-off lives on the header strip only (the grips in NotchBody's
+        // resultHeader / agentDetailHeader) — dragging the body or free glass
+        // must never split the session by accident.
         // Slide the whole form so its black CENTER (not its geometric center)
         // stays fused to the hardware notch: the island is centered in the
         // canvas, so uneven ears would otherwise drag the camera zone off the
@@ -672,6 +968,17 @@ struct NotchIsland: View {
         // stage's content changes size — hint phrase → dots → verdict, and the
         // ⌘C ear folding shut on confirm.
         .onPreferenceChange(SenseEarWidthsKey.self) { senseEarContent = $0 }
+        .onPreferenceChange(WorkEarWidthsKey.self) { workEarContent = $0 }
+        // Keep the model's resting-notch hover rect in step with the ears —
+        // hovering the verb/clock, the finished badge, or the copy hint must
+        // count as hovering the notch (see `pointerInsideRestingNotch`).
+        .onAppear { model.registerRestingEars(left: earLeft, right: earRight) }
+        .onChange(of: earLeft) { _, _ in
+            model.registerRestingEars(left: earLeft, right: earRight)
+        }
+        .onChange(of: earRight) { _, _ in
+            model.registerRestingEars(left: earLeft, right: earRight)
+        }
         .animation(.spring(response: 0.42, dampingFraction: 0.72), value: model.openWidth)
         .animation(.spring(response: 0.42, dampingFraction: 0.78), value: model.mode)
         // The note-save feedback line (Saving… → Added to Notes → gone) changes the
@@ -722,6 +1029,16 @@ struct NotchIsland: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .center)   // center within canvas
+    }
+
+    // MARK: - Tear-off (detach drag)
+
+    /// How far the body leans with a live pre-tear pull: a few points, heavily
+    /// saturated — a grabbed slab of glass giving, not content sliding away.
+    private var detachLean: CGSize {
+        guard let drag = model.detachDrag else { return .zero }
+        let lean = NotchModel.detachRubberized(drag.translation, limit: 16)
+        return CGSize(width: lean.width, height: max(lean.height, -6))
     }
 
     // MARK: - Entry physics

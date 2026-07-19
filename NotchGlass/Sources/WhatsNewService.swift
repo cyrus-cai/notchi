@@ -64,6 +64,28 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.2.0",
+            date: "2026-07-19",
+            features: [
+                "New Agent mode — point Notch at a project folder, describe a task, and it runs autonomously in the background, powered by your own Codex or Claude CLI.",
+                "Agent tasks take image attachments, survive a restart with one-tap Resume, notify you when done, and join Recent & History.",
+                "Detach any conversation or agent run into a floating window; drag it back over the notch to merge.",
+                "The closed notch shows the live step and elapsed time while work runs — toggle in Settings → Appearance.",
+                "Proxy support, manual or auto-detected, applied to Notch and the CLIs it spawns — Settings → General.",
+            ],
+            improvements: [
+                "Settings reorganized — a new Appearance tab; General now holds shortcut, language, launch-at-login, and proxy.",
+                "⌘⇧I opens a quick picker for the agent's model and reasoning effort.",
+                "Correct vendor logos for more model families (Gemma, Qwen QwQ, Yi, Hunyuan, Doubao, Ernie, and more), plus Codex's real mark.",
+                "A model picked in Settings now sticks in the Ask quick menu.",
+                "Agent mode remembers your last project folder and stays selected after relaunch.",
+                "Feedback link added to Settings → About.",
+            ],
+            fixes: [
+                "Fixed a case where two copies of Notch could run at once.",
+            ]
+        ),
+        Entry(
             version: "0.1.16",
             date: "2026-07-12",
             features: [

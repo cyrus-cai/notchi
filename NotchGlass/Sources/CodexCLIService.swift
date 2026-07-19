@@ -148,7 +148,15 @@ struct CodexCLIService: AIService {
     // MARK: - Model
 
     /// One model Codex offers this account, from the app-server's `model/list`.
-    struct Model: Equatable { let id: String; let isDefault: Bool }
+    struct Model: Equatable {
+        let id: String
+        let displayName: String
+        let isDefault: Bool
+        /// The reasoning-effort levels this model accepts (`supportedReasoningEfforts`
+        /// in the wire response) — they differ per model, so the effort menu must
+        /// come from here, not a fixed set.
+        let efforts: [String]
+    }
 
     private static let modelLock = NSLock()
     /// The account's model list, fetched once from `codex app-server` and cached.
@@ -176,6 +184,11 @@ struct CodexCLIService: AIService {
         modelLock.lock(); defer { modelLock.unlock() }
         return cachedModels ?? []
     }
+
+    /// The account's fetched model list (empty until `refreshModels()` has landed).
+    /// The agent feature builds its Codex menu entries from this, so the pinnable
+    /// models are always the ones this account can actually run.
+    static var listedModels: [Model] { fetchedModels() }
 
     /// Fetch the account's model list off the main thread and cache it. Called from
     /// `warmUp()` at launch so the picker reads a warm cache. No-op once cached.
@@ -223,6 +236,7 @@ struct CodexCLIService: AIService {
         p.arguments = ["app-server"]
         var env = ProcessInfo.processInfo.environment
         if env["HOME"] == nil { env["HOME"] = NSHomeDirectory() }
+        ProxyConfig.apply(to: &env)
         p.environment = env
         let inPipe = Pipe(), outPipe = Pipe()
         p.standardInput = inPipe
@@ -272,6 +286,7 @@ struct CodexCLIService: AIService {
         p.arguments = ["login"]
         var env = ProcessInfo.processInfo.environment
         if env["HOME"] == nil { env["HOME"] = NSHomeDirectory() }
+        ProxyConfig.apply(to: &env)
         p.environment = env
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
@@ -310,9 +325,13 @@ struct CodexCLIService: AIService {
             process.arguments = args
             process.currentDirectoryURL = workDir
             // Inherit the environment but guarantee HOME so codex finds ~/.codex/auth.json
-            // even when launched from a GUI context with a sparse environment.
+            // even when launched from a GUI context with a sparse environment. Same
+            // reason the proxy has to be injected: `--ignore-user-config` means the
+            // proxy keys in ~/.codex/config.toml don't apply either, so the
+            // environment is the only channel left.
             var env = ProcessInfo.processInfo.environment
             if env["HOME"] == nil { env["HOME"] = NSHomeDirectory() }
+            ProxyConfig.apply(to: &env)
             process.environment = env
 
             let outPipe = Pipe(), inPipe = Pipe(), errPipe = Pipe()
@@ -503,7 +522,12 @@ private final class ModelQueryState {
                 guard let id = entry["id"] as? String, !id.isEmpty,
                       (entry["hidden"] as? Bool) != true
                 else { return nil }
-                return CodexCLIService.Model(id: id, isDefault: (entry["isDefault"] as? Bool) == true)
+                let name = (entry["displayName"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                let efforts = (entry["supportedReasoningEfforts"] as? [[String: Any]])?
+                    .compactMap { $0["reasoningEffort"] as? String } ?? []
+                return CodexCLIService.Model(id: id, displayName: name ?? id,
+                                             isDefault: (entry["isDefault"] as? Bool) == true,
+                                             efforts: efforts)
             }
             return true
         }

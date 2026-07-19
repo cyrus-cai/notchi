@@ -412,7 +412,7 @@ struct ModelPickerView: View {
                 .onSubmit(commitFocused)
             if !query.isEmpty {
                 Button { query = "" } label: {
-                    Image(systemName: "xmark.circle.fill")
+                    Image(systemName: "xmark.circle")
                         .font(.system(size: 12))
                         .foregroundStyle(Tokens.text3)
                 }
@@ -591,9 +591,14 @@ private struct FilterRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: checked ? "checkmark.square.fill" : "square")
+            Image(systemName: checked ? "checkmark.square" : "square")
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(checked ? Tokens.text1 : Tokens.text4)
+                // Native SF Symbols swap — the box fills/empties instead of hard-cutting.
+                // Scoped to the symbol: `providerFilter` also drives the model list, which
+                // must not animate along with the tick.
+                .contentTransition(.symbolEffect(.replace))
+                .animation(.easeOut(duration: 0.18), value: checked)
                 .frame(width: 14)
             Text(name)
                 .font(.sf(12, weight: checked ? .semibold : .regular))
@@ -693,8 +698,21 @@ private struct ModelRowView: View {
 /// provider-menu grouping used to do now lives here, next to the model itself).
 private struct DetailPanel: View {
     let model: PickerModel
+    /// Observed for `claudeResolved` — the Claude Code alias rows fill in their
+    /// concrete model id reactively when the CLI probe lands.
+    @ObservedObject private var catalog = ModelCatalogStore.shared
 
     private var info: ModelInfo { model.info }
+
+    /// The concrete model behind a Claude Code alias row ("opus" →
+    /// "claude-opus-4-8"), once probed. Nil for every other provider, before the
+    /// probe lands, or when it adds nothing over the row's own id.
+    private var resolvedModelID: String? {
+        guard model.provider == .claudeCode,
+              let id = catalog.claudeResolved[info.id], id != info.id
+        else { return nil }
+        return id
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -722,6 +740,11 @@ private struct DetailPanel: View {
             Rectangle().fill(.white.opacity(0.07)).frame(height: 0.5).padding(.vertical, 14)
 
             VStack(alignment: .leading, spacing: 8) {
+                // Claude Code rows are CLI aliases; show what the alias actually
+                // runs, straight from the CLI's own resolution (probed + cached).
+                if let resolved = resolvedModelID {
+                    factRow(L("model.picker.resolved"), resolved)
+                }
                 factRow(L("model.provider"), model.providerName)
                 if let ctx = info.contextLabel {
                     factRow(L("model.picker.context"), ctx)
@@ -775,6 +798,768 @@ private struct DetailPanel: View {
                 .multilineTextAlignment(.trailing)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+}
+
+// MARK: - Catalog store
+
+/// The catalog every picker reads: what each provider serves, which of those models
+/// survive the fold, and which providers are callable at all.
+///
+/// It's a session-wide store rather than per-view state because the picker now has two
+/// front doors — the settings chip and the panel's ⌘⇧I summon — and a per-view cache
+/// would re-fetch (and re-fold) the whole catalog for each of them.
+@MainActor
+final class ModelCatalogStore: ObservableObject {
+    static let shared = ModelCatalogStore()
+
+    /// Live `/v1/models` results per provider. Absent = the provider falls back to its
+    /// bundled shortlist (`Provider.availableModels`).
+    @Published private(set) var liveByProvider: [Provider: [ModelInfo]] = [:]
+    /// OpenRouter's usage-ranked ids — what its fold keeps.
+    @Published private(set) var featuredByProvider: [Provider: Set<String>] = [:]
+    /// Claude Code alias → concrete model id ("opus" → "claude-opus-4-8"), from
+    /// `ClaudeCLIService`'s probe. The detail pane shows it as a fact row so the
+    /// alias rows still say what they actually run. Empty until a probe lands.
+    @Published private(set) var claudeResolved: [String: String] = [:]
+    /// Guards against a second picker-open kicking off a duplicate probe run
+    /// while the first (seconds of CLI spawns) is still in flight.
+    private var claudeResolveInFlight = false
+
+    private init() {}
+
+    /// How many of OpenRouter's usage-ranked free models ride in the picker's unfolded
+    /// view. The auto-router sits above them, outside the cap.
+    private static let openRouterShortlistLimit = 4
+
+    /// Whether `p` can actually serve a request right now. The CLI backends are keyless
+    /// (installed + signed in is the test); everyone else needs a stored key.
+    static func ready(_ p: Provider) -> Bool {
+        switch p {
+        case .codex:      return CodexCLIService.isAvailable
+        case .claudeCode: return ClaudeCLIService.isAvailable
+        default:          return APIKeyStore.current(for: p) != nil
+        }
+    }
+
+    /// Commit a pick made outside Settings (the ⌘⇧I picker): switch the serving
+    /// provider when it changed, save the model under it, and tell the backend to
+    /// rebuild. Settings has its own path (`selectAcrossProviders`), which additionally
+    /// re-syncs the provider-scoped rows on screen.
+    static func select(provider: Provider, model id: String) {
+        if APIKeyStore.selectedProvider != provider {
+            APIKeyStore.selectedProvider = provider
+        }
+        APIKeyStore.saveModel(id, for: provider)
+        // An explicit pick counts as "recently used" right away, so the chip's
+        // quick menu surfaces it even before the first ask goes out.
+        AskModelMRU.record(provider: provider, model: id)
+        NotificationCenter.default.post(name: .aiBackendChanged, object: nil)
+    }
+
+    /// Kick off the Claude alias→concrete-id probes ("opus" → "claude-opus-4-8").
+    /// Detached and un-awaited: each probe spawns the CLI (seconds), and no picker
+    /// should wait on them — consumers fill in reactively when `claudeResolved`
+    /// publishes. `refreshResolvedModels` is TTL'd, so most calls read the
+    /// persisted cache and publish instantly. Covers the chat aliases AND the
+    /// agent picker's ("fable" isn't a chat alias), so both surfaces get concrete
+    /// names from one probe run.
+    func resolveClaudeAliases() {
+        guard claudeResolved.isEmpty, !claudeResolveInFlight, ClaudeCLIService.isAvailable
+        else { return }
+        claudeResolveInFlight = true
+        var aliases = Provider.claudeCode.availableModels
+        for extra in ["fable", "opus", "sonnet"] where !aliases.contains(extra) {
+            aliases.append(extra)
+        }
+        let probeAliases = aliases
+        Task { [weak self] in
+            let resolved = await Task.detached(priority: .utility) { () -> [String: String] in
+                ClaudeCLIService.refreshResolvedModels(aliases: probeAliases)
+                return ClaudeCLIService.resolvedModels
+            }.value
+            guard let self else { return }
+            self.claudeResolveInFlight = false
+            if !resolved.isEmpty { self.claudeResolved = resolved }
+        }
+    }
+
+    /// Cache a freshly fetched list (Settings fetches the current provider on open).
+    func adopt(_ result: ModelCatalog.Result, for p: Provider) {
+        guard !result.infos.isEmpty else { return }
+        liveByProvider[p] = result.infos
+        featuredByProvider[p] = result.openRouterFeatured
+    }
+
+    /// Fetch every keyed provider's live model list once, when a picker opens, so the
+    /// rows fill in with real names/metadata. Keyless providers are skipped (they show
+    /// their bundled list). Cheap and cancel-safe: results just overwrite the cache, a
+    /// provider already cached this session is not re-fetched — nor, thanks to
+    /// `ModelCatalog`'s own per-provider+key cache, is one fetched in an earlier session.
+    func loadAll() async {
+        await RemoteModelManifest.refreshIfDue()
+        // Codex is keyless, so the keyed loop below skips it. Fetch its real model list
+        // from the app-server off-main and publish it so the picker fills in reactively —
+        // even if the launch warm-up hasn't finished yet. Never publish the bare "codex"
+        // sentinel (that's the no-models-found fallback).
+        if liveByProvider[.codex] == nil {
+            let ids = await Task.detached(priority: .userInitiated) { () -> [String] in
+                CodexCLIService.refreshModels()
+                return CodexCLIService.availableModelIDs
+            }.value
+            if ids != ["codex"] {
+                liveByProvider[.codex] = ids.map { ModelInfo(id: $0, vendor: "OpenAI") }
+            }
+        }
+        // Claude Code's alias→concrete-id mapping, the CLI twin of the fetches
+        // below — see `resolveClaudeAliases`.
+        resolveClaudeAliases()
+        await withTaskGroup(of: (Provider, ModelCatalog.Result?).self) { group in
+            for p in Provider.allCases where liveByProvider[p] == nil {
+                guard let key = APIKeyStore.current(for: p) else { continue }
+                group.addTask { (p, await ModelCatalog.fetch(for: p, apiKey: key)) }
+            }
+            for await (p, live) in group {
+                if let live { adopt(live, for: p) }
+            }
+        }
+    }
+
+    /// The ids provider `p` contributes to the picker's **collapsed** list — the fold
+    /// that keeps a hundred-model catalog from landing as one undifferentiated wall.
+    ///
+    ///  · **Keyless** providers contribute exactly one row (their default model):
+    ///    enough to advertise what a key would unlock, without ten rows you can't call.
+    ///  · **OpenRouter** contributes the auto-router plus the top few of its free
+    ///    lineup ranked by real usage — millions of users voting with their feet
+    ///    (`ModelCatalog` fetches the ranking; `OpenRouterFreeModels.group` cuts it).
+    ///  · **Everyone else** contributes their curated shortlist (`availableModels`,
+    ///    hot-updated by the remote manifest), intersected with what the live catalog
+    ///    actually serves — so an 80-id `/v1/models` dump (embeddings, TTS, whisper…)
+    ///    collapses to the handful of chat models we vouch for.
+    ///
+    /// Everything outside this set still exists in the list — it just lives behind the
+    /// picker's "Show all N models" row, and search always reaches it.
+    private func shortlistIDs(for p: Provider, infos: [ModelInfo], hasKey: Bool) -> Set<String> {
+        guard hasKey else { return Set([infos.first?.id].compactMap { $0 }) }
+        if let featured = featuredByProvider[p], !featured.isEmpty {
+            let g = OpenRouterFreeModels.group(infos.map(\.id), featured: featured,
+                                               limit: Self.openRouterShortlistLimit)
+            return Set(g.head + g.featured)
+        }
+        let live = Set(infos.map(\.id))
+        let curated = p.availableModels.filter(live.contains)
+        // A curated id the vendor no longer serves means the intersection is empty —
+        // fall back to the curated list itself rather than folding the whole provider
+        // away to nothing.
+        return Set(curated.isEmpty ? p.availableModels : curated)
+    }
+
+    /// The rows the cross-provider picker shows: every provider's models in one flat
+    /// list, ordered as the provider menu is, each tagged with whether it has a usable
+    /// key and whether it survives the fold (`featured`). Providers with a key list
+    /// their live models (once fetched) or their bundled shortlist; providers without a
+    /// key still appear — greyed — so the user sees what a key would unlock and can jump
+    /// straight to configuring it. `selected` is the provider in effect: its rows lead.
+    func rows(selected: Provider) -> [PickerModel] {
+        var rows: [PickerModel] = []
+        for p in Provider.allCases {
+            let hasKey = Self.ready(p)
+            let infos: [ModelInfo]
+            if let live = liveByProvider[p], !live.isEmpty {
+                infos = live
+            } else {
+                // The provider names the vendor for the ids that don't name their own —
+                // Codex's "codex", Claude Code's bare "opus"/"sonnet" aliases — so every
+                // row wears its vendor's mark instead of a monogram.
+                infos = p.availableModels.map {
+                    ModelInfo(id: $0, vendor: ModelRatings.vendor(for: $0, provider: p))
+                }
+            }
+            let short = shortlistIDs(for: p, infos: infos, hasKey: hasKey)
+            // Shortlisted models lead their provider's block, so expanding the fold
+            // appends rows below what was already on screen instead of reshuffling it.
+            let ordered = infos.enumerated().sorted { a, b in
+                let af = short.contains(a.element.id), bf = short.contains(b.element.id)
+                return af == bf ? a.offset < b.offset : af
+            }.map(\.element)
+            for info in ordered {
+                // A model only earns the resting (unfolded) shortlist if its vendor has a
+                // real logo — a monogram letter-tile in the featured list reads as
+                // ugly/broken, so the long-tail vendors without a bundled mark fold away
+                // (still reachable via "Show all" and search, and a selected one always
+                // shows regardless).
+                let hasLogo = VendorLogos.mark(for: info.vendor) != nil
+                rows.append(PickerModel(
+                    provider: p, providerName: p.displayName, hasKey: hasKey,
+                    featured: short.contains(info.id) && hasLogo, info: info))
+            }
+        }
+        // Usable models first (the current provider's leading), greyed ones after — the
+        // list reads as "what you can pick now" above "what a key would unlock". A stable
+        // secondary sort keeps rows from reshuffling as live lists load.
+        return rows.enumerated().sorted { a, b in
+            if a.element.hasKey != b.element.hasKey { return a.element.hasKey }
+            let aCur = a.element.provider == selected
+            let bCur = b.element.provider == selected
+            if aCur != bCur { return aCur }
+            return a.offset < b.offset
+        }.map(\.element)
+    }
+}
+
+// MARK: - Ask recents quick menu
+
+/// The Ask side's "recently used models" memory: the (provider, model) pairs most
+/// recently asked through, newest first, capped at five. Fed by every chat submit
+/// (including one-shot regenerate overrides) and by explicit picks, persisted in
+/// UserDefaults so the chip menu remembers across launches. This is what the Ask
+/// model chip's quick menu lists — the full cross-provider catalog stays in
+/// Settings.
+enum AskModelMRU {
+    struct Entry: Hashable {
+        let provider: Provider
+        let model: String
+    }
+
+    static let capacity = 5
+    private static let defaultsKey = "ask_model_mru"
+
+    /// Newest first. Entries whose provider no longer decodes (a removed enum case
+    /// after an update) are dropped rather than crashing the menu.
+    static var entries: [Entry] {
+        let raw = UserDefaults.standard.stringArray(forKey: defaultsKey) ?? []
+        return raw.compactMap { line in
+            guard let bar = line.firstIndex(of: "|"),
+                  let provider = Provider(rawValue: String(line[..<bar]))
+            else { return nil }
+            let model = String(line[line.index(after: bar)...])
+            return model.isEmpty ? nil : Entry(provider: provider, model: model)
+        }
+    }
+
+    static func record(provider: Provider, model: String) {
+        let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let entry = Entry(provider: provider, model: trimmed)
+        var list = entries
+        list.removeAll { $0 == entry }
+        list.insert(entry, at: 0)
+        UserDefaults.standard.set(
+            list.prefix(capacity).map { "\($0.provider.rawValue)|\($0.model)" },
+            forKey: defaultsKey)
+    }
+}
+
+/// What the Ask model chip opens: the agent quick picker's little glass card, on the
+/// chat side — one row per recently used model (vendor mark + pretty name), nothing
+/// else. Unlike the agent card (which stays open for its effort slider), this is a
+/// plain menu: a click picks the model AND closes — one gesture, done. ↑/↓ still
+/// arm live for keyboard users (Return / Esc close). The armed row is mirrored in
+/// local state because a pick commits straight to UserDefaults, which re-renders
+/// nothing on its own.
+struct AskRecentModelPickerView: View {
+    struct Row: Hashable {
+        let provider: Provider
+        let id: String
+    }
+
+    let rows: [Row]
+    let onSelect: (Row) -> Void
+    let onDone: () -> Void
+
+    @State private var current: Row
+    /// See `ModelPickerView.installKeyMonitor` — a local keyDown monitor is the only
+    /// reliable way to own the arrow keys inside a popover.
+    @State private var keyMonitor: Any?
+
+    init(rows: [Row], selectedProvider: Provider, selectedModelID: String,
+         onSelect: @escaping (Row) -> Void, onDone: @escaping () -> Void) {
+        self.rows = rows
+        self.onSelect = onSelect
+        self.onDone = onDone
+        _current = State(initialValue: Row(provider: selectedProvider, id: selectedModelID))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(rows, id: \.self) { r in
+                AskRecentModelRow(
+                    label: ModelRatings.prettyName(for: r.id),
+                    selected: r == current) {
+                        // Menu semantics: one click picks and dismisses. Clicking
+                        // the already-armed row just dismisses.
+                        if r != current { arm(r) }
+                        onDone()
+                    }
+            }
+        }
+        .padding(8)
+        .frame(width: 190)
+        .onAppear(perform: installKeyMonitor)
+        .onDisappear(perform: removeKeyMonitor)
+    }
+
+    private func arm(_ r: Row) {
+        current = r
+        onSelect(r)
+    }
+
+    private func installKeyMonitor() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            switch event.keyCode {
+            case 126: step(-1); return nil               // ↑
+            case 125: step(1);  return nil               // ↓
+            case 36, 76, 53: onDone(); return nil        // Return / keypad Enter / Esc
+            default: return event
+            }
+        }
+    }
+
+    private func removeKeyMonitor() {
+        if let m = keyMonitor { NSEvent.removeMonitor(m) }
+        keyMonitor = nil
+    }
+
+    private func step(_ delta: Int) {
+        guard !rows.isEmpty else { return }
+        let cur = rows.firstIndex(of: current) ?? -1
+        arm(rows[min(max(cur + delta, 0), rows.count - 1)])
+    }
+}
+
+/// One row of the Ask recents menu — `AgentModelRow`'s look (soft wash when armed,
+/// fainter on hover, no rims or checkmarks) with the vendor's real mark leading,
+/// since these rows mix providers.
+private struct AskRecentModelRow: View {
+    let label: String
+    let selected: Bool
+    let onTap: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Text(label)
+                .font(.sf(11.5, weight: selected ? .semibold : .regular))
+                .foregroundStyle(selected ? Tokens.text1 : Tokens.text2)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 6)
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 25)
+        .background(RoundedRectangle(cornerRadius: 7)
+            .fill(selected ? .white.opacity(0.12) : hovering ? .white.opacity(0.05) : .clear))
+        .contentShape(RoundedRectangle(cornerRadius: 7))
+        .onHover { hovering = $0 }
+        .onTapGesture(perform: onTap)
+        .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+}
+
+// MARK: - Agent quick picker (⌘⇧I)
+
+/// An agent engine's brand mark, tinted like the surrounding text — Codex's bundled
+/// template asset, Claude's the Anthropic sunburst already bundled for the model
+/// picker. Shared by the compose chip's row and the ⌘⇧I quick picker.
+struct AgentEngineMark: View {
+    let engine: AgentEngine
+    let size: CGFloat
+    let tint: Color
+
+    var body: some View {
+        switch engine {
+        case .codex:
+            Image("CodexMark")
+                .renderingMode(.template)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(width: size, height: size)
+                .foregroundStyle(tint)
+        case .claude:
+            if let mark = VendorLogos.mark(for: "Anthropic") {
+                SVGPathShape(pathData: mark.path, viewBox: mark.viewBox)
+                    .fill(tint, style: FillStyle(eoFill: true))
+                    .frame(width: size, height: size)
+            }
+        }
+    }
+}
+
+/// The agent's two dials — model and reasoning effort — as one card, and what ⌘⇧I
+/// summons anywhere in the panel. It's the compose chip's NSMenu without the menu: the
+/// whole model list across engines is on screen at once, with the effort ladder for the
+/// current pick right under it, so raising Opus to `xhigh` is one chord and two keys
+/// instead of a menu, a submenu, and a hunt.
+///
+/// **Everything applies live.** The cursor *is* the selection: ↑/↓ arms the model it
+/// lands on, ←/→ steps the effort. Nothing here is destructive — these are the picks
+/// the *next* run will use — so a card that committed only on Return would just be a
+/// second thing to remember. Return and Esc both simply close it.
+struct AgentModelPickerView: View {
+    /// Every available engine's model choices, flattened in menu order — picking a
+    /// model picks its engine with it, exactly as the chip's menu does.
+    let choices: [AgentModelChoice]
+    let selectedEngine: AgentEngine
+    let selectedModelID: String?
+    let selectedEffort: AgentEffort?
+    let onSelectModel: (AgentModelChoice) -> Void
+    /// nil = clear back to the CLI's own default effort.
+    let onSelectEffort: (AgentEffort?) -> Void
+    let onDone: () -> Void
+
+    /// See `ModelPickerView.installKeyMonitor` — the same reason applies here: a local
+    /// keyDown monitor is the only reliable way to own the arrow keys inside a popover.
+    @State private var keyMonitor: Any?
+    /// The live mirror the key monitor's captured closure reads (`choices` is a `let`
+    /// captured at install time, and Codex's model list can land after the card opens).
+    @State private var choicesMirror: [AgentModelChoice] = []
+    @State private var effortsMirror: [AgentEffort] = []
+    /// True only when the selection just moved via ↑/↓, so the list scrolls to keep it
+    /// visible. A click never sets it — the clicked row is visible by definition, and
+    /// scrolling the list under the pointer is exactly the misbehavior the main picker
+    /// had to fix (see `ModelPickerView.scrollToFocused`).
+    @State private var scrollToSelection = false
+    /// The armed row's wash is one shared shape that *slides* between rows
+    /// (matchedGeometryEffect) instead of blinking off one row and on another —
+    /// the springy glide is the card's one piece of motion.
+    @Namespace private var armedNS
+
+    /// The spring every selection change rides — the wash glide, the label
+    /// weight shift, and the effort bars all share it so the card moves as one.
+    private static let selectionSpring = Animation.spring(response: 0.28, dampingFraction: 0.85)
+
+    /// The engines on offer, in the order their choices were handed in — what the
+    /// bottom bar's switch shows.
+    private var engines: [AgentEngine] {
+        var out: [AgentEngine] = []
+        for c in choices where !out.contains(c.engine) { out.append(c.engine) }
+        return out
+    }
+
+    /// The list's content: only the armed engine's models. The other engine's fleet
+    /// sits behind its mark in the bottom bar — half the content of the old mixed
+    /// list, and the rows can stay bare names.
+    private var engineChoices: [AgentModelChoice] {
+        choices.filter { $0.engine == selectedEngine }
+    }
+
+    /// What was last armed per engine while this card is up, so flipping
+    /// GPT → Claude → GPT lands back on the GPT model you had, not on the
+    /// list's first row.
+    @State private var lastPick: [AgentEngine: AgentModelChoice] = [:]
+
+    /// What the group caption says — the family name, not the CLI's ("GPT", not
+    /// "Codex": the rows under it are GPT models, and that's the word the user knows).
+    private func groupTitle(for e: AgentEngine) -> String {
+        e == .codex ? "GPT" : "Claude"
+    }
+
+    /// The row title inside a group: the caption already names the family, so
+    /// "GPT-5.6-Terra" shortens to "5.6-Terra" and "Claude Fable" to "Fable".
+    /// Labels without the family prefix (Codex's bare "Codex" default) pass through.
+    private func shortLabel(_ c: AgentModelChoice) -> String {
+        let family = groupTitle(for: c.engine).lowercased()
+        for sep in ["-", " "] {
+            let p = family + sep
+            if c.label.lowercased().hasPrefix(p), c.label.count > p.count {
+                return String(c.label.dropFirst(p.count))
+            }
+        }
+        return c.label
+    }
+
+    /// The effort ladder for the model in effect — Codex's rungs differ per model, so
+    /// this re-reads on every pick.
+    private var efforts: [AgentEffort] {
+        selectedEngine.effortChoices(forModelID: selectedModelID)
+    }
+
+    private func isSelected(_ c: AgentModelChoice) -> Bool {
+        c.engine == selectedEngine && c.id == selectedModelID
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ScrollViewReader { proxy in
+                ScrollView(showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        // Only the armed engine's models — the other engine is one
+                        // tap away in the bottom bar, so the rows stay bare names.
+                        ForEach(engineChoices, id: \.self) { c in
+                            AgentModelRow(label: shortLabel(c), selected: isSelected(c),
+                                          ns: armedNS) {
+                                // A click on the armed row is a confirmation, not a
+                                // re-pick — it closes the card, giving mouse users the
+                                // same one-more-gesture exit Return gives the keyboard.
+                                if isSelected(c) { onDone() }
+                                else { withAnimation(Self.selectionSpring) { arm(c) } }
+                            }
+                            .id(c)
+                        }
+                    }
+                }
+                .frame(maxHeight: 200)
+                // Open centered on the current pick — with the fleet of models the
+                // armed one can sit below the fold, and a picker that opens blind to
+                // its own selection makes the user hunt for their bearings.
+                .onAppear {
+                    if let c = engineChoices.first(where: isSelected) {
+                        // Seed the per-engine memory so switching away and back
+                        // restores what was armed when the card opened.
+                        lastPick[c.engine] = c
+                        proxy.scrollTo(c, anchor: .center)
+                    }
+                }
+                // ↑/↓ re-arms live, so follow the selection — but only for keyboard
+                // moves (see `scrollToSelection`).
+                .onChange(of: selectedModelID) { followSelection(proxy) }
+                .onChange(of: selectedEngine) { followSelection(proxy) }
+            }
+
+            Rectangle().fill(.white.opacity(0.07)).frame(height: 0.5)
+                .padding(.vertical, 6)
+
+            // One bottom bar, two things: the engine switch (each engine's real
+            // brand mark; tap to flip the whole list) on the left, and the plainest
+            // possible effort slider — detent dots and a thumb, leftmost = the CLI
+            // default, the top rung's dot lit in the agent tint — on the right.
+            // No captions, no readouts. ←/→ still steps the effort.
+            HStack(spacing: 0) {
+                HStack(spacing: 10) {
+                    ForEach(engines, id: \.self) { e in
+                        EngineSwitchMark(engine: e, selected: e == selectedEngine) {
+                            switchEngine(e)
+                        }
+                    }
+                }
+                Spacer(minLength: 8)
+                EffortSlider(rungs: efforts, selected: selectedEffort, onSelect: onSelectEffort)
+                    .frame(width: 92)
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 25)
+        }
+        .padding(8)
+        .frame(width: 190)
+        .onAppear {
+            syncMirrors()
+            installKeyMonitor()
+        }
+        .onDisappear(perform: removeKeyMonitor)
+        .onChange(of: choices) { syncMirrors() }
+        .onChange(of: efforts) { syncMirrors() }
+        .onChange(of: selectedEngine) { syncMirrors() }
+    }
+
+    private func syncMirrors() {
+        choicesMirror = engineChoices
+        effortsMirror = efforts
+    }
+
+    /// Arm a model and remember it as its engine's pick, so the bottom bar's
+    /// switch can restore it later.
+    private func arm(_ c: AgentModelChoice) {
+        lastPick[c.engine] = c
+        onSelectModel(c)
+    }
+
+    /// Flip the list to another engine, re-arming what was last picked there (or
+    /// its first model). The armed row may sit below the fold of the freshly
+    /// swapped list, so this scrolls to it like a keyboard step does.
+    private func switchEngine(_ e: AgentEngine) {
+        guard e != selectedEngine,
+              let pick = lastPick[e] ?? choices.first(where: { $0.engine == e })
+        else { return }
+        scrollToSelection = true
+        withAnimation(Self.selectionSpring) { arm(pick) }
+    }
+
+    /// Scroll the armed row into view after a keyboard step. Reads and clears the
+    /// `scrollToSelection` flag so click-driven selection changes never move the list.
+    private func followSelection(_ proxy: ScrollViewProxy) {
+        guard scrollToSelection else { return }
+        scrollToSelection = false
+        guard let c = choicesMirror.first(where: isSelected) else { return }
+        withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(c, anchor: .center) }
+    }
+
+    // MARK: Keyboard
+
+    private func installKeyMonitor() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            switch event.keyCode {
+            case 126: stepModel(-1); return nil          // ↑
+            case 125: stepModel(1);  return nil          // ↓
+            case 123: stepEffort(-1); return nil         // ←
+            case 124: stepEffort(1);  return nil         // →
+            case 36, 76, 53: onDone(); return nil        // Return / keypad Enter / Esc
+            default: return event
+            }
+        }
+    }
+
+    private func removeKeyMonitor() {
+        if let m = keyMonitor { NSEvent.removeMonitor(m) }
+        keyMonitor = nil
+    }
+
+    /// Arm the model ±1 along the flat list, clamping at the ends, and flag the move
+    /// so the list scrolls to keep the armed row visible.
+    private func stepModel(_ delta: Int) {
+        let rows = choicesMirror
+        guard !rows.isEmpty else { return }
+        let cur = rows.firstIndex(where: isSelected) ?? -1
+        let next = min(max(cur + delta, 0), rows.count - 1)
+        scrollToSelection = true
+        withAnimation(Self.selectionSpring) { arm(rows[next]) }
+    }
+
+    /// Step the effort ±1 along the ladder. Index -1 is the CLI default (nothing lit),
+    /// so ← off the first rung lands back there — the only way out of an effort once
+    /// picked, short of clicking the lit pill.
+    private func stepEffort(_ delta: Int) {
+        let rungs = effortsMirror
+        guard !rungs.isEmpty else { return }
+        let cur = selectedEffort.flatMap { rungs.firstIndex(of: $0) } ?? -1
+        let next = min(max(cur + delta, -1), rungs.count - 1)
+        onSelectEffort(next < 0 ? nil : rungs[next])
+    }
+}
+
+/// One row of the ⌘⇧I card. Its own `View` so it owns its hover state. Deliberately
+/// spare: the armed row is just a soft wash + semibold — no rim, no checkmark — and a
+/// hovered row a fainter wash, so the card reads as text on glass, not a stack of
+/// controls. Bare names only — the engine identity lives in the bottom bar's switch.
+/// The armed wash is a single shared shape (`matchedGeometryEffect` over the
+/// card's namespace), so selection *glides* between rows instead of blinking.
+private struct AgentModelRow: View {
+    let label: String
+    let selected: Bool
+    let ns: Namespace.ID
+    let onTap: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Text(label)
+                .font(.sf(11.5, weight: selected ? .semibold : .regular))
+                .foregroundStyle(selected ? Tokens.text1 : Tokens.text2)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 6)
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 25)
+        .background {
+            if selected {
+                RoundedRectangle(cornerRadius: 7)
+                    .fill(.white.opacity(0.12))
+                    .matchedGeometryEffect(id: "armed-wash", in: ns)
+            } else if hovering {
+                RoundedRectangle(cornerRadius: 7)
+                    .fill(.white.opacity(0.05))
+            }
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 7))
+        .onHover { hovering = $0 }
+        .onTapGesture(perform: onTap)
+        .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+}
+
+/// One engine of the bottom bar's switch: the engine's real brand mark, bright when
+/// it owns the list, dimmed otherwise, warming on hover. Just the mark — no pill,
+/// no rim; the tap target is padded invisibly to row height.
+private struct EngineSwitchMark: View {
+    let engine: AgentEngine
+    let selected: Bool
+    let onTap: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        AgentEngineMark(engine: engine, size: 13,
+                        tint: selected ? Tokens.text1 : Tokens.text3)
+            .opacity(selected ? 1 : hovering ? 0.85 : 0.55)
+            .frame(width: 18, height: 25)
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 }
+            .onTapGesture(perform: onTap)
+            .animation(.easeOut(duration: 0.12), value: hovering)
+            .animation(.easeOut(duration: 0.12), value: selected)
+    }
+}
+
+/// The reasoning-effort dial at its plainest: one detent dot per position and a round
+/// thumb riding them — nothing else. The leftmost detent is the CLI default, then one
+/// dot per rung; the far (rightmost) dot is lit in the agent tint to mark the
+/// "hardest thinking" end. Click or drag snaps the thumb to the nearest detent; ←/→
+/// drive the same state from the keyboard (the thumb is derived from `selected`,
+/// never stored).
+private struct EffortSlider: View {
+    let rungs: [AgentEffort]
+    let selected: AgentEffort?
+    /// nil = the CLI's own default (position 0).
+    let onSelect: (AgentEffort?) -> Void
+
+    // Position 0 = default (nil); position i (1…count) = rungs[i-1].
+    private var positionCount: Int { rungs.count + 1 }
+    private var currentIndex: Int {
+        guard let selected, let i = rungs.firstIndex(of: selected) else { return 0 }
+        return i + 1
+    }
+
+    private let thumbD: CGFloat = 11
+    private let dot: CGFloat = 2.5
+
+    var body: some View {
+        GeometryReader { geo in
+            let usable = max(geo.size.width - thumbD, 1)
+            let step = positionCount > 1 ? usable / CGFloat(positionCount - 1) : 0
+            let thumbX = thumbD / 2 + step * CGFloat(currentIndex)
+
+            ZStack(alignment: .leading) {
+                ForEach(0..<positionCount, id: \.self) { i in
+                    let isLast = i == positionCount - 1
+                    Circle()
+                        .fill(isLast ? Tokens.agentTint : .white.opacity(0.35))
+                        .frame(width: dot, height: dot)
+                        .offset(x: thumbD / 2 + step * CGFloat(i) - dot / 2)
+                }
+
+                Circle()
+                    .fill(.white)
+                    .frame(width: thumbD, height: thumbD)
+                    .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
+                    .offset(x: thumbX - thumbD / 2)
+                    .animation(.spring(response: 0.24, dampingFraction: 0.82), value: currentIndex)
+            }
+            // Fill the GeometryReader: the dots and thumb are small offset shapes,
+            // so without this the ZStack (and the contentShape hit area with it)
+            // collapses to the thumb's own ~11pt — the slider stops being clickable
+            // anywhere but its left edge.
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { v in snap(toX: v.location.x, usable: usable, step: step) }
+            )
+        }
+    }
+
+    /// Map a touch x to the nearest detent and fire only on a real change, so a
+    /// drag doesn't spam `onSelect` with the same rung every frame.
+    private func snap(toX x: CGFloat, usable: CGFloat, step: CGFloat) {
+        guard step > 0 else { return }
+        let clamped = min(max(x - thumbD / 2, 0), usable)
+        let idx = min(max(Int((clamped / step).rounded()), 0), positionCount - 1)
+        guard idx != currentIndex else { return }
+        onSelect(idx == 0 ? nil : rungs[idx - 1])
     }
 }
 

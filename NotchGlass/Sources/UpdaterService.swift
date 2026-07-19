@@ -181,7 +181,7 @@ final class UpdaterService: ObservableObject {
                       let url = URL(string: Self.token != nil ? asset.url : asset.browser_download_url)
                 else { throw UpdateError.badResponse }
 
-                let (tmp, resp) = try await URLSession.shared.download(
+                let (tmp, resp) = try await ProxyConfig.urlSession.download(
                     for: Self.request(url, accept: "application/octet-stream"))
                 guard (resp as? HTTPURLResponse)?.statusCode == 200 else {
                     throw UpdateError.badResponse
@@ -228,7 +228,7 @@ final class UpdaterService: ObservableObject {
 
     private static func fetchLatest() async throws -> Release {
         let url = URL(string: "https://api.github.com/repos/\(repo)/releases/latest")!
-        let (data, resp) = try await URLSession.shared.data(
+        let (data, resp) = try await ProxyConfig.urlSession.data(
             for: request(url, accept: "application/vnd.github+json"))
         guard (resp as? HTTPURLResponse)?.statusCode == 200 else {
             throw UpdateError.badResponse

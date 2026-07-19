@@ -224,7 +224,7 @@ final class OpenRouterAuth: ObservableObject {
                 req.setValue("application/json", forHTTPHeaderField: "Content-Type")
                 req.httpBody = try JSONEncoder().encode(ExchangeRequest(
                     code: code, codeVerifier: verifier, codeChallengeMethod: "S256"))
-                let (data, response) = try await URLSession.shared.data(for: req)
+                let (data, response) = try await ProxyConfig.urlSession.data(for: req)
                 guard let http = response as? HTTPURLResponse,
                       (200..<300).contains(http.statusCode),
                       case let key = try JSONDecoder().decode(ExchangeResponse.self, from: data).key,

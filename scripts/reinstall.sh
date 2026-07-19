@@ -27,6 +27,24 @@ info()  { printf '%s==>%s %s\n' "$bold" "$reset" "$*"; }
 ok()    { printf '%s✓%s %s\n' "$green" "$reset" "$*"; }
 die()   { printf '%s✗%s %s\n' "$red" "$reset" "$*" >&2; exit 1; }
 
+# --- concurrency lock --------------------------------------------------------
+# Two reinstalls interleaving their pkill→open sequences is how the app ends up
+# running twice (a pkill can miss the other pass's instance while it's still in
+# its fork/exec window). One reinstall at a time. mkdir is the atomic primitive
+# (macOS ships no flock(1)); a pid file inside detects a stale lock left by a
+# hard-killed run.
+LOCK="/tmp/notch-reinstall.lock"
+if ! mkdir "$LOCK" 2>/dev/null; then
+  holder="$(cat "$LOCK/pid" 2>/dev/null || true)"
+  if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
+    die "Another reinstall (pid $holder) is already running."
+  fi
+  rm -rf "$LOCK"
+  mkdir "$LOCK" 2>/dev/null || die "Could not take the reinstall lock at $LOCK."
+fi
+echo "$$" > "$LOCK/pid"
+trap 'rm -rf "$LOCK"' EXIT
+
 # --- build -----------------------------------------------------------------
 info "Building ${SCHEME} (${CONFIG})…"
 xcodebuild -project "$PROJECT" -scheme "$SCHEME" -configuration "$CONFIG" build \
@@ -86,7 +104,16 @@ for _ in 1 2 3 4 5 6; do
   sleep 0.5
 done
 if ! $launched; then
-  ( "$dest/Contents/MacOS/Notchi" >/dev/null 2>&1 & )
+  # An `open` that errored (-600) may still have queued its launch at LS — if
+  # the app is up by now, spawning the binary on top of it is exactly the
+  # double-launch. Only force-spawn when nothing actually appeared. (The app's
+  # own single-instance guard in AppDelegate is the final backstop.)
+  sleep 1
+  if pgrep -x Notchi >/dev/null 2>&1; then
+    launched=true
+  else
+    ( "$dest/Contents/MacOS/Notchi" >/dev/null 2>&1 & )
+  fi
 fi
 sleep 1
 pgrep -x Notchi >/dev/null || die "Could not launch ${dest}."

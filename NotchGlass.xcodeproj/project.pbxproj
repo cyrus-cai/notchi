@@ -21,6 +21,7 @@
 		A1000051 /* InlineSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000050 /* InlineSettingsView.swift */; };
 		A1000731 /* ModelPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000730 /* ModelPickerView.swift */; };
 		A1000741 /* VendorLogos.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000740 /* VendorLogos.swift */; };
+		A10007E1 /* LucideIcons.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10007E0 /* LucideIcons.swift */; };
 		A100001C /* HotKey.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000D /* HotKey.swift */; };
 		A100001D /* APIKeyStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000E /* APIKeyStore.swift */; };
 		A1000060 /* NotesService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000061 /* NotesService.swift */; };
@@ -32,6 +33,10 @@
 		A1000074 /* MouseVelocityTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000075 /* MouseVelocityTracker.swift */; };
 		A1000076 /* OpenRouterAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000077 /* OpenRouterAuth.swift */; };
 		A1000790 /* CodexCLIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000791 /* CodexCLIService.swift */; };
+		A10007A0 /* AgentTaskService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10007A1 /* AgentTaskService.swift */; };
+		A10007B0 /* ClaudeCLIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10007B1 /* ClaudeCLIService.swift */; };
+		A10007C0 /* ProxyConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10007C1 /* ProxyConfig.swift */; };
+		A10007D0 /* DetachedSessionWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10007D1 /* DetachedSessionWindow.swift */; };
 		A1000078 /* Localization.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000079 /* Localization.swift */; };
 		A1000080 /* WhatsNewService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000081 /* WhatsNewService.swift */; };
 		A10000C0 /* OnboardingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000C1 /* OnboardingService.swift */; };
@@ -64,6 +69,10 @@
 		A1000075 /* MouseVelocityTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MouseVelocityTracker.swift; sourceTree = "<group>"; };
 		A1000077 /* OpenRouterAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenRouterAuth.swift; sourceTree = "<group>"; };
 		A1000791 /* CodexCLIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexCLIService.swift; sourceTree = "<group>"; };
+		A10007A1 /* AgentTaskService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentTaskService.swift; sourceTree = "<group>"; };
+		A10007B1 /* ClaudeCLIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeCLIService.swift; sourceTree = "<group>"; };
+		A10007C1 /* ProxyConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyConfig.swift; sourceTree = "<group>"; };
+		A10007D1 /* DetachedSessionWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DetachedSessionWindow.swift; sourceTree = "<group>"; };
 		A1000079 /* Localization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Localization.swift; sourceTree = "<group>"; };
 		A1000081 /* WhatsNewService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhatsNewService.swift; sourceTree = "<group>"; };
 		A10000C1 /* OnboardingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingService.swift; sourceTree = "<group>"; };
@@ -80,6 +89,7 @@
 		A1000050 /* InlineSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlineSettingsView.swift; sourceTree = "<group>"; };
 		A1000730 /* ModelPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelPickerView.swift; sourceTree = "<group>"; };
 		A1000740 /* VendorLogos.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VendorLogos.swift; sourceTree = "<group>"; };
+		A10007E0 /* LucideIcons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LucideIcons.swift; sourceTree = "<group>"; };
 		A100000D /* HotKey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HotKey.swift; sourceTree = "<group>"; };
 		A100000E /* APIKeyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIKeyStore.swift; sourceTree = "<group>"; };
 		A100000B /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -135,6 +145,10 @@
 				A1000075 /* MouseVelocityTracker.swift */,
 				A1000077 /* OpenRouterAuth.swift */,
 				A1000791 /* CodexCLIService.swift */,
+				A10007A1 /* AgentTaskService.swift */,
+				A10007B1 /* ClaudeCLIService.swift */,
+				A10007C1 /* ProxyConfig.swift */,
+				A10007D1 /* DetachedSessionWindow.swift */,
 				A1000079 /* Localization.swift */,
 				A1000081 /* WhatsNewService.swift */,
 				A10000C1 /* OnboardingService.swift */,
@@ -152,6 +166,7 @@
 				A1000050 /* InlineSettingsView.swift */,
 				A1000730 /* ModelPickerView.swift */,
 				A1000740 /* VendorLogos.swift */,
+				A10007E0 /* LucideIcons.swift */,
 				A100000D /* HotKey.swift */,
 				A100000E /* APIKeyStore.swift */,
 			);
@@ -262,6 +277,10 @@
 				A1000074 /* MouseVelocityTracker.swift in Sources */,
 				A1000076 /* OpenRouterAuth.swift in Sources */,
 				A1000790 /* CodexCLIService.swift in Sources */,
+				A10007A0 /* AgentTaskService.swift in Sources */,
+				A10007B0 /* ClaudeCLIService.swift in Sources */,
+				A10007C0 /* ProxyConfig.swift in Sources */,
+				A10007D0 /* DetachedSessionWindow.swift in Sources */,
 				A1000078 /* Localization.swift in Sources */,
 				A1000080 /* WhatsNewService.swift in Sources */,
 				A10000C0 /* OnboardingService.swift in Sources */,
@@ -279,6 +298,7 @@
 				A1000051 /* InlineSettingsView.swift in Sources */,
 				A1000731 /* ModelPickerView.swift in Sources */,
 				A1000741 /* VendorLogos.swift in Sources */,
+				A10007E1 /* LucideIcons.swift in Sources */,
 				A100001C /* HotKey.swift in Sources */,
 				A100001D /* APIKeyStore.swift in Sources */,
 			);
@@ -346,7 +366,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.16;
+				MARKETING_VERSION = 0.2.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -369,7 +389,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.16;
+				MARKETING_VERSION = 0.2.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;

@@ -9,6 +9,9 @@ import SwiftUI
 /// reads as part of the island. The gear and ⌘, both swap the RECENT block for
 /// this; the back chevron returns to the idle prompt.
 struct InlineSettingsView: View {
+    /// Where About → Feedback writes to.
+    static let feedbackEmail = "xiikii@outlook.com"
+
     @ObservedObject var model: NotchModel
     /// Self-update state (shared app-wide — the gear badge reads the same object).
     /// Drives the Version row: a quiet number normally, an Update action when a
@@ -52,17 +55,10 @@ struct InlineSettingsView: View {
     /// regardless — see `keySection`.
     @State private var keySectionOpen = false
 
-    /// Live model lists fetched per provider, for the cross-provider picker — keyed
-    /// by provider. Only providers with a key get a live fetch; the rest fall back
-    /// to their bundled `availableModels`. Filled lazily when the picker opens.
-    @State private var liveByProvider: [Provider: [ModelInfo]] = [:]
-
-    /// Which of a provider's live ids are "featured" — today only OpenRouter reports
-    /// this: its `:free` lineup ranked by real last-week usage (see `UsageRankings`).
-    /// This is what lets the picker fold a 60-model marketplace down to the handful
-    /// the world actually runs. Empty for providers that carry no usage signal; they
-    /// fold against their curated shortlist instead.
-    @State private var featuredByProvider: [Provider: Set<String>] = [:]
+    /// The model catalog behind the picker — live lists, the fold, and which providers
+    /// are callable. Session-wide (the panel's ⌘⇧I picker reads the same store), so a
+    /// list fetched for one surface is already warm for the other.
+    @ObservedObject private var catalog = ModelCatalogStore.shared
 
     /// Whether the custom cross-provider model picker overlay is open.
     @State private var modelPickerOpen = false
@@ -158,8 +154,8 @@ struct InlineSettingsView: View {
         case model = "Model"     // provider, API key, model override
         case search = "Search"   // search backend + its key
         case notes = "Notes"     // the capture pipeline: note destination + copy sensing
-        case tools = "Tools"     // quick-tool chips + per-tool prefs (translation languages)
-        case general = "General" // app-level toggles (shortcut, placement, Dock icon…)
+        case general = "General" // how you reach it: shortcut, language, launch at login, proxy
+        case appearance = "Appearance" // where it shows up: screens, full screen, Dock icon
         case about = "About"     // version + self-update
         var id: String { rawValue }
 
@@ -167,12 +163,12 @@ struct InlineSettingsView: View {
         /// identity); this is what the user actually reads.
         var title: String {
             switch self {
-            case .model:   return L("sidebar.model")
-            case .search:  return L("sidebar.search")
-            case .notes:   return L("sidebar.notes")
-            case .tools:   return L("sidebar.tools")
-            case .general: return L("sidebar.general")
-            case .about:   return L("sidebar.about")
+            case .model:      return L("sidebar.model")
+            case .search:     return L("sidebar.search")
+            case .notes:      return L("sidebar.notes")
+            case .general:    return L("sidebar.general")
+            case .appearance: return L("sidebar.appearance")
+            case .about:      return L("sidebar.about")
             }
         }
     }
@@ -228,10 +224,9 @@ struct InlineSettingsView: View {
     /// modifier), cleared on the next successful record or when recording ends.
     @State private var hotKeyHint: String?
 
-    /// Whether the quick-tools checklist popover is open. A popover (not a native
-    /// `Menu`) so toggling a tool keeps the list up — the user can check several in
-    /// a row; clicking outside dismisses it.
-    @State private var quickToolsOpen = false
+    /// What the proxy field resolves to right now — filled in asynchronously by
+    /// `refreshProxyStatus` because detection may spawn a login shell.
+    @State private var proxyStatus: String = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -276,20 +271,23 @@ struct InlineSettingsView: View {
                         // then the closed-notch copy sensing that feeds it.
                         noteDestinationRow
                         copySenseRow
-                    case .tools:
-                        // Which quick tools appear at all, then the knobs of the
-                        // individual tools (today: Translate's language pair).
-                        quickToolsRow
-                        translationLanguageRow
                     case .general:
-                        // How you summon it → where it appears → what language it
-                        // speaks → how it sits in the system.
+                        // How you reach it: the summon chord, the language it
+                        // speaks, whether it's there from login — and how the
+                        // whole app (AI requests and agent CLIs) reaches the
+                        // network.
                         shortcutRow
+                        appLanguageRow
+                        launchAtLoginRow
+                        proxyRow
+                    case .appearance:
+                        // Where it shows itself: which screens carry an island,
+                        // whether it yields to full screen, the Dock icon — and
+                        // whether background work animates the resting notch.
                         placementRow
                         fullscreenAutoHideRow
-                        appLanguageRow
                         dockIconRow
-                        launchAtLoginRow
+                        liveActivityRow
                     case .about:
                         aboutSection
                     }
@@ -302,6 +300,17 @@ struct InlineSettingsView: View {
             .padding(.top, 12)
         }
         .task {
+            // A keyless model picked in the ⌘⇧I picker sent us here: adopt the pick,
+            // aim the key section at its provider, and unfold it — from here it's the
+            // same pending flow the settings picker's own "Add key" runs (the model
+            // commits the moment a key lands, and nothing changes before that).
+            if let pending = model.pendingModelSetup {
+                model.pendingModelSetup = nil
+                section = .model
+                pendingModel = PendingModel(provider: pending.provider, id: pending.id)
+                setKeyScope(pending.provider)
+                keySectionOpen = true
+            }
             // Un-throttled freshness check while the user is actually looking at
             // the Version row (one tiny request; failures stay silent).
             updater.check()
@@ -408,7 +417,6 @@ struct InlineSettingsView: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(RecentEntryStyle())
-            .help(L("settings.back"))
 
             Text(L("settings.title"))
                 .font(.sf(10, weight: .semibold))
@@ -434,11 +442,10 @@ struct InlineSettingsView: View {
     }
 
     /// Whether `p` can answer right now: a stored/env key for a normal provider, or
-    /// — for keyless Codex — the CLI being installed and signed in. Codex has no key,
-    /// so the plain `current(for:) != nil` check would wrongly read it as unconfigured.
-    private func providerReady(_ p: Provider) -> Bool {
-        p == .codex ? CodexCLIService.isAvailable : (APIKeyStore.current(for: p) != nil)
-    }
+    /// — for keyless Codex / Claude Code — the CLI being installed and signed in.
+    /// They have no key, so the plain `current(for:) != nil` check would wrongly
+    /// read them as unconfigured.
+    private func providerReady(_ p: Provider) -> Bool { ModelCatalogStore.ready(p) }
 
     /// The collapsed-by-default key management block. At rest it's one quiet
     /// disclosure line; expanded it leads with the serving provider as a read-only
@@ -506,16 +513,18 @@ struct InlineSettingsView: View {
                 // hand, or an env var forces a key). Everyone else gets the key field.
                 if keyScope == .codex {
                     codexAccountRow
+                } else if keyScope == .claudeCode {
+                    claudeAccountRow
                 } else if keyScope == .openrouter && !manualKeyEntry && !envOverride {
                     openRouterAccountRow
                 } else {
                     keyRow
                 }
 
-                // Codex has no key to fetch — its own row carries the sign-in copy and
-                // re-authorize action, so the generic "get a key at …" footer is wrong
-                // for it and suppressed.
-                if keyScope != .codex {
+                // Codex / Claude Code have no key to fetch — their own rows carry the
+                // sign-in copy, so the generic "get a key at …" footer is wrong for
+                // them and suppressed.
+                if keyScope != .codex && keyScope != .claudeCode {
                     footer
                 }
             }
@@ -1060,6 +1069,46 @@ struct InlineSettingsView: View {
         }
     }
 
+    // MARK: - Claude Code sign-in status
+
+    /// Claude Code is keyless like Codex, with one deliberate difference: there is
+    /// NO in-app sign-in / re-authorize action at all. Anthropic's terms reserve
+    /// the OAuth flow for the user's own use of the official CLI, so Notch never
+    /// triggers it — the row just reports state and tells the user to run `claude`
+    /// in Terminal themselves. Install link only when the CLI is missing.
+    @ViewBuilder
+    private var claudeAccountRow: some View {
+        let installed = ClaudeCLIService.resolveBinary() != nil
+        let signedIn = ClaudeCLIService.authExists()
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Text(L("model.account"))
+                    .font(.sf(13, weight: .medium))
+                    .foregroundStyle(Tokens.text2)
+                    .frame(width: 64, alignment: .leading)
+
+                if !installed {
+                    // No CLI yet → link to the install docs.
+                    codexPillButton(L("claudecode.status.get")) {
+                        NSWorkspace.shared.open(Provider.claudeCode.signupURL)
+                    }
+                } else {
+                    statusPill(ok: signedIn,
+                               message: L(signedIn ? "claudecode.status.connected"
+                                                   : "claudecode.status.signedOut"))
+                }
+            }
+
+            Text(installed
+                 ? (signedIn ? L("claudecode.status.hint.ready") : L("claudecode.status.hint.login"))
+                 : L("claudecode.status.hint.install"))
+                .font(.sf(12))
+                .foregroundStyle(Tokens.text3)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.leading, 76)
+        }
+    }
+
     /// A quiet pill button in the account row's register (Get Codex / Sign in /
     /// Re-authorize) — same chrome as the OpenRouter Connect button.
     private func codexPillButton(_ title: String, action: @escaping () -> Void) -> some View {
@@ -1205,7 +1254,8 @@ struct InlineSettingsView: View {
                     HStack(spacing: 7) {
                         // The model wears its vendor mark and reads by name — the
                         // chip is about the model, not the plumbing behind it.
-                        VendorLogo(vendor: ModelRatings.vendor(for: effectiveModelID),
+                        VendorLogo(vendor: ModelRatings.vendor(for: effectiveModelID,
+                                                              provider: provider),
                                    fallback: effectiveModelID)
                             .frame(width: 15, height: 15)
                         Text(ModelRatings.prettyName(for: effectiveModelID))
@@ -1228,7 +1278,7 @@ struct InlineSettingsView: View {
                 .fixedSize()
                 .popover(isPresented: $modelPickerOpen, arrowEdge: .bottom) {
                     ModelPickerView(
-                        models: pickerModels,
+                        models: catalog.rows(selected: provider),
                         selectedProvider: provider,
                         selectedID: effectiveModelID,
                         onSelect: { prov, id in
@@ -1248,7 +1298,7 @@ struct InlineSettingsView: View {
                     .task {
                         // Fill the list with each keyed provider's live models the
                         // moment the picker opens (bundled lists show instantly).
-                        await loadAllProviderModels()
+                        await catalog.loadAll()
                     }
                     .preferredColorScheme(.dark)
                     // Back the popover with the panel's smoked Liquid Glass (same
@@ -1365,30 +1415,29 @@ struct InlineSettingsView: View {
     /// and summarize, with no Automation prompt. The folder sub-row (current path
     /// + chooser) only appears while the Markdown destination is active.
     private var noteDestinationRow: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            settingRow(label: L("general.noteDestination"),
-                       info: L("general.noteDestination.hint")) {
+        settingRow(label: L("general.noteDestination"),
+                   info: L("general.noteDestination.hint")) {
+            // Path sub-row lives in the row's content column so it left-aligns
+            // with the menu above it — no guessed label-width offset.
+            VStack(alignment: .leading, spacing: 8) {
                 GlassMenu(title: noteDestination.label) {
                     ForEach(NoteDestination.allCases) { d in
                         Button(d.label) { selectNoteDestination(d) }
                     }
                 }
-            }
-            if noteDestination == .markdownFolder {
-                HStack(spacing: 10) {
-                    Text(notesFolderDisplay)
-                        .font(.sf(12))
-                        .foregroundStyle(Tokens.text3)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Button(L("general.noteFolder.choose")) { chooseNotesFolder() }
-                        .buttonStyle(.plain)
-                        .font(.sf(11, weight: .semibold))
-                        .foregroundStyle(Tokens.text1)
+                if noteDestination == .markdownFolder {
+                    HStack(spacing: 10) {
+                        Text(notesFolderDisplay)
+                            .font(.sf(12))
+                            .foregroundStyle(Tokens.text3)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Button(L("general.noteFolder.choose")) { chooseNotesFolder() }
+                            .buttonStyle(.plain)
+                            .font(.sf(11, weight: .semibold))
+                            .foregroundStyle(Tokens.text1)
+                    }
                 }
-                // Clear the label column so the path hangs under the menu, not
-                // under the row title.
-                .padding(.leading, 76)
             }
         }
     }
@@ -1468,7 +1517,7 @@ struct InlineSettingsView: View {
         settingRow(label: L("general.launchAtLogin")) {
             Toggle("", isOn: Binding(
                 get: { launchAtLogin },
-                set: { selectLaunchAtLogin($0) }
+                set: { Haptics.levelChange(); selectLaunchAtLogin($0) }
             ))
             .labelsHidden()
             .toggleStyle(.switch)
@@ -1486,12 +1535,92 @@ struct InlineSettingsView: View {
                    info: L("general.fullscreenAutoHide.hint")) {
             Toggle("", isOn: Binding(
                 get: { hideInFullscreen },
-                set: { selectHideInFullscreen($0) }
+                set: { Haptics.levelChange(); selectHideInFullscreen($0) }
             ))
             .labelsHidden()
             .toggleStyle(.switch)
             .controlSize(.mini)
             .tint(Tokens.text2)
+        }
+    }
+
+    /// Whether background work flexes the resting notch's busy ears (the verb on
+    /// the left shoulder, the elapsed clock on the right). One global switch:
+    /// off keeps the closed notch flat for agent runs and detached Ask rounds
+    /// alike. The finished badge and the completion notification stay.
+    private var liveActivityRow: some View {
+        settingRow(label: L("appearance.liveActivity"),
+                   info: L("appearance.liveActivity.hint")) {
+            Toggle("", isOn: Binding(
+                get: { model.liveActivityEnabled },
+                set: { Haptics.levelChange(); model.liveActivityEnabled = $0 }
+            ))
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .tint(Tokens.text2)
+        }
+    }
+
+    /// The proxy the whole app connects through — a manual value is forced onto
+    /// both the app's own requests (`ProxyConfig.urlSession`) and the spawned
+    /// agent CLIs. Empty = auto: the app follows the system proxy natively, and
+    /// the CLIs (which inherit launchd's sparse environment, never the
+    /// `HTTPS_PROXY` exported in a shell profile) fall back through the inherited
+    /// env, macOS Network settings, then the login shell. The caption spells out
+    /// what auto actually resolved to, so an empty field is never a mystery.
+    private var proxyRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 3) {
+                Text(L("network.proxy"))
+                    .font(.sf(13))
+                    .foregroundStyle(Tokens.text1)
+                SettingInfo(L("network.proxy.hint"))
+            }
+            ZStack(alignment: .topLeading) {
+                if model.proxyURL.isEmpty {
+                    Text(L("network.proxy.placeholder"))
+                        .font(.sf(13))
+                        .foregroundStyle(Tokens.text3)
+                        .allowsHitTesting(false)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                }
+                TextField("", text: Binding(
+                    get: { model.proxyURL },
+                    set: { model.proxyURL = $0 }
+                ))
+                    .textFieldStyle(.plain)
+                    .font(.sf(13))
+                    .foregroundStyle(Tokens.text1)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    // Typing here counts as activity so a drifting pointer can't
+                    // fold the panel mid-edit (same guard the API-key field uses).
+                    .onChange(of: model.proxyURL) {
+                        model.noteUserTyping()
+                        refreshProxyStatus()
+                    }
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(.white.opacity(0.06))
+            )
+            Text(proxyStatus)
+                .font(.sf(11))
+                .foregroundStyle(Tokens.text3)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .onAppear { refreshProxyStatus() }
+    }
+
+    /// Resolving can spawn a login shell (the ".zshrc-only proxy" case), so it never
+    /// runs on the render path — the caption fills in a beat later.
+    private func refreshProxyStatus() {
+        Task.detached(priority: .userInitiated) {
+            let line = ProxyConfig.statusLine()
+            await MainActor.run { proxyStatus = line }
         }
     }
 
@@ -1649,130 +1778,21 @@ struct InlineSettingsView: View {
         Localization.shared.language = newValue
     }
 
-    // MARK: - Tools
-
-    /// Which clipboard quick-tools (Summarize / Translate / Proofread …) appear as
-    /// one-tap chips when text is copied (XII-111). A compact dropdown matching the
-    /// other rows: the pill shows a summary ("3 enabled"); opening it lists
-    /// every tool with a checkmark on the enabled ones. Selecting toggles a tool;
-    /// the last enabled one can't be turned off (an empty row would strip the
-    /// feature with no way back from here). Changes apply to the next copied clip.
-    private var quickToolsRow: some View {
-        settingRow(label: L("general.quickTools")) {
-            Button {
-                quickToolsOpen.toggle()
-            } label: {
-                HStack(spacing: 7) {
-                    Text(L("general.quickTools.count", model.enabledClipboardPresets.count))
-                        .font(.sf(13))
-                        .foregroundStyle(Tokens.text1)
-                        .lineLimit(1)
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(Tokens.text3)
-                }
-                .padding(.leading, 11)
-                .padding(.trailing, 9)
-                .frame(height: 30)
-                .background(
-                    RoundedRectangle(cornerRadius: 9)
-                        .fill(.white.opacity(quickToolsOpen ? 0.10 : 0.06))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 9)
-                        .strokeBorder(.white.opacity(quickToolsOpen ? 0.20 : 0.12), lineWidth: 0.5)
-                )
-                .contentShape(RoundedRectangle(cornerRadius: 9))
-            }
-            .buttonStyle(.plain)
-            .fixedSize()
-            // A popover (not a native Menu) so checking a tool keeps the list open —
-            // the user can toggle several in a row; clicking outside dismisses it.
-            .popover(isPresented: $quickToolsOpen, arrowEdge: .bottom) {
-                quickToolsChecklist
-            }
-        }
-    }
-
-    /// The checklist shown inside the quick-tools popover: one row per tool, a leading
-    /// checkmark on the enabled ones, the whole row tappable to toggle in place (the
-    /// popover stays open). The last enabled tool is disabled so the set can't be
-    /// emptied with no way back.
-    private var quickToolsChecklist: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ForEach(NotchModel.ClipboardPreset.allCases) { preset in
-                let on = model.enabledClipboardPresets.contains(preset)
-                let isLast = on && model.enabledClipboardPresets.count == 1
-                QuickToolRow(label: preset.label, on: on, disabled: isLast) {
-                    model.setClipboardPreset(preset, enabled: !on)
-                }
-            }
-        }
-        .padding(.vertical, 6)
-        .preferredColorScheme(.dark)
-        // Replace the popover's OWN window backing — not just paint a layer inside
-        // it — so no light system chrome shows around the edges (that was the white
-        // rim on the earlier opaque version). The presentation background uses the
-        // SAME glass the panel uses (`nativeGlass`) over a soft dark veil for text
-        // legibility, so the popover reads as a piece of the same surface floated
-        // out. `.presentationBackground` needs macOS 13.3+; older systems fall back
-        // to the in-content glass layer.
-        .modifier(GlassPopoverBackground())
-    }
+    // MARK: - Copy sensing
 
     /// Copy sensing: whether the *closed* notch watches ⌘C and offers to file a
-    /// copied note/reminder (press ⌘C again to confirm). The in-panel capture
-    /// chip is independent of this switch. The prose ("press ⌘C again to
-    /// confirm") lives in the ⓘ beside the title.
+    /// copied note/reminder (press ⌘C again to confirm). The prose ("press ⌘C
+    /// again to confirm") lives in the ⓘ beside the title.
     private var copySenseRow: some View {
         settingRow(label: L("general.copySense"), info: L("general.copySense.hint")) {
             Toggle("", isOn: Binding(
                 get: { model.copySenseEnabled },
-                set: { model.copySenseEnabled = $0 }
+                set: { Haptics.levelChange(); model.copySenseEnabled = $0 }
             ))
             .labelsHidden()
             .toggleStyle(.switch)
             .controlSize(.mini)
             .tint(Tokens.text2)
-        }
-    }
-
-    /// Pref1 picker — the primary language. Writing through `model.translationPref1`
-    /// publishes the change so the chip label re-renders immediately.
-    private var translationLanguageRow: some View {
-        Group {
-            settingRow(label: L("translation.pref1")) {
-                GlassMenu(title: model.translationPref1.label) {
-                    ForEach(TranslationLanguage.allCases) { lang in
-                        Button {
-                            model.translationPref1 = lang
-                        } label: {
-                            if lang == model.translationPref1 {
-                                Label(lang.label, systemImage: "checkmark")
-                            } else {
-                                Text(lang.label)
-                            }
-                        }
-                    }
-                }
-            }
-            // The direction rule — when does the secondary ever apply? — collapsed
-            // behind the ⓘ beside the second-language title it explains.
-            settingRow(label: L("translation.pref2"), info: L("translation.hint")) {
-                GlassMenu(title: model.translationPref2.label) {
-                    ForEach(TranslationLanguage.allCases) { lang in
-                        Button {
-                            model.translationPref2 = lang
-                        } label: {
-                            if lang == model.translationPref2 {
-                                Label(lang.label, systemImage: "checkmark")
-                            } else {
-                                Text(lang.label)
-                            }
-                        }
-                    }
-                }
-            }
         }
     }
 
@@ -1960,6 +1980,9 @@ struct InlineSettingsView: View {
                 (L("about.privacy"), {
                     NSWorkspace.shared.open(URL(string: "https://www.notch.website/privacy")!)
                 }),
+                (L("about.feedback"), {
+                    NSWorkspace.shared.open(URL(string: "mailto:\(Self.feedbackEmail)?subject=Notch%20Feedback")!)
+                }),
             ])
         }
         .padding(.horizontal, 14)
@@ -2066,14 +2089,12 @@ struct InlineSettingsView: View {
 
     // MARK: - Logic (mirrors the old SettingsView)
 
-    /// Fetch the *current* provider's live model list and cache it into
-    /// `liveByProvider`, so the picker shows what the vendor serves right now for
-    /// the provider in effect. Keyless providers keep their bundled shortlist (the
-    /// picker falls back to `availableModels`). Cheap and cancel-safe — and even
-    /// on the first call after Settings reopens (this view is destroyed on close,
-    /// so `liveByProvider` always starts empty), `ModelCatalog.fetch` itself
-    /// caches per provider+key for an hour, so this doesn't re-hit the network
-    /// unless the key changed or the cache actually expired.
+    /// Fetch the *current* provider's live model list into `ModelCatalogStore`, so the
+    /// picker shows what the vendor serves right now for the provider in effect.
+    /// Keyless providers keep their bundled shortlist (the picker falls back to
+    /// `availableModels`). Cheap and cancel-safe — `ModelCatalog.fetch` caches per
+    /// provider+key for an hour, so this doesn't re-hit the network unless the key
+    /// changed or the cache actually expired.
     @MainActor
     private func refreshModels() async {
         let target = provider
@@ -2090,138 +2111,10 @@ struct InlineSettingsView: View {
         loadingModels = false
         // Guard against a stale response after the user switched providers.
         guard target == provider else { return }
-        if let live, !live.infos.isEmpty {
-            liveByProvider[target] = live.infos
-            featuredByProvider[target] = live.openRouterFeatured
-        }
+        if let live { catalog.adopt(live, for: target) }
     }
 
     // MARK: - Cross-provider picker
-
-    /// How many of OpenRouter's usage-ranked free models ride in the picker's
-    /// unfolded view. The auto-router sits above them, outside the cap, so the
-    /// collapsed OpenRouter block is this + 1 rows.
-    private static let openRouterShortlistLimit = 4
-
-    /// The ids provider `p` contributes to the picker's **collapsed** list — the fold
-    /// that keeps a hundred-model catalog from landing as one undifferentiated wall.
-    ///
-    ///  · **Keyless** providers contribute exactly one row (their default model):
-    ///    enough to advertise what a key would unlock, without ten rows you can't call.
-    ///  · **OpenRouter** contributes the auto-router plus the top few of its free
-    ///    lineup ranked by real usage — millions of users voting with their feet
-    ///    (`ModelCatalog` fetches the ranking; `OpenRouterFreeModels.group` cuts it).
-    ///  · **Everyone else** contributes their curated shortlist (`availableModels`,
-    ///    hot-updated by the remote manifest), intersected with what the live catalog
-    ///    actually serves — so an 80-id `/v1/models` dump (embeddings, TTS, whisper…)
-    ///    collapses to the handful of chat models we vouch for.
-    ///
-    /// Everything outside this set still exists in the list — it just lives behind
-    /// the picker's "Show all N models" row, and search always reaches it.
-    private func shortlistIDs(for p: Provider, infos: [ModelInfo], hasKey: Bool) -> Set<String> {
-        guard hasKey else { return Set([infos.first?.id].compactMap { $0 }) }
-        if let featured = featuredByProvider[p], !featured.isEmpty {
-            let g = OpenRouterFreeModels.group(infos.map(\.id), featured: featured,
-                                               limit: Self.openRouterShortlistLimit)
-            return Set(g.head + g.featured)
-        }
-        let live = Set(infos.map(\.id))
-        let curated = p.availableModels.filter(live.contains)
-        // A curated id the vendor no longer serves means the intersection is empty —
-        // fall back to the curated list itself rather than folding the whole provider
-        // away to nothing.
-        return Set(curated.isEmpty ? p.availableModels : curated)
-    }
-
-    /// The model list the cross-provider picker shows: every provider's models in one
-    /// flat list, ordered as the provider menu is, each tagged with whether it has a
-    /// usable key and whether it survives the fold (`featured`). Providers with a key
-    /// list their live models (once fetched) or their bundled shortlist; providers
-    /// without a key still appear — greyed — so the user sees what a key would unlock
-    /// and can jump straight to configuring it.
-    private var pickerModels: [PickerModel] {
-        var rows: [PickerModel] = []
-        for p in Provider.allCases {
-            // Codex is selectable when the CLI is installed + signed in (it's
-            // keyless), not when a key is stored — so its rows aren't greyed out.
-            let hasKey = providerReady(p)
-            let infos: [ModelInfo]
-            if let live = liveByProvider[p], !live.isEmpty {
-                infos = live
-            } else {
-                infos = p.availableModels.map {
-                    // Codex's "codex" id isn't a `gpt-*` string, so map its vendor
-                    // explicitly to keep the OpenAI mark on the row.
-                    ModelInfo(id: $0, vendor: p == .codex ? "OpenAI" : ModelRatings.vendor(for: $0))
-                }
-            }
-            let short = shortlistIDs(for: p, infos: infos, hasKey: hasKey)
-            // Shortlisted models lead their provider's block, so expanding the fold
-            // appends rows below what was already on screen instead of reshuffling it.
-            let ordered = infos.enumerated().sorted { a, b in
-                let af = short.contains(a.element.id), bf = short.contains(b.element.id)
-                return af == bf ? a.offset < b.offset : af
-            }.map(\.element)
-            for info in ordered {
-                // A model only earns the resting (unfolded) shortlist if its vendor has
-                // a real logo — a monogram letter-tile in the featured list reads as
-                // ugly/broken, so the long-tail vendors without a bundled mark fold away
-                // (still reachable via "Show all" and search, and a selected one always
-                // shows regardless).
-                let hasLogo = VendorLogos.mark(for: info.vendor) != nil
-                rows.append(PickerModel(
-                    provider: p, providerName: p.displayName, hasKey: hasKey,
-                    featured: short.contains(info.id) && hasLogo, info: info))
-            }
-        }
-        // Usable models first (the current provider's leading), greyed ones after —
-        // the list reads as "what you can pick now" above "what a key would unlock".
-        // A stable secondary sort keeps rows from reshuffling as live lists load.
-        return rows.enumerated().sorted { a, b in
-            if a.element.hasKey != b.element.hasKey { return a.element.hasKey }
-            let aCur = a.element.provider == provider
-            let bCur = b.element.provider == provider
-            if aCur != bCur { return aCur }
-            return a.offset < b.offset
-        }.map(\.element)
-    }
-
-    /// Fetch every keyed provider's live model list once, when the picker opens, so
-    /// the groups fill in with real names/metadata. Keyless providers are skipped
-    /// (they show their bundled list). Cheap and cancel-safe: results just overwrite
-    /// the cache, and a provider already cached this session is not re-fetched — nor,
-    /// thanks to `ModelCatalog`'s own per-provider+key cache, is one already fetched
-    /// in a *previous* Settings session (up to 11 providers' worth of `/v1/models` +
-    /// OpenRouter's `UsageRankings` calls, otherwise replayed on every popover open).
-    @MainActor
-    private func loadAllProviderModels() async {
-        await RemoteModelManifest.refreshIfDue()
-        // Codex is keyless, so the keyed loop below skips it. Fetch its real model
-        // list from the app-server off-main and publish it so the picker fills in
-        // reactively — even if the launch warm-up hasn't finished yet. Never publish
-        // the bare "codex" sentinel (that's the no-models-found fallback).
-        if liveByProvider[.codex] == nil {
-            let ids = await Task.detached(priority: .userInitiated) { () -> [String] in
-                CodexCLIService.refreshModels()
-                return CodexCLIService.availableModelIDs
-            }.value
-            if ids != ["codex"] {
-                liveByProvider[.codex] = ids.map { ModelInfo(id: $0, vendor: "OpenAI") }
-            }
-        }
-        await withTaskGroup(of: (Provider, ModelCatalog.Result?).self) { group in
-            for p in Provider.allCases where liveByProvider[p] == nil {
-                guard let key = APIKeyStore.current(for: p) else { continue }
-                group.addTask { (p, await ModelCatalog.fetch(for: p, apiKey: key)) }
-            }
-            for await (p, live) in group {
-                if let live, !live.infos.isEmpty {
-                    liveByProvider[p] = live.infos
-                    featuredByProvider[p] = live.openRouterFeatured
-                }
-            }
-        }
-    }
 
     /// Pick a model from the cross-provider picker: switch the selected provider
     /// (reusing `selectProvider`, which re-syncs every provider-scoped row), then
@@ -2236,6 +2129,10 @@ struct InlineSettingsView: View {
         }
         modelID = id
         APIKeyStore.saveModel(id, for: newProvider)
+        // An explicit pick is a "recently used" model from the user's point of
+        // view — record it so the Ask chip's quick menu keeps it after the
+        // selection moves on (picks made here used to vanish from the menu).
+        AskModelMRU.record(provider: newProvider, model: id)
         NotificationCenter.default.post(name: .aiBackendChanged, object: nil)
     }
 
@@ -2287,10 +2184,16 @@ struct InlineSettingsView: View {
 /// popover chrome. On macOS 13.3+ it replaces the presentation background itself
 /// (so no light rim shows around the edges); older systems get the glass painted
 /// behind the content as a graceful fallback.
-private struct GlassPopoverBackground: ViewModifier {
+struct GlassPopoverBackground: ViewModifier {
     /// Corner radius of the glass slab — matches the content it wraps (small list
     /// popovers use 10; the larger model-picker card uses 14).
     var cornerRadius: CGFloat = 10
+    /// The smoked veil painted over the bare glass. The default (0.42) composites
+    /// with the 0.34 baked tint to the panel's dark register (~0.62), so an occluding
+    /// popover reads as solid material. A lower value lets far more of the liquid-glass
+    /// refraction through — the airy, transparent Control-Center look — for cards that
+    /// want to read as glass rather than a slab (e.g. the ⌘⇧I model picker).
+    var veilOpacity: Double = 0.42
 
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
@@ -2304,13 +2207,13 @@ private struct GlassPopoverBackground: ViewModifier {
         if #available(macOS 13.3, *) {
             content.presentationBackground {
                 shape.fill(.clear).nativeGlass(in: shape)
-                    .overlay(shape.fill(Color.black.opacity(0.42)))
+                    .overlay(shape.fill(Color.black.opacity(veilOpacity)))
                     .overlay(shape.strokeBorder(Tokens.hairline, lineWidth: 0.5))
             }
         } else {
             content.background {
                 shape.fill(.clear).nativeGlass(in: shape)
-                    .overlay(shape.fill(Color.black.opacity(0.42)))
+                    .overlay(shape.fill(Color.black.opacity(veilOpacity)))
                     .overlay(shape.strokeBorder(Tokens.hairline, lineWidth: 0.5))
             }
         }
@@ -2358,53 +2261,6 @@ struct SettingInfo: View {
             .padding(.vertical, 9)
             .modifier(GlassPopoverBackground())
         }
-    }
-}
-
-/// One row in the quick-tools popover checklist: a leading checkmark on the
-/// enabled tools, a hover highlight on the whole row, and a tap that toggles in
-/// place (the popover stays open). The last enabled tool comes in `disabled` so
-/// the set can't be emptied with no way back from here.
-private struct QuickToolRow: View {
-    let label: String
-    let on: Bool
-    let disabled: Bool
-    let toggle: () -> Void
-
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: toggle) {
-            HStack(spacing: 8) {
-                // Fixed-size slot, shown/hidden via opacity — NOT via `.clear` color
-                // or conditional insertion. Opacity doesn't touch layout, so the
-                // checkmark appearing/disappearing on toggle can't nudge the label
-                // left or right (the prior jitter came from the symbol's intrinsic
-                // width participating in layout as it showed/hid).
-                Image(systemName: "checkmark")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Tokens.text1)
-                    .frame(width: 14, height: 14, alignment: .center)
-                    .opacity(on ? 1 : 0)
-                Text(label)
-                    .font(.sf(13))
-                    .foregroundStyle(on ? Tokens.text1 : Tokens.text2)
-                Spacer(minLength: 16)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .frame(width: 184, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(.white.opacity(hovering && !disabled ? 0.10 : 0))
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 6))
-            .opacity(disabled ? 0.5 : 1)
-        }
-        .buttonStyle(.plain)
-        .disabled(disabled)
-        .padding(.horizontal, 6)
-        .onHover { hovering = $0 }
     }
 }
 

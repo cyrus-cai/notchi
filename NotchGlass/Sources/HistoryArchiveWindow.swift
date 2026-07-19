@@ -143,6 +143,9 @@ private struct HistoryArchiveView: View {
 
     @State private var query = ""
     @State private var sourceFilter: NotchModel.HistoryItem.Source? = nil
+    /// Whether the Ask bucket's children (Notes / Reminders) are unfurled. Ask is
+    /// the parent; its two sub-filters only appear once Ask is tapped.
+    @State private var askExpanded = false
     @State private var selection: UUID? = nil
 
     private var filteredItems: [NotchModel.HistoryItem] {
@@ -220,7 +223,7 @@ private struct HistoryArchiveView: View {
                     .foregroundStyle(Tokens.text1)
                 if !query.isEmpty {
                     Button { query = "" } label: {
-                        Image(systemName: "xmark.circle.fill")
+                        Image(systemName: "xmark.circle")
                             .font(.system(size: 12))
                             .foregroundStyle(Tokens.text4)
                     }
@@ -236,27 +239,59 @@ private struct HistoryArchiveView: View {
                           brighter: false)
             .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
-            HStack(spacing: 6) {
-                filterPill(nil, L("history.window.filter.all"))
-                filterPill(.ask, L("history.window.filter.ask"))
-                filterPill(.note, L("history.window.filter.notes"))
-                filterPill(.reminder, L("history.window.filter.reminders"))
-                Spacer()
-                Text(L("history.window.count", count))
-                    .font(.sf(11, weight: .medium))
-                    .foregroundStyle(Tokens.text4)
-                    .monospacedDigit()
-            }
+            filterRow(count: count)
         }
         .padding(12)
     }
 
-    private func filterPill(_ source: NotchModel.HistoryItem.Source?, _ title: String) -> some View {
+    /// Two buckets: Ask (a parent that unfurls Notes / Reminders on tap) and Agent.
+    /// The children only appear while Ask is expanded or one of them is the active
+    /// filter — mirroring the notch's `ManageFilterChip` menu.
+    private func filterRow(count: Int) -> some View {
+        let askGroupActive = sourceFilter == .ask || sourceFilter == .note || sourceFilter == .reminder
+        let subsShown = askExpanded || askGroupActive
+        let spring = Animation.spring(response: 0.38, dampingFraction: 0.82)
+        return HStack(spacing: 6) {
+            // Ask — the parent bucket. Lights for any of its children; tapping it
+            // selects Ask and reveals Notes/Reminders, or clears when already Ask.
+            filterPill(.ask, L("history.window.filter.ask"), active: askGroupActive) {
+                withAnimation(spring) {
+                    if sourceFilter == .ask {
+                        sourceFilter = nil
+                        askExpanded = false
+                    } else {
+                        sourceFilter = .ask
+                        askExpanded = true
+                    }
+                }
+            }
+            if subsShown {
+                filterPill(.note, L("history.window.filter.notes"))
+                filterPill(.reminder, L("history.window.filter.reminders"))
+            }
+            // Agent — the other bucket. Folds the Ask children when picked.
+            filterPill(.agent, L("history.window.filter.agent")) {
+                withAnimation(spring) {
+                    sourceFilter = sourceFilter == .agent ? nil : .agent
+                    askExpanded = false
+                }
+            }
+            Spacer()
+            Text(L("history.window.count", count))
+                .font(.sf(11, weight: .medium))
+                .foregroundStyle(Tokens.text4)
+                .monospacedDigit()
+        }
+        .animation(spring, value: subsShown)
+    }
+
+    private func filterPill(_ source: NotchModel.HistoryItem.Source?, _ title: String,
+                            active: Bool? = nil, action: (() -> Void)? = nil) -> some View {
         HistoryFilterPill(
             title: title,
-            active: sourceFilter == source,
+            active: active ?? (sourceFilter == source),
             tint: source?.archiveTint,
-            action: { sourceFilter = source }
+            action: action ?? { sourceFilter = source }
         )
     }
 
@@ -385,7 +420,7 @@ private struct HistoryArchiveRow: View {
 
     @ViewBuilder
     private var trailing: some View {
-        if item.source == .ask {
+        if item.source.isThread {
             Text(relativeTime(item.t))
                 .font(.sf(11, weight: .medium).monospacedDigit())
                 .foregroundStyle(Tokens.text4)
@@ -411,7 +446,7 @@ private struct HistoryDetailView: View {
         VStack(alignment: .leading, spacing: 0) {
             titleBar
             GlassHairline()
-            if item.source == .ask {
+            if item.source.isThread {
                 transcript
             } else {
                 capture
@@ -421,16 +456,36 @@ private struct HistoryDetailView: View {
     }
 
     private var titleBar: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(item.displayTitle)
-                .font(.sf(16, weight: .semibold))
-                .foregroundStyle(Tokens.text1)
-                .lineLimit(2)
-            Text(item.t.formatted(date: .abbreviated, time: .shortened))
-                .font(.sf(11))
-                .foregroundStyle(Tokens.text4)
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(item.displayTitle)
+                    .font(.sf(16, weight: .semibold))
+                    .foregroundStyle(Tokens.text1)
+                    .lineLimit(2)
+                HStack(spacing: 6) {
+                    Text(item.t.formatted(date: .abbreviated, time: .shortened))
+                        .font(.sf(11))
+                        .foregroundStyle(Tokens.text4)
+                    // A failed run must read as failed here too — the transcript
+                    // alone can look like an ordinary answer. (Cancelled was the
+                    // user's own act; success is the default — neither needs a tag.)
+                    if item.source == .agent, item.agentOutcome == "failure" {
+                        Text(L("history.detail.agent.failed"))
+                            .font(.sf(11, weight: .medium))
+                            .foregroundStyle(Tokens.danger.opacity(0.9))
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            // The agent record's own jump: the folder the run worked in — the same
+            // affordance the Note/Reminder detail has toward its app, in the run's
+            // violet. Only for rows that kept the full path (`link`).
+            if item.source == .agent, let path = item.link, !path.isEmpty {
+                CaptureJumpButton(title: L("agent.openFolder"), tint: Tokens.agentTint) {
+                    NSWorkspace.shared.open(URL(fileURLWithPath: path))
+                }
+            }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
     }
 
@@ -493,6 +548,12 @@ private struct TranscriptBubble: View {
                         .foregroundStyle(Tokens.text4)
                 }
             }
+            // What this turn was asked WITH, above what it said — click to open the
+            // full-size shot in Preview. The archive is the roomy place to actually
+            // look at an attachment, so this is the one surface that shows them all.
+            if !turn.imageFiles.isEmpty {
+                SavedTurnImages(files: turn.imageFiles)
+            }
             Text(turn.text)
                 .font(.sf(14))
                 .foregroundStyle(Tokens.text1)
@@ -533,13 +594,14 @@ private struct TranscriptBubble: View {
 /// The source→tint mapping for the archive's chips, kept local to this window so it
 /// doesn't reach into `NotchBody`'s `fileprivate` copy. Same palette everywhere a
 /// source shows its face: Ask a cool blue, Note the Notes amber, Remind the
-/// Reminders orange.
+/// Reminders orange, Agent a violet.
 private extension NotchModel.HistoryItem.Source {
     var archiveTint: Color {
         switch self {
         case .ask:      return .blue
         case .note:     return .yellow
         case .reminder: return .orange
+        case .agent:    return Tokens.agentTint
         }
     }
 }

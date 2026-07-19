@@ -2,25 +2,18 @@ import SwiftUI
 import AppKit
 import Combine
 
-/// A borderless prompt field styled to the design tokens.
-///
-/// Backed by a custom `NSTextField` rather than SwiftUI's `TextField` for one
-/// specific reason: AppKit's text fields pop up a floating **autocomplete
-/// suggestions panel** while typing/deleting (the empty glass box the user saw).
-/// SwiftUI gives no hook to turn it off, so we wrap `NSTextField` directly and
-/// disable `isAutomaticTextCompletionEnabled` (plus all the other "smart"
-/// substitutions that don't belong in a prompt box).
-/// The prompt's backing field. One job: strip the field editor's completion /
-/// prediction magic the moment focus arrives by ANY route. The focusTrigger
-/// path in `updateNSView` disables it after its programmatic
-/// `makeFirstResponder`, but a direct CLICK into the field creates the editor
-/// without that block ever running (its `currentEditor() == nil` guard skips),
-/// and `controlTextDidBeginEditing` waits for the first *committed* change — an
-/// entire IME composition can play out before that. A click-focused session
-/// could therefore reach its first keystrokes with the system completion panel
-/// still armed: the intermittent big empty glass box flashing over the panel.
-/// Hooking `becomeFirstResponder` covers click, Tab and programmatic focus
-/// alike, synchronously, before any keystroke can reach the editor.
+/// A single-line field that strips the field editor's completion / prediction
+/// magic the moment focus arrives by ANY route. The focusTrigger path in
+/// `updateNSView` disables it after its programmatic `makeFirstResponder`, but a
+/// direct CLICK into the field creates the editor without that block ever running
+/// (its `currentEditor() == nil` guard skips), and `controlTextDidBeginEditing`
+/// waits for the first *committed* change — an entire IME composition can play out
+/// before that. A click-focused session could therefore reach its first keystrokes
+/// with the system completion panel still armed: the intermittent big empty glass
+/// box flashing over the panel. Hooking `becomeFirstResponder` covers click, Tab
+/// and programmatic focus alike, synchronously, before any keystroke can reach the
+/// editor. (Used by the compact filter fields; the prompt itself is a
+/// `PromptTextView` — see `PromptField`.)
 final class MagiclessTextField: NSTextField {
     override func becomeFirstResponder() -> Bool {
         let accepted = super.becomeFirstResponder()
@@ -29,6 +22,74 @@ final class MagiclessTextField: NSTextField {
     }
 }
 
+/// The prompt's backing text view. Two jobs beyond a plain `NSTextView`:
+///  · strip the completion / prediction magic on every route into focus (same
+///    reasoning as `MagiclessTextField` above — a click must never reach a
+///    keystroke with the system completion panel still armed);
+///  · draw the placeholder itself, since `NSTextView` has none. (Both prompt call
+///    sites hand the placeholder to a SwiftUI label instead, so it can fade; this
+///    keeps the contract intact for any caller that doesn't.)
+final class PromptTextView: NSTextView {
+    var placeholder: String = ""
+    /// Consulted on ⌘V before the text machinery runs. Returning `true` means the
+    /// paste was consumed as something other than text (the agent compose
+    /// attaches a pasted IMAGE); `false` falls through to the normal text paste.
+    var onPasteImage: () -> Bool = { false }
+
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted { PromptField.disableEditorMagic(self) }
+        return accepted
+    }
+
+    /// A plain-text view's `readablePasteboardTypes` carries no image types, so
+    /// with a pixels-only clipboard (a bare ⌃⇧⌘4 screenshot — THE case the agent
+    /// compose's image attach exists for) AppKit validates Edit ▸ Paste to
+    /// disabled and ⌘V dies before `paste(_:)` is ever called. Claim image
+    /// types too, purely so the paste command fires; `paste(_:)` below decides
+    /// what actually happens to them.
+    override var readablePasteboardTypes: [NSPasteboard.PasteboardType] {
+        super.readablePasteboardTypes + [.png, .tiff]
+    }
+
+    override func paste(_ sender: Any?) {
+        if onPasteImage() { return }
+        // The image types above were claimed only to keep ⌘V alive for the
+        // hook. When the hook passes (not composing an agent task) and the
+        // clipboard holds nothing the plain-text machinery can read, stop —
+        // don't let AppKit improvise an attachment glyph out of raw pixels.
+        guard NSPasteboard.general.availableType(from: super.readablePasteboardTypes) != nil else { return }
+        super.paste(sender)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard string.isEmpty, !hasMarkedText(), !placeholder.isEmpty else { return }
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font ?? NSFont.systemFont(ofSize: 14),
+            .foregroundColor: NSColor(Tokens.placeholder),
+        ]
+        (placeholder as NSString).draw(
+            at: NSPoint(x: textContainerInset.width, y: textContainerInset.height),
+            withAttributes: attrs)
+    }
+}
+
+/// A borderless prompt box styled to the design tokens.
+///
+/// Backed by an AppKit `NSTextView` (in a scroll view) rather than SwiftUI's
+/// `TextField`/`TextEditor` for two reasons:
+///
+///  1. **No completion panel.** AppKit's text machinery pops a floating
+///     autocomplete/prediction panel while typing (the empty glass box) and
+///     SwiftUI gives no hook to turn it off — `disableEditorMagic` does.
+///  2. **It grows down, not sideways.** A long prompt WRAPS and the box gains a
+///     line at a time, up to `maxVisibleLines`, after which it scrolls internally.
+///     The old single-line field scrolled horizontally, hiding everything but the
+///     tail of what you'd typed.
+///
+/// The caller sizes the row from `onHeightChange` (the box's current height,
+/// already clamped to the line cap).
 struct PromptField: NSViewRepresentable {
     @Binding var text: String
     var placeholder: String
@@ -36,6 +97,9 @@ struct PromptField: NSViewRepresentable {
     /// When this flips true the field grabs first-responder (caret in the box) —
     /// our replacement for SwiftUI `@FocusState`, which can't drive an AppKit view.
     var focusTrigger: Bool = false
+    /// How tall the box may grow, in lines of text, before it stops growing and
+    /// starts scrolling its content instead.
+    var maxVisibleLines: Int = 5
     var onSubmit: () -> Void
     /// Invoked when ← is pressed while the field is empty — lets a result view bind
     /// it to "back / new conversation". No-op by default (e.g. the idle prompt),
@@ -58,66 +122,144 @@ struct PromptField: NSViewRepresentable {
     /// keyboard-highlighted recent row instead of submitting. Returns `true` when
     /// it handled the key (a row was open); `false` falls through to `onSubmit`.
     var onSubmitNav: () -> Bool = { false }
-    /// Invoked on Tab (and Shift-Tab) — the idle prompt binds it to "flip the
-    /// destination" (Ask ⇄ Note), overriding the classifier for the current line.
-    /// Returns `true` when consumed; `false` lets Tab do its default focus move.
+    /// Invoked on Tab (⇥) — the idle prompt binds it to step the destination
+    /// cycle (Ask → Note → Remind), overriding the classifier for the current
+    /// line. Returns `true` when consumed; `false` lets Tab do its default focus
+    /// move.
     var onTab: () -> Bool = { false }
-    /// Reports the width (pt) of everything the field editor is currently *showing*,
-    /// in the field's own font — committed text PLUS any in-progress IME composition
-    /// (the pinyin/marked text that isn't yet in `text`). The inline hint uses this
-    /// to sit right after the caret, so "— Ask" trails the pinyin live and slides
-    /// right as more is typed, instead of anchoring to the stale committed text.
-    /// `0` when the field is empty. No-op by default.
+    /// Invoked on Shift-Tab (⇧⇥). `nil` (the default) means "same as Tab", so a
+    /// caller that doesn't distinguish the two keys keeps the old shared
+    /// behaviour on both; the idle prompt binds this separately to flip the
+    /// Ask ⇄ Agent bucket. Returns `true` when consumed.
+    var onBackTab: (() -> Bool)? = nil
+    /// Invoked on ⌘V *before* the text paste — the idle prompt binds it to "attach
+    /// a pasted image to the agent compose". Returns `true` when it consumed
+    /// the paste (the clipboard held pixels and the compose took them); `false`
+    /// lets the paste insert text as usual.
+    var onPasteImage: () -> Bool = { false }
+    /// Reports the width (pt) of the LAST line the box is currently *showing* —
+    /// committed text PLUS any in-progress IME composition (the pinyin/marked text
+    /// that isn't yet in `text`). The inline hint uses this to sit right after the
+    /// caret, so "— Ask" trails the pinyin live and slides right as more is typed,
+    /// instead of anchoring to the stale committed text. `0` when the box is empty.
+    /// No-op by default.
     var onCaretWidth: (CGFloat) -> Void = { _ in }
+    /// Reports where that last line sits vertically, as an offset (pt) from the
+    /// box's own centre — so the inline hint can ride down with the text as the box
+    /// grows into a second, third… line. `0` for a single-line prompt (the hint
+    /// stays centred, exactly as before). No-op by default.
+    var onCaretY: (CGFloat) -> Void = { _ in }
+    /// Reports the box's current height (pt): one line at rest, growing a line at a
+    /// time with the wrapped text, clamped at `maxVisibleLines`. The caller frames
+    /// the field with it and sizes the row around it. No-op by default.
+    var onHeightChange: (CGFloat) -> Void = { _ in }
+
+    /// The text's left inset inside the box — matched to the ~2pt an `NSTextField`
+    /// cell used to draw with, so the placeholder labels and the inline hint (which
+    /// both carry the same 2pt) still land exactly on the glyphs.
+    static let textInset: CGFloat = 2
+
+    /// One line of `fontSize` text, in the same metrics the layout manager lays the
+    /// box out with — the unit the row heights and the line cap are counted in.
+    static func lineHeight(for fontSize: CGFloat) -> CGFloat {
+        NSLayoutManager().defaultLineHeight(for: .systemFont(ofSize: fontSize))
+    }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
-    func makeNSView(context: Context) -> NSTextField {
-        let field = MagiclessTextField()
-        field.delegate = context.coordinator
-        field.isBordered = false
-        field.drawsBackground = false
-        field.focusRingType = .none
-        field.bezelStyle = .roundedBezel
-        field.isBezeled = false
-        field.lineBreakMode = .byTruncatingTail
-        field.cell?.usesSingleLineMode = true
-        field.cell?.wraps = false
-        field.cell?.isScrollable = true
-        // Kill the floating suggestions panel + all auto-substitutions at the
-        // NSTextField level.
-        field.isAutomaticTextCompletionEnabled = false
-        field.allowsCharacterPickerTouchBarItem = false
-        field.importsGraphics = false
-        field.allowsEditingTextAttributes = false
-        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        applyStyle(to: field)
-        return field
+    func makeNSView(context: Context) -> NSScrollView {
+        // Build the TextKit 1 stack by hand. A bare `NSTextView()` comes up on
+        // TextKit 2, where every `layoutManager` touch silently falls back with a
+        // console warning — and the layout manager is exactly what measures the
+        // box's height and its last line's width here.
+        let storage = NSTextStorage()
+        let layout = NSLayoutManager()
+        let container = NSTextContainer(
+            size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
+        storage.addLayoutManager(layout)
+        layout.addTextContainer(container)
+
+        let tv = PromptTextView(
+            frame: NSRect(x: 0, y: 0, width: 200, height: Self.lineHeight(for: fontSize)),
+            textContainer: container)
+        tv.delegate = context.coordinator
+        tv.isRichText = false
+        tv.importsGraphics = false
+        tv.allowsUndo = true
+        tv.drawsBackground = false
+        tv.backgroundColor = .clear
+        tv.focusRingType = .none
+        tv.isVerticallyResizable = true
+        tv.isHorizontallyResizable = false
+        tv.autoresizingMask = [.width]
+        tv.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                            height: CGFloat.greatestFiniteMagnitude)
+        tv.textContainerInset = NSSize(width: Self.textInset, height: 0)
+        // Wrap to the box's width, grow without bound downward — the scroll view
+        // caps what's *visible*, not what can be typed.
+        container.lineFragmentPadding = 0
+        container.widthTracksTextView = true
+        container.heightTracksTextView = false
+        Self.disableEditorMagic(tv)
+        applyStyle(to: tv)
+        // Route ⌘V through the coordinator so the closure the view calls is
+        // always the CURRENT one (coordinator.parent is refreshed every update),
+        // never the copy captured at makeNSView time.
+        let coord = context.coordinator
+        tv.onPasteImage = { coord.parent.onPasteImage() }
+
+        let scroll = NSScrollView(frame: tv.frame)
+        scroll.documentView = tv
+        scroll.drawsBackground = false
+        scroll.backgroundColor = .clear
+        scroll.borderType = .noBorder
+        // OFF until the text actually exceeds the line cap (see `report`). Leaving
+        // this on unconditionally let macOS flash the overlay knob whenever a
+        // relayout (panel open, list expand) transiently made content > viewport —
+        // the ghost "rectangular cursor" at the field's trailing edge.
+        scroll.hasVerticalScroller = false
+        scroll.hasHorizontalScroller = false
+        scroll.autohidesScrollers = true
+        // Overlay scrollers only surface while scrolling, so a capped-out prompt
+        // shows the bar it needs and the resting one-liner shows nothing.
+        scroll.scrollerStyle = .overlay
+        scroll.verticalScrollElasticity = .none
+        scroll.contentView.drawsBackground = false
+        // The inline hint rides the last line, so it has to follow the box as its
+        // content scrolls under the cap.
+        scroll.contentView.postsBoundsChangedNotifications = true
+        context.coordinator.observe(scroll: scroll, textView: tv)
+        return scroll
     }
 
-    func updateNSView(_ field: NSTextField, context: Context) {
+    func updateNSView(_ scroll: NSScrollView, context: Context) {
+        guard let tv = scroll.documentView as? PromptTextView else { return }
         // Refresh the coordinator's view of us so its callbacks (onCaretWidth, the
         // nav hooks) run against the current closures, not the ones captured at init.
         context.coordinator.parent = self
-        // NEVER touch the field while an IME composition (marked text) is in flight.
+        // NEVER touch the text while an IME composition (marked text) is in flight.
         // During composition the bound `text` lags the display (pinyin isn't
-        // committed yet), so the `stringValue != text` check below would "correct"
-        // the field back to the stale committed text — wiping the user's half-typed
-        // pinyin. And re-renders DO happen mid-composition now: the caret-width
-        // updates driving the inline hint are SwiftUI state changes.
-        let composing = (field.currentEditor() as? NSTextView)?.hasMarkedText() ?? false
-        let textChanged = !composing && field.stringValue != text
-        if textChanged { field.stringValue = text }
-        applyStyle(to: field)
-        // When `text` is cleared programmatically (after submit) there's no editor
-        // change notification to re-measure from, so push the new width here. Use the
-        // bound `text` (the editor mirrors it; no marked text is in flight on a reset).
-        if textChanged {
-            let font = NSFont.systemFont(ofSize: fontSize)
-            let w = text.isEmpty ? 0 : ceil((text as NSString).size(withAttributes: [.font: font]).width)
-            onCaretWidth(w)
+        // committed yet), so the `string != text` check below would "correct" the box
+        // back to the stale committed text — wiping the user's half-typed pinyin. And
+        // re-renders DO happen mid-composition: the caret/height reports driving the
+        // hint and the row size are SwiftUI state changes.
+        let composing = tv.hasMarkedText()
+        if !composing, tv.string != text {
+            // Set the storage rather than `.string` so the glyphs carry our font and
+            // ink outright — a plain string assignment leans on typing attributes and
+            // can land unstyled.
+            tv.textStorage?.setAttributedString(
+                NSAttributedString(string: text, attributes: Self.attributes(fontSize: fontSize)))
+            tv.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
         }
+        applyStyle(to: tv)
+        if tv.placeholder != placeholder { tv.placeholder = placeholder; tv.needsDisplay = true }
+        // Re-measure on every pass: a programmatic set (submit clears the box, ↑
+        // recall fills it) posts no edit notification to measure from, and a width
+        // change re-wraps the text without touching it at all. Deferred a tick — the
+        // reports write SwiftUI state, and we're inside SwiftUI's update.
+        context.coordinator.reportAfterUpdate(for: tv)
+
         // Take focus exactly ONCE per rising edge of focusTrigger. SwiftUI calls
         // updateNSView on every render while the panel is open; without this latch
         // we'd enqueue a `makeFirstResponder` on each pass, piling up async blocks
@@ -125,46 +267,21 @@ struct PromptField: NSViewRepresentable {
         // each other) — a prime suspect for the recurring freeze.
         let coord = context.coordinator
         if focusTrigger {
-            if !coord.didFocus, field.window != nil, field.currentEditor() == nil {
+            if !coord.didFocus, let window = tv.window, window.firstResponder !== tv {
                 coord.didFocus = true
-                DispatchQueue.main.async { [weak field, weak coord] in
-                    guard let field, field.currentEditor() == nil else { return }
-                    field.window?.makeFirstResponder(field)
-                    // AppKit's default `becomeFirstResponder` on an NSTextField
-                    // SELECTS ALL of the field's contents. When a submit happens to
-                    // coincide with a re-focus (the mode/history/clip `onChange`s fire
-                    // `refocusInput`, and the editor can be momentarily torn down by a
-                    // layout swap so the `currentEditor() == nil` guard above passes
-                    // even though the field is still the visual focus), that select-all
-                    // is exactly the intermittent bug: the prior text shows up fully
-                    // highlighted and the caret reads as "lost" — the next keystroke
-                    // would replace the whole selection. Collapse the selection to a
-                    // caret at the end so a re-focus never highlights existing text.
-                    if let editor = field.currentEditor() {
-                        editor.selectedRange = NSRange(location: editor.string.count, length: 0)
-                    }
-                    Self.disableEditorMagic(field.currentEditor())
-                    // The editor exists from this moment — hook the caret-width
-                    // observers NOW, not at controlTextDidBeginEditing. That delegate
-                    // call only fires on the first *committed* change, so a user who
-                    // starts straight into IME composition (pinyin) would compose an
-                    // entire word before any observer existed.
-                    coord?.attachEditorObservers(field.currentEditor())
+                DispatchQueue.main.async { [weak tv] in
+                    guard let tv, let window = tv.window, window.firstResponder !== tv else { return }
+                    window.makeFirstResponder(tv)
+                    // Park the caret at the end rather than leaving a selection: a
+                    // re-focus that lands on existing text (the mode/history/clip
+                    // `onChange`s all fire `refocusInput`) must never come back with
+                    // the whole line highlighted — the next keystroke would replace it.
+                    tv.setSelectedRange(NSRange(location: (tv.string as NSString).length, length: 0))
+                    Self.disableEditorMagic(tv)
                 }
             }
         } else {
             coord.didFocus = false   // re-arm for the next open
-        }
-        // Belt-and-suspenders for click-to-focus and editor swaps: whenever this
-        // field currently owns the field editor, make sure the caret-width observers
-        // are attached (idempotent — re-attaching the same editor is a no-op) and
-        // the editor's completion/prediction magic stays off. The authoritative
-        // kill for click-focus is MagiclessTextField.becomeFirstResponder (a render
-        // isn't guaranteed between a click and the first keystroke); this pass just
-        // re-asserts it, since macOS can re-arm traits on a live editor.
-        if let editor = field.currentEditor() {
-            Self.disableEditorMagic(editor)
-            coord.attachEditorObservers(editor)
         }
     }
 
@@ -196,33 +313,35 @@ struct PromptField: NSViewRepresentable {
         }
     }
 
-    /// Only writes a property when its value actually changed. AppKit setters like
-    /// `placeholderAttributedString` rebuild layout/redraw on every assignment;
-    /// doing that unconditionally on each keystroke was wasteful churn. Cheap
-    /// equality guards keep typing smooth.
-    private func applyStyle(to field: NSTextField) {
+    /// The glyph attributes the box types (and pastes) in.
+    private static func attributes(fontSize: CGFloat) -> [NSAttributedString.Key: Any] {
+        [
+            .font: NSFont.systemFont(ofSize: fontSize),
+            .foregroundColor: NSColor(Tokens.ink).withAlphaComponent(0.96),
+        ]
+    }
+
+    /// Only writes a property when its value actually changed. AppKit setters here
+    /// rebuild layout/redraw on every assignment; doing that unconditionally on each
+    /// keystroke was wasteful churn. Cheap equality guards keep typing smooth.
+    private func applyStyle(to tv: NSTextView) {
         let wantFont = NSFont.systemFont(ofSize: fontSize)
-        if field.font != wantFont { field.font = wantFont }
+        if tv.font != wantFont { tv.font = wantFont }
 
-        let wantText = NSColor(Tokens.ink).withAlphaComponent(0.96)
-        if field.textColor != wantText { field.textColor = wantText }
-
-        // Compare the *whole* attributed placeholder (string AND color/font), not
-        // just the text — otherwise a color change with the same text gets
-        // silently dropped and the field keeps an old, darker placeholder.
-        let wantPlaceholder = NSAttributedString(
-            string: placeholder,
-            attributes: [
-                .foregroundColor: NSColor(Tokens.placeholder),
-                .font: wantFont,
-            ]
-        )
-        if field.placeholderAttributedString != wantPlaceholder {
-            field.placeholderAttributedString = wantPlaceholder
+        let wantInk = NSColor(Tokens.ink).withAlphaComponent(0.96)
+        if tv.textColor != wantInk { tv.textColor = wantInk }
+        // An NSTextView's caret defaults to the system text colour (near-black) —
+        // invisible on the glass. It's the field's ink, like the field editor's was.
+        if tv.insertionPointColor != wantInk { tv.insertionPointColor = wantInk }
+        // Guarded like the rest: re-stamping typing attributes on every render would
+        // churn them mid-IME-composition for no reason.
+        if (tv.typingAttributes[.font] as? NSFont) != wantFont
+            || (tv.typingAttributes[.foregroundColor] as? NSColor) != wantInk {
+            tv.typingAttributes = Self.attributes(fontSize: fontSize)
         }
     }
 
-    final class Coordinator: NSObject, NSTextFieldDelegate {
+    final class Coordinator: NSObject, NSTextViewDelegate {
         /// Refreshed on every `updateNSView` so the callbacks below (notably
         /// `onCaretWidth`) never fire through a stale closure captured at init.
         var parent: PromptField
@@ -230,160 +349,200 @@ struct PromptField: NSViewRepresentable {
         /// of `focusTrigger`, reset when it falls. Prevents re-enqueuing focus on
         /// every render. (See updateNSView.)
         var didFocus = false
-        /// The field editor we've subscribed to, and its text storage. Held weakly —
-        /// it's the shared window field editor, not ours to retain. The STORAGE is
-        /// the one that matters: IME composition (typing pinyin before it commits)
-        /// edits the marked text directly in the storage WITHOUT posting
-        /// `NSText.didChangeNotification` or calling `controlTextDidChange` — those
-        /// only fire for committed changes. `NSTextStorage.didProcessEditingNotification`
-        /// fires for every storage edit, marked text included, so it's the only hook
-        /// that lets the inline hint trail the pinyin live.
-        private weak var observedEditor: NSText?
-        private weak var observedStorage: NSTextStorage?
+        /// The box we measure and the scroll view that clips it. Weak — AppKit owns
+        /// the view tree; this is just our handle back into it from a notification.
+        private weak var textView: PromptTextView?
+        private weak var scrollView: NSScrollView?
+        /// Last values pushed up, so a re-measure that lands on the same numbers
+        /// doesn't kick SwiftUI into another render pass.
+        private var lastHeight: CGFloat = -1
+        private var lastCaretWidth: CGFloat = -1
+        private var lastCaretY: CGFloat = .greatestFiniteMagnitude
         init(_ parent: PromptField) { self.parent = parent }
-        deinit { detachEditorObservers() }
+        deinit { NotificationCenter.default.removeObserver(self) }
 
-        func controlTextDidBeginEditing(_ obj: Notification) {
-            guard let field = obj.object as? NSTextField else { return }
-            // Editor exists now — strip its completion/prediction behaviours.
-            PromptField.disableEditorMagic(field.currentEditor())
-            attachEditorObservers(field.currentEditor())
-            reportCaretWidth(for: field.currentEditor())
+        /// Subscribe to the two things the row's size and the inline hint ride on:
+        ///  · the text STORAGE, because IME composition (typing pinyin before it
+        ///    commits) edits marked text directly in the storage WITHOUT ever firing
+        ///    `textDidChange` — `didProcessEditing` is the only hook that sees it, so
+        ///    it's what lets the hint trail the pinyin live;
+        ///  · the clip view's bounds, because once the box is capped at
+        ///    `maxVisibleLines` the last line moves by SCROLLING, not by growing.
+        func observe(scroll: NSScrollView, textView tv: PromptTextView) {
+            self.scrollView = scroll
+            self.textView = tv
+            if let storage = tv.textStorage {
+                NotificationCenter.default.addObserver(
+                    self,
+                    selector: #selector(storageDidProcessEditing),
+                    name: NSTextStorage.didProcessEditingNotification,
+                    object: storage)
+            }
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(clipBoundsDidChange),
+                name: NSView.boundsDidChangeNotification,
+                object: scroll.contentView)
+        }
+
+        func textDidBeginEditing(_ notification: Notification) {
+            guard let tv = notification.object as? NSTextView else { return }
+            PromptField.disableEditorMagic(tv)
             // Drop the island below the IME candidate window while typing so the
             // pinyin/kana/Hangul selection popup isn't covered by the panel.
-            (field.window as? NotchPanel)?.beginFieldEditing()
+            (tv.window as? NotchPanel)?.beginFieldEditing()
         }
 
-        func controlTextDidEndEditing(_ obj: Notification) {
-            detachEditorObservers()
-            // Restore the resting level now that this field is done editing.
-            ((obj.object as? NSTextField)?.window as? NotchPanel)?.endFieldEditing()
+        func textDidEndEditing(_ notification: Notification) {
+            // Restore the resting level now that this box is done editing.
+            ((notification.object as? NSTextView)?.window as? NotchPanel)?.endFieldEditing()
         }
 
-        func controlTextDidChange(_ obj: Notification) {
-            guard let field = obj.object as? NSTextField else { return }
-            parent.text = field.stringValue
-            // Belt-and-suspenders: macOS can re-arm prediction on the editor as
-            // you type, so keep it disabled on every change (cheap idempotent set).
-            PromptField.disableEditorMagic(field.currentEditor())
-            attachEditorObservers(field.currentEditor())
-            reportCaretWidth(for: field.currentEditor())
+        func textDidChange(_ notification: Notification) {
+            guard let tv = notification.object as? PromptTextView else { return }
+            parent.text = tv.string
+            // Belt-and-suspenders: macOS can re-arm prediction as you type, so keep
+            // it disabled on every change (cheap idempotent set).
+            PromptField.disableEditorMagic(tv)
+            // Keep the caret in view once the box has capped out and started scrolling.
+            tv.scrollRangeToVisible(tv.selectedRange())
+            report(for: tv)
         }
 
-        // MARK: Caret-width tracking (for the inline hint, IME-aware)
-
-        /// Subscribe to the field editor's text storage (and, for committed-change
-        /// coverage, the editor's own didChange). Idempotent — re-attaching the same
-        /// editor/storage is a no-op — so it's safe to call from every hook that
-        /// might be the first to see the editor (focus grab, begin editing, change).
-        func attachEditorObservers(_ editor: NSText?) {
-            guard let editor else { return }
-            if editor !== observedEditor {
-                if let old = observedEditor {
-                    NotificationCenter.default.removeObserver(
-                        self, name: NSText.didChangeNotification, object: old)
-                }
-                observedEditor = editor
-                NotificationCenter.default.addObserver(
-                    self,
-                    selector: #selector(editorTextDidChange(_:)),
-                    name: NSText.didChangeNotification,
-                    object: editor
-                )
-            }
-            // The IME-aware hook: marked-text (pinyin) edits land in the storage and
-            // post didProcessEditing even though no "text did change" ever fires.
-            if let storage = (editor as? NSTextView)?.textStorage, storage !== observedStorage {
-                if let old = observedStorage {
-                    NotificationCenter.default.removeObserver(
-                        self, name: NSTextStorage.didProcessEditingNotification, object: old)
-                }
-                observedStorage = storage
-                NotificationCenter.default.addObserver(
-                    self,
-                    selector: #selector(storageDidProcessEditing(_:)),
-                    name: NSTextStorage.didProcessEditingNotification,
-                    object: storage
-                )
-            }
-        }
-
-        private func detachEditorObservers() {
-            if let editor = observedEditor {
-                NotificationCenter.default.removeObserver(
-                    self, name: NSText.didChangeNotification, object: editor)
-            }
-            observedEditor = nil
-            if let storage = observedStorage {
-                NotificationCenter.default.removeObserver(
-                    self, name: NSTextStorage.didProcessEditingNotification, object: storage)
-            }
-            observedStorage = nil
-        }
-
-        /// Committed-change path (kept as a cheap backstop alongside the storage hook).
-        @objc private func editorTextDidChange(_ note: Notification) {
-            reportCaretWidth(for: note.object as? NSText)
-        }
-
-        /// The IME path: fires on EVERY storage edit, including marked-text (pinyin)
-        /// updates mid-composition. Posted from inside `processEditing`, so defer one
-        /// runloop tick before reading the storage — measuring mid-edit would read a
-        /// half-applied state.
-        @objc private func storageDidProcessEditing(_ note: Notification) {
+        /// The IME path: fires on EVERY storage edit, marked text included. Posted
+        /// from inside `processEditing`, so defer one runloop tick before reading the
+        /// layout — measuring mid-edit would read a half-applied state.
+        @objc private func storageDidProcessEditing() {
             DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.reportCaretWidth(for: self.observedEditor)
+                guard let self, let tv = self.textView else { return }
+                self.report(for: tv)
             }
         }
 
-        /// Measure everything the editor is currently showing — committed text plus
-        /// any in-progress IME composition — in the field's font, and hand it to the
-        /// inline hint so it sits right after the caret. The editor's `string`
-        /// already includes the marked (composing) text, so measuring it covers the
-        /// pinyin-in-progress case for free.
-        private func reportCaretWidth(for editor: NSText?) {
-            let shown = editor?.string ?? parent.text
-            let font = NSFont.systemFont(ofSize: parent.fontSize)
-            let width = shown.isEmpty
-                ? 0
-                : ceil((shown as NSString).size(withAttributes: [.font: font]).width)
-            parent.onCaretWidth(width)
+        @objc private func clipBoundsDidChange() {
+            guard let tv = textView else { return }
+            report(for: tv)
         }
 
-        /// The authoritative kill switch for the word-completion popup: the field
-        /// editor asks its delegate for completions on every edit; returning an
-        /// empty list (and -1 selection) means there's never anything to show, so
-        /// the panel never appears. (Calling `complete(_:)` ourselves did the
-        /// OPPOSITE — it *opened* the panel and looped — so that's gone.)
-        func control(_ control: NSControl, textView: NSTextView,
-                     completions words: [String],
-                     forPartialWordRange charRange: NSRange,
-                     indexOfSelectedItem index: UnsafeMutablePointer<Int>) -> [String] {
-            index.pointee = -1
+        // MARK: Measurement (row height + where the last line ends, IME-aware)
+
+        /// `report`, one runloop tick later. The only safe way to measure from inside
+        /// `updateNSView`: the reports write SwiftUI state, which is illegal during
+        /// SwiftUI's own update pass.
+        func reportAfterUpdate(for tv: PromptTextView) {
+            DispatchQueue.main.async { [weak self, weak tv] in
+                guard let self, let tv else { return }
+                self.report(for: tv)
+            }
+        }
+
+        /// Lay the text out and push up the two numbers the row is built from: the
+        /// box's height (clamped to the line cap) and where the last line ENDS — its
+        /// width, and its vertical offset from the box's centre. Everything is read
+        /// from the layout manager, so a wrapped line, a pasted paragraph and a
+        /// half-composed pinyin syllable all measure the same way.
+        func report(for tv: PromptTextView) {
+            guard let layout = tv.layoutManager, let container = tv.textContainer else { return }
+            layout.ensureLayout(for: container)
+
+            let line = PromptField.lineHeight(for: parent.fontSize)
+            // `usedRect` stops at the last GLYPH, so a trailing newline (an empty last
+            // line the caret sits on) needs the extra fragment to be counted too.
+            var used = layout.usedRect(for: container).height
+            if layout.extraLineFragmentTextContainer != nil {
+                used = max(used, layout.extraLineFragmentRect.maxY)
+            }
+            let cap = line * CGFloat(max(1, parent.maxVisibleLines))
+            let height = min(max(used, line), cap).rounded(.up)
+
+            // The scroller exists only once the text has capped out and truly
+            // scrolls. Kept OFF otherwise so transient mid-animation layouts can't
+            // flash the overlay knob over the panel (the ghost "cursor" bug).
+            let scrollable = used > cap + 0.5
+            if let scroll = scrollView, scroll.hasVerticalScroller != scrollable {
+                scroll.hasVerticalScroller = scrollable
+            }
+
+            // Where the last line ends — the anchor the inline hint hangs off.
+            var lineRect = NSRect(x: 0, y: 0, width: 0, height: line)
+            var endX: CGFloat = 0
+            if layout.extraLineFragmentTextContainer != nil {
+                lineRect = layout.extraLineFragmentRect
+                endX = layout.extraLineFragmentUsedRect.maxX
+            } else if layout.numberOfGlyphs > 0 {
+                let last = layout.numberOfGlyphs - 1
+                lineRect = layout.lineFragmentRect(forGlyphAt: last, effectiveRange: nil)
+                endX = layout.lineFragmentUsedRect(forGlyphAt: last, effectiveRange: nil).maxX
+            }
+            // The box scrolls under the cap, so the visible y of that line is its
+            // position in the text MINUS however far the content has scrolled.
+            let scrolled = scrollView?.contentView.bounds.origin.y ?? 0
+            let centreY = lineRect.midY + tv.textContainerInset.height - scrolled
+            let caretY = centreY - height / 2
+
+            if height != lastHeight {
+                lastHeight = height
+                parent.onHeightChange(height)
+            }
+            let width = tv.string.isEmpty ? 0 : ceil(endX)
+            if width != lastCaretWidth {
+                lastCaretWidth = width
+                parent.onCaretWidth(width)
+            }
+            if abs(caretY - lastCaretY) > 0.5 {
+                lastCaretY = caretY
+                parent.onCaretY(caretY)
+            }
+        }
+
+        // MARK: Keys
+
+        /// The authoritative kill switch for the word-completion popup: the text view
+        /// asks its delegate for completions on every edit; returning an empty list
+        /// (and -1 selection) means there's never anything to show, so the panel never
+        /// appears. (Calling `complete(_:)` ourselves did the OPPOSITE — it *opened*
+        /// the panel and looped — so that's gone.)
+        func textView(_ textView: NSTextView,
+                      completions words: [String],
+                      forPartialWordRange charRange: NSRange,
+                      indexOfSelectedItem index: UnsafeMutablePointer<Int>?) -> [String] {
+            index?.pointee = -1
             return []
         }
 
-        func control(_ control: NSControl, textView: NSTextView,
-                     doCommandBy commandSelector: Selector) -> Bool {
+        func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
             // Defensively swallow the "show completions" command too.
             if commandSelector == #selector(NSResponder.complete(_:)) {
                 return true
             }
             if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                // ⇧⏎ breaks the line instead of sending it — the way to write the
+                // second paragraph the box can now show. Plain ⏎ still submits.
+                if NSApp.currentEvent?.modifierFlags.contains(.shift) == true {
+                    textView.insertNewlineIgnoringFieldEditor(nil)
+                    return true
+                }
                 // Give the recent-list highlight first crack at Enter — if a row is
                 // keyboard-selected, open it; otherwise submit the prompt as usual.
                 if parent.onSubmitNav() { return true }
                 parent.onSubmit()
                 return true
             }
-            // Tab flips the line's destination (Ask ⇄ Note). Shift-Tab too — the
-            // toggle is binary, so "the other one" is the same either way. The
-            // caller decides whether to consume it; unconsumed, Tab falls through
+            // ⌥⏎ — AppKit's own "newline, don't submit" command. Let it through.
+            if commandSelector == #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)) {
+                return false
+            }
+            // Tab steps the idle prompt's destination cycle (Ask → Note →
+            // Remind); Shift-Tab flips the Ask ⇄ Agent bucket. A caller that
+            // wants only one behaviour leaves `onBackTab` nil, and Shift-Tab
+            // falls back to `onTab` (the old shared behaviour). The caller
+            // decides whether to consume the key; unconsumed, it falls through
             // to its usual focus move.
-            if commandSelector == #selector(NSResponder.insertTab(_:))
-                || commandSelector == #selector(NSResponder.insertBacktab(_:)) {
+            if commandSelector == #selector(NSResponder.insertTab(_:)) {
                 return parent.onTab()
+            }
+            if commandSelector == #selector(NSResponder.insertBacktab(_:)) {
+                return (parent.onBackTab ?? parent.onTab)()
             }
             // ← on an empty field means "go back" (start a new conversation) rather
             // than moving a caret that has nothing to move. With text present we let
@@ -570,6 +729,11 @@ struct InlineSendHint: View {
     /// ghost begins; sourcing it from the editor (not from the committed `text`) is
     /// what lets "— Ask" trail the pinyin live and slide right as you type.
     var caretWidth: CGFloat
+    /// How far (pt) the line the text ends on sits from the box's vertical centre —
+    /// `0` on a one-line prompt, one line-height per line as the box grows down. The
+    /// ghost rides down with the text instead of staying pinned to the middle of a
+    /// now-tall box. Also from `PromptField` (`onCaretY`).
+    var caretY: CGFloat = 0
     /// Width available on the row for text + hint. The hint hides rather than clip
     /// when the content leaves it no room.
     var availableWidth: CGFloat
@@ -594,6 +758,19 @@ struct InlineSendHint: View {
     /// this padding alongside the hint so Ask→Note→Remind transitions stay smooth.
     static func reservedTrailingWidth(label: String, suffix: String = "", fontSize: CGFloat) -> CGFloat {
         return width(of: "— \(label)\(suffix)", fontSize: fontSize) + gap
+    }
+
+    /// SwiftUI lays a `Text` in a line box ~1pt taller than the `NSTextView` the
+    /// field types into (it rounds ascent+descent up as a pair; the layout manager
+    /// doesn't), so centring the hint on the line floats its baseline ~0.5pt ABOVE
+    /// the typed glyphs — the "— Ask" ghost reads a hair too high. Drop it back by
+    /// half that overshoot so the ghost sits on the exact baseline of the text it
+    /// trails. Derived from the font, not a magic pixel, so it holds at any size.
+    private static func baselineDrop(fontSize: CGFloat) -> CGFloat {
+        let f = NSFont.systemFont(ofSize: fontSize)
+        let swiftUILine = (f.ascender - f.descender).rounded(.up)
+        let nsLine = NSLayoutManager().defaultLineHeight(for: f)
+        return max(0, (swiftUILine - nsLine) / 2)
     }
 
     var body: some View {
@@ -649,8 +826,9 @@ struct InlineSendHint: View {
                     .fixedSize()
                     .contentTransition(.opacity)
                     .animation(.smooth(duration: 0.25), value: label + suffix)
-                    .offset(x: start)
+                    .offset(x: start, y: caretY + Self.baselineDrop(fontSize: fontSize))
                     .animation(.smooth(duration: 0.25), value: start)
+                    .animation(.smooth(duration: 0.25), value: caretY)
                     .transition(.materialize)
             }
         }
@@ -802,7 +980,6 @@ struct GlassIconButton: View {
         .buttonStyle(GlassPressStyle())
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.18), value: hovering)
-        .help(help)
     }
 }
 
@@ -977,56 +1154,9 @@ extension View {
     }
 }
 
-/// One clipboard-preset chip — a small glass capsule labelled with a Writing-Tools
-/// style action ("Summarize", "Proofread", "更友好"…) that, on tap, runs that preset
-/// against the copied text. Same Liquid Glass language as `GlassTextButton`, sized a
-/// touch larger so a row of them reads as tappable actions, not metadata.
-struct ClipboardPresetChip: View {
-    var title: String
-    /// A faint background tint for the leading capture chip ("Note"/"Remind"), set so
-    /// it reads as a slightly different *colour* from the plain-glass Ask presets beside
-    /// it — same size, same text weight, same hover feel, just a coloured wash over the
-    /// glass. `nil` (the default) leaves the chip untinted, identical to the presets.
-    var tint: Color? = nil
-    /// When set, a trailing "↵" key cap rides inside the chip — the discoverability cue
-    /// for the leading capture chip, which Enter on an empty prompt already fires. Only
-    /// the capture chip passes this; the plain Ask presets leave it `nil`.
-    var keyHint: Bool = false
-    var action: () -> Void
-
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 6) {
-                Text(title)
-                    .font(.sf(12, weight: .medium))
-                    .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
-                    .lineLimit(1)
-                // The "↵" cue: a small return glyph, so the capture chip advertises its
-                // keyboard twin without spelling out the word "Enter". Brightens with the
-                // chip on hover. No background — it rides as a bare glyph beside the label.
-                if keyHint {
-                    Image(systemName: "return")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(hovering ? Tokens.text2 : Tokens.text3)
-                }
-            }
-            .padding(.leading, 12)
-            .padding(.trailing, keyHint ? 10 : 12)
-            .padding(.vertical, 6)
-            .glassCapsule(in: Capsule(), brighter: hovering, tint: tint)
-            .contentShape(Capsule())
-        }
-        .buttonStyle(GlassPressStyle())
-        .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.18), value: hovering)
-    }
-}
-
 /// A minimal left-aligned flow layout: lays children left-to-right, wrapping to the
 /// next line when the next child would overflow the proposed width. Used for the
-/// clipboard-preset chip row, which carries more chips than fit the panel on one
+/// model-picker chip row, which can carry more chips than fit the panel on one
 /// line. Deliberately tiny — no alignment knobs beyond leading — since that's all the
 /// chip row needs; reach for a real grid if a second caller wants more.
 struct FlowLayout: Layout {
@@ -1191,10 +1321,10 @@ struct ThinkingDots: View {
         HStack(spacing: spacing) {
             ForEach(0..<3, id: \.self) { i in
                 Circle()
-                    .fill(Tokens.text2)
+                    .fill(Tokens.text3)
                     .frame(width: dot, height: dot)
                     .scaleEffect(phase ? 1.0 : 0.82)
-                    .opacity(phase ? 0.95 : 0.22)
+                    .opacity(phase ? 0.85 : 0.18)
                     .offset(y: phase ? -2 : 0)
                     .animation(
                         .easeInOut(duration: 0.62)
@@ -1413,6 +1543,13 @@ struct AssistantTurnView: View {
     @Binding var sourceCloseWork: DispatchWorkItem?
     var baseFont: CGFloat = 15
     var color: Color = Tokens.text1
+    /// This turn is an agent run's report (reopened agent session). Its footer drops
+    /// the "Copy as plain text" action — an agent report is copied as Markdown only.
+    var isAgent: Bool = false
+    /// When this agent report's run finished — the reopened record's own timestamp.
+    /// Non-nil only on a settled agent report turn; renders as a quiet completion
+    /// stamp at the end of the footer. `nil` (no stamp) for ordinary chat answers.
+    var completedAt: Date? = nil
     var onInAppCopy: (() -> Void)? = nil
     /// Re-run this answer's question for a fresh take. Non-nil only on the LAST
     /// assistant turn — regenerating a mid-thread answer would orphan everything
@@ -1649,18 +1786,21 @@ struct AssistantTurnView: View {
                             onInAppCopy?()
                         }
                         // Copy with every markdown mark removed — plain prose for
-                        // pasting into fields that don't render markdown.
-                        AnswerFooterButton(icon: "text.alignleft",
-                                           help: L("result.copyPlainText"),
-                                           rowHovered: turnHovered,
-                                           confirms: true) {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(
-                                MarkdownParser.plainText(text)
-                                    .trimmingCharacters(in: .whitespacesAndNewlines),
-                                forType: .string
-                            )
-                            onInAppCopy?()
+                        // pasting into fields that don't render markdown. Skipped on
+                        // an agent report (the detail page copies as Markdown only).
+                        if !isAgent {
+                            AnswerFooterButton(icon: "text.alignleft",
+                                               help: L("result.copyPlainText"),
+                                               rowHovered: turnHovered,
+                                               confirms: true) {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(
+                                    MarkdownParser.plainText(text)
+                                        .trimmingCharacters(in: .whitespacesAndNewlines),
+                                    forType: .string
+                                )
+                                onInAppCopy?()
+                            }
                         }
                     }
                     if let onRegenerate {
@@ -1703,6 +1843,23 @@ struct AssistantTurnView: View {
                         AnswerFooterButton(icon: "info.circle",
                                            help: caption,
                                            rowHovered: turnHovered) {}
+                    }
+                    // When the run finished — the settled agent report's completion
+                    // stamp. A quiet caption (not a button): the wall-clock time on
+                    // its own today, month·day·time once older, in the same
+                    // hover-reveal rhythm as the action icons. Its tooltip carries
+                    // the full date. Only on agent reports (`completedAt` is nil for
+                    // chat answers).
+                    if let completedAt {
+                        Text(completionStamp(completedAt))
+                            .font(.sf(11, weight: .medium).monospacedDigit())
+                            .foregroundStyle(Tokens.text4)
+                            .padding(.leading, 5)
+                            .opacity(turnHovered ? 0.9 : 0.4)
+                            .animation(.easeOut(duration: 0.18), value: turnHovered)
+                            .notchTooltip(L("result.completedAt",
+                                            completedAt.formatted(date: .abbreviated,
+                                                                  time: .shortened)))
                     }
                 }
                 .padding(.top, 2)
@@ -2736,6 +2893,7 @@ private struct CodeBlockView: View {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(text, forType: .string)
                     onInAppCopy?()
+                    Haptics.confirm()
                     withAnimation(.easeOut(duration: 0.15)) { copied = true }
                     Task {
                         try? await Task.sleep(for: .seconds(1.5))
@@ -2745,6 +2903,9 @@ private struct CodeBlockView: View {
                     Image(systemName: copied ? "checkmark" : "doc.on.doc")
                         .font(.system(size: 11, weight: .regular))
                         .foregroundStyle(copied ? Tokens.text2 : Tokens.text3)
+                        // Native SF Symbols swap — the doc morphs to the check
+                        // instead of hard-cutting.
+                        .contentTransition(.symbolEffect(.replace))
                         .frame(width: 22, height: 22)
                         .contentShape(Rectangle())
                 }
@@ -2787,6 +2948,7 @@ private struct AnswerFooterButton: View {
         Button {
             action()
             guard confirms else { return }
+            Haptics.confirm()
             withAnimation(.easeOut(duration: 0.15)) { confirmed = true }
             Task {
                 try? await Task.sleep(for: .seconds(1.5))
@@ -2796,6 +2958,8 @@ private struct AnswerFooterButton: View {
             Image(systemName: confirmed ? "checkmark" : icon)
                 .font(.system(size: 11, weight: .regular))
                 .foregroundStyle(confirmed ? Tokens.text2 : Tokens.text3)
+                // Native SF Symbols swap — icon morphs to the check, no hard cut.
+                .contentTransition(.symbolEffect(.replace))
                 .frame(width: 22, height: 22)
                 .contentShape(Rectangle())
         }
@@ -2892,7 +3056,6 @@ struct SourceBadge: View {
                     scheduleClose()             // grace period to reach the panel
                 }
             }
-            .notchTooltip(L("source.badge.help"))
     }
 
     /// Close after a short grace period, unless something (the panel's hover, or
@@ -3052,5 +3215,286 @@ private struct SourceRow: View {
         let isISODay = datePart.count == 10
             && datePart.allSatisfy { $0.isNumber || $0 == "-" }
         return isISODay ? String(datePart) : s
+    }
+}
+
+/// One saved attachment, drawn from the history image store by filename. Renders
+/// nothing at all when the file is gone (a cleared store, a hand-deleted JPEG) —
+/// a missing picture is silence, never a broken-image box.
+struct SavedImageThumb: View {
+    let file: String
+    var width: CGFloat = 34
+    var height: CGFloat = 24
+    var corner: CGFloat = 5
+
+    var body: some View {
+        if let image = NotchModel.historyImage(named: file) {
+            Image(nsImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(width: width, height: height)
+                .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: corner, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
+                )
+        }
+    }
+}
+
+/// The images a SAVED turn rode in with — the copied screenshot an Ask attached, the
+/// shots pasted into an agent task — shown above that turn's text wherever a saved
+/// thread is read back (the reopened panel, the archive transcript). Deliberately the
+/// same 34×24 thumbnail language as the live compose previews, so a reopened
+/// conversation looks like the one that was sent. Clicking one opens the full-size
+/// JPEG in Preview: the strip is a reminder of what was asked about, and the archive
+/// is where you'd go to look at it properly.
+struct SavedTurnImages: View {
+    let files: [String]
+
+    /// Past this the strip folds the rest into a "+N", same as the agent compose row —
+    /// a task can carry up to `NotchModel.agentImageLimit` (20) images, far more than
+    /// fits across the panel.
+    private static let stripMax = 6
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(files.prefix(Self.stripMax), id: \.self) { file in
+                Button {
+                    NSWorkspace.shared.open(NotchModel.historyImageURL(file))
+                } label: {
+                    SavedImageThumb(file: file)
+                }
+                .buttonStyle(.plain)
+            }
+            if files.count > Self.stripMax {
+                Text("+\(files.count - Self.stripMax)")
+                    .font(.sf(10, weight: .medium))
+                    .monospacedDigit()
+                    .foregroundStyle(Tokens.text4)
+                    .frame(width: 26, height: 24)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(Color.white.opacity(0.06))
+                    )
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+// MARK: - Agent work trail
+
+/// The transcript of an agent run's work, in the CLI apps' own display grammar:
+/// narration the agent wrote between tool calls reads as prose; the tool calls
+/// BETWEEN two narrations fold into one summary row ("4 commands · 2 file
+/// edits") that expands to the individual calls — each of which expands again
+/// to the output it captured. Folded by default so a busy run reads as a story,
+/// not a wall of terminal lines. Shared by the live agent detail page and a
+/// reopened run's record, so the two read identically.
+struct AgentWorkTrailView: View {
+    let entries: [AgentLogEntry]
+
+    /// One display unit of the trail: a prose paragraph, a follow-up prompt
+    /// marker, or a run of consecutive tool calls (folded together). Identified
+    /// by its first entry's id, which stays stable while a live run grows the
+    /// trailing group — so the group's expand state survives streaming.
+    private enum Block: Identifiable {
+        case prose(AgentLogEntry)
+        case marker(AgentLogEntry)
+        case tools([AgentLogEntry])
+
+        var id: UUID {
+            switch self {
+            case .prose(let e), .marker(let e): return e.id
+            case .tools(let run):               return run[0].id
+            }
+        }
+    }
+
+    /// Fold consecutive mono entries into `.tools` runs, keeping prose/markers
+    /// as their own blocks in order.
+    private var blocks: [Block] {
+        var out: [Block] = []
+        var run: [AgentLogEntry] = []
+        func flush() {
+            guard !run.isEmpty else { return }
+            out.append(.tools(run)); run = []
+        }
+        for entry in entries {
+            if entry.mono {
+                run.append(entry)
+            } else {
+                flush()
+                out.append(entry.title.hasPrefix("› ") ? .marker(entry) : .prose(entry))
+            }
+        }
+        flush()
+        return out
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            ForEach(blocks) { block in
+                switch block {
+                case .tools(let run):
+                    if run.count == 1 {
+                        // A lone call carries its own headline ("$ npm test",
+                        // "Editing Foo.swift") — a summary would only hide it.
+                        AgentTrailToolRow(entry: run[0])
+                    } else {
+                        AgentTrailGroupRow(entries: run)
+                    }
+                case .marker(let entry):
+                    // A follow-up round's prompt marker — present only in the
+                    // live trail (the record files the prompt as its own user
+                    // turn instead). Reads as a quiet inline bubble, in the
+                    // user bubble's own type (14.5 medium).
+                    Text(String(entry.title.dropFirst(2)))
+                        .font(.sf(14.5, weight: .medium))
+                        .foregroundStyle(Tokens.text2)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(.white.opacity(0.05))
+                        )
+                        .padding(.vertical, 3)
+                case .prose(let entry):
+                    // Narration is the agent's own words — set exactly like an
+                    // answer (same MarkdownBlocks, same 15pt base), one shade
+                    // quieter so the final report still leads.
+                    MarkdownBlocks(source: entry.title, baseFont: 15,
+                                   color: Tokens.text2)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// A folded run of consecutive tool calls: one quiet summary line ("4 commands
+/// · 2 file edits ›") that expands to the individual calls, each still its own
+/// `AgentTrailToolRow`. This is what keeps a busy stretch of work one line
+/// tall until the reader actually asks for it.
+private struct AgentTrailGroupRow: View {
+    let entries: [AgentLogEntry]
+
+    @State private var expanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Button {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                    expanded.toggle()
+                }
+            } label: {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(Self.summary(entries))
+                        .font(.sf(13))
+                        .foregroundStyle(Tokens.text4)
+                        .lineLimit(1)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 7.5, weight: .semibold))
+                        .foregroundStyle(Tokens.text4)
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if expanded {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(entries) { AgentTrailToolRow(entry: $0) }
+                }
+                // Indented under the summary, with a hairline rail so the
+                // unfolded run reads as the summary's own contents.
+                .padding(.leading, 9)
+                .overlay(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 0.75)
+                        .fill(.white.opacity(0.08))
+                        .frame(width: 1.5)
+                }
+            }
+        }
+    }
+
+    /// "4 commands · 2 file edits · 1 search" — counts by the title prefixes the
+    /// parsers write ("$ ", "Editing ", "Searching ", "Read/Reading/Grep/Glob"),
+    /// anything else counted as a plain tool call.
+    private static func summary(_ entries: [AgentLogEntry]) -> String {
+        var commands = 0, edits = 0, searches = 0, reads = 0, others = 0
+        for e in entries {
+            if e.title.hasPrefix("$ ") { commands += 1 }
+            else if e.title.hasPrefix("Editing ") { edits += 1 }
+            else if e.title.hasPrefix("Searching ") { searches += 1 }
+            else if e.title.hasPrefix("Read") || e.title.hasPrefix("Grep")
+                     || e.title.hasPrefix("Glob") { reads += 1 }
+            else { others += 1 }
+        }
+        var parts: [String] = []
+        if commands > 0 { parts.append(commands == 1 ? L("agent.trail.cmd.one") : L("agent.trail.cmd.many", commands)) }
+        if edits > 0    { parts.append(edits == 1 ? L("agent.trail.edit.one") : L("agent.trail.edit.many", edits)) }
+        if reads > 0    { parts.append(reads == 1 ? L("agent.trail.read.one") : L("agent.trail.read.many", reads)) }
+        if searches > 0 { parts.append(searches == 1 ? L("agent.trail.search.one") : L("agent.trail.search.many", searches)) }
+        if others > 0   { parts.append(others == 1 ? L("agent.trail.tool.one") : L("agent.trail.tool.many", others)) }
+        return parts.joined(separator: " · ")
+    }
+}
+
+/// One tool call in the trail: the input line in mono, with a disclosure
+/// chevron when the tool's output was captured — tapping unfolds the output in
+/// a quiet code-block card. Rows without output are inert (nothing to unfold).
+private struct AgentTrailToolRow: View {
+    let entry: AgentLogEntry
+
+    @State private var expanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                guard entry.detail != nil else { return }
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                    expanded.toggle()
+                }
+            } label: {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    // Mono at 12 = the code rung under the 13pt secondary body,
+                    // the same base−1 step markdown code blocks use.
+                    Text(entry.title)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(Tokens.text4)
+                        .lineLimit(expanded ? nil : 1)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if entry.detail != nil {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 7.5, weight: .semibold))
+                            .foregroundStyle(Tokens.text4)
+                            .rotationEffect(.degrees(expanded ? 90 : 0))
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if expanded, let detail = entry.detail {
+                Text(detail)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(Tokens.text3)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(.white.opacity(0.03))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .strokeBorder(.white.opacity(0.06), lineWidth: 0.5)
+                            )
+                    )
+            }
+        }
     }
 }

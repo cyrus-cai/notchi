@@ -15,6 +15,26 @@ struct NotchBody: View {
     /// Release-notes state — read here to surface the "what's new" cue in the idle
     /// input row once, on the first launch after an update (see `unseenVersion`).
     @ObservedObject private var whatsNew = WhatsNewService.shared
+    /// The agent-Codex run (XII: agent-to-Codex) — observed so the idle
+    /// view's task card tracks progress live and flips to the result on finish.
+    @ObservedObject private var agentManager = AgentTaskManager.shared
+    /// The model catalog behind the ⌘⇧I picker — the same store Settings' chip reads,
+    /// so a list fetched on one surface is already warm on the other.
+    @ObservedObject private var catalog = ModelCatalogStore.shared
+    /// Two-step cancel for an agent status row: the ✕ arms this with its task's
+    /// id, and only the armed "cancel?" chip actually terminates that run.
+    /// Auto-disarms after a beat. One slot on purpose — arming a second row
+    /// relaxes the first.
+    @State private var confirmingAgentCancelID: UUID? = nil
+    /// Which agent status row the pointer is over. The row's trailing slot rests
+    /// as an elapsed clock and only becomes the ✕ under the pointer, so a list of
+    /// runs reads as durations at a glance and never as a row of close buttons.
+    @State private var hoveredAgentRowID: UUID? = nil
+    /// Which attached-image thumbnail the pointer is over. Each thumbnail's ×
+    /// removal badge only appears while its own thumbnail is hovered, so the
+    /// strip rests as clean previews instead of a row of close buttons.
+    @State private var hoveredComposeImageIndex: Int? = nil
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Drives the custom field's first-responder. Set shortly after the panel
     /// opens so the caret lands without a click (the AppDelegate has just made
     /// the panel key; a tiny delay lets that settle first).
@@ -41,6 +61,17 @@ struct NotchBody: View {
     /// anything — including pinyin that hasn't committed to `model.text` yet, which
     /// is exactly when the native placeholder would disappear.
     @State private var followUpCaretWidth: CGFloat = 0
+    /// Where the line the text ends on sits, as an offset from the field's centre —
+    /// `0` while the prompt is one line, one line-height further down per line as a
+    /// long paragraph wraps. Carries the inline hint down with the last line so it
+    /// keeps trailing the caret instead of hanging in the middle of a tall box.
+    @State private var caretY: CGFloat = 0
+    @State private var followUpCaretY: CGFloat = 0
+    /// The height the prompt box is asking for: one line at rest, growing with the
+    /// wrapped text up to `NotchBody.promptMaxLines`, after which it scrolls inside
+    /// itself. The input rows size themselves off these.
+    @State private var inputHeight: CGFloat = PromptField.lineHeight(for: NotchBody.idleFontSize)
+    @State private var followUpHeight: CGFloat = PromptField.lineHeight(for: NotchBody.followUpFontSize)
     /// Small directional slide-in for the idle prompt as ↑/↓ recall swaps a past
     /// question in: set to a nonzero offset (with the step's direction) the instant
     /// a recall fires, then animated back to rest. See `model.recallPulse`.
@@ -49,17 +80,17 @@ struct NotchBody: View {
     /// filter icon is tapped so the caret lands in the expanded field without a
     /// second click; reset when the filter collapses so it can re-arm next time.
     @State private var filterFocused = false
-    /// Measured height of the immersive floating header (input, plus the quote
-    /// preview and action chips when a clipboard quote is pending). The list's top
+    /// Measured height of the immersive floating header (input, plus the copied-
+    /// image preview when one is pending). The list's top
     /// runway and frost band are derived from this so the first row always rests
     /// clear of the header no matter how tall it gets — a plain input is short, a
-    /// quote-with-chips header is tall. Seeded to the plain-input baseline so the
-    /// first frame (before the preference lands) already clears a no-quote header.
+    /// header with a preview is taller. Seeded to the plain-input baseline so the
+    /// first frame (before the preference lands) already clears a bare-input header.
     @State private var measuredImmersiveHeaderHeight: CGFloat = NotchBody.immersiveHeaderBaseline
     /// Whether the immersive header height has been measured at least once this open.
     /// The FIRST measurement (baseline → real height) must land silently — animating
     /// it forces a second, animated layout pass before the expand can even start,
-    /// which read as a ~0.5s stall before the list moved. Only LATER changes (a quote
+    /// which read as a ~0.5s stall before the list moved. Only LATER changes (a preview
     /// appearing/clearing while open) animate, so those still slide. Reset on close.
     @State private var didMeasureImmersiveHeader = false
     /// Which answer's source badge is currently open (hovered), shared between the
@@ -110,13 +141,87 @@ struct NotchBody: View {
                     resultView
                 }
             case .idle:
-                idleView
+                // An open agent detail page owns the idle slot: the run's full
+                // work trail, live while it works. Falls back to the idle panel
+                // by itself once the task is dismissed (the lookup fails).
+                if let task = agentDetailTask {
+                    agentDetailView(task)
+                } else {
+                    idleView
+                }
             }
         }
         .padding(.horizontal, 20)
         .padding(.top, 15)
         .padding(.bottom, 22)
         .frame(maxWidth: .infinity, alignment: .leading)
+        // The cross-provider model-config card — opened by the Ask bucket's model chip
+        // (`askModelChip`), the settings chip, and ⌘⇧I's fallback when no agent CLI is
+        // installed. It hangs under the panel body rather than off the chip so all three
+        // front doors land the same card right below the island, where the eye already is.
+        .popover(isPresented: $model.showModelPicker, arrowEdge: .bottom) {
+            ModelPickerView(
+                models: catalog.rows(selected: selectedProvider),
+                selectedProvider: selectedProvider,
+                selectedID: selectedModelID,
+                onSelect: { prov, id in
+                    ModelCatalogStore.select(provider: prov, model: id)
+                    model.showModelPicker = false
+                },
+                onConfigure: { m in
+                    // "Add key" on a greyed model: the picker can't take a key, so
+                    // hand the pick to Settings — it opens on that provider's key
+                    // row and commits the model the moment the key lands. The active
+                    // backend stays untouched until then.
+                    model.pendingModelSetup = .init(provider: m.provider, id: m.info.id)
+                    model.showModelPicker = false
+                    withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                        model.openSettings()
+                    }
+                })
+                .task { await catalog.loadAll() }
+                .preferredColorScheme(.dark)
+                .modifier(GlassPopoverBackground(cornerRadius: 14))
+        }
+        .onChange(of: model.showModelPicker) { _, open in
+            // The popover is its own window, outside the island's tracking area —
+            // suspend the leave-collapse while it's up, exactly as the settings
+            // picker does, or moving the pointer into the card folds the panel away.
+            model.isModelPickerOpen = open
+        }
+        // What ⌘⇧I opens: the agent's model + reasoning effort, the compose chip's menu
+        // unfolded into a card (ContentView routes the chord; the chip's own menu stays
+        // as it was). Hung off the body for the same reason as the chat picker — it lands
+        // right under the island, and it doesn't depend on the chip being on screen.
+        .popover(isPresented: $model.showAgentPicker, arrowEdge: .bottom) {
+            AgentModelPickerView(
+                choices: AgentEngine.available.flatMap(\.modelChoices),
+                selectedEngine: model.agentArmedEngine,
+                selectedModelID: model.agentModelID,
+                selectedEffort: model.agentEffort,
+                onSelectModel: { choice in
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                        model.selectAgentModel(choice)
+                    }
+                },
+                onSelectEffort: { model.agentEffort = $0 },
+                onDone: { model.showAgentPicker = false })
+                // Resolve the Claude aliases to concrete model names ("opus" →
+                // "Claude Opus 4.8") so the rows can say what they actually run;
+                // cached + TTL'd, so this is usually a no-op, and the labels fill
+                // in reactively when a real probe lands.
+                .task { catalog.resolveClaudeAliases() }
+                .preferredColorScheme(.dark)
+                // A thinner veil than the standard popover — this card reads as
+                // transparent Liquid Glass, the wallpaper refracting through it.
+                .modifier(GlassPopoverBackground(cornerRadius: 14, veilOpacity: 0.16))
+        }
+        .onChange(of: model.showAgentPicker) { _, open in
+            model.isModelPickerOpen = open
+        }
+        .onChange(of: model.showAskModelPicker) { _, open in
+            model.isModelPickerOpen = open
+        }
         .onChange(of: model.open) { _, isOpen in
             if isOpen {
                 refocusInput()
@@ -159,11 +264,41 @@ struct NotchBody: View {
                 refocusInput()
             }
         }
+        // Leaving a thread (← / ⌘N new-chat, tearing it off into a window) empties
+        // `turns` while the panel — and this view — stay mounted, so neither init's
+        // seed nor the measurement probe runs again: the OLD thread's measurement
+        // would survive into the next one. If that thread was long (>300), a fresh
+        // short question mounts straight into the full-height clipped scroller and
+        // — because the probe deliberately stays down while streaming — holds full
+        // height for the entire answer. Zero the measurement (and its model mirror,
+        // which seeds the next mount) the moment the thread leaves the screen, so
+        // every new chat starts unclipped and sizes to its content. Close is
+        // unaffected: `fullClose` parks the measurement before it empties `turns`.
+        .onChange(of: model.turns.isEmpty) { _, isEmpty in
+            if isEmpty {
+                measuredAnswerHeight = 0
+                model.lastMeasuredAnswerHeight = 0
+            }
+        }
         .onAppear {
             if model.open {
                 refocusInput()
             }
         }
+    }
+
+    /// The provider and model in effect — what the ⌘⇧I picker opens on. Read straight
+    /// from the store rather than mirrored into state: a pick closes the popover, so the
+    /// body re-reads on the next summon and can never show a stale selection.
+    private var selectedProvider: Provider { APIKeyStore.selectedProvider }
+
+    /// The wire id in effect, with the sentinels resolved (an empty override, or Codex's
+    /// legacy "codex", both mean "this provider's default") — mirrors the settings chip.
+    private var selectedModelID: String {
+        let p = selectedProvider
+        let id = APIKeyStore.storedModel(for: p)
+        if p == .codex, id.isEmpty || id == "codex" { return p.defaultModel }
+        return id.isEmpty ? p.defaultModel : id
     }
 
     /// Re-arm the PromptField's first-responder latch. `focusTrigger` only fires on
@@ -208,44 +343,55 @@ struct NotchBody: View {
                 immersiveHistoryView
             } else {
                 // While ↑/↓ recall is walking the history, the slot above the input
-                // shows a "which of how many" counter instead of the clipboard quote
-                // — the quote is irrelevant to a recalled question, and the counter
-                // tells you how far back you've stepped.
-                if let recall = model.recallPosition {
-                    recallCounterLine(recall)
-                        .transition(moduleTransition)
-                } else if let clip = model.pendingClipboard {
-                    clipboardPreviewLine(clip)
-                        .transition(moduleTransition)
-                } else if let image = model.pendingClipboardImage {
-                    clipboardImagePreviewLine(image)
-                        .transition(moduleTransition)
+                // shows a "which of how many" counter instead of the copied-image
+                // preview — the preview is irrelevant to a recalled question, and the
+                // counter tells you how far back you've stepped. An active agent
+                // compose repurposes the slot: the ambient clipboard preview is
+                // suppressed (its context chips live *below* the input), but an image
+                // the user explicitly ⌘V-pasted into the task shows here — that's
+                // part of the task being written, not noise over it.
+                if !model.agentComposeActive {
+                    if let recall = model.recallPosition {
+                        recallCounterLine(recall)
+                            .transition(moduleTransition)
+                    } else if let image = model.pendingClipboardImage {
+                        clipboardImagePreviewLine(image)
+                            .transition(moduleTransition)
+                    }
+                } else if !model.agentComposeImages.isEmpty {
+                    agentImagesAttachedLine(model.agentComposeImages) {
+                        model.removeAgentComposeImage(at: $0)
+                    }
+                    .padding(.bottom, 8)
+                    .transition(moduleTransition)
                 }
 
                 idleInputRow
 
-                // The one-tap action chips for the pending clipboard sit *below* the
-                // prompt — the field stays the focus, with the shortcuts as a quiet
-                // row beneath it. Suppressed while the recent list is open: the list
-                // takes that same space below the prompt, and showing both stacks the
-                // chips on top of the RECENT rows (a visible collision). Recent wins —
-                // it's what the user just summoned — so the shortcuts fold away until
-                // the list is closed again. Also suppressed while a note-save cue is up
-                // ("Saving…" / "Added to Notes" / error): the save just consumed the
-                // clipboard, so the action row is stale — fold it away and let the calm
-                // confirmation stand alone rather than crowding it with shortcuts.
-                // Also folded away during ↑/↓ recall: the box now holds a recalled
-                // question, not the copied text, so "summarize this"-style chips would
-                // act on the wrong thing.
-                if model.pendingClipboard != nil && !model.showHistory
-                    && noteFeedbackContent == nil && model.recallPosition == nil {
-                    clipboardPresetChips()
+                // The bucket row (XII: agent-to-Codex): the Ask|Agent pill as
+                // fixed chrome below the input, with the folder / model / effort
+                // chips unfurling beside it while Agent is armed — same slot and
+                // glass language as the one-tap presets. Hidden entirely when no
+                // agent CLI is installed, so those users keep today's exact panel.
+                // (Both the Ask|Agent pill and the Recent chevron leave the row while
+                // Recent is expanded — the chevron moves to the manage bar's
+                // bottom-right — so the row itself drops out when nothing is left.)
+                if model.agentAvailable && bucketRowHasContent {
+                    bucketRow
                         .transition(moduleTransition)
                 }
 
+                // Agent runs' presence (XII: agent-to-Codex): one status line per
+                // task — the live activity while it works, the outcome once it
+                // settles. These live ONLY inside the opened Recent list (they ride
+                // the TOP of `historyList`), never as a standalone strip in this
+                // resting compact view — tap the Recent chevron to see them. While a
+                // run is live the chevron carries the "N running" count as the sole
+                // resting cue; the rows themselves stay behind that disclosure.
+
                 // The recent list expands below the prompt once the clock is tapped.
                 // (The immersive variant above handles the overflowing case.)
-                if !model.hasText && !model.history.isEmpty && model.showHistory {
+                if !model.hasText && recentHasContent && model.showHistory {
                     historySection
                         .padding(.top, 12)
                         .transition(moduleTransition)
@@ -280,8 +426,12 @@ struct NotchBody: View {
     /// The idle prompt field, with the live note-error reset wired in. Shared by
     /// the flat idle layout and the immersive history header so the field — and
     /// all its focus/IME plumbing — exists exactly once, never duplicated.
+    /// An armed agent folder swaps the placeholder: the same field is now
+    /// composing Codex's task, and the ghost text should say so.
     private var idleInputRow: some View {
-        inputRow(placeholder: L("input.placeholder"), followUp: false)
+        inputRow(placeholder: L(model.agentComposeActive
+                                    ? "agent.placeholder" : "input.placeholder"),
+                 followUp: false)
             .onChange(of: model.text) { _, _ in
                 // Editing the field clears a stale note-save error so the cue
                 // doesn't linger over a line the user is actively rewriting.
@@ -294,15 +444,30 @@ struct NotchBody: View {
     /// nothing to flow under the input, so it keeps the calm compact layout —
     /// matching the same `> 6` overflow calibration the list itself uses.
     ///
-    /// A pending clipboard quote no longer forces the compact fallback: the quote
-    /// preview and its action chips ride inside the immersive floating header (above
-    /// and below the input), and the runway grows to clear that taller header — so the
-    /// frosted immersive surface stays consistent whether or not a quote is present.
+    /// A pending copied-image preview doesn't force the compact fallback: it rides
+    /// inside the immersive floating header above the input, and the runway grows to
+    /// clear that taller header — so the frosted immersive surface stays consistent
+    /// whether or not a preview is present.
     private var useImmersiveHistory: Bool {
         !model.hasText
             && model.showHistory
             && noteFeedbackContent == nil
             && model.recentVisible.count > 6
+    }
+
+    /// Whether the Recent area has anything to disclose — past history, or the live
+    /// agent tasks that ride the top of that same list. A running task with no prior
+    /// history still gives the chevron something to open (its own status row), so the
+    /// "N running" disclosure is never a dead button.
+    private var recentHasContent: Bool {
+        !model.history.isEmpty || !agentManager.tasks.isEmpty
+    }
+
+    /// True while the Recent list is on screen (flat `historySection` or its
+    /// immersive variant). The Ask|Agent bucket pill hides in this state — an
+    /// expanded Recent view shouldn't also carry the compose-family switch.
+    private var recentListShown: Bool {
+        !model.hasText && recentHasContent && model.showHistory
     }
 
     // MARK: - Immersive history
@@ -311,9 +476,10 @@ struct NotchBody: View {
     /// over its top as a translucent header. The list's content reaches up behind
     /// the header (`immersiveTopReach`), so rows scroll under the input and frost +
     /// fade out rather than ending on a hard cut — the panel reads as one
-    /// continuous surface. The manage bar (the ⋯ chip) FLOATS over the bottom-left
-    /// as fixed chrome: the list runs full-height *behind* it, so rows can scroll
-    /// down past the buttons and stay partly visible through/around the glass.
+    /// continuous surface. The manage bar (the ⋯ chip at bottom-left, the Recent
+    /// chevron at bottom-right) FLOATS across the bottom as fixed chrome: the list
+    /// runs full-height *behind* it, so rows can scroll down past the buttons and
+    /// stay partly visible through/around the glass.
     private var immersiveHistoryView: some View {
         ZStack(alignment: .top) {
             historyList(immersive: true)
@@ -326,24 +492,36 @@ struct NotchBody: View {
                 // behind comes entirely from the list's own top fade + blur (see
                 // `historyList(immersive:)`).
                 VStack(alignment: .leading, spacing: 0) {
-                    // A pending clipboard quote rides INSIDE the floating header:
-                    // the preview line above the prompt (the context the query folds
-                    // in). The runway (`immersiveTopReach`, measured from this
-                    // header's real height) grows to keep the first row clear.
-                    if let clip = model.pendingClipboard {
-                        clipboardPreviewLine(clip)
+                    // A pending copied-image preview rides INSIDE the floating
+                    // header, above the prompt. The runway (`immersiveTopReach`,
+                    // measured from this header's real height) grows to keep the
+                    // first row clear. Same slot swap as the flat layout: an
+                    // active agent compose shows its pasted attachment instead.
+                    if model.agentComposeActive {
+                        if !model.agentComposeImages.isEmpty {
+                            agentImagesAttachedLine(model.agentComposeImages) {
+                                model.removeAgentComposeImage(at: $0)
+                            }
+                            .padding(.bottom, 8)
+                        }
                     } else if let image = model.pendingClipboardImage {
                         clipboardImagePreviewLine(image)
                     }
                     idleInputRow
-                    // No preset chips here: this IS the expanded Recent state, and
-                    // the list owns the space below the prompt. Chips fold away to
-                    // avoid a visible collision with the RECENT rows — matching the
-                    // flat layout's same suppression when showHistory is open.
+                    // The bucket row rides the immersive header too — but only while
+                    // it still carries something (an active compose). The Ask|Agent
+                    // pill and the Recent chevron both leave it once the list is up,
+                    // and an empty row would just pad the header.
+                    if model.agentAvailable && bucketRowHasContent {
+                        bucketRow
+                    }
+                    // Agent status rows do NOT ride the header — they scroll with the
+                    // recent list as its newest rows (see `historyList(immersive:)`),
+                    // so a running task isn't pinned over the top of the scroll.
                 }
                 .padding(.bottom, 6)
                 // Measure the header's real height so runway/frost track it.
-                // A quote header is taller than a bare input; the preference feeds
+                // A header with a preview is taller than a bare input; the preference feeds
                 // measuredImmersiveHeaderHeight so immersiveTopReach adapts.
                 .background(
                     GeometryReader { geo in
@@ -356,7 +534,7 @@ struct NotchBody: View {
             .onPreferenceChange(ImmersiveHeaderHeightKey.self) { h in
                 let measured = max(h, NotchBody.immersiveHeaderBaseline)
                 if didMeasureImmersiveHeader {
-                    // A later change (quote appearing/clearing) slides the runway
+                    // A later change (preview appearing/clearing) slides the runway
                     // so the list shifts smoothly rather than snapping.
                     withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
                         measuredImmersiveHeaderHeight = measured
@@ -369,18 +547,20 @@ struct NotchBody: View {
                     measuredImmersiveHeaderHeight = measured
                 }
             }
-            // Fixed bottom chrome: the ⋯ chip, FLOATING over the bottom-left of the
-            // full-height list. Because it's an overlay (not a sibling), the list runs
+            // Fixed bottom chrome: the ⋯ chip and the Recent chevron, FLOATING over the
+            // bottom corners of the full-height list. Because it's an overlay (not a sibling), the list runs
             // its whole height behind it — rows scroll down past the buttons and stay
             // partly visible through/around the translucent glass capsules. The glass
             // material gives the buttons enough body to stay legible over moving rows.
-            .overlay(alignment: .bottomLeading) {
-                // Pull the bar tighter into the bottom-left corner than the body's
+            .overlay(alignment: .bottom) {
+                // Pull the bar tighter into the bottom corners than the body's
                 // 20pt horizontal / 22pt bottom insets would leave it: negative
-                // padding tucks it ~10pt closer on each edge, still clear of the
-                // 30pt NotchShape corner arc at the bar's height.
+                // padding tucks it ~10pt closer on each edge — the same 10 left and
+                // right, so the ⋯ and the Recent chevron end up equidistant from
+                // their own panel edge — still clear of the 30pt NotchShape corner
+                // arc at the bar's height.
                 manageBar
-                    .padding(.leading, -10)
+                    .padding(.horizontal, -10)
                     .padding(.bottom, -8)
             }
             .transition(moduleTransition)
@@ -432,35 +612,8 @@ struct NotchBody: View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// The copied-clip preview shown above the prompt when there's eligible
-    /// clipboard content — context for the input below, so the user can see what a
-    /// referential query ("summarize this") will fold in. Rendered as a *quote*: a
-    /// leading curly quotation mark precedes the copied text, so it reads as the
-    /// lifted, referenced material rather than a status line. The one-tap action
-    /// chips that act on this clip live *below* the input, in `clipboardPresetChips`.
-    private func clipboardPreviewLine(_ clip: String) -> some View {
-        let preview = clip.count > 40 ? String(clip.prefix(40)) + "…" : clip
-        return HStack(alignment: .firstTextBaseline, spacing: 4) {
-            // A leading curly opening quotation mark — the standard typographic cue
-            // that what follows is lifted, quoted material. Sits slightly larger and
-            // baseline-aligned with the preview text.
-            Text("\u{201C}")
-                .font(.system(size: 18, weight: .semibold, design: .serif))
-                .foregroundStyle(Tokens.text3.opacity(0.6))
-                .baselineOffset(-3)
-            Text(preview)
-                .font(.sf(11))
-                .tracking(0.2)
-                .foregroundStyle(Tokens.text4)
-                .lineLimit(1)
-        }
-        .fixedSize(horizontal: false, vertical: true)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.bottom, 8)
-    }
-
-    /// The copied-IMAGE preview (XII-121): a small thumbnail + caption in the
-    /// text quote's slot, shown when the clipboard holds pixels instead of words
+    /// The copied-IMAGE preview (XII-121): a small thumbnail + caption above the
+    /// prompt, shown when the clipboard holds pixels
     /// (a screenshot, a copied bitmap). The first-turn Ask attaches this image to
     /// the wire message, so the preview is exactly "what the model will see".
     private func clipboardImagePreviewLine(_ image: NSImage) -> some View {
@@ -484,10 +637,78 @@ struct NotchBody: View {
         .padding(.bottom, 8)
     }
 
-    /// The ↑/↓ recall counter that takes the clipboard quote's slot while walking
-    /// history: a small clock glyph + "pos / total" (newest = 1), so you can see
-    /// how far back the current recalled question sits. Same slot metrics as
-    /// `clipboardPreviewLine` so swapping one for the other doesn't jump the input.
+    /// How many thumbnails the attached strip shows before folding the rest into
+    /// a "+N" chip. The real cap is `NotchModel.agentImageLimit` (20) — far more
+    /// than fits across a 540pt panel, so the strip shows the first few and the
+    /// "+N" chip carries the rest.
+    private static let agentThumbStripMax = 6
+
+    /// The agent compose's attached images: a strip of thumbnails in the same
+    /// language as the copied-image preview above, each with its own × — unlike
+    /// the ambient clipboard preview (which self-refreshes), these were explicit
+    /// ⌘Vs and need an explicit way back out, one at a time. The run hands exactly
+    /// these images to the agent. Shared with the settled card's follow-up field,
+    /// which clears its own attachments — hence the injected remove action.
+    private func agentImagesAttachedLine(_ images: [NSImage],
+                                         onRemove: @escaping (Int) -> Void) -> some View {
+        HStack(spacing: 6) {
+            ForEach(Array(images.prefix(Self.agentThumbStripMax).enumerated()),
+                    id: \.offset) { index, image in
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: 34, height: 24)
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
+                    )
+                    .overlay(alignment: .topTrailing) {
+                        Button { onRemove(index) } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundStyle(.white.opacity(0.9))
+                                .frame(width: 15, height: 15)
+                                .background(Circle().fill(Color.black.opacity(0.66)))
+                                .contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .offset(x: 5, y: -5)
+                        // Rest as a clean preview; the × only appears while the
+                        // pointer is over this thumbnail.
+                        .opacity(hoveredComposeImageIndex == index ? 1 : 0)
+                        .allowsHitTesting(hoveredComposeImageIndex == index)
+                    }
+                    .onHover { inside in
+                        withAnimation(.easeOut(duration: 0.12)) {
+                            hoveredComposeImageIndex = inside ? index : (hoveredComposeImageIndex == index ? nil : hoveredComposeImageIndex)
+                        }
+                    }
+            }
+            if images.count > Self.agentThumbStripMax {
+                Text("+\(images.count - Self.agentThumbStripMax)")
+                    .font(.sf(10, weight: .medium))
+                    .monospacedDigit()
+                    .foregroundStyle(Tokens.text4)
+                    .frame(width: 26, height: 24)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(Color.white.opacity(0.06))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
+                    )
+            }
+        }
+        // The × badges overhang their thumbnails — give the row the 4pt back.
+        .padding(.top, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The ↑/↓ recall counter shown above the input while walking history: a small
+    /// clock glyph + "pos / total" (newest = 1), so you can see
+    /// how far back the current recalled question sits.
     private func recallCounterLine(_ recall: (pos: Int, total: Int)) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 5) {
             Image(systemName: "clock.arrow.circlepath")
@@ -506,162 +727,515 @@ struct NotchBody: View {
         .padding(.bottom, 8)
     }
 
-    /// A *short* row of one-tap preset actions for the pending clipboard, sitting just
-    /// beneath the prompt. Deliberately auxiliary — the prompt above is the focus — so
-    /// by default only the few most-common actions (Summarize / Proofread / Translate)
-    /// show, with a small "⋯" chip to reveal the rest (Key Points / Rewrite / tone) on
-    /// demand. Tapping an action chip authors a referential query into the prompt and
-    /// submits it, so the existing clipboard-injection path in `submit()` folds the
-    /// copied text in — the chip is just a shortcut for typing "summarize this". The
-    /// label/phrase script follows the copied text (CJK chips for CJK clips), so a
-    /// Chinese clipboard offers 总结 / 校对 / 翻译 etc.
-    private func clipboardPresetChips() -> some View {
-        // The user's enabled quick-tools (XII-111): collapsed to the first few, the
-        // rest tucked behind a "⋯" chip that unfurls on hover. Unchecked tools never
-        // appear. Wraps via FlowLayout if a row ever overflows.
-        FlowLayout(hSpacing: 6, vSpacing: 6) {
-            // When the copied text itself reads as a note/reminder, lead with a one-tap
-            // capture chip — filing the jot is the more likely intent than asking the AI
-            // about it, so it sits ahead of the Ask presets. The verdict lands
-            // asynchronously (~15ms after the row is up); the chip fades+scales in (and
-            // the presets glide right) via the `.animation(value:)` on the row below.
-            // Only while the prompt is empty: once there's typed text, Enter belongs to
-            // that line (confirmClipboardCaptureIfIdle guards !hasText), so the whole
-            // chip retires — scaling out to the leading edge while the Ask presets glide
-            // left into its place — and returns the same way if the text is cleared.
-            if let capture = model.pendingClipboardCapture, !model.hasText {
-                ClipboardPresetChip(title: captureChipTitle(capture),
-                                    tint: captureChipTint(capture),
-                                    keyHint: true) {
-                    model.runClipboardCapture(capture)
+    // MARK: - Agent to Codex (XII: agent-to-Codex)
+
+    /// An engine's real brand mark, tinted like the surrounding text — the vendors'
+    /// own glyphs, never an SF-symbol stand-in. Shared with the ⌘⇧I agent picker
+    /// (`AgentEngineMark`), which lists the same engines' models.
+    private func agentEngineMark(_ engine: AgentEngine, size: CGFloat,
+                                    tint: Color) -> some View {
+        AgentEngineMark(engine: engine, size: size, tint: tint)
+    }
+
+    /// The bucket row under the idle prompt — fixed chrome once a local agent
+    /// CLI is installed: the Ask|Agent pill, and (while Agent is armed) the
+    /// compose chips unfurled beside it. The pill is the panel's one explicit
+    /// top-level choice; everything the classifier does (note/remind routing)
+    /// happens invisibly inside its Ask half.
+    private var bucketRow: some View {
+        HStack(spacing: 6) {
+            // The Ask|Agent switch drops out while the Recent list is expanded —
+            // the compose-family pill shouldn't crowd the recall view.
+            // The Ask|Agent switch — and the compose chips that unfurl beside it —
+            // drop out while the Recent list is expanded: the recall view shouldn't
+            // also carry the compose-family chrome.
+            if !recentListShown {
+                BucketTogglePill(model: model)
+                if model.agentComposeActive {
+                    agentComposeChips
+                        .transition(.opacity)
+                } else {
+                    askModelChip
+                        .transition(.opacity)
                 }
-                .transition(.scale(scale: 0.7, anchor: .leading).combined(with: .opacity))
             }
-            ForEach(model.visibleClipboardPresets) { preset in
-                translateChip(preset)
-                    // The overflow chips (everything past the collapsed few) unfurl from the
-                    // leading edge — scaling up and fading in as they push out on hover, and
-                    // collapsing back the same way. Asymmetric so the fold-back reads as a
-                    // tuck-in rather than a mirror of the reveal.
-                    .transition(
-                        .asymmetric(
-                            insertion: .scale(scale: 0.55, anchor: .leading)
-                                .combined(with: .opacity),
-                            removal: .scale(scale: 0.7, anchor: .leading)
-                                .combined(with: .opacity)
-                        )
-                    )
-            }
-            // The "⋯" affordance: only when the enabled set is longer than the collapsed
-            // count. Expands on *hover* (the whole row's onHover drives the flag), so the
-            // extra chips unfurl in place; collapsed it's a quiet hint, expanded the
-            // trailing chips have replaced it so it disappears on its own.
-            if !model.clipboardPresetsExpanded
-                && model.clipboardPresets.count > NotchModel.collapsedPresetCount {
-                ClipboardPresetChip(title: "⋯") {
-                    // Tap still works as a fallback for non-hover input.
-                    withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
-                        model.clipboardPresetsExpanded = true
-                    }
+            // The Recent (+ pin) cluster rides this row's trailing edge — on the
+            // same line as the Ask|Agent pill, pushed right by the spacer — instead
+            // of hovering a row up in the input's trailing slot. The bare Recent
+            // chevron / pin hide while typing (the input's inline send hint owns that
+            // slot then), but a live "N running ⌄" count stays put — a background
+            // agent's progress shouldn't vanish the moment you start a new prompt.
+            // Handed over to the manage bar's trailing edge once Recent is up (see
+            // `manageBar`), so the way out of the list sits in the bottom-right corner.
+            let runningLive = agentManager.runningTasks.count > 0
+            if (!model.hasText || runningLive) && !recentListShown {
+                let cluster = idleTrailingCluster
+                if !cluster.isEmpty {
+                    Spacer(minLength: 8)
+                    cluster
                 }
-                .transition(.opacity.combined(with: .scale(scale: 0.7)))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.top, 10)
-        // Hover anywhere over the chip row to unfurl the overflow actions in place;
-        // leaving folds them back to the collapsed few. Driving the expansion off the
-        // *row's* hover (not the tiny "⋯" chip's) lets the pointer travel onto the
-        // newly-revealed chips without collapsing them.
-        .onHover { hovering in
-            guard model.clipboardPresets.count > NotchModel.collapsedPresetCount else { return }
-            withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
-                model.clipboardPresetsExpanded = hovering
-            }
-        }
-        // Tie the FlowLayout reflow (capture chip landing AND overflow unfurling) to the
-        // same spring that carries the per-chip transitions, so existing chips glide to
-        // their new positions while new ones scale in beside them.
-        .animation(.spring(response: 0.42, dampingFraction: 0.82), value: model.visibleClipboardPresets.count)
-        .animation(.spring(response: 0.34, dampingFraction: 0.82), value: model.pendingClipboardCapture)
-        // The capture chip's retire/return as typing starts/clears rides the same
-        // spring: the chip scales out through its `.transition` while the presets
-        // glide left to close the gap (and the reverse on clearing the text).
-        .animation(.spring(response: 0.34, dampingFraction: 0.82), value: model.hasText)
     }
 
-    /// One clipboard-preset chip, with the Translate chip getting special treatment:
-    /// it shows both preferred languages (e.g. "译 中/En") and surfaces a context
-    /// menu split into pref1 / pref2 submenus. Left-click still runs the preset
-    /// immediately. All other presets render as plain chips.
-    @ViewBuilder
-    private func translateChip(_ preset: NotchModel.ClipboardPreset) -> some View {
-        if preset == .translate {
-            // Chip label: "译 →En" — preset label + the resolved target for the
-            // pending clip. We route the clip the same way the prompt does and name
-            // only the target language ("→En"), dropping the source to keep the chip
-            // compact. See `NotchModel.translateChipDirection`.
-            let chipTitle: String = "\(preset.label) \(model.translateChipDirection)"
-            ClipboardPresetChip(title: chipTitle) {
-                model.runClipboardPreset(preset)
+    /// Whether the bucket row still has anything to draw. With Recent expanded the
+    /// Ask|Agent pill and its compose chips hide, and the Recent cluster moves down
+    /// to the manage bar, so the row can end up empty — and an empty row would still
+    /// spend its 10pt top padding, padding out the immersive header for nothing.
+    private var bucketRowHasContent: Bool {
+        !recentListShown
+    }
+
+    /// The idle prompt's Recent-list disclosure (and, once pinned, the tack) as a
+    /// glass cluster, configured against the model. Built here once and hosted in
+    /// one of two places: the bucket row's trailing edge when a local agent CLI
+    /// gives us that row, else the input row's own trailing slot.
+    private var idleTrailingCluster: IdleTrailingCluster {
+        IdleTrailingCluster(
+            pinned: model.isAnswerPinned,
+            recentOpen: model.showHistory,
+            showsRecent: recentHasContent,
+            runningCount: agentManager.runningTasks.count,
+            togglePin: {
+                withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                    model.toggleAnswerPin()
+                }
+            },
+            toggleRecent: {
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                    model.showHistory.toggle()
+                    // Closing via the chevron drops any keyboard highlight; opening
+                    // starts un-highlighted (the caret stays in the input).
+                    model.highlightedHistoryIndex = nil
+                }
             }
-            .contextMenu {
-                // Two sections: one per preference slot. Each lists all languages
-                // with a checkmark on the current value for that slot.
-                Section(L("translation.pref1")) {
-                    ForEach(TranslationLanguage.allCases) { lang in
-                        Button {
-                            model.translationPref1 = lang
-                        } label: {
-                            if lang == model.translationPref1 {
-                                Label(lang.label, systemImage: "checkmark")
-                            } else {
-                                Text(lang.label)
+        )
+    }
+
+    /// The Ask bucket's model chip — the Ask-side twin of the agent compose chips,
+    /// riding the same slot beside the pill. It names the model in effect and, on
+    /// tap, opens the Ask recents quick menu (`AskRecentModelPickerView`) — the
+    /// agent card's little glass sibling listing the five most recently used
+    /// models, instead of detouring through the full cross-provider catalog (which
+    /// stays reachable from Settings). The popover hangs off the chip itself — a
+    /// menu should pop from the control that opened it, not float detached under
+    /// the island the way the keyboard-summoned pickers do. Reads the selection
+    /// straight from the store like the settings chip, so the chip can never show
+    /// a stale model.
+    private var askModelChip: some View {
+        AgentComposeChip(title: ModelRatings.prettyName(for: selectedModelID), action: {
+            model.showAskModelPicker = true
+        }, icon: { EmptyView() })
+        .fixedSize()
+        .popover(isPresented: $model.showAskModelPicker, arrowEdge: .bottom) {
+            AskRecentModelPickerView(
+                rows: askRecentModelRows,
+                selectedProvider: selectedProvider,
+                selectedModelID: selectedModelID,
+                onSelect: { row in
+                    ModelCatalogStore.select(provider: row.provider, model: row.id)
+                },
+                onDone: { model.showAskModelPicker = false })
+                .preferredColorScheme(.dark)
+                .modifier(GlassPopoverBackground(cornerRadius: 14, veilOpacity: 0.16))
+        }
+    }
+
+    /// The rows the Ask chip's quick menu shows: the selection in effect first, then
+    /// the most recently asked-through models (`AskModelMRU`), skipping duplicates
+    /// and providers that can't serve right now, capped at the MRU's five. No
+    /// padding: fewer than five recents just means a shorter menu — every row is
+    /// something the user actually used or picked, never a catalog filler.
+    private var askRecentModelRows: [AskRecentModelPickerView.Row] {
+        var rows = [AskRecentModelPickerView.Row(provider: selectedProvider, id: selectedModelID)]
+        for e in AskModelMRU.entries {
+            let row = AskRecentModelPickerView.Row(provider: e.provider, id: e.model)
+            guard !rows.contains(row), ModelCatalogStore.ready(e.provider) else { continue }
+            rows.append(row)
+        }
+        return Array(rows.prefix(AskModelMRU.capacity))
+    }
+
+    /// The agent compose chips beside the pill: the task's three facts as glass
+    /// chips in the clipboard presets' own language — the folder the agent will
+    /// work in (tap to re-pick; "choose" until one has ever been picked), the
+    /// model (one menu mixing every engine's entries; picking a model picks its
+    /// engine), and the reasoning effort. The way out is the pill's Ask half.
+    /// The input above is composing the task description; Enter starts the run.
+    private var agentComposeChips: some View {
+        HStack(spacing: 6) {
+            AgentComposeChip(title: Self.compactFolderTitle(
+                                        model.agentComposeFolder?.lastPathComponent)
+                                    ?? L("agent.folder.choose"),
+                                action: {
+                model.pickAgentFolder()
+            }, icon: { EmptyView() })
+            .fixedSize()
+
+            // Model + reasoning effort read as ONE chip — "Claude Opus xhigh".
+            // Clicking it opens the same model+effort quick picker ⌘⇧I summons
+            // (the AgentModelPickerView card hung off the body), not an NSMenu —
+            // so both front doors land on one card and behave identically.
+            AgentComposeChip(title: agentModelEffortTitle, action: {
+                model.showAgentPicker = true
+            }, icon: { EmptyView() })
+            .fixedSize()
+        }
+    }
+
+    /// The folder chip's title, middle-truncated in the STRING rather than by
+    /// the Text: the chip is `.fixedSize()` (without it the row's fixed-size
+    /// menu chips squeeze it and SwiftUI trims even a short name to "not…"),
+    /// so a pathological folder name must be bounded here instead.
+    private static func compactFolderTitle(_ name: String?) -> String? {
+        guard let name else { return nil }
+        guard name.count > 22 else { return name }
+        return name.prefix(12) + "…" + name.suffix(9)
+    }
+
+    /// The model chip's title: the explicit pick's label, or the engine's plain
+    /// name when the run rides the CLI-config default. The vendor family word is
+    /// dropped the same way the picker's rows drop it — "Claude Opus 4.8" reads
+    /// as "Opus 4.8", "GPT-5.1-Codex" as "5.1-Codex" — so the merged chip stays a
+    /// tight "Opus 4.8 xhigh" instead of restating the vendor on every run.
+    private var agentModelTitle: String {
+        let engine = model.agentArmedEngine
+        if let id = model.agentModelID,
+           let choice = engine.modelChoices.first(where: { $0.id == id }) {
+            return Self.strippingModelFamily(choice.label, engine: engine)
+        }
+        return engine.displayName
+    }
+
+    /// Drop the leading vendor family word from a model label — codex labels are
+    /// "GPT-…", claude labels "Claude …", so the chip shows only the model. Mirrors
+    /// `AgentModelPickerView.shortLabel`; labels without the prefix pass through.
+    private static func strippingModelFamily(_ label: String, engine: AgentEngine) -> String {
+        let family = (engine == .codex ? "GPT" : "Claude").lowercased()
+        for sep in ["-", " "] {
+            let p = family + sep
+            if label.lowercased().hasPrefix(p), label.count > p.count {
+                return String(label.dropFirst(p.count))
+            }
+        }
+        return label
+    }
+
+    /// The merged model+effort chip's title: the model on its own while effort
+    /// rides its CLI default, or "model effort" once a level is picked — the
+    /// effort trails as the bare lowercase level (`xhigh`), no separator, no
+    /// dash, so the line stays quiet and only names the effort when it's set.
+    private var agentModelEffortTitle: String {
+        guard let effort = model.agentEffort else { return agentModelTitle }
+        return "\(agentModelTitle) \(effort.rawValue)"
+    }
+
+    /// The panel presence of agent runs — one quiet line per task, never a card.
+    /// Presence and reading are separate things: a bead and one phrase, nothing
+    /// else. While a run works the line is the live activity and the leading slot
+    /// breathes a soft tint pulse; once it settles a glass bead lights the slot and the line
+    /// falls back to the task's own name. A tap opens the run's Recent record in the result view — the
+    /// same conversation surface every other thread reads in. Outcome prose,
+    /// clocks, file counts and the work trail all belong in that record, not
+    /// here: this is a glance surface.
+    private var agentStatusRows: some View {
+        // spacing 0 so a stack of agent rows keeps the SAME vertical rhythm as the
+        // Recent rows below (each row carries its own 9pt vertical pad — see
+        // `agentStatusRow`), instead of an airier gap that reads as "bigger padding".
+        VStack(alignment: .leading, spacing: 0) {
+            // `tasks` is stored in spawn order; show it newest-first so the most
+            // recently started run sits at the top of the list.
+            ForEach(agentManager.tasks.reversed()) { task in
+                agentStatusRow(task)
+            }
+        }
+    }
+
+    private func agentStatusRow(_ task: AgentTaskManager.AgentTask) -> some View {
+        HStack(spacing: 8) {
+            // A settled run marks its slot with a glass bead (blue done, red
+            // failed, grey cancelled); a working one breathes a soft tint pulse.
+            AgentStatusDot(running: task.isRunning, outcome: task.outcome)
+            if task.isRunning {
+                // What the run is doing right now, crossfading as the CLI reports
+                // each step — the panel twin of the resting notch's ticker. The
+                // changing words and the ticking clock are the "it's alive" signal.
+                CrossfadeText(text: task.activity ?? L("agent.thinking"),
+                              font: 14, color: Tokens.text3)
+                    .tracking(-0.1)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 8)
+                // Stopping a minutes-long run is destructive — two-step: the ✕
+                // arms an explicit "cancel?" chip (auto-disarms after a beat),
+                // and only that second tap actually terminates.
+                if confirmingAgentCancelID == task.id {
+                    Button {
+                        agentManager.cancel(taskID: task.id)
+                        confirmingAgentCancelID = nil
+                    } label: {
+                        Text(L("agent.cancelConfirm"))
+                            .font(.sf(11, weight: .medium))
+                            .foregroundStyle(Color(red: 1.0, green: 0.45, blue: 0.40))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Capsule().fill(Color.red.opacity(0.16)))
+                            .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .transition(.scale(scale: 0.8, anchor: .trailing).combined(with: .opacity))
+                    .task {
+                        // Un-tapped, the armed confirm quietly relaxes back to
+                        // the plain ✕. Cancelled automatically if the chip
+                        // leaves the screen first.
+                        try? await Task.sleep(nanoseconds: 3_000_000_000)
+                        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                            if confirmingAgentCancelID == task.id {
+                                confirmingAgentCancelID = nil
+                            }
+                        }
+                    }
+                } else {
+                    agentRowTrailing(task) {
+                        agentCardButton("xmark", help: L("agent.cancel")) {
+                            withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                                confirmingAgentCancelID = task.id
                             }
                         }
                     }
                 }
-                Section(L("translation.pref2")) {
-                    ForEach(TranslationLanguage.allCases) { lang in
-                        Button {
-                            model.translationPref2 = lang
-                        } label: {
-                            if lang == model.translationPref2 {
-                                Label(lang.label, systemImage: "checkmark")
-                            } else {
-                                Text(lang.label)
-                            }
+            } else {
+                // Settled: just the task's own name — what was asked, not a
+                // report of what came back. The dot already says how it went, and
+                // the record behind the tap says the rest. The row body is the tap
+                // target that opens it; the ✕ throws the row away without opening
+                // (the record stays in Recent either way).
+                Text(task.prompt)
+                    .font(.sf(14))
+                    .tracking(-0.1)
+                    .foregroundStyle(task.outcome == .failure
+                        ? Tokens.danger.opacity(0.9)
+                        : (task.outcome == .cancelled ? Tokens.text3 : Tokens.text2))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 8)
+                agentRowTrailing(task) {
+                    agentCardButton("xmark", help: L("agent.dismiss")) {
+                        withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
+                            agentManager.dismissFinished(taskID: task.id)
                         }
                     }
                 }
             }
-        } else {
-            ClipboardPresetChip(title: preset.label) {
-                model.runClipboardPreset(preset)
+        }
+        .padding(.leading, 10)
+        .padding(.trailing, 6)
+        // Match the Recent rows' 9pt vertical pad so an agent line sits in the same
+        // rhythm as the history below it, not a taller-looking slot.
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // The same faint glass floor + thin-material whisper the Recent rows lift
+        // under the pointer (HistoryRowStyle), at that style's unselected-hover
+        // presence (0.5), so an agent line highlights exactly like the rows below
+        // it instead of being the one row that stays flat under the cursor.
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(.white.opacity(hoveredAgentRowID == task.id ? 0.015 : 0))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(.thinMaterial)
+                        .opacity(hoveredAgentRowID == task.id ? 0.11 : 0)
+                )
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .onHover { inside in
+            withAnimation(.easeOut(duration: 0.16)) {
+                if inside { hoveredAgentRowID = task.id }
+                else if hoveredAgentRowID == task.id { hoveredAgentRowID = nil }
+            }
+        }
+        .onTapGesture {
+            if task.isRunning {
+                // A live run opens its detail page — the full work trail,
+                // streaming — instead of waiting for the record to exist.
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
+                    model.agentDetailTaskID = task.id
+                }
+            } else {
+                openAgentRecord(task)
             }
         }
     }
 
-    /// Label for the leading clipboard-capture chip, in the copied text's script and
-    /// naming where the tap files it: Apple Notes vs. Apple Reminders. Mirrors the
-    /// inline send hint's wording so the chip reads as the same destination.
-    private func captureChipTitle(_ panel: NotchModel.Panel) -> String {
-        switch panel {
-        case .reminder: return L("capture.remind")
-        case .note, .chat: return L("capture.note")
+    /// The row's trailing slot. At rest it's the run's clock — ticking while the
+    /// run works, frozen at its final duration once it settles — because that's
+    /// what a glance wants to know. Only under the pointer does it become the ✕
+    /// (`control`): the close affordance appears on the row you're aiming at,
+    /// instead of a column of ✕s shouting at you down the whole list.
+    private func agentRowTrailing<Control: View>(
+        _ task: AgentTaskManager.AgentTask,
+        @ViewBuilder control: () -> Control
+    ) -> some View {
+        ZStack(alignment: .trailing) {
+            if hoveredAgentRowID == task.id {
+                control()
+                    .transition(.opacity.combined(with: .scale(scale: 0.85)))
+            } else if task.isRunning {
+                // Live: re-read the clock every second while the run works.
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    agentElapsedLabel(context.date.timeIntervalSince(task.startedAt))
+                }
+                .transition(.opacity)
+            } else {
+                // Settled: `elapsed` is pinned by `finishedAt`, so this is the
+                // round's final duration, not a clock that keeps running.
+                agentElapsedLabel(task.elapsed)
+                    .transition(.opacity)
+            }
+        }
+        // Hold the ✕'s width so swapping between clock and button can't shove
+        // the line beside it around.
+        .frame(minWidth: 18, minHeight: 18, alignment: .trailing)
+    }
+
+    /// The elapsed clock itself, in the same language as the collapsed notch's
+    /// right ear: monospaced digits that roll rather than hard-cut on each tick.
+    private func agentElapsedLabel(_ elapsed: TimeInterval) -> some View {
+        let seconds = max(0, Int(elapsed))
+        return Text(NotchModel.formatAgentElapsed(TimeInterval(seconds)))
+            .font(.sf(11))
+            .monospacedDigit()
+            .contentTransition(.numericText(value: Double(seconds)))
+            .animation(reduceMotion ? nil : .snappy(duration: 0.3), value: seconds)
+            .foregroundStyle(Tokens.text4)
+            .lineLimit(1)
+            .fixedSize()
+    }
+
+    /// Open a settled run where it's actually read: its Recent record, in the
+    /// result view. The row's job is done once the record is open, so it leaves
+    /// the tray with the tap (the record itself stays in Recent regardless).
+    /// While the run is live there's nothing filed yet — the tap waits.
+    private func openAgentRecord(_ task: AgentTaskManager.AgentTask) {
+        guard !task.isRunning else { return }
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
+            model.openThread(id: task.id)
+            agentManager.dismissFinished(taskID: task.id)
         }
     }
 
-    /// The faint background hue for the capture chip — keyed to its destination's app
-    /// colour so the chip reads as "this goes to Reminders/Notes": Reminders' orange,
-    /// Notes' amber-yellow. Washed in at low opacity by `glassCapsule`, so it stays a
-    /// whisper of colour over the same glass material, not a solid fill.
-    private func captureChipTint(_ panel: NotchModel.Panel) -> Color {
-        switch panel {
-        case .reminder: return .orange
-        case .note, .chat: return .yellow
+    // MARK: - Agent run detail page
+
+    /// The task behind the open agent detail page, if any — nil once the task
+    /// leaves the tray (dismissed), which drops the page back to idle by itself.
+    private var agentDetailTask: AgentTaskManager.AgentTask? {
+        model.agentDetailTaskID.flatMap { id in
+            agentManager.tasks.first { $0.id == id }
         }
     }
+
+    /// Stable id for the tail spacer the detail scroll follows while streaming.
+    private static let agentDetailBottomID = "agent-detail-bottom"
+
+    /// A live run's detail page: the task prompt, then the full work trail —
+    /// the agent's narration as prose, each tool call a collapsible mono row —
+    /// with the activity ticker at the tail while it works, and the final
+    /// report once it settles. Same information structure as the record a
+    /// settled row opens; this is the during-the-run way in.
+    private func agentDetailView(_ task: AgentTaskManager.AgentTask) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            agentDetailHeader(task)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        UserQuestionBubble(text: task.prompt)
+                        if !task.log.isEmpty {
+                            AgentWorkTrailView(entries: task.log)
+                        }
+                        if task.isRunning {
+                            // The collapsed row's ticker, following the trail —
+                            // what the run is doing right now. Same 14pt/text3
+                            // face the status row wears.
+                            CrossfadeText(text: task.activity ?? L("agent.thinking"),
+                                          font: 14, color: Tokens.text3)
+                                .tracking(-0.1)
+                                .lineLimit(1)
+                                .padding(.vertical, 2)
+                        } else if let answer = task.exchanges.last?.answer,
+                                  !answer.isEmpty {
+                            // The report, in the thread's own answer type.
+                            MarkdownBlocks(source: answer, baseFont: 15)
+                        }
+                        Color.clear.frame(height: 1).id(Self.agentDetailBottomID)
+                    }
+                    .padding(.top, 2)
+                    .padding(.bottom, 10)
+                }
+                // Follow the tail while entries stream in, like a terminal.
+                .onChange(of: task.log.count) { _, _ in
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        proxy.scrollTo(Self.agentDetailBottomID, anchor: .bottom)
+                    }
+                }
+                .onAppear {
+                    proxy.scrollTo(Self.agentDetailBottomID, anchor: .bottom)
+                }
+            }
+            .frame(height: 330)
+        }
+    }
+
+    /// The detail page's top bar: back chevron (the page is a peek, not a mode —
+    /// backing out never touches the run), status dot + engine·folder title,
+    /// then the same elapsed clock the collapsed row shows and the open-folder
+    /// jump the settled record offers.
+    private func agentDetailHeader(_ task: AgentTaskManager.AgentTask) -> some View {
+        HStack(spacing: 10) {
+            // No back chevron / status dot here — ← (newChat) backs out of the
+            // page; the title carries the identity on its own.
+            // Same 14pt rung as a Recent row title / the status row's ticker.
+            Text("\(task.engine.displayName) · \(task.folder.lastPathComponent)")
+                .font(.sf(14, weight: .medium))
+                .foregroundStyle(Tokens.text2)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            if task.isRunning {
+                TimelineView(.periodic(from: task.startedAt, by: 1)) { context in
+                    agentElapsedLabel(context.date.timeIntervalSince(task.startedAt))
+                }
+            } else {
+                agentElapsedLabel(task.elapsed)
+            }
+            agentCardButton("folder", help: L("agent.openFolder")) {
+                NSWorkspace.shared.open(task.folder)
+            }
+            agentCardButton("macwindow.on.rectangle", help: L("detached.open")) {
+                model.openDetachedWindow()
+            }
+        }
+        // The detail header is also the run's tear-off grip — drag the page out
+        // and the task splits into its own window.
+        .contentShape(Rectangle())
+        .gesture(detachDragGesture)
+    }
+
+    /// A small quiet icon button for the agent card's corner actions — a bare
+    /// glyph, no drawn backing: the card already carries enough chrome, so the
+    /// buttons read as marks, not more boxes. The 18pt frame keeps the target.
+    private func agentCardButton(_ systemName: String, help: String,
+                                    action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 9.5, weight: .semibold))
+                .foregroundStyle(Tokens.text4)
+                .frame(width: 18, height: 18)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
 
     /// Shared open/close feel for the modules that unfurl below the prompt
     /// (recent list, inline settings): the whole block grows in from the top and
@@ -675,15 +1249,18 @@ struct NotchBody: View {
         )
     }
 
-    /// The manage bar, pinned to the BOTTOM-LEFT of the recent panel in both the
-    /// compact and immersive layouts. A single ⋯ chip that pops the manage MENU
-    /// upward (filter by source, Settings) — see `manageMenu`. While a
+    /// The manage bar: the recent panel's bottom chrome, in both the compact and
+    /// immersive layouts. The ⋯ chip holds the BOTTOM-LEFT corner and pops the manage
+    /// MENU upward (filter by source, Settings) — see `manageMenu`. While a
     /// source filter is active and the menu is closed, a small tinted chip beside
     /// the ⋯ names the filter and clears it on tap, so the narrowed list never
-    /// reads as "history lost". Always visible — fixed chrome below the list.
+    /// reads as "history lost". The Recent chevron (and the pin, once ⌘P holds the
+    /// panel) holds the BOTTOM-RIGHT corner opposite it — while the list is up, the
+    /// way out of it belongs on the same baseline as the ⋯, not up in the header.
+    /// Always visible — fixed chrome below the list.
     ///
     /// Used by `historySection` (compact) as a VStack sibling below the list, and by
-    /// `immersiveHistoryView` as an overlay over the bottom-left of the scroll frame.
+    /// `immersiveHistoryView` as an overlay across the bottom of the scroll frame.
     private var manageBar: some View {
         HStack(spacing: 6) {
             // The single ⋯ chip. It only toggles the menu. The passive update dot
@@ -701,7 +1278,15 @@ struct NotchBody: View {
                             .combined(with: .scale(scale: 0.9, anchor: .leading))
                     )
             }
-            Spacer()   // push the controls to the LEFT; Spacer sits at the trailing end
+
+            Spacer(minLength: 8)   // hold the two clusters apart, one per corner
+
+            // The Recent (+ pin) cluster, handed over from the header for as long as
+            // the list is up (see `bucketRow` / `inputRow`).
+            let cluster = idleTrailingCluster
+            if !cluster.isEmpty {
+                cluster
+            }
         }
         // The menu floats ABOVE the chip, anchored to its bottom-left, and grows
         // upward out of it. An overlay (not a sibling) so opening it never
@@ -726,11 +1311,11 @@ struct NotchBody: View {
         .onChange(of: model.showHistory) { _, showing in
             if !showing { manageExpanded = false }
         }
-        // Leading inset trimmed (the outer body already pads 20pt) so the bar tucks
-        // further into the bottom-left corner; the trailing 8 just keeps the Spacer
-        // honest. Bottom-left placement is finished by the call-site bottom padding.
-        .padding(.leading, 2)
-        .padding(.trailing, 8)
+        // One inset, both sides: the ⋯ and the Recent chevron sit the same distance
+        // from their own edge, so the bar's two corners read as a matched pair. The
+        // call site supplies the outward pull (the body's own 20pt is too generous
+        // for corner chrome) and the bottom placement.
+        .padding(.horizontal, 2)
     }
 
     /// The ⋯ entry: a single Liquid Glass chip that pops the manage menu up above
@@ -758,44 +1343,28 @@ struct NotchBody: View {
         }
     }
 
-    /// The upward manage menu: one small glass card holding the source filter and
-    /// Settings. Top to bottom: a row of three filter chips (Note / Remind / Ask),
-    /// then Settings. "See all history" and Clear deliberately do NOT live here —
-    /// they sit at the very END of the recent list (see `historyFooterActions`), so
-    /// they're reached by scrolling the list to its bottom.
+    /// The upward manage menu: one small glass card holding the update action,
+    /// release notes, and Settings — the two update entries pulled out here so
+    /// they're one tap away instead of buried in Settings → About. (The source
+    /// filter chips used to sit above it but were removed.) "See all history" and
+    /// Clear deliberately do NOT live here — they sit at the very END of the recent
+    /// list (see `historyFooterActions`), so they're reached by scrolling the list
+    /// to its bottom.
     private var manageMenu: some View {
         let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
         return VStack(alignment: .leading, spacing: 2) {
-            // Filter — one chip per history source, in each source's app colour
-            // (Notes amber, Reminders orange, Ask a cool blue). Tap to narrow the
-            // list to that source; tap the active one again to show everything.
-            HStack(spacing: 5) {
-                Image(systemName: "line.3.horizontal.decrease")
-                    .font(.sf(10, weight: .medium))
-                    .foregroundStyle(Tokens.text4)
-                    .padding(.trailing, 1)
-                ManageFilterChip(model: model, source: .note) { manageExpanded = false }
-                ManageFilterChip(model: model, source: .reminder) { manageExpanded = false }
-                ManageFilterChip(model: model, source: .ask) { manageExpanded = false }
+            // Update action: "Update to X" once a newer build is ready, otherwise a
+            // manual freshness check that reports its result in place. Same
+            // behaviour as the About version row.
+            updateMenuRow
+            // Release notes: the What's New panel, without a detour through Settings.
+            manageMenuRow(icon: LucideIcons.scrollText, title: L("recent.menu.releaseNotes")) {
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                    manageExpanded = false
+                    model.openWhatsNew(on: nil)
+                }
             }
-            .padding(.horizontal, 8)
-            .padding(.top, 3)
-            .padding(.bottom, 9)
-
-            // Hairline between filter and actions — fades out at both ends like a
-            // light caught across the glass, not a flat printed rule.
-            Rectangle()
-                .fill(
-                    LinearGradient(
-                        colors: [.white.opacity(0), .white.opacity(0.14), .white.opacity(0)],
-                        startPoint: .leading, endPoint: .trailing
-                    )
-                )
-                .frame(height: 0.5)
-                .padding(.horizontal, 2)
-                .padding(.bottom, 4)
-
-            manageMenuRow(icon: "gearshape", title: L("recent.menu.settings"), shortcut: "⌘,") {
+            manageMenuRow(icon: LucideIcons.settings, title: L("recent.menu.settings"), shortcut: "⌘,") {
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                     manageExpanded = false
                     model.toggleSettings()
@@ -843,19 +1412,85 @@ struct NotchBody: View {
         .shadow(color: .black.opacity(0.35), radius: 16, y: 8)
     }
 
+    /// The update row of the manage menu, with the same in-place state story as
+    /// the About panel's update slot so a tap gives visible feedback right here
+    /// instead of the menu closing on a silent check:
+    ///   • "Update to X" when a newer build is waiting — a tap installs it and
+    ///     dismisses the menu (the app relaunches, so nothing stays to look at);
+    ///   • a spinner + "Checking…" while a manual check is in flight;
+    ///   • a brief "You're up to date" confirmation that recedes back to the link;
+    ///   • otherwise the plain "Check for updates" — a tap runs the check and
+    ///     keeps the menu open so its result is actually seen.
+    @ViewBuilder
+    private var updateMenuRow: some View {
+        if case .available(let v) = updater.phase {
+            manageMenuRow(icon: LucideIcons.circleFadingArrowUp, title: L("about.update.to", v)) {
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                    manageExpanded = false
+                }
+                updater.update()
+            }
+        } else {
+            switch updater.manualCheck {
+            case .checking:
+                manageMenuStatusRow(title: L("about.checking"), spinner: true)
+            case .upToDate:
+                manageMenuStatusRow(title: L("about.upToDate"))
+                    .task {
+                        // Let the confirmation linger, then recede to the link.
+                        try? await Task.sleep(nanoseconds: 2_500_000_000)
+                        updater.clearManualConfirmation()
+                    }
+            case .idle:
+                manageMenuRow(icon: LucideIcons.circleFadingArrowUp,
+                              title: L("recent.menu.checkForUpdates")) {
+                    updater.checkManually()
+                }
+            }
+        }
+    }
+
+    /// A non-interactive twin of `manageMenuRow` for the update action's
+    /// transient faces — a spinner + "Checking…", or a plain "You're up to
+    /// date" — so the check reads as something that happened in the menu.
+    private func manageMenuStatusRow(title: String, spinner: Bool = false) -> some View {
+        HStack(spacing: 8) {
+            // The same 13pt slot the icon rows lead with, occupied or not: the update row
+            // swaps between this and `manageMenuRow` in place, and an unreserved slot
+            // would slide the label 21pt left the moment a check starts.
+            ZStack {
+                if spinner {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .controlSize(.small)
+                        // .small is 16pt — bring it down to the glyphs' 13.
+                        .scaleEffect(0.8)
+                }
+            }
+            .frame(width: 13, height: 13)
+            Text(title)
+                .font(.sf(12, weight: .medium))
+                .foregroundStyle(Tokens.text3)
+            Spacer(minLength: 16)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+        .contentShape(Rectangle())
+    }
+
     /// One full-width action row of the manage menu — icon, label, optional
     /// trailing shortcut hint — with the same gentle hover wash the history rows
     /// use, so the menu reads as part of the same surface.
     private func manageMenuRow(
-        icon: String, title: String, shortcut: String? = nil,
+        icon: LucideIcons.Mark, title: String, shortcut: String? = nil,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             HStack(spacing: 8) {
-                Image(systemName: icon)
-                    .font(.sf(11, weight: .medium))
+                // A step quieter than the label it leads — the word is the thing being
+                // read, the glyph only marks the row.
+                LucideIcon(mark: icon)
                     .foregroundStyle(Tokens.text3)
-                    .frame(width: 14)
                 Text(title)
                     .font(.sf(12, weight: .medium))
                     .foregroundStyle(Tokens.text2)
@@ -898,19 +1533,26 @@ struct NotchBody: View {
                 .frame(height: 0.5)
 
             HStack(spacing: 8) {
-                HistoryFooterButton(
-                    icon: "clock.arrow.circlepath",
-                    title: L("recent.menu.seeAll")
-                ) {
-                    // Fold the expanded recent list back to the compact prompt as
-                    // the standalone archive takes over. Otherwise the still-open
-                    // list floats above the newly centered History window and its
-                    // top gets covered — and it's redundant, since the archive now
-                    // holds everything. Same spring as the list's open/close.
-                    withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
-                        model.collapseHistory()
+                // "See all history" earns its place only once the archive holds MORE
+                // than the notch list can show — i.e. older items have been truncated
+                // past `notchRecentCap`. When everything still fits, the archive window
+                // would open onto the exact same rows already on screen, so the button
+                // is pure redundancy and we drop it (Clear stays — it's always apt).
+                if model.history.count > NotchModel.notchRecentCap {
+                    HistoryFooterButton(
+                        icon: "clock.arrow.circlepath",
+                        title: L("recent.menu.seeAll")
+                    ) {
+                        // Fold the expanded recent list back to the compact prompt as
+                        // the standalone archive takes over. Otherwise the still-open
+                        // list floats above the newly centered History window and its
+                        // top gets covered — and it's redundant, since the archive now
+                        // holds everything. Same spring as the list's open/close.
+                        withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
+                            model.collapseHistory()
+                        }
+                        NotificationCenter.default.post(name: .openHistoryArchiveRequested, object: nil)
                     }
-                    NotificationCenter.default.post(name: .openHistoryArchiveRequested, object: nil)
                 }
                 // Destructive, so it arms the confirmation instead of wiping on the
                 // first tap. The confirm card renders centered over the whole island
@@ -995,22 +1637,22 @@ struct NotchBody: View {
     /// Plain-input header baseline: the height the floating header now measures with
     /// just the input (the manage bar moved to the bottom, out of the header). The
     /// `inputRow` carries `.frame(height: 48)` and the floating-header VStack wraps it
-    /// with `.padding(.bottom, 6)` → 54pt measured for the no-quote case. The seed is
+    /// with `.padding(.bottom, 6)` → 54pt measured for the bare-input case. The seed is
     /// set to exactly 54 so the `max(h, baseline)` clamp matches the real first-frame
     /// measurement and never over-reserves runway.
     private static let immersiveHeaderBaseline: CGFloat = 54
 
     /// Breathing room between the bottom of the floating header and the first row's
-    /// resting top. `baseline (54) + gap (12) = 66`, the runway the no-quote layout
-    /// uses; a quote header measures taller and the runway grows with it.
+    /// resting top. `baseline (54) + gap (12) = 66`, the runway the bare-input layout
+    /// uses; a header with a preview measures taller and the runway grows with it.
     private let immersiveHeaderGap: CGFloat = 12
 
     /// How far the immersive list's content reaches UP behind the floating header so
     /// the first row rests just clear of it. Derived from the *measured* header height
     /// (`measuredImmersiveHeaderHeight`) rather than a constant, because the header is
-    /// not fixed: a plain input is short, but a pending clipboard quote adds a preview
-    /// line above the input and a row of action chips below it. Tracking the real
-    /// height keeps the first row clear whether or not a quote is present.
+    /// not fixed: a plain input is short, but a pending copied-image preview adds a
+    /// line above the input. Tracking the real
+    /// height keeps the first row clear whether or not a preview is present.
     private var immersiveTopReach: CGFloat { measuredImmersiveHeaderHeight + immersiveHeaderGap }
 
     /// Height of the top frost band, in points. Kept SHORTER than the layout runway
@@ -1020,7 +1662,7 @@ struct NotchBody: View {
     /// the runway is the tuned ceiling — over the 320pt viewport the deepest frost layer
     /// is also the faintest, so its tail grazing the runway edge stays imperceptible
     /// while the opaque bulk of the frost sits above. Derived from the runway (not a
-    /// constant) so the band tracks the header: it grows when a quote raises the header
+    /// constant) so the band tracks the header: it grows when a preview raises the header
     /// and shrinks back for a plain input, always ending just above the first row.
     private var immersiveBlurReach: CGFloat { max(immersiveTopReach - 4, 0) }
 
@@ -1053,6 +1695,17 @@ struct NotchBody: View {
     private let compactRowHeight: CGFloat = 35
     private let historyFooterHeight: CGFloat = 50
 
+    #if DEBUG
+    private func debugGeom(_ tag: String, _ y: CGFloat) {
+        let line = "[GEOM \(tag)] tasks=\(agentManager.tasks.count) recent=\(model.recentVisible.count) contentTopY=\(String(format: "%.1f", y)) topReach=\(String(format: "%.1f", immersiveTopReach)) header=\(String(format: "%.1f", measuredImmersiveHeaderHeight))\n"
+        if let h = FileHandle(forWritingAtPath: "/tmp/notch-geom.log") {
+            h.seekToEndOfFile(); h.write(line.data(using: .utf8)!); try? h.close()
+        } else {
+            try? line.data(using: .utf8)!.write(to: URL(fileURLWithPath: "/tmp/notch-geom.log"))
+        }
+    }
+    #endif
+
     /// The recent list. `immersive` swaps the compact, below-the-header list for
     /// the tall variant whose content scrolls UP behind the floating input —
     /// frosting and fading as it goes (see `immersiveTopReach`). Only used once
@@ -1077,6 +1730,27 @@ struct NotchBody: View {
             // Lazy: the data holds up to `notchRecentCap` (50) rows but only ~6–9
             // fit the frame — no need to build and lay out the off-screen ones.
             LazyVStack(alignment: .leading, spacing: 0) {
+                #if DEBUG
+                // TEMP: report the content-top position inside the scroll viewport so
+                // we can see the resting scroll offset (topReach = pinned to top).
+                Color.clear.frame(height: 0).background(GeometryReader { g in
+                    Color.clear
+                        .onAppear { debugGeom("appear", g.frame(in: .named("immScroll")).minY) }
+                        .onChange(of: g.frame(in: .named("immScroll")).minY) { _, y in
+                            debugGeom("change", y)
+                        }
+                })
+                #endif
+                // Agent runs ride the TOP of the scroll — the newest rows, scrolling
+                // with the recent list like everything else — instead of pinned above
+                // it (immersive: in the floating header; compact: a fixed sibling). So
+                // a live task scrolls away normally rather than fixed over the top.
+                if !agentManager.tasks.isEmpty {
+                    // No extra gap here: each agent row already carries the same 9pt
+                    // vertical pad as a Recent row, so the last agent row meets the
+                    // first history row on the same 18pt rhythm as any two rows.
+                    agentStatusRows
+                }
                 // Index into the SAME slice the model navigates (`recentVisible`),
                 // so the keyboard highlight and the rendered rows can't drift.
                 ForEach(Array(model.recentVisible.enumerated()), id: \.element.id) { index, item in
@@ -1102,7 +1776,7 @@ struct NotchBody: View {
                                 // and this small three-dot wave sits where the timestamp
                                 // will land once the answer settles in place.
                                 RecentPendingDots()
-                            } else if item.source == .ask {
+                            } else if item.source.isThread {
                                 Text(relativeTime(item.t))
                                     .font(.sf(11).monospacedDigit())
                                     .tracking(0.2)
@@ -1186,6 +1860,9 @@ struct NotchBody: View {
             // list). Compact: the edgeFade reserve, only when actually overflowing.
             .padding(.bottom, immersive ? immersiveBottomReach : (overflowing ? edgeFade : 0))
         }
+        #if DEBUG
+        .coordinateSpace(name: "immScroll")
+        #endif
         // Immersive: a tall surface that fills the whole panel; the manage bar floats
         // over its bottom-left. Compact: ~6 rows before the list scrolls, so a short
         // Recent list doesn't reserve a tall empty band. Older rows are a scroll away.
@@ -1382,6 +2059,16 @@ struct NotchBody: View {
             // clipped it floats inside the ZStack above and must NOT also render here
             // (two NSTextFields would fight for first-responder).
             //
+            // An agent run the app died in the middle of gets its own actionable
+            // capsule under the answer: one tap re-issues the cut-off round in the
+            // CLI session it left behind. It sits ABOVE the follow-up input, which
+            // still does its usual thing (ask the chat model about this thread).
+            if let resume = model.openAgentResume {
+                agentResumeRow(engine: resume.engine, resume: resume.resume)
+                    .padding(.top, isAnswerClipped ? 8 : 24)
+                    .transition(.opacity)
+            }
+
             // A failed Ask gets an actionable capsule right under the answer (XII-85):
             // "Open Settings" when there's no key to retry with, "Try again" otherwise.
             if let askError = model.askError {
@@ -1397,7 +2084,9 @@ struct NotchBody: View {
                         setupModelRow
                     }
                 }
-                .padding(.top, 24)
+                // The resume capsule already spends the 24pt gap under the answer;
+                // the input just needs to clear the capsule, not repeat that gap.
+                .padding(.top, model.openAgentResume == nil ? 24 : 10)
                 .transition(.opacity)
             } else if !model.isConfigured {
                 // Clipped + unconfigured: the setup CTA stays a sibling (it's a
@@ -1512,6 +2201,53 @@ struct NotchBody: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(SetupModelButtonStyle())
+    }
+
+    /// The resume footer under an interrupted agent run's answer — the GUI half of
+    /// `AgentEngine.resumeCommand`. One tap hands the round the app died in the
+    /// middle of straight back to the CLI session it left behind; the run picks up
+    /// as a live task and re-files this same Recent row when it settles. Styled as
+    /// the same full-width capsule the failed-Ask footer uses.
+    ///
+    /// The engine can be gone by now (uninstalled since the run), and then there's
+    /// nothing to press — so the row degrades to naming the terminal command, which
+    /// is exactly what the answer text used to carry.
+    @ViewBuilder
+    private func agentResumeRow(engine: AgentEngine,
+                                resume: NotchModel.HistoryItem.AgentResume) -> some View {
+        if engine.isAvailable {
+            Button {
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                    model.resumeAgentThread()
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 13, weight: .medium))
+                    Text(L("agent.resume", engine.displayName))
+                        .font(.sf(14.5, weight: .medium))
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Tokens.text3)
+                }
+                .foregroundStyle(Tokens.text1)
+                .padding(.leading, 13)
+                .padding(.trailing, 12)
+                .frame(height: 39)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(SetupModelButtonStyle())
+        } else {
+            Text(L("agent.interrupted.resume",
+                   engine.resumeCommand(session: resume.session)))
+                .font(.sf(11.5))
+                .monospaced()
+                .foregroundStyle(Tokens.text4)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     /// The actionable error footer for a failed Ask (XII-85): a full-width capsule —
@@ -1768,7 +2504,14 @@ struct NotchBody: View {
                 // load-only "Using clipboard" cue). Indented to line up with the bubble's
                 // text inset so it reads as a caption on this turn. `paperclip`-free on
                 // purpose: one small grey line, same whisper as the note-save cue.
-                if turn.usedClipboard {
+                // An image the turn rode in with outranks that line: the picture IS
+                // the trace, and says what "based on what you copied" only describes.
+                // Persisted with the thread, so a row reopened from Recent shows the
+                // same screenshot the question was asked about.
+                if !turn.imageFiles.isEmpty {
+                    SavedTurnImages(files: turn.imageFiles)
+                        .padding(.leading, 12)   // matches the bubble's horizontal inset
+                } else if turn.usedClipboard {
                     Text(L("result.basedOnCopied"))
                         .font(.sf(11))
                         .tracking(0.2)
@@ -1796,31 +2539,50 @@ struct NotchBody: View {
             // ChatGPT/Claude handoff always copies the whole thread — so both ride
             // only the last turn's footer, never mid-thread ones.
             let isLastTurn = model.turns.last?.id == turn.id
-            AssistantTurnView(
-                text: turn.text,
-                streaming: turn.streaming,
-                activity: turn.streaming ? model.currentActivity : nil,
-                thinkingWord: model.currentThinkingWord,
-                thinkingSince: turn.streaming ? model.thinkingStartedAt : nil,
-                sources: turn.sources,
-                hoveredSourceID: $hoveredSourceID,
-                sourceCloseWork: $sourceCloseWork,
-                onInAppCopy: { model.rebaselineClipboardAfterInAppWrite() },
-                onRegenerate: isLastTurn ? { model.regenerateLastAnswer() } : nil,
-                // Right-click the regenerate button to re-run this answer with a
-                // different model, once (XII-135). Only on the last turn (same gate
-                // as plain regenerate).
-                regenerateModels: isLastTurn ? model.regenerateModelOptions : [],
-                onRegenerateWith: isLastTurn ? { model.regenerateLastAnswer(model: $0) } : nil,
-                regenModel: turn.regenModel,
-                answerModel: turn.answerModel,
-                // The `ask_user` question card, when the model has paused this
-                // still-streaming answer on a choice only the user can make.
-                pendingQuestion: turn.streaming ? model.pendingQuestion(for: turn.id) : nil,
-                onChooseOption: { questionID, option in
-                    model.chooseUserOption(option, questionID: questionID)
+            // An agent run's report never offers regenerate: the chat model can't
+            // re-run the task in its folder, so "regenerating" it would only
+            // hallucinate a fresh report over the real one. (Chat follow-ups on
+            // the same reopened thread aren't agent turns, so they keep it.)
+            let canRegenerate = isLastTurn && !turn.isAgent
+            VStack(alignment: .leading, spacing: 14) {
+                // An agent answer carries its round's work trail above the report —
+                // the record's copy of the live detail page, so a reopened run
+                // reads the way the run looked while it worked.
+                if turn.isAgent, let trail = turn.agentLog, !trail.isEmpty {
+                    AgentWorkTrailView(entries: trail)
                 }
-            )
+                AssistantTurnView(
+                    text: turn.text,
+                    streaming: turn.streaming,
+                    activity: turn.streaming ? model.currentActivity : nil,
+                    thinkingWord: model.currentThinkingWord,
+                    thinkingSince: turn.streaming ? model.thinkingStartedAt : nil,
+                    sources: turn.sources,
+                    hoveredSourceID: $hoveredSourceID,
+                    sourceCloseWork: $sourceCloseWork,
+                    isAgent: turn.isAgent,
+                    // The record's completion time, shown as the report footer's
+                    // stamp — only on the last agent turn, so the single stored
+                    // timestamp maps to exactly one report (a follow-up chat turn,
+                    // being non-agent, never carries it).
+                    completedAt: (turn.isAgent && isLastTurn) ? model.currentThreadCompletedAt : nil,
+                    onInAppCopy: { model.rebaselineClipboardAfterInAppWrite() },
+                    onRegenerate: canRegenerate ? { model.regenerateLastAnswer() } : nil,
+                    // Right-click the regenerate button to re-run this answer with a
+                    // different model, once (XII-135). Only on the last turn (same gate
+                    // as plain regenerate).
+                    regenerateModels: canRegenerate ? model.regenerateModelOptions : [],
+                    onRegenerateWith: canRegenerate ? { model.regenerateLastAnswer(model: $0) } : nil,
+                    regenModel: turn.regenModel,
+                    answerModel: turn.answerModel,
+                    // The `ask_user` question card, when the model has paused this
+                    // still-streaming answer on a choice only the user can make.
+                    pendingQuestion: turn.streaming ? model.pendingQuestion(for: turn.id) : nil,
+                    onChooseOption: { questionID, option in
+                        model.chooseUserOption(option, questionID: questionID)
+                    }
+                )
+            }
         }
     }
 
@@ -1832,15 +2594,36 @@ struct NotchBody: View {
         HStack(spacing: 10) {
             backButton
             Spacer(minLength: 0)
-            ResultPinButton(
+            ResultTrailingCluster(
                 pinned: model.isAnswerPinned,
-                toggle: {
+                togglePin: {
                     withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
                         model.toggleAnswerPin()
                     }
-                }
+                },
+                detach: { model.openDetachedWindow() }
             )
         }
+        // The header's free strip doubles as the tear-off grip: drag the thread
+        // out of the notch and it splits into its own window (see
+        // `NotchModel.detachDragChanged`). Buttons keep their taps — the drag
+        // only arms past its minimum distance.
+        .contentShape(Rectangle())
+        .gesture(detachDragGesture)
+    }
+
+    /// The tear-off drag: raw translation goes to the model, which arms the
+    /// ghost card, stretches the membrane, and fires the split at the
+    /// threshold. The gesture keeps delivering after the hand-off — the model
+    /// ignores those ticks (`detachHandedOff`).
+    private var detachDragGesture: some Gesture {
+        DragGesture(minimumDistance: 12, coordinateSpace: .global)
+            .onChanged { value in
+                model.detachDragChanged(value.translation)
+            }
+            .onEnded { _ in
+                model.detachDragEnded()
+            }
     }
 
     /// Back to a fresh conversation: clears this Q&A off the screen and returns to
@@ -1865,30 +2648,29 @@ struct NotchBody: View {
 
     // MARK: - Inputs
 
+    /// The prompt's type size, and the follow-up field's — shared by the field, its
+    /// inline hint and the row metrics, so a one-line box and its row agree.
+    static let idleFontSize: CGFloat = 16.5
+    static let followUpFontSize: CGFloat = 14.5
+    /// How far a prompt grows before it stops growing and scrolls inside itself. A
+    /// pasted paragraph unfolds the box downward — five lines of it — rather than
+    /// scrolling off to the right where all but the tail is invisible.
+    static let promptMaxLines = 5
+    /// The idle row at rest: a one-line prompt in a 48pt row. As the box grows the
+    /// row keeps exactly that breathing room above and below.
+    static let idleRowHeight: CGFloat = 48
+    private var idleRowVerticalPadding: CGFloat {
+        NotchBody.idleRowHeight - PromptField.lineHeight(for: NotchBody.idleFontSize)
+    }
+
     private func inputRow(placeholder: String, followUp: Bool) -> some View {
-        let fontSize: CGFloat = followUp ? 14.5 : 16.5
+        let fontSize: CGFloat = followUp ? NotchBody.followUpFontSize : NotchBody.idleFontSize
         return HStack(spacing: 12) {
             // The field, with a Siri-style ghost hint trailing the typed text on the
-            // same line. This `inputRow` renders the hint only for the idle prompt
-            // (`!followUp`); the mid-thread field is `followUpRow`, which carries its
-            // own copy of the same hint. A `GeometryReader` hands the hint the row's
-            // width so it knows where to dock once a long line runs out of room.
+            // line it ends on. This `inputRow` renders the hint only for the idle
+            // prompt (`!followUp`); the mid-thread field is `followUpRow`, which
+            // carries its own copy of the same hint.
             ZStack(alignment: .leading) {
-                GeometryReader { geo in
-                    if !followUp {
-                        InlineSendHint(
-                            label: model.submitLabel,
-                            suffix: model.submitLabelSuffix,
-                            fontSize: fontSize,
-                            caretWidth: caretWidth,
-                            availableWidth: geo.size.width,
-                            tint: model.effectiveSubmitPanel.intentInk
-                        )
-                        .frame(height: geo.size.height, alignment: .center)
-                    }
-                }
-                .allowsHitTesting(false)
-
                 PromptField(
                     text: $model.text,
                     // Idle prompt: the native NSTextField placeholder HARD-SWAPS
@@ -1900,6 +2682,7 @@ struct NotchBody: View {
                     placeholder: followUp ? placeholder : "",
                     fontSize: fontSize,
                     focusTrigger: focused,
+                    maxVisibleLines: NotchBody.promptMaxLines,
                     // Enter routes by intent (ask / note / remind) from the idle
                     // prompt. The real mid-thread field is `followUpRow`, which now
                     // also routes by intent; this `followUp` branch is only the
@@ -1937,32 +2720,81 @@ struct NotchBody: View {
                     // instead of moving the caret.
                     isRecalling: followUp ? { false } : { model.isRecallingHistory },
                     onSubmitNav: followUp ? { false } : {
-                        // Enter first confirms a keyboard-highlighted Recent row; failing
-                        // that, on an empty prompt it fires the leading capture chip
-                        // (save the copied jot). Either short-circuits the empty submit.
-                        model.historyConfirmHighlighted() || model.confirmClipboardCaptureIfIdle()
+                        // Enter confirms a keyboard-highlighted Recent row, which
+                        // short-circuits the empty submit.
+                        model.historyConfirmHighlighted()
                     },
-                    // Tab steps where Enter sends this line (Ask → Note → Remind →…)
-                    // when the classifier guessed wrong — the inline hint steps with
-                    // it. Only meaningful with text in the field; an empty field's Tab
+                    // Tab steps where Enter sends this line (Ask → Note →
+                    // Remind →…) when the classifier guessed wrong — the inline
+                    // hint steps with it. Agent is NOT a stop (the bucket pill
+                    // owns that switch). Only meaningful with text in the field —
+                    // except an active agent compose, which Tab must be able to
+                    // step off even before anything is typed. An empty field's Tab
                     // is still swallowed so focus never wanders out of the prompt.
                     onTab: followUp ? { false } : {
-                        if model.hasText { model.toggleSubmitPanel() }
+                        if model.hasText || model.agentComposeActive {
+                            model.toggleSubmitPanel()
+                        }
                         return true
                     },
-                    // Live width of committed text + any composing pinyin, so the
-                    // inline hint trails the caret as the IME composes. Only the idle
-                    // prompt feeds `caretWidth` here; `followUpRow` owns its own
-                    // `followUpCaretWidth` tracking and its own hint overlay.
-                    onCaretWidth: followUp ? { _ in } : { caretWidth = $0 }
+                    // Shift-Tab flips the Ask ⇄ Agent bucket — the keyboard twin
+                    // of the BucketTogglePill. Always consumed so focus never
+                    // wanders out of the prompt; a no-op that stays on Ask when
+                    // no agent CLI is installed.
+                    onBackTab: followUp ? nil : {
+                        model.toggleAgentBucket()
+                        return true
+                    },
+                    // ⌘V while composing an agent task attaches a pixels-only
+                    // clipboard (a screenshot) as the task's image; any clipboard
+                    // carrying text pastes as text, exactly as before. No-op
+                    // outside the agent compose.
+                    onPasteImage: followUp ? { false } : {
+                        model.handleAgentPasteImage()
+                    },
+                    // Live width of the last line's committed text + any composing
+                    // pinyin, and how far down that line sits — together they park the
+                    // inline hint right after the caret, wherever the wrapped text has
+                    // carried it. Only the idle prompt feeds these; `followUpRow` owns
+                    // its own tracking and its own hint.
+                    onCaretWidth: followUp ? { _ in } : { caretWidth = $0 },
+                    onCaretY: followUp ? { _ in } : { caretY = $0 },
+                    // The box's own height — one line, or as many as the text has
+                    // wrapped to (capped). The row is built around it.
+                    onHeightChange: followUp ? { _ in } : { inputHeight = $0 }
                 )
+                .frame(height: followUp ? nil : inputHeight)
                 // Reserve the hint's docking slot at the row's trailing edge: a long
-                // line scrolls within this narrower field while "— Ask"/"— Note"
-                // holds in the reserved strip beside it, never overlapped, never lost.
-                // The reserved width follows the current label so short labels don't
-                // waste space; the ZStack animation keeps the resize smooth.
-                .padding(.trailing, followUp ? 0 : InlineSendHint.reservedTrailingWidth(label: model.submitLabel, suffix: model.submitLabelSuffix, fontSize: fontSize))
+                // line wraps within this narrower field while "— Ask"/"— Note" holds
+                // in the reserved strip beside it, never overlapped, never lost. The
+                // reserved width follows the current label so short labels don't waste
+                // space; the ZStack animation keeps the resize smooth.
+                // Agent compose owns the whole row (the Ask/Agent bucket words name
+                // the destination already), so it drops the trailing "— Agent Claude"
+                // ghost — no reserved strip, full width for the task description.
+                .padding(.trailing, (followUp || model.agentComposeActive) ? 0 : InlineSendHint.reservedTrailingWidth(label: model.submitLabel, suffix: model.submitLabelSuffix, fontSize: fontSize))
                 .animation(.smooth(duration: 0.25), value: model.submitLabel + model.submitLabelSuffix)
+                // The ghost hint shares the FIELD's box (not the row's), so its
+                // coordinates are the ones the field reports the caret in — that's what
+                // lets it ride down to the second line and stay put when the row grows.
+                // Drawn behind the text; the reserved strip above keeps them apart.
+                .background {
+                    if !followUp && !model.agentComposeActive {
+                        GeometryReader { geo in
+                            InlineSendHint(
+                                label: model.submitLabel,
+                                suffix: model.submitLabelSuffix,
+                                fontSize: fontSize,
+                                caretWidth: caretWidth,
+                                caretY: caretY,
+                                availableWidth: geo.size.width,
+                                tint: model.submitInk
+                            )
+                            .frame(height: geo.size.height, alignment: .center)
+                        }
+                        .allowsHitTesting(false)
+                    }
+                }
 
                 // The placeholder, drawn as a SwiftUI label over the (natively
                 // placeholder-less) field so its appearance can FADE — on emptying
@@ -1973,9 +2805,9 @@ struct NotchBody: View {
                         .font(.system(size: fontSize))
                         .foregroundStyle(Tokens.placeholder)
                         .lineLimit(1)
-                        // Sit on the NSTextField cell's own ~2pt left inset so the
-                        // label lands exactly where the native placeholder drew.
-                        .padding(.leading, 2)
+                        // Sit on the box's own ~2pt left inset so the label lands
+                        // exactly where the typed glyphs will.
+                        .padding(.leading, PromptField.textInset)
                         .allowsHitTesting(false)
                         .transition(.opacity)
                 }
@@ -2002,8 +2834,8 @@ struct NotchBody: View {
             // With the destination now spelled out inline beside the caret, the
             // trailing send pill would just repeat it — so while there's text the
             // inline hint owns that job and the trailing slot stays empty. When the
-            // field is empty the pin + Recent cluster tucks in there — hold the panel
-            // open, toggle Recent — and, on the first launch after an update, a
+            // field is empty the Recent cluster tucks in there (plus the tack, once
+            // ⌘P has pinned the panel) — and, on the first launch after an update, a
             // "what's new" cue leads it, the one-tap way into the release notes.
             if !model.hasText && !followUp {
                 HStack(spacing: 8) {
@@ -2011,30 +2843,25 @@ struct NotchBody: View {
                         whatsNewCue
                             .transition(.opacity)
                     }
-                    IdleTrailingCluster(
-                        pinned: model.isAnswerPinned,
-                        recentOpen: model.showHistory,
-                        showsRecent: !model.history.isEmpty,
-                        togglePin: {
-                            withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
-                                model.toggleAnswerPin()
-                            }
-                        },
-                        toggleRecent: {
-                            withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
-                                model.showHistory.toggle()
-                                // Closing via the chevron drops any keyboard highlight;
-                                // opening starts un-highlighted (the caret stays in the
-                                // input).
-                                model.highlightedHistoryIndex = nil
-                            }
+                    // With a local agent CLI, the bucket row below hosts the Recent
+                    // cluster on the Ask|Agent line; without that row, it rides here
+                    // in the input's trailing slot as before. Either way it hands over
+                    // to the manage bar's bottom-right corner while Recent is up.
+                    if !model.agentAvailable && !recentListShown {
+                        let cluster = idleTrailingCluster
+                        if !cluster.isEmpty {
+                            cluster
                         }
-                    )
+                    }
                 }
             }
         }
-        .frame(height: followUp ? 30 : 48)
+        // Grows with the box: the prompt keeps its resting breathing room and the row
+        // gains a line's height for every line the text wraps to, so the panel unfolds
+        // downward instead of the text scrolling away sideways.
+        .frame(height: followUp ? 30 : max(NotchBody.idleRowHeight, inputHeight + idleRowVerticalPadding))
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: model.hasText)
+        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: inputHeight)
     }
 
     /// The first-launch-after-update cue: a quiet "what's new" pill in the idle
@@ -2055,42 +2882,24 @@ struct NotchBody: View {
                 .contentShape(Capsule(style: .continuous))
         }
         .buttonStyle(.plain)
-        .help(L("whatsnew.title"))
     }
 
     private var followUpRow: some View {
-        HStack(spacing: 6) {
+        // Bottom-aligned so the send button stays on the box's last line as a long
+        // follow-up unfolds upward off the answer, instead of floating at its middle.
+        // A one-line box is 27pt — the button's own height — so the resting row is
+        // unchanged.
+        HStack(alignment: .bottom, spacing: 6) {
             ZStack(alignment: .leading) {
-                // Same Siri-style ghost hint the idle prompt carries, now on the
-                // mid-thread field too: "— Ask"/"— Note"/"— Remind" trailing the caret
-                // so a routed-by-intent follow-up shows its destination, and Tab's
-                // correction step is finally visible here. Rendered behind the field
-                // and hit-transparent. Mounted unconditionally, exactly like the idle
-                // row: the hint's OWN `visible` gate (caretWidth > 0, so it covers
-                // CJK/IME pre-composition) drives its materialize in/out. An outer
-                // structural `if` here would bypass that dissolve and hard-pop the
-                // ghost on the first/last character.
-                GeometryReader { geo in
-                    InlineSendHint(
-                        label: model.submitLabel,
-                        suffix: model.submitLabelSuffix,
-                        fontSize: 14.5,
-                        caretWidth: followUpCaretWidth,
-                        availableWidth: geo.size.width,
-                        tint: model.effectiveSubmitPanel.intentInk
-                    )
-                    .frame(height: geo.size.height, alignment: .center)
-                }
-                .allowsHitTesting(false)
-
                 PromptField(
-                    // The native placeholder stays empty on purpose: NSTextField can
-                    // only hard-swap its placeholder string, so the slot is owned by
-                    // the SwiftUI labels below, which cross-fade their copy instead.
+                    // The native placeholder stays empty on purpose: the box can only
+                    // hard-swap its placeholder string, so the slot is owned by the
+                    // SwiftUI labels below, which cross-fade their copy instead.
                     text: $model.text,
                     placeholder: "",
-                    fontSize: 14.5,
+                    fontSize: NotchBody.followUpFontSize,
                     focusTrigger: focused,
+                    maxVisibleLines: NotchBody.promptMaxLines,
                     // Route by intent, same as the idle prompt — a follow-up line
                     // like "remind me to ping Alex tomorrow at 9am" files to
                     // Reminders instead of being asked to the AI. A plain question
@@ -2114,25 +2923,56 @@ struct NotchBody: View {
                     // Lets the overlay placeholder hide itself the instant the editor
                     // shows ANYTHING — committed text or still-composing pinyin (which
                     // isn't in `model.text` yet) — matching the native behaviour.
-                    onCaretWidth: { followUpCaretWidth = $0 }
+                    onCaretWidth: { followUpCaretWidth = $0 },
+                    onCaretY: { followUpCaretY = $0 },
+                    onHeightChange: { followUpHeight = $0 }
                 )
+                .frame(height: followUpHeight)
                 // Reserve the hint's docking slot at the trailing edge, exactly like
-                // the idle row, so typed text scrolls within a narrower field and the
+                // the idle row, so typed text wraps within a narrower field and the
                 // "— Ask"/"— Remind" ghost never overlaps it. Width follows the current
                 // label so short labels don't leave a dead strip on the right.
-                .padding(.trailing, InlineSendHint.reservedTrailingWidth(label: model.submitLabel, suffix: model.submitLabelSuffix, fontSize: 14.5))
+                .padding(.trailing, InlineSendHint.reservedTrailingWidth(label: model.submitLabel, suffix: model.submitLabelSuffix, fontSize: NotchBody.followUpFontSize))
                 .animation(.smooth(duration: 0.25), value: model.submitLabel + model.submitLabelSuffix)
+                // Same Siri-style ghost hint the idle prompt carries, on the mid-thread
+                // field too: "— Ask"/"— Note"/"— Remind" trailing the caret so a
+                // routed-by-intent follow-up shows its destination, and Tab's correction
+                // step is visible here. It shares the FIELD's box, so it rides down with
+                // the text as the box unfolds. Rendered behind the field and
+                // hit-transparent. Mounted unconditionally: the hint's OWN `visible`
+                // gate (caretWidth > 0, so it covers CJK/IME pre-composition) drives its
+                // materialize in/out — an outer structural `if` would bypass that
+                // dissolve and hard-pop the ghost on the first/last character.
+                .background {
+                    GeometryReader { geo in
+                        InlineSendHint(
+                            label: model.submitLabel,
+                            suffix: model.submitLabelSuffix,
+                            fontSize: NotchBody.followUpFontSize,
+                            caretWidth: followUpCaretWidth,
+                            caretY: followUpCaretY,
+                            availableWidth: geo.size.width,
+                            tint: model.submitInk
+                        )
+                        .frame(height: geo.size.height, alignment: .center)
+                    }
+                    .allowsHitTesting(false)
+                }
                 // The placeholder, shown only while the editor is truly empty —
                 // committed text AND in-progress pinyin both hide it.
                 if !model.hasText && followUpCaretWidth == 0 {
                     followUpPlaceholderLabel
-                        // Nudge to sit on the NSTextField cell's own ~2pt left inset
-                        // so the label lands where the placeholder was, not 2pt left.
-                        .padding(.leading, 2)
+                        // Nudge to sit on the box's own ~2pt left inset so the label
+                        // lands where the typed glyphs will, not 2pt left.
+                        .padding(.leading, PromptField.textInset)
                         .allowsHitTesting(false)
                         .transition(.opacity)
                 }
             }
+            // The box at rest is one line (18pt) but the row is pinned to the send
+            // button's 27pt — so a resting field centres in that slot exactly as it
+            // always has, and only a wrapped follow-up pushes the row taller.
+            .frame(height: max(27, followUpHeight))
             // Drives the placeholder's fade during IME pre-composition: pinyin
             // showing in the editor flips `followUpCaretWidth` while `hasText` is
             // still false, and the row-level hasText animation never fires — so
@@ -2148,9 +2988,8 @@ struct NotchBody: View {
                     .transition(.scale(scale: 0.6).combined(with: .opacity))
             }
         }
-        // Pin the row to the height it has WITH the send button (27pt button),
-        // so it stays put when the button shows/hides instead of growing.
-        .frame(height: 27)
+        // Height comes from the field's own slot above (27pt at rest, taller once the
+        // text wraps), so the row stays put when the send button shows/hides.
         .padding(.leading, 13)
         .padding(.trailing, 6)
         .padding(.vertical, 6)
@@ -2163,7 +3002,7 @@ struct NotchBody: View {
                 // Fades out on an empty field (destination is just the default).
                 .overlay(
                     RoundedRectangle(cornerRadius: 12)
-                        .fill(model.effectiveSubmitPanel.intentTint
+                        .fill(model.submitTint
                             .opacity(model.hasText ? 0.045 : 0))
                 )
         )
@@ -2178,22 +3017,38 @@ struct NotchBody: View {
         // recurrence-suffix edit doesn't pulse.
         .intentChangePulse(on: model.effectiveSubmitPanel,
                            shape: RoundedRectangle(cornerRadius: 12),
-                           tint: model.effectiveSubmitPanel.intentInk)
+                           tint: model.submitInk)
         .animation(.smooth(duration: 0.25), value: model.effectiveSubmitPanel)
         .animation(.easeOut(duration: 0.2), value: focused)
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: model.hasText)
+        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: followUpHeight)
     }
 
     /// The follow-up field's placeholder, drawn as a SwiftUI label in the slot the
     /// native placeholder would occupy (same font, colour and inset). SwiftUI
-    /// ownership (rather than the NSTextField's own placeholder) is what lets it
-    /// hide the instant the field shows anything — including still-composing
-    /// pinyin, which the native placeholder wouldn't yield to.
+    /// ownership (rather than the box's own placeholder) is what lets it hide the
+    /// instant the field shows anything — including still-composing pinyin, which a
+    /// native placeholder wouldn't yield to.
     private var followUpPlaceholderLabel: some View {
-        Text(L("result.followUp"))
-            .font(.sf(14.5))
-            .foregroundStyle(Tokens.placeholder)
-            .lineLimit(1)
+        // On an agent thread the placeholder says who actually answers. With the
+        // run's CLI session still on record (and its engine installed), Enter
+        // resumes THAT session — the agent continues the work (`submit()` routes
+        // it via `continueAgentThread`); while a round is still in flight the
+        // line queues for the next one, and the placeholder says so. Only when
+        // the session is gone does the question fall through to the chat model,
+        // with the report as context.
+        Group {
+            if let engine = model.agentThreadContinuation {
+                Text(model.agentThreadTaskRunning
+                    ? L("result.followUp.agentQueue", engine.displayName)
+                    : L("result.followUp.agentContinue", engine.displayName))
+            } else {
+                Text(L(model.threadIsAgentRun ? "result.followUp.agent" : "result.followUp"))
+            }
+        }
+        .font(.sf(NotchBody.followUpFontSize))
+        .foregroundStyle(Tokens.placeholder)
+        .lineLimit(1)
     }
 
 }
@@ -2243,6 +3098,7 @@ fileprivate extension NotchModel.HistoryItem.Source {
         case .ask:      return .blue
         case .note:     return .yellow
         case .reminder: return .orange
+        case .agent:    return Tokens.agentTint
         }
     }
 }
@@ -2254,7 +3110,7 @@ fileprivate extension NotchModel.HistoryItem.Source {
 private struct RecentRowAccessibility: ViewModifier {
     let item: NotchModel.HistoryItem
     func body(content: Content) -> some View {
-        if item.source == .ask {
+        if item.source.isThread {
             content
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel(item.displayTitle)
@@ -2264,6 +3120,22 @@ private struct RecentRowAccessibility: ViewModifier {
                 .accessibilityElement(children: .contain)
                 .accessibilityLabel(item.displayTitle)
         }
+    }
+}
+
+/// What the input is wearing right now. `Panel` has no agent case on purpose —
+/// the agent isn't a classifier destination, it's an armed mode — so an active
+/// agent compose would otherwise fall back to Ask's blue while its chips and
+/// Recent rows wear violet. These two resolve that: agent compose paints the
+/// input the agent violet, everything else its destination's colour.
+fileprivate extension NotchModel {
+    /// Saturated body — for the field's low-opacity background wash.
+    var submitTint: Color {
+        agentComposeActive ? Tokens.agentTint : effectiveSubmitPanel.intentTint
+    }
+    /// The luminous face — for the inline ghost's word and the rim pulse.
+    var submitInk: Color {
+        agentComposeActive ? Tokens.agentInk : effectiveSubmitPanel.intentInk
     }
 }
 
@@ -2334,7 +3206,8 @@ private struct HistoryFooterButton: View {
 }
 
 /// The one place a history source maps to its filter-chip face: the label key
-/// and the source's app colour (Notes amber, Reminders orange, Ask a cool blue).
+/// and the source's app colour (Notes amber, Reminders orange, Ask a cool blue,
+/// Agent a violet).
 /// Shared by the manage menu's chips and the collapsed active-filter chip so the
 /// two can never drift apart.
 extension NotchModel.HistoryItem.Source {
@@ -2343,6 +3216,7 @@ extension NotchModel.HistoryItem.Source {
         case .note:     return L("recent.filter.note")
         case .reminder: return L("recent.filter.remind")
         case .ask:      return L("recent.filter.ask")
+        case .agent:    return L("recent.filter.agent")
         }
     }
     fileprivate var filterTint: Color {
@@ -2350,42 +3224,8 @@ extension NotchModel.HistoryItem.Source {
         case .note:     return .yellow
         case .reminder: return .orange
         case .ask:      return .blue
+        case .agent:    return Tokens.agentTint
         }
-    }
-}
-
-/// One source-filter chip inside the manage menu. The active chip wears its
-/// source's tint (the same wash the capture chips use); inactive chips are
-/// plain glass that brightens on hover. Tapping the active chip again clears
-/// the filter. Selecting one folds the menu so the narrowed list is
-/// immediately visible underneath.
-private struct ManageFilterChip: View {
-    @ObservedObject var model: NotchModel
-    var source: NotchModel.HistoryItem.Source
-    var collapse: () -> Void
-
-    @State private var hovering = false
-
-    var body: some View {
-        let active = model.historySourceFilter == source
-        Button {
-            withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
-                model.historySourceFilter = active ? nil : source
-                collapse()
-            }
-        } label: {
-            Text(source.filterTitle)
-                .font(.sf(11, weight: .medium))
-                .foregroundStyle(active ? Tokens.text1 : (hovering ? Tokens.text2 : Tokens.text3))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-            .glassCapsule(in: Capsule(), brighter: active || hovering,
-                          tint: active ? source.filterTint : nil)
-            .contentShape(Capsule())
-        }
-        .buttonStyle(GlassPressStyle())
-        .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.18), value: hovering)
     }
 }
 
@@ -2424,7 +3264,6 @@ private struct ActiveFilterChip: View {
         .buttonStyle(GlassPressStyle())
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.18), value: hovering)
-        .help(L("recent.filter.clear"))
     }
 }
 
@@ -2492,12 +3331,12 @@ private struct AnswerHeightKey: PreferenceKey {
 
 /// Carries the immersive floating header's measured height up to `NotchBody` so the
 /// list's top runway and frost band can be sized to whatever the header actually
-/// holds — a bare input, or an input flanked by a clipboard quote and its chips.
+/// holds — a bare input, or an input topped by a copied-image preview.
 private struct ImmersiveHeaderHeightKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        // Single reader; last value wins so the runway can SHRINK back when the quote
-        // clears, not just grow (same rationale as `AnswerHeightKey`).
+        // Single reader; last value wins so the runway can SHRINK back when the
+        // preview clears, not just grow (same rationale as `AnswerHeightKey`).
         let next = nextValue()
         if next > 0 { value = next }
     }
@@ -2528,50 +3367,65 @@ struct SetupModelButtonStyle: ButtonStyle {
     }
 }
 
-/// The idle prompt's trailing controls — the pin and the Recent disclosure — fused
-/// into ONE capsule: a single glass pill holding two glyphs, rather than two chips
-/// competing beside each other. Nothing divides them; the hover fill alone shows
-/// which half the pointer is over.
+/// The idle prompt's trailing controls — the pin and the Recent disclosure. Each is
+/// its own round glass chip, in exactly the language of the recent panel's ⋯ entry
+/// (`GlassIconButton`): a translucent glass circle that brightens under the cursor.
+/// They used to share one capsule, which wrapped the lone chevron in a pill of
+/// dead space — the chip IS the target now, no padding around it.
 ///
-/// Pitched deliberately fainter than the result header's standalone
-/// `ResultPinButton`. That pin sits over an answer the user is already reading; this
-/// one sits next to an empty "Type anything…" prompt, where the eye belongs on the
-/// caret — so at rest the glass is a whisper and both glyphs sit at the meta level
-/// of the ink scale. Hovering the pill brings the glass up; hovering one segment
-/// lifts just that glyph. Engaged state (pinned, or Recent open) reads through the
-/// glyph alone — the filled, upright tack and the flipped chevron — never a wash.
+/// Engaged state (pinned, or Recent open) reads through the glyph alone — the
+/// filled, upright tack and the flipped chevron — never a wash.
+///
+/// The idle prompt shows no pin *button*: an unpinned panel offers only Recent, and
+/// ⌘P/⌘D (ContentView's key handler) is how pinning happens. The tack appears here
+/// only once the panel IS pinned — state made visible, and the click that releases it.
 struct IdleTrailingCluster: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var pinned: Bool
     var recentOpen: Bool
     /// Recent has nothing to show on a first run — the pill then carries the pin
     /// alone and shrinks to a single round segment.
     var showsRecent: Bool
+    /// How many agent runs are live. Non-zero swaps the round chevron for a
+    /// "N running ⌄" capsule — the live count rides the disclosure itself instead
+    /// of a standalone status strip below the prompt.
+    var runningCount: Int = 0
     var togglePin: () -> Void
     var toggleRecent: () -> Void
 
+    /// Nothing to draw when neither segment is live — an empty capsule of glass
+    /// would still read as a control. A live run always draws (the "N running"
+    /// chip), even before any Recent history exists to disclose.
+    var isEmpty: Bool { !pinned && !showsRecent && runningCount == 0 }
+
     private enum Segment { case pin, recent }
 
-    @State private var hovering = false
     @State private var hovered: Segment? = nil
 
-    /// Square segments, so each hover circle sits concentric with the capsule's end
-    /// cap and keeps the same inset on every side.
-    private let segmentWidth: CGFloat = 32
-    private let segmentHeight: CGFloat = 32
-    /// The hover circle is inset 3pt inside the pill — flush to the glass would read
-    /// as an overflowing blob rather than a target sitting in it.
-    private let hoverDiameter: CGFloat = 26
+    /// The ⋯ chip's diameter, one step down: these sit inside the prompt row, not on
+    /// the panel's chrome.
+    private let chipSize: CGFloat = 30
 
     var body: some View {
-        HStack(spacing: 0) {
-            segment(.pin, engaged: pinned, action: togglePin,
-                    tooltip: L(pinned ? "result.unpin" : "result.pin")) {
-                // A pinned pin tips upright, the way a pushed-in tack sits.
-                Image(systemName: pinned ? "pin.fill" : "pin")
-                    .rotationEffect(.degrees(pinned ? 0 : 32))
-                    .animation(.spring(response: 0.32, dampingFraction: 0.8), value: pinned)
+        HStack(spacing: 6) {
+            // The pin has no button at rest — ⌘P/⌘D is the way in. Once pinned it
+            // surfaces here as the state's own affordance: it shows the panel is held
+            // open, and clicking it lets go.
+            if pinned {
+                segment(.pin, engaged: true, action: togglePin,
+                        tooltip: L("result.unpin")) {
+                    // A pinned pin tips upright, the way a pushed-in tack sits.
+                    Image(systemName: "pin")
+                }
+                .transition(.scale(scale: 0.6).combined(with: .opacity))
             }
-            if showsRecent {
+            // Live runs fold their count into the disclosure — "N running ⌄" — so
+            // the resting panel stays at its input while a background agent works;
+            // the standalone status strip stays hidden until nothing's running.
+            if runningCount > 0 {
+                runningRecentChip
+                    .transition(.scale(scale: 0.7).combined(with: .opacity))
+            } else if showsRecent {
                 segment(.recent, engaged: recentOpen, action: toggleRecent,
                         tooltip: L("recent.recent")) {
                     // A downward chevron reads as "pull the recent list down"; it flips
@@ -2583,100 +3437,150 @@ struct IdleTrailingCluster: View {
                 }
             }
         }
-        // The glass renders behind both segments and carries all the resting
-        // dimming, so the glyphs keep their own ink. At rest it's barely there.
-        .background {
-            Color.clear
-                .glassCapsule(in: Capsule(), brighter: hovering)
-                .opacity(hovering ? 0.72 : 0.34)
-        }
-        .clipShape(Capsule())
-        .onHover { inside in
-            hovering = inside
-            if !inside { hovered = nil }
-        }
-        .animation(.easeOut(duration: 0.18), value: hovering)
         .animation(.spring(response: 0.34, dampingFraction: 0.82), value: showsRecent)
+        .animation(.spring(response: 0.34, dampingFraction: 0.82), value: pinned)
+        .animation(.spring(response: 0.34, dampingFraction: 0.82), value: runningCount)
+    }
+
+    /// The disclosure while runs are live: the same glass, stretched to a capsule
+    /// that carries a breathing bead, the "N running" count, and the chevron. Tapping
+    /// it drops the Recent list, whose top rows are those very runs (with their
+    /// cancel controls) — so the count is a live handle, never a dead badge.
+    private var runningRecentChip: some View {
+        let hovering = hovered == .recent
+        return Button(action: toggleRecent) {
+            HStack(spacing: 5) {
+                AgentStatusDot(running: true, outcome: nil)
+                Text(L("agent.running.count", runningCount))
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .monospacedDigit()
+                    .contentTransition(.numericText(value: Double(runningCount)))
+                    // Roll the digit natively, the way the row clock ticks: the
+                    // animation has to ride the Text itself for `numericText` to
+                    // fire — on the outer Button it only drives the layout.
+                    .animation(reduceMotion ? nil : .snappy(duration: 0.3), value: runningCount)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 10, weight: .semibold))
+                    .rotationEffect(.degrees(recentOpen ? 180 : 0))
+                    .animation(.spring(response: 0.32, dampingFraction: 0.8), value: recentOpen)
+            }
+            .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
+            .padding(.horizontal, 10)
+            .frame(height: chipSize)
+            .glassCapsule(in: Capsule(), brighter: hovering)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(GlassPressStyle())
+        .onHover { inside in
+            if inside { hovered = .recent }
+            else if hovered == .recent { hovered = nil }
+        }
+        .animation(.easeOut(duration: 0.18), value: hovered)
+        .animation(.snappy(duration: 0.3), value: runningCount)
+    }
+
+    /// One round glass chip — the ⋯ entry's `GlassIconButton` body, with an extra
+    /// `engaged` ink step (pinned / Recent open) the shared component doesn't carry.
+    private func segment<Glyph: View>(
+        _ segment: Segment, engaged: Bool, action: @escaping () -> Void,
+        tooltip: String, @ViewBuilder glyph: () -> Glyph
+    ) -> some View {
+        let hovering = hovered == segment
+        return Button(action: action) {
+            glyph()
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(hovering ? Tokens.text1 : (engaged ? Tokens.text2 : Tokens.text3))
+                .frame(width: chipSize, height: chipSize)
+                .glassCapsule(in: Circle(), brighter: hovering)
+                .contentShape(Circle())
+        }
+        .buttonStyle(GlassPressStyle())
+        .onHover { inside in
+            if inside { hovered = segment }
+            else if hovered == segment { hovered = nil }
+        }
+        .animation(.easeOut(duration: 0.18), value: hovered)
+    }
+}
+
+/// The result header's trailing control — the pin — held in a Liquid Glass capsule
+/// (`glassCapsule` = native `.glassEffect` on macOS 26+, blur fallback below). The
+/// capsule is a circle around the lone pin. A bare glyph would read as an unrelated
+/// control in a different material; the system's own grouped-glass shape gives it a
+/// proper pane, the way a Safari toolbar button sits.
+///
+/// The glass lives on the capsule and only there: a hovered segment marks itself
+/// with ink and a soft circle of light, never a second pane of glass nested inside
+/// the first. Glyphs stay pure white — engaged (pinned) reads through the filled
+/// tack, its upright tilt, and a white wash, never a colour tint.
+///
+/// Toggling routes back through the model so an un-pin can immediately re-arm
+/// the leave-fold if the pointer is already gone.
+struct ResultTrailingCluster: View {
+    var pinned: Bool
+    var togglePin: () -> Void
+    /// Tear-off action. When set, a detach chip rides the same glass pill as the
+    /// pin, to its left — so both trailing actions share one piece of glass
+    /// rather than the detach glyph floating bare beside it.
+    var detach: (() -> Void)? = nil
+
+    private enum Segment { case detach, pin }
+
+    @State private var hovered: Segment? = nil
+
+    private let chip: CGFloat = 26
+
+    var body: some View {
+        HStack(spacing: 2) {
+            if let detach {
+                segment(.detach, engaged: false, action: detach,
+                        tooltip: L("detached.open")) {
+                    Image(systemName: "macwindow.on.rectangle")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+            }
+            segment(.pin, engaged: pinned, action: togglePin,
+                    tooltip: L(pinned ? "result.unpin" : "result.pin")) {
+                // A pinned pin tips upright, the way a pushed-in tack sits — a small
+                // physical cue that it's engaged, on top of the engaged tint.
+                Image(systemName: "pin")
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .rotationEffect(.degrees(pinned ? 0 : 32))
+            }
+        }
+        .padding(3)
+        // The whole cluster is the chip: a quiet whisper of glass at rest that comes
+        // to full strength (rim + specular) when the pointer is anywhere on it, or
+        // while the answer is pinned. The glass carries ALL the resting dimming —
+        // rendered behind the glyphs, so they stay pure white even at rest.
+        .background {
+            let lit = hovered != nil || pinned
+            Color.clear
+                .glassCapsule(in: Capsule(), brighter: lit)
+                .opacity(lit ? 1 : 0.55)
+        }
+        .animation(.easeOut(duration: 0.18), value: hovered)
     }
 
     private func segment<Glyph: View>(
         _ segment: Segment, engaged: Bool, action: @escaping () -> Void,
         tooltip: String, @ViewBuilder glyph: () -> Glyph
     ) -> some View {
-        Button(action: action) {
+        let hovering = hovered == segment
+        return Button(action: action) {
             glyph()
-                .font(.system(size: 11.5, weight: .semibold))
-                .foregroundStyle(engaged || hovered == segment ? Tokens.text2 : Tokens.text4)
-                .frame(width: segmentWidth, height: segmentHeight)
-                // A round fill that sits inside the segment rather than filling it —
-                // no straight seam down the middle of the pill.
+                .foregroundStyle(.white)
+                .frame(width: chip, height: chip)
                 .background(
-                    Circle()
-                        .fill(.white.opacity(hovered == segment ? 0.08 : 0))
-                        .frame(width: hoverDiameter, height: hoverDiameter)
+                    Circle().fill(.white.opacity(engaged ? 0.20 : (hovering ? 0.12 : 0)))
                 )
-                .contentShape(Rectangle())
+                .contentShape(Circle())
         }
-        .buttonStyle(SegmentPressStyle())
+        .buttonStyle(GlassPressStyle())
         .onHover { inside in
             if inside { hovered = segment }
             else if hovered == segment { hovered = nil }
         }
-        .animation(.easeOut(duration: 0.18), value: hovered)
-        .notchTooltip(tooltip)
-    }
-}
-
-/// Dims a cluster segment on press. No scale: a segment can't shrink away from its
-/// neighbour without breaking the pill it shares with it.
-private struct SegmentPressStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .opacity(configuration.isPressed ? 0.5 : 1)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
-    }
-}
-
-/// The faint clock entry: brightens slightly on hover, dims on press.
-/// Top-right pin, sitting on a real Liquid Glass circle — the same native
-/// `.glassEffect` chip the settings icon uses (`glassCapsule` on macOS 26+, blur
-/// fallback below), so it reads as a piece of the glass island rather than a bare
-/// glyph. The glyph stays pure white in both states — engaged reads through the
-/// filled glyph, the upright tilt, and a white glass wash, never a colour tint.
-/// Toggling routes back through the model so an un-pin can immediately re-arm
-/// the leave-fold if the pointer is already gone.
-struct ResultPinButton: View {
-    var pinned: Bool
-    var toggle: () -> Void
-
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: toggle) {
-            Image(systemName: pinned ? "pin.fill" : "pin")
-                .font(.system(size: 12.5, weight: .semibold))
-                .foregroundStyle(.white)
-                // A pinned pin tips slightly, the way a pushed-in tack sits — a small
-                // physical cue that it's engaged, on top of the fill.
-                .rotationEffect(.degrees(pinned ? 0 : 32))
-                .frame(width: 26, height: 26)
-                // The glass renders behind the glyph and carries ALL the resting
-                // dimming, so the pin itself stays pure white even at rest — only
-                // the glass is a quiet whisper of a chip until hovering or pinning
-                // brings it (rim + specular + white wash when pinned) to full
-                // strength.
-                .background {
-                    Color.clear
-                        .glassCapsule(in: Circle(), brighter: pinned || hovering,
-                                      tint: pinned ? .white : nil)
-                        .opacity(pinned || hovering ? 1 : 0.55)
-                }
-                .contentShape(Circle())
-        }
-        .buttonStyle(GlassPressStyle())
-        .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.18), value: hovering)
-        .notchTooltip(L(pinned ? "result.unpin" : "result.pin"))
     }
 }
 
@@ -2705,7 +3609,7 @@ struct RecentEntryStyle: ButtonStyle {
 /// height rounds its corners by half the *tall* box — a bloated, over-round blob;
 /// the smaller radius keeps a multi-line quote reading as a tidy card.
 /// `style: .continuous` matches the panel's other rounded shapes.
-private struct UserQuestionBubble: View {
+struct UserQuestionBubble: View {
     let text: String
 
     /// Whether the user tapped to expand a truncated question. Starts collapsed so a
@@ -2800,5 +3704,246 @@ private struct UserQuestionBubble: View {
                         .strokeBorder(Tokens.hairline, lineWidth: 1)
                 )
         )
+    }
+}
+
+// MARK: - Agent status dot
+
+/// The outcome of an agent run in one 7pt glass bead: purple done, red failed,
+/// grey cancelled. A *working* run draws nothing here — its activity line and
+/// ticking clock already say it's alive, and a pulsing dot on top of them was
+/// only noise. The slot is held either way, so the phrase beside it doesn't
+/// slide sideways the moment the bead lights up.
+struct AgentStatusDot: View {
+    let running: Bool
+    let outcome: AgentTaskManager.Outcome?
+
+    @State private var breathing = false
+
+    private var tint: Color {
+        switch outcome {
+        case .failure:   return Tokens.danger
+        case .cancelled: return Tokens.text4
+        default:         return Tokens.accent
+        }
+    }
+
+    var body: some View {
+        ZStack {
+            if running {
+                // A working run breathes a flat translucent white dot in the slot —
+                // the "it's alive" pulse that rides alongside the ticking activity
+                // line, swinging transparency and scale as it breathes so it reads
+                // without any glass sheen.
+                Circle()
+                    .fill(.white.opacity(0.5))
+                    .opacity(breathing ? 0.7 : 0.26)
+                    .scaleEffect(breathing ? 1.0 : 0.72)
+                    .onAppear { breathing = true }
+                    .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true),
+                               value: breathing)
+                    .transition(.scale(scale: 0.4).combined(with: .opacity))
+            } else {
+                // A settled run marks its slot with a flat coloured dot.
+                Circle()
+                    .fill(tint.opacity(0.92))
+                    .transition(.scale(scale: 0.4).combined(with: .opacity))
+            }
+        }
+        .frame(width: 7, height: 7)
+        .animation(.spring(response: 0.38, dampingFraction: 0.7), value: running)
+    }
+}
+
+// MARK: - Agent compose chips (XII: agent-to-Codex)
+
+/// The shared face of one armed-compose chip: leading glyph + label in the
+/// clipboard preset chips' exact glass capsule, so the agent row reads as
+/// the same species living in the same slot.
+private struct AgentChipFace<Icon: View>: View {
+    var icon: Icon
+    var title: String
+    var hovering: Bool
+
+    var body: some View {
+        HStack(spacing: 5) {
+            icon
+            Text(title)
+                .font(.sf(12, weight: .light))
+                .foregroundStyle(hovering ? Tokens.text2 : Tokens.text4)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .contentShape(Capsule())
+    }
+}
+
+/// A compose chip that fires an action on tap (the folder chip).
+struct AgentComposeChip<Icon: View>: View {
+    var title: String
+    var action: () -> Void
+    @ViewBuilder var icon: () -> Icon
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            AgentChipFace(icon: icon(), title: title, hovering: hovering)
+        }
+        .buttonStyle(GlassPressStyle())
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.18), value: hovering)
+    }
+}
+
+/// A compose chip that opens a picker menu on click (model / effort). The
+/// system menu indicator is hidden — the chip itself is the whole affordance,
+/// like every other capsule in the row.
+struct AgentComposeMenuChip<Icon: View, Items: View>: View {
+    var title: String
+    @ViewBuilder var items: () -> Items
+    @ViewBuilder var icon: () -> Icon
+
+    @State private var hovering = false
+
+    var body: some View {
+        Menu(content: items) {
+            AgentChipFace(icon: icon(), title: title, hovering: hovering)
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.18), value: hovering)
+    }
+}
+
+/// The persistent Ask|Agent switch that anchors the bucket row — the panel's
+/// one explicit top-level choice. Ask is the lightweight bucket (the intent
+/// classifier keeps routing note/remind invisibly inside it); Agent arms the
+/// folder-scoped compose. Two words in one glass capsule washed with the
+/// active bucket's colour — the ManageFilterChip recipe: the selected word
+/// bright, the other dim, no thumb, no divider; the wash alone says which side
+/// is live. A plain click is enough of a gate because arming is inert — it
+/// only unfurls the chips row; a run still needs a folder, a typed task, and
+/// an explicit Enter.
+private struct BucketTogglePill: View {
+    @ObservedObject var model: NotchModel
+    /// One shared namespace so the active "well" is a single element that SLIDES
+    /// between the two words on the pill's spring — a continuous move, not the
+    /// cross-dissolve two independent per-word wells would give ("一镜到底").
+    @Namespace private var wellNS
+
+    var body: some View {
+        let agentOn = model.agentComposeActive
+        HStack(spacing: 2) {
+            BucketWord(title: L("hint.ask"), icon: LucideIcons.messageCircle,
+                       active: !agentOn, wellNS: wellNS) {
+                model.setAgentBucket(false)
+            }
+            BucketWord(title: L("hint.agent"), icon: LucideIcons.codeXml,
+                       active: agentOn, wellNS: wellNS) {
+                model.setAgentBucket(true)
+            }
+        }
+        // Match the Recent disclosure chevron's fixed 30pt (IdleTrailingCluster's
+        // chipSize) so the pill and the trailing dropdown line up on the row.
+        .frame(height: 30)
+        .padding(.horizontal, 3)
+        .glassCapsule(in: Capsule(), brighter: false,
+                      tint: agentOn ? Tokens.agentTint
+                                    : NotchModel.Panel.chat.intentTint)
+        .animation(.spring(response: 0.34, dampingFraction: 0.82), value: agentOn)
+        .accessibilityElement(children: .contain)
+    }
+}
+
+/// One word of the bucket pill: the active bucket spells its name out; the
+/// inactive one collapses to a bare icon (a speech bubble for Ask, a code
+/// bracket `</>` for Agent) — dim, brightening on hover, the way over to the other side.
+/// Clicking the active half is a no-op — the pill sets a bucket, never surprises.
+private struct BucketWord: View {
+    var title: String
+    var icon: LucideIcons.Mark
+    var active: Bool
+    /// The pill's shared namespace, so this word's well is the SAME element as the
+    /// other word's — it glides across on the pill's spring instead of one fading
+    /// out while the other fades in.
+    var wellNS: Namespace.ID
+    var action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            content
+                .foregroundStyle(active ? Tokens.text1
+                                        : (hovering ? Tokens.text2 : Tokens.text4))
+                .padding(.horizontal, 9)
+                // Fill the pill's full height so the active well can be inset a
+                // uniform amount on every side (below), instead of being sized by
+                // the text and floating with an uneven top/bottom margin.
+                .frame(maxHeight: .infinity)
+                // The active side sits in a recessed inner-shadow well — the
+                // pushed-in "pin" look, so the live half reads as pressed into the
+                // glass rather than just brighter. The inactive half stays flush.
+                // The 3pt inset matches the pill's 3pt horizontal padding, so the
+                // well keeps an even margin to the glass on all four sides.
+                //
+                // `matchedGeometryEffect` makes this a single shared well: when the
+                // active side flips, SwiftUI interpolates the well's frame from the
+                // old word to the new one, so it slides (and resizes as the words
+                // expand/collapse) in one continuous move — the "一镜到底" transition.
+                .background {
+                    if active {
+                        Capsule().fill(
+                            Color.white.opacity(0.17)
+                                .shadow(.inner(color: .black.opacity(0.48),
+                                               radius: 3, y: 1))
+                        )
+                        // A hairline top rim sells the recessed glass edge — the well
+                        // now reads as a brighter, more solid pane than the barely-there
+                        // wash it was before.
+                        .overlay {
+                            Capsule()
+                                .strokeBorder(Color.white.opacity(0.14), lineWidth: 0.5)
+                        }
+                        .padding(.vertical, 3)
+                        .matchedGeometryEffect(id: "bucketWell", in: wellNS)
+                    }
+                }
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.18), value: hovering)
+        // No per-word `active` animation: the slide + the dim⇄bright colour change
+        // ride the pill's single spring (BucketTogglePill's `.animation(value:)`),
+        // so both words move together as one shot rather than each easing on its own.
+        .accessibilityLabel(title)
+        .accessibilityAddTraits(active ? [.isSelected] : [])
+    }
+
+    @ViewBuilder private var content: some View {
+        if active {
+            Text(title)
+                .font(.sf(12, weight: .medium))
+                .transition(.opacity)
+        } else {
+            // Bigger AND heavier than a menu glyph (15/2.0 → 1.25pt of stroke, against
+            // the menu's 13/1.75 → 0.95pt), because this mark carries more: once the
+            // inactive word collapses away it is the ONLY thing naming the other side
+            // of the switch, and it does that at 40% ink instead of the menu's 55%.
+            // `weight` is grid-relative, so holding it at 2.0 through the size bump is
+            // what lets the stroke ride up with the glyph rather than staying pinned to
+            // the set's thinner line — deliberate here, not an oversight. (The SF mark
+            // this replaced ran `.bold` for the same reason.)
+            LucideIcon(mark: icon, size: 15, weight: 2.0)
+                // Same air around the glyph the SF mark had (11pt in 14), scaled.
+                .frame(minWidth: 18)
+                .transition(.opacity)
+        }
     }
 }

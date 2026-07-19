@@ -1,7 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
 import Combine
-import NaturalLanguage
 import ServiceManagement
 import SwiftUI
 
@@ -34,6 +33,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if provider == .codex {
             return CodexCLIService(model: APIKeyStore.effectiveModel(for: .codex))
         }
+        // Claude Code is the same keyless pattern: the user's own `claude` sign-in,
+        // no API key. See `ClaudeCLIService` for the compliance posture.
+        if provider == .claudeCode {
+            return ClaudeCLIService(model: APIKeyStore.effectiveModel(for: .claudeCode))
+        }
         guard let key = APIKeyStore.current(for: provider) else {
             return StubAIService()
         }
@@ -54,6 +58,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if provider == .codex {
             return CodexCLIService(model: model)
         }
+        if provider == .claudeCode {
+            return ClaudeCLIService(model: model)
+        }
         if provider.isOpenAICompatible {
             return OpenAICompatAIService(provider: provider, apiKey: apiKey, model: model)
         } else {
@@ -66,9 +73,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// the result view's "set up your model" prompt when false.
     private static func isConfigured() -> Bool {
         let provider = APIKeyStore.selectedProvider
-        // Codex is "configured" when the CLI is installed and signed in, not when a
-        // key is stored (it has none).
+        // Codex / Claude Code are "configured" when the CLI is installed and signed
+        // in, not when a key is stored (they have none).
         if provider == .codex { return CodexCLIService.isAvailable }
+        if provider == .claudeCode { return ClaudeCLIService.isAvailable }
         return APIKeyStore.current(for: provider) != nil
     }
 
@@ -104,7 +112,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let canvasWidth: CGFloat = 760
     private let canvasHeight: CGFloat = 640
 
+    /// Resolve a duplicate-instance launch: the NEWEST instance survives (in the
+    /// reinstall flow that's the freshly installed build; in the Xcode dev loop
+    /// it's the copy you just ran) and every older duplicate is told to quit.
+    /// Returns true when a newer instance exists — the caller (this launch)
+    /// should bow out. The ordering is strict (launch date, pid as tiebreak) so
+    /// two instances racing through this guard can never both conclude "I win"
+    /// — or both quit.
+    private func resignedToNewerInstance() -> Bool {
+        guard let bundleID = Bundle.main.bundleIdentifier else { return false }
+        let me = NSRunningApplication.current
+        let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            .filter { $0.processIdentifier != me.processIdentifier }
+        guard !others.isEmpty else { return false }
+
+        // Strict total order: older launch date loses; identical/unknown dates
+        // fall back to pid (monotonic enough for two copies spawned seconds apart).
+        func loses(_ a: NSRunningApplication, to b: NSRunningApplication) -> Bool {
+            if let la = a.launchDate, let lb = b.launchDate, la != lb { return la < lb }
+            return a.processIdentifier < b.processIdentifier
+        }
+
+        if others.allSatisfy({ loses($0, to: me) }) {
+            // This launch is the newest claim — sweep the stale copies out.
+            others.forEach { $0.terminate() }
+            return false
+        }
+        return true   // an even newer instance exists; it runs the same sweep
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Single-instance guard — must run before anything else builds state.
+        // Duplicate instances are real here: the relaunch in
+        // `scripts/reinstall.sh` races LaunchServices (an `open` that reported
+        // -600 can still land its queued launch after the direct-spawn fallback
+        // already fired), and overlapping reinstall passes interleave their
+        // pkill→open sequences. LaunchServices only dedups launches that go
+        // through it — a directly-spawned binary bypasses that — and nothing
+        // in-app stopped a second copy, so once doubled the app stayed doubled.
+        if resignedToNewerInstance() {
+            NSApp.terminate(nil)
+            return
+        }
+
         // Agent app by default: no Dock icon, no app menu — it's a pure overlay.
         // The user can opt into a Dock icon (Settings → General), which flips this
         // to `.regular`; `applyDockIconVisibility` reads the persisted choice.
@@ -117,10 +167,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // approach vector — the entry physics in `NotchIsland` feed on it.
         MouseVelocityTracker.shared.start()
 
-        // Resolve the `codex` binary off-main now, so the first time Settings asks
-        // `CodexCLIService.isAvailable` (a SwiftUI render) it reads a warm cache
+        // Resolve the `codex` / `claude` binaries off-main now, so the first time
+        // Settings asks `isAvailable` (a SwiftUI render) it reads a warm cache
         // instead of paying the `--version` smoke-test spawn on the main thread.
         CodexCLIService.warmUp()
+        ClaudeCLIService.warmUp()
+        // Same reason: resolving the proxy may spawn a login shell, and the first
+        // agent run must not wait on it.
+        ProxyConfig.warmUp()
 
         // Warm the ask/note intent engine off the main thread: fetch/load the
         // embedding model and restore (or fit, first run ~seconds) the per-language
@@ -144,12 +198,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // hot-updated from the website) on the same quiet cadence.
             await RemoteModelManifest.refreshIfDue()
         }
-
-        // Slot a "Check for Updates…" item into the standard app menu, right
-        // under "About Notch". The menu only exists in `.regular` mode (Dock icon
-        // shown) — in the default `.accessory` overlay there's no app menu at all,
-        // so this is a no-op then and re-runs when the Dock icon is switched on.
-        installCheckForUpdatesMenuItem()
 
         rebuildPanels()
 
@@ -305,12 +353,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if env["NOTCH_DEMO_HISTORY"] == "1" {
                 model.showHistory = true
             }
-            // NOTCH_DEMO_CLIP=<text> seeds a pending clipboard at launch (bypassing
-            // the freshness gate) so the preset row and its note/reminder capture
-            // chip can be inspected without a real copy-then-hover. Debug aid only.
-            if let clip = env["NOTCH_DEMO_CLIP"], !clip.isEmpty {
-                model.seedDemoClipboard(clip)
+            #if DEBUG
+            // TEMP: NOTCH_DEMO_AGENT=N seeds N settled agent cards + opens history.
+            if let n = env["NOTCH_DEMO_AGENT"].flatMap({ Int($0) }), n > 0 {
+                AgentTaskManager.shared._debugSeedSettled(n)
+                model.showHistory = true
             }
+            #endif
         }
         // Debug aid: NOTCH_SETTINGS=1 opens the panel straight into the inline
         // settings view at launch (via the same path as ⌘,) so it can be
@@ -411,6 +460,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        // The app menu's "Check for Updates…" command (see `NotchGlassApp`'s
+        // `.commands`) routes here: open Settings → About and start a manual check.
+        NotificationCenter.default.addObserver(
+            forName: .checkForUpdatesRequested,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.checkForUpdatesFromMenu()
+            }
+        }
+
         // The Recent list's "See all" action opens the standalone History window
         // showing the complete, uncapped archive (the notch keeps only the newest
         // slice). A real top-level window, managed by its own controller.
@@ -452,6 +513,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         self.model.activeDisplay = display
                     }
                     self.model.openThread(id: id)
+                }
+            }
+        }
+
+        // File every settled agent run into Recent (XII: agent-to-Codex),
+        // so the result outlives the in-panel card and the banner tap below has
+        // a row to land on.
+        AgentTaskManager.shared.onSettled = { [weak self] task in
+            self?.model.recordAgentHistory(task)
+        }
+
+        // Runs that were still in flight when the app last went away (quit,
+        // crash, kill): agent processes deliberately outlive the app (their
+        // output goes to files, not pipes), so a run found still alive is
+        // re-adopted in place — its card comes back, still running — and one
+        // that finished while the app was gone comes back here as a normal
+        // completion. Only a run that truly died files as interrupted. Every
+        // settled shape lands in Recent via the same call.
+        for recovered in AgentTaskManager.shared.recoverInterruptedRuns() {
+            model.recordAgentHistory(recovered, countAsUnseen: false)
+        }
+
+        // A tap on an agent-Codex "task finished" banner: summon the panel and
+        // reopen the run's Recent record (filed above just before the banner
+        // posted) — the same routing as an answer tap.
+        NotificationCenter.default.addObserver(
+            forName: NotificationService.agentTapped,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            Task { @MainActor in
+                guard let self else { return }
+                NSApp.activate(ignoringOtherApps: true)
+                let display = self.displayForSummon()
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
+                    if !self.model.open {
+                        self.model.mode = .idle
+                        self.model.openPanel(on: display)
+                    } else if let display {
+                        self.model.activeDisplay = display
+                    }
+                    if let id = note.userInfo?[NotificationService.threadIDKey] as? UUID {
+                        self.model.openThread(id: id)
+                    }
                 }
             }
         }
@@ -531,46 +636,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(visibility.activationPolicy)
         if visibility == .shown {
             NSApp.activate(ignoringOtherApps: true)
-            // Switching to `.regular` builds the app menu fresh (it doesn't
-            // exist under `.accessory`), so re-slot our item — deferred a runloop
-            // turn so AppKit has finished assembling the standard menu first.
-            DispatchQueue.main.async { [weak self] in
-                self?.installCheckForUpdatesMenuItem()
-            }
         }
     }
 
     // MARK: - App menu
 
-    /// Insert a "Check for Updates…" item into the standard app menu, just below
-    /// "About Notch". Idempotent (tagged so a re-run finds and skips it), and a
-    /// no-op when there's no app menu — the default `.accessory` overlay has none.
-    private func installCheckForUpdatesMenuItem() {
-        let tag = 0x4E4F5443  // "NOTC" — our marker so we never add it twice.
-        // The app menu is the first submenu of the main menu.
-        guard let appMenu = NSApp.mainMenu?.items.first?.submenu else { return }
-        if appMenu.item(withTag: tag) != nil { return }
-
-        let item = NSMenuItem(
-            title: L("about.checkForUpdates") + "…",
-            action: #selector(checkForUpdatesFromMenu),
-            keyEquivalent: "")
-        item.target = self
-        item.tag = tag
-
-        // Place it right after "About Notch" (index 0) when present, else on top.
-        let insertAt = appMenu.items.isEmpty ? 0 : 1
-        appMenu.insertItem(item, at: insertAt)
-        // Keep the visual grouping tidy: a separator after our item so it reads
-        // as its own line, matching the About/Settings separators around it.
-        appMenu.insertItem(.separator(), at: insertAt + 1)
-    }
-
-    /// The "Check for Updates…" menu action: open the in-panel settings straight
-    /// to the About pane (where the update UI lives) and kick off a user-initiated
-    /// check, so the result — a spinner, an "up to date" note, or the Update
-    /// button — shows right there.
-    @objc private func checkForUpdatesFromMenu() {
+    /// The "Check for Updates…" menu command's action (posted as
+    /// `.checkForUpdatesRequested` from `NotchGlassApp`'s `.commands`): open the
+    /// in-panel settings straight to the About pane (where the update UI lives) and
+    /// kick off a user-initiated check, so the result — a spinner, an "up to date"
+    /// note, or the Update button — shows right there.
+    private func checkForUpdatesFromMenu() {
         model.settingsSection = "About"
         UpdaterService.shared.checkManually()
         NotificationCenter.default.post(name: .openSettingsRequested, object: nil)
@@ -906,183 +982,6 @@ enum LaunchAtLogin {
         } else {
             if service.status == .enabled { try service.unregister() }
         }
-    }
-}
-
-/// A language the user can pick for translation. Used for both pref1 and pref2
-/// of the dual-preference translation model. Persisted per-preference in
-/// UserDefaults under "translationPref1" / "translationPref2".
-///
-/// Migration note: previous single-target key ("translationTarget") and the old
-/// A/B pair keys ("translationLangA", "translationLangB") are ignored — unrecognised
-/// keys fall back to their respective defaults (pref1 → .chineseSimplified,
-/// pref2 → .english).
-enum TranslationLanguage: String, CaseIterable, Identifiable {
-    case english
-    case chineseSimplified
-    case chineseTraditional
-    case japanese
-    case korean
-    case french
-    case german
-    case spanish
-    case portuguese
-    case italian
-    case russian
-    case arabic
-    case hindi
-
-    var id: String { rawValue }
-
-    /// The picker label, shown in the user's interface language-agnostic form
-    /// (each language named in itself, the convention OS language pickers use).
-    var label: String {
-        switch self {
-        case .english:            return "English"
-        case .chineseSimplified:  return "简体中文"
-        case .chineseTraditional: return "繁體中文"
-        case .japanese:           return "日本語"
-        case .korean:             return "한국어"
-        case .french:             return "Français"
-        case .german:             return "Deutsch"
-        case .spanish:            return "Español"
-        case .portuguese:         return "Português"
-        case .italian:            return "Italiano"
-        case .russian:            return "Русский"
-        case .arabic:             return "العربية"
-        case .hindi:              return "हिन्दी"
-        }
-    }
-
-    /// A compact label for the translate chip — short enough to pair as "中→En".
-    var chipLabel: String {
-        switch self {
-        case .english:            return "En"
-        case .chineseSimplified:  return "中"
-        case .chineseTraditional: return "繁"
-        case .japanese:           return "日"
-        case .korean:             return "韓"
-        case .french:             return "Fr"
-        case .german:             return "De"
-        case .spanish:            return "Es"
-        case .portuguese:         return "Pt"
-        case .italian:            return "It"
-        case .russian:            return "Ru"
-        case .arabic:             return "ع"
-        case .hindi:              return "हि"
-        }
-    }
-
-    /// The language named in English, for the Latin-script prompt phrase.
-    var englishName: String {
-        switch self {
-        case .english:            return "English"
-        case .chineseSimplified:  return "Simplified Chinese"
-        case .chineseTraditional: return "Traditional Chinese"
-        case .japanese:           return "Japanese"
-        case .korean:             return "Korean"
-        case .french:             return "French"
-        case .german:             return "German"
-        case .spanish:            return "Spanish"
-        case .portuguese:         return "Portuguese"
-        case .italian:            return "Italian"
-        case .russian:            return "Russian"
-        case .arabic:             return "Arabic"
-        case .hindi:              return "Hindi"
-        }
-    }
-
-    /// The language named in Chinese, for the CJK prompt phrase.
-    var cjkName: String {
-        switch self {
-        case .english:            return "英语"
-        case .chineseSimplified:  return "简体中文"
-        case .chineseTraditional: return "繁体中文"
-        case .japanese:           return "日语"
-        case .korean:             return "韩语"
-        case .french:             return "法语"
-        case .german:             return "德语"
-        case .spanish:            return "西班牙语"
-        case .portuguese:         return "葡萄牙语"
-        case .italian:            return "意大利语"
-        case .russian:            return "俄语"
-        case .arabic:             return "阿拉伯语"
-        case .hindi:              return "印地语"
-        }
-    }
-
-    // MARK: - Detection
-
-    /// The dominant language of `text`, mapped to one of our 13 cases — or nil if
-    /// detection is inconclusive or lands on a language we don't offer. Runs
-    /// locally via `NLLanguageRecognizer` (no network, no third-party library).
-    /// Chinese disambiguation: `NaturalLanguage` reports both scripts as
-    /// `.simplifiedChinese` / `.traditionalChinese` only when confident; we fall
-    /// back to a Han-presence check that maps any Chinese to Simplified, which is
-    /// enough for the direction display (the AI still does the real translation).
-    static func detect(in text: String) -> TranslationLanguage? {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        let recognizer = NLLanguageRecognizer()
-        recognizer.processString(trimmed)
-        guard let lang = recognizer.dominantLanguage else { return nil }
-        switch lang {
-        case .english:            return .english
-        case .simplifiedChinese:  return .chineseSimplified
-        case .traditionalChinese: return .chineseTraditional
-        case .japanese:           return .japanese
-        case .korean:             return .korean
-        case .french:             return .french
-        case .german:             return .german
-        case .spanish:            return .spanish
-        case .portuguese:         return .portuguese
-        case .italian:            return .italian
-        case .russian:            return .russian
-        case .arabic:             return .arabic
-        case .hindi:              return .hindi
-        default:                  return nil
-        }
-    }
-
-    /// The translate direction the chip should advertise for a given pending
-    /// clip, resolved exactly the way the AI prompt routes it:
-    ///   • source is pref1            → target pref2
-    ///   • source is pref2, or other  → target pref1
-    /// Returns the *source* only when it's one of the two prefs (so the chip can
-    /// show "src→dst"); when the source is some third language (or undetected),
-    /// `source` is nil and only the guaranteed target is known ("→dst").
-    static func resolveDirection(
-        clip: String?, pref1: TranslationLanguage, pref2: TranslationLanguage
-    ) -> (source: TranslationLanguage?, target: TranslationLanguage) {
-        let detected = clip.flatMap(detect(in:))
-        if detected == pref1 { return (pref1, pref2) }
-        if detected == pref2 { return (pref2, pref1) }
-        return (nil, pref1)
-    }
-
-    // MARK: - Persistence
-
-    private static let pref1Key = "translationPref1"
-    private static let pref2Key = "translationPref2"
-
-    /// Load the persisted pref1 language. Falls back to `.chineseSimplified`.
-    static func loadPref1() -> TranslationLanguage {
-        UserDefaults.standard.string(forKey: pref1Key)
-            .flatMap(TranslationLanguage.init) ?? .chineseSimplified
-    }
-
-    static func savePref1(_ value: TranslationLanguage) {
-        UserDefaults.standard.set(value.rawValue, forKey: pref1Key)
-    }
-
-    /// Load the persisted pref2 language. Falls back to `.english`.
-    static func loadPref2() -> TranslationLanguage {
-        UserDefaults.standard.string(forKey: pref2Key)
-            .flatMap(TranslationLanguage.init) ?? .english
-    }
-
-    static func savePref2(_ value: TranslationLanguage) {
-        UserDefaults.standard.set(value.rawValue, forKey: pref2Key)
     }
 }
 

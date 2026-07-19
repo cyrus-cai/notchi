@@ -34,6 +34,15 @@ enum Tokens {
     // glass; shown only for the ~0.6s confirmation beat, never as a standing pill.
     static let success = Color(red: 0.40, green: 0.82, blue: 0.55)
 
+    // Agent violet — the ONE hue the agent wears wherever it shows a face: the
+    // inline "— Agent" ghost, the Recent filter/capture chips, the archive's
+    // agent rows. Two faces of the same colour, mirroring the intent palette
+    // (`Panel.intentTint` / `intentInk`): a saturated body for the low-opacity
+    // chip washes, and the same hue lifted toward white so it reads as coloured
+    // *light* when used as ink on the dark glass.
+    static let agentTint = Color(red: 0.64, green: 0.44, blue: 1.00)
+    static let agentInk  = Color(red: 0.82, green: 0.72, blue: 1.00)
+
     /// Placeholder text for the prompt — a soft, faint hint, clearly LIGHTER than
     /// real typed text so it reads as a transient suggestion rather than content.
     /// Kept low on the scale so "Ask anything" whispers instead of shouting.
@@ -53,6 +62,27 @@ enum Tokens {
     static let openWidthSettings: CGFloat = 580   // inline settings form
     static let openWidthWhatsNew: CGFloat = 600   // release-notes reading column
     static let openWidthOnboarding: CGFloat = 720  // first-run guide: left controls + right demo pane
+}
+
+/// Trackpad haptics — the native macOS confirmation channel (the same taps
+/// Finder gives on snap-align and QuickTime on trim boundaries). Fired only on
+/// *user-initiated* moments, per the HIG: the island snapping open under the
+/// cursor, a drop landing, a copy confirmed, a switch flipped. Passive motion
+/// (auto-collapse on leave, streaming) stays silent. No-ops on Macs without a
+/// Force Touch trackpad.
+enum Haptics {
+    /// Something snapped into place: the island opening, a folder drop landing.
+    static func alignment() {
+        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+    }
+    /// A control changed level: a settings switch flipped.
+    static func levelChange() {
+        NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
+    }
+    /// A quiet confirmation for actions with no visible result (copy).
+    static func confirm() {
+        NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+    }
 }
 
 extension Font {

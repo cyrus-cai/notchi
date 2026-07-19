@@ -411,7 +411,6 @@ struct OnboardingView: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help(L("onboarding.back"))
             .opacity(backHidden ? 0 : 1)
             .allowsHitTesting(!backHidden)
             // On the first step the hidden Back button must not reserve space —

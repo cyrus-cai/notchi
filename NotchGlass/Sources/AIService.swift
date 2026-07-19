@@ -315,6 +315,12 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     // after OpenAI as its subscription-billed sibling. Not an HTTP endpoint — it
     // shells out to the local `codex` binary (see `CodexCLIService`).
     case codex
+    // Anthropic's Claude Code CLI, the same keyless pattern as Codex: Notch
+    // spawns the user's own official `claude` binary (their own `claude` sign-in,
+    // billed to their Claude plan). The compliance posture is deliberate — see
+    // `ClaudeCLIService`: only the genuine binary is run, credentials are never
+    // read, and Notch offers no in-app Claude sign-in.
+    case claudeCode
     case anthropic
     case gemini
     case deepseek
@@ -394,6 +400,21 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
                 signupHost: "developers.openai.com",
                 signupURL: "https://developers.openai.com/codex/cli",
                 envVarName: "CODEX_CLI_UNUSED")
+        case .claudeCode:
+            // Not an HTTP backend — `ClaudeCLIService` shells out to the local
+            // `claude` binary; `endpoint` is a never-used placeholder. "claude" is
+            // a sentinel meaning "the account's default model" (no `--model` flag);
+            // the aliases are the CLI's documented `--model` shorthands. The
+            // `signupURL` points at the install docs — there's no key to create,
+            // and sign-in happens in the user's own terminal (`claude`), never in
+            // Notch.
+            return ProviderSpec(
+                displayName: "Claude Code",
+                endpoint: "https://code.claude.com/unused",
+                models: ["claude", "opus", "sonnet", "haiku"],
+                signupHost: "code.claude.com",
+                signupURL: "https://code.claude.com/docs/en/quickstart",
+                envVarName: "CLAUDE_CODE_UNUSED")
         case .gemini:
             return ProviderSpec(
                 displayName: "Google Gemini",
@@ -471,6 +492,34 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     var signupURL: URL          { spec.signupURL }
     var envVarName: String      { spec.envVarName }
 
+    /// The brand behind this provider's **own** models — the vendor label
+    /// `VendorLogos` looks a mark up by when an id doesn't name its vendor itself.
+    ///
+    /// First-party catalogs are full of ids that carry no vendor at all (OpenAI's
+    /// `dall-e-3` / `chatgpt-4o-latest`, GLM's `cogview-4`, Qwen's `qwq-32b`) or that
+    /// name something that isn't one (Gemini's OpenAI-compat `/models` prefixes every
+    /// id: `models/gemini-3.1-pro`). Those models still belong to the vendor whose
+    /// endpoint served them, so the picker draws that vendor's mark instead of falling
+    /// back to a monogram tile.
+    ///
+    /// `nil` for the two gateways: their ids are `vendor/slug`, so they already answer
+    /// the question themselves, and a fallback would stamp the wrong logo on the
+    /// hundreds of third-party models they front.
+    var vendorName: String? {
+        switch self {
+        case .openrouter, .vercel:    return nil
+        case .openai, .codex:         return "OpenAI"
+        case .anthropic, .claudeCode: return "Anthropic"
+        case .gemini:                 return "Google"
+        case .deepseek:               return "DeepSeek"
+        case .qwen:                   return "Qwen"
+        case .glm:                    return "Zhipu"
+        case .kimi:                   return "Moonshot"
+        case .minimax:                return "MiniMax"
+        case .mimo:                   return "MiMo"
+        }
+    }
+
     // MARK: Behavioral traits (grouped by client behavior, not by vendor)
 
     /// Whether this provider speaks the OpenAI-compatible `/v1/chat/completions`
@@ -478,10 +527,11 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     /// `/v1/messages`). `AppDelegate` uses this to pick the client implementation.
     var isOpenAICompatible: Bool {
         switch self {
-        // Anthropic speaks its native protocol; Codex isn't HTTP at all (it's a
-        // subprocess). Both are routed to their own client, never the shared one.
-        case .anthropic, .codex: return false
-        default:                 return true
+        // Anthropic speaks its native protocol; Codex and Claude Code aren't HTTP
+        // at all (subprocesses). All are routed to their own client, never the
+        // shared one.
+        case .anthropic, .codex, .claudeCode: return false
+        default:                              return true
         }
     }
 
@@ -516,13 +566,13 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     /// harness reads that as a normal `end_turn`. The gate exists so a future
     /// known-toolless provider can be excluded cleanly without touching the harness.
     var supportsTools: Bool {
-        // Codex runs its OWN agent loop inside the CLI (search, reasoning, file
-        // access), so Notch's tool harness must stay out of its way — the turn
-        // dispatcher takes the plain `stream` path for it. Every other provider
-        // exposes a function-calling API the harness can drive.
+        // Codex and Claude Code run their OWN agent loops inside the CLI (search,
+        // reasoning, file access), so Notch's tool harness must stay out of their
+        // way — the turn dispatcher takes the plain `stream` path for them. Every
+        // other provider exposes a function-calling API the harness can drive.
         switch self {
-        case .codex: return false
-        default:     return true
+        case .codex, .claudeCode: return false
+        default:                  return true
         }
     }
 
@@ -640,9 +690,10 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     /// data, with no way to reach current information. The Settings provider menu
     /// uses this to demote the no-search vendors into a "not recommended" submenu.
     var supportsWebSearch: Bool {
-        // Codex searches the web itself as part of its agent loop, so it earns the
-        // "Web search" chip even though Notch injects nothing (`serverSearch == nil`).
-        serverSearch != nil || self == .glm || self == .codex
+        // Codex and Claude Code search the web themselves as part of their agent
+        // loops, so they earn the "Web search" chip even though Notch injects
+        // nothing (`serverSearch == nil`).
+        serverSearch != nil || self == .glm || self == .codex || self == .claudeCode
     }
 }
 
@@ -800,7 +851,7 @@ struct OpenAICompatAIService: AIService {
                         )
                         req.httpBody = try JSONEncoder().encode(body)
 
-                        let (bytes, response) = try await URLSession.shared.bytes(for: req)
+                        let (bytes, response) = try await ProxyConfig.urlSession.bytes(for: req)
                         guard let http = response as? HTTPURLResponse else {
                             throw ServiceError.malformedResponse(provider: provider.displayName)
                         }
@@ -1009,7 +1060,7 @@ struct AnthropicAIService: AIService {
                         )
                         req.httpBody = try JSONEncoder().encode(body)
 
-                        let (bytes, response) = try await URLSession.shared.bytes(for: req)
+                        let (bytes, response) = try await ProxyConfig.urlSession.bytes(for: req)
                         guard let http = response as? HTTPURLResponse else {
                             throw OpenAICompatAIService.ServiceError.malformedResponse(provider: provider.displayName)
                         }
@@ -1194,7 +1245,7 @@ enum RemoteModelManifest {
 
         var req = URLRequest(url: manifestURL)
         req.timeoutInterval = 10
-        guard let (data, response) = try? await URLSession.shared.data(for: req),
+        guard let (data, response) = try? await ProxyConfig.urlSession.data(for: req),
               let http = response as? HTTPURLResponse,
               (200..<300).contains(http.statusCode),
               let lists = decode(data) else { return }
@@ -1328,7 +1379,7 @@ enum ModelCatalog {
         req.timeoutInterval = 10
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: req)
+            let (data, response) = try await ProxyConfig.urlSession.data(for: req)
             guard let http = response as? HTTPURLResponse,
                   (200..<300).contains(http.statusCode) else { return nil }
             let list = try JSONDecoder().decode(ModelList.self, from: data)
@@ -1338,10 +1389,11 @@ enum ModelCatalog {
             let entries = list.data.filter { !$0.id.isEmpty && $0.isChatModel }
             // id → rich metadata, so the reordered/​filtered id lists below can
             // carry their `ModelInfo` along without re-decoding.
-            let byID = Dictionary(entries.map { ($0.id, ModelInfo(entry: $0)) },
+            let byID = Dictionary(entries.map { ($0.id, ModelInfo(entry: $0, provider: provider)) },
                                   uniquingKeysWith: { a, _ in a })
             func infos(for ids: [String]) -> [ModelInfo] {
-                ids.map { byID[$0] ?? ModelInfo(id: $0, vendor: ModelRatings.vendor(for: $0)) }
+                ids.map { byID[$0]
+                    ?? ModelInfo(id: $0, vendor: ModelRatings.vendor(for: $0, provider: provider)) }
             }
             // OpenRouter's catalog is its FULL marketplace — hundreds of ids, most
             // of them paid, which a freshly-connected $0 account can't call. Offer
@@ -1485,12 +1537,14 @@ struct ModelInfo: Identifiable, Equatable, Sendable {
 
     /// Build from a rich OpenRouter entry: capabilities and context come straight
     /// off the payload; the meters and tier are curated/heuristic via `ModelRatings`.
-    init(entry: ModelCatalog.ModelList.Entry) {
+    /// `provider` is who served the entry — it names the vendor for the ids that don't
+    /// name their own (see `ModelRatings.vendor(for:provider:)`).
+    init(entry: ModelCatalog.ModelList.Entry, provider: Provider) {
         let params = entry.supportedParameters ?? []
         let modalities = entry.architecture?.inputModalities ?? []
         self.id = entry.id
         self.name = entry.name?.isEmpty == false ? entry.name! : ModelRatings.prettyName(for: entry.id)
-        self.vendor = ModelRatings.vendor(for: entry.id)
+        self.vendor = ModelRatings.vendor(for: entry.id, provider: provider)
         self.contextTokens = entry.contextLength
         self.vision = modalities.contains("image")
         self.toolUse = params.contains("tools") || params.contains("tool_choice")
@@ -1842,10 +1896,12 @@ enum ModelRatings {
         "bytedance": "ByteDance", "bytedance-seed": "ByteDance",
         "tencent": "Tencent", "baidu": "Baidu", "stepfun": "StepFun",
         "liquid": "Liquid AI", "meituan": "Meituan", "inclusionai": "InclusionAI",
+        "thinkingmachines": "Thinking Machines", "thinking-machines": "Thinking Machines",
         "kwaipilot": "Kwaipilot", "arcee-ai": "Arcee", "allenai": "Ai2",
         "ai21": "AI21", "ibm-granite": "IBM", "inflection": "Inflection",
         "inception": "Inception", "upstage": "Upstage", "deepcogito": "Deep Cogito",
-        "morph": "Morph", "relace": "Relace",
+        "morph": "Morph", "relace": "Relace", "poolside": "Poolside",
+        "01-ai": "01.AI", "internlm": "InternLM", "baichuan-inc": "Baichuan",
         // No brand mark worth shrinking — named only so the monogram picks the right
         // initial (`nousresearch` would otherwise capitalize to "Nousresearch").
         "nousresearch": "Nous Research", "cognitivecomputations": "Dolphin",
@@ -1864,9 +1920,9 @@ enum ModelRatings {
         let l = id.lowercased()
         if l.hasPrefix("gpt") || l.hasPrefix("o1") || l.hasPrefix("o3") || l.hasPrefix("o4") { return "OpenAI" }
         if l.hasPrefix("claude") { return "Anthropic" }
-        if l.hasPrefix("gemini") { return "Google" }
+        if l.hasPrefix("gemini") || l.hasPrefix("gemma") { return "Google" }
         if l.hasPrefix("deepseek") { return "DeepSeek" }
-        if l.hasPrefix("qwen") { return "Qwen" }
+        if l.hasPrefix("qwen") || l.hasPrefix("qwq") || l.hasPrefix("qvq") { return "Qwen" }
         if l.hasPrefix("glm") || l.hasPrefix("chatglm") { return "Zhipu" }
         if l.hasPrefix("kimi") || l.hasPrefix("moonshot") { return "Moonshot" }
         if l.hasPrefix("minimax") || l.hasPrefix("abab") { return "MiniMax" }
@@ -1874,7 +1930,43 @@ enum ModelRatings {
         if l.hasPrefix("grok") { return "xAI" }
         if l.hasPrefix("mistral") || l.hasPrefix("pixtral") || l.hasPrefix("codestral") { return "Mistral" }
         if l.hasPrefix("llama") { return "Meta" }
+        // Third-party families a first-party endpoint may also host (DashScope resells
+        // a few). Named here so `vendor(for:provider:)` recognizes them and leaves them
+        // alone rather than stamping the host's logo on someone else's model.
+        if l.hasPrefix("baichuan") { return "Baichuan" }
+        if l.hasPrefix("yi-") { return "01.AI" }
+        if l.hasPrefix("internlm") { return "InternLM" }
+        if l.hasPrefix("hunyuan") { return "Tencent" }
+        if l.hasPrefix("doubao") || l.hasPrefix("seed-") { return "ByteDance" }
+        if l.hasPrefix("ernie") { return "Baidu" }
+        if l.hasPrefix("step-") { return "StepFun" }
         return ""
+    }
+
+    /// Every label a *recognized* id resolves to — the gateway slugs plus the bare-id
+    /// families above (each family's label is also a `vendorNames` value). Anything
+    /// outside this set came back from `vendor(for:)` as a guess: an unknown slug,
+    /// capitalized, or the empty string. That distinction is what `vendor(for:provider:)`
+    /// keys off.
+    static let knownVendors: Set<String> = Set(vendorNames.values)
+
+    /// The vendor label for an id **served by a known provider** — what the picker
+    /// actually needs, and strictly better than the id alone.
+    ///
+    /// A first-party endpoint's catalog is full of ids that name no vendor (OpenAI's
+    /// `dall-e-3`, GLM's `cogview-4`, MiniMax's `speech-02`) or name a non-vendor
+    /// (Gemini's OpenAI-compat layer prefixes every id with `models/`, which used to
+    /// capitalize into a "Models" monogram). Those are the provider's own models, so
+    /// the provider's brand is the honest answer.
+    ///
+    /// The fallback fires **only** when the id itself named no vendor we know: a model
+    /// a provider resells (DashScope's `deepseek-r1`, `llama3.3-70b`, `baichuan2-13b`)
+    /// keeps its real vendor and never wears the host's logo. Gateways opt out
+    /// entirely (`vendorName == nil`) — their ids already carry the vendor.
+    static func vendor(for id: String, provider: Provider) -> String {
+        let v = vendor(for: id)
+        guard let own = provider.vendorName, !knownVendors.contains(v) else { return v }
+        return own
     }
 
     /// A tidy display name from an id: drop the `vendor/` prefix and the `:free`
@@ -2110,7 +2202,7 @@ enum UsageRankings {
         req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         req.timeoutInterval = 10
         do {
-            let (data, response) = try await URLSession.shared.data(for: req)
+            let (data, response) = try await ProxyConfig.urlSession.data(for: req)
             guard let http = response as? HTTPURLResponse,
                   (200..<300).contains(http.statusCode) else { return nil }
             let payload = try JSONDecoder().decode(Payload.self, from: data)
@@ -2244,7 +2336,7 @@ enum ConnectivityTest {
         req.timeoutInterval = 12
 
         do {
-            let (_, response) = try await URLSession.shared.data(for: req)
+            let (_, response) = try await ProxyConfig.urlSession.data(for: req)
             guard let http = response as? HTTPURLResponse else {
                 return .failed(L("conn.unexpected"))
             }
@@ -2394,7 +2486,7 @@ extension OpenAICompatAIService: AgentCapableService {
                         }
                         req.httpBody = try AgentWire.body(body)
 
-                        let (bytes, response) = try await URLSession.shared.bytes(for: req)
+                        let (bytes, response) = try await ProxyConfig.urlSession.bytes(for: req)
                         guard let http = response as? HTTPURLResponse else {
                             throw ServiceError.malformedResponse(provider: provider.displayName)
                         }
@@ -2615,7 +2707,7 @@ extension AnthropicAIService: AgentCapableService {
                         if !wireTools.isEmpty { body["tools"] = wireTools }
                         req.httpBody = try AgentWire.body(body)
 
-                        let (bytes, response) = try await URLSession.shared.bytes(for: req)
+                        let (bytes, response) = try await ProxyConfig.urlSession.bytes(for: req)
                         guard let http = response as? HTTPURLResponse else {
                             throw OpenAICompatAIService.ServiceError.malformedResponse(provider: provider.displayName)
                         }

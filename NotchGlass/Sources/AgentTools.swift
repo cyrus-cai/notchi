@@ -40,10 +40,9 @@ struct DateTimeTool: NotchTool {
     }
 }
 
-/// Read the system clipboard. The notch already pulls clipboard text into the
-/// prompt heuristically (`clipboardContextIfEligible`); this gives the *model*
-/// explicit, on-demand access for the cases that heuristic skips — a follow-up
-/// turn, or a question the classifier didn't read as referential. Returns text or
+/// Read the system clipboard. This is how the *model* gets at what the user
+/// copied ("summarize this", "what I copied") — explicit, on-demand access on
+/// any turn, with no client-side injection heuristic. Returns text or
 /// a short "nothing usable" note; never the raw pasteboard object.
 struct ReadClipboardTool: NotchTool {
     let name = "read_clipboard"
@@ -476,7 +475,7 @@ struct GLMWebSearchTool: SourcedTool {
         ])
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: req)
+            let (data, response) = try await ProxyConfig.urlSession.data(for: req)
             guard let http = response as? HTTPURLResponse,
                   (200..<300).contains(http.statusCode) else {
                 return ("Search failed (HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)).", [])
@@ -583,7 +582,7 @@ struct ExaWebSearchTool: SourcedTool {
         ])
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: req)
+            let (data, response) = try await ProxyConfig.urlSession.data(for: req)
             guard let http = response as? HTTPURLResponse,
                   (200..<300).contains(http.statusCode) else {
                 return ("Search failed (HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)).", [])
@@ -702,7 +701,7 @@ struct KeenableWebSearchTool: SourcedTool {
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["query": query])
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: req)
+            let (data, response) = try await ProxyConfig.urlSession.data(for: req)
             guard let http = response as? HTTPURLResponse,
                   (200..<300).contains(http.statusCode) else {
                 return ("Search failed (HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)).", [])
@@ -845,7 +844,7 @@ struct ReadPageTool: NotchTool {
         req.setValue("text/html,application/xhtml+xml", forHTTPHeaderField: "Accept")
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: req)
+            let (data, response) = try await ProxyConfig.urlSession.data(for: req)
             guard let http = response as? HTTPURLResponse else {
                 return "Error: no response from \(url.host ?? raw)."
             }

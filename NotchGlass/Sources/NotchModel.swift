@@ -1,6 +1,14 @@
 import SwiftUI
 import Combine
 import AppKit   // NSWorkspace — opening Notes/Reminders for a Recent capture
+import UniformTypeIdentifiers   // UTType — is a pasted file URL an image? (agent ⌘V)
+
+/// Images loaded back out of the history store (`NotchModel.historyImage(named:)`),
+/// keyed by filename. File-scope rather than a static on the (main-actor) model, so
+/// the loader can stay `nonisolated` — a thumbnail is read from wherever the view or
+/// a background sweep happens to run. `NSCache` is thread-safe and evicts under
+/// memory pressure, so a big archive can't pin every screenshot it ever saw in RAM.
+private let historyImageCache = NSCache<NSString, NSImage>()
 
 /// Decodes a JSON array element-by-element, dropping any element that fails to
 /// decode instead of failing the whole array. Used for persisted history so one
@@ -117,6 +125,29 @@ final class NotchModel: ObservableObject {
         /// thread still shows it.
         var answerModel: String? = nil
 
+        /// The images this (user) turn rode in with — the copied screenshot an Ask
+        /// attached, or the shots pasted into an agent task — as filenames under
+        /// `NotchModel.historyImagesDirectory`, never bytes: the archive is one JSON
+        /// file rewritten after every answer, and inlining base64 screenshots would
+        /// add hundreds of KB to every rewrite. Empty for a plain text turn; a file
+        /// that's since been deleted simply renders as nothing.
+        var imageFiles: [String] = []
+
+        /// True on a turn that is an agent run's record (the task prompt, the
+        /// CLI's report) rather than a chat exchange. Gates the chat-only
+        /// affordances on a reopened run: regenerate would re-run the task's
+        /// prompt against the *chat model*, which can't touch the run's folder —
+        /// so an agent report never offers it. Persisted, so a reopened run
+        /// stays distinguishable from an Ask thread.
+        var isAgent: Bool = false
+
+        /// An agent answer turn's work trail — the round's tool calls and
+        /// narration, sliced per round at settle (`AgentExchange.log`). The
+        /// reopened record renders it above the report, so the thread reads
+        /// like the live detail page did. `nil` on chat turns and on agent
+        /// records filed before the trail was persisted.
+        var agentLog: [AgentLogEntry]? = nil
+
         init(id: UUID = UUID(), role: String, text: String,
              streaming: Bool = false, usedClipboard: Bool = false) {
             self.id = id; self.role = role; self.text = text
@@ -130,7 +161,7 @@ final class NotchModel: ObservableObject {
         // it. `decodeIfPresent` + defaults is what keeps old saved conversations
         // loadable. `role`/`text` are required — every saved turn has them.
         // `toolActivity` is deliberately absent: it's runtime-only UI state.
-        enum CodingKeys: String, CodingKey { case id, role, text, streaming, usedClipboard, sources, isError, regenModel, answerModel }
+        enum CodingKeys: String, CodingKey { case id, role, text, streaming, usedClipboard, sources, isError, regenModel, answerModel, imageFiles, isAgent, agentLog }
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -143,6 +174,9 @@ final class NotchModel: ObservableObject {
             isError      = try c.decodeIfPresent(Bool.self, forKey: .isError) ?? false
             regenModel   = try c.decodeIfPresent(String.self, forKey: .regenModel)
             answerModel  = try c.decodeIfPresent(String.self, forKey: .answerModel)
+            imageFiles   = try c.decodeIfPresent([String].self, forKey: .imageFiles) ?? []
+            isAgent      = try c.decodeIfPresent(Bool.self, forKey: .isAgent) ?? false
+            agentLog     = try c.decodeIfPresent([AgentLogEntry].self, forKey: .agentLog)
         }
     }
 
@@ -164,13 +198,29 @@ final class NotchModel: ObservableObject {
         /// otherwise the first user message for backward compatibility.
         var displayTitle: String { title ?? q }
 
-        /// Where this captured line actually went. `.ask` is an AI Q&A (reopens the
-        /// conversation); `.note`/`.reminder` are captures filed into Apple
-        /// Notes/Reminders — they keep a trace in Recent but have no answer to
-        /// reopen, so tapping one jumps to that note/reminder in its app instead.
+        /// Every image attached anywhere in this conversation, in turn order — a
+        /// screenshot an Ask rode in on, the shots pasted into an agent task. The
+        /// Recent / archive rows preview the first one; the transcript shows them
+        /// all on the turn they belong to.
+        var imageFiles: [String] { (turns ?? []).flatMap(\.imageFiles) }
+
+        /// Where this captured line actually went. `.ask` is an AI Q&A and `.agent`
+        /// a finished Codex/Claude run — both are threads that reopen; `.note`/
+        /// `.reminder` are captures filed into Apple Notes/Reminders — they keep a
+        /// trace in Recent but have no answer to reopen, so tapping one jumps to
+        /// that note/reminder in its app instead.
         /// Defaults to `.ask`; decoded with `decodeIfPresent` (see `init(from:)`)
         /// so items saved before this field decode as `.ask`, not a hard failure.
-        enum Source: String, Codable { case ask, note, reminder }
+        /// (Agent runs filed before `.agent` existed stay `.ask` — they read as
+        /// ordinary threads, which is exactly what they were.)
+        enum Source: String, Codable {
+            case ask, note, reminder, agent
+
+            /// Rows whose body reopens a conversation, as opposed to a capture
+            /// whose body is inert and whose trailing button jumps to another app.
+            /// Every "is this an Ask row?" branch means this.
+            var isThread: Bool { self == .ask || self == .agent }
+        }
         var source: Source = .ask
 
         /// Deep link back to the exact note/reminder this capture created, so
@@ -183,6 +233,33 @@ final class NotchModel: ObservableObject {
         /// creation time; if that capture fails the link stays nil and the row
         /// still opens the app, never dead-ends.
         var link: String? = nil
+
+        /// How an `.agent` run ended — "success" / "failure" / "cancelled".
+        /// Lets the detail surfaces show a failed run as failed instead of
+        /// reading like an ordinary answer. `nil` for non-agent rows and for
+        /// runs filed before this field existed.
+        var agentOutcome: String? = nil
+
+        /// The CLI session an `.agent` run left behind, and where it was working.
+        /// Present on every settled row whose run reported a session id — it's
+        /// what lets the reopened thread's follow-up resume the run in place
+        /// (`continueAgentThread`), and what the interrupted row's resume button
+        /// re-issues the cut round into.
+        struct AgentResume: Codable, Equatable {
+            /// `AgentEngine.rawValue` — the engine that owns the session.
+            let engine: String
+            let folderPath: String
+            /// The CLI's own conversation handle (claude `session_id` / codex
+            /// `thread_id`) — what `--resume` / `exec resume` takes.
+            let session: String
+        }
+        var agentResume: AgentResume? = nil
+
+        /// True only on a row whose run the app died during — the one row that
+        /// grows the explicit resume button (`openAgentResume`). A resumed run
+        /// re-files this same row on settle with this back to false, so the
+        /// affordance disappears the moment the work is no longer interrupted.
+        var agentInterrupted: Bool = false
 
         /// Transient: true while the first answer for this thread is still
         /// streaming. Set when the question is submitted so the row appears in
@@ -198,7 +275,7 @@ final class NotchModel: ObservableObject {
         /// capture has no conversation at all — never synthesize a ghost assistant
         /// bubble for it.
         var conversation: [Turn] {
-            guard source == .ask else { return [] }
+            guard source.isThread else { return [] }
             return turns ?? [
                 Turn(role: "user", text: q),
                 Turn(role: "assistant", text: a),
@@ -207,10 +284,12 @@ final class NotchModel: ObservableObject {
 
         init(id: UUID = UUID(), q: String, a: String, t: Date,
              turns: [Turn]? = nil, title: String? = nil,
-             source: Source = .ask, link: String? = nil) {
+             source: Source = .ask, link: String? = nil,
+             agentResume: AgentResume? = nil) {
             self.id = id; self.q = q; self.a = a; self.t = t
             self.turns = turns; self.title = title
             self.source = source; self.link = link
+            self.agentResume = agentResume
         }
 
         // Custom decoder — the load-bearing reason this exists: history is decoded
@@ -225,7 +304,10 @@ final class NotchModel: ObservableObject {
         // falling back to their defaults) is what actually makes old items decode
         // cleanly with no migration. `id`/`q`/`a`/`t` are required — every saved
         // item has always had them.
-        enum CodingKeys: String, CodingKey { case id, q, a, t, turns, title, source, link }
+        enum CodingKeys: String, CodingKey {
+            case id, q, a, t, turns, title, source, link, agentOutcome, agentResume,
+                 agentInterrupted
+        }
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -237,11 +319,34 @@ final class NotchModel: ObservableObject {
             title  = try c.decodeIfPresent(String.self,  forKey: .title)
             source = try c.decodeIfPresent(Source.self,  forKey: .source) ?? .ask
             link   = try c.decodeIfPresent(String.self,  forKey: .link)
+            agentOutcome = try c.decodeIfPresent(String.self, forKey: .agentOutcome)
+            agentResume = try c.decodeIfPresent(AgentResume.self, forKey: .agentResume)
+            // Legacy rows (saved before this key) only carried `agentResume` when
+            // the run WAS interrupted — so a missing key + a resume handle means
+            // interrupted, not false, or old interrupted rows would lose their
+            // resume button.
+            agentInterrupted = try c.decodeIfPresent(Bool.self, forKey: .agentInterrupted)
+                ?? (agentResume != nil)
         }
     }
 
     // Open / closed drives the grow-out-of-the-notch animation.
-    @Published var open = false
+    @Published var open = false {
+        didSet {
+            // Opening the panel is "seeing" the results: the finished-task badge
+            // on the resting notch (see `unseenFinishedCount`) counts work the
+            // user hasn't looked at yet, and the open panel shows all of it —
+            // Recent rows and the agent card — so the count zeroes here.
+            if open {
+                unseenFinishedCount = 0
+                // A bucket that came back armed from the last launch still has to be
+                // re-seeded (folder, live engine) — see `rearmPersistedAgentBucket`.
+                // Done on open, not at init: the probes it needs shell out, and by
+                // the first open the launch `warmUp()` has warmed their caches.
+                rearmPersistedAgentBucket()
+            }
+        }
+    }
     /// The brief "content dissolving" beat between a close request and the shell
     /// actually retracting. Closing used to be one snap — `open` flipped false and
     /// the glass body and its content collapsed on the same transaction, reading as
@@ -273,6 +378,137 @@ final class NotchModel: ObservableObject {
     /// out from under the open picker. Set true while the popover shows, false on close.
     @Published var isModelPickerOpen = false
 
+    /// The cross-provider model-config card, summoned straight from the panel instead of
+    /// from inside Settings. Opened by the settings chip, and by ⌘⇧I only as the fallback
+    /// for a machine with no agent CLI installed (there, the agent picker has nothing to
+    /// show). `NotchBody` hangs the popover off the panel body.
+    @Published var showModelPicker = false
+
+    /// What ⌘⇧I summons: the agent's model + reasoning-effort quick picker — the two dials
+    /// turned between runs — regardless of mode or whether the Agent bucket is armed.
+    /// `NotchBody` hangs the popover off the panel body; `ContentView` owns the chord.
+    @Published var showAgentPicker = false
+
+    /// The Ask model chip's quick menu — the agent quick picker's card on the chat
+    /// side, listing the five most recently used models (`AskModelMRU`). `NotchBody`
+    /// hangs the popover off the panel body like the other two pickers.
+    @Published var showAskModelPicker = false
+
+    /// The agent task whose detail page is open — the full-page work trail a
+    /// status row's tap opens while its run is live (a settled row opens its
+    /// Recent record instead, which shows the same trail). `nil` = no detail
+    /// page; also cleared by `newChat` so Back/⌘N leaves it like any thread.
+    @Published var agentDetailTaskID: UUID? = nil
+
+    /// A model picked from the ⌘⇧I picker whose provider has no key yet. The picker
+    /// can't take a key itself, so it hands the pick to Settings: the panel opens on the
+    /// key section for that provider, and the model is selected the moment a key lands
+    /// (the same "configure only when the pick needs it" flow the settings picker runs).
+    /// `InlineSettingsView` consumes and clears it on appear.
+    @Published var pendingModelSetup: PendingModelSetup?
+
+    struct PendingModelSetup: Equatable {
+        let provider: Provider
+        let id: String
+    }
+
+    /// Agent compose state (XII: agent-to-Codex): ON while the idle input
+    /// is composing an agent task — Enter starts a `AgentTaskManager` run
+    /// instead of asking the chat model. Entered by the bucket pill's Agent half
+    /// (or Shift-Tab), or by dropping a project folder on the island; left by
+    /// Shift-Tab / Tab or the pill's Ask half — NOT by submitting.
+    /// A bucket you *live in*, not one you pass through: persisted, so a submit,
+    /// a close, and a relaunch all land you back where you were, armed on the
+    /// same project and engine.
+    @Published var agentComposeActive =
+        UserDefaults.standard.bool(forKey: "agentBucketArmed") {
+        didSet { UserDefaults.standard.set(agentComposeActive, forKey: "agentBucketArmed") }
+    }
+
+    /// The folder the composed task will run in — seeded from the remembered
+    /// last project on entry, replaced via the folder chip or a drop. nil until
+    /// the user has ever picked one; Enter then opens the picker, which doubles
+    /// as the first run's confirmation gate.
+    @Published var agentComposeFolder: URL? = nil
+
+    /// Which agent CLI the armed task will run on (Codex / Claude Code). Seeded
+    /// from the remembered choice (raw read — no process probe at init) and
+    /// persisted on change, so the armed mode survives relaunches whole. Driven
+    /// by the compose row's model chip — picking a model picks its engine.
+    @Published var agentArmedEngine: AgentEngine =
+        AgentEngine.storedPreference ?? .codex {
+        didSet { AgentEngine.rememberPreference(agentArmedEngine) }
+    }
+
+    /// The armed run's explicit model pick — a flag value from the armed
+    /// engine's `modelChoices`, nil = that engine's own CLI-config default.
+    /// Persisted alongside the engine so the whole compose survives relaunches.
+    @Published var agentModelID: String? =
+        UserDefaults.standard.string(forKey: "agentModel") {
+        didSet { UserDefaults.standard.set(agentModelID, forKey: "agentModel") }
+    }
+
+    /// The armed run's reasoning effort (compose row's third chip); nil leaves
+    /// both CLIs on their own defaults.
+    @Published var agentEffort: AgentEffort? =
+        UserDefaults.standard.string(forKey: "agentEffort").flatMap(AgentEffort.init) {
+        didSet { UserDefaults.standard.set(agentEffort?.rawValue, forKey: "agentEffort") }
+    }
+
+    /// The images ⌘V-pasted into the agent compose — screenshots of the bug,
+    /// a design mock, a before/after pair. Each ⌘V appends, so a task can carry
+    /// several. They ride the run to the agent alongside the task text (codex
+    /// attaches them with one `exec -i` each; claude gets them as vision blocks
+    /// via `--input-format stream-json`). Session-only, cleared when the compose
+    /// exits — an attachment belongs to the task being written, not the mode.
+    @Published var agentComposeImages: [NSImage] = []
+
+    /// How many images one agent round may carry. Both CLIs take far more —
+    /// codex's `-i` is variadic (OpenAI accepts 500 images / 50MB per request)
+    /// and claude's stream-json takes 100 image blocks — but Anthropic imposes a
+    /// stricter per-image dimension cap on requests holding MORE than 20 images,
+    /// so 20 is the line where neither engine needs special handling. (Screenshots
+    /// encode at a 1568px long side anyway, well inside even that stricter cap.)
+    static let agentImageLimit = 20
+
+    /// The last project chosen for an agent Codex task. Kept separately so the
+    /// folder picker can reopen there even after the user explicitly exits agent
+    /// mode.
+    private static let agentFolderKey = "agentLastFolder"
+
+    private static func savedAgentFolder(forKey key: String) -> URL? {
+        guard let path = UserDefaults.standard.string(forKey: key) else { return nil }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            UserDefaults.standard.removeObject(forKey: key)
+            return nil
+        }
+        return URL(fileURLWithPath: path, isDirectory: true)
+    }
+
+    private static func saveAgentFolder(_ folder: URL?, forKey key: String) {
+        if let folder {
+            UserDefaults.standard.set(folder.path, forKey: key)
+        } else {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+    }
+
+    private var lastAgentFolder: URL? {
+        get {
+            Self.savedAgentFolder(forKey: Self.agentFolderKey)
+        }
+        set {
+            Self.saveAgentFolder(newValue, forKey: Self.agentFolderKey)
+        }
+    }
+
+    /// The NSOpenPanel for picking a agent folder is up. Gates `collapseOnLeave`
+    /// exactly like `isModelPickerOpen`: the open panel is a separate window, so
+    /// the pointer moving into it must not fold the island behind it.
+    @Published var isFolderPickerOpen = false
+
     /// True while the AI is in its pre-stream *thinking* phase — from the moment a
     /// question is submitted until the first answer token lands (or the round ends).
     /// Drives the 3 thinking dots shown beside the physical notch. Deliberately
@@ -289,14 +525,52 @@ final class NotchModel: ObservableObject {
 
     /// How many Ask rounds are currently in flight — on screen or detached. A
     /// fully closed panel with a non-zero count means an answer is still
-    /// streaming in the background, and the resting notch grows its small
-    /// left-side extension with the waving dots (see `NotchIsland`) so the work
+    /// streaming in the background, and the resting notch flexes into its busy
+    /// ears — verb left, elapsed clock right (see `NotchIsland`) — so the work
     /// stays visible in the meanwhile; the walk-away notification and the Recent
     /// row cover the *result*. Unlike `thinking` (pre-stream wait only), this
     /// spans the whole round: incremented when a round's task starts, decremented
     /// on every exit path (clean finish, mid-stream error, supersede-cancel), so
     /// the indicator can never stick on after the last round settles.
     @Published private(set) var roundsInFlight = 0
+
+    /// Background work that FINISHED while the panel was fully closed and hasn't
+    /// been looked at yet — detached Ask rounds landing in Recent, and agent
+    /// Codex runs settling. While non-zero (and nothing is still running), the
+    /// resting notch keeps a small count badge instead of folding flat, so a
+    /// finished task doesn't just silently disappear into the bezel. Cleared the
+    /// moment the panel opens (`open.didSet`): the panel shows everything.
+    @Published private(set) var unseenFinishedCount = 0
+
+    /// Count one background task as finished-but-unseen. No-op while the panel
+    /// is open anywhere — on-screen results are being seen as they land (the
+    /// thread itself, the Recent row, the agent card).
+    func noteBackgroundTaskFinished() {
+        guard !open else { return }
+        unseenFinishedCount += 1
+    }
+
+    /// When the oldest still-running Ask round started — the resting notch's
+    /// busy ear shows this elapsed clock (mirroring the agent card's), so
+    /// "working" reads as *for how long*, not just an abstract wave.
+    var busySince: Date? { inFlightRounds.first?.startedAt }
+
+    /// The newest tool-activity line from ANY in-flight round, on screen or
+    /// detached ("Searching the web…", "Reading github.com…"). Unlike
+    /// `thinkingActivity` (on-screen rounds only), this one exists for the
+    /// collapsed notch: the busy left ear shows whatever the AI is actually
+    /// doing right now, falling back to a plain verb only between tools.
+    /// Last-writer-wins across concurrent rounds; cleared when the last round
+    /// settles (see the round task's defer).
+    @Published private(set) var backgroundActivity: String? = nil
+
+    /// True once an in-flight round has started streaming answer text — the
+    /// collapsed busy ear's "Writing" phase. The tool-activity label is nil
+    /// during the final compose/stream, and without this the ear would fall
+    /// back to "Thinking" for the entire write. One publish per round (guarded
+    /// in `appendChunk`), never per chunk; reset when a fresh round starts from
+    /// idle and when the last round settles.
+    @Published private(set) var backgroundWriting = false
 
     /// One still-streaming round's live mirror. A detached round streams into a
     /// task-local snapshot the screen can't see — this mirror is the model's
@@ -308,6 +582,8 @@ final class NotchModel: ObservableObject {
         let answerID: UUID
         let threadID: UUID
         var thread: [Turn]
+        /// Stamped at append — feeds the resting notch's elapsed clock.
+        let startedAt = Date()
     }
 
     /// Live mirrors of every round currently in flight, oldest first — appended
@@ -507,6 +783,19 @@ final class NotchModel: ObservableObject {
         islandFrames[display] = frame
     }
 
+    /// The resting notch's current ear widths (busy verb/clock, finished badge,
+    /// copy-sense hint), registered by `NotchIsland` so the resting-notch hover
+    /// rect can include them without the model re-deriving measured text
+    /// widths. Global, not per display: the collapsed ears render identically
+    /// on every screen. Plain vars for the same reason as `islandFrames`.
+    private var restingEarLeft: CGFloat = 0
+    private var restingEarRight: CGFloat = 0
+
+    func registerRestingEars(left: CGFloat, right: CGFloat) {
+        restingEarLeft = left
+        restingEarRight = right
+    }
+
     /// Whether the pointer is really over `display`'s island right now.
     /// `slop` pads the test outward, absorbing measurement/animation slack.
     /// Returns nil when the geometry isn't known (yet) — callers then fall back
@@ -537,11 +826,13 @@ final class NotchModel: ObservableObject {
                           y: panel.maxY - restHeight,
                           width: Tokens.notchWidth,
                           height: restHeight)
-        // While a detached round streams, the resting notch flexes 48pt left
-        // (the busy extension) — that strip is hoverable too.
-        if !open, roundsInFlight > 0 {
-            rect.origin.x -= 48
-            rect.size.width += 48
+        // While the resting notch is flexed into its ears — background work's
+        // verb/clock, the finished-count badge, or the copy-sense hint — those
+        // strips are hoverable too. Widths come from the view's registration
+        // (measured content); both are zero on a bare notch.
+        if !open {
+            rect.origin.x -= restingEarLeft
+            rect.size.width += restingEarLeft + restingEarRight
         }
         return rect.insetBy(dx: -slop, dy: -slop).contains(NSEvent.mouseLocation)
     }
@@ -560,6 +851,357 @@ final class NotchModel: ObservableObject {
                           : pointerInsideRestingNotch(on: display, slop: 8)
         if inside == false { return }
         openPanel(on: display, velocity: velocity)
+    }
+
+    // MARK: - Detached session windows (tear-off / 分裂)
+
+    /// The live tear-off drag, while the ghost card is still attached to the
+    /// island: set by the header drag gesture (NotchBody), rendered as the ghost
+    /// card + goo bridge by NotchIsland's overlay.
+    struct DetachDrag: Equatable {
+        var session: DetachedSession
+        var face: DetachedCardFace
+        /// Raw pointer translation since the grab, unclamped.
+        var translation: CGSize = .zero
+    }
+    @Published var detachDrag: DetachDrag? = nil
+
+    /// True while a settled detached window is being dragged over a resting
+    /// notch — the island swells slightly to say "drop it here to take it back".
+    @Published var detachMergeHint = false
+
+    /// How far the grab must travel (raw, unclamped) before the panel tears
+    /// free into its window. Short — the tear should feel immediate, the
+    /// pre-phase is just accident insurance.
+    static let detachThreshold: CGFloat = 60
+
+    /// The attached phase's rubber band: the pull follows the hand with rising
+    /// resistance, saturating at `limit` — the glass giving, not the panel
+    /// escaping. tanh keeps the response smooth from the very first point.
+    static func detachRubberized(_ t: CGSize, limit: CGFloat = 96) -> CGSize {
+        let mag = (t.width * t.width + t.height * t.height).squareRoot()
+        guard mag > 0.5 else { return .zero }
+        let eff = limit * CGFloat(tanh(Double(mag / limit)))
+        return CGSize(width: t.width * eff / mag, height: t.height * eff / mag)
+    }
+
+    /// 0…1 how close this pull is to the tear threshold.
+    static func detachProgress(_ t: CGSize) -> CGFloat {
+        min((t.width * t.width + t.height * t.height).squareRoot() / detachThreshold, 1)
+    }
+
+    /// True from the instant a drag hands off to the window until the SwiftUI
+    /// gesture ends — its remaining onChanged ticks must not re-arm a drag.
+    private var detachHandedOff = false
+
+    /// What a tear-off from the current page would carry: the open agent-run
+    /// detail if one is up, else the on-screen thread. Nil when the page has
+    /// nothing detachable (idle prompt, settings, history…).
+    var detachableSession: DetachedSession? {
+        guard open, !showOnboarding else { return nil }
+        if let id = agentDetailTaskID { return .agentTask(id: id) }
+        if mode != .idle, !turns.isEmpty,
+           !showSettings, !showWhatsNew, !showHistory {
+            return .thread(id: threadHistoryID)
+        }
+        return nil
+    }
+
+    /// The face the tear-off card wears — computed at grab time so ghost and
+    /// window render the same card.
+    private func detachedFace(for session: DetachedSession) -> DetachedCardFace {
+        switch session {
+        case .agentTask(let id):
+            if let task = AgentTaskManager.shared.tasks.first(where: { $0.id == id }) {
+                return DetachedCardFace(
+                    title: task.prompt.replacingOccurrences(of: "\n", with: " "),
+                    subtitle: "\(task.engine.displayName) · \(task.folder.lastPathComponent)",
+                    isAgent: true,
+                    running: task.isRunning)
+            }
+            return DetachedCardFace(title: L("detached.task.gone"), subtitle: "",
+                                    isAgent: true, running: false)
+        case .thread:
+            let q = turns.first(where: { $0.role == "user" })?.text ?? ""
+            let streaming = turns.contains { $0.streaming }
+            return DetachedCardFace(
+                title: q.replacingOccurrences(of: "\n", with: " "),
+                subtitle: streaming ? L("busy.writing") : L("detached.thread.subtitle"),
+                isAgent: threadIsAgentRun,
+                running: streaming)
+        }
+    }
+
+    /// Drag tick from the header gesture. Arms the ghost on the first tick,
+    /// stretches the membrane while attached, and fires the tear-off once the
+    /// pull crosses the threshold.
+    func detachDragChanged(_ translation: CGSize) {
+        guard !detachHandedOff else { return }
+        if detachDrag == nil {
+            guard let session = detachableSession else { return }
+            detachDrag = DetachDrag(session: session, face: detachedFace(for: session))
+        }
+        detachDrag?.translation = translation
+        if Self.detachProgress(translation) >= 1 { tearOff() }
+    }
+
+    /// Release under the threshold: the membrane pulls the card home.
+    func detachDragEnded() {
+        detachHandedOff = false
+        guard detachDrag != nil else { return }
+        withAnimation(.spring(response: 0.38, dampingFraction: 0.68)) {
+            detachDrag = nil
+        }
+    }
+
+    /// The split: the COMPLETE window is born in place over the panel — same
+    /// position, full session content, no thumbnail stage — and rides the mouse
+    /// from here (the window controller owns the rest of the drag). The panel
+    /// lets the session go and folds underneath it.
+    private func tearOff() {
+        guard let drag = detachDrag else { return }
+        detachHandedOff = true
+        Haptics.alignment()
+        let session = drag.session
+        let face = drag.face
+        if let spawnRect = detachWindowSpawnRect() {
+            DetachedSessionWindowController.beginDragDetach(
+                session: session, face: face, model: self, spawnRect: spawnRect)
+        } else {
+            // Geometry unknown (shouldn't happen mid-drag) — still honor the
+            // intent: open the window in place without the ride.
+            DetachedSessionWindowController.present(
+                session: session, face: face, model: self, from: nil)
+        }
+        var tx = Transaction()
+        tx.disablesAnimations = true
+        withTransaction(tx) { detachDrag = nil }
+        completeDetach(of: session)
+    }
+
+    /// V0 (no drag): the header button — the same full window, fading in right
+    /// over the panel.
+    func openDetachedWindow() {
+        guard let session = detachableSession else { return }
+        let face = detachedFace(for: session)
+        DetachedSessionWindowController.present(
+            session: session, face: face, model: self,
+            from: detachWindowSpawnRect())
+        completeDetach(of: session)
+    }
+
+    /// The session left for a window: clear it off the panel (stream keeps
+    /// going detached, exactly like `newChat`) and fold the shell.
+    private func completeDetach(of session: DetachedSession) {
+        switch session {
+        case .agentTask:
+            agentDetailTaskID = nil
+        case .thread:
+            task = nil          // detach, never cancel — the round streams on
+            parkedSession = nil // the window owns the page now; nothing to restore
+            turns = []
+            text = ""
+            mode = .idle
+            isAnswerPinned = false
+        }
+        beginClose()
+    }
+
+    /// A detached window is closing / merging home: put the session back on the
+    /// panel. A still-streaming thread reattaches its live round; a settled one
+    /// reopens from Recent; `snapshot` is the window's last view of a thread
+    /// that never reached history (edge insurance, not the normal path).
+    func reattachDetachedSession(_ session: DetachedSession, snapshot: [Turn]?,
+                                 on display: CGDirectDisplayID?) {
+        openPanel(on: display ?? activeDisplay)
+        switch session {
+        case .agentTask(let id):
+            if AgentTaskManager.shared.tasks.contains(where: { $0.id == id }) {
+                agentDetailTaskID = id
+            }
+        case .thread(let id):
+            if let round = inFlightRounds.first(where: { $0.threadID == id }) {
+                attachInFlightRound(round)
+            } else if let item = history.first(where: { $0.id == id }),
+                      !item.pending, item.source.isThread {
+                openHistory(item)
+            } else if let snapshot,
+                      snapshot.contains(where: { $0.role == "assistant" && !$0.text.isEmpty }) {
+                var cleaned = snapshot
+                for i in cleaned.indices {
+                    cleaned[i].streaming = false
+                    cleaned[i].toolActivity = nil
+                }
+                turns = cleaned
+                threadHistoryID = id
+                mode = .result
+            }
+        }
+    }
+
+    /// Live mirrors for detached thread windows, keyed by thread id — fed at
+    /// streaming cadence from `syncInFlight` and settled by `persistThread`,
+    /// so only the window observing a thread re-renders on its chunks.
+    private var detachedThreadStores: [UUID: DetachedThreadStore] = [:]
+
+    func adoptDetachedThread(_ threadID: UUID) -> DetachedThreadStore {
+        if let existing = detachedThreadStores[threadID] { return existing }
+        let seed: [Turn]
+        if let round = inFlightRounds.first(where: { $0.threadID == threadID }) {
+            seed = round.thread
+        } else if threadHistoryID == threadID, !turns.isEmpty {
+            seed = turns
+        } else {
+            seed = history.first(where: { $0.id == threadID })?.conversation ?? []
+        }
+        let store = DetachedThreadStore(threadID: threadID, turns: seed)
+        detachedThreadStores[threadID] = store
+        return store
+    }
+
+    func releaseDetachedThread(_ threadID: UUID) {
+        detachedThreadStores[threadID] = nil
+    }
+
+    /// A follow-up typed in a detached thread window. The round runs through
+    /// the exact panel pipeline (`submit`) so tools, persistence, and Recent
+    /// behave identically — borrowed headless: the thread is loaded into the
+    /// panel state just long enough for `submit()` to arm the round, then
+    /// everything is put back and the new round is left detached ("detach,
+    /// never cancel" — the same hand-off as the tear-off itself). The round's
+    /// snapshots reach the window via `syncInFlight` → `detachedThreadStores`.
+    func submitDetachedFollowUp(threadID: UUID, question: String) {
+        let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return }
+        // The panel is sitting on this very thread: an ordinary panel submit —
+        // both surfaces hear every chunk.
+        if threadHistoryID == threadID, !turns.isEmpty {
+            text = q
+            submit()
+            return
+        }
+        runDetachedRound(threadID: threadID, seed: detachedSeed(for: threadID),
+                         question: q)
+    }
+
+    /// Regenerate the last settled answer from a detached thread window — the
+    /// window footer's ↻, mirroring `regenerateLastAnswer`: drop the newest
+    /// Q/A pair from the seed and re-run the question, optionally pinned to a
+    /// model for this one round (XII-135).
+    func regenerateDetachedAnswer(threadID: UUID, model: String? = nil) {
+        if threadHistoryID == threadID, !turns.isEmpty {
+            regenerateLastAnswer(model: model)
+            return
+        }
+        var seed = detachedSeed(for: threadID)
+        guard let last = seed.last, last.role == "assistant", !last.streaming,
+              !last.isAgent else { return }
+        seed.removeLast()
+        guard let questionTurn = seed.last, questionTurn.role == "user" else { return }
+        seed.removeLast()
+        regenOverrideModel = model
+        runDetachedRound(threadID: threadID, seed: seed, question: questionTurn.text)
+    }
+
+    /// The thread a detached-window round starts from: the window's live
+    /// mirror, else the persisted row (mirror already released — shouldn't
+    /// happen while the window is open, but never start from nothing).
+    private func detachedSeed(for threadID: UUID) -> [Turn] {
+        detachedThreadStores[threadID]?.turns
+            ?? history.first(where: { $0.id == threadID })?.conversation
+            ?? []
+    }
+
+    /// The headless borrow shared by the window's follow-up and regenerate:
+    /// swap the thread into the panel state, let `submit()` arm the round
+    /// (it captures its own snapshot + thread id immediately), then restore
+    /// the panel exactly as it was and leave the round streaming detached.
+    private func runDetachedRound(threadID: UUID, seed: [Turn], question: String) {
+        // Never stack rounds on one thread from the window: the tear-off
+        // dropped the round's task handle, so a second submit couldn't
+        // supersede-cancel the first. The field is disabled while streaming;
+        // this is the backstop.
+        guard !seed.contains(where: { $0.streaming }) else { return }
+        let saved = (turns: turns, threadID: threadHistoryID, mode: mode,
+                     text: text, task: task, pinned: isAnswerPinned,
+                     error: askError, history: showHistory)
+        task = nil                                    // detach, never cancel
+        turns = seed
+        threadHistoryID = threadID
+        text = question
+        submit()
+        // A regenerate that emptied the seed re-ids the thread (`submit`
+        // treats it as fresh) — re-key the window's mirror so it keeps
+        // hearing the round under the new id.
+        if threadHistoryID != threadID, let store = detachedThreadStores[threadID] {
+            detachedThreadStores.removeValue(forKey: threadID)
+            store.threadID = threadHistoryID
+            detachedThreadStores[threadHistoryID] = store
+        }
+        // Show the fresh question pair in the window right away — the first
+        // `syncInFlight` only lands with the first token.
+        detachedThreadStores[threadHistoryID]?.turns = turns
+        // Hand the round off detached and put the panel back exactly as it was.
+        task = saved.task
+        turns = saved.turns
+        threadHistoryID = saved.threadID
+        mode = saved.mode
+        text = saved.text
+        isAnswerPinned = saved.pinned
+        askError = saved.error
+        showHistory = saved.history
+    }
+
+    /// Screens whose panels have registered geometry — the merge zones a
+    /// detached window tests its drag against.
+    var knownDisplays: [CGDirectDisplayID] { Array(panelScreenFrames.keys) }
+
+    /// The island's current on-screen rect (bottom-left origin screen coords).
+    func islandScreenRect(on display: CGDirectDisplayID?) -> CGRect? {
+        guard let display,
+              let panel = panelScreenFrames[display],
+              let island = islandFrames[display] else { return nil }
+        return CGRect(x: panel.minX + island.minX,
+                      y: panel.maxY - island.maxY,
+                      width: island.width, height: island.height)
+    }
+
+    /// The resting notch's on-screen rect — the merge drop zone.
+    func restingNotchScreenRect(on display: CGDirectDisplayID?) -> CGRect? {
+        guard let display,
+              let panel = panelScreenFrames[display],
+              let restHeight = restHeights[display] else { return nil }
+        return CGRect(x: panel.midX - Tokens.notchWidth / 2,
+                      y: panel.maxY - restHeight,
+                      width: Tokens.notchWidth, height: restHeight)
+    }
+
+    /// Where a detached window is born: the panel's own glass body — same
+    /// left/right edges, top just under the notch zone — so the tear reads as
+    /// the panel itself coming off the bezel. Clamped to a usable session size
+    /// (extending downward) and onto the screen.
+    private func detachWindowSpawnRect() -> CGRect? {
+        guard let display = activeDisplay,
+              let island = islandScreenRect(on: display),
+              let restHeight = restHeights[display] else { return nil }
+        let minSize = CGSize(width: 560, height: 420)
+        var rect = CGRect(x: island.minX,
+                          y: island.minY,
+                          width: island.width,
+                          height: max(island.height - restHeight, 0))
+        if rect.width < minSize.width {
+            rect.origin.x -= (minSize.width - rect.width) / 2
+            rect.size.width = minSize.width
+        }
+        if rect.height < minSize.height {
+            rect.origin.y -= minSize.height - rect.height   // grow downward
+            rect.size.height = minSize.height
+        }
+        if let screen = NSScreen.screens.first(where: { $0.displayID == display })?.visibleFrame {
+            rect.origin.x = max(screen.minX + 8, min(rect.origin.x, screen.maxX - rect.width - 8))
+            rect.origin.y = max(screen.minY + 8, min(rect.origin.y, screen.maxY - rect.height - 8))
+        }
+        return rect
     }
 
     /// In-flight date detection for the current text — superseded by every
@@ -688,15 +1330,61 @@ final class NotchModel: ObservableObject {
     }
 
     /// Tab in the idle prompt: step where Enter will send the current line
-    /// (Ask → Note → Remind → Ask…), overriding the classifier. Steps from whatever
-    /// the *effective* destination is right now — including a prior override — so
-    /// each press reads as "the next one", exactly what the cycled inline hint shows.
+    /// (Ask → Note → Remind → Ask…), overriding the classifier. Steps from
+    /// whatever the *effective* destination is right now — including a prior
+    /// override — so each press reads as "the next one", exactly what the cycled
+    /// inline hint shows. The cycle stays INSIDE the Ask bucket: Agent is not a
+    /// stop — it's the bucket pill's job (`setAgentBucket`). Keeping the
+    /// heavyweight mode off an ambient navigation key is what makes mashing Tab
+    /// through a wrong note/remind guess safe; a misrouted note costs nothing,
+    /// a misrouted agent arm is a surprise. Tab while armed still steps off —
+    /// the keyboard twin of tapping the pill's Ask half.
     func toggleSubmitPanel() {
+        if agentComposeActive {
+            exitAgentCompose()
+            manualPanelOverride = .chat
+            return
+        }
         switch effectiveSubmitPanel {
         case .chat:     manualPanelOverride = .note
         case .note:     manualPanelOverride = .reminder
         case .reminder: manualPanelOverride = .chat
         }
+    }
+
+    /// Whether any local agent CLI is installed + signed in — gates the bucket
+    /// pill. Cheap after the launch `warmUp()`: binary resolution is cached and
+    /// the sign-in probe is a file-exists.
+    var agentAvailable: Bool { !AgentEngine.available.isEmpty }
+
+    /// The bucket pill's two taps — an idempotent "set", not a toggle, so
+    /// clicking the word that's already active is a no-op instead of a surprise
+    /// flip. Ask restores the lightweight bucket with the classifier back in
+    /// charge (no manual override — the pill picks a bucket, not a destination
+    /// within one); Agent arms the compose exactly like the folder-drop path,
+    /// seeded with the remembered project folder when there is one. Arming is
+    /// deliberately cheap and reversible: it only unfurls the chips row — a run
+    /// still needs a folder, a typed task, and an explicit Enter.
+    func setAgentBucket(_ armed: Bool) {
+        if armed {
+            guard !agentComposeActive else { return }
+            enterAgentCompose()
+        } else {
+            guard agentComposeActive else { return }
+            exitAgentCompose()
+            manualPanelOverride = nil
+        }
+    }
+
+    /// Shift-Tab in the idle prompt: flip the bucket between Ask and Agent — the
+    /// keyboard twin of tapping the `BucketTogglePill`. Kept off the plain-Tab
+    /// cycle on purpose: Tab stays inside the lightweight Ask bucket (Ask → Note
+    /// → Remind), so mashing it through a wrong note/remind guess can never
+    /// surprise you into arming the heavyweight agent mode — that gets its own
+    /// key. A no-op that stays on Ask when no agent CLI is installed, since
+    /// `setAgentBucket` → `enterAgentCompose` already guards on availability.
+    func toggleAgentBucket() {
+        setAgentBucket(!agentComposeActive)
     }
 
     /// The word in the inline hint — the destination spelled out: "Note" when this
@@ -705,6 +1393,9 @@ final class NotchModel: ObservableObject {
     /// the text crosses intents, so the hint beside the caret literally says where
     /// Enter sends the line.
     var submitLabel: String {
+        // An active agent compose owns the hint: Enter sends the line to the
+        // agent CLI.
+        if agentComposeActive { return L("hint.agent") }
         switch effectiveSubmitPanel {
         case .chat:     return L("hint.ask")
         case .note:     return L("hint.note")
@@ -712,32 +1403,22 @@ final class NotchModel: ObservableObject {
         }
     }
 
-    /// The dimmer trailing detail rendered after `submitLabel` — the Ask model name
-    /// ("Ask gpt-4o"), the Remind recurrence ("Remind · Daily"), or nothing for Note.
-    /// Kept separate from the destination word so the inline hint can paint it a shade
-    /// lighter than the word: the word answers "where does Enter send this", the suffix
-    /// is the softer footnote "…and with which model / how often".
+    /// The dimmer trailing detail rendered after `submitLabel` — the Remind
+    /// recurrence ("Remind · Daily"), or nothing for Ask/Note. Ask deliberately
+    /// carries no model name here: the model is already named in the pill row
+    /// below the field, and repeating it in the ghost read as clutter. Kept
+    /// separate from the destination word so the inline hint can paint it a shade
+    /// lighter than the word: the word answers "where does Enter send this", the
+    /// suffix is the softer footnote "…how often".
     var submitLabelSuffix: String {
+        // The compose hint names the runner, not a chat model: "Agent Codex" /
+        // "Agent Claude".
+        if agentComposeActive { return " " + agentArmedEngine.displayName }
         switch effectiveSubmitPanel {
-        case .chat:     return askModelHintSuffix
+        case .chat:     return ""
         case .note:     return ""
         case .reminder: return submitHintSuffix
         }
-    }
-
-    /// The model this Ask will actually call, spelled out after the "Ask" hint —
-    /// "Ask gpt-4o" — so the inline hint says not just *where* Enter sends the line
-    /// but *which model* answers it. Resolved exactly the way `submit` resolves it:
-    /// the selected provider's effective model (Settings override → provider
-    /// default), then prettified (drops the vendor prefix and any `:free` suffix).
-    /// Just a space in front — the model name reads as a continuation of "Ask", not
-    /// a separate field. Only the Ask (`.chat`) label carries it — Note/Remind
-    /// don't call a model.
-    var askModelHintSuffix: String {
-        let provider = APIKeyStore.selectedProvider
-        let model = APIKeyStore.effectiveModel(for: provider) ?? provider.defaultModel
-        let pretty = ModelRatings.prettyName(for: model)
-        return pretty.isEmpty ? "" : " \(pretty)"
     }
 
     /// Present-progressive "thinking" words shown beside the dots while the AI is
@@ -1039,13 +1720,6 @@ final class NotchModel: ObservableObject {
     /// on the closed→open edge.
     private var pasteboardChangeCountAtRest = NSPasteboard.general.changeCount
 
-    /// The clipboard content that's currently available to be folded into an Ask
-    /// if the user's question refers to it ("summarize this", "翻译这段", etc.).
-    /// Surfaced in the idle UI so the user sees what a referential query would
-    /// actually point at. `nil` when the clipboard is stale, empty, oversized, or
-    /// an unsupported type.
-    @Published var pendingClipboard: String? = nil
-
     /// The clipboard IMAGE available to attach to an Ask (XII-121) — a screenshot
     /// (⇧⌘⌃4) or any copied bitmap. Non-nil only when the ACTIVE MODEL reads
     /// images (`Provider.modelSupportsVision` — a text-only model never shows the
@@ -1061,44 +1735,6 @@ final class NotchModel: ObservableObject {
     /// matching, so this never leaks across conversations. Session-only (not
     /// persisted with history).
     private var threadImage: (threadID: UUID, image: ChatImage)? = nil
-
-    /// What the *copied text itself* reads as, when it leans note/reminder rather than
-    /// something to ask about — `.note` or `.reminder`, never `.chat`, and `nil` while
-    /// it reads as an Ask, is ambiguous, or the classifier hasn't landed yet. Computed
-    /// off the same engine the input box uses, but on the clipboard's text instead of
-    /// the prompt's, and published asynchronously by `classifyPendingClipboard()` when
-    /// a new clip becomes pending. Drives a leading "Note"/"Remind" capture chip in the
-    /// preset row so a copied jot can be filed in one tap, ahead of the Ask presets.
-    @Published private(set) var pendingClipboardCapture: Panel? = nil
-
-    /// In-flight clipboard classification — superseded (cancelled) when a new clip
-    /// becomes pending, so only the read of what's actually copied lands.
-    private var clipboardClassifyTask: Task<Void, Never>?
-
-    /// Set for exactly one `submit()` when a clipboard preset chip is fired, so that
-    /// turn folds in the copied text *unconditionally* — skipping the `isReferentialQuery`
-    /// re-classification a typed query is gated on. A chip is only ever rendered when
-    /// clipboard content exists and its whole purpose is to act on that content, so the
-    /// intent isn't in doubt; routing it through the lexical gate just risked a preset
-    /// whose phrase happens not to read as referential (e.g. "List the key points of
-    /// this") silently running with no copied text. `submit()` reads this once and
-    /// clears it, so it never leaks into a follow-up.
-    private var forceClipboardInjection = false
-
-    /// Set for exactly one `submit()` when a preset chip fires
-    /// (translate/summarize/…), so that turn takes the plain single-shot stream
-    /// (no agent/tool harness — a mechanical transform never needs web search)
-    /// and skips custom instructions (XII-137). Read once and cleared in
-    /// `submit()`, so it can never carry into a later typed Ask.
-    private var presetTurn = false
-
-    /// When a chip's on-screen wording differs from the instruction sent to the
-    /// model (currently only Translate, whose verbose detect-and-route rule must
-    /// not leak into the "You" bubble), `runClipboardPreset` stashes the full
-    /// instruction here while the visible turn carries the short display phrase.
-    /// `submit()` consumes it once for the wire copy, then clears it so it can
-    /// never carry into a later typed turn.
-    private var forcedWirePhrase: String?
 
     /// The live conversation rendered in the result view — alternating user and
     /// assistant `Turn`s. A follow-up appends to this rather than replacing it, so
@@ -1375,70 +2011,11 @@ final class NotchModel: ObservableObject {
         refreshPendingClipboard()
     }
 
-    /// Read the current pasteboard and update `pendingClipboard` for the idle UI.
-    /// Called on the closed→open edge and after any in-app pasteboard write, so the
-    /// preview stays in sync with what's actually available. Respects the same
-    /// eligibility rules as injection (fresh, non-empty, ≤1500 chars, supported type).
+    /// Read the current pasteboard and update `pendingClipboardImage` for the idle
+    /// UI (XII-121). Called on the closed→open edge and after any in-app pasteboard
+    /// write, so the thumbnail stays in sync with what an Ask would actually attach.
     func refreshPendingClipboard() {
-        let next = clipboardContextIfEligible()
-        if next != pendingClipboard {
-            // A new (or cleared) clipboard always reopens the preset row collapsed, so
-            // the panel never inherits a previous clip's expanded "⋯" state.
-            clipboardPresetsExpanded = false
-            // Drop the prior clip's verdict *synchronously* so its chip can't linger
-            // over the new clip while the async re-classification is still in flight —
-            // otherwise a "Note" chip from the old copy could briefly sit (and act) on
-            // the new one. classifyPendingClipboard republishes once the read lands.
-            pendingClipboardCapture = nil
-            classifyPendingClipboard(next)
-        }
-        pendingClipboard = next
-        // The image preview (XII-121) only exists when no text clip took the slot;
-        // a stale/text clipboard clears it so a thumbnail never lingers.
-        pendingClipboardImage = (next == nil) ? clipboardImageIfEligible() : nil
-    }
-
-    /// Read whether the *copied text* is itself a note/reminder, and publish the verdict
-    /// to `pendingClipboardCapture`. Mirrors the input box's `scheduleClassification`,
-    /// but on the clipboard string and with no debounce — a clipboard changes far less
-    /// often than a keystroke, so we classify the one snapshot directly. Clears the
-    /// capture immediately for an empty/stale clip so a leftover verdict can't linger.
-    ///
-    /// The note→reminder split is the same structural rule the prompt uses: a note that
-    /// names a future time is a reminder. We compute that date here from the *clip*
-    /// (not `detectedDue`, which tracks the input box) so the chip and the eventual
-    /// write agree on what got copied.
-    private func classifyPendingClipboard(_ clip: String?) {
-        clipboardClassifyTask?.cancel()
-        guard let clip, !clip.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            pendingClipboardCapture = nil
-            return
-        }
-        // A clip the sense confirm already filed (or is filing right now) never
-        // re-offers as a chip — tapping it would file the same text twice.
-        guard clip != senseCapturedClip else {
-            pendingClipboardCapture = nil
-            return
-        }
-        clipboardClassifyTask = Task { [weak self] in
-            let reading = await IntentEngine.shared.classify(clip)
-            guard !Task.isCancelled, let self, self.pendingClipboard == clip else { return }
-            // Only a confident *note* read earns a capture chip; an Ask (or anything
-            // unsure) leaves the row as the existing preset-only Ask shortcuts.
-            let verdict: Panel?
-            if reading.confidence >= Self.intentActionFloor, reading.intent == .note {
-                let due = RemindersService.futureDate(in: clip)
-                    ?? RemindersService.recurrenceDate(in: clip)
-                verdict = due != nil ? .reminder : .note
-            } else {
-                verdict = nil
-            }
-            // The read lands ~10-20ms after the preset row is already on screen. The
-            // chip's appearance is animated by an `.animation(value:)` on the row itself
-            // (see clipboardPresetChips) — keying the spring there, not here, keeps the
-            // FlowLayout reflow and the chip's own transition on one transaction.
-            self.pendingClipboardCapture = verdict
-        }
+        pendingClipboardImage = clipboardImageIfEligible()
     }
 
     // MARK: - Clipboard sense (copy → hint on the resting notch → ⌘C again to file)
@@ -1471,6 +2048,34 @@ final class NotchModel: ObservableObject {
         }
     }
     private static let copySenseKey = "copySenseEnabled"
+
+    /// Whether background work drives the RESTING notch's busy ears (Settings →
+    /// Appearance, "Live activity"). Agent runs are minutes long, so the
+    /// verb-and-clock flex is the one background readout that stays on screen
+    /// while you work in another app — some people want the notch to hold still
+    /// instead. One global switch for everything live: off keeps the closed notch
+    /// flat for agent runs AND detached Ask rounds alike. The finished-count
+    /// badge, the agent card and the completion notification are all unaffected.
+    @Published var liveActivityEnabled: Bool =
+        UserDefaults.standard.object(forKey: NotchModel.liveActivityKey) as? Bool ?? true
+    {
+        didSet {
+            UserDefaults.standard.set(liveActivityEnabled,
+                                      forKey: NotchModel.liveActivityKey)
+        }
+    }
+    /// Legacy key name, kept so the setting survives the agent-only → global move.
+    private static let liveActivityKey = "agentNotchActivityEnabled"
+
+    /// The proxy Notch connects through (Settings → General) — the app's own
+    /// requests and the spawned agent CLIs alike. Empty means auto — the app
+    /// follows the system proxy natively, and `ProxyConfig` walks the CLIs through
+    /// the inherited env, the system proxy, then the login shell. Storage and
+    /// resolution live in `ProxyConfig`; this only publishes the field the
+    /// settings row binds to.
+    @Published var proxyURL: String = ProxyConfig.manual {
+        didSet { ProxyConfig.manual = proxyURL }
+    }
 
     /// A one-line personal preference the user set in Settings (XII-137), appended
     /// after the built-in persona on the Ask path — "always answer in English",
@@ -1800,6 +2405,11 @@ final class NotchModel: ObservableObject {
         // pre-open resting value forward is what lets that copy-then-open read as
         // fresh in `clipboardContextIfEligible`.
         if !open {
+            // One trackpad tap on the closed→open edge only — hover re-enters and
+            // display migrations while already open stay silent, as do the
+            // programmatic opens (settings / What's New / onboarding), which can
+            // fire without the cursor on the island.
+            Haptics.alignment()
             pasteboardChangeCountAtOpen = pasteboardChangeCountAtRest
             if mode == .idle, turns.isEmpty, !showOnboarding, let round = inFlightRounds.last {
                 // A round is still streaming in the background — the busy
@@ -1842,8 +2452,7 @@ final class NotchModel: ObservableObject {
         // instead of completing its fade, and the pending `beginClose` timer no-ops.
         closing = false
         open = true
-        // An open hands the clipboard to the in-panel flow: a visible sense hint
-        // retires (its clip re-surfaces as the capture chip via the refresh below),
+        // An open retires a visible sense hint (the panel takes over the screen),
         // while a saving/saved narration settles on its own timer, just unseen.
         if case .hinting = clipboardSense { senseCancelHint() }
         refreshPendingClipboard()
@@ -2000,7 +2609,7 @@ final class NotchModel: ObservableObject {
         // The user pinned this answer: leaving is no longer a fold signal. Drop any
         // watch that was already armed (a leave-during-typing may have scheduled
         // one before the pin) so it can't fire behind the pin's back.
-        if isAnswerPinned || isModelPickerOpen {
+        if isAnswerPinned || isModelPickerOpen || isFolderPickerOpen || detachDrag != nil {
             cancelLeaveWatch()
             return
         }
@@ -2053,7 +2662,7 @@ final class NotchModel: ObservableObject {
     private func recheckLeaveWatch() {
         guard let watch = leaveWatch else { return }
         guard open else { leaveWatch = nil; return }
-        if isAnswerPinned || isModelPickerOpen { cancelLeaveWatch(); return }
+        if isAnswerPinned || isModelPickerOpen || isFolderPickerOpen { cancelLeaveWatch(); return }
         // Parked back over (or still over) the island: nothing to fold, but keep
         // watching — AppKit's tracking state may be desynced, so the exit that
         // would restart this conversation might never arrive.
@@ -2157,6 +2766,10 @@ final class NotchModel: ObservableObject {
         mode = .idle
         isAnswerPinned = false
         isModelPickerOpen = false
+        isFolderPickerOpen = false
+        showModelPicker = false
+        showAgentPicker = false
+        showAskModelPicker = false
         text = ""; turns = []
         showHistory = false
         showSettings = false
@@ -2182,9 +2795,7 @@ final class NotchModel: ObservableObject {
         senseLastChangeCount = pasteboardChangeCountAtRest
         // Drop the preview so the resting panel stays minimal; the next open will
         // re-evaluate and surface anything fresh.
-        pendingClipboard = nil
-        clipboardClassifyTask?.cancel()
-        pendingClipboardCapture = nil
+        pendingClipboardImage = nil
     }
 
     /// "Back" / start a new conversation: drop the current Q&A from the screen and
@@ -2199,18 +2810,23 @@ final class NotchModel: ObservableObject {
         // Drop any parked page too, so "start fresh" can't be haunted by a
         // snapshot from before the reset.
         parkedSession = nil
+        // The park is gone; so must the parked height measurement. Left in place,
+        // a long thread's >300pt value would seed the next NotchBody mount into
+        // the clipped full-height layout for a brand-new short chat. NotchBody
+        // zeroes its live @State when `turns` empties below — this covers the
+        // mirror when the body isn't mounted to see that change.
+        lastMeasuredAnswerHeight = 0
         mode = .idle
         isAnswerPinned = false
+        agentDetailTaskID = nil
         text = ""; turns = []
         showHistory = false
         showSettings = false
         highlightedHistoryIndex = nil
         // Clear the note/reminder-save state, exactly like `fullClose` does (XII-86).
         // Backing out with Back while a Note/Reminder write is still in flight (e.g.
-        // an AppleScript retry) used to leave `noteSaving` stuck true here — and the
-        // `guard !noteSaving` in `runClipboardCapture` then permanently blocked every
-        // clipboard-capture chip tap until the next full close. Resetting it (plus the
-        // cue task and feedback fields) keeps the next session clean.
+        // an AppleScript retry) used to leave `noteSaving` stuck true here. Resetting
+        // it (plus the cue task and feedback fields) keeps the next session clean.
         noteCueTask?.cancel()
         lastSavedNote = nil
         noteError = nil
@@ -2237,11 +2853,506 @@ final class NotchModel: ObservableObject {
     /// This matches `submitLabel` exactly, so the inline "Ask"/"Note"/"Remind" hint
     /// always names where the line actually went.
     func submitCurrent() {
+        // An active agent compose sends the line to the agent CLI, not the
+        // chat model — regardless of what the classifier reads.
+        if agentComposeActive { submitAgent(); return }
         switch effectiveSubmitPanel {
         case .chat:     submit()
         case .note:     submitNote()
         case .reminder: submitReminder()
         }
+    }
+
+    // MARK: - Agent to Codex (XII: agent-to-Codex)
+
+    /// Enter the agent compose: unfurl the chip row and point the hint at the
+    /// agent CLI. With a `folder` (the drop path) that folder is the compose's;
+    /// without one (the pill path) the remembered last project seeds it — possibly
+    /// nothing, in which case the folder chip says "choose" and Enter opens the
+    /// picker. Animated here because both entries (a pill tap, a drop) land
+    /// outside any withAnimation context.
+    func enterAgentCompose(folder: URL? = nil) {
+        guard !AgentEngine.available.isEmpty else { return }
+        withAnimation(.smooth(duration: 0.3)) {
+            if let folder {
+                lastAgentFolder = folder
+                agentComposeFolder = folder
+            } else if agentComposeFolder == nil {
+                agentComposeFolder = lastAgentFolder
+            }
+            agentComposeActive = true
+            manualPanelOverride = nil
+        }
+        // The remembered engine may have been uninstalled / signed out since it
+        // was last used — fall back to whichever is live, and drop the model
+        // pick with it (it named the dead engine's model).
+        if !agentArmedEngine.isAvailable,
+           let fallback = AgentEngine.available.first {
+            agentArmedEngine = fallback
+            agentModelID = nil
+        }
+    }
+
+    /// The persisted-bucket twin of `enterAgentCompose`: a bucket restored from the
+    /// last launch is armed without ever having been *entered* this run, so nothing
+    /// seeded it. Run on open — seed the remembered project, and repoint a stale
+    /// engine (uninstalled / signed out since it was last used), dropping its model
+    /// pick with it. No agent CLI survives at all → fall back to Ask rather than
+    /// unfurl a compose row that can't run.
+    private func rearmPersistedAgentBucket() {
+        guard agentComposeActive else { return }
+        guard agentAvailable else {
+            agentComposeActive = false
+            return
+        }
+        if agentComposeFolder == nil { agentComposeFolder = lastAgentFolder }
+        if !agentArmedEngine.isAvailable, let fallback = AgentEngine.available.first {
+            agentArmedEngine = fallback
+            agentModelID = nil
+        }
+    }
+
+    /// Exit the compose (Shift-Tab, Tab, or the pill's Ask half — NOT a submit; the
+    /// bucket outlives the task it sent). Keeps the folder memory — re-entering
+    /// lands on the same project; the attached images don't (they belonged to the
+    /// task that was being written).
+    func exitAgentCompose() {
+        withAnimation(.smooth(duration: 0.3)) {
+            agentComposeActive = false
+            agentComposeImages = []
+        }
+    }
+
+    /// ⌘V in the prompt while composing an agent task: a clipboard carrying an
+    /// IMAGE attaches it to the task instead of pasting text. Each paste APPENDS,
+    /// so ⌘V twice sends two screenshots. Returns `true` when consumed; a
+    /// clipboard with no image falls through to the normal paste, so copying a
+    /// path or a snippet keeps working exactly as before. A paste past the limit
+    /// is still consumed (it was an image, and pasting its bytes as text would be
+    /// nonsense) — it just doesn't attach.
+    func handleAgentPasteImage() -> Bool {
+        guard agentComposeActive, let image = Self.pasteboardImage() else { return false }
+        guard agentComposeImages.count < Self.agentImageLimit else { return true }
+        // A pasted image is real input, exactly like typed text — so fold the
+        // Recent list the same way the `text` setter does. Without this the
+        // list lingers open over the compose until the user also types
+        // something (the bug: "粘贴图片时没有自动收起历史记录，必须要打字").
+        collapseHistory()
+        noteUserTyping()
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+            agentComposeImages.append(image)
+        }
+        return true
+    }
+
+    /// The stand-in instruction an image-only send carries: the CLIs read the
+    /// prompt from stdin/args, so "no text" still has to say *something* — and
+    /// what it should say is "the images are the task".
+    static func agentImageOnlyPrompt(count: Int) -> String {
+        count > 1
+            ? "See the attached images — they describe the task."
+            : "See the attached image — it describes the task."
+    }
+
+    /// The image on the clipboard, or `nil` if it doesn't carry one. Keyed on the
+    /// pasteboard actually declaring an IMAGE payload — not on "it has no text".
+    /// The distinction is the whole feature: most apps that copy an image put a
+    /// string alongside the pixels (a source URL, an alt text, a file path), so a
+    /// "text ⇒ not an image" rule only ever recognizes a bare ⌃⇧⌘4 screenshot and
+    /// pastes that URL as text everywhere else. Two shapes count:
+    ///   · pixels on the board (screenshot, in-app image copy) — text riding along
+    ///     is metadata about the image, so the image still wins;
+    ///   · an image FILE copied in Finder, which puts a file URL and no pixels.
+    /// Anything else (plain text, RTF/HTML from a doc, a non-image file) returns
+    /// `nil` and pastes as text.
+    static func pasteboardImage() -> NSImage? {
+        let pb = NSPasteboard.general
+        if pb.availableType(from: [.png, .tiff]) != nil,
+           let image = NSImage(pasteboard: pb), image.isValid {
+            return image
+        }
+        if let url = (pb.readObjects(forClasses: [NSURL.self]) as? [URL])?.first,
+           let type = UTType(filenameExtension: url.pathExtension), type.conforms(to: .image),
+           let image = NSImage(contentsOf: url), image.isValid {
+            return image
+        }
+        return nil
+    }
+
+    /// A thumbnail's × in the attached-images strip — drop that one, keep the
+    /// rest and keep composing.
+    func removeAgentComposeImage(at index: Int) {
+        guard agentComposeImages.indices.contains(index) else { return }
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+            agentComposeImages.remove(at: index)
+        }
+    }
+
+    /// A project folder dropped on the island — the compose's second doorway.
+    /// The folder is exactly the argument the mode is missing, so one drop both
+    /// enters the compose and answers "where". Wherever the panel was (a thread,
+    /// settings), the drop lands it on the idle prompt — that's where the task
+    /// gets written; a thread on screen files into Recent like ⌘N.
+    func handleAgentFolderDrop(_ url: URL) {
+        guard !showOnboarding else { return }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else { return }
+        // The drop landing — the trackpad answers the release like Finder's snap.
+        Haptics.alignment()
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+            if showSettings { showSettings = false }
+            if showWhatsNew { showWhatsNew = false }
+            if mode != .idle { newChat() }
+        }
+        enterAgentCompose(folder: url)
+    }
+
+    /// Pick (or change) the compose's folder. The picker is a separate window,
+    /// so `isFolderPickerOpen` holds the island open while it's up (same trick
+    /// as the model picker popover). `then` runs on a successful pick — the
+    /// no-remembered-folder Enter path uses it to fire the run straight from
+    /// the picker's OK, making the picker the first run's confirmation gate.
+    func pickAgentFolder(then completion: ((URL) -> Void)? = nil) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.message = L("agent.pick.message")
+        // Reopen at the user's last project when selecting a different agent folder.
+        panel.directoryURL = lastAgentFolder
+        isFolderPickerOpen = true
+        NSApp.activate(ignoringOtherApps: true)
+        panel.begin { [weak self] response in
+            Task { @MainActor in
+                guard let self else { return }
+                self.isFolderPickerOpen = false
+                if response == .OK, let url = panel.url {
+                    self.lastAgentFolder = url
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                        self.agentComposeFolder = url
+                    }
+                    completion?(url)
+                }
+            }
+        }
+    }
+
+    /// The compose row's model menu: picking a model picks its engine with it
+    /// (the menu mixes every available engine's entries into one list).
+    func selectAgentModel(_ choice: AgentModelChoice) {
+        agentArmedEngine = choice.engine
+        agentModelID = choice.id
+    }
+
+    /// Enter on a composed line: start the agent run. With no folder yet
+    /// (first-ever agent) the picker opens and its OK starts the run — the
+    /// natural confirmation gate; nothing ever launches silently. The run is
+    /// owned by the manager — closing the panel doesn't touch it; a notification
+    /// announces the finish. Submitting does NOT end the compose: the bucket is a
+    /// mode you stay in, so the next task starts armed on the same project.
+    private func submitAgent() {
+        var prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Attached images alone are a valid task — a screenshot of the bug IS
+        // the description. The CLIs still need some text next to the pixels, so
+        // a wordless send rides a minimal stand-in instruction.
+        if prompt.isEmpty {
+            guard !agentComposeImages.isEmpty else { return }
+            prompt = Self.agentImageOnlyPrompt(count: agentComposeImages.count)
+        }
+        // No single-task gate: tasks run in parallel — a submit while others
+        // are working just spawns another run.
+        if let folder = agentComposeFolder {
+            startAgentRun(folder: folder, prompt: prompt)
+        } else {
+            pickAgentFolder { [weak self] folder in
+                self?.startAgentRun(folder: folder, prompt: prompt)
+            }
+        }
+    }
+
+    private func startAgentRun(folder: URL, prompt: String) {
+        // Pass the model pick only if it still belongs to the armed engine —
+        // a stale cross-engine leftover would 404 the run.
+        let engine = agentArmedEngine
+        let model = engine.modelChoices.contains { $0.id == agentModelID }
+            ? agentModelID : nil
+        // Same staleness rule for the effort: a level the picked engine+model
+        // doesn't offer (e.g. ultra left over from another model) drops to the
+        // CLI default rather than erroring the run.
+        let effort = agentEffort.flatMap {
+            engine.effortChoices(forModelID: model).contains($0) ? $0 : nil
+        }
+        // Captured before the send clears them. Encoding a Retina
+        // screenshot (downscale + JPEG) is real CPU — and there may now be
+        // several — so it runs off-main, same as the chat path: the spawn waits
+        // a beat but ⏎ stays instant. An image that fails to encode is dropped,
+        // not fatal to the run.
+        let images = agentComposeImages
+        Task {
+            var jpegs: [Data] = []
+            if !images.isEmpty {
+                jpegs = await Task.detached(priority: .userInitiated) {
+                    images.compactMap { Self.encodeJPEGForVision($0) }
+                }.value
+            }
+            AgentTaskManager.shared.start(folder: folder, prompt: prompt,
+                                              engine: engine, model: model,
+                                              effort: effort, imagesJPEG: jpegs)
+        }
+        text = ""
+        // The bucket survives its own send: sending a task doesn't mean you're done
+        // sending tasks, so the compose stays armed on the same project and engine.
+        // Only the attachments go — they belonged to the task just sent.
+        withAnimation(.smooth(duration: 0.3)) { agentComposeImages = [] }
+    }
+
+    /// File a settled agent run into Recent as an ask-shaped record — the
+    /// task description as the user turn, Codex's report as the answer — so the
+    /// result outlives the card (dismiss, app restart) and reopens like any
+    /// conversation. The answer footer carries "Codex · <folder>" so the row's
+    /// thread reads as what it is. Keyed by the task id, so the finished banner's
+    /// tap can route straight to this row. Reopening also makes the result
+    /// follow-up-able: questions about it go to the chat model with the report
+    /// in context.
+    /// `countAsUnseen` is false for a run recovered at launch (see
+    /// `recoverInterruptedRun`): it settled in a previous life of the app, so it
+    /// isn't news the resting notch should badge.
+    func recordAgentHistory(_ task: AgentTaskManager.AgentTask,
+                            countAsUnseen: Bool = true) {
+        // Every settled round is an exchange — cancels and interrupted runs
+        // included, so a run that ended badly still leaves a record; a follow-up
+        // settles the same task id again with a longer thread, replacing the
+        // previous record in place.
+        guard let last = task.exchanges.last else { return }
+        let footer = "\(task.engine.displayName) · \(task.folder.lastPathComponent)"
+        var thread: [Turn] = []
+        for exchange in task.exchanges {
+            var promptTurn = Turn(role: "user", text: exchange.prompt)
+            // The screenshots pasted into this round — often the whole task ("fix
+            // this"), so the record is unreadable without them.
+            promptTurn.imageFiles = exchange.imageFiles
+            promptTurn.isAgent = true
+            thread.append(promptTurn)
+            var answerTurn = Turn(role: "assistant", text: exchange.answer)
+            answerTurn.answerModel = footer
+            // Marked as the agent's turn so the reopened thread knows what it is:
+            // no regenerate on the report (the chat model can't redo the run),
+            // and the follow-up field says who a question actually goes to.
+            answerTurn.isAgent = true
+            // The round's work trail rides the record, so the reopened thread
+            // shows the same tool rows the live detail page does. Trimmed on the
+            // way in — the archive is one JSON file rewritten after every answer,
+            // so a marathon round keeps its newest 200 steps and each captured
+            // output its first 800 chars.
+            if !exchange.log.isEmpty {
+                answerTurn.agentLog = exchange.log.suffix(200).map {
+                    AgentLogEntry(id: $0.id, title: $0.title, mono: $0.mono,
+                                  detail: $0.detail.map { String($0.prefix(800)) })
+                }
+            }
+            thread.append(answerTurn)
+        }
+        var item = HistoryItem(id: task.id, q: task.prompt, a: last.answer,
+                               t: Date(), turns: thread, source: .agent)
+        // The run's working folder, full path — what the reopened thread's and the
+        // archive's open-folder buttons jump to. (The footer string above only
+        // carries the last path component, for reading.)
+        item.link = task.folder.path
+        switch task.outcome {
+        case .success:   item.agentOutcome = "success"
+        case .failure:   item.agentOutcome = "failure"
+        case .cancelled: item.agentOutcome = "cancelled"
+        case nil:        break   // unreachable: only settled tasks are filed
+        }
+        // The CLI session handle rides EVERY settled row that has one — it's what
+        // lets the reopened thread's follow-up go back to the agent, resuming the
+        // run in place (`continueAgentThread`). `agentInterrupted` marks the rows
+        // whose run the app died during; only those grow the explicit resume
+        // button (`openAgentResume`).
+        if let session = task.sessionID {
+            item.agentResume = .init(engine: task.engine.rawValue,
+                                     folderPath: task.folder.path,
+                                     session: session)
+        }
+        item.agentInterrupted = task.interrupted
+        history.removeAll { $0.id == task.id }
+        history.insert(item, at: 0)
+        // Straight to disk — NOT through the 0.4s save debounce — and the run's
+        // in-flight crash marker clears only once the row is written. The
+        // debounced path left a window (marker already cleared at settle, row
+        // not yet on disk) where a crash erased the run without a trace.
+        let settledTaskID = task.id
+        saveHistoryNow { AgentTaskManager.clearInFlight(taskID: settledTaskID) }
+        // A run settling with the panel closed joins the resting notch's
+        // finished-count badge — but not a cancel (the user just threw that away
+        // by hand, nothing "unseen" about it), and not a run recovered from a
+        // previous launch.
+        guard countAsUnseen, task.outcome != .cancelled else { return }
+        noteBackgroundTaskFinished()
+    }
+
+    /// Whether the on-screen thread is (or grew out of) an agent run's record.
+    /// Drives the affordances that must read differently there: the follow-up
+    /// placeholder names the chat model as the answerer, and the result header
+    /// grows an open-folder button.
+    var threadIsAgentRun: Bool { turns.contains { $0.isAgent } }
+
+    /// The working folder of the agent run behind the on-screen thread — non-nil
+    /// only for a reopened `.agent` row that kept its folder path. Drives the
+    /// result header's open-folder button (parity with the live card's footer).
+    var currentThreadAgentFolder: String? {
+        guard threadIsAgentRun,
+              let item = history.first(where: { $0.id == threadHistoryID }),
+              item.source == .agent, let path = item.link, !path.isEmpty else { return nil }
+        return path
+    }
+
+    /// When the agent run behind the on-screen thread finished — the reopened
+    /// record's own timestamp (`recordAgentHistory` stamps it at settle). Drives
+    /// the settled report footer's completion stamp. `nil` for non-agent threads
+    /// and threads not backed by a saved record.
+    var currentThreadCompletedAt: Date? {
+        guard threadIsAgentRun,
+              let item = history.first(where: { $0.id == threadHistoryID }),
+              item.source == .agent else { return nil }
+        return item.t
+    }
+
+    /// Jump to the reopened run's working folder in Finder — the result header's
+    /// folder button. Deliberate app-leave, same as the capture jumps.
+    func openThreadAgentFolder() {
+        guard let path = currentThreadAgentFolder else { return }
+        NSWorkspace.shared.open(URL(fileURLWithPath: path))
+    }
+
+    /// The interrupted agent run behind the thread that's open right now, if any.
+    /// Drives the result view's resume row: the open Recent row still holds the CLI
+    /// session its run was killed in, so the answer can carry a button that picks it
+    /// back up — no terminal, no copied command. `nil` for every other thread.
+    var openAgentResume: (engine: AgentEngine, resume: HistoryItem.AgentResume)? {
+        guard let item = history.first(where: { $0.id == threadHistoryID }),
+              item.agentInterrupted,
+              let resume = item.agentResume,
+              let engine = AgentEngine(rawValue: resume.engine) else { return nil }
+        return (engine, resume)
+    }
+
+    /// Re-issue the round the interruption cut off, in the CLI session it left
+    /// behind — the button under an interrupted run's answer, and the GUI half of
+    /// `AgentEngine.resumeCommand`. The task revives under this row's own id, so
+    /// when it settles it re-files the SAME Recent row (interrupted marker and all
+    /// replaced) instead of forking a second copy of the conversation. The panel
+    /// drops back to idle, where the revived run rides the bucket row's badge like
+    /// any other working task.
+    func resumeAgentThread() {
+        guard let item = history.first(where: { $0.id == threadHistoryID }),
+              let resume = item.agentResume,
+              let engine = AgentEngine(rawValue: resume.engine) else { return }
+
+        // Rebuild the rounds from the saved thread. Everything before the last one
+        // settled normally and stays in the transcript; the last IS the interrupted
+        // round (its answer is the "Task interrupted" notice) — its prompt is what
+        // goes back to the CLI, so the work resumes where it was cut off.
+        var rounds: [AgentTaskManager.AgentExchange] = []
+        var askedTurn: Turn? = nil
+        for turn in item.conversation {
+            if turn.role == "user" {
+                askedTurn = turn
+            } else if let asked = askedTurn {
+                rounds.append(.init(prompt: asked.text, answer: turn.text,
+                                    imageFiles: asked.imageFiles,
+                                    log: turn.agentLog ?? []))
+                askedTurn = nil
+            }
+        }
+        guard let cut = rounds.popLast() else { return }
+        // The screenshots that round rode in on go back out with it — they were
+        // often the whole task ("fix this").
+        let jpegs = cut.imageFiles.compactMap { try? Data(contentsOf: Self.historyImageURL($0)) }
+
+        AgentTaskManager.shared.resume(taskID: item.id, engine: engine,
+                                       folder: URL(fileURLWithPath: resume.folderPath),
+                                       headline: item.q, session: resume.session,
+                                       priorRounds: rounds, prompt: cut.prompt,
+                                       imagesJPEG: jpegs)
+        newChat()
+    }
+
+    /// The engine that can pick the on-screen agent thread's CLI session back up
+    /// for a follow-up — non-nil only when the thread's record kept its session
+    /// handle and that engine is still installed. Drives the follow-up routing
+    /// (`submit` hands such a line to `continueAgentThread`) and the placeholder
+    /// that says who answers.
+    var agentThreadContinuation: AgentEngine? {
+        guard threadIsAgentRun,
+              let item = history.first(where: { $0.id == threadHistoryID }),
+              let resume = item.agentResume,
+              let engine = AgentEngine(rawValue: resume.engine),
+              engine.isAvailable else { return nil }
+        return engine
+    }
+
+    /// True while the on-screen agent thread's task is running a round right
+    /// now (a follow-up already dispatched from this thread, or the settled
+    /// tray card re-opened mid-round). Enter still routes to
+    /// `continueAgentThread` — the manager queues the line for the next round —
+    /// so the follow-up placeholder says "queued" instead of promising an
+    /// immediate continue. (Freshness rides on views also observing
+    /// `AgentTaskManager`, whose task changes re-render them.)
+    var agentThreadTaskRunning: Bool {
+        guard threadIsAgentRun else { return false }
+        return AgentTaskManager.shared.tasks
+            .first { $0.id == threadHistoryID }?.isRunning == true
+    }
+
+    /// Route a result-view follow-up back into the run's CLI session. The record
+    /// in Recent IS the run's conversation now, so Enter on its thread means
+    /// "next instruction to the agent", not "ask the chat model about this". The
+    /// round then runs like any background task — the panel drops to idle, the
+    /// status row carries the live activity — and on settle it re-files the SAME
+    /// Recent row (task id == row id), so reopening lands on the grown thread.
+    func continueAgentThread(prompt: String) {
+        guard let item = history.first(where: { $0.id == threadHistoryID }),
+              let resume = item.agentResume,
+              let engine = AgentEngine(rawValue: resume.engine) else { return }
+        let manager = AgentTaskManager.shared
+        if manager.tasks.contains(where: { $0.id == item.id }) {
+            // The run's task is still in the tray (its status row not yet
+            // dismissed) — a plain follow-up round on it. Settled → spawns
+            // now; still running → the manager queues it for the next round,
+            // so a line typed mid-run is never dropped.
+            manager.followUp(taskID: item.id, prompt: prompt)
+        } else {
+            // The task is gone (row dismissed, or the app relaunched since):
+            // rebuild the prior rounds from the record and spawn a resumed run
+            // under the row's own id.
+            var rounds: [AgentTaskManager.AgentExchange] = []
+            var askedTurn: Turn? = nil
+            for turn in item.conversation {
+                if turn.role == "user" {
+                    askedTurn = turn
+                } else if let asked = askedTurn {
+                    rounds.append(.init(prompt: asked.text, answer: turn.text,
+                                        imageFiles: asked.imageFiles,
+                                        log: turn.agentLog ?? []))
+                    askedTurn = nil
+                }
+            }
+            manager.resume(taskID: item.id, engine: engine,
+                           folder: URL(fileURLWithPath: resume.folderPath),
+                           headline: item.q, session: resume.session,
+                           priorRounds: rounds, prompt: prompt)
+        }
+        newChat()
+    }
+
+    /// "42s" / "12m 05s" — the one elapsed format for background work: the
+    /// agent card, the no-report fallback answer, and the resting notch's
+    /// busy ear all read the same clock.
+    static func formatAgentElapsed(_ t: TimeInterval) -> String {
+        let s = max(0, Int(t))
+        return s < 60 ? "\(s)s" : String(format: "%dm %02ds", s / 60, s % 60)
     }
 
     /// ⌘↵: submit the current line to the *other family* — the one-key flip for
@@ -2261,19 +3372,20 @@ final class NotchModel: ObservableObject {
         }
     }
 
-    /// The clipboard string that's *available* to fold into an Ask, or `nil` when
-    /// the clipboard itself isn't a candidate. This is only the clipboard-state half
-    /// of the gate — whether the *query* actually refers to it is `isReferentialQuery`,
-    /// tested separately in `submit`. Available means: the user copied for *this*
+    /// The clipboard string that's *available* as fresh outside context, or `nil`
+    /// when the clipboard itself isn't a candidate. Consumers today: the deictic
+    /// note capture ("save this" folds the copied URL/snippet into the note body)
+    /// and the image gate (`clipboardImageIfEligible` only offers a thumbnail when
+    /// no eligible text clip exists). Available means: the user copied for *this*
     /// session — the `changeCount` has moved past its pre-open resting baseline, which
     /// covers the intended copy-THEN-open flow (the baseline is the count from before
     /// the open; see `pasteboardChangeCountAtOpen`) as well as a copy made while the
     /// panel is open; the clipboard holds a non-empty string, URL, or file URL; and
     /// it's short enough (≤ 1500 chars) to inject without blowing up the prompt;
     /// and it isn't text this session is itself displaying (see
-    /// `isCurrentSessionText` — an in-panel copy never becomes a quote).
+    /// `isCurrentSessionText` — an in-panel copy never counts as outside context).
     /// Anything longer than 1500 chars, an image, or a stale clipboard returns nil.
-    /// Read once per submit; never mutates the pasteboard.
+    /// Never mutates the pasteboard.
     private func clipboardContextIfEligible() -> String? {
         let pb = NSPasteboard.general
         guard pb.changeCount != pasteboardChangeCountAtOpen else { return nil }
@@ -2321,13 +3433,21 @@ final class NotchModel: ObservableObject {
     /// text clip exists — a copied string always wins, so nothing about the text
     /// flow changes. `NSImage(pasteboard:)` reads PNG/TIFF (the screenshot
     /// formats) and returns nil for a text-only pasteboard.
-    private func clipboardImageIfEligible() -> NSImage? {
+    /// Can the model an Ask would go to right now actually read an image? Gates both
+    /// the clipboard thumbnail below and the re-attach of a reopened thread's saved
+    /// image — nothing offers or sends pixels a text-only model would choke on.
+    /// Codex / Claude Code (CLI backends) count as text-only here: their models
+    /// report as vision-capable by id, but the chat path doesn't forward images to
+    /// the subprocess, so an attach there would be silently dropped.
+    private var activeModelSupportsVision: Bool {
         let provider = APIKeyStore.selectedProvider
         let model = APIKeyStore.effectiveModel(for: provider) ?? provider.defaultModel
-        // Codex (CLI backend) is text-only here — its models report as vision-capable
-        // by id, but Notch doesn't forward the image to `codex exec`, so never offer
-        // a thumbnail it would silently drop.
-        guard provider != .codex, Provider.modelSupportsVision(model) else { return nil }
+        guard provider != .codex, provider != .claudeCode else { return false }
+        return Provider.modelSupportsVision(model)
+    }
+
+    private func clipboardImageIfEligible() -> NSImage? {
+        guard activeModelSupportsVision else { return nil }
         let pb = NSPasteboard.general
         guard pb.changeCount != pasteboardChangeCountAtOpen else { return nil }
         guard clipboardContextIfEligible() == nil else { return nil }
@@ -2335,18 +3455,20 @@ final class NotchModel: ObservableObject {
         return image
     }
 
-    /// Downsample + encode a clipboard image for the wire (XII-121): long side
-    /// capped at 1568px (Anthropic's documented vision sweet spot; also keeps any
-    /// provider's payload sane), JPEG at 0.82 — a full-screen Retina screenshot
-    /// lands in the hundreds-of-KB range instead of many MB. Returns `nil` when
-    /// the bitmap can't be read or encoded, in which case the turn just goes out
-    /// as plain text.
-    /// `nonisolated`: the downscale + JPEG + base64 of a Retina screenshot is real
-    /// CPU, so `submit` runs it on a detached task (see the encode step at the top
-    /// of the round's task) instead of on the main actor at the moment of ⏎.
-    /// Everything here draws into an offscreen bitmap context, which is safe off
-    /// the main thread.
-    nonisolated static func encodeForVision(_ image: NSImage) -> ChatImage? {
+    /// Downsample + encode an attached image (XII-121): long side capped at 1568px
+    /// (Anthropic's documented vision sweet spot; also keeps any provider's payload
+    /// sane), JPEG at 0.82 — a full-screen Retina screenshot lands in the
+    /// hundreds-of-KB range instead of many MB. Returns `nil` when the bitmap can't
+    /// be read or encoded, in which case the turn just goes out as plain text.
+    /// Every consumer takes these same bytes: the chat wraps them as a base64
+    /// `ChatImage`, the agent hands them to its CLI (a temp file for codex's
+    /// `exec -i`, a base64 vision block for claude's stream-json stdin), and the
+    /// history store keeps them as the saved thumbnail.
+    /// `nonisolated`: the downscale + JPEG of a Retina screenshot is real CPU, so
+    /// callers run it on a detached task (see the encode step at the top of the
+    /// round's task) instead of on the main actor at the moment of ⏎. Everything
+    /// here draws into an offscreen bitmap context, which is safe off the main thread.
+    nonisolated static func encodeJPEGForVision(_ image: NSImage) -> Data? {
         guard let tiff = image.tiffRepresentation,
               let rep = NSBitmapImageRep(data: tiff) else { return nil }
         let w = rep.pixelsWide, h = rep.pixelsHigh
@@ -2377,219 +3499,14 @@ final class NotchModel: ObservableObject {
         } else {
             finalRep = rep
         }
-        guard let jpeg = finalRep.representation(using: .jpeg,
-                                                 properties: [.compressionFactor: 0.82])
-        else { return nil }
-        return ChatImage(base64: jpeg.base64EncodedString(), mediaType: "image/jpeg")
+        return finalRep.representation(using: .jpeg,
+                                       properties: [.compressionFactor: 0.82])
     }
 
-    /// Does this query *refer to* something the user has on hand — i.e. is it the
-    /// kind of line where folding in the clipboard actually helps? This is the
-    /// automatic gate that replaced the manual "attach" pill: a fresh copy alone
-    /// isn't enough to inject (people copy things incidentally), so we only pull the
-    /// clipboard in when the question reads as being *about* it. Two signals, either
-    /// one is enough:
-    ///   1. A deictic — a pointing word with no antecedent in the query itself
-    ///      ("summarize **this**", "翻译**这段**", "what does **it** mean"). On a
-    ///      first turn there's nothing on screen to point at, so the referent is
-    ///      almost always what they just copied.
-    ///   2. A bare content operation — a transform verb whose object is missing
-    ///      ("summarize", "translate", "解释一下", "润色"). "Summarize the French
-    ///      revolution" names its own object and is NOT referential; "Summarize" /
-    ///      "Summarize this" leaves the object open, so the clipboard fills it.
-    /// Deliberately conservative: a self-contained question ("what's the capital of
-    /// France") matches neither and gets no clipboard, which is the safe default —
-    /// a false negative just means the old no-context behaviour, a false positive
-    /// silently pollutes an unrelated answer. Lexical only; no model call.
-    private func isReferentialQuery(_ query: String) -> Bool {
-        let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !q.isEmpty else { return false }
-
-        // --- Colon guard (ASCII + fullwidth): "translate: bonjour", "解释：光合作用",
-        // "rewrite this sentence: the cat sat …". When a colon is followed by ≥2
-        // non-blank chars the object is supplied inline — NOT referential, whatever
-        // verb or deictic precedes it.
-        if let colon = q.range(of: ":") ?? q.range(of: "：") {
-            let after = q[colon.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
-            if after.count >= 2 { return false }
-        }
-
-        // ── Chinese ───────────────────────────────────────────────────────────
-        // Verbs first — a couple of CJK gates below key off whether one is present.
-        // Bare transform verbs that imply "…this text". Length gate ≤15 (up from 8)
-        // lets polite forms like "帮我总结一下重要内容" through; the named-object guard
-        // keeps "总结法国史"/"翻译猫" out.
-        let cjkContentOps = ["总结", "概括", "归纳", "摘要", "翻译", "翻", "解释",
-                             "润色", "改写", "修改", "修正", "改", "扩写", "缩写",
-                             "提炼", "分析", "点评", "校对", "整理", "检查", "查"]
-        let hasCjkVerb = cjkContentOps.contains { q.contains($0) }
-
-        // Specific content-deictics (point at a text object, not a place/time).
-        // Excludes bare "这" (fires on "这里" = a location) and bare "其" (fires
-        // inside discourse markers 其实/其次) — those were the worst false-positives.
-        let cjkDeictics = ["这个", "这段", "这些", "这条", "这句", "这篇", "这里面",
-                           "上面", "上述", "里面", "它"]
-        if cjkDeictics.contains(where: { q.contains($0) }) {
-            // CJK has no clean copula signal, so a deictic inside a plain *statement*
-            // ("其实这个问题很简单", "Python很流行，它好学吗") still slips through the
-            // deictic list. Cheap guard: if there's no content-op verb AND a degree/
-            // copula cue is present (很/真/非常/就是…), read it as a statement, not a
-            // request, and don't inject. Drops the worst remaining false-positives.
-            let statementCues = ["很", "真", "挺", "非常", "特别", "太", "就是",
-                                 "好用", "简单", "流行", "厉害"]
-            let looksLikeStatement = !hasCjkVerb && statementCues.contains { q.contains($0) }
-            if !looksLikeStatement { return true }
-        }
-
-        // "以上" points at copied text only in a *request* — not in a declarative
-        // ("以上就是我的看法" = "that's my view", a statement).
-        if q.contains("以上") {
-            let after = q.components(separatedBy: "以上").dropFirst().joined()
-            let declarative = ["是", "就是", "为", "就为"].contains { after.hasPrefix($0) }
-            if !declarative { return true }
-        }
-
-        // "刚才"/"刚刚" point at the clipboard only when the referent is *content*;
-        // when they refer to the ongoing chat ("总结一下刚才的对话") the query names
-        // its own source and is self-contained.
-        let chatReferents = ["对话", "聊", "说", "讲", "谈", "讨论", "交流", "的话"]
-        for deictic in ["刚才", "刚刚"] where q.contains(deictic) {
-            if !chatReferents.contains(where: { q.contains($0) }) { return true }
-        }
-
-        // Bare-verb path (verb list + flag hoisted above): referential only when the
-        // line is essentially the verb plus filler — no self-supplied named object.
-        if q.count <= 15, let verb = cjkContentOps.first(where: { q.contains($0) }) {
-            if !cjkHasNamedObject(q, verb: verb) { return true }
-        }
-
-        // ── English ───────────────────────────────────────────────────────────
-        // A deictic alone isn't enough — "this is great"/"it works" are statements.
-        // Require an action signal (content-op verb or question word) alongside it,
-        // and exclude fixed discourse markers that merely *contain* a deictic word.
-        let enDeictics = ["this", "that", "these", "those", "it", "above", "the following", "the text"]
-        if enDeictics.contains(where: { containsWord($0, in: q) }) {
-            let discourseMarkers = ["that said", "that is to say", "that being said",
-                                    "it depends", "it takes", "it is what it is",
-                                    "above average", "above all"]
-            if !discourseMarkers.contains(where: { q.contains($0) }) {
-                let verbs = enContentOpVerbs
-                let questionWords = ["what", "how", "why", "when", "where", "who",
-                                     "which", "does", "do", "mean", "means", "meant"]
-                let hasVerb = verbs.contains { containsWord($0, in: q) }
-                let hasQuestion = questionWords.contains { containsWord($0, in: q) }
-                // "the following"/"the text" are task-oriented even without a verb.
-                let contentDeictic = containsWord("the following", in: q) || containsWord("the text", in: q)
-                // "explain yourself" addresses the assistant, not copied text.
-                let selfDirected = containsWord("yourself", in: q) && containsWord("explain", in: q)
-                if (hasVerb || hasQuestion || contentDeictic) && !selfDirected { return true }
-            }
-        }
-
-        // Bare content-op verb (no deictic): referential when the line is the verb
-        // plus filler only. Word gate ≤7 (up from 3) admits "can you summarize for
-        // me"; the named-object guard keeps "explain recursion"/"tldr on stoicism" out.
-        let words = q.split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\t" }).count
-        if words <= 7, enContentOpVerbs.contains(where: { containsWord($0, in: q) }) {
-            if !enHasNamedObject(q) { return true }
-        }
-
-        return false
-    }
-
-    /// English transform verbs whose object can dangle onto the clipboard. Shared by
-    /// the deictic-pairing check and the bare-verb path so the two never drift.
-    private var enContentOpVerbs: [String] {
-        ["summarize", "summarise", "translate", "explain", "paraphrase",
-         "rephrase", "rewrite", "proofread", "tldr", "tl;dr", "simplify",
-         "fix", "edit", "reword", "condense", "check", "improve",
-         "clean", "correct", "tighten", "convert", "format", "compress",
-         "shorten", "expand", "review", "analyze", "analyse"]
-    }
-
-    /// Filler *nouns* that name a generic facet of the copied text rather than a
-    /// self-supplied subject — "总结一下主要**内容**" still dangles onto the clipboard,
-    /// and grammar/spelling style nouns ("帮我改一下**语法**") are properties of the
-    /// copied text, not new objects. Stripped alongside particles so they don't read
-    /// as a named object and suppress injection.
-    private let cjkFillerNouns = ["内容", "信息", "文字", "文本", "部分", "东西",
-                                  "语法", "拼写", "标点", "措辞", "格式", "错误",
-                                  "错别字", "病句", "用词"]
-
-    /// True when a CJK query supplies its *own* named object (so the clipboard isn't
-    /// needed). Strips the matched verb, polite prefixes, and filler particles; if any
-    /// CJK char survives, it's a self-supplied subject ("翻译**猫**", "总结**法国史**").
-    /// "翻译一下" / "帮我总结一下" / "总结一下主要内容" leave nothing → object is dangling.
-    private func cjkHasNamedObject(_ q: String, verb: String) -> Bool {
-        let fillers = ["一下", "一遍", "一次", "一番", "帮我", "帮忙", "请你", "你帮",
-                       "给我", "给你", "我需要", "麻烦", "请", "帮",
-                       "吧", "呢", "啊", "嘛", "吗", "哦", "哈", "好",
-                       "主要", "重要", "关键", "重点"] + cjkFillerNouns
-        var residual = q
-        // Remove the longest matching verb first ("改写" before "改") so a short verb
-        // doesn't leave its longer sibling's tail behind.
-        let allVerbs = ["总结", "概括", "归纳", "摘要", "翻译", "解释", "润色", "改写",
-                        "修改", "修正", "扩写", "缩写", "提炼", "分析", "点评", "校对",
-                        "整理", "检查", "翻", "改", "查"].sorted { $0.count > $1.count }
-        for v in allVerbs {
-            if let r = residual.range(of: v) { residual.removeSubrange(r); break }
-        }
-        // Longest filler first ("错别字" before "错误"/"字") so a short noun doesn't
-        // strand its longer sibling's tail.
-        for filler in fillers.sorted(by: { $0.count > $1.count }) {
-            residual = residual.replacingOccurrences(of: filler, with: "")
-        }
-        var maxRun = 0, run = 0
-        for c in residual {
-            let isHan = c.unicodeScalars.first.map { $0.value >= 0x4E00 && $0.value <= 0x9FFF } ?? false
-            if isHan { run += 1; maxRun = max(maxRun, run) } else { run = 0 }
-        }
-        // Even one leftover Han char ("翻译猫" → "猫") is a self-supplied object.
-        return maxRun >= 1
-    }
-
-    /// Attribute words that name a *property* of the copied text rather than a fresh
-    /// subject — "fix the grammar", "check spelling", "any typos?" all operate on
-    /// whatever was copied. Treated as fillers so they don't read as a named object
-    /// and suppress injection.
-    private let enAttributeWords: Set<String> = [
-        "grammar", "spelling", "typo", "typos", "punctuation", "wording", "phrasing",
-        "tone", "clarity", "writing", "text", "wordings", "mistakes", "errors",
-        "mistake", "error", "sentence", "sentences", "paragraph", "wordiness",
-    ]
-
-    /// True when an English query supplies its own named object beyond language /
-    /// direction words (so the clipboard isn't needed). Strips verbs, fillers, and
-    /// target-language/style words; a substantive token left over is a named subject
-    /// ("explain **recursion**", "tldr on **stoicism**"). "translate to french
-    /// please" leaves only direction/filler → object dangles → referential.
-    private func enHasNamedObject(_ q: String) -> Bool {
-        let baseFillers: Set<String> = [
-            "please", "pls", "plz", "can", "you", "me", "for", "a", "the", "i", "just",
-            "quickly", "could", "would", "should", "will", "may", "might", "help",
-            "to", "into", "from", "in", "on", "at", "of", "and", "or", "up",
-            "my", "this", "that", "these", "those", "it", "all", "any", "some", "more",
-            // target-language / style indicators name a TARGET, not the source object
-            "english", "french", "spanish", "german", "italian", "portuguese",
-            "chinese", "japanese", "korean", "arabic", "russian", "hindi",
-            "formal", "informal", "simple", "simpler", "clearer", "shorter",
-            "better", "bullet", "points", "tone", "style", "format",
-        ]
-        // Attribute words (grammar/spelling/…) operate on the copied text, not a new
-        // object, so they count as fillers too.
-        let fillers = baseFillers.union(enAttributeWords)
-        let verbs = Set(enContentOpVerbs + ["give", "get", "make"])
-        let substantive = q
-            .split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "\n" })
-            .map { String($0).trimmingCharacters(in: .punctuationCharacters) }
-            .filter { !$0.isEmpty && !fillers.contains($0) && !verbs.contains($0) }
-        return substantive.contains { $0.count >= 2 && ($0.first?.isLetter ?? false) }
-    }
-
-    /// Whole-word containment for the Latin-script gates above — avoids "it" firing
-    /// inside "edit" or "this" inside "thistle". Loops over every occurrence so a
-    /// non-boundary first hit doesn't mask a later word-boundary one. Builds a manual
-    /// boundary test rather than dragging in NSRegularExpression for a few literals.
+    /// Whole-word containment for the Latin-script gates in `isDeicticNoteCapture` —
+    /// avoids "it" firing inside "edit" or "this" inside "thistle". Loops over every
+    /// occurrence so a non-boundary first hit doesn't mask a later word-boundary one.
+    /// Builds a manual boundary test rather than dragging in NSRegularExpression.
     private func containsWord(_ word: String, in haystack: String) -> Bool {
         var start = haystack.startIndex
         while start < haystack.endIndex,
@@ -2606,301 +3523,6 @@ final class NotchModel: ObservableObject {
             start = haystack.index(after: r.lowerBound)
         }
         return false
-    }
-
-    // MARK: - Clipboard presets
-
-    /// A one-tap action offered above the prompt when there's eligible clipboard
-    /// content — the equivalent of Apple Writing Tools' Proofread / Rewrite / tone /
-    /// Summarize / Key-Points chips, but routed through this app's existing pipeline.
-    ///
-    /// Each preset is just a *referential query* the chip authors into the prompt:
-    /// the phrase ("Summarize this", "润色", …) is deliberately object-less so
-    /// `isReferentialQuery` reads it as pointing at the copied text and `submit()`
-    /// folds the clipboard in — no separate prompt plumbing, the same path a typed
-    /// "summarize this" already takes. The cases mirror Apple's set; `phrase(cjk:)`
-    /// returns the wording in the language of the copied text (we present the action
-    /// in the script the user actually copied, matching the bilingual gates above).
-    enum ClipboardPreset: String, CaseIterable, Identifiable {
-        case summarize          // Apple: Summary
-        case keyPoints          // Apple: Key Points
-        case proofread          // Apple: Proofread
-        case rewrite            // Apple: Rewrite
-        case friendly           // Apple: Friendly tone
-        case professional       // Apple: Professional tone
-        case concise            // Apple: Concise tone
-        case translate          // (Notch addition — common on copied text)
-
-        var id: String { rawValue }
-
-        /// The short chip label, in the app's interface language. (The *phrase*
-        /// sent to the model still follows the copied text's script — see
-        /// `phrase(cjk:)` — but the chip the user reads tracks the UI language.)
-        var label: String {
-            switch self {
-            case .summarize:    return L("preset.summarize")
-            case .keyPoints:    return L("preset.keyPoints")
-            case .proofread:    return L("preset.proofread")
-            case .rewrite:      return L("preset.rewrite")
-            case .friendly:     return L("preset.friendly")
-            case .professional: return L("preset.professional")
-            case .concise:      return L("preset.concise")
-            case .translate:    return L("preset.translate")
-            }
-        }
-
-        /// The text shown in the on-screen "You" bubble for this chip — what the
-        /// user *conceptually* asked, not the full instruction sent to the model.
-        /// For most presets the wire phrase already reads naturally ("Summarize
-        /// this"), so the display text *is* the phrase. Translate is the exception:
-        /// its wire phrase is a verbose detect-and-route rule that must never leak
-        /// on screen, so it gets a short stand-in. `submit()` shows this while
-        /// sending the full `phrase(cjk:)` (plus the clipboard) to the model.
-        func displayPhrase(cjk: Bool) -> String {
-            switch self {
-            case .translate: return cjk ? "翻译这段" : "Translate this"
-            default:         return phrase(cjk: cjk)
-            }
-        }
-
-        /// The referential query the chip drops into the prompt. Object-less by
-        /// design so `isReferentialQuery` pairs it with the clipboard.
-        func phrase(cjk: Bool) -> String {
-            switch self {
-            case .summarize:    return cjk ? "总结一下这段"           : "Summarize this"
-            case .keyPoints:    return cjk ? "用要点列出这段的重点"     : "List the key points of this"
-            case .proofread:    return cjk ? "校对这段，修正语法和拼写" : "Proofread this for grammar and spelling"
-            case .rewrite:      return cjk ? "改写这段"               : "Rewrite this"
-            case .friendly:     return cjk ? "把这段改得更友好一些"     : "Rewrite this to sound more friendly"
-            case .professional: return cjk ? "把这段改得更正式一些"     : "Rewrite this to sound more professional"
-            case .concise:      return cjk ? "把这段改得更精炼"         : "Rewrite this to be more concise"
-            case .translate:
-                // Dual-preference rule: detect the language of the pasted text,
-                // then translate based on these three cases:
-                //   1. Neither pref1 nor pref2 → translate into pref1
-                //   2. Is pref1 → translate into pref2
-                //   3. Is pref2 → translate into pref1
-                // The AI does the language detection — no third-party library
-                // is introduced. Phrase is object-less so `isReferentialQuery`
-                // pairs it with the clipboard.
-                let pref1 = TranslationLanguage.loadPref1()
-                let pref2 = TranslationLanguage.loadPref2()
-                // Guard the degenerate pref1 == pref2 case (XII-113): the user can set
-                // both slots to the same language (Settings, or either chip context
-                // submenu), and the three-way rule then collapses into "if it's X,
-                // translate to X" — self-contradictory, so the model echoes the source
-                // or flails, silently. Fall back to the old single-target rule: if the
-                // clip is already that language, translate it back to its source
-                // language; otherwise translate it into that language. Always a
-                // meaningful direction, never a no-op.
-                guard pref1 != pref2 else {
-                    let only = pref1
-                    if cjk {
-                        return "把这段翻译一下：如果是\(only.cjkName)就翻译成它的原文语言，" +
-                               "否则翻译成\(only.cjkName)。只输出译文，不加解释。"
-                    } else {
-                        return "Translate this: if it is in \(only.englishName), translate it to its " +
-                               "original language; otherwise translate it into \(only.englishName). " +
-                               "Output only the translation, no explanation."
-                    }
-                }
-                if cjk {
-                    return "判断这段文字是什么语言，然后按以下规则翻译：" +
-                           "如果是\(pref1.cjkName)，翻译成\(pref2.cjkName)；" +
-                           "如果是\(pref2.cjkName)，翻译成\(pref1.cjkName)；" +
-                           "如果两者都不是，翻译成\(pref1.cjkName)。" +
-                           "只输出译文，不加解释。"
-                } else {
-                    return "Detect the language of this text, then translate it: " +
-                           "if it is \(pref1.englishName), translate into \(pref2.englishName); " +
-                           "if it is \(pref2.englishName), translate into \(pref1.englishName); " +
-                           "if it is neither, translate into \(pref1.englishName). " +
-                           "Output only the translation, no explanation."
-                }
-            }
-        }
-
-        /// The default enabled set when the user has never customized it — every
-        /// preset, in the canonical order. Customizing (XII-111) narrows this; the
-        /// enabled set then drives the clipboard chip row (collapsed to a few behind
-        /// a "⋯", unfurling on hover).
-        static let defaultEnabled: [ClipboardPreset] = ClipboardPreset.allCases
-    }
-
-    /// Which clipboard presets the user has chosen to offer, in display order —
-
-    // MARK: - Translation preferences
-
-    /// Primary translation language (pref1). The chip translates into pref1
-    /// when the copied text is pref2 or any other language. Published so the
-    /// chip label re-renders immediately; `didSet` persists to UserDefaults.
-    @Published var translationPref1: TranslationLanguage =
-        TranslationLanguage.loadPref1() {
-        didSet { TranslationLanguage.savePref1(translationPref1) }
-    }
-
-    /// Secondary translation language (pref2). The chip translates into pref2
-    /// when the copied text is pref1. Published so the chip label re-renders
-    /// immediately; `didSet` persists to UserDefaults.
-    @Published var translationPref2: TranslationLanguage =
-        TranslationLanguage.loadPref2() {
-        didSet { TranslationLanguage.savePref2(translationPref2) }
-    }
-
-    /// The directional suffix for the Translate chip, resolved against the *pending
-    /// clipboard* — only the target language is shown ("→dst", e.g. "→En"); the
-    /// source is omitted so the chip stays compact. Recomputes whenever the
-    /// clipboard or either pref changes (all are `@Published`).
-    var translateChipDirection: String {
-        let (_, target) = TranslationLanguage.resolveDirection(
-            clip: pendingClipboard,
-            pref1: translationPref1,
-            pref2: translationPref2)
-        return "→\(target.chipLabel)"
-    }
-
-    /// the "custom quick-tools" set (XII-111). Persisted as an ordered list of
-    /// raw values in `UserDefaults`; defaults to every preset. The published
-    /// property drives the chip row live, and its `didSet` writes through.
-    @Published var enabledClipboardPresets: [ClipboardPreset] = NotchModel.loadEnabledPresets() {
-        didSet { NotchModel.saveEnabledPresets(enabledClipboardPresets) }
-    }
-
-    private static let enabledPresetsKey = "clipboardPresets.enabled"
-
-    private static func loadEnabledPresets() -> [ClipboardPreset] {
-        guard let raw = UserDefaults.standard.array(forKey: enabledPresetsKey) as? [String] else {
-            return ClipboardPreset.defaultEnabled
-        }
-        // Map stored raw values back to cases, dropping any unknown (e.g. a preset
-        // removed in a later build). An empty/all-unknown result falls back to the
-        // default so the row is never silently emptied by stale data.
-        let restored = raw.compactMap { ClipboardPreset(rawValue: $0) }
-        return restored.isEmpty ? ClipboardPreset.defaultEnabled : restored
-    }
-
-    private static func saveEnabledPresets(_ presets: [ClipboardPreset]) {
-        UserDefaults.standard.set(presets.map(\.rawValue), forKey: enabledPresetsKey)
-    }
-
-    /// Toggle one preset on/off in the enabled set, preserving canonical order.
-    /// Refuses to remove the last one — an empty row would strip the feature
-    /// entirely with no way back from the chip UI.
-    func setClipboardPreset(_ preset: ClipboardPreset, enabled: Bool) {
-        if enabled {
-            guard !enabledClipboardPresets.contains(preset) else { return }
-            // Re-insert in canonical order so the row stays stably ordered.
-            enabledClipboardPresets = ClipboardPreset.allCases.filter {
-                $0 == preset || enabledClipboardPresets.contains($0)
-            }
-        } else {
-            guard enabledClipboardPresets.count > 1 else { return }
-            enabledClipboardPresets.removeAll { $0 == preset }
-        }
-    }
-
-    /// The presets to offer for the currently-pending clipboard, or `[]` when there's
-    /// nothing eligible. Honors the user's enabled set (XII-111); only the *script*
-    /// of the labels/phrases follows the copied text (so a Chinese clipboard gets
-    /// Chinese chips), ordered to read left-to-right by likelihood.
-    var clipboardPresets: [ClipboardPreset] {
-        guard pendingClipboard != nil else { return [] }
-        return enabledClipboardPresets
-    }
-
-    /// How many enabled presets the collapsed row shows before the rest tuck behind
-    /// the "⋯" chip. Keeps the resting row short in the narrow notch; the user's full
-    /// enabled set unfurls on hover. (Unchecked presets never appear at all.)
-    static let collapsedPresetCount = 3
-
-    /// Whether the preset row is unfurled to show every enabled preset (true) or just
-    /// the first `collapsedPresetCount` behind a "⋯" chip (false, the default). Resets
-    /// to collapsed each time a new clipboard becomes pending so the row opens compact.
-    @Published var clipboardPresetsExpanded = false
-
-    /// The presets visible right now: the user's enabled set (XII-111), but collapsed
-    /// to the first `collapsedPresetCount` until the row is hovered/expanded — the rest
-    /// tuck behind a "⋯" chip rather than scrolling or wrapping. Unchecked presets are
-    /// absent entirely. Empty when there's nothing eligible.
-    var visibleClipboardPresets: [ClipboardPreset] {
-        let all = clipboardPresets
-        guard !all.isEmpty else { return [] }
-        if clipboardPresetsExpanded { return all }
-        return Array(all.prefix(NotchModel.collapsedPresetCount))
-    }
-
-    /// True when the pending clipboard is predominantly CJK text, so the preset chips
-    /// speak the language the user copied. Counts Han characters against total letters;
-    /// a short majority is enough (mixed clips lean to whichever script dominates).
-    var pendingClipboardIsCJK: Bool {
-        guard let clip = pendingClipboard else { return false }
-        var han = 0, letters = 0
-        for scalar in clip.unicodeScalars {
-            if scalar.value >= 0x4E00 && scalar.value <= 0x9FFF { han += 1; letters += 1 }
-            else if CharacterSet.letters.contains(scalar) { letters += 1 }
-        }
-        guard letters > 0 else { return false }
-        return Double(han) / Double(letters) >= 0.3
-    }
-
-    /// Fire a clipboard preset: author its referential phrase into the prompt and
-    /// submit it. Going through `text` + `submitCurrent()` (rather than a bespoke
-    /// path) means the existing clipboard-injection gate in `submit()` does the real
-    /// work — the phrase is object-less, so `isReferentialQuery` pairs it with the
-    /// copied text and folds it into the wire message exactly as a typed "summarize
-    /// this" would. No-op if the clipboard went stale between render and tap.
-    ///
-    /// Goes straight to `submit()` (the AI path), NOT `submitCurrent()`: a preset is
-    /// always an Ask, and `submitCurrent()` would route off the *stale* `liveIntent`
-    /// — classification is debounced ~140ms, so right after we set `text` the read is
-    /// still whatever the field held before, which could misfile a preset to
-    /// Note/Reminder. Calling `submit()` directly sidesteps the classifier entirely;
-    /// the referential phrase still drives clipboard injection inside `submit()`.
-    func runClipboardPreset(_ preset: ClipboardPreset) {
-        guard pendingClipboard != nil else { return }
-        manualPanelOverride = nil
-        // The "You" bubble shows the short display phrase; the model gets the full
-        // instruction. They match for every preset except Translate, whose
-        // detect-and-route rule must stay off screen — see `displayPhrase`.
-        let display = preset.displayPhrase(cjk: pendingClipboardIsCJK)
-        let wire = preset.phrase(cjk: pendingClipboardIsCJK)
-        text = display
-        forcedWirePhrase = (wire != display) ? wire : nil
-        // The chip *is* the clipboard intent — fold the copied text in directly rather
-        // than re-deriving it from the phrase's wording (which `isReferentialQuery`
-        // can misjudge). `submit()` reads and clears the flag this turn.
-        forceClipboardInjection = true
-        // This turn is a mechanical preset (translate/summarize/…) — it takes the
-        // plain stream and skips custom instructions. Consumed once in `submit()`,
-        // so it never leaks into a later typed Ask.
-        presetTurn = true
-        submit()
-    }
-
-    /// Fire the leading capture chip: file the *copied text itself* straight into
-    /// Apple Notes or Reminders, the one-tap path for when you copied a jot rather
-    /// than something to ask about. Drops the clip into `text` and routes through the
-    /// existing `submitNote()`/`submitReminder()` so the write, the "Added to…" cue,
-    /// the Recent row, and (for reminders) `detectedDue` + the recurrence suffix all
-    /// come for free — `text.didSet` recomputes the due date from the clip we just
-    /// assigned, so the reminder lands at the time the copied line names. No-op if the
-    /// clipboard went stale between render and tap.
-    func runClipboardCapture(_ panel: Panel) {
-        // No-op if the clipboard went stale, or a save is already in flight — the chip
-        // vanishes the instant we fire (we clear the verdict below), but the Enter path
-        // could re-enter before the async write lands, which would file a duplicate.
-        guard let clip = pendingClipboard, !noteSaving else { return }
-        // Consume the verdict up front: the chip's whole purpose is this one tap, so it
-        // disappears immediately rather than lingering over already-filed text (where a
-        // second tap would file a duplicate). The clipboard preview itself stays — the
-        // copied text is still a valid Ask referent for the presets beside it.
-        manualPanelOverride = nil
-        pendingClipboardCapture = nil
-        text = clip
-        switch panel {
-        case .reminder: submitReminder()
-        case .note, .chat: submitNote()
-        }
     }
 
     /// Rough char budget for the wired conversation history. A long thread grows
@@ -2970,23 +3592,18 @@ final class NotchModel: ObservableObject {
     func submit() {
         let q = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty else { return }
+        // A follow-up on an agent thread whose CLI session is still resumable
+        // goes back to the AGENT, not the chat model: the result view is the
+        // run's conversation, so Enter there means "next instruction". Only
+        // when the session is gone (no handle on record / engine uninstalled)
+        // does the line fall through to the chat model, report as context.
+        if agentThreadContinuation != nil {
+            text = ""
+            continueAgentThread(prompt: q)
+            return
+        }
         // Clear any prior error state — this attempt replaces it (XII-85).
         askError = nil
-        // One-shot: a preset chip set this so its turn injects the clipboard without
-        // having to read as referential. Consume it here regardless of the early
-        // returns below, so it can never carry over to a later typed submit.
-        let forceClip = forceClipboardInjection
-        forceClipboardInjection = false
-        // The instruction to send the model in place of the visible bubble text, if a
-        // chip set one (Translate). Consumed once here so it never bleeds into a later
-        // typed turn. Only honoured on a forced-clip turn, paired with the clipboard.
-        let wireOverride = forcedWirePhrase
-        forcedWirePhrase = nil
-        // One-shot: this turn is a preset (translate/summarize) → skip the tool
-        // harness and custom instructions. Consumed here so it never carries into
-        // a later typed Ask.
-        let presetTurn = self.presetTurn
-        self.presetTurn = false
         // One-shot regenerate-with-model override (XII-135): build a service pinned
         // to the picked model for THIS turn only, without touching the saved
         // default. Consumed + cleared here. `regenModel` is stamped onto the answer
@@ -2998,6 +3615,13 @@ final class NotchModel: ObservableObject {
             guard let key = APIKeyStore.current(for: provider) else { return nil }
             return AppDelegate.makeService(provider: provider, apiKey: key, model: m)
         }
+        // This ask "uses" the model it will stream from — feed the chip menu's
+        // recents (the one-shot regenerate override counts as the model used).
+        let askProvider = APIKeyStore.selectedProvider
+        AskModelMRU.record(provider: askProvider,
+                           model: overrideModel
+                               ?? APIKeyStore.effectiveModel(for: askProvider)
+                               ?? askProvider.defaultModel)
         text = ""
         showHistory = false
         highlightedHistoryIndex = nil
@@ -3023,7 +3647,12 @@ final class NotchModel: ObservableObject {
         // Append this question and an empty assistant turn it'll stream into. On a
         // first question `turns` is empty (fresh thread); on a follow-up the prior
         // turns are already here, so the new pair just extends the conversation.
-        turns.append(Turn(role: "user", text: q))
+        let questionTurn = Turn(role: "user", text: q)
+        // Held so the deferred image encode below can find this exact turn again —
+        // by id, never by index, since the thread on screen may have moved on (a new
+        // chat, a reopened row) by the time the JPEG lands.
+        let questionID = questionTurn.id
+        turns.append(questionTurn)
         let answerID = UUID()
         var answerTurn = Turn(id: answerID, role: "assistant", text: "", streaming: true)
         // Stamp the one-shot regenerate model (XII-135) so the answer shows which
@@ -3038,83 +3667,19 @@ final class NotchModel: ObservableObject {
         // of which providers either reject outright or misread as model speech.
         var context: [ChatMessage] = Self.wireContext(from: turns, excluding: answerID)
 
-        // Clipboard-context injection — first turn only. If the user copied text
-        // before invoking Notch and then typed a referential query ("summarize
-        // this", "translate this"), fold the copied text into THIS user message so
-        // the model has the referent. We rewrite the existing user turn's content
-        // rather than prepend a fake assistant ack — that keeps the user/assistant
-        // alternation valid (Anthropic rejects a leading non-alternating turn) and
-        // never persists a ghost turn to the on-screen thread or Recent (the
-        // visible `turns` and the saved snapshot still hold the raw `q`). Only the
-        // wire copy in `context` carries the clipboard. Skipped on follow-ups: a
-        // mid-conversation clipboard change is almost never "about" the new turn.
-        // Custom instructions ride the Ask path only (XII-137): a preset
-        // (translate/summarize) carries its own precise instruction
-        // and must not be polluted by "always answer in English"-style preferences.
-        let customForTurn = presetTurn ? nil : customInstructions
-        var system = notchSystemPromptDated(customInstructions: customForTurn)
-        // Clipboard injection — first turn only. We no longer gate on a lexical
-        // "is this referential?" guess: whenever a clip is eligible we hand the model
-        // the FULL copied text and let *it* decide whether the text is relevant to the
-        // question (a model judges relevance far better than a keyword list). The
-        // framing below makes the clip explicitly optional — "use it only if relevant,
-        // otherwise ignore it" — so an incidentally-copied snippet no longer pollutes a
-        // self-contained answer.
-        //
-        // A forced (chip-driven) turn falls back to `pendingClipboard` — the exact text
-        // the chip previewed — if a re-read comes back stale (e.g. an in-app copy bumped
-        // the baseline between render and tap), so the chip always acts on what it showed.
-        let clipForTurn = forceClip ? (clipboardContextIfEligible() ?? pendingClipboard)
-                                    : clipboardContextIfEligible()
-        if firstTurn, let clip = clipForTurn {
-            // The instruction the model acts on: the chip's full wire phrase (e.g. the
-            // Translate detect-and-route rule) when one was set, otherwise the visible
-            // question. The on-screen bubble keeps `q`; only this wire copy diverges.
-            let instruction = wireOverride ?? q
-            // A forced/chip turn IS about the clip by construction; a typed turn that
-            // reads as referential ("summarize this") almost certainly is too. Those
-            // get the imperative framing (act on it) and the 200-word enriched budget.
-            // Everything else gets the clip as *optional* background the model may
-            // ignore, on the normal budget — copying something then asking an unrelated
-            // question shouldn't widen the answer or force the clip in.
-            let actsOnClip = forceClip || isReferentialQuery(q)
-            if actsOnClip {
-                context[context.count - 1] = ChatMessage(
-                    role: "user",
-                    content: "For context, here is what I have copied:\n\n\(clip)\n\nWith that in mind: \(instruction)")
-                // Stamp the on-screen user turn so the result view can show a *permanent*
-                // "based on what you copied" trace above it — not a load-only flash. The
-                // user turn is the second-to-last entry (the empty assistant placeholder
-                // is last). Set before `seedThread = turns` is captured below, so the flag
-                // rides into the saved snapshot and survives reopen from Recent.
-                if turns.count >= 2 { turns[turns.count - 2].usedClipboard = true }
-                // The injected text needs room the 90-word cap can't give. Append the
-                // shared enriched-turn marker so the persona allows 200 words AND the
-                // client raises the wire `max_tokens` to match (XII-91) — at the default
-                // ceiling a long clip + question + 200-word answer was truncated. Single
-                // source for the marker string lives in `ReplyTokens`.
-                system = notchSystemPromptDated(customInstructions: customForTurn) + ReplyTokens.enrichedMarker
-            } else {
-                // Optional-context framing: the model gets the full clip but is told to
-                // use it only if it's actually relevant to the question, otherwise to
-                // answer as if it weren't there. No `usedClipboard` stamp (we don't know
-                // the model used it) and no enriched budget.
-                context[context.count - 1] = ChatMessage(
-                    role: "user",
-                    content: "I have the following text on my clipboard — use it only if it's relevant to my question, otherwise ignore it completely:\n\n\(clip)\n\nMy question: \(instruction)")
-            }
-        }
+        let system = notchSystemPromptDated(customInstructions: customInstructions)
 
         // Clipboard IMAGE injection (XII-121). A first turn with a fresh copied
-        // image (and no text clip — text always wins the slot) attaches it to the
-        // wire message so vision models can see it; the on-screen bubble keeps just
-        // the question. The encoded image is also parked on the thread so
-        // follow-ups re-attach it — "how do I fix it?" still sees the screenshot
-        // the thread started from. Image rounds skip the agent harness below (the
-        // tool wire doesn't carry image blocks), taking the plain stream instead.
+        // image (and no eligible text clip — see `clipboardImageIfEligible`)
+        // attaches it to the wire message so vision models can see it; the
+        // on-screen bubble keeps just the question. The encoded image is also
+        // parked on the thread so follow-ups re-attach it — "how do I fix it?"
+        // still sees the screenshot the thread started from. Image rounds skip
+        // the agent harness below (the tool wire doesn't carry image blocks),
+        // taking the plain stream instead.
         var imageAttached = false
         var pendingVisionImage: NSImage? = nil
-        if firstTurn, clipForTurn == nil, let image = clipboardImageIfEligible() {
+        if firstTurn, let image = clipboardImageIfEligible() {
             // The actual encode is deferred into the round's task and runs on a
             // detached (background) task there — it's real CPU that used to run
             // synchronously right here, on the main thread, at the exact moment
@@ -3173,11 +3738,19 @@ final class NotchModel: ObservableObject {
             // defer pairs the teardown with every way out of this task —
             // finish, error, and supersede-cancel alike.
             self.roundsInFlight += 1
+            // A round starting from idle owns the busy ear's phase from scratch.
+            if self.inFlightRounds.isEmpty { self.backgroundWriting = false }
             self.inFlightRounds.append(
                 InFlightRound(answerID: answerID, threadID: threadID, thread: seedThread))
             defer {
                 self.roundsInFlight -= 1
                 self.inFlightRounds.removeAll { $0.answerID == answerID }
+                // Don't let the last round's tool label / write phase outlive
+                // it on the collapsed notch's busy ear.
+                if self.inFlightRounds.isEmpty {
+                    self.backgroundActivity = nil
+                    self.backgroundWriting = false
+                }
                 // A question can't normally outlive its round (cancellation and the
                 // timeout both resolve it), but never strand a card on screen — or a
                 // parked continuation — if one somehow does.
@@ -3189,18 +3762,39 @@ final class NotchModel: ObservableObject {
             // the wire bytes off the main actor, then attach them to the outgoing
             // context — nothing reads `context` until the stream starts below, so
             // the suspension is invisible beyond the thinking dots it happens under.
+            // The same bytes are parked in the image store, so the row this round
+            // settles into keeps the picture it was asked about.
+            var savedImageFile: String? = nil
             if let image = pendingVisionImage {
-                let encoded = await Task.detached(priority: .userInitiated) {
-                    Self.encodeForVision(image)
+                let jpeg = await Task.detached(priority: .userInitiated) {
+                    Self.encodeJPEGForVision(image)
                 }.value
-                if let encoded {
+                if let jpeg {
+                    let encoded = ChatImage(base64: jpeg.base64EncodedString(),
+                                            mediaType: "image/jpeg")
                     context[context.count - 1].image = encoded
                     // Park it on the thread so follow-ups re-attach it (unchanged
                     // from the synchronous version).
                     self.threadImage = (threadID: threadID, image: encoded)
+                    savedImageFile = await Task.detached(priority: .utility) {
+                        Self.storeHistoryImage(jpeg)
+                    }.value
+                    // Stamp the on-screen turn too, so the thumbnail shows on the
+                    // question the moment the answer starts writing — not only after
+                    // the row is reopened from Recent.
+                    if let file = savedImageFile,
+                       let i = self.turns.firstIndex(where: { $0.id == questionID }) {
+                        self.turns[i].imageFiles = [file]
+                    }
                 }
             }
             var thread = seedThread
+            // …and on the snapshot that actually gets persisted — `seedThread` was
+            // captured before the encode finished, so it still has the bare question.
+            if let file = savedImageFile,
+               let i = thread.firstIndex(where: { $0.id == questionID }) {
+                thread[i].imageFiles = [file]
+            }
             // Hoisted out of `do` so the error `catch` can read whatever streamed
             // before the failure — a mid-stream drop that already produced text must
             // persist that partial round, not discard it (see the catch below).
@@ -3305,6 +3899,9 @@ final class NotchModel: ObservableObject {
                     // dots even if the panel folded away (the round is detached but still
                     // ours). Idempotent: only the round that owns the flag clears it.
                     self.endThinking(for: answerID)
+                    // Mark the write phase for the collapsed busy ear — guarded
+                    // so it publishes once per round, never per chunk.
+                    if !self.backgroundWriting { self.backgroundWriting = true }
                     let now = ProcessInfo.processInfo.systemUptime
                     if now - lastFlushAt >= flushInterval {
                         flushChunks()
@@ -3340,11 +3937,7 @@ final class NotchModel: ObservableObject {
                 // wins, else the main service. An upgraded model still gets the tool
                 // harness below (search etc.), so the override rides both paths.
                 let askService: AIService = overrideService ?? self.ai
-                // A preset turn (translate/summarize) takes the plain stream and
-                // skips the tool harness — a mechanical transform never needs web
-                // search.
-                if !presetTurn,
-                   !imageAttached,
+                if !imageAttached,
                    let agent = askService as? AgentCapableService,
                    APIKeyStore.selectedProvider.supportsTools,
                    !registry.isEmpty {
@@ -3358,6 +3951,13 @@ final class NotchModel: ObservableObject {
                         onText: appendChunk,
                         onActivity: { [weak self] label in
                             guard let self else { return }
+                            // Every round feeds the background slot, on screen
+                            // or detached — the collapsed notch's busy ear shows
+                            // the same live line the panel would ("Searching the
+                            // web…", "Reading github.com…"). This must sit BEFORE
+                            // the isOnScreen gate: a detached round is exactly
+                            // the one the resting notch is reporting on.
+                            self.backgroundActivity = label
                             // The activity line only shows on a still-on-screen
                             // round; a detached harness silently ignores it.
                             if self.isOnScreen(answerID: answerID) {
@@ -3448,6 +4048,7 @@ final class NotchModel: ObservableObject {
                 self.markFinished(id: answerID)   // no-op when detached
                 self.persistThread(thread, threadID: threadID, answer: acc)
                 if walkedAway {
+                    self.noteBackgroundTaskFinished()
                     self.notifyAnswerReady(threadID: threadID, question: q, answer: acc)
                 }
             } catch is CancellationError {
@@ -3489,6 +4090,7 @@ final class NotchModel: ObservableObject {
                     } else if walkedAway {
                         // Interrupted but salvaged a partial answer, and the user had
                         // already walked away — still notify, same as a clean finish.
+                        self.noteBackgroundTaskFinished()
                         self.notifyAnswerReady(threadID: threadID, question: q, answer: saved)
                     }
                 } else {
@@ -3497,6 +4099,15 @@ final class NotchModel: ObservableObject {
                     // round parked in Recent so the question doesn't linger stuck on
                     // the three dots — whether or not it's still on screen.
                     self.settlePending(threadID)
+                    // A detached window mirroring this thread must not sit on a
+                    // spinner forever: settle its mirror with the failure reason
+                    // in the answer slot (the panel path below shows the same).
+                    if self.detachedThreadStores[threadID] != nil {
+                        if let i = thread.firstIndex(where: { $0.id == answerID }) {
+                            thread[i].text = error.localizedDescription
+                        }
+                        self.detachedThreadStores[threadID]?.settle(with: thread)
+                    }
                     if self.isOnScreen(answerID: answerID) {
                         // Surface the REAL reason (XII-85) — `ServiceError` already
                         // localizes to e.g. "Anthropic · HTTP 401" — and raise an
@@ -3605,7 +4216,11 @@ final class NotchModel: ObservableObject {
     /// turn (regenerating mid-thread would orphan everything after it), and gated
     /// on the stream being settled so a tap can't tear down an answer mid-flight.
     func regenerateLastAnswer(model: String? = nil) {
-        guard let last = turns.last, last.role == "assistant", !last.streaming else { return }
+        // Never on an agent run's report (footer button and ⌘R alike): the chat
+        // model can't re-run a task in the run's folder — it would just hallucinate
+        // a "completed" report over the real one.
+        guard let last = turns.last, last.role == "assistant", !last.streaming,
+              !last.isAgent else { return }
         resubmitLastQuestion(model: model)
     }
 
@@ -3641,8 +4256,7 @@ final class NotchModel: ObservableObject {
     }
 
     /// Does this *note* line point at something on the clipboard rather than carry
-    /// its own content? Sibling to `isReferentialQuery` (which is tuned for ASK
-    /// content-ops like summarize/translate) but calibrated for **note-filing**: the
+    /// its own content? Calibrated for **note-filing**: the
     /// verbs are save/keep/bookmark/file, and the useful payload is the copied
     /// URL/snippet, not the directive phrase. "Add this to my reading list" should
     /// file the link, not the literal sentence. Two signals, either is enough:
@@ -3928,6 +4542,8 @@ final class NotchModel: ObservableObject {
     private func syncInFlight(_ answerID: UUID, _ thread: [Turn]) {
         guard let i = inFlightRounds.firstIndex(where: { $0.answerID == answerID }) else { return }
         inFlightRounds[i].thread = thread
+        // A detached window following this thread hears every snapshot too.
+        detachedThreadStores[inFlightRounds[i].threadID]?.turns = thread
     }
 
     /// Put a still-streaming round back on screen: restore its live snapshot to
@@ -4094,6 +4710,9 @@ final class NotchModel: ObservableObject {
     /// text). The recent row shows the first question + latest answer; reopening
     /// it restores every turn.
     private func persistThread(_ thread: [Turn], threadID: UUID, answer ans: String) {
+        // A detached window following this thread freezes on the final state —
+        // caret gone, no stale activity line — whatever happens below.
+        detachedThreadStores[threadID]?.settle(with: thread)
         let trimmed = ans.trimmingCharacters(in: .whitespacesAndNewlines)
         // Nothing worth keeping (a stream that errored before any text): drop the
         // pending placeholder that `submit` parked here, so the question doesn't
@@ -4105,11 +4724,21 @@ final class NotchModel: ObservableObject {
         // (a follow-up), update it in place instead of inserting a duplicate, so
         // a long chat is a single recent row, not one per turn. Carry over any
         // previously generated title so follow-ups don't wipe it.
-        let existingTitle = history.first(where: { $0.id == threadID })?.title
+        let existing = history.first(where: { $0.id == threadID })
+        let existingTitle = existing?.title
         var item = HistoryItem(id: threadID, q: firstQ, a: trimmed, t: Date(), turns: thread)
         item.title = existingTitle
-        if let existing = history.firstIndex(where: { $0.id == threadID }) {
-            history.remove(at: existing)
+        // A chat follow-up on a reopened agent thread updates the SAME row — it
+        // must keep the row's agent identity (source, folder link, outcome,
+        // resume handle) rather than silently demoting it to a plain `.ask`.
+        if let existing {
+            item.source = existing.source
+            item.link = existing.link
+            item.agentOutcome = existing.agentOutcome
+            item.agentResume = existing.agentResume
+        }
+        if let i = history.firstIndex(where: { $0.id == threadID }) {
+            history.remove(at: i)
         }
         history.insert(item, at: 0)
         // No cap: the full archive is retained (see `persistCapture`).
@@ -4242,15 +4871,6 @@ final class NotchModel: ObservableObject {
         lastSavedNote = toReminders ? L("feedback.addedReminders", "") : L("feedback.addedNotes")
     }
 
-    /// Debug-only: seed a pending clipboard (bypassing the freshness/changeCount gate)
-    /// so the preset row — and the note/reminder capture chip — can be inspected at
-    /// launch without a real copy-then-hover. Runs the same async classification the
-    /// live path does. Used by the `NOTCH_DEMO_CLIP` env path in `AppDelegate`.
-    func seedDemoClipboard(_ text: String) {
-        pendingClipboard = text
-        classifyPendingClipboard(text)
-    }
-
     /// Debug-only: seed a long multi-turn thread so the result view's scrolling and
     /// edge fades can be inspected at launch without clicking. Used by the
     /// `NOTCH_DEMO_THREAD` env path in `AppDelegate`.
@@ -4304,7 +4924,7 @@ final class NotchModel: ObservableObject {
         // jump lives on a dedicated trailing button instead (`openCaptureInApp`),
         // so leaving the app is always a deliberate, separate tap. Here the row
         // body is a no-op for captures — the list stays open, nothing switches.
-        guard item.source == .ask else { return }
+        guard item.source.isThread else { return }
 
         showHistory = false
         highlightedHistoryIndex = nil
@@ -4315,7 +4935,22 @@ final class NotchModel: ObservableObject {
         // new one. (Legacy single-Q/A items rebuild a two-turn thread.)
         turns = item.conversation
         threadHistoryID = item.id
+        // A reopened thread that rode an image puts it back on the wire, so a
+        // follow-up ("so how do I fix it?") still sees the screenshot the thread
+        // started from instead of asking about nothing. The saved JPEG is already
+        // the downsampled one that went out the first time. Only when the model on
+        // duty now reads images at all — a text-only model gets the thread's text.
+        threadImage = activeModelSupportsVision ? Self.parkedImage(for: item) : nil
         mode = .result
+    }
+
+    /// The image a saved thread carries, rebuilt from the store as a wire attachment
+    /// (see `threadImage`). `nil` when the thread had none, or its file is gone.
+    private static func parkedImage(for item: HistoryItem) -> (threadID: UUID, image: ChatImage)? {
+        guard let file = item.conversation.first(where: { $0.role == "user" })?.imageFiles.first,
+              let jpeg = try? Data(contentsOf: historyImageURL(file)) else { return nil }
+        return (threadID: item.id,
+                image: ChatImage(base64: jpeg.base64EncodedString(), mediaType: "image/jpeg"))
     }
 
     /// Jump a Note/Reminder capture out to its app — the DELIBERATE exit, fired
@@ -4323,7 +4958,7 @@ final class NotchModel: ObservableObject {
     /// body (which stays put; see `openHistory`). Switching apps is a decision the
     /// user makes on purpose, so it has its own control. No-op for `.ask` rows.
     func openCaptureInApp(_ item: HistoryItem) {
-        guard item.source != .ask else { return }
+        guard !item.source.isThread else { return }
         openCapture(item)
         // Attention is moving to Notes/Reminders — hard-close the panel behind it
         // so the notch doesn't hang unfurled over the app the user just jumped to.
@@ -4379,8 +5014,8 @@ final class NotchModel: ObservableObject {
             } else {
                 openApp(bundleID: "com.apple.reminders")
             }
-        case .ask:
-            break   // handled by openHistory; never reached here
+        case .ask, .agent:
+            break   // threads — handled by openHistory; never reached here
         }
     }
 
@@ -4507,22 +5142,11 @@ final class NotchModel: ObservableObject {
         // highlighted capture it fires the jump (the keyboard twin of clicking the
         // trailing button), while a mouse click on the row body stays put. Ask
         // rows reopen the thread as before.
-        if item.source == .ask {
+        if item.source.isThread {
             openHistory(item)
         } else {
             openCaptureInApp(item)
         }
-        return true
-    }
-
-    /// Enter on an *empty* idle prompt while a capture chip is showing: file the copied
-    /// jot straight to Notes/Reminders, the keyboard twin of tapping the leading chip.
-    /// Only fires with nothing typed — once there's text, Enter belongs to that line
-    /// (routed by intent), so this never steals a real submit. Returns `true` when it
-    /// handled the key so the caller stops before the empty `submitCurrent()` no-op.
-    func confirmClipboardCaptureIfIdle() -> Bool {
-        guard !hasText, let capture = pendingClipboardCapture else { return false }
-        runClipboardCapture(capture)
         return true
     }
 
@@ -4541,6 +5165,10 @@ final class NotchModel: ObservableObject {
         // Clearing before the launch load lands must also veto the merge, or the
         // archive would pop right back once the disk read finishes.
         if !historyLoaded { historyClearedBeforeLoad = true }
+        // The rows go, so their attachments go with them. (A clear that lands before
+        // the load only sees what's in memory; the rest of the store is swept by the
+        // prune in `mergeLoadedHistory`, which then finds nothing referencing it.)
+        Self.deleteHistoryImages(history.flatMap(\.imageFiles))
         history = []
         saveHistory()
     }
@@ -4552,6 +5180,7 @@ final class NotchModel: ObservableObject {
     /// or releasing the highlight (and folding the list) once it's empty.
     func deleteHistory(id: UUID) {
         guard let removedVisibleIndex = recentVisible.firstIndex(where: { $0.id == id }) else { return }
+        Self.deleteHistoryImages(history.first(where: { $0.id == id })?.imageFiles ?? [])
         history.removeAll { $0.id == id }
         saveHistory()
 
@@ -4590,6 +5219,78 @@ final class NotchModel: ObservableObject {
             .appendingPathComponent("history.json")
     }
 
+    // MARK: - History images
+    //
+    // An attached image is kept as its own JPEG beside the archive, and the turn
+    // that carried it references it by filename (`Turn.imageFiles`). The bytes are
+    // the ones already downsampled for the wire (`encodeJPEGForVision` — long side
+    // ≤1568px), so a saved thumbnail costs a couple hundred KB, not the multi-MB
+    // Retina original. Files are removed with the rows that reference them
+    // (`deleteHistory` / `clearHistory`), and anything orphaned by a crash is swept
+    // at the next launch (`pruneHistoryImages`).
+
+    nonisolated static var historyImagesDirectory: URL {
+        historyFileURL.deletingLastPathComponent()
+            .appendingPathComponent("HistoryImages", isDirectory: true)
+    }
+
+    nonisolated static func historyImageURL(_ name: String) -> URL {
+        historyImagesDirectory.appendingPathComponent(name)
+    }
+
+    /// Park one already-encoded JPEG in the store. Returns the filename to stamp on
+    /// the turn, or `nil` if the write failed — in which case the turn simply keeps
+    /// no attachment, exactly as it did before this existed.
+    nonisolated static func storeHistoryImage(_ jpeg: Data) -> String? {
+        let dir = historyImagesDirectory
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let name = UUID().uuidString + ".jpg"
+        guard (try? jpeg.write(to: dir.appendingPathComponent(name), options: .atomic)) != nil
+        else { return nil }
+        return name
+    }
+
+    /// The image behind a saved filename, or `nil` if the file is gone (a wiped store,
+    /// a hand-deleted file). Views render nothing in that case rather than a broken box.
+    /// Decoded once per file per launch (see `historyImageCache`): the Recent list and
+    /// the archive rebuild on every keystroke in their search field, and re-decoding a
+    /// JPEG on each pass would show as jank.
+    nonisolated static func historyImage(named name: String) -> NSImage? {
+        if let cached = historyImageCache.object(forKey: name as NSString) { return cached }
+        guard let image = NSImage(contentsOf: historyImageURL(name)), image.isValid else { return nil }
+        historyImageCache.setObject(image, forKey: name as NSString)
+        return image
+    }
+
+    nonisolated static func deleteHistoryImages(_ names: [String]) {
+        guard !names.isEmpty else { return }
+        DispatchQueue.global(qos: .utility).async {
+            for name in names {
+                historyImageCache.removeObject(forKey: name as NSString)
+                try? FileManager.default.removeItem(at: historyImageURL(name))
+            }
+        }
+    }
+
+    /// Sweep images no saved row references any more — the residue of a crash between
+    /// writing the file and persisting the row that names it. A file young enough to
+    /// belong to a round still in flight (its row lands in the archive only once the
+    /// answer does) is left alone, so this can never delete an attachment out from
+    /// under a live conversation.
+    nonisolated private static func pruneHistoryImages(keeping referenced: Set<String>) {
+        let dir = historyImagesDirectory
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path)
+        else { return }
+        let cutoff = Date().addingTimeInterval(-3600)
+        for name in names where !referenced.contains(name) {
+            let url = dir.appendingPathComponent(name)
+            let written = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate
+            if let written, written > cutoff { continue }
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
     /// True once the launch load has merged the on-disk archive into `history`.
     /// Saves that fire before that (a capture seconds into a launch) are deferred:
     /// writing then would snapshot ONLY the new items, and a crash before the
@@ -4618,6 +5319,13 @@ final class NotchModel: ObservableObject {
             if historySaveDeferred {
                 historySaveDeferred = false
                 saveHistory()
+            }
+            // The archive is now whole, so anything in the image store it doesn't
+            // reference is residue (a crash between writing the JPEG and persisting
+            // the row, a Clear that landed before the load) — sweep it.
+            let referenced = Set(history.flatMap(\.imageFiles))
+            DispatchQueue.global(qos: .utility).async {
+                Self.pruneHistoryImages(keeping: referenced)
             }
         }
         guard !historyClearedBeforeLoad, !loaded.isEmpty else { return }
@@ -4684,6 +5392,27 @@ final class NotchModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
     }
 
+    /// Immediate, non-debounced archive write for rows that must not sit in the
+    /// debounce window. `then` runs after the write lands (on the IO queue) —
+    /// the agent path uses it to clear its crash-recovery marker only once the
+    /// row is safely on disk. Pre-load (launch recovery, whose marker is
+    /// already consumed) it falls back to the deferred-save path and runs the
+    /// completion immediately.
+    private func saveHistoryNow(then completion: @escaping @Sendable () -> Void) {
+        guard historyLoaded else {
+            historySaveDeferred = true
+            completion()
+            return
+        }
+        pendingHistorySave?.cancel()
+        pendingHistorySave = nil
+        let snapshot = history
+        Self.historyIO.async {
+            Self.writeHistoryToDisk(snapshot)
+            completion()
+        }
+    }
+
     /// Quit-time flush: run the debounced save NOW (synchronously through the IO
     /// queue) so the newest rows survive a ⌘Q inside the debounce window.
     private func flushHistorySave() {
@@ -4725,4 +5454,15 @@ func relativeTime(_ date: Date) -> String {
     if s < 3600 { return L("time.minutesAgo", s / 60) }
     if s < 86400 { return L("time.hoursAgo", s / 3600) }
     return L("time.daysAgo", s / 86400)
+}
+
+/// A settled record's wall-clock completion stamp for the answer footer — the
+/// time on its own when it finished today, month·day·time once it's older (year
+/// dropped either way). Locale-aware (24h vs AM/PM follows the system), kept short
+/// so it sits in the footer's quiet toolbar. The full date lives in the tooltip.
+func completionStamp(_ date: Date) -> String {
+    if Calendar.current.isDateInToday(date) {
+        return date.formatted(date: .omitted, time: .shortened)
+    }
+    return date.formatted(.dateTime.month(.abbreviated).day().hour().minute())
 }

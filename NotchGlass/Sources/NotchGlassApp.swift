@@ -18,6 +18,21 @@ struct NotchGlassApp: App {
         // blank window, the scene redirects: it closes its own window on sight
         // and routes to the in-panel settings via the same notification ⌘, uses.
         Settings { SettingsRedirectView() }
+            // Slot a "Check for Updates…" item into the standard app menu, right
+            // under "About Notch". Done through SwiftUI's command system (not a
+            // hand-inserted `NSMenuItem`) so it survives SwiftUI rebuilding the
+            // menu after launch. The app menu only exists in `.regular` mode (Dock
+            // icon shown); in the default `.accessory` overlay there's no menu bar
+            // at all, so the item simply isn't visible then. The action routes
+            // through `AppDelegate` via a notification — same handler ⌘ uses.
+            .commands {
+                CommandGroup(after: .appInfo) {
+                    Button(L("about.checkForUpdates") + "…") {
+                        NotificationCenter.default.post(
+                            name: .checkForUpdatesRequested, object: nil)
+                    }
+                }
+            }
     }
 }
 

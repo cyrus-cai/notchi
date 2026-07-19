@@ -53,7 +53,6 @@ struct WhatsNewView: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(RecentEntryStyle())
-            .help(L("whatsnew.back"))
 
             Text(L("whatsnew.title"))
                 .font(.sf(10, weight: .semibold))
