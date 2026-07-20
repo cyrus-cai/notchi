@@ -1197,7 +1197,10 @@ struct AgentEngineMark: View {
 /// **Everything applies live.** The cursor *is* the selection: ↑/↓ arms the model it
 /// lands on, ←/→ steps the effort. Nothing here is destructive — these are the picks
 /// the *next* run will use — so a card that committed only on Return would just be a
-/// second thing to remember. Return and Esc both simply close it.
+/// second thing to remember. Return and Esc both simply close it. A mouse click on a
+/// model row picks it and closes in one gesture (plain menu semantics); only the
+/// effort slider and the engine switch keep the card open, since those are dials
+/// you adjust, not a choice you make once.
 struct AgentModelPickerView: View {
     /// Every available engine's model choices, flattened in menu order — picking a
     /// model picks its engine with it, exactly as the chip's menu does.
@@ -1291,11 +1294,12 @@ struct AgentModelPickerView: View {
                         ForEach(engineChoices, id: \.self) { c in
                             AgentModelRow(label: shortLabel(c), selected: isSelected(c),
                                           ns: armedNS) {
-                                // A click on the armed row is a confirmation, not a
-                                // re-pick — it closes the card, giving mouse users the
-                                // same one-more-gesture exit Return gives the keyboard.
-                                if isSelected(c) { onDone() }
-                                else { withAnimation(Self.selectionSpring) { arm(c) } }
+                                // Menu semantics, same as the Ask recents menu: one
+                                // click picks the model AND closes — no lingering
+                                // card after the choice is made. Effort / engine
+                                // tweaks below are what keep the card open.
+                                if !isSelected(c) { arm(c) }
+                                onDone()
                             }
                             .id(c)
                         }

@@ -354,6 +354,39 @@ final class AgentTaskManager: ObservableObject {
             tasks.append(t)
         }
     }
+
+    /// TEMP debug: seed one LIVE (running) card — a fixed activity line and a
+    /// clock already minutes in — so the running status row and the resting
+    /// notch's busy ears can be screenshotted without a real CLI run. Never
+    /// persisted (running tasks only archive on settle); a normal relaunch
+    /// clears it. Used by the `NOTCH_DEMO_AGENT_RUN` env path in `AppDelegate`.
+    func _debugSeedRunning(prompt: String, activity: String, elapsed: TimeInterval,
+                           logLines: Int = 0) {
+        let engine = AgentEngine.available.first ?? .codex
+        var t = AgentTask(engine: engine,
+                          folder: URL(fileURLWithPath: "/tmp/demo-project"),
+                          prompt: prompt,
+                          startedAt: Date().addingTimeInterval(-elapsed))
+        t.activity = activity
+        // Optional dense work trail (NOTCH_DEMO_AGENT_LOG=<n>) so the live
+        // detail page can be exercised/screenshotted at realistic size — a
+        // repeating prose → commands → edit pattern, some rows with output.
+        if logLines > 0 {
+            t.log = (0..<logLines).map { i in
+                switch i % 6 {
+                case 0: return AgentLogEntry(id: UUID(), title: "Looking at the failing test to understand the assertion before touching the implementation.", mono: false)
+                case 1: return AgentLogEntry(id: UUID(), title: "$ swift test --filter NotchModelTests", mono: true,
+                                             detail: "Test Suite 'NotchModelTests' passed.\n Executed 12 tests, with 0 failures.")
+                case 2: return AgentLogEntry(id: UUID(), title: "Read NotchModel.swift", mono: true)
+                case 3: return AgentLogEntry(id: UUID(), title: "Editing NotchModel.swift", mono: true)
+                case 4: return AgentLogEntry(id: UUID(), title: "$ git diff --stat", mono: true,
+                                             detail: " NotchModel.swift | 24 ++++++++-----\n 1 file changed")
+                default: return AgentLogEntry(id: UUID(), title: "Searching hover collapse", mono: true)
+                }
+            }
+        }
+        tasks.append(t)
+    }
     #endif
 
     private func taskIndex(_ id: UUID) -> Int? {

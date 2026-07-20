@@ -1981,7 +1981,16 @@ struct InlineSettingsView: View {
                     NSWorkspace.shared.open(URL(string: "https://www.notch.website/privacy")!)
                 }),
                 (L("about.feedback"), {
-                    NSWorkspace.shared.open(URL(string: "mailto:\(Self.feedbackEmail)?subject=Notch%20Feedback")!)
+                    let mailto = URL(string: "mailto:\(Self.feedbackEmail)?subject=Notch%20Feedback")!
+                    // Route the compose to the desktop Mail.app specifically —
+                    // a plain mailto: hands off to whatever the default handler
+                    // is (often web Gmail / nothing), which isn't what we want.
+                    // Fall back to the default handler only if Mail is absent.
+                    if let mail = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.mail") {
+                        NSWorkspace.shared.open([mailto], withApplicationAt: mail, configuration: NSWorkspace.OpenConfiguration())
+                    } else {
+                        NSWorkspace.shared.open(mailto)
+                    }
                 }),
             ])
         }

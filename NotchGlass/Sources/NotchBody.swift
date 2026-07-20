@@ -34,6 +34,12 @@ struct NotchBody: View {
     /// removal badge only appears while its own thumbnail is hovered, so the
     /// strip rests as clean previews instead of a row of close buttons.
     @State private var hoveredComposeImageIndex: Int? = nil
+    /// The agent model+effort chip's title, frozen while its quick picker is up.
+    /// A live pick re-titles the chip, the chip resizes, and the moved anchor
+    /// trips `SettledPopover`'s re-glue — the open card visibly dismisses and
+    /// pops again. Freezing the label keeps the anchor still for the whole
+    /// session; the chip catches up the moment the card closes.
+    @State private var agentChipFrozenTitle: String? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Drives the custom field's first-responder. Set shortly after the panel
     /// opens so the caret lands without a click (the AppDelegate has just made
@@ -159,7 +165,11 @@ struct NotchBody: View {
         // (`askModelChip`), the settings chip, and ⌘⇧I's fallback when no agent CLI is
         // installed. It hangs under the panel body rather than off the chip so all three
         // front doors land the same card right below the island, where the eye already is.
-        .popover(isPresented: $model.showModelPicker, arrowEdge: .bottom) {
+        // Routed through SettledPopover (not a bare `.popover`): NSPopover pins
+        // itself to the anchor's frame at present time only, so firing while the
+        // island's open spring is still moving left the card visibly torn off
+        // the glass. The gate waits for the body to stand still, then presents.
+        .modifier(SettledPopover(isPresented: $model.showModelPicker) {
             ModelPickerView(
                 models: catalog.rows(selected: selectedProvider),
                 selectedProvider: selectedProvider,
@@ -182,40 +192,16 @@ struct NotchBody: View {
                 .task { await catalog.loadAll() }
                 .preferredColorScheme(.dark)
                 .modifier(GlassPopoverBackground(cornerRadius: 14))
-        }
+        })
         .onChange(of: model.showModelPicker) { _, open in
             // The popover is its own window, outside the island's tracking area —
             // suspend the leave-collapse while it's up, exactly as the settings
             // picker does, or moving the pointer into the card folds the panel away.
             model.isModelPickerOpen = open
         }
-        // What ⌘⇧I opens: the agent's model + reasoning effort, the compose chip's menu
-        // unfolded into a card (ContentView routes the chord; the chip's own menu stays
-        // as it was). Hung off the body for the same reason as the chat picker — it lands
-        // right under the island, and it doesn't depend on the chip being on screen.
-        .popover(isPresented: $model.showAgentPicker, arrowEdge: .bottom) {
-            AgentModelPickerView(
-                choices: AgentEngine.available.flatMap(\.modelChoices),
-                selectedEngine: model.agentArmedEngine,
-                selectedModelID: model.agentModelID,
-                selectedEffort: model.agentEffort,
-                onSelectModel: { choice in
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                        model.selectAgentModel(choice)
-                    }
-                },
-                onSelectEffort: { model.agentEffort = $0 },
-                onDone: { model.showAgentPicker = false })
-                // Resolve the Claude aliases to concrete model names ("opus" →
-                // "Claude Opus 4.8") so the rows can say what they actually run;
-                // cached + TTL'd, so this is usually a no-op, and the labels fill
-                // in reactively when a real probe lands.
-                .task { catalog.resolveClaudeAliases() }
-                .preferredColorScheme(.dark)
-                // A thinner veil than the standard popover — this card reads as
-                // transparent Liquid Glass, the wallpaper refracting through it.
-                .modifier(GlassPopoverBackground(cornerRadius: 14, veilOpacity: 0.16))
-        }
+        // The agent's model+effort picker (⌘⇧I / the compose chip tap) hangs off
+        // the model chip itself — see `agentComposeChips` — not the body, so it
+        // pops from the control that opened it exactly like the Ask chip's menu.
         .onChange(of: model.showAgentPicker) { _, open in
             model.isModelPickerOpen = open
         }
@@ -829,7 +815,10 @@ struct NotchBody: View {
             model.showAskModelPicker = true
         }, icon: { EmptyView() })
         .fixedSize()
-        .popover(isPresented: $model.showAskModelPicker, arrowEdge: .bottom) {
+        // Settle-gated like the body-hung pickers: a pick changes the chip's
+        // title, the chip resizes, and a bare NSPopover would stay pinned to
+        // where the chip *was* — the gate re-glues it to the moved chip.
+        .modifier(SettledPopover(isPresented: $model.showAskModelPicker) {
             AskRecentModelPickerView(
                 rows: askRecentModelRows,
                 selectedProvider: selectedProvider,
@@ -840,7 +829,7 @@ struct NotchBody: View {
                 onDone: { model.showAskModelPicker = false })
                 .preferredColorScheme(.dark)
                 .modifier(GlassPopoverBackground(cornerRadius: 14, veilOpacity: 0.16))
-        }
+        })
     }
 
     /// The rows the Ask chip's quick menu shows: the selection in effect first, then
@@ -875,13 +864,53 @@ struct NotchBody: View {
             .fixedSize()
 
             // Model + reasoning effort read as ONE chip — "Claude Opus xhigh".
-            // Clicking it opens the same model+effort quick picker ⌘⇧I summons
-            // (the AgentModelPickerView card hung off the body), not an NSMenu —
-            // so both front doors land on one card and behave identically.
-            AgentComposeChip(title: agentModelEffortTitle, action: {
+            // Clicking it opens the same model+effort quick picker ⌘⇧I summons,
+            // not an NSMenu — so both front doors land on one card and behave
+            // identically.
+            AgentComposeChip(title: agentChipFrozenTitle ?? agentModelEffortTitle, action: {
                 model.showAgentPicker = true
             }, icon: { EmptyView() })
             .fixedSize()
+            // Freeze the title while the card is up (the card itself shows the
+            // armed pick), covering both front doors — the chip tap and ⌘⇧I.
+            // This runs in the same update as SettledPopover's own close, so
+            // the unfreeze resize lands only after `shown` is already false.
+            .onChange(of: model.showAgentPicker) { _, open in
+                agentChipFrozenTitle = open ? agentModelEffortTitle : nil
+            }
+            // ⌘⇧I can arm the flag while the island (and this chip) is still
+            // unmounted — the onChange above never fires then, so seed the
+            // freeze on mount.
+            .onAppear {
+                if model.showAgentPicker { agentChipFrozenTitle = agentModelEffortTitle }
+            }
+            // Hung off the chip itself, exactly like the Ask chip's menu — the
+            // card pops from the control that opened it instead of floating
+            // detached under the island. Settle-gated so a pick that resizes the
+            // chip re-glues the tail to where the chip lands.
+            .modifier(SettledPopover(isPresented: $model.showAgentPicker) {
+                AgentModelPickerView(
+                    choices: AgentEngine.available.flatMap(\.modelChoices),
+                    selectedEngine: model.agentArmedEngine,
+                    selectedModelID: model.agentModelID,
+                    selectedEffort: model.agentEffort,
+                    onSelectModel: { choice in
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            model.selectAgentModel(choice)
+                        }
+                    },
+                    onSelectEffort: { model.agentEffort = $0 },
+                    onDone: { model.showAgentPicker = false })
+                    // Resolve the Claude aliases to concrete model names ("opus" →
+                    // "Claude Opus 4.8") so the rows can say what they actually run;
+                    // cached + TTL'd, so this is usually a no-op, and the labels fill
+                    // in reactively when a real probe lands.
+                    .task { catalog.resolveClaudeAliases() }
+                    .preferredColorScheme(.dark)
+                    // A thinner veil than the standard popover — this card reads as
+                    // transparent Liquid Glass, the wallpaper refracting through it.
+                    .modifier(GlassPopoverBackground(cornerRadius: 14, veilOpacity: 0.16))
+            })
         }
     }
 
@@ -1152,7 +1181,9 @@ struct NotchBody: View {
                     VStack(alignment: .leading, spacing: 14) {
                         UserQuestionBubble(text: task.prompt)
                         if !task.log.isEmpty {
-                            AgentWorkTrailView(entries: task.log)
+                            // Lazy: a long run's trail is hundreds of rows and
+                            // this page pins to the tail — see `isLazy`'s doc.
+                            AgentWorkTrailView(entries: task.log, isLazy: true)
                         }
                         if task.isRunning {
                             // The collapsed row's ticker, following the trail —
@@ -1412,15 +1443,15 @@ struct NotchBody: View {
         .shadow(color: .black.opacity(0.35), radius: 16, y: 8)
     }
 
-    /// The update row of the manage menu, with the same in-place state story as
-    /// the About panel's update slot so a tap gives visible feedback right here
-    /// instead of the menu closing on a silent check:
-    ///   • "Update to X" when a newer build is waiting — a tap installs it and
-    ///     dismisses the menu (the app relaunches, so nothing stays to look at);
-    ///   • a spinner + "Checking…" while a manual check is in flight;
-    ///   • a brief "You're up to date" confirmation that recedes back to the link;
-    ///   • otherwise the plain "Check for updates" — a tap runs the check and
-    ///     keeps the menu open so its result is actually seen.
+    /// The update row of the manage menu:
+    ///   • "Update to X" when a newer build is already waiting — a tap installs
+    ///     it and dismisses the menu (the app relaunches, so nothing stays to
+    ///     look at);
+    ///   • otherwise "Check for updates" — a tap jumps to Settings → About with
+    ///     a user-initiated check already running (the same path as the app
+    ///     menu's "Check for Updates…"), so the spinner, the "up to date" note,
+    ///     or the Update button land in the About slot built to show them
+    ///     instead of the menu pantomiming the check in place.
     @ViewBuilder
     private var updateMenuRow: some View {
         if case .available(let v) = updater.phase {
@@ -1431,51 +1462,16 @@ struct NotchBody: View {
                 updater.update()
             }
         } else {
-            switch updater.manualCheck {
-            case .checking:
-                manageMenuStatusRow(title: L("about.checking"), spinner: true)
-            case .upToDate:
-                manageMenuStatusRow(title: L("about.upToDate"))
-                    .task {
-                        // Let the confirmation linger, then recede to the link.
-                        try? await Task.sleep(nanoseconds: 2_500_000_000)
-                        updater.clearManualConfirmation()
-                    }
-            case .idle:
-                manageMenuRow(icon: LucideIcons.circleFadingArrowUp,
-                              title: L("recent.menu.checkForUpdates")) {
-                    updater.checkManually()
+            manageMenuRow(icon: LucideIcons.circleFadingArrowUp,
+                          title: L("recent.menu.checkForUpdates")) {
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                    manageExpanded = false
+                    model.settingsSection = "About"
+                    model.toggleSettings()
                 }
+                updater.checkManually()
             }
         }
-    }
-
-    /// A non-interactive twin of `manageMenuRow` for the update action's
-    /// transient faces — a spinner + "Checking…", or a plain "You're up to
-    /// date" — so the check reads as something that happened in the menu.
-    private func manageMenuStatusRow(title: String, spinner: Bool = false) -> some View {
-        HStack(spacing: 8) {
-            // The same 13pt slot the icon rows lead with, occupied or not: the update row
-            // swaps between this and `manageMenuRow` in place, and an unreserved slot
-            // would slide the label 21pt left the moment a check starts.
-            ZStack {
-                if spinner {
-                    ProgressView()
-                        .progressViewStyle(.circular)
-                        .controlSize(.small)
-                        // .small is 16pt — bring it down to the glyphs' 13.
-                        .scaleEffect(0.8)
-                }
-            }
-            .frame(width: 13, height: 13)
-            Text(title)
-                .font(.sf(12, weight: .medium))
-                .foregroundStyle(Tokens.text3)
-            Spacer(minLength: 16)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 7)
-        .contentShape(Rectangle())
     }
 
     /// One full-width action row of the manage menu — icon, label, optional
@@ -3131,11 +3127,11 @@ private struct RecentRowAccessibility: ViewModifier {
 fileprivate extension NotchModel {
     /// Saturated body — for the field's low-opacity background wash.
     var submitTint: Color {
-        agentComposeActive ? Tokens.agentTint : effectiveSubmitPanel.intentTint
+        submitGoesToAgent ? Tokens.agentTint : effectiveSubmitPanel.intentTint
     }
     /// The luminous face — for the inline ghost's word and the rim pulse.
     var submitInk: Color {
-        agentComposeActive ? Tokens.agentInk : effectiveSubmitPanel.intentInk
+        submitGoesToAgent ? Tokens.agentInk : effectiveSubmitPanel.intentInk
     }
 }
 
@@ -3944,6 +3940,115 @@ private struct BucketWord: View {
                 // Same air around the glyph the SF mark had (11pt in 14), scaled.
                 .frame(minWidth: 18)
                 .transition(.opacity)
+        }
+    }
+}
+
+/// Presents a popover only once its anchor is standing still — and re-pins it
+/// if the anchor moves underneath.
+///
+/// `.popover` on macOS is an NSPopover: it computes its screen position ONCE,
+/// from the anchor's frame at presentation time, and never re-tracks SwiftUI
+/// layout (the island animates entirely inside one hosting NSView, so AppKit
+/// sees nothing move). Fire a picker mid-spring — ⌘⇧I pressed right on the
+/// open edge, or a flag left armed while the body was unmounted — and the
+/// card lands wherever the island happened to be that frame, its tail
+/// visibly torn off the glass. The fix is temporal, not spatial: hold the
+/// actual presentation until the anchor's global frame has been quiet for a
+/// beat, and if the anchor slides under an open popover (the island
+/// re-laying out, a chip growing on pick), drop and re-present so the tail
+/// is glued again.
+struct SettledPopover<PopContent: View>: ViewModifier {
+    /// The caller's intent flag (usually a model @Published). `shown` is what
+    /// the real `.popover` sees — it trails this by however long the anchor
+    /// needs to stop moving, and reflects click-away dismissals back into it.
+    @Binding var isPresented: Bool
+    var arrowEdge: Edge
+    @ViewBuilder var popoverContent: () -> PopContent
+
+    @State private var shown = false
+    /// True while `shown` is being cycled false→true to re-pin after an
+    /// anchor move — tells the dismiss-sync below the drop wasn't the user's.
+    @State private var regluing = false
+    /// When the anchor's global frame last changed. `.distantPast` means "no
+    /// move ever seen" — a settled anchor presents with zero added latency.
+    @State private var lastMove = Date.distantPast
+
+    /// How long the anchor must hold still to count as settled. The open
+    /// spring (response 0.42) stops emitting layout deltas well inside this
+    /// once its tail goes sub-pixel.
+    private static var quiet: TimeInterval { 0.15 }
+
+    init(isPresented: Binding<Bool>,
+         arrowEdge: Edge = .bottom,
+         @ViewBuilder popoverContent: @escaping () -> PopContent) {
+        _isPresented = isPresented
+        self.arrowEdge = arrowEdge
+        self.popoverContent = popoverContent
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .background(GeometryReader { g in
+                let frame = g.frame(in: .global)
+                Color.clear
+                    .onChange(of: frame) { old, new in
+                        lastMove = Date()
+                        // Anchor slid under an open popover — NSPopover won't
+                        // follow, so re-pin once it settles. Sub-pixel layout
+                        // jitter doesn't count; a real move does.
+                        guard shown, !regluing,
+                              abs(new.midX - old.midX) + abs(new.maxY - old.maxY) > 2
+                        else { return }
+                        regluing = true
+                        shown = false
+                        afterSettle {
+                            shown = isPresented
+                            regluing = false
+                        }
+                    }
+            })
+            .popover(isPresented: $shown, arrowEdge: arrowEdge) { popoverContent() }
+            .onChange(of: isPresented) { _, wants in
+                if wants {
+                    afterSettle { if isPresented { shown = true } }
+                } else {
+                    shown = false
+                }
+            }
+            // Click-away/Esc dismisses the NSPopover directly — reflect that
+            // back into the intent flag so the model knows the card is gone.
+            .onChange(of: shown) { _, s in
+                if !s, !regluing, isPresented { isPresented = false }
+            }
+            // The intent flag can be armed while this view is unmounted (⌘⇧I
+            // with the island closed leaves it set): present once the mount's
+            // open spring lands. Seeding `lastMove` here is what makes the
+            // gate wait — the spring's first frames haven't emitted a change
+            // yet, and presenting on the mount frame is exactly the bug.
+            .onAppear {
+                guard isPresented else { return }
+                lastMove = Date()
+                afterSettle { if isPresented { shown = true } }
+            }
+    }
+
+    /// Run `action` once the anchor has been still for `quiet`, checking on
+    /// short hops (a spring's tail emits no "done" signal to observe). Gives
+    /// up after ~1.2s and runs anyway — a continuously-reflowing body (a
+    /// streaming answer) must not eat the popover entirely.
+    private func afterSettle(_ action: @escaping () -> Void) {
+        afterSettle(deadline: Date().addingTimeInterval(1.2), action)
+    }
+
+    private func afterSettle(deadline: Date, _ action: @escaping () -> Void) {
+        let since = Date().timeIntervalSince(lastMove)
+        if since >= Self.quiet || Date() >= deadline {
+            action()
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + (Self.quiet - since) + 0.02) {
+                afterSettle(deadline: deadline, action)
+            }
         }
     }
 }

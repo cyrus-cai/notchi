@@ -359,8 +359,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 AgentTaskManager.shared._debugSeedSettled(n)
                 model.showHistory = true
             }
+            // NOTCH_DEMO_AGENT_COMPOSE=1 arms the agent compose (folder + engine
+            // chips unfurl; the input hint reads the engine) so the compose
+            // surface can be screenshotted. NOTCH_DEMO_AGENT_FOLDER names the
+            // project the folder chip shows. Combine with NOTCH_DEMO_INPUT for
+            // a typed task line. Screenshot aid only.
+            if env["NOTCH_DEMO_AGENT_COMPOSE"] == "1" {
+                model.enterAgentCompose()
+                // Set the demo folder directly on the transient compose state —
+                // passing it through enterAgentCompose(folder:) would persist it
+                // as the real "last project" memory.
+                if let path = env["NOTCH_DEMO_AGENT_FOLDER"] {
+                    model.agentComposeFolder = URL(fileURLWithPath: path)
+                }
+            }
             #endif
         }
+        #if DEBUG
+        // NOTCH_DEMO_AGENT_RUN=<activity line> seeds one RUNNING agent card
+        // (prompt via NOTCH_DEMO_AGENT_PROMPT, elapsed seconds via
+        // NOTCH_DEMO_AGENT_ELAPSED, default 3m40s). With NOTCH_OPEN=1 the row
+        // shows inside the expanded Recent list; without it, the resting notch
+        // plays its busy ears (live verb + clock). Screenshot aid only.
+        if let activity = env["NOTCH_DEMO_AGENT_RUN"], !activity.isEmpty {
+            let elapsed = env["NOTCH_DEMO_AGENT_ELAPSED"].flatMap(Double.init) ?? 220
+            AgentTaskManager.shared._debugSeedRunning(
+                prompt: env["NOTCH_DEMO_AGENT_PROMPT"] ?? "Demo agent task",
+                activity: activity,
+                elapsed: elapsed,
+                // NOTCH_DEMO_AGENT_LOG=<n> fills the run's work trail with n
+                // seeded entries, so the live detail page can be exercised at
+                // realistic (hundreds-of-rows) size.
+                logLines: env["NOTCH_DEMO_AGENT_LOG"].flatMap(Int.init) ?? 0
+            )
+            if env["NOTCH_OPEN"] == "1" { model.showHistory = true }
+        }
+        #endif
         // Debug aid: NOTCH_SETTINGS=1 opens the panel straight into the inline
         // settings view at launch (via the same path as ⌘,) so it can be
         // inspected/screenshotted without a hover. No effect in normal use.

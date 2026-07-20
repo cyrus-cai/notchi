@@ -1387,15 +1387,28 @@ final class NotchModel: ObservableObject {
         setAgentBucket(!agentComposeActive)
     }
 
+    /// True when Enter on the current input goes to an agent CLI: an armed
+    /// compose on the idle prompt, or a follow-up on an agent thread whose
+    /// session is resumable (`submit` hands that line to `continueAgentThread`).
+    /// With a thread on screen the THREAD decides — an ask thread's follow-up
+    /// goes to the chat model even while the Agent bucket sits armed underneath,
+    /// and an agent thread's goes to its agent regardless of the bucket. The
+    /// ghost hint, its colours, and `submitCurrent` all read this one switch, so
+    /// the word beside the caret can never disagree with where the line lands.
+    var submitGoesToAgent: Bool {
+        if !turns.isEmpty { return agentThreadContinuation != nil }
+        return agentComposeActive
+    }
+
     /// The word in the inline hint — the destination spelled out: "Note" when this
     /// line will be saved to Apple Notes, "Remind" when it'll be filed in Apple
     /// Reminders, "Ask" when it'll go to the AI. Flips live with the classifier as
     /// the text crosses intents, so the hint beside the caret literally says where
     /// Enter sends the line.
     var submitLabel: String {
-        // An active agent compose owns the hint: Enter sends the line to the
-        // agent CLI.
-        if agentComposeActive { return L("hint.agent") }
+        // Agent-bound input (armed compose, or an agent thread's follow-up)
+        // owns the hint: Enter sends the line to the agent CLI.
+        if submitGoesToAgent { return L("hint.agent") }
         switch effectiveSubmitPanel {
         case .chat:     return L("hint.ask")
         case .note:     return L("hint.note")
@@ -1411,9 +1424,12 @@ final class NotchModel: ObservableObject {
     /// lighter than the word: the word answers "where does Enter send this", the
     /// suffix is the softer footnote "…how often".
     var submitLabelSuffix: String {
-        // The compose hint names the runner, not a chat model: "Agent Codex" /
-        // "Agent Claude".
-        if agentComposeActive { return " " + agentArmedEngine.displayName }
+        // The agent hint names the runner, not a chat model: "Agent Codex" /
+        // "Agent Claude" — the thread's own engine on a follow-up, the armed
+        // one in a compose.
+        if submitGoesToAgent {
+            return " " + (agentThreadContinuation ?? agentArmedEngine).displayName
+        }
         switch effectiveSubmitPanel {
         case .chat:     return ""
         case .note:     return ""
@@ -2015,7 +2031,71 @@ final class NotchModel: ObservableObject {
     /// UI (XII-121). Called on the closed→open edge and after any in-app pasteboard
     /// write, so the thumbnail stays in sync with what an Ask would actually attach.
     func refreshPendingClipboard() {
-        pendingClipboardImage = clipboardImageIfEligible()
+        guard let image = clipboardImageIfEligible() else {
+            pendingClipboardImage = nil
+            pendingPreviewChangeCount = nil
+            return
+        }
+        // The pasteboard hands back the FULL-resolution bitmap — a Retina
+        // screenshot runs tens of MB decoded — and the idle strip only draws it
+        // at 34×24pt. Publishing the raw image made SwiftUI decode all of it on
+        // the main thread at first draw, i.e. mid-open-spring (this refresh runs
+        // from `openPanel`), which is exactly the copy-screenshot-then-hover flow
+        // stuttering on its first frames. Downsample on a background task and
+        // publish a thumbnail-sized copy instead; the submit path is untouched —
+        // it re-reads the pasteboard itself (`clipboardImageIfEligible` at
+        // submit time) and always encodes from the full-resolution original.
+        let count = NSPasteboard.general.changeCount
+        // Same clip as the preview already built (hover re-enters call this
+        // repeatedly) — don't re-decode the identical image.
+        guard count != pendingPreviewChangeCount else { return }
+        pendingPreviewChangeCount = count
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let preview = NotchModel.previewThumbnail(image) ?? image
+            await MainActor.run {
+                guard let self, self.pendingPreviewChangeCount == count else { return }
+                self.pendingClipboardImage = preview
+            }
+        }
+    }
+
+    /// The pasteboard `changeCount` the current preview thumbnail was built from
+    /// (or is being built from — set before the decode task is spawned, so a
+    /// burst of refreshes can't stack duplicate decodes). `nil` when no preview
+    /// is showing.
+    private var pendingPreviewChangeCount: Int? = nil
+
+    /// Downsample a pasteboard image to preview size — called on a background
+    /// task by `refreshPendingClipboard` (offscreen bitmap drawing is safe off
+    /// the main thread; same pattern as `encodeJPEGForVision`). 160px on the
+    /// long side is ~2.3× the 34×24pt slot at Retina scale, so the fill-crop
+    /// stays crisp while the decode-at-draw cost becomes negligible.
+    nonisolated static func previewThumbnail(_ image: NSImage, maxSide: Int = 160) -> NSImage? {
+        guard let tiff = image.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff) else { return nil }
+        let w = rep.pixelsWide, h = rep.pixelsHigh
+        guard w > 0, h > 0 else { return nil }
+        let scale = min(1.0, Double(maxSide) / Double(max(w, h)))
+        let outW = max(1, Int(Double(w) * scale))
+        let outH = max(1, Int(Double(h) * scale))
+        guard let resized = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: outW, pixelsHigh: outH,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+        ) else { return nil }
+        // Draw in pixel space: pin the rep's point size to its pixel size so the
+        // NSImage draw isn't rescaled by a Retina points-vs-pixels factor.
+        resized.size = NSSize(width: outW, height: outH)
+        NSGraphicsContext.saveGraphicsState()
+        if let ctx = NSGraphicsContext(bitmapImageRep: resized) {
+            NSGraphicsContext.current = ctx
+            image.draw(in: NSRect(x: 0, y: 0, width: outW, height: outH),
+                       from: .zero, operation: .copy, fraction: 1.0)
+        }
+        NSGraphicsContext.restoreGraphicsState()
+        let out = NSImage(size: NSSize(width: outW, height: outH))
+        out.addRepresentation(resized)
+        return out
     }
 
     // MARK: - Clipboard sense (copy → hint on the resting notch → ⌘C again to file)
@@ -2794,8 +2874,11 @@ final class NotchModel: ObservableObject {
         // already accounted for and can never hint on the way out.
         senseLastChangeCount = pasteboardChangeCountAtRest
         // Drop the preview so the resting panel stays minimal; the next open will
-        // re-evaluate and surface anything fresh.
+        // re-evaluate and surface anything fresh. The changeCount token goes with
+        // it, or the re-evaluation would see "same clip, already previewed" and
+        // skip rebuilding the thumbnail it just dropped.
         pendingClipboardImage = nil
+        pendingPreviewChangeCount = nil
     }
 
     /// "Back" / start a new conversation: drop the current Q&A from the screen and
@@ -2853,6 +2936,11 @@ final class NotchModel: ObservableObject {
     /// This matches `submitLabel` exactly, so the inline "Ask"/"Note"/"Remind" hint
     /// always names where the line actually went.
     func submitCurrent() {
+        // A thread on screen routes by the THREAD, not the armed bucket:
+        // `submit()` continues the conversation (its agent session when
+        // resumable, else the chat model), so a persisted Agent bucket can
+        // never hijack an ask thread's follow-up into a fresh agent task.
+        if !turns.isEmpty { submit(); return }
         // An active agent compose sends the line to the agent CLI, not the
         // chat model — regardless of what the classifier reads.
         if agentComposeActive { submitAgent(); return }

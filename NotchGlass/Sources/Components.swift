@@ -3294,6 +3294,16 @@ struct SavedTurnImages: View {
 /// reopened run's record, so the two read identically.
 struct AgentWorkTrailView: View {
     let entries: [AgentLogEntry]
+    /// Materialize rows lazily (only those near the viewport). The LIVE detail
+    /// page turns this on: its trail holds the full log (capped at 300 entries)
+    /// and pins to the bottom, so eagerly laying out hundreds of rows — every
+    /// one a button with its own chevron — on the tap that opens the page was
+    /// a visible stall the chat thread never had; and every ~250ms progress
+    /// tick re-ran that full-stack layout while the page stayed up. Lazy, the
+    /// mount and each tick only touch the screenful by the tail. Records keep
+    /// the eager stack (default): their logs are one settled round's slice
+    /// inside a thread whose scroll already manages its own geometry.
+    var isLazy: Bool = false
 
     /// One display unit of the trail: a prose paragraph, a follow-up prompt
     /// marker, or a run of consecutive tool calls (folded together). Identified
@@ -3334,43 +3344,54 @@ struct AgentWorkTrailView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            ForEach(blocks) { block in
-                switch block {
-                case .tools(let run):
-                    if run.count == 1 {
-                        // A lone call carries its own headline ("$ npm test",
-                        // "Editing Foo.swift") — a summary would only hide it.
-                        AgentTrailToolRow(entry: run[0])
-                    } else {
-                        AgentTrailGroupRow(entries: run)
-                    }
-                case .marker(let entry):
-                    // A follow-up round's prompt marker — present only in the
-                    // live trail (the record files the prompt as its own user
-                    // turn instead). Reads as a quiet inline bubble, in the
-                    // user bubble's own type (14.5 medium).
-                    Text(String(entry.title.dropFirst(2)))
-                        .font(.sf(14.5, weight: .medium))
-                        .foregroundStyle(Tokens.text2)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(.white.opacity(0.05))
-                        )
-                        .padding(.vertical, 3)
-                case .prose(let entry):
-                    // Narration is the agent's own words — set exactly like an
-                    // answer (same MarkdownBlocks, same 15pt base), one shade
-                    // quieter so the final report still leads.
-                    MarkdownBlocks(source: entry.title, baseFont: 15,
-                                   color: Tokens.text2)
+        if isLazy {
+            LazyVStack(alignment: .leading, spacing: 7) { rows }
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            VStack(alignment: .leading, spacing: 7) { rows }
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// The trail rows themselves — one ForEach, shared by the lazy and eager
+    /// containers above. (Lazy containers preserve per-row @State — a group
+    /// expanded, an output unfolded — for rows that scroll offscreen, so the
+    /// two containers behave identically beyond when layout happens.)
+    private var rows: some View {
+        ForEach(blocks) { block in
+            switch block {
+            case .tools(let run):
+                if run.count == 1 {
+                    // A lone call carries its own headline ("$ npm test",
+                    // "Editing Foo.swift") — a summary would only hide it.
+                    AgentTrailToolRow(entry: run[0])
+                } else {
+                    AgentTrailGroupRow(entries: run)
                 }
+            case .marker(let entry):
+                // A follow-up round's prompt marker — present only in the
+                // live trail (the record files the prompt as its own user
+                // turn instead). Reads as a quiet inline bubble, in the
+                // user bubble's own type (14.5 medium).
+                Text(String(entry.title.dropFirst(2)))
+                    .font(.sf(14.5, weight: .medium))
+                    .foregroundStyle(Tokens.text2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(.white.opacity(0.05))
+                    )
+                    .padding(.vertical, 3)
+            case .prose(let entry):
+                // Narration is the agent's own words — set exactly like an
+                // answer (same MarkdownBlocks, same 15pt base), one shade
+                // quieter so the final report still leads.
+                MarkdownBlocks(source: entry.title, baseFont: 15,
+                               color: Tokens.text2)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

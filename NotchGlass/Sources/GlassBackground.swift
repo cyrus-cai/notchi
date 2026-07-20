@@ -171,6 +171,12 @@ struct GlassMaterial: View {
             )
             .frame(height: 110)
             .blur(radius: 6)
+            // Flatten the blurred band to one offscreen texture (same trick as
+            // the drop shadow below): its content is fixed — a 110pt gradient,
+            // stops in fractions — so the 0.7s sweep animates a cached raster
+            // via the offset transform instead of re-running the radius-6 blur
+            // on every frame of the travel. Pixel-identical.
+            .drawingGroup()
             .offset(y: sweep ? travel - 55 : -110)
             .blendMode(.plusLighter)
         }
@@ -200,9 +206,16 @@ struct GlassMaterial: View {
             // Oversize + rotate so the band sweeps the lower-right corner area at a
             // shallow diagonal, like raking light, then blur it to a soft gloss.
             .frame(width: w * 1.8, height: h * 1.8)
+            // Blur BEFORE the rotation (a gaussian is isotropic, so blur∘rotate
+            // and rotate∘blur are the same picture) and flatten to one offscreen
+            // texture — the drop-shadow trick. The radius-14 blur over a 1.8×
+            // oversized band was the panel's biggest filter pass, re-run on every
+            // frame of the open/close spring; flattened, the rotation and offset
+            // ride the cached raster as plain transforms.
+            .blur(radius: 14)
+            .drawingGroup()
             .rotationEffect(.degrees(-18))
             .offset(x: w * 0.12, y: h * 0.30)
-            .blur(radius: 14)
             .blendMode(.plusLighter)
         }
         .allowsHitTesting(false)
