@@ -20,6 +20,10 @@ struct WhatsNewView: View {
     /// the notes breathe and just scroll when there are more than a few releases.
     private let maxHeight: CGFloat = 360
 
+    /// Length of the bottom taper where the notes dissolve as they scroll past the
+    /// frame edge, matching the recent list's `edgeFade`.
+    private let edgeFade: CGFloat = 64
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
@@ -80,6 +84,10 @@ struct WhatsNewView: View {
         }
         .frame(maxHeight: maxHeight)
         .scrollIndicators(.never)
+        // The header caps the top, so only the bottom tapers — the bundled history
+        // always outgrows the frame (a spec-less/empty changelog takes `emptyState`
+        // instead), so the notes always dissolve into this bottom edge as they scroll.
+        .scrollEdgeFade(top: false, bottom: true, bottomFade: edgeFade)
     }
 
     /// One release: a quiet meta line (date leading, version trailing — both the

@@ -78,6 +78,15 @@ struct NotchBody: View {
     /// itself. The input rows size themselves off these.
     @State private var inputHeight: CGFloat = PromptField.lineHeight(for: NotchBody.idleFontSize)
     @State private var followUpHeight: CGFloat = PromptField.lineHeight(for: NotchBody.followUpFontSize)
+    /// The live agent-detail page's own follow-up line — kept separate from the
+    /// idle prompt's `model.text` so a line typed while watching a run doesn't
+    /// leak into the fresh-chat box the page falls back to when the task ends.
+    /// Enter queues it as the run's next instruction (`AgentTaskManager.followUp`),
+    /// exactly like the detached agent window's field; the box stays put after
+    /// send so more can be lined up.
+    @State private var agentDetailFollowUp: String = ""
+    @State private var agentDetailFollowUpCaretWidth: CGFloat = 0
+    @State private var agentDetailFollowUpHeight: CGFloat = PromptField.lineHeight(for: NotchBody.followUpFontSize)
     /// Small directional slide-in for the idle prompt as ↑/↓ recall swaps a past
     /// question in: set to a nonzero offset (with the step's direction) the instant
     /// a recall fires, then animated back to rest. See `model.recallPulse`.
@@ -828,7 +837,7 @@ struct NotchBody: View {
                 },
                 onDone: { model.showAskModelPicker = false })
                 .preferredColorScheme(.dark)
-                .modifier(GlassPopoverBackground(cornerRadius: 14, veilOpacity: 0.16))
+                .modifier(GlassPopoverBackground(cornerRadius: 14, veilOpacity: 0, glassTint: 0.14))
         })
     }
 
@@ -909,7 +918,7 @@ struct NotchBody: View {
                     .preferredColorScheme(.dark)
                     // A thinner veil than the standard popover — this card reads as
                     // transparent Liquid Glass, the wallpaper refracting through it.
-                    .modifier(GlassPopoverBackground(cornerRadius: 14, veilOpacity: 0.16))
+                    .modifier(GlassPopoverBackground(cornerRadius: 14, veilOpacity: 0, glassTint: 0.14))
             })
         }
     }
@@ -1174,18 +1183,52 @@ struct NotchBody: View {
     /// report once it settles. Same information structure as the record a
     /// settled row opens; this is the during-the-run way in.
     private func agentDetailView(_ task: AgentTaskManager.AgentTask) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        // The flat trail (`task.log`) spans every round; the settled rounds each
+        // own their own slice via `exchange.log`. Whatever's left over belongs to
+        // the round in flight — its "› " prompt marker plus the tool rows it has
+        // produced so far. Split by entry id, never by index, so a capped/trimmed
+        // trail still partitions cleanly.
+        let claimedIDs = Set(task.exchanges.flatMap { $0.log.map(\.id) })
+        let liveTail = task.log.filter { !claimedIDs.contains($0.id) }
+        return VStack(alignment: .leading, spacing: 10) {
             agentDetailHeader(task)
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
-                        UserQuestionBubble(text: task.prompt)
-                        if !task.log.isEmpty {
-                            // Lazy: a long run's trail is hundreds of rows and
-                            // this page pins to the tail — see `isLazy`'s doc.
-                            AgentWorkTrailView(entries: task.log, isLazy: true)
+                        // Every settled round in order — its prompt, its own slice
+                        // of the work trail, then its report — so a follow-up thread
+                        // keeps ALL prior answers on screen. (This page used to
+                        // collapse to the task headline + the single latest answer,
+                        // dropping every earlier round's report the moment a
+                        // follow-up started.) Same structure as the record a settled
+                        // Recent row reopens into.
+                        ForEach(Array(task.exchanges.enumerated()), id: \.offset) { _, exchange in
+                            UserQuestionBubble(text: exchange.prompt)
+                            // The trail's last narration entry IS this round's report
+                            // (the parser records it in both places) — drop it so it
+                            // isn't printed again by the answer just below. See
+                            // `droppingTrailingAnswer`.
+                            let trail = exchange.log.droppingTrailingAnswer(exchange.answer)
+                            if !trail.isEmpty {
+                                // Lazy: a long run's trail is hundreds of rows and
+                                // this page pins to the tail — see `isLazy`'s doc.
+                                AgentWorkTrailView(entries: trail, isLazy: true)
+                            }
+                            if !exchange.answer.isEmpty {
+                                MarkdownBlocks(source: exchange.answer, baseFont: 15)
+                            }
                         }
+                        // The round still in flight has no settled exchange yet.
+                        // Round one carries no "› " marker, so its prompt is the task
+                        // headline; a follow-up round's prompt already rides the live
+                        // tail as its leading "› " marker.
                         if task.isRunning {
+                            if task.exchanges.isEmpty {
+                                UserQuestionBubble(text: task.prompt)
+                            }
+                            if !liveTail.isEmpty {
+                                AgentWorkTrailView(entries: liveTail, isLazy: true)
+                            }
                             // The collapsed row's ticker, following the trail —
                             // what the run is doing right now. Same 14pt/text3
                             // face the status row wears.
@@ -1194,16 +1237,26 @@ struct NotchBody: View {
                                 .tracking(-0.1)
                                 .lineLimit(1)
                                 .padding(.vertical, 2)
-                        } else if let answer = task.exchanges.last?.answer,
-                                  !answer.isEmpty {
-                            // The report, in the thread's own answer type.
-                            MarkdownBlocks(source: answer, baseFont: 15)
                         }
                         Color.clear.frame(height: 1).id(Self.agentDetailBottomID)
                     }
-                    .padding(.top, 2)
+                    // Runway: the trail rests below the header, then scrolls up into
+                    // this empty band to fade + frost out — the same soft top edge
+                    // the detached agent window wears (`ThreadScroll`), so the page
+                    // reads identically on both sides of a tear.
+                    .padding(.top, ThreadScroll.runway)
                     .padding(.bottom, 10)
                 }
+                // The shared dissolve at the top edge only — the page pins to the
+                // tail, so the newest line rests at the bottom and must stay at
+                // full strength (a bottom taper would permanently dim it).
+                .scrollEdgeFade(top: true, bottom: false, topFade: ThreadScroll.runway)
+                // Frost rests while the run streams (same discipline as the result
+                // view's ConditionalTopBlur): the blurred copy re-rasterizes on
+                // every content change, and a live trail changes constantly.
+                .modifier(ConditionalTopBlur(active: !task.isRunning,
+                                             height: ThreadScroll.band,
+                                             maxRadius: ThreadScroll.blurRadius))
                 // Follow the tail while entries stream in, like a terminal.
                 .onChange(of: task.log.count) { _, _ in
                     withAnimation(.easeOut(duration: 0.2)) {
@@ -1215,7 +1268,84 @@ struct NotchBody: View {
                 }
             }
             .frame(height: 330)
+
+            // A live follow-up box, same as the detached agent window carries. The
+            // run is mid-reply, so Enter can't interrupt it — the line queues and
+            // the manager dispatches it as the next round on settle (its "› "
+            // marker joins the trail above the moment it lands). The box stays after
+            // send, so several instructions can be lined up. Hidden only when the
+            // run settled without ever reporting a session id (nothing to resume,
+            // ever); a still-running or resumable task keeps it live.
+            if task.isRunning || task.sessionID != nil {
+                agentDetailFollowUpRow(task)
+            }
         }
+    }
+
+    /// The agent-detail page's follow-up input. Wired straight to the task's queue
+    /// (`AgentTaskManager.followUp`) rather than the panel's submit routing — the
+    /// page renders in `.idle` mode with empty `turns`, so `submitCurrent` would
+    /// mis-route the line to the chat model. Placeholder says "queue" while a round
+    /// is in flight, "ask a follow-up" once it settles.
+    private func agentDetailFollowUpRow(_ task: AgentTaskManager.AgentTask) -> some View {
+        HStack(alignment: .bottom, spacing: 6) {
+            ZStack(alignment: .leading) {
+                PromptField(
+                    text: $agentDetailFollowUp,
+                    placeholder: "",
+                    fontSize: NotchBody.followUpFontSize,
+                    focusTrigger: focused,
+                    maxVisibleLines: NotchBody.promptMaxLines,
+                    onSubmit: { submitAgentDetailFollowUp(task) },
+                    onCaretWidth: { agentDetailFollowUpCaretWidth = $0 },
+                    onHeightChange: { agentDetailFollowUpHeight = $0 }
+                )
+                .frame(height: agentDetailFollowUpHeight)
+                if agentDetailFollowUp.isEmpty && agentDetailFollowUpCaretWidth == 0 {
+                    Text(L(task.isRunning ? "agent.followUp.queue"
+                                          : "agent.followUp.placeholder"))
+                        .font(.sf(NotchBody.followUpFontSize))
+                        .foregroundStyle(Tokens.placeholder)
+                        .lineLimit(1)
+                        .padding(.leading, PromptField.textInset)
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
+                }
+            }
+            .frame(height: max(27, agentDetailFollowUpHeight))
+            .animation(.easeOut(duration: 0.16), value: agentDetailFollowUpCaretWidth == 0)
+
+            if !agentDetailFollowUp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                SendButton(compact: true) { submitAgentDetailFollowUp(task) }
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+            }
+        }
+        .padding(.leading, 13)
+        .padding(.trailing, 6)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(.white.opacity(focused ? 0.08 : 0.05))
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(.white.opacity(focused ? 0.20 : 0.10), lineWidth: 0.5)
+        )
+        .animation(.easeOut(duration: 0.2), value: focused)
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: agentDetailFollowUp.isEmpty)
+        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: agentDetailFollowUpHeight)
+    }
+
+    /// Queue the line as the run's next instruction and clear the field — the box
+    /// itself stays so more can follow. While the round is in flight the manager
+    /// holds it and dispatches on settle; a settled-but-resumable task spawns it
+    /// straight away. Never dismisses the page.
+    private func submitAgentDetailFollowUp(_ task: AgentTaskManager.AgentTask) {
+        let line = agentDetailFollowUp.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !line.isEmpty else { return }
+        agentDetailFollowUp = ""
+        AgentTaskManager.shared.followUp(taskID: task.id, prompt: line)
     }
 
     /// The detail page's top bar: back chevron (the page is a peek, not a mode —
@@ -1224,13 +1354,12 @@ struct NotchBody: View {
     /// jump the settled record offers.
     private func agentDetailHeader(_ task: AgentTaskManager.AgentTask) -> some View {
         HStack(spacing: 10) {
-            // No back chevron / status dot here — ← (newChat) backs out of the
-            // page; the title carries the identity on its own.
-            // Same 14pt rung as a Recent row title / the status row's ticker.
-            Text("\(task.engine.displayName) · \(task.folder.lastPathComponent)")
-                .font(.sf(14, weight: .medium))
-                .foregroundStyle(Tokens.text2)
-                .lineLimit(1)
+            // Back chevron: the page renders in `.idle` mode, so the bare-← key
+            // handler (which gates on `mode != .idle`) can't reach it — a visible
+            // button is the only reliable way out (Esc closes the whole panel).
+            // Same chevron the result header carries; taps `newChat()`, which
+            // drops `agentDetailTaskID` and falls back to the idle prompt.
+            backButton
             Spacer(minLength: 0)
             if task.isRunning {
                 TimelineView(.periodic(from: task.startedAt, by: 1)) { context in
@@ -1239,12 +1368,21 @@ struct NotchBody: View {
             } else {
                 agentElapsedLabel(task.elapsed)
             }
-            agentCardButton("folder", help: L("agent.openFolder")) {
-                NSWorkspace.shared.open(task.folder)
-            }
-            agentCardButton("macwindow.on.rectangle", help: L("detached.open")) {
-                model.openDetachedWindow()
-            }
+            // Open-folder + detach ride the same trailing-cluster glass the result
+            // header and detached window wear (`GlassSegmentCluster`), so every
+            // two-icon corner control in the app reads as one species.
+            GlassSegmentCluster(segments: [
+                .init(tooltip: L("agent.openFolder"),
+                      action: { NSWorkspace.shared.open(task.folder) }) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 12, weight: .semibold))
+                },
+                .init(tooltip: L("detached.open"),
+                      action: { model.openDetachedWindow() }) {
+                    Image(systemName: "macwindow.on.rectangle")
+                        .font(.system(size: 12, weight: .semibold))
+                },
+            ])
         }
         // The detail header is also the run's tear-off grip — drag the page out
         // and the task splits into its own window.
@@ -2544,7 +2682,9 @@ struct NotchBody: View {
                 // An agent answer carries its round's work trail above the report —
                 // the record's copy of the live detail page, so a reopened run
                 // reads the way the run looked while it worked.
-                if turn.isAgent, let trail = turn.agentLog, !trail.isEmpty {
+                if turn.isAgent,
+                   let trail = turn.agentLog?.droppingTrailingAnswer(turn.text),
+                   !trail.isEmpty {
                     AgentWorkTrailView(entries: trail)
                 }
                 AssistantTurnView(
@@ -3177,7 +3317,7 @@ private struct HistoryFooterButton: View {
     @State private var hovering = false
 
     private var tint: Color {
-        if destructive { return Color.red.opacity(hovering ? 0.95 : 0.75) }
+        if destructive { return Color.white.opacity(hovering ? 1.0 : 0.85) }
         return hovering ? Tokens.text2 : Tokens.text4
     }
 
@@ -3520,63 +3660,26 @@ struct ResultTrailingCluster: View {
     /// rather than the detach glyph floating bare beside it.
     var detach: (() -> Void)? = nil
 
-    private enum Segment { case detach, pin }
-
-    @State private var hovered: Segment? = nil
-
-    private let chip: CGFloat = 26
-
     var body: some View {
-        HStack(spacing: 2) {
+        GlassSegmentCluster(segments: {
+            var segs: [GlassSegmentCluster.Segment] = []
             if let detach {
-                segment(.detach, engaged: false, action: detach,
-                        tooltip: L("detached.open")) {
+                segs.append(.init(tooltip: L("detached.open"), action: detach) {
                     Image(systemName: "macwindow.on.rectangle")
                         .font(.system(size: 12, weight: .semibold))
-                }
+                })
             }
-            segment(.pin, engaged: pinned, action: togglePin,
-                    tooltip: L(pinned ? "result.unpin" : "result.pin")) {
+            segs.append(.init(engaged: pinned,
+                              tooltip: L(pinned ? "result.unpin" : "result.pin"),
+                              action: togglePin) {
                 // A pinned pin tips upright, the way a pushed-in tack sits — a small
                 // physical cue that it's engaged, on top of the engaged tint.
                 Image(systemName: "pin")
                     .font(.system(size: 12.5, weight: .semibold))
                     .rotationEffect(.degrees(pinned ? 0 : 32))
-            }
-        }
-        .padding(3)
-        // The whole cluster is the chip: a quiet whisper of glass at rest that comes
-        // to full strength (rim + specular) when the pointer is anywhere on it, or
-        // while the answer is pinned. The glass carries ALL the resting dimming —
-        // rendered behind the glyphs, so they stay pure white even at rest.
-        .background {
-            let lit = hovered != nil || pinned
-            Color.clear
-                .glassCapsule(in: Capsule(), brighter: lit)
-                .opacity(lit ? 1 : 0.55)
-        }
-        .animation(.easeOut(duration: 0.18), value: hovered)
-    }
-
-    private func segment<Glyph: View>(
-        _ segment: Segment, engaged: Bool, action: @escaping () -> Void,
-        tooltip: String, @ViewBuilder glyph: () -> Glyph
-    ) -> some View {
-        let hovering = hovered == segment
-        return Button(action: action) {
-            glyph()
-                .foregroundStyle(.white)
-                .frame(width: chip, height: chip)
-                .background(
-                    Circle().fill(.white.opacity(engaged ? 0.20 : (hovering ? 0.12 : 0)))
-                )
-                .contentShape(Circle())
-        }
-        .buttonStyle(GlassPressStyle())
-        .onHover { inside in
-            if inside { hovered = segment }
-            else if hovered == segment { hovered = nil }
-        }
+            })
+            return segs
+        }())
     }
 }
 
@@ -3635,11 +3738,19 @@ struct UserQuestionBubble: View {
     /// caused the relayout freeze). Counts hard newlines, plus an approximate wrap
     /// count for long unbroken lines (~48 chars/line at this width/font). If that
     /// exceeds the collapsed cap, the question is being clipped, so show the toggle.
-    private var isTruncated: Bool {
+    private var isTruncated: Bool { estimatedLines(exceed: collapsedLineLimit) }
+
+    /// Whether the EXPANDED text outgrows `expandedMaxHeight` and actually scrolls
+    /// inside the bubble — the gate for the scroll-edge fade below. Same string-only
+    /// estimate as `isTruncated` (no geometry read): ~19pt per line at this font, so
+    /// 240pt ≈ 12 lines.
+    private var expandedOverflows: Bool { estimatedLines(exceed: 12) }
+
+    private func estimatedLines(exceed cap: Int) -> Bool {
         var lines = 0
         for segment in text.split(separator: "\n", omittingEmptySubsequences: false) {
             lines += 1 + segment.count / 48
-            if lines > collapsedLineLimit { return true }
+            if lines > cap { return true }
         }
         return false
     }
@@ -3670,8 +3781,17 @@ struct UserQuestionBubble: View {
             if expanded {
                 ScrollView(.vertical, showsIndicators: false) {
                     questionText
+                        // Breathing room the fade falls across, so the last line can
+                        // rest above the taper at full strength when scrolled to the
+                        // end (the shared fade discipline — never dim resting text).
+                        .padding(.bottom, expandedOverflows ? 28 : 0)
                 }
                 .frame(maxHeight: expandedMaxHeight)
+                // The shared dissolve instead of a hard cut where the text scrolls
+                // past the bubble's edge. Gated on actual overflow — a bubble whose
+                // full text fits sizes to content, and fading it would dim real
+                // lines. Top stays crisp: the first line rests at the very top.
+                .scrollEdgeFade(top: false, bottom: expandedOverflows, fade: 28)
             } else {
                 questionText
             }

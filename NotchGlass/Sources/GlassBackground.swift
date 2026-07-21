@@ -374,7 +374,7 @@ extension View {
     /// smoked tint and keeps text legible. Reused by the quick-tools popover so it
     /// shares the panel's glass instead of an opaque slab.
     @ViewBuilder
-    func nativeGlass<S: Shape>(in shape: S) -> some View {
+    func nativeGlass<S: Shape>(in shape: S, tintOpacity: Double = GlassMaterial.bakedTint) -> some View {
         if #available(macOS 26.0, *) {
             // The tint bakes the panel's BASE darkening into the glass material
             // itself instead of leaving it all to the SwiftUI veil above. The
@@ -386,7 +386,7 @@ extension View {
             // an escaped sliver now reads as the same smoked glass as the panel
             // body instead of a bright unveiled band. `darkVeil` subtracts this
             // tint from its own stops so the settled look is unchanged.
-            self.glassEffect(.clear.tint(.black.opacity(GlassMaterial.bakedTint)), in: shape)
+            self.glassEffect(.clear.tint(.black.opacity(tintOpacity)), in: shape)
         } else {
             self.background(LegacyGlassBackdrop().clipShape(shape))
         }

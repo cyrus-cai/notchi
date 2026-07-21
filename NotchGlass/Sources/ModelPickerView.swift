@@ -336,7 +336,16 @@ struct ModelPickerView: View {
                         }
                     }
                     .padding(.trailing, 2)
+                    // Breathing room the bottom fade falls across, so the tail row
+                    // (or the fold handle) rests above the taper at full strength.
+                    .padding(.bottom, 40)
                 }
+                // The shared dissolve (`scrollEdgeFade`) where rows scroll past the
+                // column's bottom edge, instead of a hard cut. Bottom only — the
+                // search field caps the top and the first row rests right under it.
+                // The viewport is fixed (the card is 360pt tall), so a short result
+                // list just tapers empty space.
+                .scrollEdgeFade(top: false, bottom: true, fade: 40)
                 // Scroll only for keyboard moves (scrollToFocused), never for hover —
                 // that's what stopped the list scrolling wildly under the pointer.
                 .onChange(of: focused) {
@@ -513,6 +522,11 @@ struct ModelPickerView: View {
     private var providerFilterMenu: some View {
         let configured = providerOptions.filter(\.hasKey)
         let unconfigured = providerOptions.filter { !$0.hasKey }
+        // Whether the provider list actually outgrows the 218pt cap and scrolls —
+        // the gate for the shared edge fade below. String-only estimate (~30pt per
+        // FilterRow incl. spacing, plus two section headers): 7+ rows overflow. A
+        // menu that fits sizes to content, and fading it would dim real rows.
+        let overflowing = providerOptions.count >= 7
         return VStack(alignment: .leading, spacing: 2) {
             FilterRow(name: L("model.picker.allProviders"), count: models.count,
                       checked: providerFilter.isEmpty) { providerFilter = [] }
@@ -522,7 +536,12 @@ struct ModelPickerView: View {
                     section(L("model.picker.configured"), configured, isFirst: true)
                     section(L("model.picker.unconfigured"), unconfigured, isFirst: configured.isEmpty)
                 }
+                // Breathing room the bottom fade falls across at end of scroll.
+                .padding(.bottom, overflowing ? 24 : 0)
             }
+            // The shared dissolve (`scrollEdgeFade`) at the overflow edge instead of
+            // a hard cut. Bottom only: the pinned "All providers" row caps the top.
+            .scrollEdgeFade(top: false, bottom: overflowing, fade: 24)
             .frame(maxHeight: 218)
         }
         .padding(6)
@@ -1284,6 +1303,11 @@ struct AgentModelPickerView: View {
         c.engine == selectedEngine && c.id == selectedModelID
     }
 
+    /// Whether the model list actually outgrows the 200pt cap and scrolls — the
+    /// gate for the shared edge fade below. Row math, no geometry read: 25pt rows
+    /// at 2pt spacing → 8+ rows overflow.
+    private var overflowing: Bool { engineChoices.count >= 8 }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ScrollViewReader { proxy in
@@ -1304,7 +1328,14 @@ struct AgentModelPickerView: View {
                             .id(c)
                         }
                     }
+                    // Breathing room the bottom fade falls across at end of scroll.
+                    .padding(.bottom, overflowing ? 24 : 0)
                 }
+                // The shared dissolve (`scrollEdgeFade`) at the overflow edge instead
+                // of a hard cut. Gated on actual overflow — a short engine list sizes
+                // to content, and fading it would dim real rows. Bottom only: the
+                // first row rests at the very top when scrolled up.
+                .scrollEdgeFade(top: false, bottom: overflowing, fade: 24)
                 .frame(maxHeight: 200)
                 // Open centered on the current pick — with the fleet of models the
                 // armed one can sit below the fold, and a picker that opens blind to

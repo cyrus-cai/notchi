@@ -312,8 +312,16 @@ private struct HistoryArchiveView: View {
                 }
             }
             .padding(.horizontal, 8)
-            .padding(.vertical, 8)
+            .padding(.top, 8)
+            // The edge-fade reserve: end-of-scroll rests the last row above the
+            // taper at full strength, per the shared fade discipline.
+            .padding(.bottom, 64)
         }
+        // The shared dissolve (`scrollEdgeFade`, panel default 64pt) where rows
+        // scroll past the window's bottom edge, instead of a hard cut. Bottom only —
+        // the filter bar caps the top and the first row rests right under it. The
+        // viewport fills the window, so a short list just tapers empty space.
+        .scrollEdgeFade(top: false, bottom: true)
     }
 
     private var emptyList: some View {
@@ -497,8 +505,16 @@ private struct HistoryDetailView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(16)
+            .padding([.horizontal, .top], 16)
+            // The edge-fade reserve: end-of-scroll rests the last bubble above the
+            // taper at full strength, per the shared fade discipline.
+            .padding(.bottom, 64)
         }
+        // The shared dissolve (`scrollEdgeFade`, panel default 64pt) where bubbles
+        // scroll past the pane's bottom edge, instead of a hard cut. Bottom only —
+        // the title bar + hairline cap the top. The viewport fills the pane, so a
+        // short transcript just tapers empty space.
+        .scrollEdgeFade(top: false, bottom: true)
     }
 
     private var capture: some View {

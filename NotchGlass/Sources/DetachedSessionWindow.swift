@@ -596,54 +596,20 @@ private struct WindowTrailingCluster: View {
     var togglePin: () -> Void
     var reattach: () -> Void
 
-    private enum Segment { case reattach, pin }
-    @State private var hovered: Segment? = nil
-    private let chip: CGFloat = 26
-
     var body: some View {
-        HStack(spacing: 2) {
-            segment(.reattach, engaged: false, action: reattach,
-                    tooltip: L("detached.continueInNotch.help")) {
+        GlassSegmentCluster(segments: [
+            .init(tooltip: L("detached.continueInNotch.help"), action: reattach) {
                 Image(systemName: "arrow.up.forward.and.arrow.down.backward")
                     .font(.system(size: 11, weight: .semibold))
-            }
-            segment(.pin, engaged: pinned, action: togglePin,
-                    tooltip: L(pinned ? "result.unpin" : "result.pin")) {
+            },
+            .init(engaged: pinned,
+                  tooltip: L(pinned ? "result.unpin" : "result.pin"),
+                  action: togglePin) {
                 Image(systemName: "pin")
                     .font(.system(size: 12.5, weight: .semibold))
                     .rotationEffect(.degrees(pinned ? 0 : 32))
-            }
-        }
-        .padding(3)
-        .background {
-            let lit = hovered != nil || pinned
-            Color.clear
-                .glassCapsule(in: Capsule(), brighter: lit)
-                .opacity(lit ? 1 : 0.55)
-        }
-        .animation(.easeOut(duration: 0.18), value: hovered)
-        .animation(.easeOut(duration: 0.18), value: pinned)
-    }
-
-    private func segment<Glyph: View>(
-        _ segment: Segment, engaged: Bool, action: @escaping () -> Void,
-        tooltip: String, @ViewBuilder glyph: () -> Glyph
-    ) -> some View {
-        let hovering = hovered == segment
-        return Button(action: action) {
-            glyph()
-                .foregroundStyle(.white)
-                .frame(width: chip, height: chip)
-                .background(
-                    Circle().fill(.white.opacity(engaged ? 0.20 : (hovering ? 0.12 : 0)))
-                )
-                .contentShape(Circle())
-        }
-        .buttonStyle(GlassPressStyle())
-        .onHover { inside in
-            if inside { hovered = segment }
-            else if hovered == segment { hovered = nil }
-        }
+            },
+        ])
     }
 }
 
@@ -668,16 +634,18 @@ struct DetachedWindowGlass: View {
     }
 }
 
-// MARK: - Detached scroll edge
+// MARK: - Thread scroll edge
 
-/// Shared geometry for the detached scroll's soft top edge. The conversation
+/// Shared geometry for a headed thread scroll's soft top edge. The conversation
 /// runs up behind the header into a `runway` of empty inset, fading
 /// (`scrollEdgeFade`) and frosting (`progressiveTopBlur`) as it goes — the same
 /// dissolve the panel's immersive list uses, so overflowing content melts into
 /// the glass instead of ending on a hard top cut. The frost `band` stays shorter
 /// than the runway so no resting row sits inside it and haloes (see
-/// `ProgressiveTopBlur`).
-private enum DetachedScroll {
+/// `ProgressiveTopBlur`). Internal on purpose: the panel's agent-detail page
+/// (NotchBody) is the same species and shares these numbers, so the tear-off
+/// keeps the exact dissolve the panel showed.
+enum ThreadScroll {
     static let runway: CGFloat = 28
     static let band: CGFloat = 22
     static let blurRadius: CGFloat = 16
@@ -724,13 +692,13 @@ struct DetachedThreadView: View {
                         Color.clear.frame(height: 1).id(Self.bottomID)
                     }
                     // Runway: rows rest below the header, then scroll up into
-                    // this empty band to fade + frost out (see DetachedScroll).
-                    .padding(.top, DetachedScroll.runway)
+                    // this empty band to fade + frost out (see ThreadScroll).
+                    .padding(.top, ThreadScroll.runway)
                     .padding(.bottom, 16)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .scrollEdgeFade(top: true, bottom: false, topFade: DetachedScroll.runway)
-                .progressiveTopBlur(height: DetachedScroll.band, maxRadius: DetachedScroll.blurRadius)
+                .scrollEdgeFade(top: true, bottom: false, topFade: ThreadScroll.runway)
+                .progressiveTopBlur(height: ThreadScroll.band, maxRadius: ThreadScroll.blurRadius)
                 .onChange(of: store.turns.last?.text.count ?? 0) { _, _ in
                     guard streaming else { return }
                     proxy.scrollTo(Self.bottomID, anchor: .bottom)
@@ -804,7 +772,7 @@ struct DetachedThreadView: View {
             UserQuestionBubble(text: turn.text)
         } else {
             VStack(alignment: .leading, spacing: 10) {
-                if let log = turn.agentLog, !log.isEmpty {
+                if let log = turn.agentLog?.droppingTrailingAnswer(turn.text), !log.isEmpty {
                     AgentWorkTrailView(entries: log)
                 }
                 assistantTurn(turn)
@@ -888,8 +856,14 @@ struct DetachedAgentTaskView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
                         UserQuestionBubble(text: task.prompt)
-                        if !task.log.isEmpty {
-                            AgentWorkTrailView(entries: task.log)
+                        // Once settled, the trail's last narration entry is the report
+                        // shown below — drop it so it isn't printed twice. While running
+                        // no report shows, so the whole trail stands (empty answer = no
+                        // strip). See `droppingTrailingAnswer`.
+                        let settledAnswer = task.isRunning ? "" : (task.exchanges.last?.answer ?? "")
+                        let trail = task.log.droppingTrailingAnswer(settledAnswer)
+                        if !trail.isEmpty {
+                            AgentWorkTrailView(entries: trail)
                         }
                         if task.isRunning {
                             CrossfadeText(text: task.activity ?? L("agent.thinking"),
@@ -903,13 +877,13 @@ struct DetachedAgentTaskView: View {
                         Color.clear.frame(height: 1).id(Self.bottomID)
                     }
                     // Runway: the trail rests below the header, then scrolls up
-                    // into this empty band to fade + frost out (see DetachedScroll).
-                    .padding(.top, DetachedScroll.runway)
+                    // into this empty band to fade + frost out (see ThreadScroll).
+                    .padding(.top, ThreadScroll.runway)
                     .padding(.bottom, 12)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .scrollEdgeFade(top: true, bottom: false, topFade: DetachedScroll.runway)
-                .progressiveTopBlur(height: DetachedScroll.band, maxRadius: DetachedScroll.blurRadius)
+                .scrollEdgeFade(top: true, bottom: false, topFade: ThreadScroll.runway)
+                .progressiveTopBlur(height: ThreadScroll.band, maxRadius: ThreadScroll.blurRadius)
                 .onChange(of: task.log.count) { _, _ in
                     withAnimation(.easeOut(duration: 0.2)) {
                         proxy.scrollTo(Self.bottomID, anchor: .bottom)
@@ -949,14 +923,6 @@ struct DetachedAgentTaskView: View {
             } else {
                 elapsedLabel(task.elapsed)
             }
-            Button(action: { NSWorkspace.shared.open(task.folder) }) {
-                Image(systemName: "folder")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Tokens.text4)
-                    .frame(width: 24, height: 24)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
             WindowTrailingCluster(pinned: pinned, togglePin: onTogglePin,
                                   reattach: onReattach)
         }

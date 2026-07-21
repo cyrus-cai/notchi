@@ -269,8 +269,13 @@ struct ContentView: View {
             // while the answer is still loading/streaming (the back chevron is
             // visible then, and the round finishes detached into Recent). Only
             // when the follow-up field is empty, so a left-arrow while editing
-            // still just moves the caret instead of leaving the thread.
-            if event.keyCode == 123, model.mode != .idle, !model.hasText {
+            // still just moves the caret instead of leaving the thread. The
+            // agent-detail page renders in `.idle` mode, so admit it explicitly
+            // (via agentDetailTaskID) — otherwise ← is dead there and only the
+            // header chevron backs out.
+            if event.keyCode == 123,
+               model.mode != .idle || model.agentDetailTaskID != nil,
+               !model.hasText {
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                     model.newChat()
                 }

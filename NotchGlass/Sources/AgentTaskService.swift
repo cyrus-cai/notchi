@@ -150,6 +150,28 @@ struct AgentLogEntry: Identifiable, Equatable, Codable {
     var detail: String? = nil
 }
 
+extension Array where Element == AgentLogEntry {
+    /// The work trail with its trailing narration entry dropped when that entry
+    /// only repeats the `answer` rendered directly beneath it.
+    ///
+    /// The agent's final assistant message is captured twice by design: the stream
+    /// parser can't tell mid-run which text block is the last, so every narration
+    /// block becomes a trail entry AND the last one also becomes the round's answer
+    /// (`finalMessage`). Any view that stacks the trail above the answer therefore
+    /// printed the report twice (the "回答内容重复展示"). Drop it here, where both
+    /// halves are known. Only a non-mono (narration) tail entry is eligible — a tool
+    /// row (`mono`) is never the answer — and only when the answer begins with its
+    /// (prefix-capped, whitespace-trimmed) title. Pass an empty `answer` (e.g. while
+    /// the round still streams and no report shows yet) to keep the trail whole.
+    func droppingTrailingAnswer(_ answer: String) -> [AgentLogEntry] {
+        guard let last, !last.mono else { return self }
+        let title = last.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, !body.isEmpty, body.hasPrefix(title) else { return self }
+        return Array(dropLast())
+    }
+}
+
 /// Runs a **agent implementation task**: the user picks a folder, describes a
 /// task, and a local agent CLI (Codex or Claude Code — `AgentEngine`) works
 /// *in that folder* — reading and writing files — until it's done, then reports

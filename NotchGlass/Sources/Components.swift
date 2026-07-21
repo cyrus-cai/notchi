@@ -1,6 +1,8 @@
 import SwiftUI
 import AppKit
 import Combine
+import PDFKit
+import ImageIO
 
 /// A single-line field that strips the field editor's completion / prediction
 /// magic the moment focus arrives by ANY route. The focusTrigger path in
@@ -960,6 +962,10 @@ struct GlassIconButton: View {
     var systemName: String
     var help: String
     var size: CGFloat = 30
+    /// Glyph point size inside the capsule. Defaults to the original 14pt; the
+    /// compact header corners pass a smaller value so the glass reads as a quiet
+    /// mark rather than a full button.
+    var glyphSize: CGFloat = 14
     var action: () -> Void
 
     @State private var hovering = false
@@ -967,7 +973,7 @@ struct GlassIconButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: 14, weight: .regular))
+                .font(.system(size: glyphSize, weight: .regular))
                 .foregroundStyle(hovering ? Tokens.text1 : Tokens.text3)
                 // Cross-fade the glyph when `systemName` flips (e.g. ⋯ ⇄ back chevron
                 // on the manage chip). No-op for the static-icon callers since their
@@ -980,6 +986,75 @@ struct GlassIconButton: View {
         .buttonStyle(GlassPressStyle())
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.18), value: hovering)
+    }
+}
+
+/// A row of glyphs riding one Liquid Glass capsule — the panel/detached-window
+/// trailing-cluster species, extracted so every caller shares one implementation.
+/// The capsule is a quiet whisper of glass at rest and comes to full rim+specular
+/// strength whenever the pointer is on any segment (or a segment is `engaged`,
+/// e.g. a live pin); each segment carries a soft round highlight under its glyph.
+/// `ResultTrailingCluster`, `WindowTrailingCluster`, and the agent detail header
+/// all build on this — don't hand-roll another two-icon glass pill.
+struct GlassSegmentCluster: View {
+    struct Segment {
+        var engaged: Bool
+        var tooltip: String
+        var action: () -> Void
+        var glyph: AnyView
+
+        init<Glyph: View>(engaged: Bool = false, tooltip: String,
+                          action: @escaping () -> Void,
+                          @ViewBuilder glyph: () -> Glyph) {
+            self.engaged = engaged
+            self.tooltip = tooltip
+            self.action = action
+            self.glyph = AnyView(glyph())
+        }
+    }
+
+    var segments: [Segment]
+    /// Square tap target per segment (also the pill's height).
+    var chip: CGFloat = 26
+
+    // Identity is by index (stable across rebuilds), so the hover highlight
+    // survives re-renders — a per-segment UUID would churn and drop it.
+    @State private var hoveredIndex: Int? = nil
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(Array(segments.enumerated()), id: \.offset) { index, seg in
+                let hovering = hoveredIndex == index
+                Button(action: seg.action) {
+                    seg.glyph
+                        .foregroundStyle(.white)
+                        .frame(width: chip, height: chip)
+                        .background(
+                            Circle().fill(.white.opacity(
+                                seg.engaged ? 0.20 : (hovering ? 0.12 : 0)))
+                        )
+                        .contentShape(Circle())
+                }
+                .buttonStyle(GlassPressStyle())
+                .onHover { inside in
+                    if inside { hoveredIndex = index }
+                    else if hoveredIndex == index { hoveredIndex = nil }
+                }
+                .help(seg.tooltip)
+            }
+        }
+        .padding(3)
+        // The whole cluster is the chip: glass carries ALL the resting dimming
+        // (rendered behind the glyphs, so they stay pure white even at rest) and
+        // lights fully when hovered or while a segment is engaged.
+        .background {
+            let lit = hoveredIndex != nil || segments.contains { $0.engaged }
+            Color.clear
+                .glassCapsule(in: Capsule(), brighter: lit)
+                .opacity(lit ? 1 : 0.55)
+        }
+        .animation(.easeOut(duration: 0.18), value: hoveredIndex)
+        .animation(.easeOut(duration: 0.18), value: segments.map(\.engaged))
     }
 }
 
@@ -1763,6 +1838,14 @@ struct AssistantTurnView: View {
             // action icons share `turnHovered` so they surface together (see
             // `AnswerFooterButton`).
             if !streaming && (hasText || !sources.isEmpty) {
+                // Optically align the row's left edge with the answer text above
+                // it. When a bare icon leads, its 11pt glyph sits centered in a
+                // 22pt hit-frame, so it rests ~5pt inset from x=0 — the row reads
+                // as indented past the text. Pull the row back by that inset so
+                // the first glyph lands on the text's left edge. A leading source
+                // badge is a bounded pill whose capsule is already flush at x=0,
+                // so it needs no shift.
+                let leadInset: CGFloat = sources.isEmpty ? -5 : 0
                 HStack(spacing: 2) {
                     if !sources.isEmpty {
                         SourceBadge(sources: sources,
@@ -1862,6 +1945,7 @@ struct AssistantTurnView: View {
                                                                   time: .shortened)))
                     }
                 }
+                .padding(.leading, leadInset)
                 .padding(.top, 2)
             }
         }
@@ -1971,10 +2055,15 @@ struct InlineMarkdownText: View {
     }
 
     private var attributed: AttributedString {
+        // Inline `$…$` / `\(…\)` math converts to Unicode glyphs BEFORE the
+        // markdown parse — by the time SwiftUI reads the line, `x^2` is already
+        // `x²` and any character surviving conversion that markdown would
+        // reinterpret (`*`, `_`, …) is escaped.
+        let source = MathTypeset.inline(raw)
         // SwiftUI's built-in inline-markdown parsing covers **bold**, *italic*,
         // and `code` — exactly the subset we need.
         if var parsed = try? AttributedString(
-            markdown: raw,
+            markdown: source,
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         ) {
             // The markdown parser also turns `[label](url)` into a tappable link.
@@ -1996,7 +2085,7 @@ struct InlineMarkdownText: View {
             }
             return parsed
         }
-        return AttributedString(raw)
+        return AttributedString(source)
     }
 }
 
@@ -2027,6 +2116,19 @@ enum MarkdownBlock: Equatable {
     /// `header.count` cells (short rows padded, long rows truncated) so the grid
     /// is always rectangular. Cell text keeps its inline markdown.
     case table(header: [String], rows: [[String]])
+    /// A display-math island — `$$…$$` / `\[…\]` opening its own line, or a
+    /// ```math fence. `text` is the raw LaTeX between the delimiters; rendering
+    /// converts it to Unicode via `MathTypeset` (a glyph translation, not a
+    /// math engine, in keeping with the no-library rule).
+    case math(text: String)
+    /// A `![alt](url)` reference lifted out of its line — rendered as an inline
+    /// image island, downloaded on first sight (http/https only; see
+    /// `AnswerMediaLoader`).
+    case image(alt: String, url: String)
+    /// A reference to a `.pdf` URL — either image syntax or a `[label](….pdf)`
+    /// link standing alone on its line. Rendered as a first-page preview island
+    /// via PDFKit; tapping opens the document.
+    case pdf(title: String, url: String)
     case divider
 }
 
@@ -2090,13 +2192,52 @@ enum MarkdownParser {
                     body.append(inner)
                     i += 1
                 }
-                blocks.append(.code(language: lang.isEmpty ? nil : lang, text: body.joined(separator: "\n")))
+                // A ```math fence (GitHub's display-math fence) is math, not
+                // code — everything else stays a verbatim code island (```latex
+                // included: that's usually code the user wants to copy).
+                if lang.lowercased() == "math" {
+                    blocks.append(.math(text: body.joined(separator: "\n")))
+                } else {
+                    blocks.append(.code(language: lang.isEmpty ? nil : lang, text: body.joined(separator: "\n")))
+                }
                 i += 1
                 continue
             }
 
             if line.isEmpty {
                 i += 1
+                continue
+            }
+
+            // Display math — `$$ … $$` or `\[ … \]` opening its own line. The
+            // block may close on the same line or span several; an unclosed one
+            // swallows the rest (mirroring code fences), so a streaming answer
+            // renders its partial formula instead of raw TeX.
+            if line.hasPrefix("$$") || line.hasPrefix("\\[") {
+                let close = line.hasPrefix("$$") ? "$$" : "\\]"
+                let rest = String(line.dropFirst(2))
+                if let r = rest.range(of: close) {
+                    blocks.append(.math(text: String(rest[..<r.lowerBound]).trimmingCharacters(in: .whitespaces)))
+                    // Trailing prose after the closer keeps its own paragraph.
+                    let after = String(rest[r.upperBound...]).trimmingCharacters(in: .whitespaces)
+                    if !after.isEmpty { blocks.append(.paragraph(text: after)) }
+                    i += 1
+                    continue
+                }
+                var body: [String] = rest.trimmingCharacters(in: .whitespaces).isEmpty ? [] : [rest]
+                i += 1
+                while i < lines.count {
+                    let inner = lines[i]
+                    if let r = inner.range(of: close) {
+                        let before = String(inner[..<r.lowerBound])
+                        if !before.trimmingCharacters(in: .whitespaces).isEmpty { body.append(before) }
+                        i += 1
+                        break
+                    }
+                    body.append(inner)
+                    i += 1
+                }
+                blocks.append(.math(text: body.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)))
                 continue
             }
 
@@ -2162,7 +2303,7 @@ enum MarkdownParser {
             } else if let (number, text) = ordered(line) {
                 blocks.append(.ordered(number: number, text: text, indent: listIndent(of: rawLine)))
             } else {
-                blocks.append(.paragraph(text: line))
+                blocks.append(contentsOf: paragraphOrMedia(line))
             }
             i += 1
         }
@@ -2291,6 +2432,47 @@ enum MarkdownParser {
         return cells
     }
 
+    // MARK: - Media references
+
+    /// `![alt](url)` — the alt text, then the URL (an optional `"title"` after
+    /// the URL is tolerated and dropped).
+    private static let imageRef = #/!\[([^\]]*)\]\(\s*(\S+?)(?:\s+"[^"]*")?\s*\)/#
+    /// A `[label](url)` link standing alone on its line.
+    private static let soloLink = #/^\[([^\]]+)\]\(\s*(\S+?)(?:\s+"[^"]*")?\s*\)$/#
+
+    /// Turn one paragraph-shaped line into blocks, lifting media out of it:
+    /// every `![alt](url)` becomes its own `.image` (or `.pdf` when the URL is
+    /// a PDF) below the line's remaining text, and a bare `[label](….pdf)` link
+    /// alone on the line becomes a `.pdf` preview. Anything else stays one
+    /// paragraph. Lifting is per-line only — images inside lists/quotes/tables
+    /// keep their textual form.
+    private static func paragraphOrMedia(_ line: String) -> [MarkdownBlock] {
+        // The cheap gate: no `](` means no reference of either kind.
+        guard line.contains("](") else { return [.paragraph(text: line)] }
+
+        if let m = line.wholeMatch(of: soloLink), isPDFURL(String(m.2)) {
+            return [.pdf(title: String(m.1), url: String(m.2))]
+        }
+
+        var text = line
+        var media: [MarkdownBlock] = []
+        while let m = text.firstMatch(of: imageRef) {
+            let alt = String(m.1), url = String(m.2)
+            media.append(isPDFURL(url) ? .pdf(title: alt, url: url) : .image(alt: alt, url: url))
+            text.removeSubrange(m.range)
+        }
+        guard !media.isEmpty else { return [.paragraph(text: line)] }
+        let rest = text.trimmingCharacters(in: .whitespaces)
+        return rest.isEmpty ? media : [.paragraph(text: rest)] + media
+    }
+
+    /// Does the URL's path (query/fragment ignored) end in `.pdf`?
+    private static func isPDFURL(_ urlString: String) -> Bool {
+        let path = urlString.split(separator: "?", maxSplits: 1)[0]
+            .split(separator: "#", maxSplits: 1)[0]
+        return path.lowercased().hasSuffix(".pdf")
+    }
+
     /// `1. item` / `2) item` → (number, text).
     private static func ordered(_ line: String) -> (Int, String)? {
         var digits = ""
@@ -2345,6 +2527,13 @@ enum MarkdownParser {
                     lines.append(row.map { stripInline($0) }.joined(separator: "\t"))
                 }
                 out.append(lines.joined(separator: "\n"))
+            case let .math(text):
+                // Copy the formula the way it renders — Unicode, not raw TeX.
+                out.append(MathTypeset.unicode(text))
+            case let .image(alt, url):
+                out.append(alt.isEmpty ? url : "\(alt): \(url)")
+            case let .pdf(title, url):
+                out.append(title.isEmpty ? url : "\(title): \(url)")
             case .divider:
                 // A rule carries no text; drop it (the blank-line join keeps the
                 // visual break between the blocks it separated).
@@ -2363,14 +2552,423 @@ enum MarkdownParser {
     /// parser as `InlineMarkdownText` so the two stay consistent; falls back to the
     /// raw line if parsing fails.
     private static func stripInline(_ line: String) -> String {
+        // Inline math first, same as the visible renderer, so a copied line
+        // reads `x²`, not `$x^2$`.
+        let source = MathTypeset.inline(line)
         if let parsed = try? AttributedString(
-            markdown: line,
+            markdown: source,
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         ) {
             return String(parsed.characters)
         }
-        return line
+        return source
     }
+}
+
+// MARK: - LaTeX math → Unicode
+
+/// Turns the LaTeX math LLM answers embed — inline `$…$` / `\(…\)` spans and
+/// display `$$…$$` / `\[…\]` blocks — into plain Unicode: `x^2` → `x²`,
+/// `\alpha` → `α`, `\frac{a}{b}` → `a/b`, `\sqrt{2}` → `√2`. A glyph
+/// translation, not a math engine: no library, no webview, in keeping with the
+/// app's minimalism. The long tail of TeX (matrices, over-braces, …) degrades
+/// to readable text — an unknown `\command` renders as its bare name — instead
+/// of showing raw markup.
+enum MathTypeset {
+
+    // MARK: Inline span scanning
+
+    /// Replace every inline math span in one line of markdown with its Unicode
+    /// rendering, leaving the rest untouched. `\(…\)` and `$$…$$` are
+    /// unambiguous and always convert; `$…$` needs a math "tell" (see `isMath`)
+    /// so money — "$5 and $10" — is never eaten. The replacement has its
+    /// markdown specials escaped, so a `*` that survives conversion can't turn
+    /// the rest of the line italic when SwiftUI parses it.
+    static func inline(_ line: String) -> String {
+        guard line.contains("$") || line.contains("\\(") else { return line }
+        let chars = Array(line)
+        var out = ""
+        var i = 0
+        while i < chars.count {
+            let c = chars[i]
+            if c == "\\", i + 1 < chars.count {
+                if chars[i + 1] == "(", let close = find(chars, "\\)", from: i + 2) {
+                    out += escaped(unicode(String(chars[(i + 2)..<close])))
+                    i = close + 2
+                    continue
+                }
+                // Any other escape (incl. `\$`) passes through untouched, so
+                // the dollar scan below can't take an escaped `$` as a delimiter.
+                out.append(c)
+                out.append(chars[i + 1])
+                i += 2
+                continue
+            }
+            if c == "$" {
+                if i + 1 < chars.count, chars[i + 1] == "$",
+                   let close = find(chars, "$$", from: i + 2) {
+                    out += escaped(unicode(String(chars[(i + 2)..<close])))
+                    i = close + 2
+                    continue
+                }
+                if let close = chars[(i + 1)...].firstIndex(of: "$"),
+                   isMath(String(chars[(i + 1)..<close])) {
+                    out += escaped(unicode(String(chars[(i + 1)..<close])))
+                    i = close + 1
+                    continue
+                }
+            }
+            out.append(c)
+            i += 1
+        }
+        return out
+    }
+
+    /// The `$…$` ambiguity gate: convert only when the span reads as math, not
+    /// money or prose. A command / script / equals sign is a sure tell; failing
+    /// that, a single space-free non-digit-led token (`$x$`, `$a+b$`) passes,
+    /// while "5 and $10" (edge whitespace) and "100-" (digit-led, the span
+    /// between two prices) stay literal text.
+    private static func isMath(_ body: String) -> Bool {
+        guard let first = body.first, let last = body.last,
+              !first.isWhitespace, !last.isWhitespace, !body.contains("\n")
+        else { return false }
+        if body.contains(where: { "\\^_=".contains($0) }) { return true }
+        return !body.contains(" ") && !first.isNumber
+    }
+
+    /// Index of the first occurrence of a two-character delimiter at/after
+    /// `from`, or nil.
+    private static func find(_ chars: [Character], _ delim: String, from: Int) -> Int? {
+        let d = Array(delim)
+        var i = from
+        while i + d.count <= chars.count {
+            if chars[i] == d[0], chars[i + 1] == d[1] { return i }
+            i += 1
+        }
+        return nil
+    }
+
+    /// Escape the markdown-special characters a converted span may still carry
+    /// so the math text survives `AttributedString(markdown:)` verbatim.
+    private static func escaped(_ s: String) -> String {
+        var out = ""
+        for ch in s {
+            if "\\*_`[]".contains(ch) { out.append("\\") }
+            out.append(ch)
+        }
+        return out
+    }
+
+    // MARK: Expression conversion
+
+    /// Convert one LaTeX math expression to a Unicode string.
+    static func unicode(_ latex: String) -> String {
+        let chars = Array(latex)
+        var i = 0
+        return squeeze(convert(chars, &i, until: nil))
+    }
+
+    /// The recursive walk. `until` is the group-closing brace this level stops
+    /// (and consumes) at — nil at top level. Nested `{…}` groups recurse, so an
+    /// inner brace never terminates an outer level early.
+    private static func convert(_ chars: [Character], _ i: inout Int, until stop: Character?) -> String {
+        var out = ""
+        while i < chars.count {
+            let c = chars[i]
+            if let stop, c == stop {
+                i += 1
+                return out
+            }
+            switch c {
+            case "\\":
+                i += 1
+                out += command(chars, &i)
+            case "^":
+                i += 1
+                out += scripted(argument(chars, &i), with: Self.superscripts, marker: "^")
+            case "_":
+                i += 1
+                out += scripted(argument(chars, &i), with: Self.subscripts, marker: "_")
+            case "{":
+                i += 1
+                out += convert(chars, &i, until: "}")
+            case "}":
+                i += 1   // unbalanced closer — drop it
+            case "&", "~":
+                out += " "   // alignment tab / non-breaking tie → plain space
+                i += 1
+            default:
+                out.append(c)
+                i += 1
+            }
+        }
+        return out
+    }
+
+    /// One `\…` command, cursor just past the backslash. Structural commands
+    /// (fractions, roots, wrappers) recurse; everything else looks up the
+    /// symbol table and — the graceful-degradation rule — falls back to its
+    /// own name.
+    private static func command(_ chars: [Character], _ i: inout Int) -> String {
+        guard i < chars.count else { return "" }
+        let first = chars[i]
+        guard first.isLetter else {
+            // Single-character escape: `\\` is a TeX row break; the thin-space
+            // family collapses to a space or nothing; anything else (`\{`,
+            // `\%`, `\$`, …) means the literal character.
+            i += 1
+            switch first {
+            case "\\": return "\n"
+            case ",", ";", ":", " ": return " "
+            case "!": return ""
+            default: return String(first)
+            }
+        }
+        var name = ""
+        while i < chars.count, chars[i].isLetter {
+            name.append(chars[i])
+            i += 1
+        }
+        if i < chars.count, chars[i] == "*" { i += 1 }   // \operatorname* etc.
+
+        switch name {
+        case "frac", "dfrac", "tfrac", "cfrac":
+            return fraction(argument(chars, &i), argument(chars, &i))
+        case "sqrt":
+            var degree: String?
+            if i < chars.count, chars[i] == "[" {
+                i += 1
+                var d = ""
+                while i < chars.count, chars[i] != "]" {
+                    d.append(chars[i])
+                    i += 1
+                }
+                if i < chars.count { i += 1 }
+                degree = unicode(d)
+            }
+            let body = argument(chars, &i)
+            let prefix = degree.map { scripted($0, with: superscripts, marker: "") } ?? ""
+            return body.count <= 2 ? prefix + "√" + body : prefix + "√(" + body + ")"
+        case "text", "textrm", "textit", "textbf", "textsf", "texttt", "textnormal",
+             "mathrm", "mathit", "mathbf", "mathsf", "mathtt", "mathfrak",
+             "operatorname", "mbox", "hbox", "boldsymbol", "bm", "pmb":
+            return argument(chars, &i)
+        case "mathbb":
+            return remapped(argument(chars, &i), via: blackboard)
+        case "mathcal", "mathscr":
+            return remapped(argument(chars, &i), via: calligraphic)
+        case "vec", "hat", "widehat", "bar", "overline", "underline",
+             "tilde", "widetilde", "dot", "ddot":
+            // Single-character accents ride as combining marks (`\vec{v}` →
+            // v⃗); longer bodies drop the decoration and keep the text.
+            let body = argument(chars, &i)
+            if body.count == 1, let mark = combining[name] { return body + mark }
+            return body
+        case "left", "right":
+            // Delimiter sizing — the delimiter itself follows and the main
+            // loop keeps it; `\left.` / `\right.` is an invisible wall.
+            if i < chars.count, chars[i] == "." { i += 1 }
+            return ""
+        case "big", "Big", "bigg", "Bigg", "bigl", "bigr", "bigm",
+             "Bigl", "Bigr", "biggl", "biggr", "Biggl", "Biggr",
+             "displaystyle", "textstyle", "scriptstyle", "limits", "nolimits":
+            return ""
+        case "phantom", "vphantom", "hphantom":
+            _ = argument(chars, &i)
+            return ""
+        case "hspace", "vspace":
+            _ = argument(chars, &i)
+            return " "
+        case "begin", "end":
+            _ = argument(chars, &i)   // the environment name — rows/tabs are
+            return ""                 // handled by the global `\\` / `&` rules
+        case "pmod":
+            return " (mod " + argument(chars, &i) + ")"
+        case "not":
+            let rel = argument(chars, &i)
+            return negated[rel] ?? ("¬" + rel)
+        default:
+            return symbols[name] ?? name
+        }
+    }
+
+    /// One command argument: a `{…}` group, a nested `\command`, or a single
+    /// character. Leading spaces are TeX-insignificant and skipped.
+    private static func argument(_ chars: [Character], _ i: inout Int) -> String {
+        while i < chars.count, chars[i] == " " { i += 1 }
+        guard i < chars.count else { return "" }
+        let c = chars[i]
+        if c == "{" {
+            i += 1
+            return convert(chars, &i, until: "}")
+        }
+        if c == "\\" {
+            i += 1
+            return command(chars, &i)
+        }
+        i += 1
+        return String(c)
+    }
+
+    /// Render a super/subscript: whole-span Unicode when every character has a
+    /// script form (`x^2` → `x²`, `a_n` → `aₙ`), else fall back to the marker
+    /// (`x^(n+1)`), parenthesised only when the script is more than one glyph.
+    private static func scripted(_ body: String, with map: [Character: Character], marker: String) -> String {
+        if body.isEmpty { return "" }
+        if body == "∘" { return "°" }   // `x^\circ` is the degree sign
+        let mapped = body.compactMap { map[$0] }
+        if mapped.count == body.count { return String(mapped) }
+        return body.count == 1 ? marker + body : marker + "(" + body + ")"
+    }
+
+    /// `\frac{a}{b}` → `a/b`, parenthesising a side only when it carries an
+    /// operator or space (`\frac{a+b}{2}` → `(a+b)/2`, `\frac{dy}{dx}` →
+    /// `dy/dx`). The handful of fractions with real glyphs use them.
+    private static func fraction(_ num: String, _ den: String) -> String {
+        if let glyph = vulgar[num + "/" + den] { return glyph }
+        return side(num) + "/" + side(den)
+    }
+
+    private static func side(_ s: String) -> String {
+        s.contains(where: { "+-−±∓=<>≤≥*·×÷/, ".contains($0) }) ? "(" + s + ")" : s
+    }
+
+    private static func remapped(_ s: String, via table: [Character: Character]) -> String {
+        String(s.map { table[$0] ?? $0 })
+    }
+
+    /// Collapse runs of spaces (TeX treats them as one) and trim each line's
+    /// edges, leaving row breaks from `\\` intact.
+    private static func squeeze(_ s: String) -> String {
+        s.components(separatedBy: "\n").map { line in
+            var out = ""
+            var lastWasSpace = false
+            for ch in line.trimmingCharacters(in: .whitespaces) {
+                if ch == " " {
+                    if !lastWasSpace { out.append(ch) }
+                    lastWasSpace = true
+                } else {
+                    out.append(ch)
+                    lastWasSpace = false
+                }
+            }
+            return out
+        }.joined(separator: "\n")
+    }
+
+    // MARK: Glyph tables
+
+    /// `\command` → symbol, kept to what LLM answers actually emit.
+    private static let symbols: [String: String] = [
+        // Greek
+        "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ",
+        "epsilon": "ε", "varepsilon": "ε", "zeta": "ζ", "eta": "η",
+        "theta": "θ", "vartheta": "ϑ", "iota": "ι", "kappa": "κ",
+        "lambda": "λ", "mu": "μ", "nu": "ν", "xi": "ξ", "pi": "π",
+        "varpi": "ϖ", "rho": "ρ", "varrho": "ϱ", "sigma": "σ",
+        "varsigma": "ς", "tau": "τ", "upsilon": "υ", "phi": "φ",
+        "varphi": "φ", "chi": "χ", "psi": "ψ", "omega": "ω",
+        "Gamma": "Γ", "Delta": "Δ", "Theta": "Θ", "Lambda": "Λ",
+        "Xi": "Ξ", "Pi": "Π", "Sigma": "Σ", "Upsilon": "Υ",
+        "Phi": "Φ", "Psi": "Ψ", "Omega": "Ω",
+        // Operators & relations
+        "times": "×", "div": "÷", "pm": "±", "mp": "∓", "cdot": "·",
+        "ast": "∗", "star": "⋆", "circ": "∘", "bullet": "•",
+        "leq": "≤", "le": "≤", "geq": "≥", "ge": "≥", "neq": "≠",
+        "ne": "≠", "equiv": "≡", "approx": "≈", "sim": "∼",
+        "simeq": "≃", "cong": "≅", "propto": "∝", "ll": "≪", "gg": "≫",
+        "prec": "≺", "succ": "≻", "asymp": "≍", "doteq": "≐",
+        // Calculus & big operators
+        "infty": "∞", "partial": "∂", "nabla": "∇", "sum": "∑",
+        "prod": "∏", "coprod": "∐", "int": "∫", "iint": "∬",
+        "iiint": "∭", "oint": "∮", "prime": "′",
+        // Sets & logic
+        "in": "∈", "notin": "∉", "ni": "∋", "subset": "⊂",
+        "supset": "⊃", "subseteq": "⊆", "supseteq": "⊇",
+        "subsetneq": "⊊", "supsetneq": "⊋", "cup": "∪", "cap": "∩",
+        "setminus": "∖", "emptyset": "∅", "varnothing": "∅",
+        "forall": "∀", "exists": "∃", "nexists": "∄", "neg": "¬",
+        "lnot": "¬", "land": "∧", "wedge": "∧", "lor": "∨", "vee": "∨",
+        "oplus": "⊕", "ominus": "⊖", "otimes": "⊗", "oslash": "⊘",
+        "odot": "⊙", "models": "⊨", "vdash": "⊢", "dashv": "⊣",
+        "top": "⊤", "bot": "⊥", "therefore": "∴", "because": "∵",
+        "implies": "⟹", "iff": "⟺",
+        // Arrows
+        "to": "→", "rightarrow": "→", "gets": "←", "leftarrow": "←",
+        "Rightarrow": "⇒", "Leftarrow": "⇐", "leftrightarrow": "↔",
+        "Leftrightarrow": "⇔", "mapsto": "↦", "uparrow": "↑",
+        "downarrow": "↓", "longrightarrow": "⟶", "longleftarrow": "⟵",
+        "hookrightarrow": "↪", "rightharpoonup": "⇀",
+        // Delimiters & dots
+        "langle": "⟨", "rangle": "⟩", "lfloor": "⌊", "rfloor": "⌋",
+        "lceil": "⌈", "rceil": "⌉", "ldots": "…", "cdots": "⋯",
+        "vdots": "⋮", "ddots": "⋱", "dots": "…", "dotsc": "…", "dotsb": "⋯",
+        // Misc
+        "angle": "∠", "perp": "⊥", "parallel": "∥", "nparallel": "∦",
+        "mid": "∣", "nmid": "∤", "degree": "°", "hbar": "ℏ", "ell": "ℓ",
+        "Re": "ℜ", "Im": "ℑ", "aleph": "ℵ", "wp": "℘", "dagger": "†",
+        "ddagger": "‡", "checkmark": "✓", "triangle": "△", "square": "□",
+        "Box": "□", "diamond": "◇", "colon": ":", "quad": " ",
+        "qquad": " ", "space": " ",
+    ]
+
+    /// `\not` + relation → the precomposed negated glyph where one exists.
+    private static let negated: [String: String] = [
+        "=": "≠", "∈": "∉", "<": "≮", ">": "≯", "≤": "≰", "≥": "≱",
+        "≡": "≢", "∼": "≁", "≈": "≉", "⊂": "⊄", "⊃": "⊅", "⊆": "⊈",
+        "⊇": "⊉", "∣": "∤", "∥": "∦",
+    ]
+
+    /// Single-character accent decorations → combining marks.
+    private static let combining: [String: String] = [
+        "vec": "\u{20D7}", "hat": "\u{0302}", "widehat": "\u{0302}",
+        "bar": "\u{0304}", "overline": "\u{0305}", "underline": "\u{0332}",
+        "tilde": "\u{0303}", "widetilde": "\u{0303}",
+        "dot": "\u{0307}", "ddot": "\u{0308}",
+    ]
+
+    private static let superscripts: [Character: Character] = [
+        "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵",
+        "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "+": "⁺", "-": "⁻",
+        "−": "⁻", "=": "⁼", "(": "⁽", ")": "⁾",
+        "a": "ᵃ", "b": "ᵇ", "c": "ᶜ", "d": "ᵈ", "e": "ᵉ", "f": "ᶠ",
+        "g": "ᵍ", "h": "ʰ", "i": "ⁱ", "j": "ʲ", "k": "ᵏ", "l": "ˡ",
+        "m": "ᵐ", "n": "ⁿ", "o": "ᵒ", "p": "ᵖ", "r": "ʳ", "s": "ˢ",
+        "t": "ᵗ", "u": "ᵘ", "v": "ᵛ", "w": "ʷ", "x": "ˣ", "y": "ʸ",
+        "z": "ᶻ", "T": "ᵀ",
+    ]
+
+    private static let subscripts: [Character: Character] = [
+        "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅",
+        "6": "₆", "7": "₇", "8": "₈", "9": "₉", "+": "₊", "-": "₋",
+        "−": "₋", "=": "₌", "(": "₍", ")": "₎",
+        "a": "ₐ", "e": "ₑ", "h": "ₕ", "i": "ᵢ", "j": "ⱼ", "k": "ₖ",
+        "l": "ₗ", "m": "ₘ", "n": "ₙ", "o": "ₒ", "p": "ₚ", "r": "ᵣ",
+        "s": "ₛ", "t": "ₜ", "u": "ᵤ", "v": "ᵥ", "x": "ₓ",
+    ]
+
+    private static let blackboard: [Character: Character] = [
+        "A": "𝔸", "B": "𝔹", "C": "ℂ", "D": "𝔻", "E": "𝔼", "F": "𝔽",
+        "G": "𝔾", "H": "ℍ", "I": "𝕀", "J": "𝕁", "K": "𝕂", "L": "𝕃",
+        "M": "𝕄", "N": "ℕ", "O": "𝕆", "P": "ℙ", "Q": "ℚ", "R": "ℝ",
+        "S": "𝕊", "T": "𝕋", "U": "𝕌", "V": "𝕍", "W": "𝕎", "X": "𝕏",
+        "Y": "𝕐", "Z": "ℤ", "1": "𝟙",
+    ]
+
+    private static let calligraphic: [Character: Character] = [
+        "A": "𝒜", "B": "ℬ", "C": "𝒞", "D": "𝒟", "E": "ℰ", "F": "ℱ",
+        "G": "𝒢", "H": "ℋ", "I": "ℐ", "J": "𝒥", "K": "𝒦", "L": "ℒ",
+        "M": "ℳ", "N": "𝒩", "O": "𝒪", "P": "𝒫", "Q": "𝒬", "R": "ℛ",
+        "S": "𝒮", "T": "𝒯", "U": "𝒰", "V": "𝒱", "W": "𝒲", "X": "𝒳",
+        "Y": "𝒴", "Z": "𝒵",
+    ]
+
+    private static let vulgar: [String: String] = [
+        "1/2": "½", "1/3": "⅓", "2/3": "⅔", "1/4": "¼", "3/4": "¾",
+        "1/5": "⅕", "2/5": "⅖", "3/5": "⅗", "4/5": "⅘", "1/6": "⅙",
+        "5/6": "⅚", "1/8": "⅛", "3/8": "⅜", "5/8": "⅝", "7/8": "⅞",
+    ]
 }
 
 /// Renders a parsed answer as stacked block-level markdown — headings and lists
@@ -2476,7 +3074,7 @@ struct StreamingMarkdown: View {
     private func tailToken(for block: MarkdownBlock) -> Int {
         switch block {
         case .heading(_, let t), .bullet(let t, _), .ordered(_, let t, _),
-             .task(_, let t, _), .quote(let t), .paragraph(let t):
+             .task(_, let t, _), .quote(let t), .paragraph(let t), .math(let t):
             return t.count
         case .code(_, let t):
             return t.count
@@ -2485,6 +3083,8 @@ struct StreamingMarkdown: View {
             // table still building its last row re-fades only as it changes.
             return header.reduce(0) { $0 + $1.count }
                 + rows.reduce(0) { $0 + $1.reduce(0) { $0 + $1.count } }
+        case .image(_, let url), .pdf(_, let url):
+            return url.count
         case .divider:
             return -1
         }
@@ -2660,7 +3260,7 @@ struct MarkdownBlockRow: View, Equatable {
     /// the industry implementations this follows), and a divider has no glyphs.
     private static func fadeable(_ block: MarkdownBlock) -> Bool {
         switch block {
-        case .code, .table, .divider: return false
+        case .code, .table, .divider, .image, .pdf: return false
         default: return true
         }
     }
@@ -2672,9 +3272,9 @@ struct MarkdownBlockRow: View, Equatable {
     private static func fadeLength(_ block: MarkdownBlock) -> Int {
         switch block {
         case .heading(_, let t), .bullet(let t, _), .ordered(_, let t, _),
-             .task(_, let t, _), .quote(let t), .paragraph(let t):
+             .task(_, let t, _), .quote(let t), .paragraph(let t), .math(let t):
             return t.count
-        case .code, .table, .divider:
+        case .code, .table, .divider, .image, .pdf:
             return 0
         }
     }
@@ -2745,6 +3345,26 @@ struct MarkdownBlockRow: View, Equatable {
 
         case .table(let header, let rows):
             MarkdownTableView(header: header, rows: rows, baseFont: baseFont, color: color)
+
+        case .math(let text):
+            // Display math: the Unicode rendering, centred like a typeset
+            // formula, a shade larger than body so it reads as an island.
+            Text(MathTypeset.unicode(text))
+                .font(.sf(baseFont + 1))
+                .tracking(0.1)
+                .lineSpacing(baseFont * 0.5)
+                .foregroundStyle(color)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.vertical, 2)
+
+        case .image(let alt, let url):
+            AnswerImageView(alt: alt, urlString: url, baseFont: baseFont, color: color)
+
+        case .pdf(let title, let url):
+            AnswerPDFView(title: title, urlString: url, baseFont: baseFont, color: color)
 
         case .divider:
             Rectangle()
@@ -2845,6 +3465,281 @@ private struct MarkdownTableView: View {
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
             .textSelection(.enabled)
+    }
+}
+
+// MARK: - Answer media (images & PDFs)
+
+/// Downloads and caches the media an answer references. One shared instance so
+/// the several mounted copies of a turn (visible thread, height probe, blur
+/// overlays) resolve a URL to ONE download: finished outcomes are cached,
+/// in-flight fetches are joined. http/https only — answer text comes from an
+/// LLM, so every other scheme (file://, custom) stays inert, matching the link
+/// policy in `InlineMarkdownText`.
+@MainActor
+final class AnswerMediaLoader {
+    static let shared = AnswerMediaLoader()
+
+    /// A rendered PDF preview: page 1 plus how much more there is.
+    struct PDFPreview {
+        let firstPage: NSImage
+        let pageCount: Int
+    }
+
+    enum Outcome {
+        case image(NSImage)
+        case pdf(PDFPreview)
+        case failed
+    }
+
+    private enum Kind { case image, pdf }
+
+    private var cache: [String: Outcome] = [:]
+    private var order: [String] = []   // insertion order, for eviction
+    private var inflight: [String: Task<Outcome, Never>] = [:]
+
+    /// More than this is a mistake to pull down for a chat answer.
+    private nonisolated static let byteCap = 30 * 1024 * 1024
+    /// Decode bound — the panel shows ~700 device pixels, so a 12-megapixel
+    /// photograph should cost a thumbnail's memory, not a 50 MB bitmap.
+    private nonisolated static let maxPixel: CGFloat = 1600
+
+    func image(for urlString: String) async -> Outcome {
+        await outcome(for: urlString, as: .image)
+    }
+
+    func pdf(for urlString: String) async -> Outcome {
+        await outcome(for: urlString, as: .pdf)
+    }
+
+    private func outcome(for urlString: String, as kind: Kind) async -> Outcome {
+        if let hit = cache[urlString] { return hit }
+        if let running = inflight[urlString] { return await running.value }
+        let task = Task { await Self.fetch(urlString, as: kind) }
+        inflight[urlString] = task
+        let result = await task.value
+        inflight[urlString] = nil
+        cache[urlString] = result
+        order.append(urlString)
+        if order.count > 64 { cache.removeValue(forKey: order.removeFirst()) }
+        return result
+    }
+
+    /// The off-main part: download, bound, decode. `nonisolated` so the fetch
+    /// runs on the concurrency pool, not the main thread this class lives on.
+    private nonisolated static func fetch(_ urlString: String, as kind: Kind) async -> Outcome {
+        guard let url = URL(string: urlString),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let (data, response) = try? await URLSession.shared.data(from: url),
+              data.count <= byteCap,
+              (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? true
+        else { return .failed }
+
+        switch kind {
+        case .image:
+            guard let image = downsampled(data) else { return .failed }
+            return .image(image)
+        case .pdf:
+            guard let doc = PDFDocument(data: data), doc.pageCount > 0,
+                  let page = doc.page(at: 0)
+            else { return .failed }
+            let bounds = page.bounds(for: .mediaBox)
+            let scale = min(2, 1200 / max(bounds.width, 1))
+            let size = NSSize(width: bounds.width * scale, height: bounds.height * scale)
+            return .pdf(PDFPreview(firstPage: page.thumbnail(of: size, for: .mediaBox),
+                                   pageCount: doc.pageCount))
+        }
+    }
+
+    /// Decode via ImageIO with a pixel cap (also normalises EXIF rotation).
+    private nonisolated static func downsampled(_ data: Data) -> NSImage? {
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+        ]
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+        else { return nil }
+        return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+    }
+}
+
+/// Open a media reference in the default app — same scheme gate as the loader.
+private func openAnswerMediaURL(_ urlString: String) {
+    guard let url = URL(string: urlString),
+          let scheme = url.scheme?.lowercased(),
+          scheme == "http" || scheme == "https" else { return }
+    NSWorkspace.shared.open(url)
+}
+
+/// The shape media takes while its download is in flight — a quiet island of
+/// fixed height, so the panel settles in one reflow when the pixels land.
+private struct MediaLoadingPlaceholder: View {
+    var body: some View {
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .fill(Color.white.opacity(0.04))
+            .frame(height: 120)
+            .overlay(ProgressView().controlSize(.small).tint(.white.opacity(0.4)))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(Tokens.hairline, lineWidth: 0.5)
+            )
+    }
+}
+
+/// The degraded form of a media reference whose download failed (or whose
+/// bytes weren't what the syntax claimed): a compact link-out chip, so the
+/// reference is still reachable, never silently dropped.
+private struct MediaLinkChip: View {
+    let icon: String
+    let label: String
+    var baseFont: CGFloat = 15
+    var color: Color = Tokens.text1
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: baseFont - 3, weight: .medium))
+                Text(label)
+                    .font(.sf(baseFont - 1))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Image(systemName: "arrow.up.right")
+                    .font(.system(size: baseFont - 5, weight: .semibold))
+                    .opacity(0.6)
+            }
+            .foregroundStyle(color.opacity(0.75))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Capsule().fill(Color.white.opacity(0.05)))
+            .overlay(Capsule().strokeBorder(Tokens.hairline, lineWidth: 0.5))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// One `![alt](url)` reference as an inline image island. Never upscales (a
+/// small icon stays small); tapping opens the source in the browser.
+private struct AnswerImageView: View {
+    let alt: String
+    let urlString: String
+    var baseFont: CGFloat = 15
+    var color: Color = Tokens.text1
+
+    @State private var outcome: AnswerMediaLoader.Outcome?
+
+    var body: some View {
+        Group {
+            switch outcome {
+            case .image(let image):
+                Button { openAnswerMediaURL(urlString) } label: {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: image.size.width,
+                               maxHeight: min(260, image.size.height))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .strokeBorder(Tokens.hairline, lineWidth: 0.5)
+                        )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(alt.isEmpty ? "image" : alt)
+            case .pdf, .failed:
+                MediaLinkChip(icon: "photo",
+                              label: alt.isEmpty ? (URL(string: urlString)?.host ?? urlString) : alt,
+                              baseFont: baseFont, color: color) {
+                    openAnswerMediaURL(urlString)
+                }
+            case nil:
+                MediaLoadingPlaceholder()
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .task(id: urlString) {
+            outcome = await AnswerMediaLoader.shared.image(for: urlString)
+        }
+    }
+}
+
+/// A `.pdf` reference as a document island: the first page, then a footer with
+/// the document's name and page count. Tapping opens the PDF itself.
+private struct AnswerPDFView: View {
+    let title: String
+    let urlString: String
+    var baseFont: CGFloat = 15
+    var color: Color = Tokens.text1
+
+    @State private var outcome: AnswerMediaLoader.Outcome?
+
+    var body: some View {
+        Group {
+            switch outcome {
+            case .pdf(let preview):
+                Button { openAnswerMediaURL(urlString) } label: {
+                    VStack(spacing: 0) {
+                        Image(nsImage: preview.firstPage)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxHeight: 240)
+                            .frame(maxWidth: .infinity)
+                        Divider().overlay(Tokens.hairline)
+                        HStack(spacing: 6) {
+                            Image(systemName: "doc.text")
+                                .font(.system(size: baseFont - 3, weight: .medium))
+                            Text(displayTitle)
+                                .font(.sf(baseFont - 1, weight: .medium))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer(minLength: 8)
+                            Text(preview.pageCount == 1 ? "1 page" : "\(preview.pageCount) pages")
+                                .font(.sf(baseFont - 2))
+                                .opacity(0.55)
+                            Image(systemName: "arrow.up.right")
+                                .font(.system(size: baseFont - 5, weight: .semibold))
+                                .opacity(0.6)
+                        }
+                        .foregroundStyle(color.opacity(0.85))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                    }
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(Color.white.opacity(0.04))
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .strokeBorder(Tokens.hairline, lineWidth: 0.5)
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(displayTitle)
+            case .image, .failed:
+                MediaLinkChip(icon: "doc.text", label: displayTitle,
+                              baseFont: baseFont, color: color) {
+                    openAnswerMediaURL(urlString)
+                }
+            case nil:
+                MediaLoadingPlaceholder()
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .task(id: urlString) {
+            outcome = await AnswerMediaLoader.shared.pdf(for: urlString)
+        }
+    }
+
+    private var displayTitle: String {
+        if !title.isEmpty { return title }
+        let name = URL(string: urlString)?.lastPathComponent ?? ""
+        return name.isEmpty ? urlString : name
     }
 }
 
@@ -3122,8 +4017,15 @@ struct SourcePopoverPanel: View {
                     SourceRow(source: source)
                 }
             }
+            // Breathing room the bottom fade falls across, so the last row rests
+            // above the taper at full strength once scrolled to the end.
+            .padding(.bottom, scrolls ? 24 : 0)
         }
         .scrollBounceBehavior(.basedOnSize)
+        // The shared dissolve at the overflow edge (`scrollEdgeFade`) instead of a
+        // hard cut — only when the list actually scrolls; a short list that fits
+        // stays crisp. Bottom only: the first row rests at the very top.
+        .scrollEdgeFade(top: false, bottom: scrolls, fade: 24)
         .frame(height: visibleHeight)
         .padding(.horizontal, 16)
         .padding(.vertical, 14)

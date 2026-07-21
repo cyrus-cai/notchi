@@ -64,6 +64,24 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.2.1",
+            date: "2026-07-21",
+            features: [
+                "Answers now render LaTeX math as clean symbols (x², α, √) and preview linked images and PDFs inline — tap to open.",
+            ],
+            improvements: [
+                "Follow up on an agent task straight from the notch panel — earlier rounds stay on screen.",
+                "Back out of an agent's detail page with ← or the new back button.",
+                "Model names show capitalized across the pickers.",
+                "Lighter, lit Liquid Glass look for the model and Ask pickers.",
+                "Softer top/bottom fade on more scrolling lists.",
+            ],
+            fixes: [
+                "An agent's final answer no longer prints twice in its work trail.",
+                "A running agent task no longer shows twice in Recent.",
+            ]
+        ),
+        Entry(
             version: "0.2.0",
             date: "2026-07-19",
             features: [

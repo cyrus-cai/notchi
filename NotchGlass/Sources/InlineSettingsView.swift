@@ -2203,6 +2203,13 @@ struct GlassPopoverBackground: ViewModifier {
     /// refraction through — the airy, transparent Control-Center look — for cards that
     /// want to read as glass rather than a slab (e.g. the ⌘⇧I model picker).
     var veilOpacity: Double = 0.42
+    /// Overrides the darkening baked into the glass material itself (default
+    /// `GlassMaterial.bakedTint` = 0.34). The airy picker cards want to read as
+    /// near-clear Liquid Glass, and the baked 0.34 is a *floor* on how transparent
+    /// the card can get — no amount of lowering `veilOpacity` goes below it. Passing
+    /// a lower tint (with `veilOpacity` at 0) lets the wallpaper refract through far
+    /// more strongly than the standard occluding popover.
+    var glassTint: Double = GlassMaterial.bakedTint
 
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
@@ -2213,18 +2220,31 @@ struct GlassPopoverBackground: ViewModifier {
         // text underneath stays legible *through* the card, reading as mud rather
         // than material. The veil is what makes it occlude like every other
         // floating layer in the app. (0.42 over the 0.34 baked tint ≈ 0.62.)
+        //
+        // The two touches that make it read as *glass* rather than a flat dark
+        // board — the whole point of an airy card like the ⌘⇧I picker:
+        //  · a soft top-down **sheen**, light pooling on the upper face, and
+        //  · a directional **specular rim** — bright along the top edge, fading
+        //    down the sides — the island's / detached card's edge idiom.
+        // A flat, even hairline read as a drawn outline; the lit gradient edge
+        // reads as the caught light on the rim of a real glass slab.
+        let slab = ZStack {
+            shape.fill(.clear).nativeGlass(in: shape, tintOpacity: glassTint)
+                .overlay(shape.fill(Color.black.opacity(veilOpacity)))
+            shape
+                .fill(LinearGradient(colors: [.white.opacity(0.12), .clear],
+                                     startPoint: .top, endPoint: .center))
+                .blendMode(.plusLighter)
+            shape.strokeBorder(
+                LinearGradient(colors: [.white.opacity(0.34), .white.opacity(0.08)],
+                               startPoint: .top, endPoint: .bottom),
+                lineWidth: 0.75)
+        }
+
         if #available(macOS 13.3, *) {
-            content.presentationBackground {
-                shape.fill(.clear).nativeGlass(in: shape)
-                    .overlay(shape.fill(Color.black.opacity(veilOpacity)))
-                    .overlay(shape.strokeBorder(Tokens.hairline, lineWidth: 0.5))
-            }
+            content.presentationBackground { slab }
         } else {
-            content.background {
-                shape.fill(.clear).nativeGlass(in: shape)
-                    .overlay(shape.fill(Color.black.opacity(veilOpacity)))
-                    .overlay(shape.strokeBorder(Tokens.hairline, lineWidth: 0.5))
-            }
+            content.background { slab }
         }
     }
 }

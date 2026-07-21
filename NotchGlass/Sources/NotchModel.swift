@@ -1913,8 +1913,20 @@ final class NotchModel: ObservableObject {
     /// keyboard nav auto-scrolls the highlight into view, so every visible item is
     /// reachable. Keyboard navigation indexes into THIS, so highlight bounds and the
     /// rendered rows can never drift apart. Older items live in the History window.
+    ///
+    /// A run whose task is still in the agent tray is already on screen as its
+    /// status row (settled card, or a live re-run), directly above this list —
+    /// so its filed record is held back here rather than stacking the same title
+    /// twice. Dismissing the card reveals the record row; the archive window
+    /// (`archiveVisible`) never hides it. (Freshness rides on views also
+    /// observing `AgentTaskManager`, whose task changes re-render them.)
     var recentVisible: [HistoryItem] {
-        Array(filteredHistory.prefix(NotchModel.notchRecentCap))
+        let trayIDs = Set(AgentTaskManager.shared.tasks.map(\.id))
+        guard !trayIDs.isEmpty else {
+            return Array(filteredHistory.prefix(NotchModel.notchRecentCap))
+        }
+        return Array(filteredHistory.lazy.filter { !trayIDs.contains($0.id) }
+            .prefix(NotchModel.notchRecentCap))
     }
 
     /// The FULL filtered history, newest-first — every retained item, uncapped.

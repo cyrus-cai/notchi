@@ -1970,15 +1970,16 @@ enum ModelRatings {
     }
 
     /// A tidy display name from an id: drop the `vendor/` prefix and the `:free`
-    /// suffix. `gpt-5.5` → "gpt-5.5" stays lower (model ids read better verbatim).
-    /// The one non-id entry — OpenRouter's free auto-router — gets its product
-    /// name instead of the bare slug remainder ("free").
+    /// suffix, then capitalize the first letter (`opus` → "Opus", `gpt-5.5` →
+    /// "Gpt-5.5") so every model name leads with a capital. The one non-id entry —
+    /// OpenRouter's free auto-router — gets its product name instead of the bare
+    /// slug remainder ("free").
     static func prettyName(for id: String) -> String {
         if id == "openrouter/free" { return "Auto Router (Free)" }
         var s = id
         if let slash = s.lastIndex(of: "/") { s = String(s[s.index(after: slash)...]) }
         if let colon = s.firstIndex(of: ":") { s = String(s[..<colon]) }
-        return s
+        return s.prefix(1).uppercased() + s.dropFirst()
     }
 }
 
