@@ -25,6 +25,13 @@ enum TurnEvent: Sendable {
     /// only place the real model surfaces (the request only names the router);
     /// the UI shows it under the answer. Emitted at most once per turn.
     case model(String)
+    /// A tool-call block just OPENED in the stream: the model has committed to
+    /// running `name`, but its arguments are still streaming in. Emitted so the
+    /// UI can raise the activity line the moment the decision is visible instead
+    /// of waiting the seconds it takes the arguments JSON to finish — the window
+    /// in which a preface-then-search turn used to show no progress at all. The
+    /// assembled `.toolCall` for the same call still follows.
+    case toolCallStarted(name: String)
     /// The model finished a tool-call request: it wants `name(input)` run, keyed
     /// by `id` so the result can be matched back. Emitted once per tool call after
     /// its arguments have fully streamed in.
@@ -255,8 +262,12 @@ struct AgentHarness {
     /// caller runs on the main actor, so it can capture main-actor mutable state.
     typealias TextSink = @MainActor (String) -> Void
     /// A tool is about to run / has finished → drive a transient "🔍 searching…"
-    /// activity line on the streaming turn. `nil` clears it. Also main-actor.
-    typealias ActivitySink = @MainActor (String?) -> Void
+    /// activity line on the streaming turn. `nil` clears it. The `OrbState`
+    /// rides alongside so the wait line's thinking orb can wear the matching
+    /// reference mode (globe while searching, orbits while a tool works) —
+    /// decided HERE, where the tool name is known, never re-derived from the
+    /// localized label downstream. Also main-actor.
+    typealias ActivitySink = @MainActor (String?, OrbState) -> Void
     /// A search round produced structured sources → attach them to the answer turn
     /// for the source badge. Called with the round's sources (accumulated across
     /// rounds is the caller's job). Main-actor.
@@ -332,7 +343,7 @@ struct AgentHarness {
                     let visible = markupFilter.feed(piece)
                     guard !visible.isEmpty else { continue }
                     if !clearedGapLabel {
-                        onActivity(nil)
+                        onActivity(nil, .composing)
                         clearedGapLabel = true
                     }
                     assistantText += visible
@@ -345,6 +356,19 @@ struct AgentHarness {
                         reportedModel = true
                         onModel?(ran)
                     }
+                case .toolCallStarted(let name):
+                    // The model has committed to a tool; its arguments are still
+                    // streaming. Raise the activity line NOW, from the name alone,
+                    // so the wait never goes dark between a spoken preface and the
+                    // tool actually running. The label is re-derived (and, for
+                    // read_page, refined with the page's host) when the assembled
+                    // calls execute below — same helpers, so the words agree.
+                    let preview = [ToolInvocation(id: "", name: name, input: [:])]
+                    onActivity(activityLabel(for: preview, isRepeatRound: didTool),
+                               Self.orbState(for: preview))
+                    // Text after this point is call-adjacent prose, not the answer
+                    // displacing the label — don't let it clear the line.
+                    clearedGapLabel = true
                 case .toolCall(let id, let name, let input):
                     pendingCalls.append(ToolInvocation(id: id, name: name, input: input))
                 case .finished(let reason):
@@ -365,7 +389,7 @@ struct AgentHarness {
 
             // No tool calls (or we suppressed them at the cap) → the model is done.
             if pendingCalls.isEmpty {
-                onActivity(nil)
+                onActivity(nil, .composing)
                 // A clean stop → done. But if the model ran out of budget mid-answer,
                 // the visible text is cut off mid-sentence with no sign to the user.
                 // Append a short marker so the reply doesn't just trail off as if
@@ -402,7 +426,7 @@ struct AgentHarness {
                     + "could not be run. Issue fewer tool calls at once and keep each "
                     + "one's arguments short, or answer directly if you already have "
                     + "enough to respond.")))
-                onActivity(nil)
+                onActivity(nil, .composing)
                 iteration += 1
                 continue
             }
@@ -419,7 +443,8 @@ struct AgentHarness {
             // completes a full appear → settle → disappear cycle. The fade in/out
             // itself is the view's `.transition(.opacity)` (see `turnView`).
             let shownAt = Date()
-            onActivity(activityLabel(for: pendingCalls, isRepeatRound: didTool))
+            onActivity(activityLabel(for: pendingCalls, isRepeatRound: didTool),
+                       Self.orbState(for: pendingCalls))
             let completed = await runConcurrently(pendingCalls)
             let elapsed = Date().timeIntervalSince(shownAt)
             if elapsed < Self.minActivityVisible {
@@ -443,9 +468,10 @@ struct AgentHarness {
             // draw the stop-searching nudge — reading a page is how the model
             // *escapes* the re-search loop, not another lap of it.
             if pendingCalls.contains(where: { Self.isSearchTool($0.name) || $0.name == "read_page" }) {
-                onActivity(L("agent.activity.composing"))
+                // The read-the-results gap is still the search flow — keep the globe.
+                onActivity(L("agent.activity.composing"), .searching)
             } else {
-                onActivity(nil)
+                onActivity(nil, .composing)
             }
             try Task.checkCancellation()
 
@@ -544,6 +570,28 @@ struct AgentHarness {
                   + "or tell the user plainly that the search did not turn up an answer."
         }
         return "\n\n[System note] " + nudge
+    }
+
+    /// The thinking-orb mode for the running calls — the semantic twin of
+    /// `activityLabel`, decided from the same tool names in the same place so
+    /// the orb and the words can never disagree. The whole search flow (search,
+    /// refine, read a page) wears the reference's searching globe; everything
+    /// else that runs a tool wears the working orbits; `ask_user` is a wait on
+    /// the human, not work, so it keeps the calm thinking ribbon (the wait line
+    /// is usually hidden behind the question card there anyway).
+    static func orbState(for calls: [ToolInvocation]) -> OrbState {
+        if let first = calls.first, calls.count == 1 {
+            switch first.name {
+            case "lookup_web", "$web_search", "exa_search", "keenable_search", "read_page":
+                return .searching
+            case "ask_user":
+                return .composing
+            default:
+                return .working
+            }
+        }
+        // A multi-call round is mixed work; orbits is the honest generic.
+        return .working
     }
 
     /// A short, human-readable progress label for the running calls, e.g.

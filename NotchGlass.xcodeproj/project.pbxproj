@@ -33,6 +33,7 @@
 		A1000074 /* MouseVelocityTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000075 /* MouseVelocityTracker.swift */; };
 		A1000076 /* OpenRouterAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000077 /* OpenRouterAuth.swift */; };
 		A1000790 /* CodexCLIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000791 /* CodexCLIService.swift */; };
+		A1000900 /* GrokCLIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000901 /* GrokCLIService.swift */; };
 		A10007A0 /* AgentTaskService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10007A1 /* AgentTaskService.swift */; };
 		A10007B0 /* ClaudeCLIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10007B1 /* ClaudeCLIService.swift */; };
 		A10007C0 /* ProxyConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10007C1 /* ProxyConfig.swift */; };
@@ -69,6 +70,7 @@
 		A1000075 /* MouseVelocityTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MouseVelocityTracker.swift; sourceTree = "<group>"; };
 		A1000077 /* OpenRouterAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenRouterAuth.swift; sourceTree = "<group>"; };
 		A1000791 /* CodexCLIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexCLIService.swift; sourceTree = "<group>"; };
+		A1000901 /* GrokCLIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GrokCLIService.swift; sourceTree = "<group>"; };
 		A10007A1 /* AgentTaskService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentTaskService.swift; sourceTree = "<group>"; };
 		A10007B1 /* ClaudeCLIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeCLIService.swift; sourceTree = "<group>"; };
 		A10007C1 /* ProxyConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyConfig.swift; sourceTree = "<group>"; };
@@ -145,6 +147,7 @@
 				A1000075 /* MouseVelocityTracker.swift */,
 				A1000077 /* OpenRouterAuth.swift */,
 				A1000791 /* CodexCLIService.swift */,
+				A1000901 /* GrokCLIService.swift */,
 				A10007A1 /* AgentTaskService.swift */,
 				A10007B1 /* ClaudeCLIService.swift */,
 				A10007C1 /* ProxyConfig.swift */,
@@ -277,6 +280,7 @@
 				A1000074 /* MouseVelocityTracker.swift in Sources */,
 				A1000076 /* OpenRouterAuth.swift in Sources */,
 				A1000790 /* CodexCLIService.swift in Sources */,
+				A1000900 /* GrokCLIService.swift in Sources */,
 				A10007A0 /* AgentTaskService.swift in Sources */,
 				A10007B0 /* ClaudeCLIService.swift in Sources */,
 				A10007C0 /* ProxyConfig.swift in Sources */,
@@ -366,7 +370,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.2.1;
+				MARKETING_VERSION = 0.2.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -389,7 +393,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.2.1;
+				MARKETING_VERSION = 0.2.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;

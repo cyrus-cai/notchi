@@ -38,6 +38,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if provider == .claudeCode {
             return ClaudeCLIService(model: APIKeyStore.effectiveModel(for: .claudeCode))
         }
+        // Grok CLI is the same keyless pattern — the user's own `grok login`
+        // (browser OAuth) or `XAI_API_KEY`, no key of ours. See `GrokCLIService`.
+        if provider == .grokCode {
+            return GrokCLIService(model: APIKeyStore.effectiveModel(for: .grokCode))
+        }
         guard let key = APIKeyStore.current(for: provider) else {
             return StubAIService()
         }
@@ -61,6 +66,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if provider == .claudeCode {
             return ClaudeCLIService(model: model)
         }
+        if provider == .grokCode {
+            return GrokCLIService(model: model)
+        }
         if provider.isOpenAICompatible {
             return OpenAICompatAIService(provider: provider, apiKey: apiKey, model: model)
         } else {
@@ -77,6 +85,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // in, not when a key is stored (they have none).
         if provider == .codex { return CodexCLIService.isAvailable }
         if provider == .claudeCode { return ClaudeCLIService.isAvailable }
+        if provider == .grokCode { return GrokCLIService.isAvailable }
         return APIKeyStore.current(for: provider) != nil
     }
 
@@ -167,11 +176,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // approach vector — the entry physics in `NotchIsland` feed on it.
         MouseVelocityTracker.shared.start()
 
-        // Resolve the `codex` / `claude` binaries off-main now, so the first time
+        // Resolve the `codex` / `claude` / `grok` binaries off-main now, so the first time
         // Settings asks `isAvailable` (a SwiftUI render) it reads a warm cache
         // instead of paying the `--version` smoke-test spawn on the main thread.
         CodexCLIService.warmUp()
         ClaudeCLIService.warmUp()
+        GrokCLIService.warmUp()
         // Same reason: resolving the proxy may spawn a login shell, and the first
         // agent run must not wait on it.
         ProxyConfig.warmUp()
@@ -371,6 +381,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // as the real "last project" memory.
                 if let path = env["NOTCH_DEMO_AGENT_FOLDER"] {
                     model.agentComposeFolder = URL(fileURLWithPath: path)
+                }
+                // NOTCH_DEMO_AGENT_PICKER=1 additionally opens the model+effort
+                // quick picker card off the compose chip (the ⌘⇧I card), so the
+                // popover itself can be screenshotted. Screenshot aid only.
+                if env["NOTCH_DEMO_AGENT_PICKER"] == "1" {
+                    model.showAgentPicker = true
                 }
             }
             #endif

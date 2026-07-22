@@ -515,6 +515,8 @@ struct InlineSettingsView: View {
                     codexAccountRow
                 } else if keyScope == .claudeCode {
                     claudeAccountRow
+                } else if keyScope == .grokCode {
+                    grokAccountRow
                 } else if keyScope == .openrouter && !manualKeyEntry && !envOverride {
                     openRouterAccountRow
                 } else {
@@ -524,7 +526,7 @@ struct InlineSettingsView: View {
                 // Codex / Claude Code have no key to fetch — their own rows carry the
                 // sign-in copy, so the generic "get a key at …" footer is wrong for
                 // them and suppressed.
-                if keyScope != .codex && keyScope != .claudeCode {
+                if keyScope != .codex && keyScope != .claudeCode && keyScope != .grokCode {
                     footer
                 }
             }
@@ -1102,6 +1104,49 @@ struct InlineSettingsView: View {
             Text(installed
                  ? (signedIn ? L("claudecode.status.hint.ready") : L("claudecode.status.hint.login"))
                  : L("claudecode.status.hint.install"))
+                .font(.sf(12))
+                .foregroundStyle(Tokens.text3)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.leading, 76)
+        }
+    }
+
+    // MARK: - Grok CLI sign-in status
+
+    /// Grok is keyless like Codex, and — unlike Claude — offers an in-app sign-in:
+    /// `grok login` is a first-class user-facing subcommand that opens the browser
+    /// OAuth flow, so the row can spawn it directly (the same command the user would
+    /// run in a terminal). Install link only when the CLI is missing.
+    @ViewBuilder
+    private var grokAccountRow: some View {
+        let installed = GrokCLIService.resolveBinary() != nil
+        let signedIn = GrokCLIService.authExists()
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Text(L("model.account"))
+                    .font(.sf(13, weight: .medium))
+                    .foregroundStyle(Tokens.text2)
+                    .frame(width: 64, alignment: .leading)
+
+                if !installed {
+                    // No CLI yet → link to install docs (there's nothing to sign into).
+                    codexPillButton(L("grok.status.get")) {
+                        NSWorkspace.shared.open(Provider.grokCode.signupURL)
+                    }
+                } else if signedIn {
+                    // Signed in → status + Re-authorize (re-run `grok login`).
+                    statusPill(ok: true, message: L("grok.status.connected"))
+                    Spacer(minLength: 8)
+                    codexPillButton(L("grok.action.reauthorize")) { GrokCLIService.reauthorize() }
+                } else {
+                    // Installed but not signed in → sign in (same `grok login` flow).
+                    codexPillButton(L("grok.action.signIn")) { GrokCLIService.reauthorize() }
+                }
+            }
+
+            Text(installed
+                 ? (signedIn ? L("grok.status.hint.ready") : L("grok.status.hint.login"))
+                 : L("grok.status.hint.install"))
                 .font(.sf(12))
                 .foregroundStyle(Tokens.text3)
                 .fixedSize(horizontal: false, vertical: true)

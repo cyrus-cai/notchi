@@ -64,6 +64,21 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.2.2",
+            date: "2026-07-23",
+            features: [
+                "New Grok engine — pick Grok CLI for chat or Agent tasks, signed in with your own xAI account (grok login, or XAI_API_KEY).",
+            ],
+            improvements: [
+                "A dotted thinking orb now sits by the status word — a globe while it searches, orbits while a tool runs.",
+                "Progress shows the instant the model reaches for a tool, not after its arguments finish streaming.",
+                "A search running under a spoken preface keeps its progress line instead of stalling mid-answer.",
+            ],
+            fixes: [
+                "Agent model picker no longer overflows its edges or clips to a single row when you switch engines.",
+            ]
+        ),
+        Entry(
             version: "0.2.1",
             date: "2026-07-21",
             features: [

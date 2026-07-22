@@ -1,9 +1,23 @@
 import SwiftUI
 
-/// Entry point. The app runs as a UI-element (no Dock icon, no menu bar app
+/// True entry point. Before SwiftUI/AppKit spins up, the headless service mode
+/// is peeled off: launched with `GrokSearchMCPServer.launchFlag`, this binary is
+/// a tiny MCP stdio server (grok spawns it to reach Notch's unified web-search
+/// backend — see `GrokCLIService`) and must never touch the UI stack. Everything
+/// else falls through to the normal SwiftUI app.
+@main
+enum NotchGlassMain {
+    static func main() {
+        if CommandLine.arguments.contains(GrokSearchMCPServer.launchFlag) {
+            GrokSearchMCPServer.runAndExit()
+        }
+        NotchGlassApp.main()
+    }
+}
+
+/// The app. Runs as a UI-element (no Dock icon, no menu bar app
 /// window) — it's a single floating panel that grows out of the Mac's notch.
 /// The real work happens in `AppDelegate`, which owns the borderless panel.
-@main
 struct NotchGlassApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 

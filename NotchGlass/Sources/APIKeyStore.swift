@@ -261,6 +261,11 @@ enum APIKeyStore {
         if provider == .codex, stored.isEmpty || stored == "codex" {
             return provider.defaultModel
         }
+        // Grok: same shape — an empty override or the "grok" sentinel both mean
+        // "use the account's default model" (read from the CLI's model cache).
+        if provider == .grokCode, stored.isEmpty || stored == "grok" {
+            return provider.defaultModel
+        }
         return stored.isEmpty ? nil : stored
     }
 

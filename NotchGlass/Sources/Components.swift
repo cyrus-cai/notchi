@@ -1414,6 +1414,426 @@ struct ThinkingDots: View {
     }
 }
 
+/// The "thinking orb" beside the wait word — a 1:1 port of the reference
+/// implementation (orbs.jakubantalik.com, github.com/Jakubantalik/thinking-orbs),
+/// NOT an approximation. What's ported, file by file:
+///
+/// - `engine/core.ts` → `OrbEngine`'s primitives: `fibDir` (Fibonacci lattice),
+///   `makeProj` (spin + tilt + orthographic projection), `paint` (z-sorted
+///   far→near painter, matte grayscale dots whose ink value is mirrored on the
+///   dark substrate so near dots read bright) and `radiusScale` (sub-linear
+///   size compensation, tuned around a 300pt frame).
+/// - `engine/ribbon.ts` → `drawRibbon` (the demo's "Thinking…." pill),
+///   `engine/lattice.ts` → `drawGlobe` (searching — a scan meridian sweeps a
+///   dotted globe), `engine/orbits.ts` → `drawOrbits` (working — particles on
+///   tilted orbits). All verbatim.
+/// - `engine/profiles.ts` + `presets.ts` → each mode's base profile with its
+///   inline `@ size 20` preset applied through the same `scaleCounts` /
+///   `scaleRadii` machinery. The reference's other three modes (wave / rubik /
+///   morph) have no Notch wait state to wear them, so they aren't ported —
+///   dead code isn't fidelity.
+///
+/// Which mode shows is SEMANTIC, decided where the activity originates (the
+/// agent harness knows which tool it just launched — see
+/// `AgentHarness.orbState(for:)`), never sniffed back out of a localized
+/// status string:
+///   • no tool activity (mood word / bare wait)      → `.composing` (ribbon)
+///   • the search flow (search / refine / read page) → `.searching` (globe)
+///   • any other tool running                        → `.working`  (orbits)
+/// A state change cross-dissolves on the house beat rather than the
+/// reference's hard remount — the one deliberate deviation, matching how
+/// `CrossfadeText` melts the wait words this orb sits beside.
+///
+/// Grayscale literals here are the reference's own ink values, not house
+/// tokens, deliberately: fidelity to the source is the point. Under Reduce
+/// Motion this renders the reference's static representative frame (t = 0.6),
+/// exactly as `ThinkingOrb.tsx` does for `prefers-reduced-motion`.
+struct ThinkingOrb: View {
+    /// Which of the ported reference states to show. Defaults to the calm
+    /// "Thinking…." ribbon; the wait lines pass the live semantic state.
+    var state: OrbState = .composing
+    /// Rendered size. The reference ships exactly one inline tuning — 20 CSS
+    /// px — and every preset below is that tuning, so this stays 20 unless
+    /// a new preset is deliberately baked.
+    var size: CGFloat = 20
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        let preset = OrbEngine.preset(for: state)
+        TimelineView(.animation(paused: reduceMotion)) { timeline in
+            // The reference clock: seconds × the preset's baked speed. Reduced
+            // motion gets the reference's fixed frame (`frame(0.6)`).
+            let t = reduceMotion
+                ? 0.6
+                : timeline.date.timeIntervalSinceReferenceDate * preset.speed
+            // The ZStack is the stage for the state cross-dissolve: on a state
+            // change the outgoing mode's last frame fades under the incoming
+            // live one (`.id` swaps identity, `.transition` overlaps them).
+            ZStack {
+                Canvas { ctx, canvasSize in
+                    preset.draw(&ctx,
+                                Double(min(canvasSize.width, canvasSize.height)),
+                                t,
+                                preset.opts)
+                }
+                .id(state)
+                .transition(.opacity)
+            }
+        }
+        .frame(width: size, height: size)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.35), value: state)
+        .accessibilityHidden(true)
+    }
+}
+
+/// The reference states Notch actually wears, named exactly as `types.ts`
+/// names them (`OrbState`). The mapping from Notch's wait-line semantics to
+/// these lives with the producers (harness / model), not the views.
+enum OrbState: Hashable {
+    /// Ribbon — the demo's "Thinking…." pairing. The default calm state.
+    case composing
+    /// Globe with a sweeping scan meridian — the search flow.
+    case searching
+    /// Particles on tilted orbits — a non-search tool doing work.
+    case working
+}
+
+/// The dotted-orb engine, ported 1:1 from `thinking-orbs/src/engine`. Kept as
+/// literal a translation as Swift allows — same names, same formulas, same
+/// defaults — so it can be diffed against the TypeScript source line by line.
+enum OrbEngine {
+    /// `core.ts` `Dot`: ink `white` is 0 = darkest ink on paper; the painter
+    /// mirrors it on our dark glass so near dots read bright.
+    struct Dot {
+        var x: Double
+        var y: Double
+        var z: Double
+        var r: Double
+        var white: Double
+        var a: Double = 1
+    }
+
+    /// `core.ts` `hashD`: deterministic hash in [0, 1).
+    static func hashD(_ a: Double, _ b: Double) -> Double {
+        let h = sin(a * 12.9898 + b * 78.233) * 43758.5453
+        return h - h.rounded(.down)
+    }
+
+    /// `core.ts` `angleDelta`: shortest signed angular distance, wrapped to (−π, π].
+    static func angleDelta(_ a: Double, _ b: Double) -> Double {
+        atan2(sin(a - b), cos(a - b))
+    }
+
+    /// `core.ts` `fibDir`: stable directions on a unit sphere (Fibonacci lattice).
+    static func fibDir(_ i: Int, _ n: Int) -> (Double, Double, Double) {
+        let golden = Double.pi * (3 - sqrt(5.0))
+        let y = 1 - (2 * (Double(i) + 0.5)) / Double(n)
+        let rad = sqrt(max(0, 1 - y * y))
+        let a = Double(i) * golden
+        return (rad * cos(a), y, rad * sin(a))
+    }
+
+    /// `core.ts` `makeProj`: shared spin + tilt + orthographic projection.
+    static func makeProj(yaw: Double, tilt: Double, cx: Double, cy: Double, scale: Double)
+        -> (Double, Double, Double) -> (Double, Double, Double) {
+        let st = sin(tilt), ct = cos(tilt)
+        let sy = sin(yaw), cyw = cos(yaw)
+        return { x, y, z in
+            let x1 = x * cyw + z * sy
+            let z1 = -x * sy + z * cyw
+            let y1 = y * ct - z1 * st
+            let z2 = y * st + z1 * ct
+            return (cx + x1 * scale, cy - y1 * scale, z2)
+        }
+    }
+
+    /// `core.ts` `paint`: z-sort far→near, matte grayscale dots. Notch's glass
+    /// is always the dark substrate, so the ink value is mirrored (`1 - white`)
+    /// unconditionally — the reference's `dark: true` path.
+    static func paint(_ ctx: inout GraphicsContext, _ dots: inout [Dot], rMin: Double = 0.3) {
+        dots.sort { $0.z < $1.z }
+        for d in dots {
+            guard d.a >= 0.02 else { continue }
+            let w = min(1, max(0, d.white))
+            let g = 1 - w
+            let r = max(rMin, d.r)
+            let rect = CGRect(x: d.x - r, y: d.y - r, width: r * 2, height: r * 2)
+            ctx.fill(Path(ellipseIn: rect), with: .color(Color(white: g, opacity: d.a)))
+        }
+    }
+
+    /// `core.ts` `radiusScale`: dot radii were tuned for a 300pt frame;
+    /// sub-linear scaling keeps small spinners legible.
+    static func radiusScale(_ size: Double, _ power: Double) -> Double {
+        pow(size / 300, power)
+    }
+
+    // MARK: profiles + preset (`profiles.ts`, `presets.ts`)
+
+    /// `BASE_PROFILES.ribbon`, verbatim.
+    static let ribbonBase: [String: Double] = [
+        "lanes": 5, "segs": 88, "ghostN": 150,
+        "rBase": 1.1, "rDepth": 1.7, "rsPow": 0.6, "rMin": 0.3,
+    ]
+
+    /// `profiles.ts` `scaleCounts`: paired 2-D lattice counts each take √scale
+    /// so the TOTAL scales by `scale`; flat counts scale linearly. Only the
+    /// keys the ribbon profile carries matter here, but the pair table is kept
+    /// whole to stay diffable against the source.
+    static func scaleCounts(_ opts: [String: Double], _ scale: Double) -> [String: Double] {
+        var out = opts
+        var done = Set<String>()
+        let rt = sqrt(scale)
+        let countPairs = [("latRings", "lonDensity"), ("rings", "lonDensity"), ("lanes", "segs")]
+        for (a, b) in countPairs {
+            if let va = out[a], let vb = out[b], !done.contains(a), !done.contains(b) {
+                out[a] = max(2, (va * rt).rounded())
+                out[b] = max(2, (vb * rt).rounded())
+                done.insert(a)
+                done.insert(b)
+            }
+        }
+        for k in ["orbitN", "ghostN"] {
+            if let v = out[k], !done.contains(k) { out[k] = max(1, (v * scale).rounded()) }
+        }
+        if let v = out["iconD"] { out["iconD"] = max(0.02, v * scale) }
+        return out
+    }
+
+    /// `profiles.ts` `scaleRadii`: every radius key scales together so a dot's
+    /// near/far falloff stays intact while the mark shrinks or grows.
+    static func scaleRadii(_ opts: [String: Double], _ scale: Double) -> [String: Double] {
+        var out = opts
+        for k in ["rBase", "rDepth", "rActive", "rDot", "ghostR", "partR", "partRDepth"] {
+            if let v = out[k] { out[k] = v * scale }
+        }
+        out["rSizeMul"] = (out["rSizeMul"] ?? 1) * scale
+        return out
+    }
+
+    /// `BASE_PROFILES.globe`, verbatim. (`rBoost` is deliberately absent from
+    /// `RADIUS_KEYS` in the source, so preset radius scaling leaves it alone.)
+    static let globeBase: [String: Double] = [
+        "latRings": 17, "lonDensity": 44,
+        "rBase": 0.6, "rDepth": 1.7, "rBoost": 1.0,
+        "inkFar": 0.62, "inkSpan": 0.54, "rsPow": 0.6, "rMin": 0.3,
+    ]
+
+    /// `BASE_PROFILES.orbits`, verbatim. (`particles` is per-orbit and not a
+    /// count key in the source, so it survives count scaling untouched.)
+    static let orbitsBase: [String: Double] = [
+        "orbitN": 12, "ghostN": 40, "ghostR": 0.9, "ghostA": 0.5,
+        "particles": 3, "partR": 1.2, "partRDepth": 1.6,
+        "rsPow": 0.6, "rMin": 0.3,
+    ]
+
+    /// One resolved (state, 20) preset: the mode's baked clock multiplier, its
+    /// fully-scaled draw options, and its frame painter.
+    struct OrbPreset {
+        let speed: Double
+        let opts: [String: Double]
+        let draw: (inout GraphicsContext, Double, Double, [String: Double]) -> Void
+    }
+
+    /// `resolvePreset(state, 20)` for the three states Notch wears, each built
+    /// through the same machinery as the source and cached once:
+    ///   composing → ribbon 20 {speed 3.12,  count ×0.051, size ×1.073,
+    ///                          spin 0, bandMul 4.94, wobMul 1}
+    ///   searching → globe  20 {speed 2.665, count ×0.105, size ×1.75,
+    ///                          scanMul 4.335, dimBase 0.45}
+    ///   working   → orbits 20 {speed 3.9,   count ×0.238, size ×2.4}
+    private static let presets: [OrbState: OrbPreset] = {
+        var composing = scaleRadii(scaleCounts(ribbonBase, 0.051), 1.073)
+        for (k, v) in ["spin": 0.0, "bandMul": 4.94, "wobMul": 1.0] { composing[k] = v }
+
+        var searching = scaleRadii(scaleCounts(globeBase, 0.105), 1.75)
+        for (k, v) in ["scanMul": 4.335, "dimBase": 0.45] { searching[k] = v }
+
+        let working = scaleRadii(scaleCounts(orbitsBase, 0.238), 2.4)
+
+        return [
+            .composing: OrbPreset(speed: 3.12, opts: composing, draw: drawRibbon),
+            .searching: OrbPreset(speed: 2.665, opts: searching, draw: drawGlobe),
+            .working: OrbPreset(speed: 3.9, opts: working, draw: drawOrbits),
+        ]
+    }()
+
+    static func preset(for state: OrbState) -> OrbPreset {
+        presets[state]!   // the table covers every OrbState case by construction
+    }
+
+    // MARK: ribbon (`ribbon.ts`)
+
+    /// `drawRibbon`, verbatim: an undulating sash of parallel strands rides a
+    /// great circle over a faint Fibonacci ghost shell. With the preset's
+    /// spin = 0 the 3D tumble is frozen — only the traveling undulation moves.
+    static func drawRibbon(_ ctx: inout GraphicsContext, size: Double, t: Double, o: [String: Double]) {
+        let cx = size / 2
+        let cy = size / 2
+        let R = (size / 2) * 0.78
+        let spin = o["spin"] ?? 1
+        let pt = makeProj(yaw: t * 0.1 * spin, tilt: 0.3, cx: cx, cy: cy, scale: 1)
+        let rs = radiusScale(size, o["rsPow"] ?? 0.6)
+
+        var dots: [Dot] = []
+        let ghostN = Int(o["ghostN"] ?? 150)
+        for i in 0..<ghostN {
+            let d = fibDir(i, ghostN)
+            let (px, py, z) = pt(d.0 * R, d.1 * R, d.2 * R)
+            let depth = (z / R + 1) / 2
+            dots.append(Dot(x: px, y: py, z: z, r: 0.8 * rs, white: 0.78,
+                            a: 0.1 + 0.22 * depth))
+        }
+
+        // The band plane, precessing (frozen when spin = 0).
+        let ya = t * 0.24 * spin
+        let ta = 0.55 + 0.3 * sin(t * 0.18) * spin
+        let ux = cos(ya), uy = 0.0, uz = sin(ya)
+        let vx = -uz * sin(ta), vy = cos(ta), vz = ux * sin(ta)
+        // Plane normal n = u × v.
+        let nx = uy * vz - uz * vy
+        let ny = uz * vx - ux * vz
+        let nz = ux * vy - uy * vx
+
+        let baseLanes = o["lanes"] ?? 5
+        let segs = Int(o["segs"] ?? 88)
+        let lanes = max(1, Int((baseLanes * (o["bandMul"] ?? 1)).rounded()))
+        for w in 0..<lanes {
+            let laneOff = (Double(w) - Double(lanes - 1) / 2) * 0.075
+            let edge = abs(Double(w) - Double(lanes - 1) / 2) / max(1, Double(lanes - 1) / 2)
+            for k in 0..<segs {
+                let a = (Double(k) / Double(segs)) * 2 * .pi
+                // The undulation: two traveling waves along the band.
+                let wob = (0.16 * sin(a * 3 - t * 1.7 + Double(w) * 0.22)
+                         + 0.07 * sin(a * 5 + t * 1.1)) * (o["wobMul"] ?? 1)
+                let off = laneOff + wob
+                let x = ux * cos(a) + vx * sin(a) + nx * off
+                let y = uy * cos(a) + vy * sin(a) + ny * off
+                let z = uz * cos(a) + vz * sin(a) + nz * off
+                let l = sqrt(x * x + y * y + z * z)
+                let (px, py, zr) = pt(x / l * R, y / l * R, z / l * R)
+                let depth = (zr / R + 1) / 2
+                dots.append(Dot(
+                    x: px, y: py, z: zr,
+                    r: ((o["rBase"] ?? 1.1) + (o["rDepth"] ?? 1.7) * depth) * (1 - 0.25 * edge) * rs,
+                    white: 0.52 - 0.44 * depth + 0.18 * edge,
+                    a: 0.4 + 0.6 * depth))
+            }
+        }
+        paint(&ctx, &dots, rMin: o["rMin"] ?? 0.3)
+    }
+
+    // MARK: globe (`lattice.ts`)
+
+    /// `drawGlobe`, verbatim: a lat/long dot field; a scan meridian sweeps —
+    /// read as a size ripple riding the near face, not a shine.
+    static func drawGlobe(_ ctx: inout GraphicsContext, size: Double, t: Double, o: [String: Double]) {
+        let spin = 0.5
+        let cx = size / 2
+        let cy = size / 2
+        let radius = (size / 2) * 0.82
+        let tilt = 0.4 + 0.06 * sin(t * 0.35)
+        let pt = makeProj(yaw: t * spin, tilt: tilt, cx: cx, cy: cy, scale: radius)
+        // The scan sweeps relative to the spin; scanMul scales that relative rate.
+        let scan = t * (spin + (1.7 - spin) * (o["scanMul"] ?? 1))
+        let rs = radiusScale(size, o["rsPow"] ?? 0.6)
+        let dimBase = o["dimBase"] ?? 1
+
+        var dots: [Dot] = []
+        let latRings = Int(o["latRings"] ?? 17)
+        let lonDensity = o["lonDensity"] ?? 44
+        for li in 0...latRings {
+            let lat = -Double.pi / 2 + (Double(li) / Double(latRings)) * .pi
+            let cosLat = cos(lat)
+            let sinLat = sin(lat)
+            let lonCount = max(1, Int((abs(cosLat) * lonDensity).rounded()))
+            for lj in 0..<lonCount {
+                let lon = (Double(lj) / Double(lonCount)) * 2 * .pi
+                let (px, py, z) = pt(cosLat * cos(lon), sinLat, cosLat * sin(lon))
+                let depth = (z + 1) / 2
+                // The scan: a moving meridian read as a size ripple, not a shine.
+                let d = angleDelta(lon + t * spin, scan)
+                let boost = exp(-(d * d) / 0.18) * max(0, z)
+                dots.append(Dot(
+                    x: px, y: py, z: z,
+                    r: ((o["rBase"] ?? 0.6) + (o["rDepth"] ?? 1.7) * depth
+                        + (o["rBoost"] ?? 1) * boost) * rs,
+                    white: (o["inkFar"] ?? 0.62) - (o["inkSpan"] ?? 0.54) * depth,
+                    // dimBase < 1 fades un-scanned dots so the meridian reads clearly.
+                    a: dimBase + (1 - dimBase) * min(1, boost)))
+            }
+        }
+        paint(&ctx, &dots, rMin: o["rMin"] ?? 0.3)
+    }
+
+    // MARK: orbits (`orbits.ts`)
+
+    /// `drawOrbits`, verbatim: particles on tilted orbits — no nucleus (the
+    /// tuned preset runs coreless): just ghost paths and the particles doing
+    /// the work.
+    static func drawOrbits(_ ctx: inout GraphicsContext, size: Double, t: Double, o: [String: Double]) {
+        let cx = size / 2
+        let cy = size / 2
+        let R = (size / 2) * 0.82
+        let pt = makeProj(yaw: t * 0.12, tilt: 0.3, cx: cx, cy: cy, scale: 1)
+        let rs = radiusScale(size, o["rsPow"] ?? 0.6)
+
+        var dots: [Dot] = []
+        let orbitN = Int(o["orbitN"] ?? 12)
+        let ghostN = Int(o["ghostN"] ?? 40)
+        let particles = Int(o["particles"] ?? 3)
+
+        // Orbits: each a tilted circle — a ghost path + running particles.
+        for orb in 0..<orbitN {
+            let h1 = hashD(Double(orb), 1.7)
+            let h2 = hashD(Double(orb), 5.2)
+            let h3 = hashD(Double(orb), 8.9)
+            let ro = R * (0.45 + 0.52 * h1)
+            let th = h1 * 2 * .pi
+            let phi = acos(2 * h2 - 1)
+            // Orbit plane basis (u, v ⟂ normal n).
+            let nx = sin(phi) * cos(th)
+            let ny = cos(phi)
+            let nz = sin(phi) * sin(th)
+            var ux = -ny
+            var uy = nx
+            let uz = 0.0
+            let ul = max(1e-6, sqrt(ux * ux + uy * uy))
+            ux /= ul
+            uy /= ul
+            let vx = ny * uz - nz * uy
+            let vy = nz * ux - nx * uz
+            let vz = nx * uy - ny * ux
+            let speed = (0.25 + 0.55 * h3) * (h3 > 0.5 ? 1 : -1)
+
+            // Ghost path.
+            for k in 0..<ghostN {
+                let a = (Double(k) / Double(ghostN)) * 2 * .pi
+                let (px, py, z) = pt((ux * cos(a) + vx * sin(a)) * ro,
+                                     (uy * cos(a) + vy * sin(a)) * ro,
+                                     (uz * cos(a) + vz * sin(a)) * ro)
+                let depth = (z / ro + 1) / 2
+                dots.append(Dot(x: px, y: py, z: z,
+                                r: (o["ghostR"] ?? 0.9) * rs, white: 0.72,
+                                a: (o["ghostA"] ?? 0.5) * (0.4 + 0.6 * depth)))
+            }
+            // The particles doing the work.
+            for m in 0..<particles {
+                let a = t * speed + (Double(m) / Double(particles)) * 2 * .pi + h2 * 6
+                let (px, py, z) = pt((ux * cos(a) + vx * sin(a)) * ro,
+                                     (uy * cos(a) + vy * sin(a)) * ro,
+                                     (uz * cos(a) + vz * sin(a)) * ro)
+                let depth = (z / ro + 1) / 2
+                dots.append(Dot(x: px, y: py, z: z,
+                                r: ((o["partR"] ?? 1.2) + (o["partRDepth"] ?? 1.6) * depth) * rs,
+                                white: 0.3 - 0.22 * depth))
+            }
+        }
+        paint(&ctx, &dots, rMin: o["rMin"] ?? 0.3)
+    }
+}
+
 /// A single status-line slot that dissolves whenever its `text` changes, so a
 /// rotating mood word ("Glowing" → "Drifting") or a status change ("Searching the
 /// web…" → "Reading the results…") melts from one into the next rather than
@@ -1608,6 +2028,10 @@ struct AssistantTurnView: View {
     /// The live tool-activity line ("Searching the web…") when a tool is running,
     /// else nil — takes the wait slot over the mood word while present.
     var activity: String? = nil
+    /// The thinking orb's semantic mode for the wait line — rides the same
+    /// harness signal as `activity` (see `NotchModel.thinkingOrbState`), so the
+    /// orb and the words always agree. Defaults to the calm thinking ribbon.
+    var orbState: OrbState = .composing
     /// The present-progressive mood word for the pre-stream wait (e.g. "Gazing…").
     var thinkingWord: String = ""
     /// When this round started thinking — drives the quiet elapsed-time suffix on
@@ -1732,6 +2156,19 @@ struct AssistantTurnView: View {
     /// your choice…" line above it would just say it twice.
     private var showWait: Bool { streaming && !hasText && pendingQuestion == nil }
 
+    /// The mid-answer activity row. Once real text lands, `showWait` is off for
+    /// good — but a tool can still be running under that text (the model spoke a
+    /// preface, then searched), and hiding every cue there is what made a turn
+    /// read as stalled mid-search. Whenever a live activity exists past the first
+    /// text, it gets its OWN row under the growing answer instead of the overlay.
+    /// Gated on `activity` (not `waitLine`) so the mood-word fallback never rides
+    /// along — a plain streaming answer keeps its clean, indicator-free look.
+    /// Suppressed under an `ask_user` card exactly like `showWait` (the card is
+    /// the wait state then).
+    private var showActivityRow: Bool {
+        streaming && hasText && activity != nil && pendingQuestion == nil
+    }
+
     /// The distinct hosts to walk through, in first-seen order. `sources` is the
     /// URL-deduped list accumulated across *all* search rounds, so a later round
     /// that pulls a different page of a site already shown (a fresh URL, same host)
@@ -1767,6 +2204,24 @@ struct AssistantTurnView: View {
         return thinkingWord.isEmpty ? nil : thinkingWord
     }
 
+    /// The one wait row — orb, crossfading line, elapsed suffix — shared by the
+    /// pre-text overlay and the mid-answer activity row, so the two states render
+    /// identically and hand off without a visual seam.
+    private func waitRow(_ line: String) -> some View {
+        HStack(spacing: 8) {
+            ThinkingOrb(state: orbState)
+            CrossfadeText(text: line, font: baseFont, color: Tokens.text2)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            // The elapsed suffix sits OUTSIDE the dissolving word (a sibling,
+            // fixed size) so the ticking seconds never ride the word-change
+            // transition, and a long activity line truncates while the timer
+            // stays visible.
+            WaitElapsedSuffix(since: thinkingSince, font: baseFont)
+                .fixedSize()
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             // The answer — the SAME view whether streaming or settled, so the
@@ -1800,22 +2255,23 @@ struct AssistantTurnView: View {
                     // so the slot just dissolves from one to the next.
                     Group {
                         if let waitLine {
-                            // The elapsed suffix sits OUTSIDE the dissolving word
-                            // (a sibling, fixed size) so the ticking seconds never
-                            // ride the word-change transition, and a long activity
-                            // line truncates while the timer stays visible.
-                            HStack(spacing: 8) {
-                                CrossfadeText(text: waitLine, font: baseFont, color: Tokens.text2)
-                                    .lineLimit(1)
-                                    .truncationMode(.tail)
-                                WaitElapsedSuffix(since: thinkingSince, font: baseFont)
-                                    .fixedSize()
-                            }
+                            waitRow(waitLine)
                         }
                     }
                     .opacity(showWait ? 1 : 0)
                     .allowsHitTesting(false)
                 }
+
+            // The mid-answer activity row (see `showActivityRow`): the same wait
+            // row, but as a SIBLING under the growing text — an overlay would sit
+            // on top of the answer. It appears only while a tool is actually
+            // running past the first text ("Searching the web…" under a spoken
+            // preface), and dissolves when the tool clears and the answer resumes.
+            if showActivityRow, let waitLine {
+                waitRow(waitLine)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+            }
 
             // The `ask_user` question card: the model has paused this answer to ask
             // the user a multiple-choice question and is suspended until they pick
@@ -1951,6 +2407,7 @@ struct AssistantTurnView: View {
         }
         .onHover { turnHovered = $0 }
         .animation(.easeInOut(duration: Self.fade), value: showWait)
+        .animation(.easeInOut(duration: Self.fade), value: showActivityRow)
         .animation(.easeInOut(duration: 0.12), value: activity != nil)
         // The question card fades in when the model asks and out when the pick (or
         // timeout) releases the round — same beat as the wait overlay's fade.

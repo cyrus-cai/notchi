@@ -7,11 +7,13 @@ import AppKit
 enum AgentEngine: String, CaseIterable {
     case codex
     case claude
+    case grok
 
     var displayName: String {
         switch self {
         case .codex:  return "Codex"
         case .claude: return "Claude"
+        case .grok:   return "Grok"
         }
     }
 
@@ -20,6 +22,7 @@ enum AgentEngine: String, CaseIterable {
         switch self {
         case .codex:  return CodexCLIService.isAvailable
         case .claude: return ClaudeCLIService.isAvailable
+        case .grok:   return GrokCLIService.isAvailable
         }
     }
 
@@ -31,6 +34,7 @@ enum AgentEngine: String, CaseIterable {
         switch self {
         case .codex:  return "codex resume \(session)"
         case .claude: return "claude --resume \(session)"
+        case .grok:   return "grok --resume \(session)"
         }
     }
 
@@ -87,6 +91,19 @@ enum AgentEngine: String, CaseIterable {
                     label: resolved[alias].map(ClaudeCLIService.displayName(forResolved:))
                         ?? fallback)
             }
+        case .grok:
+            // Grok's models come from the CLI's own cache (see `GrokCLIService`),
+            // labelled with the cache's display names ("Grok 4.5" — the id's bare
+            // version tail says nothing in the list). An empty cache → the one
+            // flag-less default entry (an available engine must never have an
+            // empty section, since the menu is the only way to arm it).
+            let listed = GrokCLIService.listedModels
+            if listed.isEmpty {
+                return [AgentModelChoice(engine: self, id: nil, label: displayName)]
+            }
+            return listed.map {
+                AgentModelChoice(engine: self, id: $0.id, label: $0.displayName)
+            }
         }
     }
 }
@@ -123,6 +140,10 @@ extension AgentEngine {
     func effortChoices(forModelID modelID: String?) -> [AgentEffort] {
         switch self {
         case .claude:
+            return [.low, .medium, .high, .xhigh, .max]
+        case .grok:
+            // Grok's `--reasoning-effort` ladder (the standard rungs; grok also
+            // accepts none/minimal, which have no AgentEffort case).
             return [.low, .medium, .high, .xhigh, .max]
         case .codex:
             let models = CodexCLIService.listedModels
@@ -546,6 +567,25 @@ final class AgentTaskManager: ObservableObject {
         switch engine {
         case .codex:  return CodexCLIService.authExists() ? CodexCLIService.resolveBinary() : nil
         case .claude: return ClaudeCLIService.authExists() ? ClaudeCLIService.resolveBinary() : nil
+        case .grok:   return GrokCLIService.authExists() ? GrokCLIService.resolveBinary() : nil
+        }
+    }
+
+    /// The event parser for an engine's JSONL dialect.
+    private static func makeParser(for engine: AgentEngine) -> AgentEventParser {
+        switch engine {
+        case .codex:  return CodexAgentStreamState()
+        case .claude: return ClaudeAgentStreamState()
+        case .grok:   return GrokAgentStreamState()
+        }
+    }
+
+    /// The user-facing "couldn't start the CLI" reason for an engine.
+    private static func spawnFailureReason(_ engine: AgentEngine, _ detail: String) -> String? {
+        switch engine {
+        case .codex:  return CodexError.spawnFailed(detail).errorDescription
+        case .claude: return ClaudeCodeError.spawnFailed(detail).errorDescription
+        case .grok:   return GrokError.spawnFailed(detail).errorDescription
         }
     }
 
@@ -627,6 +667,29 @@ final class AgentTaskManager: ObservableObject {
             // the CLI's only image route (there is no `-i` equivalent). The
             // output dialect is stream-json either way, so parsing is untouched.
             if !imagesJPEG.isEmpty { args += ["--input-format", "stream-json"] }
+        case .grok:
+            // Grok headless needs the prompt via --prompt-file: bare stdin
+            // errors "Device not configured (os error 6)", and `-p` would merge
+            // the stdin the shared writer sends (double prompt) — but
+            // --prompt-file is authoritative and ignores stdin (verified). The
+            // prompt file rides `tempImageURLs` so it's cleaned up on settle.
+            // --always-approve lets file edits / shell run unattended (the twin
+            // of codex's workspace-write and claude's acceptEdits); --no-plan
+            // stops it pausing on a plan no one will approve. NOT sandboxed
+            // (grok's sandbox profiles aren't wired) — parity with the Claude
+            // engine, which likewise runs Bash unconfined. Session persists, so
+            // a follow-up rides `--resume <id>` (id parsed from the `end` event).
+            let promptURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("notch-grok-prompt-\(UUID().uuidString).txt")
+            try? Data(prompt.utf8).write(to: promptURL)
+            run.tempImageURLs.append(promptURL)
+            args = ["--prompt-file", promptURL.path,
+                    "--output-format", "streaming-json",
+                    "--always-approve", "--no-plan", "--no-memory", "--no-subagents",
+                    "--no-auto-update", "--cwd", folder.path]
+            if let resumeSession { args += ["--resume", resumeSession] }
+            if let model { args += ["-m", model] }
+            if let effort { args += ["--reasoning-effort", effort.rawValue] }
         }
 
         let p = Process()
@@ -659,9 +722,7 @@ final class AgentTaskManager: ObservableObject {
               let errWrite = try? FileHandle(forWritingTo: errURL) else {
             // No log files means no redirect, no recovery record and no output
             // parse — don't spawn a run we'd be blind to.
-            let reason = (engine == .codex
-                ? CodexError.spawnFailed("run log unavailable").errorDescription
-                : ClaudeCodeError.spawnFailed("run log unavailable").errorDescription)
+            let reason = Self.spawnFailureReason(engine, "run log unavailable")
             settle(taskID: taskID,
                    snapshot: AgentSnapshot(finalMessage: "", failure: reason,
                                            stderrTail: "", sawTerminal: false),
@@ -671,8 +732,7 @@ final class AgentTaskManager: ObservableObject {
         p.standardOutput = outWrite
         p.standardError = errWrite
 
-        let state: AgentEventParser = engine == .codex
-            ? CodexAgentStreamState() : ClaudeAgentStreamState()
+        let state: AgentEventParser = Self.makeParser(for: engine)
 
         // Progress streams off the growing log file — push became poll: the
         // pipe's readability handler used to feed these bytes; a quarter-second
@@ -714,9 +774,7 @@ final class AgentTaskManager: ObservableObject {
             // exchange, same Recent row. Hand-rolling the outcome here (as this
             // used to) skipped `onSettled`, so a spawn failure left no record
             // at all once its card was dismissed.
-            let reason = (engine == .codex
-                ? CodexError.spawnFailed(error.localizedDescription).errorDescription
-                : ClaudeCodeError.spawnFailed(error.localizedDescription).errorDescription)
+            let reason = Self.spawnFailureReason(engine, error.localizedDescription)
             settle(taskID: taskID,
                    snapshot: AgentSnapshot(finalMessage: "", failure: reason,
                                            stderrTail: "", sawTerminal: false),
@@ -1013,8 +1071,7 @@ final class AgentTaskManager: ObservableObject {
                           pid: Int32(pid), spawnedAt: run.spawnedAt,
                           imageFiles: run.currentImageFiles)
 
-        let state: AgentEventParser = engine == .codex
-            ? CodexAgentStreamState() : ClaudeAgentStreamState()
+        let state: AgentEventParser = Self.makeParser(for: engine)
         let outURL = Self.stdoutLogURL(taskID: taskID)
         let errURL = Self.stderrLogURL(taskID: taskID)
         // The tailer starts at offset zero, so its first tick replays
@@ -1083,8 +1140,7 @@ final class AgentTaskManager: ObservableObject {
                                engine: AgentEngine) -> AgentTask? {
         let outURL = Self.stdoutLogURL(taskID: taskID)
         guard let data = try? Data(contentsOf: outURL), !data.isEmpty else { return nil }
-        let state: AgentEventParser = engine == .codex
-            ? CodexAgentStreamState() : ClaudeAgentStreamState()
+        let state: AgentEventParser = Self.makeParser(for: engine)
         let progress = state.ingest(data)
         Self.appendStderrFile(Self.stderrLogURL(taskID: taskID), to: state)
         let snapshot = state.finish()
@@ -1139,8 +1195,13 @@ final class AgentTaskManager: ObservableObject {
     /// re-auth lives in-app, not in the terminal).
     nonisolated private static func friendlyFailure(_ reason: String,
                                                     engine: AgentEngine) -> String {
-        engine == .claude && ClaudeCodeError.isAuthFailure(reason)
-            ? L("claudecode.error.authExpired") : reason
+        if engine == .claude, ClaudeCodeError.isAuthFailure(reason) {
+            return L("claudecode.error.authExpired")
+        }
+        if engine == .grok, GrokError.isAuthFailure(reason) {
+            return L("grok.error.authExpired")
+        }
+        return reason
     }
 
     /// The last-resort recovery: nothing left of the run but its marker (and
@@ -1873,6 +1934,129 @@ private final class ClaudeAgentStreamState: AgentEventParser {
         lock.lock(); defer { lock.unlock() }
         // Same residue flush as the codex parser: a final unterminated line is
         // exactly where the `result` event would be.
+        if !buffer.isEmpty {
+            buffer.append(0x0A)
+            var residue = AgentProgress()
+            _ = drainLines(into: &residue)
+        }
+        let tail = stderrTail
+            .split(separator: "\n")
+            .map(String.init)
+            .last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })
+            ?? ""
+        return AgentSnapshot(finalMessage: finalMessage, failure: failure,
+                             stderrTail: tail, sawTerminal: sawTerminal)
+    }
+}
+
+/// The **grok** dialect (`grok --prompt-file … --output-format streaming-json`).
+/// Deliberately the thinnest of the three parsers, because grok's headless
+/// streaming-json surfaces only `text` (answer deltas), `thought` (reasoning
+/// deltas) and a terminal `end` — NO per-tool events, even when the run edits
+/// files or runs commands (verified). So there is no fine-grained work trail to
+/// build: the ticker shows the report streaming (or "Thinking…" during
+/// reasoning), and the whole report lands as one narration entry at `end`. The
+/// full per-command / per-file trail would need grok's ACP mode (`grok agent
+/// stdio`), a bidirectional JSON-RPC protocol incompatible with this subsystem's
+/// file-tailing, survive-app-quit design. The `end` event carries `sessionId`
+/// (what `grok --resume` continues) and `stopReason`; no token usage is emitted,
+/// so the context meter stays blank for grok.
+private final class GrokAgentStreamState: AgentEventParser {
+    private let lock = NSLock()
+    private var buffer = Data()
+    private var stderrTail = ""
+    private var finalMessage = ""
+    private var failure: String?
+    private var sawTerminal = false
+    /// The report is emitted as a work-trail entry once, at `end`.
+    private var emittedReport = false
+
+    func ingest(_ data: Data) -> AgentProgress? {
+        lock.lock(); defer { lock.unlock() }
+        buffer.append(data)
+        var progress = AgentProgress()
+        return drainLines(into: &progress) ? progress : nil
+    }
+
+    /// Parse every complete (newline-terminated) line into `progress`. Caller
+    /// holds the lock.
+    private func drainLines(into progress: inout AgentProgress) -> Bool {
+        var any = false
+        while let nl = buffer.firstIndex(of: 0x0A) {
+            let line = buffer.subdata(in: buffer.startIndex..<nl)
+            buffer.removeSubrange(buffer.startIndex...nl)
+            guard !line.isEmpty,
+                  let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+                  let type = obj["type"] as? String
+            else { continue }
+            switch type {
+            case "text":
+                if let t = obj["data"] as? String, !t.isEmpty {
+                    finalMessage += t
+                    // Rolling ticker: the tail of the report as it's written, so
+                    // the collapsed card shows motion even without a tool trail.
+                    let flat = finalMessage
+                        .replacingOccurrences(of: "\n", with: " ")
+                        .trimmingCharacters(in: .whitespaces)
+                    progress.activity = String(flat.suffix(80))
+                    any = true
+                }
+            case "thought":
+                progress.activity = L("agent.thinking")
+                any = true
+            case "end":
+                sawTerminal = true
+                if let sid = obj["sessionId"] as? String, !sid.isEmpty {
+                    progress.sessionID = sid
+                    any = true
+                }
+                // The turn's token accounting, when the `end` event carries it:
+                // `input_tokens` is the request's full prompt = what the turn
+                // occupied of the context window (same semantic as codex's).
+                if let usage = obj["usage"] as? [String: Any],
+                   let input = usage["input_tokens"] as? Int, input > 0 {
+                    progress.contextUsed = input
+                    any = true
+                }
+                let report = finalMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+                // A terminal stopReason that names an error, with no report, is a
+                // failure worth surfacing.
+                if report.isEmpty, let reason = obj["stopReason"] as? String {
+                    let r = reason.lowercased()
+                    if r.contains("error") || r.contains("refus") || r.contains("cancel") {
+                        failure = reason
+                    }
+                }
+                if !emittedReport, !report.isEmpty {
+                    emittedReport = true
+                    progress.entries.append(AgentLogEntry(
+                        id: UUID(), title: String(report.prefix(500)), mono: false))
+                    any = true
+                }
+            case "error":
+                sawTerminal = true
+                failure = (obj["message"] as? String)
+                    ?? (obj["data"] as? String)
+                    ?? (obj["error"] as? String)
+                    ?? "unknown error"
+            default:
+                break   // any other event types
+            }
+        }
+        return any
+    }
+
+    func appendStderr(_ data: Data) {
+        guard let s = String(data: data, encoding: .utf8) else { return }
+        lock.lock(); defer { lock.unlock() }
+        stderrTail += s
+        if stderrTail.count > 2000 { stderrTail = String(stderrTail.suffix(2000)) }
+    }
+
+    func finish() -> AgentSnapshot {
+        lock.lock(); defer { lock.unlock() }
+        // A last line the stream never newline-terminated (the `end` event, if
+        // the process was killed mid-flush) still gets one parse.
         if !buffer.isEmpty {
             buffer.append(0x0A)
             var residue = AgentProgress()

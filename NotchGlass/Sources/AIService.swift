@@ -321,6 +321,11 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     // `ClaudeCLIService`: only the genuine binary is run, credentials are never
     // read, and Notch offers no in-app Claude sign-in.
     case claudeCode
+    // xAI's Grok CLI, the same keyless pattern as Codex/Claude Code: Notch spawns
+    // the user's own official `grok` binary (their `grok login` browser sign-in, or
+    // `XAI_API_KEY`), billed to their xAI / SuperGrok plan. Not an HTTP endpoint —
+    // it shells out to the local `grok` binary (see `GrokCLIService`).
+    case grokCode
     case anthropic
     case gemini
     case deepseek
@@ -415,6 +420,19 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
                 signupHost: "code.claude.com",
                 signupURL: "https://code.claude.com/docs/en/quickstart",
                 envVarName: "CLAUDE_CODE_UNUSED")
+        case .grokCode:
+            // Not an HTTP backend — `GrokCLIService` shells out to the local `grok`
+            // binary; `endpoint` is a never-used placeholder. "grok" is a sentinel
+            // meaning "the account's default model" (no `-m` flag). The `signupURL`
+            // points at the install docs — there's no key to create; sign-in is
+            // `grok login` (browser OAuth) or the `XAI_API_KEY` env var.
+            return ProviderSpec(
+                displayName: "Grok CLI",
+                endpoint: "https://cli-chat-proxy.grok.com/unused",
+                models: ["grok"],
+                signupHost: "docs.x.ai",
+                signupURL: "https://docs.x.ai/docs/cli",
+                envVarName: "GROK_CLI_UNUSED")
         case .gemini:
             return ProviderSpec(
                 displayName: "Google Gemini",
@@ -479,6 +497,9 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // `codex` is configured to run (read from ~/.codex/config.toml), so the
         // picker and answer footer show the real model name, not a generic "codex".
         if self == .codex { return CodexCLIService.defaultModel }
+        // Grok's model likewise isn't a curated shortlist — it's the account's own,
+        // read from the CLI's model cache (see `GrokCLIService`).
+        if self == .grokCode { return GrokCLIService.defaultModel }
         return RemoteModelManifest.models(for: self)?.first ?? spec.defaultModel
     }
     var availableModels: [String] {
@@ -486,6 +507,9 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // (see `CodexCLIService`), falling back to the single configured model until
         // that fetch lands — never a curated/remote shortlist.
         if self == .codex { return CodexCLIService.availableModelIDs }
+        // Grok's list is the account's real models from `~/.grok/models_cache.json`
+        // (see `GrokCLIService`), falling back to the single "grok" sentinel.
+        if self == .grokCode { return GrokCLIService.availableModelIDs }
         return RemoteModelManifest.models(for: self) ?? spec.availableModels
     }
     var signupHost: String      { spec.signupHost }
@@ -510,6 +534,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         case .openrouter, .vercel:    return nil
         case .openai, .codex:         return "OpenAI"
         case .anthropic, .claudeCode: return "Anthropic"
+        case .grokCode:               return "xAI"
         case .gemini:                 return "Google"
         case .deepseek:               return "DeepSeek"
         case .qwen:                   return "Qwen"
@@ -530,8 +555,8 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // Anthropic speaks its native protocol; Codex and Claude Code aren't HTTP
         // at all (subprocesses). All are routed to their own client, never the
         // shared one.
-        case .anthropic, .codex, .claudeCode: return false
-        default:                              return true
+        case .anthropic, .codex, .claudeCode, .grokCode: return false
+        default:                                         return true
         }
     }
 
@@ -571,8 +596,8 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // way — the turn dispatcher takes the plain `stream` path for them. Every
         // other provider exposes a function-calling API the harness can drive.
         switch self {
-        case .codex, .claudeCode: return false
-        default:                  return true
+        case .codex, .claudeCode, .grokCode: return false
+        default:                             return true
         }
     }
 
@@ -690,10 +715,11 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     /// data, with no way to reach current information. The Settings provider menu
     /// uses this to demote the no-search vendors into a "not recommended" submenu.
     var supportsWebSearch: Bool {
-        // Codex and Claude Code search the web themselves as part of their agent
-        // loops, so they earn the "Web search" chip even though Notch injects
+        // Codex, Claude Code and Grok search the web themselves as part of their
+        // agent loops, so they earn the "Web search" chip even though Notch injects
         // nothing (`serverSearch == nil`).
         serverSearch != nil || self == .glm || self == .codex || self == .claudeCode
+            || self == .grokCode
     }
 }
 
@@ -1351,9 +1377,9 @@ enum ModelCatalog {
     /// in the Settings UI does today). A failed fetch is never cached, so the
     /// next call — cache or no — always gets a real retry.
     static func fetch(for provider: Provider, apiKey: String, force: Bool = false) async -> Result? {
-        // Codex has no `/v1/models` endpoint (it's a local subprocess, not HTTP), so
-        // there's nothing to fetch — its single bundled "codex" id is the whole list.
-        if provider == .codex { return nil }
+        // Codex / Grok have no `/v1/models` endpoint (they're local subprocesses, not
+        // HTTP), so there's nothing to fetch — their model lists come from the CLIs.
+        if provider == .codex || provider == .grokCode { return nil }
         if !force, let hit = withCacheLock({ cache[provider] }),
            hit.apiKey == apiKey, Date().timeIntervalSince(hit.fetchedAt) < ttl {
             return hit.result
@@ -2543,7 +2569,16 @@ extension OpenAICompatAIService: AgentCapableService {
                                     var entry = callsByIndex[idx] ?? (id: "", name: "", args: "")
                                     if let id = tc["id"] as? String, !id.isEmpty { entry.id = id }
                                     if let fn = tc["function"] as? [String: Any] {
-                                        if let n = fn["name"] as? String, !n.isEmpty { entry.name = n }
+                                        if let n = fn["name"] as? String, !n.isEmpty {
+                                            // First sight of this call's name — the model
+                                            // has committed to the tool while its arguments
+                                            // are still streaming. Announce it now so the
+                                            // activity line doesn't wait for the JSON tail.
+                                            if entry.name.isEmpty {
+                                                continuation.yield(.toolCallStarted(name: n))
+                                            }
+                                            entry.name = n
+                                        }
                                         if let a = fn["arguments"] as? String { entry.args += a }
                                     }
                                     callsByIndex[idx] = entry
@@ -2745,6 +2780,12 @@ extension AnthropicAIService: AgentCapableService {
                                    block["type"] as? String == "tool_use" {
                                     let id = block["id"] as? String ?? "toolu_\(idx)"
                                     let name = block["name"] as? String ?? ""
+                                    // The block carries the tool name up front while
+                                    // the arguments stream behind it — announce the
+                                    // call now so the activity line doesn't wait.
+                                    if !name.isEmpty {
+                                        continuation.yield(.toolCallStarted(name: name))
+                                    }
                                     blocks[idx] = (id: id, name: name, partialJSON: "")
                                 }
                             case "content_block_delta":

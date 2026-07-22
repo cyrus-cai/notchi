@@ -1459,6 +1459,20 @@ final class NotchModel: ObservableObject {
     /// tool is running, else nil. Set by the harness via `updateActivity`.
     @Published private var thinkingActivity: String? = nil
 
+    /// The thinking orb's mode riding the live activity line — set by the SAME
+    /// harness call that sets the label (the harness knows which tool it just
+    /// launched; see `AgentHarness.orbState(for:)`), so the orb is never guessed
+    /// back out of a localized string. Meaningful only while `thinkingActivity`
+    /// is non-nil; the exposure below falls back to the calm thinking ribbon.
+    @Published private var thinkingActivityOrb: OrbState = .composing
+
+    /// What the wait line's orb should wear right now: the activity's semantic
+    /// mode while a tool runs, else the reference "Thinking…." ribbon (mood
+    /// word, bare wait, and the compose gap all read as thinking).
+    var thinkingOrbState: OrbState {
+        thinkingActivity != nil ? thinkingActivityOrb : .composing
+    }
+
     /// When the current round's pre-stream wait began — the anchor for the quiet
     /// "· 12s" elapsed suffix on the wait line (see `WaitElapsedSuffix`). Set when
     /// the wait starts, cleared when the first token lands or the round ends, so
@@ -1482,12 +1496,13 @@ final class NotchModel: ObservableObject {
     }
 
     /// The live tool-activity line on its own, exposed read-only so the streaming
-    /// turn can render it as an INDEPENDENT row (above the answer) rather than
-    /// folding it into the dots/answer cross-fade. Non-nil exactly while a tool is
-    /// running ("Searching the web…", "Reading the results…"); nil otherwise. Kept
-    /// separate from `thinkingStatus` because the activity line must stay visible
-    /// even after the model has emitted a leading-whitespace preface — sharing the
-    /// dots' `hasText` gate is what hid it mid-search.
+    /// turn can render it as an INDEPENDENT row (under the growing answer — see
+    /// `AssistantTurnView.showActivityRow`) rather than folding it into the
+    /// dots/answer cross-fade. Non-nil exactly while a tool is running ("Searching
+    /// the web…", "Reading the results…"); nil otherwise. Kept separate from
+    /// `thinkingStatus` because the activity line must stay visible even after the
+    /// model has emitted a preface — sharing the dots' `hasText` gate is what hid
+    /// it mid-search.
     var currentActivity: String? { thinkingActivity }
 
     /// The rotating mood word on its own (no activity merged in), exposed read-only
@@ -1535,13 +1550,27 @@ final class NotchModel: ObservableObject {
         hasUsedToolThisRound = false
     }
 
+    /// The first-token freeze: stop the mood-word rotation (the pre-stream wait
+    /// is over) but leave `thinkingActivity` and the elapsed clock ALONE. This is
+    /// what the reveal flush calls — it fires on every flush, which can happen
+    /// while a tool from the same round is still running (the model spoke a
+    /// preface before searching), and clearing the activity there is exactly what
+    /// used to kill the "Searching the web…" line the moment any text landed.
+    /// Terminal paths (finish/error/stop) use `stopThinkingWordRotation()`, which
+    /// clears everything.
+    func freezeThinkingWord() {
+        thinkingWordTimer?.invalidate()
+        thinkingWordTimer = nil
+    }
+
     /// Funnel the harness's activity label into the single `thinkingStatus` value. A
     /// non-nil label means a tool is running — which also latches the round into "word
     /// mode" so that after the tool clears, the wait shows the mood word (not back to
     /// bare dots). `nil` clears the live line, falling back to the mood word.
-    func setThinkingActivity(_ label: String?) {
+    func setThinkingActivity(_ label: String?, orb: OrbState = .composing) {
         if label != nil { hasUsedToolThisRound = true }
         thinkingActivity = label
+        thinkingActivityOrb = orb
     }
 
     // MARK: - Ask-the-user questions (the `ask_user` tool)
@@ -3536,13 +3565,13 @@ final class NotchModel: ObservableObject {
     /// Can the model an Ask would go to right now actually read an image? Gates both
     /// the clipboard thumbnail below and the re-attach of a reopened thread's saved
     /// image — nothing offers or sends pixels a text-only model would choke on.
-    /// Codex / Claude Code (CLI backends) count as text-only here: their models
-    /// report as vision-capable by id, but the chat path doesn't forward images to
-    /// the subprocess, so an attach there would be silently dropped.
+    /// Codex / Claude Code / Grok (CLI backends) count as text-only here: their
+    /// models report as vision-capable by id, but the chat path doesn't forward
+    /// images to the subprocess, so an attach there would be silently dropped.
     private var activeModelSupportsVision: Bool {
         let provider = APIKeyStore.selectedProvider
         let model = APIKeyStore.effectiveModel(for: provider) ?? provider.defaultModel
-        guard provider != .codex, provider != .claudeCode else { return false }
+        guard provider != .codex, provider != .claudeCode, provider != .grokCode else { return false }
         return Provider.modelSupportsVision(model)
     }
 
@@ -3970,7 +3999,10 @@ final class NotchModel: ObservableObject {
                        self.turns.first(where: { $0.id == answerID })?.streaming == true {
                         // First real token ends the pre-stream wait: freeze the
                         // rotating thinking word (the dots/word fade out now anyway).
-                        self.stopThinkingWordRotation()
+                        // Freeze ONLY — a full stop would also clear the tool
+                        // activity, and a tool can still be running under this very
+                        // text (a preface before a search): its line must survive.
+                        self.freezeThinkingWord()
                         // First chunk: flip to the result view so the answer appears
                         // to grow in place out of the thinking state.
                         if self.mode == .load { self.mode = .result }
@@ -4049,7 +4081,7 @@ final class NotchModel: ObservableObject {
                         system: system,
                         messages: agentMessages,
                         onText: appendChunk,
-                        onActivity: { [weak self] label in
+                        onActivity: { [weak self] label, orb in
                             guard let self else { return }
                             // Every round feeds the background slot, on screen
                             // or detached — the collapsed notch's busy ear shows
@@ -4062,7 +4094,7 @@ final class NotchModel: ObservableObject {
                             // round; a detached harness silently ignores it.
                             if self.isOnScreen(answerID: answerID) {
                                 if self.mode == .load { self.mode = .result }
-                                self.updateActivity(id: answerID, label: label)
+                                self.updateActivity(id: answerID, label: label, orb: orb)
                             }
                         },
                         onSources: { [weak self] roundSources in
@@ -4747,9 +4779,9 @@ final class NotchModel: ObservableObject {
     /// Funnel the harness's transient tool-activity label (e.g. "Searching the web…")
     /// into the single `thinkingStatus` value so it *replaces* the rotating mood word
     /// rather than rendering as a second, parallel line. `nil` falls back to the word.
-    private func updateActivity(id: UUID, label: String?) {
+    private func updateActivity(id: UUID, label: String?, orb: OrbState) {
         guard isOnScreen(answerID: id) else { return }
-        setThinkingActivity(label)
+        setThinkingActivity(label, orb: orb)
     }
 
     /// Append a search round's sources to the on-screen assistant turn (deduped by

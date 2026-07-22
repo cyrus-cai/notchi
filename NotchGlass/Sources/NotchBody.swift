@@ -293,6 +293,7 @@ struct NotchBody: View {
         let p = selectedProvider
         let id = APIKeyStore.storedModel(for: p)
         if p == .codex, id.isEmpty || id == "codex" { return p.defaultModel }
+        if p == .grokCode, id.isEmpty || id == "grok" { return p.defaultModel }
         return id.isEmpty ? p.defaultModel : id
     }
 
@@ -951,7 +952,12 @@ struct NotchBody: View {
     /// "GPT-…", claude labels "Claude …", so the chip shows only the model. Mirrors
     /// `AgentModelPickerView.shortLabel`; labels without the prefix pass through.
     private static func strippingModelFamily(_ label: String, engine: AgentEngine) -> String {
-        let family = (engine == .codex ? "GPT" : "Claude").lowercased()
+        let family: String
+        switch engine {
+        case .codex:  family = "gpt"
+        case .claude: family = "claude"
+        case .grok:   family = "grok"
+        }
         for sep in ["-", " "] {
             let p = family + sep
             if label.lowercased().hasPrefix(p), label.count > p.count {
@@ -2062,6 +2068,7 @@ struct NotchBody: View {
             // dissolving word, so the ticking seconds never ride the word swap.
             HStack(spacing: 8) {
                 let label = model.thinkingStatus.isEmpty ? model.currentThinkingWord : model.thinkingStatus
+                ThinkingOrb(state: model.thinkingOrbState)
                 CrossfadeText(text: label, font: 15, color: Tokens.text2)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -2691,6 +2698,7 @@ struct NotchBody: View {
                     text: turn.text,
                     streaming: turn.streaming,
                     activity: turn.streaming ? model.currentActivity : nil,
+                    orbState: turn.streaming ? model.thinkingOrbState : .composing,
                     thinkingWord: model.currentThinkingWord,
                     thinkingSince: turn.streaming ? model.thinkingStartedAt : nil,
                     sources: turn.sources,

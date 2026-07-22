@@ -857,6 +857,7 @@ final class ModelCatalogStore: ObservableObject {
         switch p {
         case .codex:      return CodexCLIService.isAvailable
         case .claudeCode: return ClaudeCLIService.isAvailable
+        case .grokCode:   return GrokCLIService.isAvailable
         default:          return APIKeyStore.current(for: p) != nil
         }
     }
@@ -928,6 +929,18 @@ final class ModelCatalogStore: ObservableObject {
             }.value
             if ids != ["codex"] {
                 liveByProvider[.codex] = ids.map { ModelInfo(id: $0, vendor: "OpenAI") }
+            }
+        }
+        // Grok is keyless too — its model ids come from the CLI's own cache file
+        // (see `GrokCLIService`), read off-main and published so the picker fills in.
+        // Never publish the bare "grok" sentinel (the no-models-found fallback).
+        if liveByProvider[.grokCode] == nil {
+            let ids = await Task.detached(priority: .userInitiated) { () -> [String] in
+                GrokCLIService.refreshModels()
+                return GrokCLIService.availableModelIDs
+            }.value
+            if ids != ["grok"] {
+                liveByProvider[.grokCode] = ids.map { ModelInfo(id: $0, vendor: "xAI") }
             }
         }
         // Claude Code's alias→concrete-id mapping, the CLI twin of the fetches
@@ -1203,6 +1216,12 @@ struct AgentEngineMark: View {
                     .fill(tint, style: FillStyle(eoFill: true))
                     .frame(width: size, height: size)
             }
+        case .grok:
+            if let mark = VendorLogos.mark(for: "xAI") {
+                SVGPathShape(pathData: mark.path, viewBox: mark.viewBox)
+                    .fill(tint, style: FillStyle(eoFill: true))
+                    .frame(width: size, height: size)
+            }
         }
     }
 }
@@ -1245,9 +1264,12 @@ struct AgentModelPickerView: View {
     /// had to fix (see `ModelPickerView.scrollToFocused`).
     @State private var scrollToSelection = false
     /// The armed row's wash is one shared shape that *slides* between rows
-    /// (matchedGeometryEffect) instead of blinking off one row and on another —
-    /// the springy glide is the card's one piece of motion.
-    @Namespace private var armedNS
+    /// instead of blinking off one row and on another — the springy glide is the
+    /// card's one piece of motion. It lives as a single offset-driven shape
+    /// BEHIND the row stack (see `body`), not as a per-row
+    /// `matchedGeometryEffect` background: one persistent shape whose offset is
+    /// plain row arithmetic can't desync from the rows, and the rows themselves
+    /// keep constant view structure.
 
     /// The spring every selection change rides — the wash glide, the label
     /// weight shift, and the effort bars all share it so the card moves as one.
@@ -1259,6 +1281,20 @@ struct AgentModelPickerView: View {
         var out: [AgentEngine] = []
         for c in choices where !out.contains(c.engine) { out.append(c.engine) }
         return out
+    }
+
+    /// The card's content width. The floor (174) is the two-engine design; past
+    /// that, the width is DERIVED from the bottom bar's real minimum — its engine
+    /// marks (18pt each, 10pt spacing), the 8pt spacer, the 92pt effort slider and
+    /// its own 16pt padding — because the bar is the card's one rigid row. A third
+    /// engine (Grok) pushed that minimum to 190 while the card stayed fixed at
+    /// 174: the bar overflowed, SwiftUI centered the spill, and the whole content
+    /// column slid 8pt out of the popover's margins (the 边距乱 bug). Deriving the
+    /// width keeps the card exactly as designed at two engines and simply grows it
+    /// when the bar genuinely needs more.
+    private var cardWidth: CGFloat {
+        let marks = CGFloat(engines.count) * 18 + CGFloat(max(0, engines.count - 1)) * 10
+        return max(174, marks + 8 + 92 + 16)
     }
 
     /// The list's content: only the armed engine's models. The other engine's fleet
@@ -1276,13 +1312,20 @@ struct AgentModelPickerView: View {
     /// What the group caption says — the family name, not the CLI's ("GPT", not
     /// "Codex": the rows under it are GPT models, and that's the word the user knows).
     private func groupTitle(for e: AgentEngine) -> String {
-        e == .codex ? "GPT" : "Claude"
+        switch e {
+        case .codex:  return "GPT"
+        case .claude: return "Claude"
+        case .grok:   return "Grok"
+        }
     }
 
     /// The row title inside a group: the caption already names the family, so
     /// "GPT-5.6-Terra" shortens to "5.6-Terra" and "Claude Fable" to "Fable".
     /// Labels without the family prefix (Codex's bare "Codex" default) pass through.
+    /// Grok is exempt: its models are bare version numbers, and a row reading
+    /// just "4.5" says nothing — "Grok 4.5" stays whole.
     private func shortLabel(_ c: AgentModelChoice) -> String {
+        if c.engine == .grok { return c.label }
         let family = groupTitle(for: c.engine).lowercased()
         for sep in ["-", " "] {
             let p = family + sep
@@ -1308,6 +1351,17 @@ struct AgentModelPickerView: View {
     /// at 2pt spacing → 8+ rows overflow.
     private var overflowing: Bool { engineChoices.count >= 8 }
 
+    /// The list's height, DEMANDED explicitly rather than `.frame(maxHeight:)`:
+    /// rows are fixed 25pt at 2pt spacing, so it's pure arithmetic. A flexible
+    /// ScrollView inside an NSPopover accepts whatever height the popover last
+    /// proposed — flipping Grok (1 row) → Claude (3 rows) left the window at the
+    /// short height and the taller list clipped to a single visible row (the
+    /// armed one, which `scrollTo` had centered). An explicit height forces the
+    /// popover to re-size with the list in both directions.
+    private var listHeight: CGFloat {
+        max(0, min(CGFloat(engineChoices.count) * 27 - 2, 200))
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ScrollViewReader { proxy in
@@ -1316,8 +1370,7 @@ struct AgentModelPickerView: View {
                         // Only the armed engine's models — the other engine is one
                         // tap away in the bottom bar, so the rows stay bare names.
                         ForEach(engineChoices, id: \.self) { c in
-                            AgentModelRow(label: shortLabel(c), selected: isSelected(c),
-                                          ns: armedNS) {
+                            AgentModelRow(label: shortLabel(c), selected: isSelected(c)) {
                                 // Menu semantics, same as the Ask recents menu: one
                                 // click picks the model AND closes — no lingering
                                 // card after the choice is made. Effort / engine
@@ -1328,6 +1381,22 @@ struct AgentModelPickerView: View {
                             .id(c)
                         }
                     }
+                    // The armed wash: ONE persistent shape behind the row stack,
+                    // riding a row-index offset (rows are fixed 25pt + 2pt spacing,
+                    // so the position is pure arithmetic). Re-arming animates the
+                    // offset — the springy glide between rows — with no
+                    // matchedGeometryEffect and no per-row background insertion,
+                    // so the wash can never disagree with the rows' geometry.
+                    .background(alignment: .topLeading) {
+                        if let i = engineChoices.firstIndex(where: isSelected) {
+                            RoundedRectangle(cornerRadius: 7)
+                                .fill(.white.opacity(0.12))
+                                .frame(height: 25)
+                                .frame(maxWidth: .infinity)
+                                .offset(y: CGFloat(i) * 27)
+                                .animation(Self.selectionSpring, value: i)
+                        }
+                    }
                     // Breathing room the bottom fade falls across at end of scroll.
                     .padding(.bottom, overflowing ? 24 : 0)
                 }
@@ -1336,7 +1405,7 @@ struct AgentModelPickerView: View {
                 // to content, and fading it would dim real rows. Bottom only: the
                 // first row rests at the very top when scrolled up.
                 .scrollEdgeFade(top: false, bottom: overflowing, fade: 24)
-                .frame(maxHeight: 200)
+                .frame(height: listHeight)
                 // Open centered on the current pick — with the fleet of models the
                 // armed one can sit below the fold, and a picker that opens blind to
                 // its own selection makes the user hunt for their bearings.
@@ -1377,8 +1446,13 @@ struct AgentModelPickerView: View {
             .padding(.horizontal, 8)
             .frame(height: 25)
         }
+        // Content width first, padding outside — sized bottom-up from what the
+        // content actually needs (see `cardWidth`), never a top-down frame the
+        // children can overflow. The popover canvas, the system's content
+        // placement, and the `presentationBackground` slab are all negotiated
+        // from this size; a child spilling past it is what desynced the three.
+        .frame(width: cardWidth)
         .padding(8)
-        .frame(width: 190)
         .onAppear {
             syncMirrors()
             installKeyMonitor()
@@ -1469,12 +1543,11 @@ struct AgentModelPickerView: View {
 /// spare: the armed row is just a soft wash + semibold — no rim, no checkmark — and a
 /// hovered row a fainter wash, so the card reads as text on glass, not a stack of
 /// controls. Bare names only — the engine identity lives in the bottom bar's switch.
-/// The armed wash is a single shared shape (`matchedGeometryEffect` over the
-/// card's namespace), so selection *glides* between rows instead of blinking.
+/// The armed wash is a single offset-driven shape behind the whole row stack (see
+/// `AgentModelPickerView`), so selection *glides* between rows instead of blinking.
 private struct AgentModelRow: View {
     let label: String
     let selected: Bool
-    let ns: Namespace.ID
     let onTap: () -> Void
 
     @State private var hovering = false
@@ -1490,15 +1563,13 @@ private struct AgentModelRow: View {
         }
         .padding(.horizontal, 8)
         .frame(height: 25)
+        // The hover wash is a CONSTANT shape whose fill changes — the row's
+        // view structure never varies with state. The armed wash isn't this
+        // row's business at all: it's the single gliding shape behind the
+        // whole stack (see the list's `.background` in `AgentModelPickerView`).
         .background {
-            if selected {
-                RoundedRectangle(cornerRadius: 7)
-                    .fill(.white.opacity(0.12))
-                    .matchedGeometryEffect(id: "armed-wash", in: ns)
-            } else if hovering {
-                RoundedRectangle(cornerRadius: 7)
-                    .fill(.white.opacity(0.05))
-            }
+            RoundedRectangle(cornerRadius: 7)
+                .fill(hovering && !selected ? .white.opacity(0.05) : .clear)
         }
         .contentShape(RoundedRectangle(cornerRadius: 7))
         .onHover { hovering = $0 }
