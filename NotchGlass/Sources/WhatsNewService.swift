@@ -64,6 +64,16 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.2.3",
+            date: "2026-07-23",
+            improvements: [
+                "Inline images in an answer now span the answer's width, up to a capped height.",
+            ],
+            fixes: [
+                "Clear in Recent now reads at the same weight as See all history.",
+            ]
+        ),
+        Entry(
             version: "0.2.2",
             date: "2026-07-23",
             features: [

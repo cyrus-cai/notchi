@@ -4080,13 +4080,19 @@ private struct MediaLinkChip: View {
     }
 }
 
-/// One `![alt](url)` reference as an inline image island. Never upscales (a
-/// small icon stays small); tapping opens the source in the browser.
+/// One `![alt](url)` reference as an inline image island. Spans the answer's
+/// width (left-aligned, never upscaled past its natural size); tapping opens the
+/// source in the browser.
 private struct AnswerImageView: View {
     let alt: String
     let urlString: String
     var baseFont: CGFloat = 15
     var color: Color = Tokens.text1
+
+    /// Height ceiling for a tall image — enforced by capping the *width* instead
+    /// of the height, so the frame keeps hugging the image (a maxHeight would
+    /// pillarbox it inside a wider border).
+    private static let heightCap: CGFloat = 360
 
     @State private var outcome: AnswerMediaLoader.Outcome?
 
@@ -4094,12 +4100,12 @@ private struct AnswerImageView: View {
         Group {
             switch outcome {
             case .image(let image):
+                let ratio = image.size.width / max(image.size.height, 1)
                 Button { openAnswerMediaURL(urlString) } label: {
                     Image(nsImage: image)
                         .resizable()
-                        .scaledToFit()
-                        .frame(maxWidth: image.size.width,
-                               maxHeight: min(260, image.size.height))
+                        .aspectRatio(ratio, contentMode: .fit)
+                        .frame(maxWidth: min(image.size.width, Self.heightCap * ratio))
                         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                         .overlay(
                             RoundedRectangle(cornerRadius: 10, style: .continuous)

@@ -1699,8 +1699,7 @@ struct NotchBody: View {
                 // (see NotchIsland), not anchored to this pill.
                 HistoryFooterButton(
                     icon: "trash",
-                    title: L("recent.clear"),
-                    destructive: true
+                    title: L("recent.clear")
                 ) {
                     withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
                         model.confirmingClear = true
@@ -3319,14 +3318,16 @@ extension NotchModel.Panel {
 private struct HistoryFooterButton: View {
     var icon: String
     var title: String
-    var destructive: Bool = false
     var action: () -> Void
 
     @State private var hovering = false
 
+    /// Both footer pills read the same weight — Clear used to sit at near-white
+    /// while "See all history" was meta-dim, and the mismatch made the pair look
+    /// like two different controls rather than one row. The destructive step is
+    /// carried by the confirmation card, not by a brighter label.
     private var tint: Color {
-        if destructive { return Color.white.opacity(hovering ? 1.0 : 0.85) }
-        return hovering ? Tokens.text2 : Tokens.text4
+        hovering ? Tokens.text2 : Tokens.text4
     }
 
     var body: some View {
