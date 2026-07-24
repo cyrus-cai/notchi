@@ -65,12 +65,12 @@ final class WhatsNewService: ObservableObject {
     private static let bundled: [Entry] = [
         Entry(
             version: "0.2.3",
-            date: "2026-07-23",
-            improvements: [
-                "Inline images in an answer now span the answer's width, up to a capped height.",
+            date: "2026-07-24",
+            features: [
+                "Notch now speaks Japanese and Korean — pick 日本語 or 한국어 in Settings, or let it follow your Mac.",
             ],
-            fixes: [
-                "Clear in Recent now reads at the same weight as See all history.",
+            improvements: [
+                "Ask ⇄ Agent now flips in one continuous move: the word wipes open beside its mark as the well slides across.",
             ]
         ),
         Entry(

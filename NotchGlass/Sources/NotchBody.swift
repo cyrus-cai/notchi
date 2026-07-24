@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// The content that lives inside the glass, below the constant black notch zone.
 /// Switches between idle / load / result exactly like the prototype's modes.
@@ -3956,22 +3957,77 @@ struct AgentComposeMenuChip<Icon: View, Items: View>: View {
 /// an explicit Enter.
 private struct BucketTogglePill: View {
     @ObservedObject var model: NotchModel
-    /// One shared namespace so the active "well" is a single element that SLIDES
-    /// between the two words on the pill's spring — a continuous move, not the
-    /// cross-dissolve two independent per-word wells would give ("一镜到底").
-    @Namespace private var wellNS
+
+    /// The pill's whole geometry, as five constants: the mark's slot, the gap from
+    /// the mark to its word, a word's leading padding, the soft edge its label is
+    /// wiped open with, and the gap between the two words. Both the words AND the
+    /// well below are laid out from these same numbers, which is what keeps the
+    /// flip a single continuous move.
+    ///
+    /// `wipeSoft` is carved out of what used to be the word's trailing padding, so
+    /// the label's clip ends in a fade instead of a razor cut — every outer
+    /// measurement stays exactly what it was (`wordPad + wipeSoft + wordTrailPad`
+    /// is still 9 + 9), only the last 8pt of the box is now a falloff instead of
+    /// dead air.
+    static let iconSlot: CGFloat = 18
+    static let labelGap: CGFloat = 5
+    static let wordPad: CGFloat = 9
+    static let wipeSoft: CGFloat = 8
+    static let wordTrailPad: CGFloat = wordPad - wipeSoft
+    private static let wordGap: CGFloat = 2
+
+    /// How wide the label's box is: the soft edge alone once the word is wiped
+    /// shut, the gap plus the spelled-out word plus that edge when it is open.
+    static func labelBoxWidth(_ title: String, spelled: Bool) -> CGFloat {
+        spelled ? labelGap + BucketWord.labelWidth(title) + wipeSoft : wipeSoft
+    }
+
+    /// How wide a half is: always its mark, plus the spelled-out word when live.
+    private static func wordWidth(_ title: String, spelled: Bool) -> CGFloat {
+        wordPad + iconSlot + labelBoxWidth(title, spelled: spelled) + wordTrailPad
+    }
 
     var body: some View {
         let agentOn = model.agentComposeActive
-        HStack(spacing: 2) {
-            BucketWord(title: L("hint.ask"), icon: LucideIcons.messageCircle,
-                       active: !agentOn, wellNS: wellNS) {
+        let ask = L("hint.ask"), agent = L("hint.agent")
+        HStack(spacing: Self.wordGap) {
+            BucketWord(title: ask, icon: LucideIcons.messageCircle, active: !agentOn) {
                 model.setAgentBucket(false)
             }
-            BucketWord(title: L("hint.agent"), icon: LucideIcons.codeXml,
-                       active: agentOn, wellNS: wellNS) {
+            BucketWord(title: agent, icon: LucideIcons.codeXml, active: agentOn) {
                 model.setAgentBucket(true)
             }
+        }
+        // Horizontal only (the words still stretch to the pill's 30pt height):
+        // pins the row to exactly the width `wordWidth` computes, so a parent that
+        // hands the pill extra room can never stretch a word out from under the
+        // well below.
+        .fixedSize(horizontal: true, vertical: false)
+        // The active side sits in a recessed inner-shadow well — the pushed-in
+        // "pin" look, so the live half reads as pressed into the glass rather than
+        // just brighter. The 3pt inset matches the pill's 3pt horizontal padding,
+        // so the well keeps an even margin to the glass on all four sides.
+        //
+        // ONE persistent shape behind BOTH words, positioned by the same word
+        // arithmetic the words themselves are built from — not a per-word
+        // background that inserts on one side and removes on the other, and not a
+        // `matchedGeometryEffect` pair. Flipping the bucket just changes a width
+        // and an offset, so the well GLIDES across and resizes on the pill's single
+        // spring and can never disagree with the words it sits behind (the model
+        // picker card's armed-row wash learned this the same way).
+        .background(alignment: .leading) {
+            Capsule().fill(
+                Color.white.opacity(0.17)
+                    .shadow(.inner(color: .black.opacity(0.48), radius: 3, y: 1))
+            )
+            // A hairline top rim sells the recessed glass edge — the well reads as
+            // a brighter, more solid pane than a barely-there wash.
+            .overlay {
+                Capsule().strokeBorder(Color.white.opacity(0.14), lineWidth: 0.5)
+            }
+            .frame(width: Self.wordWidth(agentOn ? agent : ask, spelled: true))
+            .padding(.vertical, 3)
+            .offset(x: agentOn ? Self.wordWidth(ask, spelled: false) + Self.wordGap : 0)
         }
         // Match the Recent disclosure chevron's fixed 30pt (IdleTrailingCluster's
         // chipSize) so the pill and the trailing dropdown line up on the row.
@@ -3980,95 +4036,124 @@ private struct BucketTogglePill: View {
         .glassCapsule(in: Capsule(), brighter: false,
                       tint: agentOn ? Tokens.agentTint
                                     : NotchModel.Panel.chat.intentTint)
-        .animation(.spring(response: 0.34, dampingFraction: 0.82), value: agentOn)
+        // Fast and all but critically damped. A 30pt switch is not a panel: the
+        // old 0.34/0.82 took ~300ms and arrived with a visible bounce, where the
+        // tab bar this is modelled on settles a comparable move in ~175ms flat.
+        // 0.26/0.86 lands at ~220ms with under half a point of overshoot — quick
+        // enough to read as one snap, with just enough spring left to belong to
+        // the rest of the panel.
+        .animation(.spring(response: 0.26, dampingFraction: 0.86), value: agentOn)
         .accessibilityElement(children: .contain)
     }
 }
 
-/// One word of the bucket pill: the active bucket spells its name out; the
-/// inactive one collapses to a bare icon (a speech bubble for Ask, a code
-/// bracket `</>` for Agent) — dim, brightening on hover, the way over to the other side.
+/// One word of the bucket pill. Both halves carry their mark (a speech bubble for
+/// Ask, a code bracket `</>` for Agent); the active one spells its name out beside
+/// it, the inactive one collapses to the bare icon — dim, brightening on hover, the
+/// way over to the other side.
 /// Clicking the active half is a no-op — the pill sets a bucket, never surprises.
 private struct BucketWord: View {
     var title: String
     var icon: LucideIcons.Mark
     var active: Bool
-    /// The pill's shared namespace, so this word's well is the SAME element as the
-    /// other word's — it glides across on the pill's spring instead of one fading
-    /// out while the other fades in.
-    var wellNS: Namespace.ID
     var action: () -> Void
 
     @State private var hovering = false
+
+    /// The spelled-out word's exact width. `Font.sf` IS the system face, so
+    /// `NSFont.systemFont` measures the very glyphs SwiftUI will draw — which turns
+    /// the label into plain arithmetic instead of a geometry read that only settles
+    /// a frame later, and hands the pill's well the SAME number this word is sized
+    /// from. The +1 keeps the last glyph clear of the clip below.
+    static func labelWidth(_ title: String) -> CGFloat {
+        ceil(NSAttributedString(
+            string: title,
+            attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .medium)]
+        ).size().width) + 1
+    }
 
     var body: some View {
         Button(action: action) {
             content
                 .foregroundStyle(active ? Tokens.text1
                                         : (hovering ? Tokens.text2 : Tokens.text4))
-                .padding(.horizontal, 9)
-                // Fill the pill's full height so the active well can be inset a
-                // uniform amount on every side (below), instead of being sized by
-                // the text and floating with an uneven top/bottom margin.
+                // Asymmetric on purpose: the trailing 8pt the word used to pad
+                // with now lives inside the label's box as the wipe's falloff.
+                .padding(.leading, BucketTogglePill.wordPad)
+                .padding(.trailing, BucketTogglePill.wordTrailPad)
+                // Fill the pill's full height so the well behind it can be inset a
+                // uniform amount on every side, instead of being sized by the text
+                // and floating with an uneven top/bottom margin.
                 .frame(maxHeight: .infinity)
-                // The active side sits in a recessed inner-shadow well — the
-                // pushed-in "pin" look, so the live half reads as pressed into the
-                // glass rather than just brighter. The inactive half stays flush.
-                // The 3pt inset matches the pill's 3pt horizontal padding, so the
-                // well keeps an even margin to the glass on all four sides.
-                //
-                // `matchedGeometryEffect` makes this a single shared well: when the
-                // active side flips, SwiftUI interpolates the well's frame from the
-                // old word to the new one, so it slides (and resizes as the words
-                // expand/collapse) in one continuous move — the "一镜到底" transition.
-                .background {
-                    if active {
-                        Capsule().fill(
-                            Color.white.opacity(0.17)
-                                .shadow(.inner(color: .black.opacity(0.48),
-                                               radius: 3, y: 1))
-                        )
-                        // A hairline top rim sells the recessed glass edge — the well
-                        // now reads as a brighter, more solid pane than the barely-there
-                        // wash it was before.
-                        .overlay {
-                            Capsule()
-                                .strokeBorder(Color.white.opacity(0.14), lineWidth: 0.5)
-                        }
-                        .padding(.vertical, 3)
-                        .matchedGeometryEffect(id: "bucketWell", in: wellNS)
-                    }
-                }
                 .contentShape(Capsule())
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.18), value: hovering)
-        // No per-word `active` animation: the slide + the dim⇄bright colour change
-        // ride the pill's single spring (BucketTogglePill's `.animation(value:)`),
-        // so both words move together as one shot rather than each easing on its own.
+        // No per-word `active` animation: the word's reveal and the dim⇄bright
+        // colour change ride the pill's single spring (BucketTogglePill's
+        // `.animation(value:)`), so both halves and the well move as one shot
+        // rather than each easing on its own.
         .accessibilityLabel(title)
         .accessibilityAddTraits(active ? [.isSelected] : [])
     }
 
-    @ViewBuilder private var content: some View {
-        if active {
-            Text(title)
-                .font(.sf(12, weight: .medium))
-                .transition(.opacity)
-        } else {
-            // Bigger AND heavier than a menu glyph (15/2.0 → 1.25pt of stroke, against
-            // the menu's 13/1.75 → 0.95pt), because this mark carries more: once the
-            // inactive word collapses away it is the ONLY thing naming the other side
-            // of the switch, and it does that at 40% ink instead of the menu's 55%.
-            // `weight` is grid-relative, so holding it at 2.0 through the size bump is
-            // what lets the stroke ride up with the glyph rather than staying pinned to
-            // the set's thinner line — deliberate here, not an oversight. (The SF mark
-            // this replaced ran `.bold` for the same reason.)
+    private var content: some View {
+        // Nothing here is ever inserted or removed by the flip — that's the whole
+        // point. The mark is permanent on BOTH halves, and the word stays in the
+        // tree too, revealed by an animatable WIDTH (0 ⇄ its measured width) under
+        // a clip. So the switch is one continuous interpolation on the pill's
+        // spring: the word wipes open beside its mark while the other wipes shut
+        // and the well glides between them. A `if active { Text }` instead would
+        // pop the label in and out of layout and leave the outgoing word fading
+        // outside the flow — the desynced, un-"一镜到底" version of this.
+        //
+        // The mark is bigger AND heavier than a menu glyph (15/2.0 → 1.25pt of
+        // stroke, against the menu's 13/1.75 → 0.95pt), because it carries more: on
+        // the inactive side, with the word wiped shut, it is the ONLY thing naming
+        // the other half of the switch, and it does that at 40% ink instead of the
+        // menu's 55%. `weight` is grid-relative, so holding it at 2.0 through the
+        // size bump is what lets the stroke ride up with the glyph rather than
+        // staying pinned to the set's thinner line — deliberate, not an oversight.
+        // (The SF mark this replaced ran `.bold` for the same reason.) It takes the
+        // active side's ink from the shared `foregroundStyle`, so a live mark is
+        // exactly as bright as the word beside it.
+        HStack(spacing: 0) {
             LucideIcon(mark: icon, size: 15, weight: 2.0)
                 // Same air around the glyph the SF mark had (11pt in 14), scaled.
-                .frame(minWidth: 18)
-                .transition(.opacity)
+                .frame(minWidth: BucketTogglePill.iconSlot)
+            Text(title)
+                .font(.sf(12, weight: .medium))
+                // Ideal width regardless of the frame below, so the wipe slides the
+                // clip across a fully-typeset word instead of re-wrapping it.
+                .fixedSize()
+                .padding(.leading, BucketTogglePill.labelGap)
+                // The ink is the ONE thing that does NOT ride the pill's spring.
+                // Sharing that curve leaves both words parked at half opacity
+                // through the middle of the flip — two ghosts, the exact opposite
+                // of one continuous shot. So the outgoing word is gone in ~70ms
+                // (before its box has travelled far) and the incoming one comes up
+                // just BEHIND the wipe front, never ahead of it.
+                .opacity(active ? 1 : 0)
+                .animation(active ? .easeOut(duration: 0.16).delay(0.04)
+                                  : .easeIn(duration: 0.07),
+                           value: active)
+                .frame(width: BucketTogglePill.labelBoxWidth(title, spelled: active),
+                       alignment: .leading)
+                .clipped()
+                // …and the front itself is a gradient, not a razor: the glyph
+                // crossing it rises through the falloff instead of being sliced
+                // down the middle. At rest the 8pt zone sits past the last glyph,
+                // in what used to be the word's trailing padding, so a settled
+                // label is fully opaque.
+                .mask(alignment: .leading) {
+                    HStack(spacing: 0) {
+                        Rectangle()
+                        LinearGradient(colors: [.black, .black.opacity(0)],
+                                       startPoint: .leading, endPoint: .trailing)
+                            .frame(width: BucketTogglePill.wipeSoft)
+                    }
+                }
         }
     }
 }

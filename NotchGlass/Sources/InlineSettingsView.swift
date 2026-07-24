@@ -1794,7 +1794,8 @@ struct InlineSettingsView: View {
     }
 
     /// The interface language. `System` follows the Mac; the explicit picks
-    /// (English / 简体中文 / 繁體中文) each named in their own script. Switching
+    /// (English / 简体中文 / 繁體中文 / 日本語 / 한국어) each named in their own
+    /// script. Switching
     /// republishes `Localization.shared`, so the whole app — this panel included —
     /// re-renders in the new language at once, no relaunch.
     private var appLanguageRow: some View {

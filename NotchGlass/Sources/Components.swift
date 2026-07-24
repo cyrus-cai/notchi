@@ -4494,7 +4494,7 @@ struct SourcePopoverPanel: View {
         .padding(.vertical, 14)
         // A fixed width gives the rows a definite bound to truncate long titles
         // against (instead of stretching the popup to the longest line).
-        .frame(width: 380, alignment: .leading)
+        .frame(width: 350, alignment: .leading)
         .background {
             // Real Liquid Glass: the high-transparency `.clear` material refracts
             // the wallpaper through the whole card; a soft dark veil over it keeps

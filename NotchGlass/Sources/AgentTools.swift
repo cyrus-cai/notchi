@@ -34,6 +34,8 @@ struct DateTimeTool: NotchTool {
         case .en:     fmt.locale = Foundation.Locale(identifier: "en_US")
         case .zhHans: fmt.locale = Foundation.Locale(identifier: "zh_Hans")
         case .zhHant: fmt.locale = Foundation.Locale(identifier: "zh_Hant")
+        case .ja:     fmt.locale = Foundation.Locale(identifier: "ja_JP")
+        case .ko:     fmt.locale = Foundation.Locale(identifier: "ko_KR")
         }
         let tz = TimeZone.current
         return "\(fmt.string(from: now)) (timezone \(tz.identifier), UTC offset \(tz.secondsFromGMT() / 3600))"

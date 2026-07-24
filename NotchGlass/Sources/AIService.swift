@@ -207,6 +207,8 @@ func notchSystemPromptDated(customInstructions: String? = nil) -> String {
     case .en:     fmt.locale = Foundation.Locale(identifier: "en_US")
     case .zhHans: fmt.locale = Foundation.Locale(identifier: "zh_Hans")
     case .zhHant: fmt.locale = Foundation.Locale(identifier: "zh_Hant")
+    case .ja:     fmt.locale = Foundation.Locale(identifier: "ja_JP")
+    case .ko:     fmt.locale = Foundation.Locale(identifier: "ko_KR")
     }
     var prompt = "Today is \(fmt.string(from: Date())).\n\n" + notchSystemPrompt
     // The user's own preferences (XII-137), appended AFTER the built-in persona so
