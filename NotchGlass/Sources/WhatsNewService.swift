@@ -64,6 +64,21 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.2.5",
+            date: "2026-07-25",
+            features: [
+                "Type / on an empty prompt to pick where the line goes — Ask, Note, Remind, Agent.",
+                "Tab now arms a destination before you type; the placeholder says which one.",
+            ],
+            improvements: [
+                "Hover tooltips are built in the island's own glass.",
+                "The search line no longer trails off in dots.",
+            ],
+            fixes: [
+                "Tooltips no longer get clipped at the island's edge or nudged off target.",
+            ]
+        ),
+        Entry(
             version: "0.2.4",
             date: "2026-07-25",
             features: [
