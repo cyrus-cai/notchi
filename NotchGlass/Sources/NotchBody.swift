@@ -365,6 +365,11 @@ struct NotchBody: View {
 
                 idleInputRow
 
+                // (The `/` command menu is NOT in this stack — it lives in its own
+                // borderless window, hung under the input by `SlashMenuHost`. It
+                // takes no space here, moves nothing, and is free to overhang the
+                // island's edge.)
+
                 // The bucket row (XII: agent-to-Codex): the Ask|Agent pill as
                 // fixed chrome below the input, with the folder / model / effort
                 // chips unfurling beside it while Agent is armed — same slot and
@@ -424,11 +429,11 @@ struct NotchBody: View {
     /// the flat idle layout and the immersive history header so the field — and
     /// all its focus/IME plumbing — exists exactly once, never duplicated.
     /// An armed agent folder swaps the placeholder: the same field is now
-    /// composing Codex's task, and the ghost text should say so.
+    /// composing Codex's task, and the ghost text should say so. A mode pinned by
+    /// `/` swaps it the same way ("Write a note…"), since an empty field has no
+    /// glyphs for the inline ghost to trail — see `idlePlaceholderKey`.
     private var idleInputRow: some View {
-        inputRow(placeholder: L(model.agentComposeActive
-                                    ? "agent.placeholder" : "input.placeholder"),
-                 followUp: false)
+        inputRow(placeholder: L(model.idlePlaceholderKey), followUp: false)
             .onChange(of: model.text) { _, _ in
                 // Editing the field clears a stale note-save error so the cue
                 // doesn't linger over a line the user is actively rewriting.
@@ -2835,6 +2840,9 @@ struct NotchBody: View {
                     // opens a keyboard-highlighted row instead of submitting. The
                     // follow-up field leaves these at their no-op defaults.
                     onDown: followUp ? { false } : {
+                        // An open `/` menu owns the arrows before anything else —
+                        // they walk its rows.
+                        if model.slashMenuStep(1) { return true }
                         if model.recallNextQuestion() { return true }
                         return withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                             model.historyNavigateDown()
@@ -2846,6 +2854,7 @@ struct NotchBody: View {
                     // of the ↓ that opened it). Only with no highlight to walk does
                     // ↑ fall through to shell-style recall.
                     onUp: followUp ? { false } : {
+                        if model.slashMenuStep(-1) { return true }
                         let steppedList = withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                             model.historyNavigateUp()
                         }
@@ -2855,23 +2864,36 @@ struct NotchBody: View {
                     // Keep ↑/↓ routed to recall even after the box fills with a
                     // recalled question, so pressing ↑ again steps further back
                     // instead of moving the caret.
+                    // While `/` has the menu up, ↑/↓ belong to its rows even
+                    // though the field holds text.
+                    isMenuOpen: followUp ? { false } : { model.slashMenuOpen },
                     isRecalling: followUp ? { false } : { model.isRecallingHistory },
                     onSubmitNav: followUp ? { false } : {
-                        // Enter confirms a keyboard-highlighted Recent row, which
-                        // short-circuits the empty submit.
-                        model.historyConfirmHighlighted()
+                        // Enter lands the highlighted `/` command — the word in the
+                        // box IS the command, never a question to send.
+                        if withAnimation(.spring(response: 0.34, dampingFraction: 0.82), {
+                            model.confirmSlashCommand()
+                        }) { return true }
+                        // Otherwise Enter confirms a keyboard-highlighted Recent row,
+                        // which short-circuits the empty submit.
+                        return model.historyConfirmHighlighted()
                     },
                     // Tab steps where Enter sends this line (Ask → Note →
                     // Remind →…) when the classifier guessed wrong — the inline
                     // hint steps with it. Agent is NOT a stop (the bucket pill
-                    // owns that switch). Only meaningful with text in the field —
-                    // except an active agent compose, which Tab must be able to
-                    // step off even before anything is typed. An empty field's Tab
-                    // is still swallowed so focus never wanders out of the prompt.
+                    // owns that switch). It works on the EMPTY prompt too: the
+                    // mode is picked before the line is typed, exactly like a `/`
+                    // command, and the placeholder ("Write a note…") says which
+                    // one is armed while there are no glyphs for the ghost to
+                    // trail. Always consumed either way, so focus never wanders
+                    // out of the prompt.
                     onTab: followUp ? { false } : {
-                        if model.hasText || model.agentComposeActive {
-                            model.toggleSubmitPanel()
-                        }
+                        // Tab picks the highlighted `/` row too — the completion
+                        // key doing the completing, before the cycle gets a turn.
+                        if withAnimation(.spring(response: 0.34, dampingFraction: 0.82), {
+                            model.confirmSlashCommand()
+                        }) { return true }
+                        model.toggleSubmitPanel()
                         return true
                     },
                     // Shift-Tab flips the Ask ⇄ Agent bucket — the keyboard twin
@@ -2909,14 +2931,17 @@ struct NotchBody: View {
                 // Agent compose owns the whole row (the Ask/Agent bucket words name
                 // the destination already), so it drops the trailing "— Agent Claude"
                 // ghost — no reserved strip, full width for the task description.
-                .padding(.trailing, (followUp || model.agentComposeActive) ? 0 : InlineSendHint.reservedTrailingWidth(label: model.submitLabel, suffix: model.submitLabelSuffix, fontSize: fontSize))
+                // The `/` menu owns the row the same way: the word in the box is a
+                // command being picked, not a line being sent, so no ghost and no
+                // reserved strip for one.
+                .padding(.trailing, (followUp || model.agentComposeActive || model.slashMenuOpen) ? 0 : InlineSendHint.reservedTrailingWidth(label: model.submitLabel, suffix: model.submitLabelSuffix, fontSize: fontSize))
                 .animation(.smooth(duration: 0.25), value: model.submitLabel + model.submitLabelSuffix)
                 // The ghost hint shares the FIELD's box (not the row's), so its
                 // coordinates are the ones the field reports the caret in — that's what
                 // lets it ride down to the second line and stay put when the row grows.
                 // Drawn behind the text; the reserved strip above keeps them apart.
                 .background {
-                    if !followUp && !model.agentComposeActive {
+                    if !followUp && !model.agentComposeActive && !model.slashMenuOpen {
                         GeometryReader { geo in
                             InlineSendHint(
                                 label: model.submitLabel,
@@ -2949,6 +2974,18 @@ struct NotchBody: View {
                         // Sit on the box's own ~2pt left inset so the label lands
                         // exactly where the typed glyphs will.
                         .padding(.leading, PromptField.textInset)
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
+                } else if !followUp && model.slashMenuOpen && model.text == "/" {
+                    // The bare "/" gets its own hint, parked right after the slash:
+                    // the menu below already lists every command, so the one thing
+                    // left to say is that typing narrows it. Gone the moment a
+                    // letter lands — the filtering has begun; saying so is noise.
+                    Text(L("slash.filter"))
+                        .font(.sf(fontSize))
+                        .foregroundStyle(Tokens.placeholder)
+                        .lineLimit(1)
+                        .padding(.leading, PromptField.textInset + caretWidth + 1)
                         .allowsHitTesting(false)
                         .transition(.opacity)
                 }
@@ -3005,6 +3042,11 @@ struct NotchBody: View {
         .frame(height: followUp ? 30 : max(NotchBody.idleRowHeight, inputHeight + idleRowVerticalPadding))
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: model.hasText)
         .animation(.spring(response: 0.32, dampingFraction: 0.86), value: inputHeight)
+        // The `/` menu's anchor: a zero-cost probe that reports THIS row's screen
+        // rect and hangs the menu's own window under it. Nothing about the row (or
+        // anything else in the panel) changes when the menu is up — see
+        // `SlashMenuHost`.
+        .background(SlashMenuHost(model: model, open: !followUp && model.slashMenuOpen))
     }
 
     /// The first-launch-after-update cue: a quiet "what's new" pill in the idle
@@ -3962,6 +4004,285 @@ struct AgentComposeMenuChip<Icon: View, Items: View>: View {
         .fixedSize()
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+    }
+}
+
+/// Hangs the `/` menu under the prompt in a window of its OWN — the reason the
+/// menu is a true overlay instead of another block in the panel's stack.
+///
+/// This is a zero-size probe dropped in the input row's `.background`. It takes no
+/// space, so nothing in the panel moves when the menu opens; it reports the row's
+/// SCREEN rect (from its own `NSView`, so it stays right through island re-layouts
+/// and display switches); and it parents a borderless child panel to the island's
+/// window, hung just under that rect. Being a separate window is what lets the card
+/// overhang the island's edge and spill onto the desktop — inside the SwiftUI tree
+/// it would be clipped by the glass form and would push the panel taller.
+///
+/// The child panel deliberately **cannot become key** (`SlashMenuPanel`), so
+/// clicking a row never pulls first-responder off the prompt field — you can keep
+/// typing to filter with the pointer sitting on the card. It closes itself when the
+/// menu shuts, when the probe leaves the tree (panel folded, thread opened), and
+/// when its host window goes away.
+private struct SlashMenuHost: NSViewRepresentable {
+    let model: NotchModel
+    let open: Bool
+
+    func makeNSView(context: Context) -> NSView { SlashMenuAnchorView() }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        (view as? SlashMenuAnchorView)?.apply(model: model, open: open)
+    }
+
+    static func dismantleNSView(_ view: NSView, coordinator: ()) {
+        (view as? SlashMenuAnchorView)?.closeMenu()
+    }
+}
+
+/// A borderless panel that never takes key focus — the menu's window. Everything
+/// it hosts is pointer-driven; the keyboard stays with the prompt field that the
+/// user is typing the command into.
+private final class SlashMenuPanel: NSPanel {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+}
+
+/// The probe view: measures, positions, and owns the menu's panel.
+private final class SlashMenuAnchorView: NSView {
+    /// Air between the input row's bottom edge and the card's top.
+    private static let gap: CGFloat = 6
+    /// Transparent margin inside the window, around the card — the card draws its
+    /// own two shadows in SwiftUI, and a window sized flush to the card would clip
+    /// them off. Also the slack the position math has to add back.
+    private static let shadowMargin: CGFloat = 28
+
+    private var panel: SlashMenuPanel?
+    private var hosting: NSHostingView<AnyView>?
+    private var isOpen = false
+
+    func apply(model: NotchModel, open: Bool) {
+        guard open else {
+            closeMenu()
+            return
+        }
+        let card = AnyView(
+            SlashCommandMenu(model: model).padding(Self.shadowMargin)
+        )
+        if let hosting {
+            hosting.rootView = card
+        } else {
+            openMenu(with: card)
+        }
+        reposition()
+    }
+
+    private func openMenu(with card: AnyView) {
+        guard let host = window else { return }
+        let hosting = NSHostingView(rootView: card)
+        let panel = SlashMenuPanel(
+            contentRect: NSRect(origin: .zero, size: hosting.fittingSize),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isFloatingPanel = true
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.hasShadow = false          // the card draws its own
+        panel.isMovable = false
+        panel.isReleasedWhenClosed = false
+        panel.ignoresMouseEvents = false
+        // Dark like the island, and along for the ride across Spaces / full-screen.
+        panel.appearance = NSAppearance(named: .darkAqua)
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary,
+                                    .stationary, .ignoresCycle]
+        panel.contentView = hosting
+        panel.alphaValue = 0
+        // A CHILD of the island's window: it rides along when that window moves,
+        // stays ordered above it whatever level the island is at (the panel drops
+        // to `.floating` while an IME is composing), and goes away with it.
+        host.addChildWindow(panel, ordered: .above)
+        self.panel = panel
+        self.hosting = hosting
+        self.isOpen = true
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.12
+            panel.animator().alphaValue = 1
+        }
+    }
+
+    func closeMenu() {
+        guard let panel else { return }
+        self.panel = nil
+        self.hosting = nil
+        self.isOpen = false
+        panel.parent?.removeChildWindow(panel)
+        panel.orderOut(nil)
+    }
+
+    /// Park the card just under the input row, left edges flush. Runs on every
+    /// apply and on every layout pass, so a growing prompt box (or the island
+    /// re-laying out under it) carries the card with it instead of leaving it
+    /// stranded mid-panel.
+    private func reposition() {
+        guard let panel, let hosting, let host = window else { return }
+        let size = hosting.fittingSize
+        let anchor = host.convertToScreen(convert(bounds, to: nil))
+        let margin = Self.shadowMargin
+        var origin = CGPoint(
+            x: anchor.minX - margin,
+            y: anchor.minY - Self.gap - size.height + margin
+        )
+        // Never let it walk off the bottom of the display it's on.
+        if let visible = (host.screen ?? NSScreen.main)?.visibleFrame {
+            origin.y = max(origin.y, visible.minY + 8 - margin)
+        }
+        panel.setFrame(NSRect(origin: origin, size: size), display: true)
+    }
+
+    override func layout() {
+        super.layout()
+        if isOpen { reposition() }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil { closeMenu() } else if isOpen { reposition() }
+    }
+
+    // The probe is invisible chrome: it must never eat a click meant for the row
+    // it is sitting behind.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+/// The `/` command menu — a small floating card of plain words under the prompt.
+///
+/// Deliberately spare: one word per row, no icons, no descriptions, no shortcut
+/// column. The whole menu is a completion list for what the user is already
+/// typing, so the words ARE the content — anything else beside them is furniture
+/// competing with the four things that matter. It sizes to its longest word and
+/// hangs at the prompt's left edge, in the same Liquid Glass the manage menu
+/// wears, so it reads as a card hovering over the panel rather than a new block
+/// bolted into it.
+///
+/// Keyboard and pointer drive the SAME highlight (`model.slashHighlight`): ↑/↓
+/// walk it, hover moves it under the cursor, Enter/Tab land it. One index, so the
+/// row the eye is on is always the row Enter picks.
+///
+/// The card itself knows nothing about where it is drawn — `SlashMenuHost` puts it
+/// in its own window.
+private struct SlashCommandMenu: View {
+    @ObservedObject var model: NotchModel
+
+    /// The card's padding around the rows, and each row's around its word — shared
+    /// with the width arithmetic below so the two can't drift.
+    static let cardPad: CGFloat = 5
+    static let rowPad: CGFloat = 9
+    static let fontSize: CGFloat = 13
+
+    /// The card's width: the widest destination word (measured in the very font
+    /// SwiftUI will draw it in — `Font.sf` IS the system face, the same trick
+    /// `BucketWord.labelWidth` uses) plus both paddings. Plain arithmetic instead
+    /// of a geometry read, so the card is right on its first frame.
+    static var cardWidth: CGFloat {
+        let font = NSFont.systemFont(ofSize: fontSize, weight: .medium)
+        let widest = NotchModel.SlashCommand.allCases
+            .map { NSAttributedString(string: $0.title, attributes: [.font: font]).size().width }
+            .max() ?? 0
+        return ceil(widest) + (rowPad + cardPad) * 2
+    }
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        return VStack(alignment: .leading, spacing: 1) {
+            ForEach(Array(model.slashMatches.enumerated()), id: \.element.id) { index, command in
+                SlashCommandRow(
+                    command: command,
+                    selected: index == model.slashHighlight,
+                    hover: { model.slashHighlight = index },
+                    action: {
+                        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                            model.applySlashCommand(command)
+                        }
+                    }
+                )
+            }
+        }
+        .padding(SlashCommandMenu.cardPad)
+        // Sized by its own words, pinned left under the caret — a menu, not a bar.
+        // An explicit width rather than `fixedSize()`: under a fixed size every row
+        // gets its IDEAL width, so the selected row's wash would stop at the end of
+        // its own word instead of spanning the card. Measured off the widest of ALL
+        // four words (not just the ones currently matching), so the card holds still
+        // as the list filters down instead of breathing in and out per keystroke.
+        .frame(width: SlashCommandMenu.cardWidth, alignment: .leading)
+        // The manage menu's card recipe: `.clear` material refracting what's behind
+        // it under a dark veil, a top sheen, a specular rim, and the two shadows
+        // that lift it off the surface.
+        //
+        // The veil is heavier here than on the manage menu (0.38 → 0.66) because
+        // this card lives in its OWN window and routinely hangs off the island onto
+        // whatever the desktop happens to be — a bright Finder window, a white page.
+        // At 0.38 the words washed out the moment the card left the glass; the
+        // darker veil makes the menu read the same over anything.
+        .background {
+            shape.fill(.clear).nativeGlass(in: shape)
+                .overlay(shape.fill(Color.black.opacity(0.66)))
+        }
+        .overlay(
+            shape.fill(
+                LinearGradient(colors: [.white.opacity(0.09), .clear],
+                               startPoint: .top, endPoint: .center)
+            )
+            .blendMode(.plusLighter)
+            .allowsHitTesting(false)
+        )
+        .overlay(
+            shape.strokeBorder(
+                LinearGradient(colors: [.white.opacity(0.30), .white.opacity(0.07)],
+                               startPoint: .top, endPoint: .bottom),
+                lineWidth: 0.75
+            )
+            .allowsHitTesting(false)
+        )
+        .clipShape(shape)
+        .shadow(color: .black.opacity(0.30), radius: 3, y: 1)
+        .shadow(color: .black.opacity(0.35), radius: 16, y: 8)
+    }
+}
+
+/// One row: the destination's word, and nothing else. The selected row wears a
+/// soft wash — pointer and keyboard share it, so there's never a second,
+/// competing hover state.
+private struct SlashCommandRow: View {
+    let command: NotchModel.SlashCommand
+    let selected: Bool
+    let hover: () -> Void
+    let action: () -> Void
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+        return Button(action: action) {
+            Text(command.title)
+                .font(.sf(SlashCommandMenu.fontSize, weight: .medium))
+                .foregroundStyle(selected ? Tokens.text1 : Tokens.text3)
+                .lineLimit(1)
+                .padding(.horizontal, SlashCommandMenu.rowPad)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background {
+                    if selected {
+                        shape.fill(Color.white.opacity(0.14))
+                    }
+                }
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        // Hover writes the SHARED highlight instead of painting a second one, so
+        // moving the mouse over the card also moves what Enter would pick.
+        .onHover { if $0 { hover() } }
+        .animation(.easeOut(duration: Tokens.rowFade), value: selected)
+        .accessibilityLabel(command.title)
+        .accessibilityAddTraits(selected ? [.isSelected] : [])
     }
 }
 

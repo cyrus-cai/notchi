@@ -576,12 +576,19 @@ extension View {
 
 // MARK: - Tooltip
 
-/// Name of the panel-canvas coordinate space, published once at the SwiftUI root
-/// (`AppDelegate.makePanel`). A tooltip whose anchor isn't inside a ScrollView
-/// clamps its horizontal position to this space so the capsule never runs off
-/// the panel's edge.
+/// Name of the **clip box** a tooltip keeps itself inside — published by each
+/// surface that actually clips its content: the island (`ContentView`, right on
+/// the `.frame(width:)` the `NotchShape` clip follows), the detached session
+/// window, and the archive window. A tooltip clamps its horizontal position to
+/// this box so the capsule never runs off the edge and gets chopped.
+///
+/// It must be registered on the CLIPPING view, not on the hosting canvas. It used
+/// to sit on `AppDelegate.makePanel`'s root frame — but that frame is the full
+/// *screen-wide* canvas the island floats in, so clamping to it never moved
+/// anything: a capsule spilling off the 600pt island was still comfortably inside
+/// the 1512pt canvas. Same trap as `.scrollView` below; see `resolvedBounds`.
 enum TooltipCoordinateSpace {
-    static let canvas = "notchCanvas"
+    static let clipBox = "notchTooltipClipBox"
 }
 
 /// A hover tooltip drawn in the notch's own visual language instead of AppKit's
@@ -614,8 +621,8 @@ private struct NotchTooltip: ViewModifier {
     /// Measured width of the capsule, so it can be nudged clear of a container wall.
     @State private var tipWidth: CGFloat = 0
     /// The anchor's own width, and the horizontal bounds of its clip container
-    /// (the answer ScrollView, or the panel canvas) — both in the anchor's local
-    /// space, so `horizontalNudge` can keep the centred capsule inside the walls.
+    /// (see `resolvedBounds`) — both in the anchor's local space, so
+    /// `horizontalNudge` can keep the centred capsule inside the walls.
     @State private var anchorWidth: CGFloat = 0
     @State private var boundMinX: CGFloat = -.greatestFiniteMagnitude
     @State private var boundMaxX: CGFloat = .greatestFiniteMagnitude
@@ -642,6 +649,36 @@ private struct NotchTooltip: ViewModifier {
         return 0
     }
 
+    /// The horizontal walls the capsule must stay inside, in the anchor's own
+    /// space. The `clipBox` (island / detached window / archive window) is the
+    /// authority — that's the view whose clip actually chops the capsule.
+    ///
+    /// A ScrollView around the anchor can clip *tighter* than that, so it narrows
+    /// the box further — but only when it genuinely encloses the anchor. That
+    /// guard is the whole point: `bounds(of: .scrollView)` answers for the nearest
+    /// scroll view in the ANCESTRY, and returns a box even when the anchor sits
+    /// outside its visible rect. The header cluster (which lives above the
+    /// conversation scroll, not in it) was getting back a box lying entirely to
+    /// its left — `maxX` negative — and dutifully shoving its tip ~180pt off
+    /// target. Reading the scroll view alone, as this used to, also silently
+    /// dropped the island wall on the footer icons: the scroll box measured wider
+    /// than the 600pt island, so the left-most tip "fit" and was never nudged —
+    /// which is exactly how it ended up sliced off at the island's edge.
+    private static func resolvedBounds(_ g: GeometryProxy) -> (minX: CGFloat, maxX: CGFloat) {
+        guard let clip = g.bounds(of: .named(TooltipCoordinateSpace.clipBox)) else {
+            return (-.greatestFiniteMagnitude, .greatestFiniteMagnitude)
+        }
+        var minX = clip.minX, maxX = clip.maxX
+        // `0..<g.size.width` IS the anchor in this space, so "encloses the anchor"
+        // is just: the scroll box straddles it on both sides.
+        if let scroll = g.bounds(of: .scrollView),
+           scroll.minX <= 0, scroll.maxX >= g.size.width {
+            minX = max(minX, scroll.minX)
+            maxX = min(maxX, scroll.maxX)
+        }
+        return (minX, maxX)
+    }
+
     func body(content: Content) -> some View {
         content
             .onHover { inside in
@@ -659,20 +696,18 @@ private struct NotchTooltip: ViewModifier {
                     withAnimation(.easeOut(duration: 0.10)) { shown = false }
                 }
             }
-            // Track the clip container the capsule must stay inside — the answer
-            // ScrollView when the anchor is in one, else the panel canvas — in the
-            // anchor's own coordinate space, so `horizontalNudge` can measure how
-            // close the anchor sits to each wall. Zero-footprint (a clear backdrop).
+            // Track the clip container the capsule must stay inside (see
+            // `resolvedBounds`) in the anchor's own coordinate space, so
+            // `horizontalNudge` can measure how close the anchor sits to each
+            // wall. Zero-footprint (a clear backdrop).
             .background(
                 GeometryReader { g in
-                    let box = g.bounds(of: .scrollView)
-                        ?? g.bounds(of: .named(TooltipCoordinateSpace.canvas))
+                    let box = Self.resolvedBounds(g)
                     Color.clear.preference(
                         key: TooltipBoundsKey.self,
-                        value: TooltipBounds(
-                            minX: box?.minX ?? -.greatestFiniteMagnitude,
-                            maxX: box?.maxX ?? .greatestFiniteMagnitude,
-                            anchorWidth: g.size.width))
+                        value: TooltipBounds(minX: box.minX,
+                                             maxX: box.maxX,
+                                             anchorWidth: g.size.width))
                 }
             )
             .onPreferenceChange(TooltipBoundsKey.self) { b in
@@ -749,10 +784,23 @@ private struct TooltipBoundsKey: PreferenceKey {
 }
 
 /// The capsule itself — factored out so the shadow/rim/material live in one place.
+///
+/// Built in the island's **Liquid Glass** language rather than as a flat dark
+/// wafer: real `.glassEffect(.clear)` on macOS 26+ (blurred `NSVisualEffectView`
+/// below) so the wafer refracts what's behind it, plus the two touches that make
+/// glass read as glass instead of a painted board — a top-down sheen and a
+/// directional specular rim, bright along the top edge and fading down the sides.
+/// Same recipe as `GlassCard` / `glassCapsule`; don't hand-roll a third one.
+///
+/// The veil over the glass is deliberate, not a leftover. Bare `.clear` glass
+/// composites to only ~0.34 and 11pt text sitting on arbitrary wallpaper or body
+/// copy goes to mud; 0.30 over the 0.34 baked tint lands ≈0.54 — a touch airier
+/// than the old flat 0.62 while still occluding enough to stay legible.
 private struct TooltipLabel: View {
     let text: String
 
     var body: some View {
+        let shape = Capsule(style: .continuous)
         Text(text)
             .font(.sf(11, weight: .medium))
             .tracking(0.1)
@@ -763,12 +811,17 @@ private struct TooltipLabel: View {
             .padding(.vertical, 5)
             .background(
                 ZStack {
-                    // A near-black glass wafer, not the stock yellow bubble.
-                    Capsule(style: .continuous)
-                        .fill(Color.black.opacity(0.62))
-                        .background(.ultraThinMaterial, in: Capsule(style: .continuous))
-                    Capsule(style: .continuous)
-                        .strokeBorder(Tokens.hairline, lineWidth: 0.5)
+                    shape.fill(.clear)
+                        .nativeGlass(in: shape, tintOpacity: GlassMaterial.bakedTint)
+                        .overlay(shape.fill(Color.black.opacity(0.30)))
+                    shape
+                        .fill(LinearGradient(colors: [.white.opacity(0.12), .clear],
+                                             startPoint: .top, endPoint: .center))
+                        .blendMode(.plusLighter)
+                    shape.strokeBorder(
+                        LinearGradient(colors: [.white.opacity(0.34), .white.opacity(0.08)],
+                                       startPoint: .top, endPoint: .bottom),
+                        lineWidth: 0.6)
                 }
             )
             .shadow(color: .black.opacity(0.35), radius: 8, y: 3)

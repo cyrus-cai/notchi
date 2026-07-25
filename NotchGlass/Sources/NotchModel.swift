@@ -611,6 +611,16 @@ final class NotchModel: ObservableObject {
                text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 manualPanelOverride = nil
             }
+            // The `/` menu's highlight is scoped to the menu being open: every
+            // edit that shuts it (a space, a submit, a delete-all) parks the
+            // highlight back on the top row, and every edit that *narrows* it
+            // clamps the highlight inside the shorter list — so the keyboard can
+            // never sit on a row that isn't there.
+            if !slashMenuOpen {
+                slashHighlight = 0
+            } else if slashHighlight >= slashMatches.count {
+                slashHighlight = max(slashMatches.count - 1, 0)
+            }
             // Any real edit ends an ↑/↓ recall session, so the next ↑ starts fresh
             // from the newest item. `isRecallingText` shields the recall's own
             // fill from tripping this (it writes `text` too).
@@ -1339,6 +1349,12 @@ final class NotchModel: ObservableObject {
     /// through a wrong note/remind guess safe; a misrouted note costs nothing,
     /// a misrouted agent arm is a surprise. Tab while armed still steps off —
     /// the keyboard twin of tapping the pill's Ask half.
+    ///
+    /// It also works on the EMPTY prompt, where there is no "current line" yet:
+    /// the press arms a destination for the line about to be typed, the same pin
+    /// a `/` command sets, and `idlePlaceholderKey` shows which one is armed.
+    /// Since the pin only lifts when the field EMPTIES (`text.didSet`), one armed
+    /// on an already-empty field survives right through the typing that follows.
     func toggleSubmitPanel() {
         if agentComposeActive {
             exitAgentCompose()
@@ -1385,6 +1401,136 @@ final class NotchModel: ObservableObject {
     /// `setAgentBucket` → `enterAgentCompose` already guards on availability.
     func toggleAgentBucket() {
         setAgentBucket(!agentComposeActive)
+    }
+
+    // MARK: - The `/` command menu
+
+    /// The four modes a `/` on the empty prompt can pin the next line to. The set
+    /// the pill (Ask ⇄ Agent) and the Tab cycle (Ask → Note → Remind) already
+    /// reach between them — this is the one surface that names all four at once,
+    /// for the people who'd rather type the destination than learn two keys.
+    enum SlashCommand: String, CaseIterable, Identifiable {
+        case ask, note, remind, agent
+
+        var id: String { rawValue }
+
+        /// The destination word — the SAME string the inline ghost and the bucket
+        /// pill show, so `/note` and the hint beside the caret can't disagree.
+        var title: String { L("hint." + rawValue) }
+
+        /// What the text after the slash matches on: the English command word
+        /// (stable in every UI language — `/note` works on a Chinese interface),
+        /// a couple of natural aliases, and the localized title, so `/记` finds
+        /// 记录 too.
+        var keywords: [String] {
+            let base: [String]
+            switch self {
+            case .ask:    base = ["ask", "chat"]
+            case .note:   base = ["note", "notes", "memo"]
+            case .remind: base = ["remind", "reminder", "todo"]
+            case .agent:  base = ["agent", "code", "task"]
+            }
+            return base + [title.lowercased()]
+        }
+    }
+
+    /// Which row of the `/` menu the keyboard is on. Kept pinned to the top
+    /// whenever the menu is shut (`text.didSet`), so a reopened menu never
+    /// inherits a stale highlight.
+    @Published var slashHighlight: Int = 0
+
+    /// Is the `/` menu on screen? Only on a FRESH prompt (with a thread up, every
+    /// line is a follow-up), only while the text IS the command — a leading `/`
+    /// with no whitespace after it — and only while something still matches. That
+    /// last clause is what keeps a real line that happens to open with a path
+    /// ("/usr/local, what lives there?") from having its keys eaten: the menu
+    /// drops away the moment the query stops naming a mode.
+    var slashMenuOpen: Bool {
+        guard turns.isEmpty, text.hasPrefix("/") else { return false }
+        guard !text.dropFirst().contains(where: { $0.isWhitespace || $0.isNewline })
+        else { return false }
+        return !slashMatches.isEmpty
+    }
+
+    /// The rows the current query leaves standing, always in the enum's declared
+    /// order so the list never reshuffles under the highlight as you type. A bare
+    /// `/` matches all of them. Agent is offered only when a local agent CLI is
+    /// actually installed — the same gate the bucket pill runs on.
+    var slashMatches: [SlashCommand] {
+        let query = text.hasPrefix("/") ? String(text.dropFirst()).lowercased() : ""
+        return SlashCommand.allCases.filter { command in
+            guard command != .agent || agentAvailable else { return false }
+            guard !query.isEmpty else { return true }
+            return command.keywords.contains { $0.hasPrefix(query) }
+        }
+    }
+
+    /// ↓ / ↑ inside the menu, wrapping at both ends so the rows are a ring.
+    /// Returns whether the key was consumed — `false` with no menu open, which is
+    /// what lets ↑/↓ fall through to history recall exactly as before.
+    func slashMenuStep(_ delta: Int) -> Bool {
+        guard slashMenuOpen else { return false }
+        let count = slashMatches.count
+        guard count > 0 else { return false }
+        slashHighlight = ((slashHighlight + delta) % count + count) % count
+        return true
+    }
+
+    /// Enter / Tab on an open menu: apply the highlighted row instead of sending
+    /// "/no" off to the AI.
+    func confirmSlashCommand() -> Bool {
+        guard slashMenuOpen else { return false }
+        let matches = slashMatches
+        guard matches.indices.contains(slashHighlight) else { return false }
+        applySlashCommand(matches[slashHighlight])
+        return true
+    }
+
+    /// Esc on an open menu: drop the command word, and the menu with it, back to
+    /// the blank prompt — one step out, not a panel close.
+    func dismissSlashMenu() -> Bool {
+        guard slashMenuOpen else { return false }
+        text = ""
+        return true
+    }
+
+    /// Land on a mode. Clear the command word FIRST (the field is now empty and
+    /// ready for the real line), then pin where Enter will send it — that order
+    /// matters, since emptying the field is exactly what clears
+    /// `manualPanelOverride`. The pin then behaves like a Tab override that was
+    /// pressed a keystroke early: it holds through the whole line and lifts on
+    /// submit. Note/Remind announce themselves through the prompt's placeholder
+    /// until there's text for the inline ghost to trail; Agent flips the pill.
+    func applySlashCommand(_ command: SlashCommand) {
+        text = ""
+        slashHighlight = 0
+        switch command {
+        case .ask:
+            setAgentBucket(false)
+            manualPanelOverride = nil
+        case .note:
+            setAgentBucket(false)
+            manualPanelOverride = .note
+        case .remind:
+            setAgentBucket(false)
+            manualPanelOverride = .reminder
+        case .agent:
+            manualPanelOverride = nil
+            setAgentBucket(true)
+        }
+    }
+
+    /// The idle prompt's placeholder key. A mode pinned by `/` (or by Tab on a
+    /// line since deleted) has nothing else to show on an empty field — the
+    /// inline ghost only exists beside typed glyphs — so the placeholder carries
+    /// it: "Write a note…", "Remind me to…". Agent compose keeps its own.
+    var idlePlaceholderKey: String {
+        if agentComposeActive { return "agent.placeholder" }
+        switch manualPanelOverride {
+        case .note:     return "note.placeholder"
+        case .reminder: return "remind.placeholder"
+        default:        return "input.placeholder"
+        }
     }
 
     /// True when Enter on the current input goes to an agent CLI: an armed

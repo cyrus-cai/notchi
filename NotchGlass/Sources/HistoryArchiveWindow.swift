@@ -66,7 +66,11 @@ final class HistoryArchiveWindowController: NSObject, NSWindowDelegate {
         // glass instead of flipping to a light-mode treatment on a light desktop.
         window.appearance = NSAppearance(named: .darkAqua)
 
-        window.contentView = NSHostingView(rootView: HistoryArchiveView(model: model))
+        window.contentView = NSHostingView(
+            rootView: HistoryArchiveView(model: model)
+                // Same as the detached window: this window's edges are the wall
+                // its hover tooltips clamp to.
+                .coordinateSpace(.named(TooltipCoordinateSpace.clipBox)))
         window.delegate = self
         window.center()
         window.setFrameAutosaveName("NotchHistoryArchive")

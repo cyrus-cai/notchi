@@ -905,9 +905,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let hasNotch = screen.safeAreaInsets.top > 0
         let root = ContentView(model: model)
             .frame(width: canvasWidth, height: canvasHeight, alignment: .top)
-            // The panel-canvas coordinate space a tooltip clamps to when its anchor
-            // isn't inside a ScrollView, so a hover capsule never runs off the edge.
-            .coordinateSpace(.named(TooltipCoordinateSpace.canvas))
             // The live string store — observed app-wide so an App Language switch
             // re-renders every panel's SwiftUI tree instantly, no relaunch.
             .environmentObject(Localization.shared)

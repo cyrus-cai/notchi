@@ -217,6 +217,9 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
                 self?.model?.regenerateModelOptions ?? []
             })
             .environmentObject(Localization.shared)
+            // This window's own edges are the wall its hover tooltips clamp to —
+            // the island's coordinate space doesn't reach here.
+            .coordinateSpace(.named(TooltipCoordinateSpace.clipBox))
         w.contentView = NSHostingView(rootView: root)
         w.delegate = self
         window = w

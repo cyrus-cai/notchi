@@ -601,7 +601,7 @@ struct AgentHarness {
         return .working
     }
 
-    /// How much of a search query the wait line spells out before eliding. The
+    /// How much of a search query the wait line spells out before cutting. The
     /// row truncates at the tail on its own, but cutting here keeps the closing
     /// quote visible instead of letting the line end mid-word.
     private static let maxQueryChars = 24
@@ -619,8 +619,11 @@ struct AgentHarness {
         // Collapse internal whitespace so a multi-line query can't blow up the
         // single-line slot, then cap it.
         q = q.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        // A hard cut, no ellipsis: the closing quote already ends the line, and a
+        // "…" before it (with the label's own "…" after it) left the wait line
+        // trailing off in dots.
         if q.count > maxQueryChars {
-            q = q.prefix(maxQueryChars).trimmingCharacters(in: .whitespaces) + "…"
+            q = String(q.prefix(maxQueryChars)).trimmingCharacters(in: .whitespaces)
         }
         return q
     }

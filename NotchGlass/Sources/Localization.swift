@@ -425,6 +425,13 @@ enum Strings {
         "hint.ask": "Ask",
         "hint.note": "Note",
         "hint.remind": "Remind",
+        // The prompt's placeholder while `/` (or Tab) has pinned a destination —
+        // an empty field has no glyphs for the inline ghost to trail, so the
+        // placeholder is what says where the next line is going.
+        "note.placeholder": "Write a note…",
+        "remind.placeholder": "Remind me to…",
+        // Sits after the lone "/" while the command menu is up.
+        "slash.filter": "Type to filter",
 
         // First-run onboarding (see OnboardingService / OnboardingView).
         // The gesture hint teaches the summon affordance at the resting notch; the
@@ -602,8 +609,8 @@ enum Strings {
         // Agent tool activity (shown on the streaming turn while a tool runs)
         "agent.activity.search": "Searching the web…",
         "agent.activity.refining": "Digging deeper…",
-        "agent.activity.searchQuery": "Searching “%@”…",
-        "agent.activity.refiningQuery": "Digging into “%@”…",
+        "agent.activity.searchQuery": "Searching “%@”",
+        "agent.activity.refiningQuery": "Digging into “%@”",
         "agent.activity.composing": "Reading the results…",
         // While reading results, the line names the page (its host) being read.
         "agent.activity.readingPage": "Reading %@",
@@ -896,6 +903,9 @@ enum Strings {
         "hint.ask": "提问",
         "hint.note": "记录",
         "hint.remind": "提醒",
+        "note.placeholder": "写点什么…",
+        "remind.placeholder": "提醒我…",
+        "slash.filter": "输入以筛选",
 
         // First-run onboarding (see OnboardingService / OnboardingView).
         "onboarding.gestureHint": "悬停唤出，或按 ⌘,",
@@ -1064,8 +1074,8 @@ enum Strings {
         // 智能体工具活动（工具运行时显示在流式回答上方）
         "agent.activity.search": "正在联网搜索…",
         "agent.activity.refining": "正在进一步查证…",
-        "agent.activity.searchQuery": "正在搜索「%@」…",
-        "agent.activity.refiningQuery": "正在查证「%@」…",
+        "agent.activity.searchQuery": "正在搜索「%@」",
+        "agent.activity.refiningQuery": "正在查证「%@」",
         "agent.activity.composing": "正在整理搜索结果…",
         "agent.activity.readingPage": "正在阅读 %@…",
         "agent.activity.clipboard": "正在读取剪贴板…",
@@ -1356,6 +1366,9 @@ enum Strings {
         "hint.ask": "提問",
         "hint.note": "記錄",
         "hint.remind": "提醒",
+        "note.placeholder": "寫點什麼…",
+        "remind.placeholder": "提醒我…",
+        "slash.filter": "輸入以篩選",
 
         // First-run onboarding (see OnboardingService / OnboardingView).
         "onboarding.gestureHint": "懸停喚出，或按 ⌘,",
@@ -1524,8 +1537,8 @@ enum Strings {
         // 智慧代理工具活動（工具執行時顯示在串流回答上方）
         "agent.activity.search": "正在聯網搜尋…",
         "agent.activity.refining": "正在進一步查證…",
-        "agent.activity.searchQuery": "正在搜尋「%@」…",
-        "agent.activity.refiningQuery": "正在查證「%@」…",
+        "agent.activity.searchQuery": "正在搜尋「%@」",
+        "agent.activity.refiningQuery": "正在查證「%@」",
         "agent.activity.composing": "正在整理搜尋結果…",
         "agent.activity.readingPage": "正在閱讀 %@…",
         "agent.activity.clipboard": "正在讀取剪貼簿…",
@@ -1815,6 +1828,9 @@ enum Strings {
         "hint.ask": "質問",
         "hint.note": "メモ",
         "hint.remind": "リマインド",
+        "note.placeholder": "メモを書く…",
+        "remind.placeholder": "リマインドしてほしいこと…",
+        "slash.filter": "入力して絞り込み",
 
         // First-run onboarding (see OnboardingService / OnboardingView).
         "onboarding.gestureHint": "カーソルを合わせる、または ⌘,",
@@ -1981,8 +1997,8 @@ enum Strings {
         // エージェントのツール活動（ツール実行中、ストリーミング中の回答の上に表示）
         "agent.activity.search": "Web を検索中…",
         "agent.activity.refining": "さらに詳しく確認しています…",
-        "agent.activity.searchQuery": "「%@」を検索中…",
-        "agent.activity.refiningQuery": "「%@」をさらに確認中…",
+        "agent.activity.searchQuery": "「%@」を検索中",
+        "agent.activity.refiningQuery": "「%@」をさらに確認中",
         "agent.activity.composing": "検索結果を読んでいます…",
         "agent.activity.readingPage": "%@ を読んでいます",
         "agent.activity.clipboard": "クリップボードを読んでいます…",
@@ -2272,6 +2288,9 @@ enum Strings {
         "hint.ask": "질문",
         "hint.note": "메모",
         "hint.remind": "알림",
+        "note.placeholder": "메모를 적어보세요…",
+        "remind.placeholder": "알림 내용을 입력하세요…",
+        "slash.filter": "입력해서 필터",
 
         // First-run onboarding (see OnboardingService / OnboardingView).
         "onboarding.gestureHint": "포인터를 올리거나 ⌘,",
@@ -2438,8 +2457,8 @@ enum Strings {
         // 에이전트 도구 활동(도구가 도는 동안 스트리밍 답변 위에 표시)
         "agent.activity.search": "웹을 검색하는 중…",
         "agent.activity.refining": "더 자세히 확인하는 중…",
-        "agent.activity.searchQuery": "“%@” 검색 중…",
-        "agent.activity.refiningQuery": "“%@” 더 자세히 확인하는 중…",
+        "agent.activity.searchQuery": "“%@” 검색 중",
+        "agent.activity.refiningQuery": "“%@” 더 자세히 확인하는 중",
         "agent.activity.composing": "검색 결과를 읽는 중…",
         "agent.activity.readingPage": "%@ 읽는 중",
         "agent.activity.clipboard": "클립보드를 읽는 중…",

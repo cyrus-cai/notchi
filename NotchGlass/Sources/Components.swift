@@ -115,6 +115,11 @@ struct PromptField: NSViewRepresentable {
     /// highlight back up (and folds it away past the top). Same return contract as
     /// `onDown`.
     var onUp: () -> Bool = { false }
+    /// Whether a keyboard-driven menu is open over the field — the `/` command
+    /// menu today. While it is, ↑/↓ go to `onUp`/`onDown` (they walk its rows)
+    /// even though the box holds text, which the empty-field rule below would
+    /// otherwise send to the caret. Default `false`: no menu, no change.
+    var isMenuOpen: () -> Bool = { false }
     /// Whether an ↑/↓ history-recall session is live. When `true`, ↑/↓ keep going
     /// to `onUp`/`onDown` even though the box now holds a recalled question (so the
     /// user can press ↑ again to step further back), instead of moving the caret.
@@ -561,8 +566,11 @@ struct PromptField: NSViewRepresentable {
             // present, no recall) the arrows move the caret as usual. `onDown`/`onUp`
             // return whether they consumed the key, so ↓ with no history at all still
             // falls through to default behaviour.
+            // …and an open menu takes them first, text or no text: with `/no` in
+            // the box the arrows belong to the menu's rows, not to the caret.
             let emptyOrRecalling =
-                parent.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                parent.isMenuOpen()
+                || parent.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 || parent.isRecalling()
             if commandSelector == #selector(NSResponder.moveDown(_:)), emptyOrRecalling {
                 return parent.onDown()

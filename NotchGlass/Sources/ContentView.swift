@@ -207,6 +207,12 @@ struct ContentView: View {
                     }
                     return true
                 }
+                // `/` menu up → first Esc drops the command word and the menu with
+                // it, landing back on the blank prompt. One step out, like folding
+                // the recent list, not a panel close.
+                if withAnimation(.spring(response: 0.34, dampingFraction: 0.82), {
+                    model.dismissSlashMenu()
+                }) { return true }
                 // Guided first run open → Esc skips it (returns to the prompt and
                 // records it done, like the header's Skip).
                 if model.showOnboarding {
@@ -867,6 +873,12 @@ struct NotchIsland: View {
             }
         }
         .frame(width: width)
+        // The box every hover tooltip clamps itself inside. It belongs HERE, on
+        // the island's own width — the `NotchShape` clip below follows this exact
+        // frame, so this is the wall a capsule actually gets chopped against. (It
+        // used to be published on the screen-wide hosting canvas in
+        // `AppDelegate.makePanel`, which never clamped anything.)
+        .coordinateSpace(.named(TooltipCoordinateSpace.clipBox))
         .padding(.top, -topBleed)   // pull the form up so it bleeds off the top
         .background(GlassMaterial(bottomRadius: bottomRadius,
                                   expanded: isOpen,
