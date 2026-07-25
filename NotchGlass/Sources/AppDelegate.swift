@@ -96,6 +96,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.setService(AppDelegate.makeService())
         model.isConfigured = AppDelegate.isConfigured()
     }
+    /// The menu bar item and its menu — the app's one always-visible handle
+    /// besides the notch. Held for the app's lifetime; `nil` is never the state
+    /// (hiding the icon tears down the status item inside the controller, not
+    /// the controller itself).
+    private var menuBar: MenuBarController?
     /// Local key monitor backing ⌘, → Settings. App-scoped (not a global Carbon
     /// hot key), so ⌘, only opens Settings while Notch is frontmost and stays out
     /// of every other app's way. Held so it lives for the app's lifetime.
@@ -168,6 +173,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The user can opt into a Dock icon (Settings → General), which flips this
         // to `.regular`; `applyDockIconVisibility` reads the persisted choice.
         applyDockIconVisibility()
+
+        // …and the menu bar item, the counterpart handle: with no Dock icon the
+        // status menu is the only way in that doesn't require remembering the
+        // summon shortcut or reaching the notch (full-screen Spaces cover it).
+        installMenuBar()
 
         // Seed the configured flag to match the service the model launched with.
         model.isConfigured = AppDelegate.isConfigured()
@@ -450,6 +460,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        // The Settings → Appearance menu-bar-icon choice adds/removes the status
+        // item live.
+        NotificationCenter.default.addObserver(
+            forName: .menuBarIconVisibilityChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.menuBar?.apply()
+            }
+        }
+
         // Auto-hide the island while a full-screen app covers its (virtual-notch)
         // screen — see `HideNotchInFullscreen`. Entering/leaving native full screen
         // is a Space switch, and a borderless full-screen window shows up as an app
@@ -686,6 +708,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(visibility.activationPolicy)
         if visibility == .shown {
             NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    // MARK: - Menu bar
+
+    /// Build the status-item controller and put it on screen if the setting says
+    /// so. Every action routes into a path the panel already owns — the menu adds
+    /// no behaviour of its own, it just makes those paths reachable from the bar.
+    /// Opens land on the screen the mouse is on (`displayForSummon`), same as ⌘,.
+    private func installMenuBar() {
+        menuBar = MenuBarController(actions: MenuBarController.Actions(
+            openNotch: { [weak self] in
+                guard let self else { return }
+                // Open, never toggle: a menu item labelled "Open Notch" that
+                // closes the panel would be a lie. Already-open just migrates it
+                // to this screen.
+                self.summonFromMenuBar { model, display in
+                    model.mode = .idle
+                    model.openPanel(on: display)
+                }
+            },
+            newChat: { [weak self] in
+                self?.summonFromMenuBar { model, display in
+                    model.newChat()
+                    model.openPanel(on: display)
+                }
+            },
+            openHistory: {
+                NotificationCenter.default.post(name: .openHistoryArchiveRequested, object: nil)
+            },
+            openSettings: {
+                NotificationCenter.default.post(name: .openSettingsRequested, object: nil)
+            },
+            openModelSettings: { [weak self] in
+                self?.model.settingsSection = "Model"
+                NotificationCenter.default.post(name: .openSettingsRequested, object: nil)
+            },
+            openWhatsNew: { [weak self] in
+                self?.summonFromMenuBar { model, display in
+                    model.openWhatsNew(on: display)
+                }
+            },
+            checkForUpdates: { [weak self] in
+                self?.checkForUpdatesFromMenu()
+            }
+        ))
+        menuBar?.apply()
+    }
+
+    /// Run a menu-driven open against the model, on the screen the mouse is on
+    /// and inside the same spring every other summon uses. Activation is handled
+    /// by the `$open` observer — a status-menu click leaves the previous app
+    /// frontmost, so that path still records the right app to hand focus back to.
+    private func summonFromMenuBar(_ body: @escaping (NotchModel, CGDirectDisplayID?) -> Void) {
+        let display = displayForSummon()
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+            body(model, display)
         }
     }
 

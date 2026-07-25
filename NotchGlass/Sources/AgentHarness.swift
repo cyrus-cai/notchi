@@ -365,7 +365,7 @@ struct AgentHarness {
                     // calls execute below — same helpers, so the words agree.
                     let preview = [ToolInvocation(id: "", name: name, input: [:])]
                     onActivity(activityLabel(for: preview, isRepeatRound: didTool),
-                               Self.orbState(for: preview))
+                               Self.orbState(for: preview, isRepeatRound: didTool))
                     // Text after this point is call-adjacent prose, not the answer
                     // displacing the label — don't let it clear the line.
                     clearedGapLabel = true
@@ -444,7 +444,7 @@ struct AgentHarness {
             // itself is the view's `.transition(.opacity)` (see `turnView`).
             let shownAt = Date()
             onActivity(activityLabel(for: pendingCalls, isRepeatRound: didTool),
-                       Self.orbState(for: pendingCalls))
+                       Self.orbState(for: pendingCalls, isRepeatRound: didTool))
             let completed = await runConcurrently(pendingCalls)
             let elapsed = Date().timeIntervalSince(shownAt)
             if elapsed < Self.minActivityVisible {
@@ -573,16 +573,23 @@ struct AgentHarness {
     }
 
     /// The thinking-orb mode for the running calls — the semantic twin of
-    /// `activityLabel`, decided from the same tool names in the same place so
-    /// the orb and the words can never disagree. The whole search flow (search,
-    /// refine, read a page) wears the reference's searching globe; everything
-    /// else that runs a tool wears the working orbits; `ask_user` is a wait on
-    /// the human, not work, so it keeps the calm thinking ribbon (the wait line
-    /// is usually hidden behind the question card there anyway).
-    static func orbState(for calls: [ToolInvocation]) -> OrbState {
+    /// `activityLabel`, decided from the same tool names, on the same
+    /// `isRepeatRound` flag, in the same place, so the orb and the words can
+    /// never disagree. A first search (and any page read) wears the reference's
+    /// searching globe; a REPEAT search round wears the solver, because the
+    /// words have already switched to "digging deeper" and an unchanged globe
+    /// makes round two look like round one frozen. Everything else that runs a
+    /// tool wears the working orbits; `ask_user` is a wait on the human, not
+    /// work, so it keeps the calm thinking ribbon (the wait line is usually
+    /// hidden behind the question card there anyway).
+    static func orbState(for calls: [ToolInvocation], isRepeatRound: Bool) -> OrbState {
         if let first = calls.first, calls.count == 1 {
             switch first.name {
-            case "lookup_web", "$web_search", "exa_search", "keenable_search", "read_page":
+            case "lookup_web", "$web_search", "exa_search", "keenable_search":
+                return isRepeatRound ? .solving : .searching
+            case "read_page":
+                // Reading a page keeps its own wait line ("Reading example.com")
+                // on every round, so its orb doesn't flip either.
                 return .searching
             case "ask_user":
                 return .composing
@@ -594,6 +601,30 @@ struct AgentHarness {
         return .working
     }
 
+    /// How much of a search query the wait line spells out before eliding. The
+    /// row truncates at the tail on its own, but cutting here keeps the closing
+    /// quote visible instead of letting the line end mid-word.
+    private static let maxQueryChars = 24
+
+    /// The query a search call is about to run, tidied for the one-line wait
+    /// slot — or nil when the call's arguments haven't arrived yet (the
+    /// streaming `toolCallStarted` preview passes an empty input), so the caller
+    /// falls back to the generic line. Our three search tools name the argument
+    /// `query`; Kimi's builtin names it `search_query`.
+    private static func searchQuery(of call: ToolInvocation) -> String? {
+        let raw = (call.input["query"] as? String) ?? (call.input["search_query"] as? String)
+        guard var q = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !q.isEmpty else {
+            return nil
+        }
+        // Collapse internal whitespace so a multi-line query can't blow up the
+        // single-line slot, then cap it.
+        q = q.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        if q.count > maxQueryChars {
+            q = q.prefix(maxQueryChars).trimmingCharacters(in: .whitespaces) + "…"
+        }
+        return q
+    }
+
     /// A short, human-readable progress label for the running calls, e.g.
     /// "Searching the web…". `isRepeatRound` is true on a second-or-later tool
     /// round, where a search reads as "digging deeper" rather than a fresh start.
@@ -602,6 +633,14 @@ struct AgentHarness {
         if let first = calls.first, calls.count == 1 {
             switch first.name {
             case "lookup_web", "$web_search", "exa_search", "keenable_search":
+                // Name what it's actually looking up once the arguments have
+                // landed — the same move `read_page` makes with its host. At
+                // `toolCallStarted` they're still streaming, so the generic line
+                // stands until the assembled call re-derives this.
+                if let q = Self.searchQuery(of: first) {
+                    return L(isRepeatRound ? "agent.activity.refiningQuery"
+                                           : "agent.activity.searchQuery", q)
+                }
                 return L(isRepeatRound ? "agent.activity.refining" : "agent.activity.search")
             case "ask_user": return L("agent.activity.askUser")
             case "read_clipboard": return L("agent.activity.clipboard")

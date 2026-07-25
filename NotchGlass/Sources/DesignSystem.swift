@@ -21,6 +21,44 @@ enum Tokens {
     static let text4 = ink.opacity(0.40)   // meta (timestamps)
     static let hairline = Color.white.opacity(0.12)
 
+    // MARK: Recessed surface
+    //
+    // The flat chip surface worn by controls that sit INSIDE a panel rather than
+    // floating on it — the settings menus, the onboarding connect cards, the
+    // "set up a model" card, the follow-up composer box. (Controls that float ON
+    // the glass — the round icon chips, the filter pills, the send button — wear
+    // `glassCapsule` instead; that's a different, translucent species.)
+    //
+    // Two states, one recipe: a faint white floor with a hairline rim at rest,
+    // both lifting together when the control is hovered/focused. Every site used
+    // to carry its own hand-picked pair (0.05/0.06 floors, 0.10/0.12/0.16 rims,
+    // 0.20/0.22/0.24 lit rims) — near-identical numbers that read as drift, not
+    // as intent. Route new recessed controls through `recessedSurface`.
+    static let recessFill    = Color.white.opacity(0.06)
+    static let recessFillLit = Color.white.opacity(0.10)
+    static let recessRim     = Color.white.opacity(0.12)
+    static let recessRimLit  = Color.white.opacity(0.22)
+
+    /// The same surface one step louder, for the *primary* action of a screen —
+    /// the onboarding's Next/Ask, Settings' "Connect OpenRouter". One rung above
+    /// the recessed rest so the eye lands on it first, and — unlike before — it
+    /// still answers a hover, which those two buttons alone in the app did not.
+    static let prominentFill    = Color.white.opacity(0.12)
+    static let prominentFillLit = Color.white.opacity(0.18)
+    static let prominentRim     = Color.white.opacity(0.22)
+    static let prominentRimLit  = Color.white.opacity(0.32)
+
+    /// The one duration every *chip's* hover brighten runs at — buttons, pills,
+    /// glass capsules, the ⓘ marks. Long enough to read as a fade rather than a
+    /// flick, short enough to feel immediate.
+    static let hoverFade: TimeInterval = 0.18
+    /// The faster twin, for *list rows* — Recent, the archive, the settings
+    /// sidebar, the model pickers. A cursor sweeping a list crosses several rows a
+    /// second, so the wash has to keep up; at chip speed it smears behind the
+    /// pointer. (These two used to be five values between 0.12 and 0.18, assigned
+    /// per-site rather than per-species.)
+    static let rowFade: TimeInterval = 0.12
+
     // Danger accent — used sparingly for genuine errors and destructive actions
     // (update failure, a destructive menu item). Success/confirmation states stay
     // neutral ink instead: no coloured dots, no green pills.
@@ -34,14 +72,28 @@ enum Tokens {
     // glass; shown only for the ~0.6s confirmation beat, never as a standing pill.
     static let success = Color(red: 0.40, green: 0.82, blue: 0.55)
 
-    // Agent violet — the ONE hue the agent wears wherever it shows a face: the
-    // inline "— Agent" ghost, the Recent filter/capture chips, the archive's
-    // agent rows. Two faces of the same colour, mirroring the intent palette
-    // (`Panel.intentTint` / `intentInk`): a saturated body for the low-opacity
-    // chip washes, and the same hue lifted toward white so it reads as coloured
-    // *light* when used as ink on the dark glass.
-    static let agentTint = Color(red: 0.64, green: 0.44, blue: 1.00)
-    static let agentInk  = Color(red: 0.82, green: 0.72, blue: 1.00)
+    // MARK: Source / intent palette
+    //
+    // The ONE table every surface reads for "which kind of thing is this" — the
+    // inline "— Ask/— Note/— Remind/— Agent" ghost, the Recent filter chips, the
+    // capture jump pills, the archive window's chips and bubbles. Each kind has
+    // TWO faces: a saturated `…Tint` body for the low-opacity glass WASHES (where
+    // saturation survives dilution), and the same hue lifted toward white as
+    // `…Ink` for TEXT and glows — a fully saturated colour used as ink sinks into
+    // the dark glass (blue especially reads as a murky shadow), while these
+    // luminous pastels read as coloured *light*.
+    //
+    // Read through `NotchModel.HistoryItem.Source.tint` / `NotchModel.Panel`'s
+    // `intentTint` / `intentInk` rather than reaching for the raw values — those
+    // are the mappings, this is the palette. Never hand-roll a fourth copy.
+    static let askTint      = Color.blue
+    static let askInk       = Color(red: 0.66, green: 0.80, blue: 1.00)
+    static let noteTint     = Color.yellow
+    static let noteInk      = Color(red: 1.00, green: 0.89, blue: 0.58)
+    static let reminderTint = Color.orange
+    static let reminderInk  = Color(red: 1.00, green: 0.78, blue: 0.56)
+    static let agentTint    = Color(red: 0.64, green: 0.44, blue: 1.00)
+    static let agentInk     = Color(red: 0.82, green: 0.72, blue: 1.00)
 
     /// Placeholder text for the prompt — a soft, faint hint, clearly LIGHTER than
     /// real typed text so it reads as a transient suggestion rather than content.
@@ -64,6 +116,46 @@ enum Tokens {
     static let openWidthOnboarding: CGFloat = 720  // first-run guide: left controls + right demo pane
 }
 
+/// The panel's **recessed** control surface: a faint white floor plus a hairline
+/// rim, both lifting together when `lit` (hovered, focused, or open). The flat
+/// counterpart to `glassCapsule` — that one is for chips floating ON the glass,
+/// this one for controls sunk INTO a panel. See `Tokens.recessFill` for why the
+/// numbers live in one place.
+struct RecessedSurface<S: InsettableShape>: ViewModifier {
+    var shape: S
+    var lit: Bool
+    /// The louder rung, for a screen's primary action. Same recipe, brighter pair.
+    var prominent: Bool = false
+
+    private var fill: Color {
+        if prominent { return lit ? Tokens.prominentFillLit : Tokens.prominentFill }
+        return lit ? Tokens.recessFillLit : Tokens.recessFill
+    }
+    private var rim: Color {
+        if prominent { return lit ? Tokens.prominentRimLit : Tokens.prominentRim }
+        return lit ? Tokens.recessRimLit : Tokens.recessRim
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .background(shape.fill(fill))
+            .overlay(shape.strokeBorder(rim, lineWidth: 0.5))
+    }
+}
+
+extension View {
+    /// Wear the shared recessed-control surface (see `RecessedSurface`). Pass the
+    /// control's own shape so the floor, the rim and the hit area agree.
+    func recessedSurface<S: InsettableShape>(in shape: S, lit: Bool) -> some View {
+        modifier(RecessedSurface(shape: shape, lit: lit))
+    }
+
+    /// The prominent rung of the same surface — a screen's ONE primary action.
+    func prominentSurface<S: InsettableShape>(in shape: S, lit: Bool) -> some View {
+        modifier(RecessedSurface(shape: shape, lit: lit, prominent: true))
+    }
+}
+
 /// Trackpad haptics — the native macOS confirmation channel (the same taps
 /// Finder gives on snap-align and QuickTime on trim boundaries). Fired only on
 /// *user-initiated* moments, per the HIG: the island snapping open under the
@@ -82,6 +174,23 @@ enum Haptics {
     /// A quiet confirmation for actions with no visible result (copy).
     static func confirm() {
         NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+    }
+}
+
+extension View {
+    /// The panel's ONE small-caps caption register: the title over a full-panel
+    /// module (SETTINGS / WHAT'S NEW) and the section headings inside one
+    /// (FEATURES / FIXES, the model picker's provider groups). 10pt semibold,
+    /// tracked out, at meta weight — quiet enough to label without competing with
+    /// the content it sits over.
+    ///
+    /// Four surfaces used to spell this out by hand and had drifted to 10/0.8 in
+    /// three of them and 9.5/0.7 in the fourth — a difference nobody chose and
+    /// nobody can see, which is exactly how a register stops being a register.
+    func captionLabel() -> some View {
+        font(.sf(10, weight: .semibold))
+            .tracking(0.8)
+            .foregroundStyle(Tokens.text4)
     }
 }
 

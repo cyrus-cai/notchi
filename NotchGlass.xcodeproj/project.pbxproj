@@ -29,6 +29,7 @@
 		A1000064 /* IntentEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000065 /* IntentEngine.swift */; };
 		A1000068 /* RemindersService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000069 /* RemindersService.swift */; };
 		A10000AA /* DiagnosticsLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000BB /* DiagnosticsLog.swift */; };
+		A1000A10 /* MenuBarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000A11 /* MenuBarController.swift */; };
 		A1000072 /* UpdaterService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000073 /* UpdaterService.swift */; };
 		A1000074 /* MouseVelocityTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000075 /* MouseVelocityTracker.swift */; };
 		A1000076 /* OpenRouterAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000077 /* OpenRouterAuth.swift */; };
@@ -66,6 +67,7 @@
 		A1000065 /* IntentEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntentEngine.swift; sourceTree = "<group>"; };
 		A1000069 /* RemindersService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemindersService.swift; sourceTree = "<group>"; };
 		A10000BB /* DiagnosticsLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsLog.swift; sourceTree = "<group>"; };
+		A1000A11 /* MenuBarController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarController.swift; sourceTree = "<group>"; };
 		A1000073 /* UpdaterService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdaterService.swift; sourceTree = "<group>"; };
 		A1000075 /* MouseVelocityTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MouseVelocityTracker.swift; sourceTree = "<group>"; };
 		A1000077 /* OpenRouterAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenRouterAuth.swift; sourceTree = "<group>"; };
@@ -133,6 +135,7 @@
 			children = (
 				A1000001 /* NotchGlassApp.swift */,
 				A1000002 /* AppDelegate.swift */,
+				A1000A11 /* MenuBarController.swift */,
 				A1000003 /* NotchPanel.swift */,
 				A1000004 /* DesignSystem.swift */,
 				A1000005 /* AIService.swift */,
@@ -266,6 +269,7 @@
 			files = (
 				A1000010 /* NotchGlassApp.swift in Sources */,
 				A1000011 /* AppDelegate.swift in Sources */,
+				A1000A10 /* MenuBarController.swift in Sources */,
 				A1000012 /* NotchPanel.swift in Sources */,
 				A1000013 /* DesignSystem.swift in Sources */,
 				A1000014 /* AIService.swift in Sources */,
@@ -370,7 +374,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.2.3;
+				MARKETING_VERSION = 0.2.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -393,7 +397,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.2.3;
+				MARKETING_VERSION = 0.2.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;

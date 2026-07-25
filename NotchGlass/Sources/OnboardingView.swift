@@ -202,7 +202,7 @@ struct OnboardingView: View {
         case .connected:
             HStack(spacing: 8) {
                 Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.sf(15, weight: .semibold))
                     .foregroundStyle(Tokens.success)
                 Text(L("onboarding.connect.connected"))
                     .font(.sf(13, weight: .medium))
@@ -291,7 +291,7 @@ struct OnboardingView: View {
                 HStack(spacing: 4) {
                     Text(L("onboarding.paste.get"))
                     Image(systemName: "arrow.up.right")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.sf(9, weight: .semibold))
                 }
                 .font(.sf(11.5, weight: .medium))
                 .foregroundStyle(Tokens.text3)
@@ -315,7 +315,7 @@ struct OnboardingView: View {
                     .foregroundStyle(Tokens.text1)
                 Spacer(minLength: 0)
                 Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.sf(10, weight: .semibold))
                     .foregroundStyle(Tokens.text3)
             }
             .padding(.horizontal, 13)
@@ -395,7 +395,7 @@ struct OnboardingView: View {
             // Back. On the paste sub-step it returns to the connect cards (not a step
             // change); otherwise it walks the steps back. Hidden only on the very
             // first step, where there's nowhere to go back to.
-            Button {
+            PanelBackButton {
                 if pasting {
                     closePaste()
                 } else {
@@ -403,14 +403,7 @@ struct OnboardingView: View {
                         step = max(0, step - 1)
                     }
                 }
-            } label: {
-                Image(systemName: "chevron.left")
-                    .font(.sf(12, weight: .semibold))
-                    .foregroundStyle(Tokens.text3)
-                    .frame(width: 30, height: 30)
-                    .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
             .opacity(backHidden ? 0 : 1)
             .allowsHitTesting(!backHidden)
             // On the first step the hidden Back button must not reserve space —
@@ -497,30 +490,7 @@ struct OnboardingView: View {
                                icon: String? = nil,
                                wide: Bool = true,
                                action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 7) {
-                if let icon {
-                    Image(systemName: icon)
-                        .font(.system(size: 11, weight: .semibold))
-                }
-                Text(label)
-                    .font(.sf(13, weight: .medium))
-            }
-            .foregroundStyle(Tokens.text1)
-            .padding(.horizontal, 16)
-            .frame(height: 38)
-            .frame(maxWidth: wide ? .infinity : nil)
-            .background(
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(.white.opacity(0.12))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .strokeBorder(.white.opacity(0.22), lineWidth: 0.5)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 10))
-        }
-        .buttonStyle(.plain)
+        PrimaryOnboardingButton(label: label, icon: icon, wide: wide, action: action)
     }
 
     private func advance() {
@@ -602,6 +572,42 @@ struct OnboardingView: View {
 /// neither reads as "already selected." The only hover feedback is a faint fill/border
 /// brighten plus the pointing-hand cursor; no colour bloom, no scaling. (The `tint`
 /// argument is kept for call-site compatibility but no longer changes the look.)
+/// The guide's forward action — the connect CTA and the footer's Next/Ask, one
+/// look for "this moves you forward". Wears the shared *prominent* surface, and
+/// (new) actually answers a hover and gives on press: it used to be the app's
+/// most important button and the only one that did neither.
+private struct PrimaryOnboardingButton: View {
+    let label: String
+    var icon: String? = nil
+    var wide: Bool = true
+    let action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 7) {
+                if let icon {
+                    Image(systemName: icon)
+                        .font(.sf(11, weight: .semibold))
+                }
+                Text(label)
+                    .font(.sf(13, weight: .medium))
+            }
+            .foregroundStyle(Tokens.text1)
+            .padding(.horizontal, 16)
+            .frame(height: 38)
+            .frame(maxWidth: wide ? .infinity : nil)
+            .prominentSurface(in: RoundedRectangle(cornerRadius: 10, style: .continuous),
+                              lit: hovering)
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(GlassPressStyle())
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+    }
+}
+
 private struct TintedConnectButton: View {
     let title: String
     let subtitle: String
@@ -616,7 +622,7 @@ private struct TintedConnectButton: View {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 7) {
                     Image(systemName: icon)
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.sf(12, weight: .semibold))
                     Text(title)
                         .font(.sf(13, weight: .semibold))
                         .lineLimit(1)
@@ -631,19 +637,13 @@ private struct TintedConnectButton: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 13)
             .padding(.vertical, 11)
-            .background(
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(.white.opacity(hovering ? 0.10 : 0.06))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(.white.opacity(hovering ? 0.24 : 0.16), lineWidth: 0.5)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 12))
+            .recessedSurface(in: RoundedRectangle(cornerRadius: 12, style: .continuous),
+                             lit: hovering)
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
         .buttonStyle(.plain)
         .onHover { h in
-            withAnimation(.easeOut(duration: 0.16)) { hovering = h }
+            withAnimation(.easeOut(duration: Tokens.hoverFade)) { hovering = h }
             if h { NSCursor.pointingHand.push() } else { NSCursor.pop() }
         }
     }
@@ -674,7 +674,7 @@ private struct WelcomeDemo: View {
             ForEach(0..<rows.count, id: \.self) { i in
                 HStack(spacing: 11) {
                     Image(systemName: rows[i].0)
-                        .font(.system(size: 14, weight: .medium))
+                        .font(.sf(14, weight: .medium))
                         .foregroundStyle(rows[i].1)
                         .frame(width: 22)
                     Text(labels[i])
@@ -826,7 +826,7 @@ private struct ConnectDemo: View {
                 .frame(width: nodeSize, height: nodeSize)
                 .shadow(color: tint.opacity(0.6), radius: glow)
             Image(systemName: icon)
-                .font(.system(size: 18, weight: .semibold))
+                .font(.sf(18, weight: .semibold))
                 .foregroundStyle(active ? tint : Tokens.text3)
         }
         .animation(.spring(response: 0.45, dampingFraction: 0.7), value: connected)

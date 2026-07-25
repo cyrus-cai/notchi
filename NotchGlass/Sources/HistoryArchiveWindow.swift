@@ -215,7 +215,7 @@ private struct HistoryArchiveView: View {
         VStack(spacing: 10) {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.sf(12, weight: .medium))
                     .foregroundStyle(Tokens.text3)
                 TextField(L("history.window.search"), text: $query)
                     .textFieldStyle(.plain)
@@ -224,7 +224,7 @@ private struct HistoryArchiveView: View {
                 if !query.isEmpty {
                     Button { query = "" } label: {
                         Image(systemName: "xmark.circle")
-                            .font(.system(size: 12))
+                            .font(.sf(12))
                             .foregroundStyle(Tokens.text4)
                     }
                     .buttonStyle(.plain)
@@ -290,7 +290,7 @@ private struct HistoryArchiveView: View {
         HistoryFilterPill(
             title: title,
             active: active ?? (sourceFilter == source),
-            tint: source?.archiveTint,
+            tint: source?.tint,
             action: action ?? { sourceFilter = source }
         )
     }
@@ -327,7 +327,7 @@ private struct HistoryArchiveView: View {
     private var emptyList: some View {
         VStack(spacing: 8) {
             Image(systemName: "clock.arrow.circlepath")
-                .font(.system(size: 26, weight: .light))
+                .font(.sf(26, weight: .light))
                 .foregroundStyle(Tokens.text4)
             Text(query.isEmpty && sourceFilter == nil
                  ? L("history.window.empty")
@@ -348,7 +348,7 @@ private struct HistoryArchiveView: View {
         } else {
             VStack(spacing: 10) {
                 Image(systemName: "text.bubble")
-                    .font(.system(size: 28, weight: .light))
+                    .font(.sf(26, weight: .light))
                     .foregroundStyle(Tokens.text4)
                 Text(L("history.window.detail.empty"))
                     .font(.sf(13))
@@ -385,7 +385,7 @@ private struct HistoryFilterPill: View {
         }
         .buttonStyle(GlassPressStyle())
         .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.18), value: hovering)
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
     }
 }
 
@@ -435,7 +435,7 @@ private struct HistoryArchiveRow: View {
         } else {
             CaptureJumpButton(
                 title: item.source == .note ? L("recent.badge.notes") : L("recent.badge.reminders"),
-                tint: item.source.archiveTint,
+                tint: item.source.tint,
                 action: jump
             )
         }
@@ -528,12 +528,12 @@ private struct HistoryDetailView: View {
                 HStack(spacing: 5) {
                     Text(item.source == .note ? L("recent.badge.notes") : L("recent.badge.reminders"))
                         .font(.sf(12, weight: .medium))
-                    Image(systemName: "arrow.up.right").font(.system(size: 10, weight: .semibold))
+                    Image(systemName: "arrow.up.right").font(.sf(10, weight: .semibold))
                 }
                 .foregroundStyle(Tokens.text2)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 8)
-                .glassCapsule(in: Capsule(), brighter: false, tint: item.source.archiveTint)
+                .glassCapsule(in: Capsule(), brighter: false, tint: item.source.tint)
                 .contentShape(Capsule())
             }
             .buttonStyle(GlassPressStyle())
@@ -607,17 +607,3 @@ private struct TranscriptBubble: View {
     }
 }
 
-/// The source→tint mapping for the archive's chips, kept local to this window so it
-/// doesn't reach into `NotchBody`'s `fileprivate` copy. Same palette everywhere a
-/// source shows its face: Ask a cool blue, Note the Notes amber, Remind the
-/// Reminders orange, Agent a violet.
-private extension NotchModel.HistoryItem.Source {
-    var archiveTint: Color {
-        switch self {
-        case .ask:      return .blue
-        case .note:     return .yellow
-        case .reminder: return .orange
-        case .agent:    return Tokens.agentTint
-        }
-    }
-}

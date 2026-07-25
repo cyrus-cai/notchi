@@ -68,14 +68,30 @@ struct ClaudeCLIService: AIService {
     /// "no binary". Resolution shells out (`--version`), so it's cached for the
     /// process lifetime — warm it off-main at launch via `warmUp()`.
     private static var cachedBinary: String??
+    /// `--version` output of the resolved binary, captured by the same spawn that
+    /// vetted it — see `binaryFingerprint()`.
+    private static var cachedVersion: String?
 
     /// The resolved `claude` binary path, or `nil` if none works. Cached.
     static func resolveBinary() -> String? {
         resolveLock.lock(); defer { resolveLock.unlock() }
         if let cached = cachedBinary { return cached }
         let resolved = locateBinary()
-        cachedBinary = .some(resolved)
-        return resolved
+        cachedBinary = .some(resolved?.path)
+        cachedVersion = resolved?.version
+        return resolved?.path
+    }
+
+    /// Identity of the CLI that will actually be spawned: path **and** version.
+    /// The alias→model mapping is only valid for one such identity — a CLI update
+    /// moves the version, switching installs (native → homebrew) moves the path —
+    /// so this is what the resolved-model cache keys on instead of a clock.
+    /// Free: the version comes from the `--version` spawn that vetted the binary.
+    static func binaryFingerprint() -> String? {
+        guard let path = resolveBinary() else { return nil }
+        resolveLock.lock(); defer { resolveLock.unlock() }
+        guard let version = cachedVersion else { return nil }
+        return "\(path)|\(version)"
     }
 
     /// Resolve the binary off the main thread so the first `isAvailable` read
@@ -86,27 +102,35 @@ struct ClaudeCLIService: AIService {
         }
     }
 
-    private static func locateBinary() -> String? {
+    private static func locateBinary() -> (path: String, version: String)? {
         let fm = FileManager.default
         for p in candidatePaths where fm.isExecutableFile(atPath: p) {
-            if smokeTest(p) { return p }
+            if let v = smokeTest(p) { return (p, v) }
         }
         // Fall back to the user's login-shell PATH (npm-global and other
         // non-standard installs).
-        if let p = loginShellWhich(), smokeTest(p) { return p }
+        if let p = loginShellWhich(), let v = smokeTest(p) { return (p, v) }
         return nil
     }
 
     /// A candidate is real only if `--version` exits cleanly — skips broken shims.
-    private static func smokeTest(_ path: String) -> Bool {
+    /// Returns that version string (the caller keys the resolved-model cache on
+    /// it); `"unknown"` when the binary is fine but prints nothing, so a quiet
+    /// build is still accepted. `nil` means "not a working `claude`".
+    private static func smokeTest(_ path: String) -> String? {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: path)
         p.arguments = ["--version"]
-        p.standardOutput = Pipe()
+        let out = Pipe()
+        p.standardOutput = out
         p.standardError = Pipe()
-        do { try p.run() } catch { return false }
+        do { try p.run() } catch { return nil }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
-        return p.terminationStatus == 0
+        guard p.terminationStatus == 0 else { return nil }
+        let version = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return version.isEmpty ? "unknown" : version
     }
 
     private static func loginShellWhich() -> String? {
@@ -149,15 +173,23 @@ struct ClaudeCLIService: AIService {
     /// and drifts as new models ship — there is no static source to bundle. The
     /// `init` event on `claude -p`'s stream-json stdout carries the resolved id and
     /// is printed *before* the turn runs, so probing is nearly free: spawn, read the
-    /// first line, kill. Probes run off-main behind a TTL'd UserDefaults cache — the
+    /// first line, kill. Probes run off-main behind a UserDefaults cache — the
     /// picker only ever reads the cache (see `ModelCatalogStore.loadAll`).
+    ///
+    /// The cache is keyed on `binaryFingerprint()`, not on a clock. Only two
+    /// things move this mapping: the CLI updating (fingerprint catches it the
+    /// moment it happens) and the account's default model changing (invisible to
+    /// a version, which is what the TTL below is left for). Keying on time alone
+    /// used to mean a CLI update took up to a day to show up in the picker.
     private static let resolvedModelsLock = NSLock()
     private static var cachedResolvedModels: [String: String]?
     private static let resolvedModelsKey = "claudeCode.resolvedModels"
     private static let resolvedModelsFetchedAtKey = "claudeCode.resolvedModels.fetchedAt"
-    /// One day: the alias→id mapping only moves when the CLI updates or the
-    /// account's default changes — daily is plenty, and each miss costs 4 spawns.
-    private static let resolvedModelsTTL: TimeInterval = 24 * 3600
+    private static let resolvedModelsFingerprintKey = "claudeCode.resolvedModels.fingerprint"
+    /// Backstop for the one change the fingerprint can't see — the account's
+    /// default model. A week: CLI updates land via the fingerprint instead, so
+    /// this no longer has to be the freshness mechanism.
+    private static let resolvedModelsTTL: TimeInterval = 7 * 24 * 3600
 
     /// A resolved id as a display name: "claude-opus-4-8" → "Claude Opus 4.8".
     /// Family words capitalized, numeric tokens joined into a dotted version,
@@ -197,31 +229,51 @@ struct ClaudeCLIService: AIService {
     }
 
     /// Probe the CLI for what each alias resolves to and cache the mapping.
-    /// Blocking (seconds — one spawn per alias); call off the main thread. No-op
-    /// while the persisted cache is fresh and already covers every alias.
+    /// Blocking (seconds); call off the main thread. Cheap on a hit — it returns
+    /// without spawning anything while the persisted cache was written by *this*
+    /// CLI build, is inside the TTL, and already covers every alias. Callers are
+    /// meant to call it freely rather than gate it themselves.
     static func refreshResolvedModels(aliases: [String]) {
         let defaults = UserDefaults.standard
         let known = resolvedModels
-        if let fetched = defaults.object(forKey: resolvedModelsFetchedAtKey) as? Date,
+        let fingerprint = binaryFingerprint()
+        if fingerprint != nil,
+           fingerprint == defaults.string(forKey: resolvedModelsFingerprintKey),
+           let fetched = defaults.object(forKey: resolvedModelsFetchedAtKey) as? Date,
            Date().timeIntervalSince(fetched) < resolvedModelsTTL,
            aliases.allSatisfy({ known[$0] != nil }) {
             return
         }
-        var merged = known   // keep stale entries for aliases whose probe fails
-        var anyLanded = false
+
+        // One spawn per alias, all at once: they're independent processes and each
+        // is a cold node boot, so serially this ran to 4× the wall clock of the
+        // slowest one. Rare now that the fingerprint gates it, but no reason to wait.
+        let landedLock = NSLock()
+        var landed: [String: String] = [:]
+        let group = DispatchGroup()
         for alias in aliases {
-            // "claude" is the account-default sentinel — probe it with no --model.
-            guard let id = probeResolvedModel(alias: alias == "claude" ? nil : alias)
-            else { continue }
-            merged[alias] = id
-            anyLanded = true
+            DispatchQueue.global(qos: .utility).async(group: group) {
+                // "claude" is the account-default sentinel — probe it with no --model.
+                guard let id = probeResolvedModel(alias: alias == "claude" ? nil : alias)
+                else { return }
+                landedLock.lock(); landed[alias] = id; landedLock.unlock()
+            }
         }
-        guard anyLanded else { return }
+        group.wait()
+
+        guard !landed.isEmpty else { return }
+        var merged = known   // keep stale entries for aliases whose probe failed
+        merged.merge(landed) { _, fresh in fresh }
         resolvedModelsLock.lock()
         cachedResolvedModels = merged
         resolvedModelsLock.unlock()
         defaults.set(merged, forKey: resolvedModelsKey)
         defaults.set(Date(), forKey: resolvedModelsFetchedAtKey)
+        if let fingerprint {
+            defaults.set(fingerprint, forKey: resolvedModelsFingerprintKey)
+        } else {
+            defaults.removeObject(forKey: resolvedModelsFingerprintKey)
+        }
     }
 
     /// One probe: spawn `claude -p` exactly as a real turn would, read the first

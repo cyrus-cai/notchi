@@ -64,6 +64,25 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.2.4",
+            date: "2026-07-25",
+            features: [
+                "New menu bar icon — open Notch, start a chat, switch model, reach History and Settings. Toggle it in Settings → Appearance.",
+            ],
+            improvements: [
+                "The progress line now names what it's searching for.",
+                "The thinking orb changes when a search digs deeper.",
+                "Claude Code models show their real name instead of the CLI alias, and follow the CLI when it updates.",
+                "Torn-off sessions carry the panel's own composer, and fade softly at the bottom.",
+                "Settings actions and the first-run buttons answer a hover; one tooltip style everywhere.",
+                "Proxy moved into a folded Advanced block in General.",
+            ],
+            fixes: [
+                "The status line and answer footer no longer crowd the answer.",
+                "The placeholder no longer lingers after a ⇧⏎ line break.",
+            ]
+        ),
+        Entry(
             version: "0.2.3",
             date: "2026-07-24",
             features: [

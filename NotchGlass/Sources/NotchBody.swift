@@ -663,8 +663,8 @@ struct NotchBody: View {
                     .overlay(alignment: .topTrailing) {
                         Button { onRemove(index) } label: {
                             Image(systemName: "xmark")
-                                .font(.system(size: 8, weight: .bold))
-                                .foregroundStyle(.white.opacity(0.9))
+                                .font(.sf(8, weight: .bold))
+                                .foregroundStyle(Tokens.text1)
                                 .frame(width: 15, height: 15)
                                 .background(Circle().fill(Color.black.opacity(0.66)))
                                 .contentShape(Circle())
@@ -709,7 +709,7 @@ struct NotchBody: View {
     private func recallCounterLine(_ recall: (pos: Int, total: Int)) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 5) {
             Image(systemName: "clock.arrow.circlepath")
-                .font(.system(size: 10, weight: .semibold))
+                .font(.sf(10, weight: .semibold))
                 .foregroundStyle(Tokens.text4)
                 .baselineOffset(-1)
             Text("\(recall.pos) / \(recall.total)")
@@ -1332,12 +1332,12 @@ struct NotchBody: View {
         .padding(.vertical, 6)
         .background(
             RoundedRectangle(cornerRadius: 12)
-                .fill(.white.opacity(focused ? 0.08 : 0.05))
+                .fill(focused ? Tokens.recessFillLit : Tokens.recessFill)
         )
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .overlay(
             RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(.white.opacity(focused ? 0.20 : 0.10), lineWidth: 0.5)
+                .strokeBorder(focused ? Tokens.recessRimLit : Tokens.recessRim, lineWidth: 0.5)
         )
         .animation(.easeOut(duration: 0.2), value: focused)
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: agentDetailFollowUp.isEmpty)
@@ -1382,12 +1382,12 @@ struct NotchBody: View {
                 .init(tooltip: L("agent.openFolder"),
                       action: { NSWorkspace.shared.open(task.folder) }) {
                     Image(systemName: "folder")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.sf(12, weight: .semibold))
                 },
                 .init(tooltip: L("detached.open"),
                       action: { model.openDetachedWindow() }) {
                     Image(systemName: "macwindow.on.rectangle")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.sf(12, weight: .semibold))
                 },
             ])
         }
@@ -1404,7 +1404,7 @@ struct NotchBody: View {
                                     action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: 9.5, weight: .semibold))
+                .font(.sf(9.5, weight: .semibold))
                 .foregroundStyle(Tokens.text4)
                 .frame(width: 18, height: 18)
                 .contentShape(Rectangle())
@@ -1930,7 +1930,7 @@ struct NotchBody: View {
                                 // fires the jump and doesn't bubble to the row's Ask path.
                                 CaptureJumpButton(
                                     title: item.source == .note ? L("recent.badge.notes") : L("recent.badge.reminders"),
-                                    tint: item.source.captureJumpTint
+                                    tint: item.source.tint
                                 ) { model.openCaptureInApp(item) }
                                 // VoiceOver: this control is the jump; name it by
                                 // destination so it reads distinctly from the row.
@@ -2326,12 +2326,12 @@ struct NotchBody: View {
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "slider.horizontal.3")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.sf(13, weight: .medium))
                 Text(L("result.setUpModel"))
                     .font(.sf(14.5, weight: .medium))
                 Spacer(minLength: 0)
                 Image(systemName: "arrow.up.right")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.sf(11, weight: .semibold))
                     .foregroundStyle(Tokens.text3)
             }
             .foregroundStyle(Tokens.text1)
@@ -2364,12 +2364,12 @@ struct NotchBody: View {
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.sf(13, weight: .medium))
                     Text(L("agent.resume", engine.displayName))
                         .font(.sf(14.5, weight: .medium))
                     Spacer(minLength: 0)
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.sf(11, weight: .semibold))
                         .foregroundStyle(Tokens.text3)
                 }
                 .foregroundStyle(Tokens.text1)
@@ -2407,12 +2407,12 @@ struct NotchBody: View {
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: askError.needsSetup ? "slider.horizontal.3" : "arrow.clockwise")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.sf(13, weight: .medium))
                 Text(askError.needsSetup ? L("error.openSettings") : L("error.retry"))
                     .font(.sf(14.5, weight: .medium))
                 Spacer(minLength: 0)
                 Image(systemName: askError.needsSetup ? "arrow.up.right" : "chevron.right")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.sf(11, weight: .semibold))
                     .foregroundStyle(Tokens.text3)
             }
             .foregroundStyle(Tokens.text1)
@@ -2776,18 +2776,11 @@ struct NotchBody: View {
     /// to the ← arrow key (see ContentView's key handler), so a glance-and-go feels
     /// keyboard-native.
     private var backButton: some View {
-        Button {
+        GlassBackButton {
             withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                 model.newChat()
             }
-        } label: {
-            Image(systemName: "chevron.left")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Tokens.text2)
-                .frame(width: 26, height: 26)
-                .contentShape(Rectangle())
         }
-        .buttonStyle(RecentEntryStyle())
     }
 
     // MARK: - Inputs
@@ -2943,10 +2936,14 @@ struct NotchBody: View {
                 // The placeholder, drawn as a SwiftUI label over the (natively
                 // placeholder-less) field so its appearance can FADE — on emptying
                 // the field the native swap was an instant pop. Gated on the caret
-                // width, not just `hasText`, so in-progress pinyin hides it too.
-                if !followUp && !model.hasText && caretWidth == 0 {
+                // width, not just emptiness, so in-progress pinyin hides it too.
+                // Emptiness is the RAW string, not `hasText` (which trims): a
+                // ⇧⏎/⌥⏎ line break leaves text = "\n", which trims back to empty
+                // and used to keep the ghost sitting on line 1 of a now-two-line
+                // box. Anything at all in the editor takes the placeholder away.
+                if !followUp && model.text.isEmpty && caretWidth == 0 {
                     Text(placeholder)
-                        .font(.system(size: fontSize))
+                        .font(.sf(fontSize))
                         .foregroundStyle(Tokens.placeholder)
                         .lineLimit(1)
                         // Sit on the box's own ~2pt left inset so the label lands
@@ -2958,8 +2955,10 @@ struct NotchBody: View {
             }
             // Drives the placeholder fade in BOTH directions (first character in,
             // last character out — including pinyin pre-composition, which flips
-            // `caretWidth` while `hasText` is still false).
+            // `caretWidth` while `hasText` is still false). The second key covers
+            // a bare line break, which moves neither `caretWidth` nor `hasText`.
             .animation(.easeOut(duration: 0.16), value: caretWidth == 0)
+            .animation(.easeOut(duration: 0.16), value: model.text.isEmpty)
             // ↑/↓ history recall: as each recalled question swaps in, slide the text
             // in from the step's direction (↑ from above, ↓ from below) and fade it
             // up. Idle prompt only. We snap `recallSlide` to the start offset the
@@ -3103,8 +3102,10 @@ struct NotchBody: View {
                     .allowsHitTesting(false)
                 }
                 // The placeholder, shown only while the editor is truly empty —
-                // committed text AND in-progress pinyin both hide it.
-                if !model.hasText && followUpCaretWidth == 0 {
+                // committed text, a bare line break, and in-progress pinyin all
+                // hide it. (Raw `text.isEmpty`, not `hasText`: the latter trims,
+                // so a ⇧⏎-only field read as empty and kept the ghost.)
+                if model.text.isEmpty && followUpCaretWidth == 0 {
                     followUpPlaceholderLabel
                         // Nudge to sit on the box's own ~2pt left inset so the label
                         // lands where the typed glyphs will, not 2pt left.
@@ -3122,6 +3123,7 @@ struct NotchBody: View {
             // still false, and the row-level hasText animation never fires — so
             // without this key the placeholder would hard-pop instead of fading.
             .animation(.easeOut(duration: 0.16), value: followUpCaretWidth == 0)
+            .animation(.easeOut(duration: 0.16), value: model.text.isEmpty)
 
             // The send button appears the moment the user starts typing a
             // follow-up. (The "continue in ChatGPT/Claude" handoff used to rest
@@ -3139,7 +3141,7 @@ struct NotchBody: View {
         .padding(.vertical, 6)
         .background(
             RoundedRectangle(cornerRadius: 12)
-                .fill(.white.opacity(focused ? 0.08 : 0.05))
+                .fill(focused ? Tokens.recessFillLit : Tokens.recessFill)
                 // A whisper of the destination's colour washed over the box while
                 // there's text — the background twin of the tinted "— Note" ghost,
                 // so the field itself leans toward where Enter will send the line.
@@ -3153,7 +3155,7 @@ struct NotchBody: View {
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .overlay(
             RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(.white.opacity(focused ? 0.20 : 0.10), lineWidth: 0.5)
+                .strokeBorder(focused ? Tokens.recessRimLit : Tokens.recessRim, lineWidth: 0.5)
         )
         // Flash the field's rim when the destination flips (Ask⇄Note⇄Remind) — the
         // peripheral twin of the inline "— Ask"/"— Note" word swap, in the NEW
@@ -3227,21 +3229,28 @@ struct HistoryRowStyle: ButtonStyle {
             )
             .contentShape(Rectangle())
             .onHover { hovering = $0 }
-            .animation(.easeOut(duration: 0.16), value: selected)
-            .animation(.easeOut(duration: 0.16), value: hovering)
+            .animation(.easeOut(duration: Tokens.rowFade), value: selected)
+            .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
     }
 }
 
-/// The tint behind a capture row's trailing "open in Notes/Reminders" pill. Same
-/// palette the archive window gives the identical button, so the notch's jump and
-/// the standalone window's jump read as one control in two places: Note the Notes
-/// amber, Remind the Reminders orange, Ask a cool blue.
-fileprivate extension NotchModel.HistoryItem.Source {
-    var captureJumpTint: Color {
+/// The ONE colour a source wears wherever it shows a face — the Recent filter
+/// chips, the collapsed active-filter tag, the capture rows' "open in Notes /
+/// Reminders" pill, and every one of the archive window's chips, rows and
+/// bubbles. Note the Notes amber, Remind the Reminders orange, Ask a cool blue,
+/// Agent the violet; the values themselves live in `Tokens`, beside the matching
+/// `Panel.intentTint` the composer reads, so the input's colour story and the
+/// history's are literally the same table.
+///
+/// This used to be three separate copies (`filterTint` / `captureJumpTint` here,
+/// `archiveTint` over in the archive window) that happened to agree — one edit
+/// away from a source reading amber in the notch and yellow in the window.
+extension NotchModel.HistoryItem.Source {
+    var tint: Color {
         switch self {
-        case .ask:      return .blue
-        case .note:     return .yellow
-        case .reminder: return .orange
+        case .ask:      return Tokens.askTint
+        case .note:     return Tokens.noteTint
+        case .reminder: return Tokens.reminderTint
         case .agent:    return Tokens.agentTint
         }
     }
@@ -3293,9 +3302,9 @@ extension NotchModel.Panel {
     /// (the follow-up box's background lean), where saturation survives dilution.
     var intentTint: Color {
         switch self {
-        case .chat:     return .blue
-        case .note:     return .yellow
-        case .reminder: return .orange
+        case .chat:     return Tokens.askTint
+        case .note:     return Tokens.noteTint
+        case .reminder: return Tokens.reminderTint
         }
     }
 
@@ -3305,9 +3314,9 @@ extension NotchModel.Panel {
     /// coloured *light* instead, keeping the hue legible and the ghost elegant.
     var intentInk: Color {
         switch self {
-        case .chat:     return Color(red: 0.66, green: 0.80, blue: 1.00)
-        case .note:     return Color(red: 1.00, green: 0.89, blue: 0.58)
-        case .reminder: return Color(red: 1.00, green: 0.78, blue: 0.56)
+        case .chat:     return Tokens.askInk
+        case .note:     return Tokens.noteInk
+        case .reminder: return Tokens.reminderInk
         }
     }
 }
@@ -3347,7 +3356,7 @@ private struct HistoryFooterButton: View {
         }
         .buttonStyle(GlassPressStyle())
         .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.18), value: hovering)
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
     }
 }
 
@@ -3363,14 +3372,6 @@ extension NotchModel.HistoryItem.Source {
         case .reminder: return L("recent.filter.remind")
         case .ask:      return L("recent.filter.ask")
         case .agent:    return L("recent.filter.agent")
-        }
-    }
-    fileprivate var filterTint: Color {
-        switch self {
-        case .note:     return .yellow
-        case .reminder: return .orange
-        case .ask:      return .blue
-        case .agent:    return Tokens.agentTint
         }
     }
 }
@@ -3404,12 +3405,12 @@ private struct ActiveFilterChip: View {
             // pair reads as one bar of same-height controls, not a big circle with
             // a smaller tag hanging off it.
             .frame(height: 34)
-            .glassCapsule(in: Capsule(), brighter: hovering, tint: source.filterTint)
+            .glassCapsule(in: Capsule(), brighter: hovering, tint: source.tint)
             .contentShape(Capsule())
         }
         .buttonStyle(GlassPressStyle())
         .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.18), value: hovering)
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
     }
 }
 
@@ -3497,18 +3498,12 @@ struct SetupModelButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         let pressed = configuration.isPressed
         return configuration.label
-            .background(
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(.white.opacity(hovering ? 0.10 : 0.05))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(.white.opacity(hovering ? 0.22 : 0.10), lineWidth: 0.5)
-            )
+            .recessedSurface(in: RoundedRectangle(cornerRadius: 12, style: .continuous),
+                             lit: hovering)
             .scaleEffect(pressed ? 0.985 : 1)
             .opacity(pressed ? 0.85 : 1)
             .onHover { hovering = $0 }
-            .animation(.easeOut(duration: 0.18), value: hovering)
+            .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
             .animation(.spring(response: 0.25, dampingFraction: 0.7), value: pressed)
     }
 }
@@ -3598,7 +3593,7 @@ struct IdleTrailingCluster: View {
             HStack(spacing: 5) {
                 AgentStatusDot(running: true, outcome: nil)
                 Text(L("agent.running.count", runningCount))
-                    .font(.system(size: 11.5, weight: .semibold))
+                    .font(.sf(11.5, weight: .semibold))
                     .monospacedDigit()
                     .contentTransition(.numericText(value: Double(runningCount)))
                     // Roll the digit natively, the way the row clock ticks: the
@@ -3606,7 +3601,7 @@ struct IdleTrailingCluster: View {
                     // fire — on the outer Button it only drives the layout.
                     .animation(reduceMotion ? nil : .snappy(duration: 0.3), value: runningCount)
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.sf(10, weight: .semibold))
                     .rotationEffect(.degrees(recentOpen ? 180 : 0))
                     .animation(.spring(response: 0.32, dampingFraction: 0.8), value: recentOpen)
             }
@@ -3634,7 +3629,7 @@ struct IdleTrailingCluster: View {
         let hovering = hovered == segment
         return Button(action: action) {
             glyph()
-                .font(.system(size: 11.5, weight: .semibold))
+                .font(.sf(11.5, weight: .semibold))
                 .foregroundStyle(hovering ? Tokens.text1 : (engaged ? Tokens.text2 : Tokens.text3))
                 .frame(width: chipSize, height: chipSize)
                 .glassCapsule(in: Circle(), brighter: hovering)
@@ -3676,7 +3671,7 @@ struct ResultTrailingCluster: View {
             if let detach {
                 segs.append(.init(tooltip: L("detached.open"), action: detach) {
                     Image(systemName: "macwindow.on.rectangle")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.sf(12, weight: .semibold))
                 })
             }
             segs.append(.init(engaged: pinned,
@@ -3685,11 +3680,35 @@ struct ResultTrailingCluster: View {
                 // A pinned pin tips upright, the way a pushed-in tack sits — a small
                 // physical cue that it's engaged, on top of the engaged tint.
                 Image(systemName: "pin")
-                    .font(.system(size: 12.5, weight: .semibold))
+                    .font(.sf(12.5, weight: .semibold))
                     .rotationEffect(.degrees(pinned ? 0 : 32))
             })
             return segs
         }())
+    }
+}
+
+/// The header's back chevron, wearing the panel's **Liquid Glass** language: a
+/// real glass circle (native `.glassEffect` on macOS 26+, blurred fallback below)
+/// with the signature specular rim, brightening under the cursor like every other
+/// chip in the header. It used to be a bare glyph over a flat white-wash hover
+/// pill, which read as a different material from the glass cluster opposite it.
+private struct GlassBackButton: View {
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "chevron.left")
+                .font(.sf(13, weight: .semibold))
+                .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
+                .frame(width: 26, height: 26)
+                .glassCapsule(in: Circle(), brighter: hovering)
+                .contentShape(Circle())
+        }
+        .buttonStyle(GlassPressStyle())
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
     }
 }
 
@@ -3707,7 +3726,7 @@ struct RecentEntryStyle: ButtonStyle {
             )
             .opacity(configuration.isPressed ? 0.5 : (hovering ? 1 : 0.85))
             .onHover { hovering = $0 }
-            .animation(.easeOut(duration: 0.15), value: hovering)
+            .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
     }
 }
 
@@ -3919,7 +3938,7 @@ struct AgentComposeChip<Icon: View>: View {
         }
         .buttonStyle(GlassPressStyle())
         .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.18), value: hovering)
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
     }
 }
 
@@ -3942,7 +3961,7 @@ struct AgentComposeMenuChip<Icon: View, Items: View>: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.18), value: hovering)
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
     }
 }
 
@@ -4089,7 +4108,7 @@ private struct BucketWord: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.18), value: hovering)
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
         // No per-word `active` animation: the word's reveal and the dim⇄bright
         // colour change ride the pill's single spring (BucketTogglePill's
         // `.animation(value:)`), so both halves and the well move as one shot

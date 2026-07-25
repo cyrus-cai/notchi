@@ -45,23 +45,14 @@ struct WhatsNewView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Button {
+            PanelBackButton {
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                     model.closeWhatsNew()
                 }
-            } label: {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Tokens.text2)
-                    .frame(width: 26, height: 26)
-                    .contentShape(Rectangle())
             }
-            .buttonStyle(RecentEntryStyle())
 
             Text(L("whatsnew.title"))
-                .font(.sf(10, weight: .semibold))
-                .tracking(0.8)
-                .foregroundStyle(Tokens.text4)
+                .captionLabel()
 
             Spacer()
         }
@@ -145,9 +136,7 @@ struct WhatsNewView: View {
     private func noteGroup(heading: String, lines: [String]) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(heading)
-                .font(.sf(9.5, weight: .semibold))
-                .tracking(0.7)
-                .foregroundStyle(Tokens.text4)
+                .captionLabel()
 
             ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
                 bulletLine(line)

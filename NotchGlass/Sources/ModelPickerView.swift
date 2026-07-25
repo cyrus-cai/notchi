@@ -16,6 +16,12 @@ struct PickerModel: Identifiable {
     /// `InlineSettingsView.shortlistIDs`.
     let featured: Bool
     let info: ModelInfo
+    /// The title the row and the detail header carry. Usually the catalog's own
+    /// name, but Claude Code rows are CLI **aliases** ("opus") and a bare family
+    /// word names a shelf, not a model — once the CLI probe lands they read as the
+    /// concrete model the alias runs today ("Claude Opus 4.8"). Stored rather than
+    /// computed so the rows genuinely rebuild when that probe publishes.
+    let displayName: String
     /// (provider, id) is unique across the flat list — the same id can appear under
     /// two aggregators, so the pair, not the id alone, identifies a row.
     var id: String { "\(provider.rawValue):\(info.id)" }
@@ -116,7 +122,8 @@ struct ModelPickerView: View {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         guard q.isEmpty else {
             return base.filter {
-                $0.info.name.lowercased().contains(q)
+                $0.displayName.lowercased().contains(q)
+                || $0.info.name.lowercased().contains(q)
                 || $0.info.id.lowercased().contains(q)
                 || $0.providerName.lowercased().contains(q)
             }
@@ -374,7 +381,7 @@ struct ModelPickerView: View {
     private var foldToggle: some View {
         HStack(spacing: 8) {
             Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                .font(.system(size: 10, weight: .semibold))
+                .font(.sf(10, weight: .semibold))
                 .frame(width: 20)
             Text(expanded ? L("model.picker.showLess")
                           : L("model.picker.showAll", scoped.count))
@@ -409,7 +416,7 @@ struct ModelPickerView: View {
     private var searchField: some View {
         HStack(spacing: 7) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 12, weight: .medium))
+                .font(.sf(12, weight: .medium))
                 .foregroundStyle(Tokens.text3)
             TextField(L("model.picker.search"), text: $query)
                 .textFieldStyle(.plain)
@@ -422,7 +429,7 @@ struct ModelPickerView: View {
             if !query.isEmpty {
                 Button { query = "" } label: {
                     Image(systemName: "xmark.circle")
-                        .font(.system(size: 12))
+                        .font(.sf(12))
                         .foregroundStyle(Tokens.text3)
                 }
                 .buttonStyle(.plain)
@@ -453,7 +460,7 @@ struct ModelPickerView: View {
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: "line.3.horizontal.decrease")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.sf(10, weight: .semibold))
                     .foregroundStyle(on ? Tokens.text1 : Tokens.text3)
                 Text(filterTitle)
                     .font(.sf(12, weight: on ? .semibold : .medium))
@@ -462,7 +469,7 @@ struct ModelPickerView: View {
                     .truncationMode(.tail)
                 Spacer(minLength: 2)
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .semibold))
+                    .font(.sf(8, weight: .semibold))
                     .foregroundStyle(Tokens.text3)
                     .rotationEffect(.degrees(filterOpen ? 180 : 0))
             }
@@ -565,12 +572,8 @@ struct ModelPickerView: View {
     @ViewBuilder
     private func section(_ title: String, _ opts: [ProviderOption], isFirst: Bool) -> some View {
         if !opts.isEmpty {
-            // The settings header's caption register, verbatim: 10pt semibold, tracked
-            // out, at meta weight.
             Text(title)
-                .font(.sf(10, weight: .semibold))
-                .tracking(0.8)
-                .foregroundStyle(Tokens.text4)
+                .captionLabel()
                 .padding(.horizontal, 8)
                 .padding(.top, isFirst ? 2 : 8)
                 .padding(.bottom, 2)
@@ -611,7 +614,7 @@ private struct FilterRow: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: checked ? "checkmark.square" : "square")
-                .font(.system(size: 12, weight: .medium))
+                .font(.sf(12, weight: .medium))
                 .foregroundStyle(checked ? Tokens.text1 : Tokens.text4)
                 // Native SF Symbols swap — the box fills/empties instead of hard-cutting.
                 // Scoped to the symbol: `providerFilter` also drives the model list, which
@@ -642,7 +645,7 @@ private struct FilterRow: View {
         .contentShape(RoundedRectangle(cornerRadius: 8))
         .onHover { hovering = $0 }
         .onTapGesture(perform: action)
-        .animation(.easeOut(duration: 0.12), value: hovering)
+        .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
     }
 }
 
@@ -671,7 +674,7 @@ private struct ModelRowView: View {
             // the logo only. The provider surfaces just twice: as "Add key" when the
             // model can't be picked, and as a quiet subtitle when the same name is
             // sold by two providers and the rows would otherwise be twins.
-            Text(model.info.id.isEmpty ? L("model.picker.default") : model.info.name)
+            Text(model.displayName)
                 .font(.sf(13, weight: selected ? .semibold : .regular))
                 .foregroundStyle(enabled ? Tokens.text1 : Tokens.text2)
                 .lineLimit(1)
@@ -739,7 +742,7 @@ private struct DetailPanel: View {
             HStack(alignment: .center, spacing: 9) {
                 VendorLogo(vendor: info.vendor, fallback: info.name)
                     .frame(width: 24, height: 24)
-                Text(info.id.isEmpty ? L("model.picker.default") : info.name)
+                Text(model.displayName)
                     .font(.sf(15, weight: .semibold))
                     .foregroundStyle(Tokens.text1)
                     .lineLimit(2)
@@ -877,15 +880,21 @@ final class ModelCatalogStore: ObservableObject {
         NotificationCenter.default.post(name: .aiBackendChanged, object: nil)
     }
 
-    /// Kick off the Claude alias→concrete-id probes ("opus" → "claude-opus-4-8").
+    /// Kick off the Claude alias→concrete-id probes ("opus" → "claude-opus-5").
     /// Detached and un-awaited: each probe spawns the CLI (seconds), and no picker
     /// should wait on them — consumers fill in reactively when `claudeResolved`
-    /// publishes. `refreshResolvedModels` is TTL'd, so most calls read the
-    /// persisted cache and publish instantly. Covers the chat aliases AND the
-    /// agent picker's ("fable" isn't a chat alias), so both surfaces get concrete
-    /// names from one probe run.
+    /// publishes. `refreshResolvedModels` gates itself on the CLI's fingerprint,
+    /// so a call that has nothing to learn reads the persisted cache and publishes
+    /// instantly. Covers the chat aliases AND the agent picker's ("fable" isn't a
+    /// chat alias), so both surfaces get concrete names from one probe run.
+    ///
+    /// Deliberately *not* gated on `claudeResolved.isEmpty`: Notch is a menu-bar
+    /// app that stays up for days, and a once-per-launch probe meant a CLI that
+    /// updated underneath it kept showing the previous model until a relaunch.
+    /// Re-asking on every picker open is what makes the update land; the real
+    /// cost control lives in `refreshResolvedModels`.
     func resolveClaudeAliases() {
-        guard claudeResolved.isEmpty, !claudeResolveInFlight, ClaudeCLIService.isAvailable
+        guard !claudeResolveInFlight, ClaudeCLIService.isAvailable
         else { return }
         claudeResolveInFlight = true
         var aliases = Provider.claudeCode.availableModels
@@ -987,6 +996,20 @@ final class ModelCatalogStore: ObservableObject {
         return Set(curated.isEmpty ? p.availableModels : curated)
     }
 
+    /// A row's title. Claude Code's ids are the CLI's rolling aliases, so a row
+    /// would otherwise read "Opus" — a family, not a model; once the probe has
+    /// landed it names the concrete model the alias runs ("Claude Opus 4.8").
+    /// The account-default sentinel ("claude") keeps its "Default" word in front:
+    /// it resolves to whichever alias is the account default today (Opus, as of
+    /// writing), and a bare resolved name would make it that row's twin.
+    private func title(for info: ModelInfo, provider p: Provider) -> String {
+        if info.id.isEmpty { return L("model.picker.default") }
+        guard p == .claudeCode, let resolved = claudeResolved[info.id]
+        else { return info.name }
+        let full = ClaudeCLIService.displayName(forResolved: resolved)
+        return info.id == "claude" ? "\(L("model.picker.default")) · \(full)" : full
+    }
+
     /// The rows the cross-provider picker shows: every provider's models in one flat
     /// list, ordered as the provider menu is, each tagged with whether it has a usable
     /// key and whether it survives the fold (`featured`). Providers with a key list
@@ -1024,7 +1047,8 @@ final class ModelCatalogStore: ObservableObject {
                 let hasLogo = VendorLogos.mark(for: info.vendor) != nil
                 rows.append(PickerModel(
                     provider: p, providerName: p.displayName, hasKey: hasKey,
-                    featured: short.contains(info.id) && hasLogo, info: info))
+                    featured: short.contains(info.id) && hasLogo, info: info,
+                    displayName: title(for: info, provider: p)))
             }
         }
         // Usable models first (the current provider's leading), greyed ones after — the
@@ -1187,7 +1211,7 @@ private struct AskRecentModelRow: View {
         .contentShape(RoundedRectangle(cornerRadius: 7))
         .onHover { hovering = $0 }
         .onTapGesture(perform: onTap)
-        .animation(.easeOut(duration: 0.12), value: hovering)
+        .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
     }
 }
 
@@ -1574,7 +1598,7 @@ private struct AgentModelRow: View {
         .contentShape(RoundedRectangle(cornerRadius: 7))
         .onHover { hovering = $0 }
         .onTapGesture(perform: onTap)
-        .animation(.easeOut(duration: 0.12), value: hovering)
+        .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
     }
 }
 
@@ -1596,7 +1620,7 @@ private struct EngineSwitchMark: View {
             .contentShape(Rectangle())
             .onHover { hovering = $0 }
             .onTapGesture(perform: onTap)
-            .animation(.easeOut(duration: 0.12), value: hovering)
+            .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
             .animation(.easeOut(duration: 0.12), value: selected)
     }
 }
@@ -1702,7 +1726,7 @@ private struct CapabilityChip: View {
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: icon)
-                .font(.system(size: 10, weight: .medium))
+                .font(.sf(10, weight: .medium))
             Text(label)
                 .font(.sf(11, weight: .medium))
                 .lineLimit(1)

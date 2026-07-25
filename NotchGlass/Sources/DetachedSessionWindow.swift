@@ -600,13 +600,13 @@ private struct WindowTrailingCluster: View {
         GlassSegmentCluster(segments: [
             .init(tooltip: L("detached.continueInNotch.help"), action: reattach) {
                 Image(systemName: "arrow.up.forward.and.arrow.down.backward")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.sf(11, weight: .semibold))
             },
             .init(engaged: pinned,
                   tooltip: L(pinned ? "result.unpin" : "result.pin"),
                   action: togglePin) {
                 Image(systemName: "pin")
-                    .font(.system(size: 12.5, weight: .semibold))
+                    .font(.sf(12.5, weight: .semibold))
                     .rotationEffect(.degrees(pinned ? 0 : 32))
             },
         ])
@@ -636,15 +636,18 @@ struct DetachedWindowGlass: View {
 
 // MARK: - Thread scroll edge
 
-/// Shared geometry for a headed thread scroll's soft top edge. The conversation
+/// Shared geometry for a headed thread scroll's soft edges. The conversation
 /// runs up behind the header into a `runway` of empty inset, fading
 /// (`scrollEdgeFade`) and frosting (`progressiveTopBlur`) as it goes — the same
 /// dissolve the panel's immersive list uses, so overflowing content melts into
-/// the glass instead of ending on a hard top cut. The frost `band` stays shorter
+/// the glass instead of ending on a hard cut. The frost `band` stays shorter
 /// than the runway so no resting row sits inside it and haloes (see
-/// `ProgressiveTopBlur`). Internal on purpose: the panel's agent-detail page
-/// (NotchBody) is the same species and shares these numbers, so the tear-off
-/// keeps the exact dissolve the panel showed.
+/// `ProgressiveTopBlur`). The BOTTOM edge is the exact mirror — same runway,
+/// same band, `progressiveBottomBlur` — so a thread scrolled to its end melts
+/// into the follow-up line the way it melts into the header, instead of the
+/// hard cut the tear-off used to show there. Internal on purpose: the panel's
+/// agent-detail page (NotchBody) is the same species and shares these numbers,
+/// so the tear-off keeps the exact dissolve the panel showed.
 enum ThreadScroll {
     static let runway: CGFloat = 28
     static let band: CGFloat = 22
@@ -691,14 +694,17 @@ struct DetachedThreadView: View {
                         }
                         Color.clear.frame(height: 1).id(Self.bottomID)
                     }
-                    // Runway: rows rest below the header, then scroll up into
-                    // this empty band to fade + frost out (see ThreadScroll).
+                    // Runways: rows rest between the header and the follow-up
+                    // line, then scroll into these empty bands — up behind the
+                    // header, down behind the input — to fade + frost out on
+                    // both edges (see ThreadScroll).
                     .padding(.top, ThreadScroll.runway)
-                    .padding(.bottom, 16)
+                    .padding(.bottom, ThreadScroll.runway)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .scrollEdgeFade(top: true, bottom: false, topFade: ThreadScroll.runway)
+                .scrollEdgeFade(top: true, bottom: true, fade: ThreadScroll.runway)
                 .progressiveTopBlur(height: ThreadScroll.band, maxRadius: ThreadScroll.blurRadius)
+                .progressiveBottomBlur(height: ThreadScroll.band, maxRadius: ThreadScroll.blurRadius)
                 .onChange(of: store.turns.last?.text.count ?? 0) { _, _ in
                     guard streaming else { return }
                     proxy.scrollTo(Self.bottomID, anchor: .bottom)
@@ -718,31 +724,30 @@ struct DetachedThreadView: View {
     /// Disabled while a round streams: the tear-off dropped the round's task
     /// handle, so a mid-stream line couldn't supersede it.
     private var followUpRow: some View {
+        // Same composer the panel carries, down to the type size, the recessed
+        // surface and the glass `SendButton` — a torn-off session is the same
+        // conversation in a bigger frame, so its input can't be a different
+        // control. (It used to be a bare `arrow.up.circle.fill` with no hover,
+        // no press-give and no entrance, over a flat 1pt-rimmed box.)
         HStack(spacing: 10) {
             TextField(L("result.followUp"), text: $followUp)
                 .textFieldStyle(.plain)
-                .font(.sf(14))
+                .font(.sf(NotchBody.followUpFontSize))
                 .foregroundStyle(Tokens.text1)
                 .onSubmit(sendFollowUp)
             if !followUp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Button(action: sendFollowUp) {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 18))
-                        .foregroundStyle(Tokens.text2)
-                }
-                .buttonStyle(.plain)
+                SendButton(compact: true, action: sendFollowUp)
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 9)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(.white.opacity(0.06))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(Tokens.hairline, lineWidth: 1)
-                )
-        )
+        .frame(minHeight: 27)
+        .padding(.leading, 13)
+        .padding(.trailing, 6)
+        .padding(.vertical, 6)
+        .recessedSurface(in: RoundedRectangle(cornerRadius: 12, style: .continuous),
+                         lit: false)
+        .animation(.spring(response: 0.3, dampingFraction: 0.7),
+                   value: followUp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         .opacity(streaming ? 0.45 : 1)
         .disabled(streaming)
     }
@@ -876,14 +881,17 @@ struct DetachedAgentTaskView: View {
                         }
                         Color.clear.frame(height: 1).id(Self.bottomID)
                     }
-                    // Runway: the trail rests below the header, then scrolls up
-                    // into this empty band to fade + frost out (see ThreadScroll).
+                    // Runways: the trail rests between the header and the
+                    // follow-up line, then scrolls into these empty bands — up
+                    // behind the header, down behind the input — to fade +
+                    // frost out on both edges (see ThreadScroll).
                     .padding(.top, ThreadScroll.runway)
-                    .padding(.bottom, 12)
+                    .padding(.bottom, ThreadScroll.runway)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .scrollEdgeFade(top: true, bottom: false, topFade: ThreadScroll.runway)
+                .scrollEdgeFade(top: true, bottom: true, fade: ThreadScroll.runway)
                 .progressiveTopBlur(height: ThreadScroll.band, maxRadius: ThreadScroll.blurRadius)
+                .progressiveBottomBlur(height: ThreadScroll.band, maxRadius: ThreadScroll.blurRadius)
                 .onChange(of: task.log.count) { _, _ in
                     withAnimation(.easeOut(duration: 0.2)) {
                         proxy.scrollTo(Self.bottomID, anchor: .bottom)
@@ -914,7 +922,7 @@ struct DetachedAgentTaskView: View {
                 }
                 Button(action: { manager.cancel(taskID: task.id) }) {
                     Image(systemName: "stop.circle")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.sf(13, weight: .semibold))
                         .foregroundStyle(Tokens.text3)
                         .frame(width: 24, height: 24)
                         .contentShape(Rectangle())
@@ -949,28 +957,22 @@ struct DetachedAgentTaskView: View {
                                        : "agent.followUp.placeholder"),
                       text: $followUp)
                 .textFieldStyle(.plain)
-                .font(.sf(14))
+                .font(.sf(NotchBody.followUpFontSize))
                 .foregroundStyle(Tokens.text1)
                 .onSubmit { sendFollowUp(task) }
             if !followUp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Button(action: { sendFollowUp(task) }) {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 18))
-                        .foregroundStyle(Tokens.text2)
-                }
-                .buttonStyle(.plain)
+                SendButton(compact: true) { sendFollowUp(task) }
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 9)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(.white.opacity(0.06))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(Tokens.hairline, lineWidth: 1)
-                )
-        )
+        .frame(minHeight: 27)
+        .padding(.leading, 13)
+        .padding(.trailing, 6)
+        .padding(.vertical, 6)
+        .recessedSurface(in: RoundedRectangle(cornerRadius: 12, style: .continuous),
+                         lit: false)
+        .animation(.spring(response: 0.3, dampingFraction: 0.7),
+                   value: followUp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         .opacity(dead ? 0.45 : 1)
         .disabled(dead)
     }

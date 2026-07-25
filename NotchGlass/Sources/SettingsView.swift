@@ -24,6 +24,9 @@ extension Notification.Name {
     /// Posted after the user toggles the Dock icon (Settings → General), so
     /// `AppDelegate` can switch the app's activation policy live.
     static let dockIconVisibilityChanged = Notification.Name("dockIconVisibilityChanged")
+    /// Posted after the user toggles the menu bar icon (Settings → Appearance),
+    /// so `AppDelegate` can add or remove the status item right away.
+    static let menuBarIconVisibilityChanged = Notification.Name("menuBarIconVisibilityChanged")
     /// Posted after the user toggles "Hide in full screen" (Settings → General),
     /// so `AppDelegate` re-evaluates which panels to hide right away.
     static let hideNotchInFullscreenChanged = Notification.Name("hideNotchInFullscreenChanged")

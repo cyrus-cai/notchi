@@ -823,7 +823,7 @@ struct InlineSendHint: View {
                 (Text("— ").foregroundColor(tint.map { $0.opacity(0.42) } ?? Tokens.placeholder)
                     + Text(label).foregroundColor(tint.map { $0.opacity(0.42) } ?? Tokens.placeholder)
                     + Text(suffix).foregroundColor(tint.map { $0.opacity(0.42) } ?? Tokens.placeholder.opacity(0.6)))
-                    .font(.system(size: fontSize, weight: .regular))
+                    .font(.sf(fontSize, weight: .regular))
                     .lineLimit(1)
                     .fixedSize()
                     .contentTransition(.opacity)
@@ -914,7 +914,7 @@ struct SendButton: View {
         // Same press-give as the island's other glass chips.
         .buttonStyle(GlassPressStyle())
         .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.18), value: hovering)
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
         // The flip rides a quick spring so ask⇄note feels like the control morphing,
         // in step with the rest of the panel's motion language.
         .animation(.spring(response: 0.32, dampingFraction: 0.7), value: icon)
@@ -927,9 +927,9 @@ struct SendButton: View {
     private func pill(_ label: String) -> some View {
         HStack(spacing: 6) {
             Text(label)
-                .font(.system(size: 13, weight: .semibold))
+                .font(.sf(13, weight: .semibold))
             Image(systemName: icon)
-                .font(.system(size: 12, weight: .semibold))
+                .font(.sf(12, weight: .semibold))
         }
         .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
         .id(label)
@@ -943,7 +943,7 @@ struct SendButton: View {
     /// The bare form: just the send arrow in a glass circle (mid-thread follow-up).
     private var glyphCircle: some View {
         Image(systemName: icon)
-            .font(.system(size: 13, weight: .semibold))
+            .font(.sf(13, weight: .semibold))
             .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
             .id(icon)
             .transition(.scale(scale: 0.55).combined(with: .opacity))
@@ -961,6 +961,9 @@ struct SendButton: View {
 struct GlassIconButton: View {
     var systemName: String
     var help: String
+    /// Which side the hover hint floats on — `.top` by default, since these chips
+    /// sit at the panel's bottom edge where up is where the room is.
+    var tipEdge: VerticalEdge = .top
     var size: CGFloat = 30
     /// Glyph point size inside the capsule. Defaults to the original 14pt; the
     /// compact header corners pass a smaller value so the glass reads as a quiet
@@ -973,7 +976,7 @@ struct GlassIconButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: glyphSize, weight: .regular))
+                .font(.sf(glyphSize, weight: .regular))
                 .foregroundStyle(hovering ? Tokens.text1 : Tokens.text3)
                 // Cross-fade the glyph when `systemName` flips (e.g. ⋯ ⇄ back chevron
                 // on the manage chip). No-op for the static-icon callers since their
@@ -985,7 +988,13 @@ struct GlassIconButton: View {
         }
         .buttonStyle(GlassPressStyle())
         .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.18), value: hovering)
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+        // `help` used to be accepted and silently dropped — this chip was the one
+        // icon button in the app with NO hover hint at all, while its neighbours
+        // carried the glass tip and the segment cluster carried AppKit's yellow
+        // bubble. One tooltip species everywhere now.
+        .notchTooltip(help, edge: tipEdge)
+        .accessibilityLabel(help)
     }
 }
 
@@ -1016,6 +1025,10 @@ struct GlassSegmentCluster: View {
     var segments: [Segment]
     /// Square tap target per segment (also the pill's height).
     var chip: CGFloat = 26
+    /// Which side the hover hints float on. Every caller parks this cluster in a
+    /// header at the top of its panel/window, so the tip drops DOWN by default —
+    /// floating it up would run it off the top edge.
+    var tipEdge: VerticalEdge = .bottom
 
     // Identity is by index (stable across rebuilds), so the hover highlight
     // survives re-renders — a per-segment UUID would churn and drop it.
@@ -1040,7 +1053,14 @@ struct GlassSegmentCluster: View {
                     if inside { hoveredIndex = index }
                     else if hoveredIndex == index { hoveredIndex = nil }
                 }
-                .help(seg.tooltip)
+                // The island's own glass tip, not AppKit's stock yellow bubble —
+                // these glyphs sit inches from the answer footer's icons, which
+                // have always used `notchTooltip`; two tooltip materials on one
+                // screen read as two different apps.
+                .notchTooltip(seg.tooltip, edge: tipEdge)
+                // `.help()` doubled as the VoiceOver description; the glass tip
+                // is purely visual, so name the control explicitly.
+                .accessibilityLabel(seg.tooltip)
             }
         }
         .padding(3)
@@ -1082,7 +1102,33 @@ struct GlassTextButton: View {
         }
         .buttonStyle(GlassPressStyle())
         .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.18), value: hovering)
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+    }
+}
+
+/// The panel header's back chevron — the one control that walks a full-panel
+/// module (Settings, What's New, the first-run guide) back where it came from.
+/// A quiet 26pt glyph over the same soft capsule wash every other row-level
+/// affordance uses, so the three headers open and close with one gesture in one
+/// voice. Three copies of this used to drift apart: two byte-identical, and the
+/// onboarding's a 30pt `.plain` button at a lighter weight and a dimmer ink that
+/// gave no hover feedback at all.
+///
+/// Not to be confused with the result header's `GlassBackButton` — that one is a
+/// real glass circle because it sits *on* the glass, opposite the glass trailing
+/// cluster; this one sits inside a panel's own chrome.
+struct PanelBackButton: View {
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "chevron.left")
+                .font(.sf(13, weight: .semibold))
+                .foregroundStyle(Tokens.text2)
+                .frame(width: 26, height: 26)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(RecentEntryStyle())
     }
 }
 
@@ -1114,7 +1160,7 @@ struct CaptureJumpButton: View {
                 Text(title)
                     .font(.sf(11, weight: .medium))
                 Image(systemName: "arrow.up.right")
-                    .font(.system(size: 8, weight: .semibold))
+                    .font(.sf(8, weight: .semibold))
             }
             .foregroundStyle(hovering ? Tokens.text2 : Tokens.text3)
             .padding(.vertical, 3)
@@ -1124,7 +1170,7 @@ struct CaptureJumpButton: View {
         }
         .buttonStyle(GlassPressStyle())
         .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.14), value: hovering)
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
     }
 }
 
@@ -1380,7 +1426,7 @@ private struct ConfirmDialogButton: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.16), value: hovering)
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
     }
 }
 
@@ -1425,11 +1471,13 @@ struct ThinkingDots: View {
 ///   size compensation, tuned around a 300pt frame).
 /// - `engine/ribbon.ts` → `drawRibbon` (the demo's "Thinking…." pill),
 ///   `engine/lattice.ts` → `drawGlobe` (searching — a scan meridian sweeps a
-///   dotted globe), `engine/orbits.ts` → `drawOrbits` (working — particles on
-///   tilted orbits). All verbatim.
+///   dotted globe) and `drawRubik` (solving — the same dot field cut into
+///   bands that twist in quarter turns, scramble, then click back),
+///   `engine/orbits.ts` → `drawOrbits` (working — particles on tilted
+///   orbits). All verbatim.
 /// - `engine/profiles.ts` + `presets.ts` → each mode's base profile with its
 ///   inline `@ size 20` preset applied through the same `scaleCounts` /
-///   `scaleRadii` machinery. The reference's other three modes (wave / rubik /
+///   `scaleRadii` machinery. The reference's remaining two modes (wave /
 ///   morph) have no Notch wait state to wear them, so they aren't ported —
 ///   dead code isn't fidelity.
 ///
@@ -1438,8 +1486,9 @@ struct ThinkingDots: View {
 /// `AgentHarness.orbState(for:)`), never sniffed back out of a localized
 /// status string:
 ///   • no tool activity (mood word / bare wait)      → `.composing` (ribbon)
-///   • the search flow (search / refine / read page) → `.searching` (globe)
-///   • any other tool running                        → `.working`  (orbits)
+///   • a first search round, or reading a page       → `.searching` (globe)
+///   • a repeat search round ("digging deeper")      → `.solving`   (rubik)
+///   • any other tool running                        → `.working`   (orbits)
 /// A state change cross-dissolves on the house beat rather than the
 /// reference's hard remount — the one deliberate deviation, matching how
 /// `CrossfadeText` melts the wait words this orb sits beside.
@@ -1495,6 +1544,13 @@ enum OrbState: Hashable {
     case composing
     /// Globe with a sweeping scan meridian — the search flow.
     case searching
+    /// Bands twisting in quarter turns, scrambling then clicking back to
+    /// solved — a second-or-later search round, where the wait line reads
+    /// "digging deeper" rather than a fresh search. Named for the reference
+    /// state it wears (`solving`), not for Notch's copy; it shares the globe's
+    /// dot field on purpose, so a repeat round still reads as the same search
+    /// flow instead of a different job starting.
+    case solving
     /// Particles on tilted orbits — a non-search tool doing work.
     case working
 }
@@ -1620,6 +1676,15 @@ enum OrbEngine {
         "inkFar": 0.62, "inkSpan": 0.54, "rsPow": 0.6, "rMin": 0.3,
     ]
 
+    /// `BASE_PROFILES.rubik`, verbatim. (`moveCount` is the scramble LENGTH,
+    /// not a lattice count key in the source, so preset count scaling leaves
+    /// it alone — the sphere thins out, the scramble stays 14 moves long.)
+    static let rubikBase: [String: Double] = [
+        "latRings": 15, "lonDensity": 40, "moveCount": 14,
+        "rBase": 0.6, "rDepth": 1.7, "rActive": 0.3,
+        "inkFar": 0.62, "inkSpan": 0.54, "rsPow": 0.6, "rMin": 0.3,
+    ]
+
     /// `BASE_PROFILES.orbits`, verbatim. (`particles` is per-orbit and not a
     /// count key in the source, so it survives count scaling untouched.)
     static let orbitsBase: [String: Double] = [
@@ -1642,6 +1707,7 @@ enum OrbEngine {
     ///                          spin 0, bandMul 4.94, wobMul 1}
     ///   searching → globe  20 {speed 2.665, count ×0.105, size ×1.75,
     ///                          scanMul 4.335, dimBase 0.45}
+    ///   solving   → rubik  20 {speed 1.95,  count ×0.088, size ×1.9}
     ///   working   → orbits 20 {speed 3.9,   count ×0.238, size ×2.4}
     private static let presets: [OrbState: OrbPreset] = {
         var composing = scaleRadii(scaleCounts(ribbonBase, 0.051), 1.073)
@@ -1650,11 +1716,14 @@ enum OrbEngine {
         var searching = scaleRadii(scaleCounts(globeBase, 0.105), 1.75)
         for (k, v) in ["scanMul": 4.335, "dimBase": 0.45] { searching[k] = v }
 
+        let solving = scaleRadii(scaleCounts(rubikBase, 0.088), 1.9)
+
         let working = scaleRadii(scaleCounts(orbitsBase, 0.238), 2.4)
 
         return [
             .composing: OrbPreset(speed: 3.12, opts: composing, draw: drawRibbon),
             .searching: OrbPreset(speed: 2.665, opts: searching, draw: drawGlobe),
+            .solving: OrbPreset(speed: 1.95, opts: solving, draw: drawRubik),
             .working: OrbPreset(speed: 3.9, opts: working, draw: drawOrbits),
         ]
     }()
@@ -1762,6 +1831,135 @@ enum OrbEngine {
                     white: (o["inkFar"] ?? 0.62) - (o["inkSpan"] ?? 0.54) * depth,
                     // dimBase < 1 fades un-scanned dots so the meridian reads clearly.
                     a: dimBase + (1 - dimBase) * min(1, boost)))
+            }
+        }
+        paint(&ctx, &dots, rMin: o["rMin"] ?? 0.3)
+    }
+
+    // MARK: rubik (`lattice.ts`)
+
+    /// `lattice.ts` `Move`: one quarter turn of the band lying between `lo`
+    /// and `hi` along `axis` (0 = x, 1 = y, 2 = z).
+    private struct Move {
+        let axis: Int
+        let lo: Double
+        let hi: Double
+        let ang: Double
+    }
+
+    /// `lattice.ts` `solveCycle`, verbatim: rapid eased moves scramble, then
+    /// replay in reverse (a palindrome) so everything clicks back to solved,
+    /// rests, repeats. Returns how far each move has been applied plus which
+    /// one is in flight.
+    private static func solveCycle(_ time: Double, _ count: Int,
+                                   _ slotDur: Double, _ rest: Double)
+        -> (amount: [Double], active: Int) {
+        let cyc = 2 * Double(count) * slotDur + rest
+        let tc = time.truncatingRemainder(dividingBy: cyc)
+        var amount = [Double](repeating: 0, count: count)
+        var active = -1
+        if tc < 2 * Double(count) * slotDur {
+            let slot = Int(tc / slotDur)
+            let p = (tc - Double(slot) * slotDur) / slotDur
+            let cl = min(1, p / 0.7)
+            let ep = 1 - pow(1 - cl, 3)   // machine ease-out
+            if slot < count {
+                for i in 0..<slot { amount[i] = 1 }
+                amount[slot] = ep
+                active = slot
+            } else {
+                let u = 2 * count - 1 - slot
+                for i in 0..<u { amount[i] = 1 }
+                amount[u] = 1 - ep
+                active = u
+            }
+        }
+        return (amount, active)
+    }
+
+    /// `lattice.ts` `applyMoves`, verbatim: turn a point by every move whose
+    /// band contains it, each scaled by that move's eased amount. Also reports
+    /// whether the point rode the move currently in flight — the "hand".
+    private static func applyMoves(_ pt3: (Double, Double, Double),
+                                   _ moves: [Move],
+                                   _ sc: (amount: [Double], active: Int))
+        -> (Double, Double, Double, Bool) {
+        var (x, y, z) = pt3
+        var inActive = false
+        for i in 0..<moves.count {
+            if sc.amount[i] <= 0 { continue }
+            let mv = moves[i]
+            let coord = mv.axis == 0 ? x : (mv.axis == 1 ? y : z)
+            if coord < mv.lo || coord >= mv.hi { continue }
+            if i == sc.active { inActive = true }
+            let a = mv.ang * sc.amount[i]
+            let ca = cos(a), sa = sin(a)
+            if mv.axis == 0 {
+                let y2 = y * ca - z * sa
+                z = y * sa + z * ca
+                y = y2
+            } else if mv.axis == 1 {
+                let x2 = x * ca + z * sa
+                z = -x * sa + z * ca
+                x = x2
+            } else {
+                let x2 = x * ca - y * sa
+                y = x * sa + y * ca
+                x = x2
+            }
+        }
+        return (x, y, z, inActive)
+    }
+
+    /// `lattice.ts` `makeMoves`, verbatim: the scramble is DETERMINISTIC —
+    /// axis, band and direction all fall out of `hashD`, so every run turns
+    /// the same sequence. Rebuilt per frame exactly as the source does.
+    private static func makeMoves(_ count: Int) -> [Move] {
+        var moves: [Move] = []
+        for i in 0..<count {
+            let axis = min(2, Int(hashD(Double(i), 2.3) * 3))
+            let lo = -1.0 + 0.5 * Double(min(3, Int(hashD(Double(i), 5.9) * 4)))
+            let dir: Double = hashD(Double(i), 7.7) < 0.5 ? 1 : -1
+            moves.append(Move(axis: axis, lo: lo, hi: lo + 0.5, ang: dir * .pi / 2))
+        }
+        return moves
+    }
+
+    /// `drawRubik`, verbatim: the globe's lat/long dot field, cut into bands
+    /// that twist in quarter turns — scramble, then the moves replay backwards
+    /// and the sphere clicks back to solved. The band being turned inks a
+    /// touch darker and swells by `rActive`: the "hand" on it.
+    static func drawRubik(_ ctx: inout GraphicsContext, size: Double, t: Double, o: [String: Double]) {
+        let cx = size / 2
+        let cy = size / 2
+        let R = (size / 2) * 0.82
+        let pt = makeProj(yaw: t * 0.55, tilt: 0.35 + 0.1 * sin(t * 0.9),
+                          cx: cx, cy: cy, scale: R)
+        let rs = radiusScale(size, o["rsPow"] ?? 0.6)
+        let moveCount = Int(o["moveCount"] ?? 14)
+        let moves = makeMoves(moveCount)
+        let sc = solveCycle(t, moveCount, 0.42, 1.2)
+
+        var dots: [Dot] = []
+        let latRings = Int(o["latRings"] ?? 15)
+        let lonDensity = o["lonDensity"] ?? 40
+        for li in 0...latRings {
+            let lat = -Double.pi / 2 + (Double(li) / Double(latRings)) * .pi
+            let cosLat = cos(lat)
+            let sinLat = sin(lat)
+            let lonCount = max(1, Int((abs(cosLat) * lonDensity).rounded()))
+            for lj in 0..<lonCount {
+                let lon = (Double(lj) / Double(lonCount)) * 2 * .pi
+                let (x, y, z, inActive) = applyMoves(
+                    (cosLat * cos(lon), sinLat, cosLat * sin(lon)), moves, sc)
+                let (px, py, zr) = pt(x, y, z)
+                let depth = (zr + 1) / 2
+                dots.append(Dot(
+                    x: px, y: py, z: zr,
+                    r: ((o["rBase"] ?? 0.6) + (o["rDepth"] ?? 1.7) * depth
+                        + (inActive ? (o["rActive"] ?? 0.3) : 0)) * rs,
+                    white: (o["inkFar"] ?? 0.62) - (o["inkSpan"] ?? 0.54) * depth
+                        - (inActive ? 0.14 : 0)))
             }
         }
         paint(&ctx, &dots, rMin: o["rMin"] ?? 0.3)
@@ -1890,7 +2088,7 @@ struct CrossfadeText: View {
     var body: some View {
         ZStack(alignment: .leading) {
             Text(shown)
-                .font(.system(size: font, weight: .regular))
+                .font(.sf(font, weight: .regular))
                 .foregroundStyle(color)
                 .modifier(WaitShimmer(active: !reduceMotion))
                 .id(shown)
@@ -1991,7 +2189,7 @@ struct WaitElapsedSuffix: View {
                 let s = Int(context.date.timeIntervalSince(since))
                 if s >= Int(Self.threshold) {
                     Text("\(s)s")
-                        .font(.system(size: font - 2))
+                        .font(.sf(font - 2))
                         .monospacedDigit()
                         .foregroundStyle(Tokens.text4)
                         .transition(.opacity)
@@ -2269,6 +2467,13 @@ struct AssistantTurnView: View {
             // preface), and dissolves when the tool clears and the answer resumes.
             if showActivityRow, let waitLine {
                 waitRow(waitLine)
+                    // Clear the paragraph's OWN leading. Body text runs at
+                    // `lineSpacing(baseFont * 0.45)` ≈ 7pt between its lines, so
+                    // at the stack's bare 6pt this row sat tighter than the prose
+                    // it follows and read as one more line of that paragraph
+                    // rather than a separate status row. 12pt puts clear air
+                    // between the spoken preface and the tool cue under it.
+                    .padding(.top, 6)
                     .allowsHitTesting(false)
                     .transition(.opacity)
             }
@@ -2302,6 +2507,15 @@ struct AssistantTurnView: View {
                 // badge is a bounded pill whose capsule is already flush at x=0,
                 // so it needs no shift.
                 let leadInset: CGFloat = sources.isEmpty ? -5 : 0
+                // The same story vertically, and it's why this row crowded the
+                // answer exactly when it was web-grounded: a bare icon's 11pt
+                // glyph is centered in a 22pt hit-frame, so an icon-led row
+                // already carries ~5pt of air above the glyph, while a leading
+                // source badge is a flush capsule that carries none. The gap read
+                // ~13pt without sources and a cramped 8pt with them. Pay the badge
+                // case that difference so the footer sits the same distance under
+                // the answer either way.
+                let leadTop: CGFloat = sources.isEmpty ? 2 : 7
                 HStack(spacing: 2) {
                     if !sources.isEmpty {
                         SourceBadge(sources: sources,
@@ -2402,7 +2616,7 @@ struct AssistantTurnView: View {
                     }
                 }
                 .padding(.leading, leadInset)
-                .padding(.top, 2)
+                .padding(.top, leadTop)
             }
         }
         .onHover { turnHovered = $0 }
@@ -2489,7 +2703,7 @@ private struct UserQuestionOptionRow: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.14), value: hovering)
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
     }
 }
 
@@ -4060,13 +4274,13 @@ private struct MediaLinkChip: View {
         Button(action: action) {
             HStack(spacing: 6) {
                 Image(systemName: icon)
-                    .font(.system(size: baseFont - 3, weight: .medium))
+                    .font(.sf(baseFont - 3, weight: .medium))
                 Text(label)
                     .font(.sf(baseFont - 1))
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Image(systemName: "arrow.up.right")
-                    .font(.system(size: baseFont - 5, weight: .semibold))
+                    .font(.sf(baseFont - 5, weight: .semibold))
                     .opacity(0.6)
             }
             .foregroundStyle(color.opacity(0.75))
@@ -4155,7 +4369,7 @@ private struct AnswerPDFView: View {
                         Divider().overlay(Tokens.hairline)
                         HStack(spacing: 6) {
                             Image(systemName: "doc.text")
-                                .font(.system(size: baseFont - 3, weight: .medium))
+                                .font(.sf(baseFont - 3, weight: .medium))
                             Text(displayTitle)
                                 .font(.sf(baseFont - 1, weight: .medium))
                                 .lineLimit(1)
@@ -4165,7 +4379,7 @@ private struct AnswerPDFView: View {
                                 .font(.sf(baseFont - 2))
                                 .opacity(0.55)
                             Image(systemName: "arrow.up.right")
-                                .font(.system(size: baseFont - 5, weight: .semibold))
+                                .font(.sf(baseFont - 5, weight: .semibold))
                                 .opacity(0.6)
                         }
                         .foregroundStyle(color.opacity(0.85))
@@ -4259,7 +4473,7 @@ private struct CodeBlockView: View {
                     }
                 } label: {
                     Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                        .font(.system(size: 11, weight: .regular))
+                        .font(.sf(11, weight: .regular))
                         .foregroundStyle(copied ? Tokens.text2 : Tokens.text3)
                         // Native SF Symbols swap — the doc morphs to the check
                         // instead of hard-cutting.
@@ -4271,7 +4485,7 @@ private struct CodeBlockView: View {
                 .padding(5)
                 // Ghost by default; brightens on hover; full while showing the check.
                 .opacity(copied ? 1.0 : hovering ? 0.7 : 0.3)
-                .animation(.easeOut(duration: 0.18), value: hovering)
+                .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
                 .animation(.easeOut(duration: 0.15), value: copied)
             }
             .onHover { hovering = $0 }
@@ -4314,7 +4528,7 @@ private struct AnswerFooterButton: View {
             }
         } label: {
             Image(systemName: confirmed ? "checkmark" : icon)
-                .font(.system(size: 11, weight: .regular))
+                .font(.sf(11, weight: .regular))
                 .foregroundStyle(confirmed ? Tokens.text2 : Tokens.text3)
                 // Native SF Symbols swap — icon morphs to the check, no hard cut.
                 .contentTransition(.symbolEffect(.replace))
@@ -4325,7 +4539,7 @@ private struct AnswerFooterButton: View {
         // Rest → row hover → direct hover/checkmark: 0.25 → 0.7 → 1.
         .opacity(confirmed || hovering ? 1.0 : rowHovered ? 0.7 : 0.25)
         .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.18), value: hovering)
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
         .animation(.easeOut(duration: 0.18), value: rowHovered)
         .animation(.easeOut(duration: 0.15), value: confirmed)
         .notchTooltip(help)
@@ -4782,7 +4996,7 @@ private struct AgentTrailGroupRow: View {
                         .foregroundStyle(Tokens.text4)
                         .lineLimit(1)
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 7.5, weight: .semibold))
+                        .font(.sf(7.5, weight: .semibold))
                         .foregroundStyle(Tokens.text4)
                         .rotationEffect(.degrees(expanded ? 90 : 0))
                 }
@@ -4855,7 +5069,7 @@ private struct AgentTrailToolRow: View {
                         .fixedSize(horizontal: false, vertical: true)
                     if entry.detail != nil {
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 7.5, weight: .semibold))
+                            .font(.sf(7.5, weight: .semibold))
                             .foregroundStyle(Tokens.text4)
                             .rotationEffect(.degrees(expanded ? 90 : 0))
                     }

@@ -154,7 +154,7 @@ struct InlineSettingsView: View {
         case model = "Model"     // provider, API key, model override
         case search = "Search"   // search backend + its key
         case notes = "Notes"     // the capture pipeline: note destination + copy sensing
-        case general = "General" // how you reach it: shortcut, language, launch at login, proxy
+        case general = "General" // how you reach it: shortcut, language, launch at login, + Advanced (proxy)
         case appearance = "Appearance" // where it shows up: screens, full screen, Dock icon
         case about = "About"     // version + self-update
         var id: String { rawValue }
@@ -195,6 +195,11 @@ struct InlineSettingsView: View {
     /// policy immediately.
     @State private var dockIconVisibility: DockIconVisibility = .current
 
+    /// Whether the app shows a menu bar icon — mirrors the persisted value; writes
+    /// go through `selectMenuBarIconVisibility` so `AppDelegate` adds or removes
+    /// the status item immediately.
+    @State private var menuBarIconVisibility: MenuBarIconVisibility = .current
+
     /// Whether the app launches itself at login — seeded from the live system
     /// login-item status (`SMAppService`), not `UserDefaults`. Writes go through
     /// `selectLaunchAtLogin`, which registers/unregisters the item and reverts
@@ -223,6 +228,9 @@ struct InlineSettingsView: View {
     /// A transient hint shown under the row when a chord is rejected (e.g. no
     /// modifier), cleared on the next successful record or when recording ends.
     @State private var hotKeyHint: String?
+
+    /// Whether the General pane's folded Advanced block is open.
+    @State private var advancedSectionOpen = false
 
     /// What the proxy field resolves to right now — filled in asynchronously by
     /// `refreshProxyStatus` because detection may spawn a login shell.
@@ -273,19 +281,19 @@ struct InlineSettingsView: View {
                         copySenseRow
                     case .general:
                         // How you reach it: the summon chord, the language it
-                        // speaks, whether it's there from login — and how the
-                        // whole app (AI requests and agent CLIs) reaches the
-                        // network.
+                        // speaks, whether it's there from login — then the
+                        // folded Advanced block for the plumbing (proxy).
                         shortcutRow
                         appLanguageRow
                         launchAtLoginRow
-                        proxyRow
+                        advancedSection
                     case .appearance:
                         // Where it shows itself: which screens carry an island,
                         // whether it yields to full screen, the Dock icon — and
                         // whether background work animates the resting notch.
                         placementRow
                         fullscreenAutoHideRow
+                        menuBarIconRow
                         dockIconRow
                         liveActivityRow
                     case .about:
@@ -397,7 +405,7 @@ struct InlineSettingsView: View {
             }
             .buttonStyle(.plain)
             .onHover { hovering = $0 }
-            .animation(.easeOut(duration: 0.15), value: hovering)
+            .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
         }
     }
 
@@ -405,23 +413,14 @@ struct InlineSettingsView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Button {
+            PanelBackButton {
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                     model.closeSettings()
                 }
-            } label: {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Tokens.text2)
-                    .frame(width: 26, height: 26)
-                    .contentShape(Rectangle())
             }
-            .buttonStyle(RecentEntryStyle())
 
             Text(L("settings.title"))
-                .font(.sf(10, weight: .semibold))
-                .tracking(0.8)
-                .foregroundStyle(Tokens.text4)
+                .captionLabel()
 
             Spacer()
         }
@@ -471,7 +470,7 @@ struct InlineSettingsView: View {
             } label: {
                 HStack(spacing: 5) {
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.sf(9, weight: .semibold))
                         .rotationEffect(.degrees(expanded ? 90 : 0))
                     Text(L("model.keys.section"))
                         .font(.sf(12, weight: .medium))
@@ -624,10 +623,7 @@ struct InlineSettingsView: View {
                     // Back out of editing without touching the stored key — only
                     // offered when there is a stored key to fall back to.
                     if !APIKeyStore.stored(for: keyScope).isEmpty {
-                        Button(L("model.cancel")) { stopEditingKey() }
-                            .buttonStyle(.plain)
-                            .font(.sf(11, weight: .semibold))
-                            .foregroundStyle(Tokens.text2)
+                        SettingActionButton(title: L("model.cancel")) { stopEditingKey() }
                     }
                 } else if !envOverride {
                     // Saved state allows a liveness check of the stored key, plus
@@ -635,24 +631,16 @@ struct InlineSettingsView: View {
                     if testing {
                         ProgressView().controlSize(.small)
                     } else {
-                        Button(L("model.test")) { test() }
-                            .buttonStyle(.plain)
-                            .font(.sf(11, weight: .semibold))
-                            .foregroundStyle(Tokens.text1)
+                        SettingActionButton(title: L("model.test")) { test() }
                     }
-                    Button(L("model.change")) { startEditingKey() }
-                        .buttonStyle(.plain)
-                        .font(.sf(11, weight: .semibold))
-                        .foregroundStyle(Tokens.text1)
+                    SettingActionButton(title: L("model.change")) { startEditingKey() }
                 }
                 // One control: the button itself flips to "Saved" for a beat after
                 // a save, then settles back to "Save" — no separate badge, no green
                 // checkmark, just the panel's own light text.
                 if editingKey || canSave || saved {
-                    Button(saved ? L("model.saved") : L("model.save")) { save() }
-                        .buttonStyle(.plain)
-                        .font(.sf(11, weight: .semibold))
-                        .foregroundStyle(saved ? Tokens.text2 : (canSave ? Tokens.text1 : Tokens.text4))
+                    SettingActionButton(title: saved ? L("model.saved") : L("model.save"),
+                                        tone: canSave || saved ? Tokens.text2 : Tokens.text4) { save() }
                         .disabled(!canSave && !saved)
                         .animation(.easeOut(duration: 0.2), value: saved)
                 }
@@ -758,22 +746,14 @@ struct InlineSettingsView: View {
 
                 if editingKeenableKey {
                     if !APIKeyStore.storedKeenableKey().isEmpty {
-                        Button(L("model.cancel")) { stopEditingKeenableKey() }
-                            .buttonStyle(.plain)
-                            .font(.sf(11, weight: .semibold))
-                            .foregroundStyle(Tokens.text2)
+                        SettingActionButton(title: L("model.cancel")) { stopEditingKeenableKey() }
                     }
                 } else if !keenableEnvOverride {
-                    Button(L("model.change")) { editingKeenableKey = true }
-                        .buttonStyle(.plain)
-                        .font(.sf(11, weight: .semibold))
-                        .foregroundStyle(Tokens.text1)
+                    SettingActionButton(title: L("model.change")) { editingKeenableKey = true }
                 }
                 if editingKeenableKey || canSaveKeenable || keenableSaved {
-                    Button(keenableSaved ? L("model.saved") : L("model.save")) { saveKeenableKey() }
-                        .buttonStyle(.plain)
-                        .font(.sf(11, weight: .semibold))
-                        .foregroundStyle(keenableSaved ? Tokens.text2 : (canSaveKeenable ? Tokens.text1 : Tokens.text4))
+                    SettingActionButton(title: keenableSaved ? L("model.saved") : L("model.save"),
+                                        tone: canSaveKeenable || keenableSaved ? Tokens.text2 : Tokens.text4) { saveKeenableKey() }
                         .disabled(!canSaveKeenable && !keenableSaved)
                         .animation(.easeOut(duration: 0.2), value: keenableSaved)
                 }
@@ -859,22 +839,14 @@ struct InlineSettingsView: View {
                 if editingExaKey {
                     // Cancel only when there's a stored key to fall back to.
                     if !APIKeyStore.storedExaKey().isEmpty {
-                        Button(L("model.cancel")) { stopEditingExaKey() }
-                            .buttonStyle(.plain)
-                            .font(.sf(11, weight: .semibold))
-                            .foregroundStyle(Tokens.text2)
+                        SettingActionButton(title: L("model.cancel")) { stopEditingExaKey() }
                     }
                 } else if !exaEnvOverride {
-                    Button(L("model.change")) { editingExaKey = true }
-                        .buttonStyle(.plain)
-                        .font(.sf(11, weight: .semibold))
-                        .foregroundStyle(Tokens.text1)
+                    SettingActionButton(title: L("model.change")) { editingExaKey = true }
                 }
                 if editingExaKey || canSaveExa || exaSaved {
-                    Button(exaSaved ? L("model.saved") : L("model.save")) { saveExaKey() }
-                        .buttonStyle(.plain)
-                        .font(.sf(11, weight: .semibold))
-                        .foregroundStyle(exaSaved ? Tokens.text2 : (canSaveExa ? Tokens.text1 : Tokens.text4))
+                    SettingActionButton(title: exaSaved ? L("model.saved") : L("model.save"),
+                                        tone: canSaveExa || exaSaved ? Tokens.text2 : Tokens.text4) { saveExaKey() }
                         .disabled(!canSaveExa && !exaSaved)
                         .animation(.easeOut(duration: 0.2), value: exaSaved)
                 }
@@ -976,15 +948,9 @@ struct InlineSettingsView: View {
                     if testing {
                         ProgressView().controlSize(.small)
                     } else {
-                        Button(L("model.test")) { test() }
-                            .buttonStyle(.plain)
-                            .font(.sf(11, weight: .semibold))
-                            .foregroundStyle(Tokens.text1)
+                        SettingActionButton(title: L("model.test")) { test() }
                     }
-                    Button(L("model.disconnect")) { disconnectOpenRouter() }
-                        .buttonStyle(.plain)
-                        .font(.sf(11, weight: .semibold))
-                        .foregroundStyle(Tokens.text1)
+                    SettingActionButton(title: L("model.disconnect")) { disconnectOpenRouter() }
                 } else {
                     switch orAuth.phase {
                     case .waiting, .exchanging:
@@ -997,20 +963,15 @@ struct InlineSettingsView: View {
                                 .foregroundStyle(Tokens.text2)
                         }
                         .frame(height: 30)
-                        Button(L("model.cancel")) { orAuth.cancel() }
-                            .buttonStyle(.plain)
-                            .font(.sf(11, weight: .semibold))
-                            .foregroundStyle(Tokens.text2)
+                        SettingActionButton(title: L("model.cancel")) { orAuth.cancel() }
                     default:
                         connectButton
-                        Button(L("model.pasteInstead")) {
+                        SettingActionButton(title: L("model.pasteInstead"),
+                                            tone: Tokens.text3) {
                             orAuth.acknowledge()
                             manualKeyEntry = true
                             startEditingKey()
                         }
-                        .buttonStyle(.plain)
-                        .font(.sf(11, weight: .semibold))
-                        .foregroundStyle(Tokens.text3)
                     }
                 }
             }
@@ -1171,6 +1132,8 @@ struct InlineSettingsView: View {
     /// The primary action of the whole onboarding: one click, sign in (or sign
     /// up, free) in the browser, and the key arrives by itself. Slightly brighter
     /// than the surrounding chips because it IS the setup.
+    @State private var connectHovering = false
+
     private var connectButton: some View {
         Button {
             testResult = nil
@@ -1178,24 +1141,20 @@ struct InlineSettingsView: View {
         } label: {
             HStack(spacing: 7) {
                 Image(systemName: "link")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.sf(11, weight: .semibold))
                 Text(L("model.connectOpenRouter"))
                     .font(.sf(13, weight: .medium))
             }
             .foregroundStyle(Tokens.text1)
             .padding(.horizontal, 12)
             .frame(height: 30)
-            .background(
-                RoundedRectangle(cornerRadius: 9)
-                    .fill(.white.opacity(0.10))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 9)
-                    .strokeBorder(.white.opacity(0.20), lineWidth: 0.5)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 9))
+            .prominentSurface(in: RoundedRectangle(cornerRadius: 9, style: .continuous),
+                              lit: connectHovering)
+            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(GlassPressStyle())
+        .onHover { connectHovering = $0 }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: connectHovering)
     }
 
     /// Drop the stored OpenRouter key and return the row to its Connect state.
@@ -1309,7 +1268,7 @@ struct InlineSettingsView: View {
                             .lineLimit(1)
                             .truncationMode(.tail)
                         Image(systemName: "chevron.up.chevron.down")
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(.sf(10, weight: .semibold))
                             .foregroundStyle(Tokens.text3)
                     }
                     .padding(.leading, 10)
@@ -1434,6 +1393,28 @@ struct InlineSettingsView: View {
         NotificationCenter.default.post(name: .displayPlacementChanged, object: nil)
     }
 
+    /// Whether the app puts its icon in the menu bar. Shown by default — it's the
+    /// one handle that works when the notch is behind a full-screen app and the
+    /// summon shortcut has been forgotten. The choice applies immediately
+    /// (AppDelegate adds/removes the status item).
+    private var menuBarIconRow: some View {
+        settingRow(label: L("general.menuBarIcon"),
+                   info: L("general.menuBarIcon.hint")) {
+            GlassMenu(title: menuBarIconVisibility.label) {
+                ForEach(MenuBarIconVisibility.allCases) { v in
+                    Button(v.label) { selectMenuBarIconVisibility(v) }
+                }
+            }
+        }
+    }
+
+    private func selectMenuBarIconVisibility(_ newValue: MenuBarIconVisibility) {
+        guard newValue != menuBarIconVisibility else { return }
+        menuBarIconVisibility = newValue
+        MenuBarIconVisibility.current = newValue
+        NotificationCenter.default.post(name: .menuBarIconVisibilityChanged, object: nil)
+    }
+
     /// Whether the app shows a Dock icon. Off by default — the notch overlay is a
     /// menu-bar-less accessory — but some users want one place to relaunch or quit
     /// it from. The choice applies immediately (AppDelegate flips the activation
@@ -1477,10 +1458,7 @@ struct InlineSettingsView: View {
                             .foregroundStyle(Tokens.text3)
                             .lineLimit(1)
                             .truncationMode(.middle)
-                        Button(L("general.noteFolder.choose")) { chooseNotesFolder() }
-                            .buttonStyle(.plain)
-                            .font(.sf(11, weight: .semibold))
-                            .foregroundStyle(Tokens.text1)
+                        SettingActionButton(title: L("general.noteFolder.choose")) { chooseNotesFolder() }
                     }
                 }
             }
@@ -1605,6 +1583,37 @@ struct InlineSettingsView: View {
             .controlSize(.mini)
             .tint(Tokens.text2)
         }
+    }
+
+    /// The collapsed-by-default tail of the General pane: plumbing nobody should
+    /// have to walk past to reach the everyday rows. Same quiet disclosure line as
+    /// `keySection` — it stays folded until the user opens it, whatever the proxy
+    /// currently is.
+    private var advancedSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Button {
+                withAnimation(.easeOut(duration: 0.16)) { advancedSectionOpen.toggle() }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "chevron.right")
+                        .font(.sf(9, weight: .semibold))
+                        .rotationEffect(.degrees(advancedSectionOpen ? 90 : 0))
+                    Text(L("general.advanced"))
+                        .font(.sf(12, weight: .medium))
+                }
+                .foregroundStyle(Tokens.text3)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if advancedSectionOpen {
+                proxyRow
+                    // Unfolds downward out of the disclosure line rather than
+                    // popping in at full height.
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .clipped()
     }
 
     /// The proxy the whole app connects through — a manual value is forced onto
@@ -2303,6 +2312,32 @@ struct GlassPopoverBackground: ViewModifier {
 /// Takes either a plain string or a pre-built `AttributedString` (for hints with an
 /// inline link), so both the terse captions and the "get a key at …" hints collapse
 /// behind the same mark.
+/// A bare word-action hanging off a settings row — Save / Test / Change /
+/// Cancel / Disconnect / Choose…. Fourteen of these were spelled out by hand
+/// across the panel as `.buttonStyle(.plain)` + a fixed ink, which made them the
+/// one interactive class in the whole app that answered a hover with *nothing*;
+/// several also rested at `text1`, brighter than the very row label they hang
+/// off, so the eye read the escape hatch before the setting. One control now:
+/// quiet at rest (secondary ink, below its label), full ink under the cursor.
+struct SettingActionButton: View {
+    var title: String
+    /// Rest ink. Defaults to the secondary register; a de-emphasised action (a
+    /// settled "Saved", a Save with nothing to save) passes something quieter.
+    var tone: Color = Tokens.text2
+    var action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(title, action: action)
+            .buttonStyle(.plain)
+            .font(.sf(11, weight: .semibold))
+            .foregroundStyle(hovering ? Tokens.text1 : tone)
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+    }
+}
+
 struct SettingInfo: View {
     private let plain: String?
     private let rich: AttributedString?
@@ -2316,14 +2351,14 @@ struct SettingInfo: View {
     var body: some View {
         Button { showing.toggle() } label: {
             Image(systemName: "info.circle")
-                .font(.system(size: 12, weight: .regular))
+                .font(.sf(12, weight: .regular))
                 .foregroundStyle(hovering ? Tokens.text2 : Tokens.text4)
                 .frame(width: 20, height: 20)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.16), value: hovering)
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
         .popover(isPresented: $showing, arrowEdge: .bottom) {
             Group {
                 if let rich { Text(rich) } else { Text(plain ?? "") }
@@ -2364,7 +2399,7 @@ struct GlassMenu<Content: View>: View {
                         .truncationMode(.tail)
                 }
                 Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.sf(10, weight: .semibold))
                     .foregroundStyle(Tokens.text3)
             }
             // Icon-only (empty title) pills get symmetric padding so the chevron
@@ -2372,22 +2407,16 @@ struct GlassMenu<Content: View>: View {
             .padding(.leading, title.isEmpty ? 9 : 11)
             .padding(.trailing, 9)
             .frame(height: 30)
-            .background(
-                RoundedRectangle(cornerRadius: 9)
-                    .fill(.white.opacity(hovering ? 0.10 : 0.06))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 9)
-                    .strokeBorder(.white.opacity(hovering ? 0.20 : 0.12), lineWidth: 0.5)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 9))
+            .recessedSurface(in: RoundedRectangle(cornerRadius: 9, style: .continuous),
+                             lit: hovering)
+            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
         }
         .menuStyle(.button)
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .fixedSize()
         .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.15), value: hovering)
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
     }
 }
 
