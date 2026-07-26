@@ -64,6 +64,17 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.2.6",
+            date: "2026-07-26",
+            features: [
+                "Drag the input row out of the notch to get a standalone composer window.",
+                "Sending an Ask from that composer turns the window into the conversation.",
+            ],
+            improvements: [
+                "Settings picks the provider first, then that provider's models.",
+            ]
+        ),
+        Entry(
             version: "0.2.5",
             date: "2026-07-25",
             features: [
