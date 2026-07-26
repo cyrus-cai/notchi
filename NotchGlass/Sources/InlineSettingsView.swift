@@ -130,6 +130,22 @@ struct InlineSettingsView: View {
     /// standard paste field for users who'd rather supply a key by hand.
     @State private var manualKeyEntry = false
 
+    /// The custom endpoint's three fields (see `CustomProvider`), edited together
+    /// and committed by one Save — unlike a key, an endpoint that's half-typed is
+    /// worse than the old one, so nothing is persisted keystroke by keystroke.
+    @State private var customName: String = CustomProvider.name
+    @State private var customURL: String = CustomProvider.baseURL
+    @State private var customModel: String = CustomProvider.model
+    @State private var customSaved = false
+
+    /// Whether any of the three differs from what's stored — the only state where
+    /// the custom Save button lights up.
+    private var canSaveCustom: Bool {
+        customName.trimmingCharacters(in: .whitespacesAndNewlines) != CustomProvider.name
+            || customURL.trimmingCharacters(in: .whitespacesAndNewlines) != CustomProvider.baseURL
+            || customModel.trimmingCharacters(in: .whitespacesAndNewlines) != CustomProvider.model
+    }
+
     private var canSave: Bool {
         guard !envOverride else { return false }
         // Only the API key needs an explicit Save — a model switch auto-persists,
@@ -289,13 +305,15 @@ struct InlineSettingsView: View {
                         launchAtLoginRow
                         advancedSection
                     case .appearance:
-                        // Where it shows itself: which screens carry an island,
-                        // whether it yields to full screen, the Dock icon — and
-                        // whether background work animates the resting notch.
+                        // Two groups, heaviest control first. Where it shows up —
+                        // which screens carry an island, whether it also sits in
+                        // the Dock and the menu bar — then how it behaves once
+                        // there: yielding to full screen, animating on background
+                        // work.
                         placementRow
-                        fullscreenAutoHideRow
-                        menuBarIconRow
                         dockIconRow
+                        menuBarIconRow
+                        fullscreenAutoHideRow
                         liveActivityRow
                     case .about:
                         aboutSection
@@ -509,6 +527,12 @@ struct InlineSettingsView: View {
                     }
                 }
 
+                // A custom endpoint is more than a key: name, URL and model id come
+                // first, because without them there's nothing for a key to unlock.
+                if keyScope == .custom {
+                    customEndpointRows
+                }
+
                 // Codex has no key to paste — it shows a sign-in status row. OpenRouter
                 // gets the one-click Connect row (unless the user asked to paste by
                 // hand, or an env var forces a key). Everyone else gets the key field.
@@ -535,11 +559,122 @@ struct InlineSettingsView: View {
         .animation(.easeOut(duration: 0.16), value: expanded)
     }
 
+    /// The custom endpoint's own fields: what to call it, where to send requests,
+    /// and which model id to ask for. All three are the user's — nothing about
+    /// someone's private server can be guessed — so they're plain text fields, and
+    /// a single Save commits them together (`saveCustom`).
+    ///
+    /// The resolved line under the URL is the honesty check: it shows the exact
+    /// address requests will hit after normalization, so a base URL that quietly
+    /// grew a `/v1/chat/completions` is visible rather than surprising.
+    @ViewBuilder
+    private var customEndpointRows: some View {
+        customField(label: L("model.custom.name"),
+                    placeholder: L("model.custom.defaultName"),
+                    text: $customName)
+        customField(label: L("model.custom.url"),
+                    placeholder: L("model.custom.urlPlaceholder"),
+                    text: $customURL)
+        if let resolved = CustomProvider.normalized(customURL) {
+            Text(L("model.custom.resolved", resolved.absoluteString))
+                .font(.sf(11))
+                .foregroundStyle(Tokens.text3)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .padding(.leading, 76)
+        }
+        customField(label: L("model.custom.model"),
+                    placeholder: L("model.custom.modelPlaceholder"),
+                    text: $customModel)
+        HStack(spacing: 12) {
+            Spacer(minLength: 0)
+            // Test lives here rather than beside the key, because for this provider
+            // the thing worth probing is the endpoint — the key may not exist at all.
+            if testing {
+                ProgressView().controlSize(.small)
+            } else if CustomProvider.chatEndpoint != nil, !canSaveCustom {
+                SettingActionButton(title: L("model.test")) { test() }
+            }
+            SettingActionButton(title: customSaved ? L("model.saved") : L("model.save"),
+                                tone: canSaveCustom || customSaved ? Tokens.text2 : Tokens.text4) {
+                saveCustom()
+            }
+            .disabled(!canSaveCustom && !customSaved)
+            .animation(.easeOut(duration: 0.2), value: customSaved)
+        }
+    }
+
+    /// One labelled text field in the key section's column, matching the key row's
+    /// field chrome so the block reads as one form.
+    private func customField(label: String, placeholder: String,
+                             text: Binding<String>) -> some View {
+        HStack(spacing: 12) {
+            Text(label)
+                .font(.sf(13, weight: .medium))
+                .foregroundStyle(Tokens.text2)
+                .frame(width: 64, alignment: .leading)
+            ZStack(alignment: .leading) {
+                if text.wrappedValue.isEmpty {
+                    Text(placeholder)
+                        .font(.sf(13))
+                        .foregroundStyle(Tokens.text3)
+                        .lineLimit(1)
+                        .allowsHitTesting(false)
+                }
+                TextField("", text: text)
+                    .textFieldStyle(.plain)
+                    .font(.sf(13))
+                    .foregroundStyle(Tokens.text1)
+                    .onSubmit { saveCustom() }
+                    // Typing here counts as activity, so a pointer that drifted off
+                    // the island can't fold the panel mid-edit.
+                    .onChange(of: text.wrappedValue) { model.noteUserTyping() }
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 34)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 10).fill(.white.opacity(0.06)))
+            .overlay(RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(.white.opacity(0.12), lineWidth: 0.5))
+        }
+    }
+
+    /// Commit the custom endpoint. The catalog is dropped first: the model list
+    /// belongs to whichever server the old URL pointed at, and keeping it would
+    /// offer models the new one may not serve.
+    private func saveCustom() {
+        guard canSaveCustom else { return }
+        CustomProvider.name = customName
+        CustomProvider.baseURL = customURL
+        CustomProvider.model = customModel
+        // Read back what was actually stored (trimmed / cleared), so the fields
+        // show the truth rather than the draft.
+        customName = CustomProvider.name
+        customURL = CustomProvider.baseURL
+        customModel = CustomProvider.model
+        if provider == .custom { modelID = customModel }
+        catalog.forget(.custom)
+        testResult = nil    // the last verdict belonged to the previous endpoint
+        NotificationCenter.default.post(name: .aiBackendChanged, object: nil)
+        withAnimation(.easeOut(duration: 0.2)) { customSaved = true }
+        Task { await refreshModels() }
+        Task {
+            try? await Task.sleep(nanoseconds: 1_800_000_000)
+            withAnimation(.easeOut(duration: 0.3)) { customSaved = false }
+        }
+    }
+
     /// Retarget the key section onto `p`, reloading its stored key and edit
     /// state. Touches only key-editor state — never the active backend.
     private func setKeyScope(_ p: Provider) {
         guard p != keyScope else { return }
         keyScope = p
+        // Re-read the custom endpoint's fields whenever the section aims at it, so
+        // a switch away and back never shows a stale draft.
+        customName = CustomProvider.name
+        customURL = CustomProvider.baseURL
+        customModel = CustomProvider.model
+        customSaved = false
         apiKey = APIKeyStore.stored(for: p)
         saved = false
         testResult = nil   // last verdict belonged to the old provider/key
@@ -1176,8 +1311,12 @@ struct InlineSettingsView: View {
     /// env-overridden, not already running. Test only shows once a key is saved,
     /// so it probes what's on disk, never an unsaved draft.
     private var canTest: Bool {
-        !testing && !envOverride
-            && !APIKeyStore.stored(for: keyScope).isEmpty
+        guard !testing, !envOverride else { return false }
+        // The custom endpoint is testable on its URL alone: with no key required,
+        // "is this server reachable and does it answer /v1/models?" is the whole
+        // question, and it's exactly what a local server needs answered.
+        if keyScope == .custom { return CustomProvider.chatEndpoint != nil }
+        return !APIKeyStore.stored(for: keyScope).isEmpty
     }
 
     /// Swap the masked summary for an empty field ready for a fresh paste —
@@ -1457,14 +1596,58 @@ struct InlineSettingsView: View {
     /// menu-bar-less accessory — but some users want one place to relaunch or quit
     /// it from. The choice applies immediately (AppDelegate flips the activation
     /// policy).
+    ///
+    /// Drawn as a two-card picker like the placement row above: "is my icon down
+    /// there" is a spatial question, so each card shows a miniature screen with a
+    /// Dock strip — one with this app's tile in it, one without.
     private var dockIconRow: some View {
-        settingRow(label: L("general.dockIcon")) {
-            GlassMenu(title: dockIconVisibility.label) {
-                ForEach(DockIconVisibility.allCases) { v in
-                    Button(v.label) { selectDockIconVisibility(v) }
-                }
+        HStack(alignment: .top, spacing: 12) {
+            Text(L("general.dockIcon"))
+                .font(.sf(13, weight: .medium))
+                .foregroundStyle(Tokens.text2)
+                .lineLimit(1)
+                .fixedSize()
+                .frame(minWidth: 64, alignment: .leading)
+                // Sit on the cards' first inner line, matching the placement row.
+                .padding(.top, 8)
+            // Ordered "has icon" → "no icon", the same more-to-less direction the
+            // placement cards read in.
+            ForEach([DockIconVisibility.shown, .hidden]) { v in
+                dockIconCard(v)
             }
+            Spacer(minLength: 0)
         }
+    }
+
+    private func dockIconCard(_ v: DockIconVisibility) -> some View {
+        let selected = dockIconVisibility == v
+        return Button {
+            selectDockIconVisibility(v)
+        } label: {
+            VStack(spacing: 7) {
+                MiniDock(hasIcon: v == .shown)
+                    // The unselected diagram dims as a whole so the lit tile
+                    // reads as "what you'd get", not as a second active choice.
+                    .opacity(selected ? 1 : 0.55)
+                Text(v.label)
+                    .font(.sf(11, weight: selected ? .semibold : .regular))
+                    .foregroundStyle(selected ? Tokens.text1 : Tokens.text3)
+                    .lineLimit(1)
+            }
+            .padding(.vertical, 8)
+            .frame(width: 108)
+            .background(
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(.white.opacity(selected ? 0.10 : 0.04))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 9)
+                    .strokeBorder(.white.opacity(selected ? 0.40 : 0.10),
+                                  lineWidth: selected ? 1 : 0.5)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 9))
+        }
+        .buttonStyle(.plain)
     }
 
     private func selectDockIconVisibility(_ newValue: DockIconVisibility) {
@@ -2153,6 +2336,9 @@ struct InlineSettingsView: View {
             text.append(AttributedString(L("model.footer.openrouter.post")))
             return text
         }
+        // The custom endpoint has no key console to link to — the footer explains
+        // what the fields above accept, and that the key is optional.
+        if keyScope == .custom { return AttributedString(L("model.custom.footer")) }
         var text = AttributedString(L("model.footer.byok.pre"))
         var host = AttributedString(keyScope.signupHost)
         host.link = keyScope.signupURL
@@ -2204,7 +2390,11 @@ struct InlineSettingsView: View {
         // the hot-updated bundled shortlist through `availableModels`.
         await RemoteModelManifest.refreshIfDue()
         guard target == provider else { return }
-        guard let key = APIKeyStore.current(for: target) else { return }
+        // The custom endpoint fetches on its URL alone — its key is optional, and
+        // its `/v1/models` is where its model ids have to come from.
+        let optionalKey = target == .custom && CustomProvider.chatEndpoint != nil
+        guard let key = APIKeyStore.current(for: target)
+                ?? (optionalKey ? "" : nil) else { return }
         loadingModels = true
         let live = await ModelCatalog.fetch(for: target, apiKey: key)
         // Stop the spinner unconditionally — an early return on the staleness
@@ -2231,6 +2421,9 @@ struct InlineSettingsView: View {
         }
         modelID = id
         APIKeyStore.saveModel(id, for: newProvider)
+        // The custom endpoint's Model ID field is another view of the same stored
+        // value — keep it in step when the pick came from the picker.
+        if newProvider == .custom { customModel = id }
         // An explicit pick is a "recently used" model from the user's point of
         // view — record it so the Ask chip's quick menu keeps it after the
         // selection moves on (picks made here used to vanish from the menu).
@@ -2517,6 +2710,55 @@ private struct MiniDisplay: View {
                     .frame(width: 12, height: 2)
             }
         }
+    }
+}
+
+/// A miniature screen with a Dock strip along its bottom edge, for the Dock-icon
+/// picker: the "Shown" card lights this app's tile inside the strip, the "Hidden"
+/// card leaves the strip without it. Same drawing language as `MiniDisplay` two
+/// rows up so the two diagrams read as a family.
+private struct MiniDock: View {
+    /// Whether the option being drawn puts this app in the Dock — the lit tile is
+    /// the whole point of the diagram.
+    let hasIcon: Bool
+
+    var body: some View {
+        VStack(spacing: 1) {
+            ZStack(alignment: .bottom) {
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(.white.opacity(0.08))
+                RoundedRectangle(cornerRadius: 3)
+                    .strokeBorder(.white.opacity(0.35), lineWidth: 1)
+                dock
+                    .padding(.bottom, 2)
+            }
+            .frame(width: 40, height: 23)
+            // The laptop deck, a touch wider than the lid — as in `MiniDisplay`.
+            RoundedRectangle(cornerRadius: 1)
+                .fill(.white.opacity(0.35))
+                .frame(width: 46, height: 2)
+        }
+    }
+
+    private var dock: some View {
+        HStack(spacing: 2) {
+            tile(bright: false)
+            tile(bright: false)
+            if hasIcon { tile(bright: true) }
+            tile(bright: false)
+        }
+        .padding(.horizontal, 2.5)
+        .padding(.vertical, 1.5)
+        .background(
+            RoundedRectangle(cornerRadius: 2.5)
+                .fill(.white.opacity(0.16))
+        )
+    }
+
+    private func tile(bright: Bool) -> some View {
+        RoundedRectangle(cornerRadius: 1)
+            .fill(.white.opacity(bright ? 0.95 : 0.38))
+            .frame(width: 4, height: 4)
     }
 }
 

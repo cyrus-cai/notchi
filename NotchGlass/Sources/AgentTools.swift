@@ -4,11 +4,14 @@ import AppKit
 // MARK: - Built-in agent tools
 //
 // The deliberately small tool surface: read what the user already copied, tell
-// the time, do exact arithmetic, ask the user a clarifying question, run a web
-// search, and read a web page's text. All read-only — no file-system writes, no
-// shell, no computer-use; those high-blast-radius surfaces are intentionally out
-// of scope. The harness advertises exactly this set; growing it is a matter of
-// adding a `NotchTool` and registering it (see `ToolRegistry.standard(for:)`).
+// the time, do exact arithmetic, search the user's own Notch archive, ask the
+// user a clarifying question, run a web search, and read a web page's text. All
+// read-only — no file-system writes, no shell, no computer-use; those
+// high-blast-radius surfaces are intentionally out of scope. The harness
+// advertises exactly this set; growing it is a matter of adding a `NotchTool`
+// and registering it (see `ToolRegistry.standard(for:)`, or — for a tool that
+// needs the live model, like `search_history` / `ask_user` — the per-round
+// append in `NotchModel.submit`).
 
 /// Current local date and time. The notch assistant has no clock of its own
 /// (the model's knowledge has a cutoff), so any "what day is it / how long until
@@ -366,6 +369,296 @@ struct AskUserTool: NotchTool {
             return "Error: give at least 2 distinct options for the user to choose from."
         }
         return try await present(question, Array(options.prefix(4)))
+    }
+}
+
+// MARK: - The user's own archive (search_history)
+
+/// One decoded `search_history` request, in the terms the archive is actually
+/// filtered by. Provider-neutral and `Sendable` so the tool (off the main actor)
+/// can hand it to the main-actor lookup that owns `NotchModel.history`.
+struct HistoryQuery: Sendable {
+    /// Keyword to match against a row's title, question, answer, and turn text.
+    /// `nil` means "no text filter" — a pure date/kind listing, which is the
+    /// shape of "what did I do today".
+    var text: String? = nil
+    /// `HistoryItem.Source.rawValue` to restrict to, or `nil` for all four kinds.
+    var kind: String? = nil
+    /// Inclusive window. `since` is snapped to the start of its day and `until`
+    /// to the END of its day by the lookup, so "2026-07-26 → 2026-07-26" means
+    /// all of that one day rather than an empty instant.
+    var since: Date? = nil
+    var until: Date? = nil
+    /// Row cap, already clamped by the tool.
+    var limit: Int = 30
+}
+
+/// One archive row, flattened to exactly what the model is shown. Deliberately
+/// NOT `HistoryItem`: the digest crosses from the main actor into the tool, and
+/// keeping it a small `Sendable` value means transcripts, image filenames and
+/// resume handles never leave the model layer at all.
+struct HistoryDigestRow: Sendable {
+    /// Per-field caps applied at the main-actor mapping, so a single pathological
+    /// row (a pasted wall of text filed as a note) can't dominate the budget.
+    static let headlineCap = 220
+    static let bodyCap = 160
+
+    let date: Date
+    /// Display kind: `ask` / `note` / `reminder` / `agent`, the last carrying its
+    /// outcome when the run reported one (`agent·failure`).
+    let kind: String
+
+    /// The one line that identifies the row — for an Ask that's its generated
+    /// title (already an AI summary of the exchange), for a capture the captured
+    /// text itself.
+    let headline: String
+    /// The literal question behind an Ask row, when the headline is a generated
+    /// title and so doesn't already say it. `nil` for captures.
+    let body: String?
+}
+
+/// The answer to one archive query: the rows that fit, plus how many actually
+/// matched. `totalMatches` exists so a `limit`-truncated list can SAY it was
+/// truncated — without it, "summarize my week" reads the newest 30 rows of a
+/// 119-row week and presents them as the whole week, which is the one failure
+/// mode of this tool that produces a confidently wrong answer rather than a
+/// visibly thin one.
+struct HistoryDigest: Sendable {
+    let rows: [HistoryDigestRow]
+    let totalMatches: Int
+
+    static let empty = HistoryDigest(rows: [], totalMatches: 0)
+}
+
+/// Search the user's own Notch archive — the questions they asked, the notes and
+/// reminders they captured, and the agent tasks they ran, all timestamped.
+///
+/// This is what closes the loop on the app's own record: the archive is already a
+/// complete local log (`NotchModel.HistoryItem`), and this tool is the only thing
+/// that was missing to let the assistant answer *from* it ("what did I work on
+/// today", "what have I been recording", "what did I ask you last week").
+///
+/// Two deliberate properties:
+///  • **On-demand, never injected.** The digest is only assembled when the model
+///    asks for it, exactly like `read_clipboard` — no client-side heuristic
+///    quietly ships the user's archive to the provider on every question.
+///  • **Summaries, not transcripts.** Each Ask row already carries a generated
+///    title (see `titleSystemPrompt`) and each capture is one short line, so a
+///    day's worth of rows fits in a few hundred tokens without ever sending a
+///    full conversation back over the wire.
+struct SearchHistoryTool: NotchTool {
+    let name = "search_history"
+    let description = """
+    Searches the user's own history inside this app — every question they asked \
+    it, every note and reminder they captured through it, and every agent task \
+    they ran — each with its timestamp. Call this whenever the user asks about \
+    THEIR OWN past activity rather than about the world: "what did I work on \
+    today", "what have I recorded", "what did I ask you yesterday", "summarize \
+    my week", "did I ever note anything about X". Prefer a date window (`since` \
+    / `until`, or `days`) for "today / yesterday / this week" questions and a \
+    `query` keyword for "did I ever mention X". The CURRENT conversation is \
+    already visible to you — only call this for things outside it. If it returns \
+    nothing, say you found nothing recorded for that period; never invent \
+    entries.
+    """
+    let schema: [String: Any] = [
+        "type": "object",
+        "properties": [
+            "query": [
+                "type": "string",
+                "description": "Keyword to match against the text of past entries. Omit to list everything in the date window, which is what a \"what did I do today\" question wants.",
+            ],
+            "since": [
+                "type": "string",
+                "description": "Start of the window, inclusive: \"YYYY-MM-DD\", or \"today\" / \"yesterday\".",
+            ],
+            "until": [
+                "type": "string",
+                "description": "End of the window, inclusive (whole day): \"YYYY-MM-DD\", or \"today\" / \"yesterday\".",
+            ],
+            "days": [
+                "type": "integer",
+                "description": "Alternative to since/until: the last N days counting today (1 = today only, 7 = this past week). Use this when you'd rather not compute calendar dates.",
+            ],
+            "kind": [
+                "type": "string",
+                "enum": ["ask", "note", "reminder", "agent"],
+                "description": "Restrict to one kind: ask = a question they asked this app, note / reminder = something they captured through it, agent = a coding task they ran. Omit for all four.",
+            ],
+            "limit": [
+                "type": "integer",
+                "description": "Maximum entries to return, newest first. Defaults to 30, capped at 60.",
+            ],
+        ],
+    ]
+
+    /// Bridge to the archive. Injected per round by `NotchModel` (which owns
+    /// `history` on the main actor) — the same pattern `ask_user` uses, and the
+    /// reason this tool isn't in `ToolRegistry.standard(for:)`.
+    let lookup: @Sendable (HistoryQuery) async -> HistoryDigest
+
+    /// "Now", for resolving the relative arguments (`today` / `yesterday` /
+    /// `days`). Injectable so the regression harness can anchor the whole tool to
+    /// a fixed moment (see `scripts/history_eval`) — production always leaves it
+    /// as the real clock.
+    var now: @Sendable () -> Date = { Date() }
+
+    /// Total characters the digest may occupy. The archive is unbounded, so
+    /// without this one call could hand a small model tens of thousands of
+    /// characters of its own past.
+    private static let outputCap = 6000
+
+    /// Room held back from `outputCap` for the trailing "N more omitted" note. The
+    /// note is appended after the row loop, so without reserving its space the cap
+    /// was overshot by exactly its length — caught by `scripts/history_eval`'s
+    /// budget case. Comfortably longer than the note ever gets.
+    private static let footerReserve = 128
+
+    /// Fixed-locale so the dates the model reads never shift with the user's
+    /// interface language — unlike `DateTimeTool`, which deliberately localizes
+    /// because its output IS prose. Here they're data the model does arithmetic
+    /// on, so `YYYY-MM-DD (Sun) HH:mm` is the same everywhere.
+    private static let rowFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Foundation.Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd (EEE) HH:mm"
+        return f
+    }()
+
+    private static let dayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Foundation.Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
+    /// Parse one date argument: an ISO day, or the two relative words a model
+    /// reaches for even when told to send a date. Anything else is `nil`, which
+    /// simply drops that bound rather than failing the call.
+    private static func parseDay(_ raw: Any?, now: Date) -> Date? {
+        guard let s = (raw as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(), !s.isEmpty else { return nil }
+        let cal = Calendar.current
+        switch s {
+        case "today":     return cal.startOfDay(for: now)
+        case "yesterday": return cal.date(byAdding: .day, value: -1,
+                                          to: cal.startOfDay(for: now))
+        default: break
+        }
+        // Tolerate a full ISO-8601 timestamp too — some models send one anyway.
+        if let day = dayFormatter.date(from: String(s.prefix(10))) { return day }
+        return nil
+    }
+
+    func execute(_ input: [String: Any]) async throws -> String {
+        var query = HistoryQuery()
+        let clock = now()
+
+        if let text = (input["query"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+            query.text = text
+        }
+        if let kind = (input["kind"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+           ["ask", "note", "reminder", "agent"].contains(kind) {
+            query.kind = kind
+        }
+        query.since = Self.parseDay(input["since"], now: clock)
+        query.until = Self.parseDay(input["until"], now: clock)
+        // `days` is the relative alternative: N days counting today. Only honoured
+        // when the model didn't already name an explicit start, so the two ways of
+        // saying it can't contradict each other.
+        if query.since == nil, let days = intArgument(input["days"]), days > 0 {
+            let cal = Calendar.current
+            query.since = cal.date(byAdding: .day, value: -(min(days, 400) - 1),
+                                   to: cal.startOfDay(for: clock))
+        }
+        // A window given backwards ("since tomorrow, until today") would silently
+        // match nothing; read it as the window the model meant.
+        if let since = query.since, let until = query.until, since > until {
+            query.since = until
+            query.until = since
+        }
+        query.limit = min(max(intArgument(input["limit"]) ?? 30, 1), 60)
+
+        let digest = await lookup(query)
+        return Self.render(digest, query: query)
+    }
+
+    /// Decode an integer argument that may arrive as a number OR as a string —
+    /// both shapes show up across providers' function-calling JSON.
+    private func intArgument(_ raw: Any?) -> Int? {
+        if let i = raw as? Int { return i }
+        if let d = raw as? Double { return Int(d) }
+        if let s = raw as? String { return Int(s.trimmingCharacters(in: .whitespaces)) }
+        return nil
+    }
+
+    /// Render the digest the model reads. Newest first, one line per row, with a
+    /// header that states the window and what the kinds mean — so the model can
+    /// reason about coverage ("nothing on Tuesday") instead of guessing.
+    private static func render(_ digest: HistoryDigest, query: HistoryQuery) -> String {
+        let rows = digest.rows
+        var scope: [String] = []
+        if let since = query.since, let until = query.until {
+            scope.append("\(dayFormatter.string(from: since)) → \(dayFormatter.string(from: until))")
+        } else if let since = query.since {
+            scope.append("since \(dayFormatter.string(from: since))")
+        } else if let until = query.until {
+            scope.append("up to \(dayFormatter.string(from: until))")
+        }
+        if let kind = query.kind { scope.append("kind \(kind)") }
+        if let text = query.text { scope.append("matching “\(text)”") }
+        let window = scope.isEmpty ? "the whole archive" : scope.joined(separator: ", ")
+
+        guard !rows.isEmpty else {
+            return """
+            No entries found in the user's own archive (\(window)). Tell them you \
+            have nothing recorded for that — do not invent entries, and do not \
+            answer from your own memory as if it were their record.
+            """
+        }
+
+        // The `limit` cut, stated up front: a model handed the newest 30 rows of a
+        // 119-row week must know it is looking at a slice, or it will summarize the
+        // slice as if it were the week.
+        let capped = digest.totalMatches > rows.count
+        let count = capped
+            ? "The \(rows.count) most recent of \(digest.totalMatches) matching entries"
+            : "\(rows.count) entr\(rows.count == 1 ? "y" : "ies")"
+        var out = """
+        \(count) from the user's own archive in this app (\(window)), newest first. \
+        Kinds: ask = a question they asked this app, note / reminder = something \
+        they captured through it, agent = a coding task they ran.
+        """
+        if capped {
+            out += """
+             Because this is only the newest slice, say so if you summarize it \
+            ("of what I can see…"), or call again with a narrower date window or a \
+            higher limit.
+            """
+        }
+        out += "\n"
+        var omitted = 0
+        for (i, row) in rows.enumerated() {
+            var line = "\(i + 1). [\(row.kind)] \(rowFormatter.string(from: row.date)) — \(row.headline)"
+            if let body = row.body, !body.isEmpty { line += "\n   asked: \(body)" }
+            // Budget check before appending, so the cap is never overshot and the
+            // count of what didn't fit stays honest. The last row needs no footer,
+            // so it may use the reserve — otherwise a digest that exactly fits
+            // would drop its final row for a note it never prints.
+            let allowance = outputCap - (i == rows.count - 1 ? 0 : footerReserve)
+            guard out.count + line.count + 1 <= allowance else {
+                omitted = rows.count - i
+                break
+            }
+            out += line + "\n"
+        }
+        if omitted > 0 {
+            out += "…(\(omitted) more entr\(omitted == 1 ? "y" : "ies") omitted to stay "
+                + "within budget — narrow the date window or add a query keyword.)\n"
+        }
+        return out
     }
 }
 

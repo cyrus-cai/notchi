@@ -269,6 +269,20 @@ enum APIKeyStore {
         return stored.isEmpty ? nil : stored
     }
 
+    // MARK: - Custom endpoint
+
+    /// Whether `provider` needs a key at all before it can answer. Every hosted
+    /// vendor does; the user's own endpoint may not (a local Ollama / LM Studio /
+    /// vLLM server authenticates nobody), so its key field is optional.
+    static func requiresKey(_ provider: Provider) -> Bool { provider != .custom }
+
+    /// The key to send for `provider`, empty when there is none. Only meaningful
+    /// for providers that can run keyless (`.custom`); everywhere else the caller
+    /// still gates on `current(for:)` being non-nil first.
+    static func keyOrEmpty(for provider: Provider) -> String {
+        current(for: provider) ?? ""
+    }
+
     // MARK: - UserDefaults plumbing
 
     private static func defaultsKey(for provider: Provider) -> String {
@@ -289,4 +303,102 @@ enum APIKeyStore {
     private static func delete(_ provider: Provider) {
         UserDefaults.standard.removeObject(forKey: defaultsKey(for: provider))
     }
+}
+
+/// The user's **own** OpenAI-compatible backend, behind `Provider.custom`: a local
+/// server (Ollama, LM Studio, vLLM, llama.cpp), a self-hosted gateway (one-api,
+/// LiteLLM, New API), or any vendor Notch doesn't bundle. Everything the bundled
+/// providers get from a hardcoded `ProviderSpec` — name, endpoint, model — this
+/// one reads out of `UserDefaults` instead, so `Provider.custom.spec` is built at
+/// read time from whatever the user typed in Settings.
+///
+/// One slot, not a list: the app answers with a single selected provider, and a
+/// second custom endpoint would only ever be a second thing to switch between —
+/// which is what the provider menu already is.
+///
+/// The **key is optional** here (unlike every hosted vendor): a local server
+/// authenticates nobody, and some reject a blank `Authorization` header outright,
+/// so an empty key means the header is left off entirely (see `URLRequest.setBearer`).
+enum CustomProvider {
+    private static let nameKey = "custom_provider.name"
+    private static let urlKey  = "custom_provider.url"
+
+    /// The label shown in the provider menu. Empty ⇒ the generic fallback name.
+    static var name: String {
+        get { UserDefaults.standard.string(forKey: nameKey) ?? "" }
+        set {
+            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty { UserDefaults.standard.removeObject(forKey: nameKey) }
+            else { UserDefaults.standard.set(trimmed, forKey: nameKey) }
+        }
+    }
+
+    /// The base URL exactly as the user typed it — that's what the Settings field
+    /// shows back to them. `chatEndpoint` does the normalizing.
+    static var baseURL: String {
+        get { UserDefaults.standard.string(forKey: urlKey) ?? "" }
+        set {
+            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty { UserDefaults.standard.removeObject(forKey: urlKey) }
+            else { UserDefaults.standard.set(trimmed, forKey: urlKey) }
+        }
+    }
+
+    /// The model id to call. Stored in the same per-provider slot every other
+    /// provider's override uses, so nothing downstream needs a special case.
+    static var model: String {
+        get { APIKeyStore.storedModel(for: .custom) }
+        set { APIKeyStore.saveModel(newValue, for: .custom) }
+    }
+
+    /// Name for the provider menu: the user's label, else a generic one.
+    static var displayName: String {
+        let n = name
+        return n.isEmpty ? L("model.custom.defaultName") : n
+    }
+
+    /// The full chat URL to POST to, derived from `baseURL`. Users paste any of the
+    /// three shapes these servers document, so all three are accepted:
+    ///   `http://localhost:11434`              → `…:11434/v1/chat/completions`
+    ///   `http://localhost:1234/v1`            → `…/v1/chat/completions`
+    ///   `https://host/v1/chat/completions`    → unchanged
+    /// A scheme-less host gets `https://`. `nil` when nothing usable is stored —
+    /// the provider then reads as unconfigured everywhere.
+    static var chatEndpoint: URL? { normalized(baseURL) }
+
+    static func normalized(_ raw: String) -> URL? {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return nil }
+        if !s.contains("://") { s = "https://" + s }
+        while s.hasSuffix("/") { s.removeLast() }
+        guard let url = URL(string: s), let host = url.host, !host.isEmpty,
+              let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https"
+        else { return nil }
+        if s.hasSuffix("/chat/completions") { return url }
+        // A trailing API-version segment (`/v1`, `/v1beta`, `/v4`) means the user
+        // gave the OpenAI-compatible base — only the method path is missing.
+        let last = url.lastPathComponent
+        if last.hasPrefix("v"), last.dropFirst().first?.isNumber == true {
+            return URL(string: s + "/chat/completions")
+        }
+        return URL(string: s + "/v1/chat/completions")
+    }
+
+    /// A never-nil endpoint for `ProviderSpec`, which needs a concrete URL even
+    /// before anything is configured. The placeholder host doesn't resolve, so a
+    /// request that somehow escapes the readiness gates fails as "offline" rather
+    /// than reaching anyone.
+    static var endpointString: String {
+        chatEndpoint?.absoluteString ?? "https://custom.invalid/v1/chat/completions"
+    }
+
+    /// Whether this endpoint can actually serve a request: a usable URL **and** a
+    /// model id. There's no catalog to fall back on for someone else's server, so
+    /// without a model id there is nothing to ask for.
+    static var isConfigured: Bool { chatEndpoint != nil && !model.isEmpty }
+
+    /// The model list `Provider.custom` offers before any live `/v1/models` fetch
+    /// lands: just the id the user typed. The sentinel stands in while that field
+    /// is still empty — `isConfigured` is false then, so it never reaches the wire.
+    static var bundledModels: [String] { model.isEmpty ? ["custom"] : [model] }
 }

@@ -875,6 +875,8 @@ final class ModelCatalogStore: ObservableObject {
         case .codex:      return CodexCLIService.isAvailable
         case .claudeCode: return ClaudeCLIService.isAvailable
         case .grokCode:   return GrokCLIService.isAvailable
+        // The user's own endpoint needs a URL and a model, not necessarily a key.
+        case .custom:     return CustomProvider.isConfigured
         default:          return APIKeyStore.current(for: p) != nil
         }
     }
@@ -927,6 +929,15 @@ final class ModelCatalogStore: ObservableObject {
         }
     }
 
+    /// Forget everything cached for `p`, session cache and catalog cache alike, so
+    /// the next picker open refetches. Used when a provider's *endpoint* changes
+    /// under it — only the custom one can (see `CustomProvider`).
+    func forget(_ p: Provider) {
+        liveByProvider[p] = nil
+        featuredByProvider[p] = nil
+        ModelCatalog.invalidate(p)
+    }
+
     /// Cache a freshly fetched list (Settings fetches the current provider on open).
     func adopt(_ result: ModelCatalog.Result, for p: Provider) {
         guard !result.infos.isEmpty else { return }
@@ -971,6 +982,16 @@ final class ModelCatalogStore: ObservableObject {
         resolveClaudeAliases()
         await withTaskGroup(of: (Provider, ModelCatalog.Result?).self) { group in
             for p in Provider.allCases where liveByProvider[p] == nil {
+                // The custom endpoint joins the fetch as soon as it has a URL —
+                // its key is optional, so "no key" must not mean "no catalog"
+                // (a local Ollama / LM Studio serves `/v1/models` unauthenticated,
+                // and that list is the only way to pick one of its models).
+                if p == .custom {
+                    guard CustomProvider.chatEndpoint != nil else { continue }
+                    let key = APIKeyStore.keyOrEmpty(for: p)
+                    group.addTask { (p, await ModelCatalog.fetch(for: p, apiKey: key)) }
+                    continue
+                }
                 guard let key = APIKeyStore.current(for: p) else { continue }
                 group.addTask { (p, await ModelCatalog.fetch(for: p, apiKey: key)) }
             }

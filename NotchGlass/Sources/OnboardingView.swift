@@ -305,7 +305,9 @@ struct OnboardingView: View {
     /// every backend that takes a pasted key (all but OpenRouter).
     private var providerPicker: some View {
         Menu {
-            ForEach(Provider.allCases.filter { $0 != .openrouter }) { p in
+            // The custom endpoint isn't a paste-a-key provider — it needs a URL and
+            // a model id too, which only Settings → Model has fields for.
+            ForEach(Provider.allCases.filter { $0 != .openrouter && $0 != .custom }) { p in
                 Button(p.displayName) { selectPasteProvider(p) }
             }
         } label: {

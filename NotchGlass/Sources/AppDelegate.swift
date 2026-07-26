@@ -43,6 +43,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if provider == .grokCode {
             return GrokCLIService(model: APIKeyStore.effectiveModel(for: .grokCode))
         }
+        // A custom endpoint is gated on being *configured* (URL + model), not on a
+        // key: a local server authenticates nobody, so an empty key is a normal
+        // setup there and the request simply goes out without an auth header.
+        if provider == .custom {
+            guard CustomProvider.isConfigured else { return StubAIService() }
+            return makeService(provider: provider,
+                               apiKey: APIKeyStore.keyOrEmpty(for: provider),
+                               model: APIKeyStore.effectiveModel(for: provider))
+        }
         guard let key = APIKeyStore.current(for: provider) else {
             return StubAIService()
         }
@@ -86,6 +95,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if provider == .codex { return CodexCLIService.isAvailable }
         if provider == .claudeCode { return ClaudeCLIService.isAvailable }
         if provider == .grokCode { return GrokCLIService.isAvailable }
+        // The custom endpoint is "configured" when it has a URL and a model id —
+        // its key is optional (see `CustomProvider`).
+        if provider == .custom { return CustomProvider.isConfigured }
         return APIKeyStore.current(for: provider) != nil
     }
 

@@ -328,6 +328,54 @@ final class NotchModel: ObservableObject {
             agentInterrupted = try c.decodeIfPresent(Bool.self, forKey: .agentInterrupted)
                 ?? (agentResume != nil)
         }
+
+        /// Content search for the `search_history` tool — every place the user's own
+        /// words could be, not just the row's title. The Recent list's filter
+        /// matches `displayTitle` alone (that's the right behavior for skimming a
+        /// list of rows), but a model asked "did I ever note anything about the
+        /// landlord" has to find the word wherever it was written: in the generated
+        /// title, in the captured line, in the answer, or in any turn of a longer
+        /// thread.
+        func matchesArchiveSearch(_ needle: String) -> Bool {
+            if let title, title.localizedCaseInsensitiveContains(needle) { return true }
+            if q.localizedCaseInsensitiveContains(needle) { return true }
+            if a.localizedCaseInsensitiveContains(needle) { return true }
+            return (turns ?? []).contains { $0.text.localizedCaseInsensitiveContains(needle) }
+        }
+
+        /// Squeeze a stored field onto ONE line: the digest is line-per-row, so a
+        /// multi-line note ("会议结论\n下周二出稿") would otherwise split into what
+        /// reads as two separate entries.
+        private static func flattened(_ s: String) -> String {
+            s.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        }
+
+        /// Flatten to the one line the model reads (see `HistoryDigestRow`).
+        ///
+        /// The headline is free summarization the app already paid for: an Ask row's
+        /// `title` was generated from the whole exchange, and a capture's `q` IS the
+        /// user's line — so a day of activity reads as a day of activity without any
+        /// transcript crossing the wire. `body` carries the literal question behind
+        /// an Ask only when the title is a summary that doesn't already say it.
+        var digestRow: HistoryDigestRow {
+            var kind = source.rawValue
+            // A failed run must not read like an ordinary finished task.
+            if source == .agent, let outcome = agentOutcome, !outcome.isEmpty {
+                kind += "·\(outcome)"
+            }
+            let headline = String(Self.flattened(displayTitle)
+                .prefix(HistoryDigestRow.headlineCap))
+            var body: String? = nil
+            if source.isThread {
+                let asked = Self.flattened(q)
+                // Only when it adds something: an untitled row's headline already IS
+                // the question, and repeating it would just spend budget.
+                if !asked.isEmpty, asked != headline {
+                    body = String(asked.prefix(HistoryDigestRow.bodyCap))
+                }
+            }
+            return HistoryDigestRow(date: t, kind: kind, headline: headline, body: body)
+        }
     }
 
     // Open / closed drives the grow-out-of-the-notch animation.
@@ -2205,6 +2253,66 @@ final class NotchModel: ObservableObject {
         }
         filteredHistoryCache = items
         return items
+    }
+
+    // MARK: - Archive as context (search_history)
+
+    /// Answer one `search_history` call: the slice of the user's own archive the
+    /// model asked for, flattened to the digest rows it actually reads.
+    ///
+    /// Deliberately NOT `filteredHistory`: that pipeline serves the on-screen list
+    /// (its inputs are the UI's own filter chips, and its text match only looks at
+    /// `displayTitle`, so a keyword that appears in the body of a note finds
+    /// nothing). This one is a real content search over the whole row, and it must
+    /// never be perturbed by — or perturb — whatever the user has typed into the
+    /// Recent filter field.
+    ///
+    /// Two rows are always withheld:
+    ///  • **`pending`** — the question being answered right now is parked in
+    ///    `history` the instant it's submitted (`parkPending`), so without this the
+    ///    model would find the very question it is currently answering and report
+    ///    it back as a past activity.
+    ///  • **the thread on screen** — already in the wire context verbatim; the tool
+    ///    exists for what's *outside* the current conversation.
+    func searchArchive(_ query: HistoryQuery) -> HistoryDigest {
+        Self.archiveDigest(query, in: history, currentThread: threadHistoryID)
+    }
+
+    /// The query itself, as a pure function of (request, rows) — so it can be
+    /// exercised against fixtures and against a real `history.json` without
+    /// standing up a `NotchModel` (see `scripts/history_eval`). `nonisolated`
+    /// because nothing here touches this object's state: the two rows the instance
+    /// method withholds are passed in, not read.
+    nonisolated static func archiveDigest(_ query: HistoryQuery,
+                                          in items: [HistoryItem],
+                                          currentThread: UUID?) -> HistoryDigest {
+        let cal = Calendar.current
+        // `until` names a whole day, so the bound is the START of the following day
+        // and the comparison is strictly-less — otherwise "until today" would drop
+        // everything after 00:00 today, i.e. all of today.
+        let lowerBound = query.since.map { cal.startOfDay(for: $0) }
+        let upperBound = query.until
+            .flatMap { cal.date(byAdding: .day, value: 1, to: cal.startOfDay(for: $0)) }
+
+        let matches = items.lazy.filter { item in
+            guard !item.pending else { return false }
+            guard item.id != currentThread else { return false }
+            if let kind = query.kind, item.source.rawValue != kind { return false }
+            if let lower = lowerBound, item.t < lower { return false }
+            if let upper = upperBound, item.t >= upper { return false }
+            guard let needle = query.text, !needle.isEmpty else { return true }
+            return item.matchesArchiveSearch(needle)
+        }
+
+        // `history` is maintained newest-first (every write inserts at 0), but sort
+        // explicitly rather than lean on that — the digest states "newest first" to
+        // the model, and a row that ever lands out of order would make it misread
+        // the chronology it's summarizing.
+        let ordered = matches.sorted { $0.t > $1.t }
+        // The full match count rides along, not just the capped slice: it's what
+        // lets the digest admit it was truncated (see `HistoryDigest`).
+        return HistoryDigest(rows: ordered.prefix(query.limit).map(\.digestRow),
+                             totalMatches: ordered.count)
     }
 
     private var ai: AIService
@@ -4273,16 +4381,25 @@ final class NotchModel: ObservableObject {
                 // that can't do tools, or a turn with an empty registry, falls
                 // straight back to the existing behavior: nothing about plain Q&A
                 // changes.
-                // The standard tool set, plus this round's `ask_user` bridge: the
-                // tool's suspension is owned by the model (`awaitUserChoice`), keyed
-                // to THIS round's answer turn so the question card renders under the
-                // answer it interrupts.
+                // The standard tool set, plus the two tools that can't live in
+                // `ToolRegistry.standard(for:)` because they need the live model:
+                //  · `ask_user` — its suspension is owned by the model
+                //    (`awaitUserChoice`), keyed to THIS round's answer turn so the
+                //    question card renders under the answer it interrupts;
+                //  · `search_history` — reads the archive off `history`, which is
+                //    main-actor state on this object.
                 var agentTools = ToolRegistry.standard(for: APIKeyStore.selectedProvider).tools
                 agentTools.append(AskUserTool { [weak self] question, options in
                     guard let self else { throw CancellationError() }
                     return try await self.awaitUserChoice(answerID: answerID,
                                                           question: question,
                                                           options: options)
+                })
+                agentTools.append(SearchHistoryTool { [weak self] query in
+                    // A round whose model went away has no archive to read; an empty
+                    // digest renders as "nothing recorded", which is honest.
+                    guard let self else { return .empty }
+                    return await MainActor.run { self.searchArchive(query) }
                 })
                 let registry = ToolRegistry(agentTools)
                 // The service for THIS turn: a one-shot regenerate override (XII-135)

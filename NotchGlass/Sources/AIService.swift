@@ -1,5 +1,18 @@
 import Foundation
 
+extension URLRequest {
+    /// Set `Authorization: Bearer …`, or leave the header off entirely when there
+    /// is no key. Every hosted vendor always has one; a user's own endpoint
+    /// (`Provider.custom` pointed at Ollama / LM Studio / vLLM) authenticates
+    /// nobody, and a blank `Bearer ` is worse than no header at all — some servers
+    /// reject the empty credential outright.
+    mutating func setBearer(_ key: String) {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        setValue("Bearer \(trimmed)", forHTTPHeaderField: "Authorization")
+    }
+}
+
 /// One turn in a conversation, in the shape every chat API expects: a `role`
 /// (`"user"` or `"assistant"`) and its `content`. `NotchModel` builds the running
 /// list and hands the whole thing to the service on each submit, so a follow-up
@@ -181,6 +194,11 @@ answer from the results.
 - What the user copied ("this", "what I copied") → read_clipboard.
 - Exact arithmetic → calculate.
 - The current clock time → current_datetime (today's date is already stated above).
+- The user's own past activity in this app — "what did I work on today", "what \
+have I recorded", "what did I ask you yesterday", "summarize my week", "did I \
+ever note anything about X" → search_history. It reads their own questions, \
+notes, reminders and agent tasks, with timestamps. The current conversation is \
+already in front of you, so only reach for it to see beyond this thread.
 
 You don't need to spell out your source every time; cite it only when it \
 matters — when the claim is contested, surprising, or the user would want to \
@@ -336,6 +354,11 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     case kimi
     case minimax
     case mimo
+    // The user's own OpenAI-compatible endpoint — a local server, a self-hosted
+    // gateway, or a vendor we don't bundle. Last in the menu: it's the escape
+    // hatch for everything the list above doesn't cover. Its whole spec is read
+    // from Settings at call time (see `CustomProvider`), not hardcoded here.
+    case custom
 
     var id: String { rawValue }
 
@@ -483,6 +506,20 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
                 signupHost: "platform.moonshot.cn",
                 signupURL: "https://platform.moonshot.cn/console/api-keys/api_key",
                 envVarName: "KIMI_API_KEY")
+        case .custom:
+            // Everything here is the user's, read fresh from `UserDefaults` on
+            // every access so editing the endpoint in Settings takes effect on the
+            // next request — no relaunch, no cached spec. `signupURL` points at the
+            // endpoint itself (there's no key console to send anyone to); the
+            // Settings footer replaces the "get a key at …" line for this provider,
+            // so that link is only a fallback.
+            return ProviderSpec(
+                displayName: CustomProvider.displayName,
+                endpoint: CustomProvider.endpointString,
+                models: CustomProvider.bundledModels,
+                signupHost: CustomProvider.chatEndpoint?.host ?? "",
+                signupURL: CustomProvider.endpointString,
+                envVarName: "CUSTOM_API_KEY")
         }
     }
 
@@ -502,6 +539,9 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // Grok's model likewise isn't a curated shortlist — it's the account's own,
         // read from the CLI's model cache (see `GrokCLIService`).
         if self == .grokCode { return GrokCLIService.defaultModel }
+        // The custom endpoint's model is the user's own typed id — a remote
+        // manifest has no business overriding someone's private server.
+        if self == .custom { return spec.defaultModel }
         return RemoteModelManifest.models(for: self)?.first ?? spec.defaultModel
     }
     var availableModels: [String] {
@@ -512,6 +552,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // Grok's list is the account's real models from `~/.grok/models_cache.json`
         // (see `GrokCLIService`), falling back to the single "grok" sentinel.
         if self == .grokCode { return GrokCLIService.availableModelIDs }
+        if self == .custom { return spec.availableModels }
         return RemoteModelManifest.models(for: self) ?? spec.availableModels
     }
     var signupHost: String      { spec.signupHost }
@@ -533,7 +574,9 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     /// hundreds of third-party models they front.
     var vendorName: String? {
         switch self {
-        case .openrouter, .vercel:    return nil
+        // The gateways front other people's models, and a custom endpoint could be
+        // serving anything at all — in both cases the id has to speak for itself.
+        case .openrouter, .vercel, .custom: return nil
         case .openai, .codex:         return "OpenAI"
         case .anthropic, .claudeCode: return "Anthropic"
         case .grokCode:               return "xAI"
@@ -862,7 +905,7 @@ struct OpenAICompatAIService: AIService {
                         req.httpMethod = "POST"
                         req.timeoutInterval = Self.streamTimeout
                         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                        req.setBearer(apiKey)
                         for (field, value) in provider.extraHeaders {
                             req.setValue(value, forHTTPHeaderField: field)
                         }
@@ -1391,6 +1434,15 @@ enum ModelCatalog {
         return result
     }
 
+    /// Drop the cached catalog for `provider`. The cache keys on (provider, key),
+    /// which is enough while a provider's endpoint is fixed — but the custom
+    /// endpoint's URL is itself editable, so pointing it at a different server
+    /// with the same (often empty) key would otherwise serve the old server's
+    /// model list. Settings calls this when those fields change.
+    static func invalidate(_ provider: Provider) {
+        withCacheLock { cache[provider] = nil }
+    }
+
     /// The actual network round-trip behind `fetch` — split out so `fetch` can
     /// wrap it with the cache check/write above without indenting this whole body.
     private static func fetchLive(for provider: Provider, apiKey: String) async -> Result? {
@@ -1398,7 +1450,7 @@ enum ModelCatalog {
         var req = URLRequest(url: url)
         req.httpMethod = "GET"
         if provider.isOpenAICompatible {
-            req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            req.setBearer(apiKey)
         } else {
             // Anthropic: same key header + pinned version as the messages API.
             req.setValue(apiKey, forHTTPHeaderField: "x-api-key")
@@ -2348,7 +2400,9 @@ enum ConnectivityTest {
     /// actor. Returns a verdict — never throws.
     static func run(provider: Provider, apiKey: String) async -> Result {
         let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty else { return .missingKey }
+        // A custom endpoint may legitimately have no key (a local server), so the
+        // probe still runs — "can I reach it?" is exactly what Test means there.
+        guard !key.isEmpty || provider == .custom else { return .missingKey }
         guard let url = probeURL(for: provider) else {
             // No /models sibling we can derive — fall back to "we can't test this".
             return .failed(L("conn.unavailable"))
@@ -2357,7 +2411,7 @@ enum ConnectivityTest {
         var req = URLRequest(url: url)
         req.httpMethod = "GET"
         if provider.isOpenAICompatible {
-            req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+            req.setBearer(key)
         } else {
             req.setValue(key, forHTTPHeaderField: "x-api-key")
             req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
@@ -2457,7 +2511,7 @@ extension OpenAICompatAIService: AgentCapableService {
                         req.httpMethod = "POST"
                         req.timeoutInterval = Self.streamTimeout
                         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                        req.setBearer(apiKey)
                         for (field, value) in provider.extraHeaders {
                             req.setValue(value, forHTTPHeaderField: field)
                         }
