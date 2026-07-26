@@ -254,10 +254,11 @@ struct InlineSettingsView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     switch section {
                     case .model:
-                        // The model is the protagonist: the pane leads with the
-                        // picker chip. Provider and API key are supporting cast —
-                        // folded into `keySection`, which only unfolds when a pick
-                        // actually needs a key (or the user opens it by hand).
+                        // Two steps, in the order you make them: pick the backend,
+                        // then pick one of *its* models. The API key stays supporting
+                        // cast — folded into `keySection`, which only unfolds when the
+                        // choice actually needs a key (or the user opens it by hand).
+                        providerRow
                         modelRow
                         keySection
                         customInstructionsRow
@@ -447,12 +448,11 @@ struct InlineSettingsView: View {
     private func providerReady(_ p: Provider) -> Bool { ModelCatalogStore.ready(p) }
 
     /// The collapsed-by-default key management block. At rest it's one quiet
-    /// disclosure line; expanded it leads with the serving provider as a read-only
-    /// fact (the provider is picked *by picking a model*, never here), then that
-    /// provider's key/account row and the where-to-get-a-key footer. Other
-    /// providers' keys are reached the same way models are — through the picker
-    /// ("Add key" on a keyless model, or switch to a keyed one). A required
-    /// setup (see `setupRequired`) forces it open with a one-line reason on top.
+    /// disclosure line; expanded it carries the key/account row for whichever
+    /// provider it's aimed at (normally the one the Provider row names) and the
+    /// where-to-get-a-key footer. A required setup (see `setupRequired`) forces it
+    /// open with a one-line reason on top — which is what picking an unconfigured
+    /// provider upstairs triggers.
     @ViewBuilder
     private var keySection: some View {
         let expanded = keySectionOpen || setupRequired
@@ -495,16 +495,18 @@ struct InlineSettingsView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                // The backend serving the current model — a fact, not a control.
-                // The provider is chosen by picking a model (each picker row is a
-                // one-to-one (provider, model) pair); nothing here can reroute it,
-                // so this row never dresses as a menu.
-                settingRow(label: L("model.provider")) {
-                    Text(provider.displayName)
-                        .font(.sf(13))
-                        .foregroundStyle(Tokens.text1)
-                        .lineLimit(1)
-                        .frame(height: 30)
+                // Whose key this section is editing — shown only when that isn't the
+                // active provider (the ⌘⇧I picker's "Add key" aims it elsewhere).
+                // For the ordinary case the Provider row above already says it, and
+                // repeating it here would read as a second, contradicting control.
+                if keyScope != provider {
+                    settingRow(label: L("model.provider")) {
+                        Text(keyScope.displayName)
+                            .font(.sf(13))
+                            .foregroundStyle(Tokens.text1)
+                            .lineLimit(1)
+                            .frame(height: 30)
+                    }
                 }
 
                 // Codex has no key to paste — it shows a sign-in status row. OpenRouter
@@ -545,10 +547,10 @@ struct InlineSettingsView: View {
         editingKey = apiKey.isEmpty && !APIKeyStore.hasEnvOverride(for: p)
     }
 
-    /// Switch the active backend — the provider whose model answers. Reached only
-    /// through model selection now (the pane has no standalone provider control).
-    /// The key section always follows the backend: the only state where it aims
-    /// elsewhere is a pending model (picker "Add key"), which retargets it itself.
+    /// Switch the active backend — the provider whose model answers. Driven by the
+    /// Provider row (step one) and by a cross-provider pick arriving from the ⌘⇧I
+    /// picker. The key section always follows the backend: the only state where it
+    /// aims elsewhere is a pending model (picker "Add key"), which retargets it itself.
     private func selectProvider(_ newValue: Provider) {
         guard newValue != provider else { return }
         provider = newValue
@@ -1245,10 +1247,43 @@ struct InlineSettingsView: View {
         return modelID.isEmpty ? provider.defaultModel : modelID
     }
 
+    /// Step one: **which backend answers.** A plain menu of every provider, split
+    /// into the ones that can answer right now and the ones that still need a key —
+    /// so the useful half is never buried among a dozen unconfigured vendors.
+    ///
+    /// Picking an unconfigured provider is a legitimate move (it's how you get to a
+    /// new vendor's key field): the switch goes through, and `keySection` unfolds
+    /// itself on the spot because `setupRequired` now holds.
+    private var providerRow: some View {
+        settingRow(label: L("model.provider")) {
+            GlassMenu(title: provider.displayName) {
+                let ready = Provider.allCases.filter(providerReady)
+                let unready = Provider.allCases.filter { !providerReady($0) }
+                if !ready.isEmpty {
+                    SwiftUI.Section(L("model.picker.configured")) {
+                        ForEach(ready) { p in
+                            Button(p.displayName) { selectProvider(p) }
+                        }
+                    }
+                }
+                if !unready.isEmpty {
+                    SwiftUI.Section(L("model.picker.unconfigured")) {
+                        ForEach(unready) { p in
+                            Button(p.displayName) { selectProvider(p) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Step two: **which of that provider's models.** The picker card is the same
+    /// one the ⌘⇧I summon opens, locked to the chosen provider — search, the fold,
+    /// and the detail pane all work over that provider's catalog alone.
     private var modelRow: some View {
         settingRow(label: L("model.label")) {
             HStack(spacing: 6) {
-                // The chip anchors the cross-provider picker as a native popover.
+                // The chip anchors the model picker as a native popover.
                 // A popover opens in its own window outside the island's tracking
                 // area, so `model.isModelPickerOpen` suspends the panel's
                 // leave-collapse for as long as it's up (see NotchModel).
@@ -1285,6 +1320,9 @@ struct InlineSettingsView: View {
                         models: catalog.rows(selected: provider),
                         selectedProvider: provider,
                         selectedID: effectiveModelID,
+                        // The provider is settled one row up — this list is its
+                        // models only.
+                        lockedProvider: provider,
                         onSelect: { prov, id in
                             selectAcrossProviders(provider: prov, model: id)
                             modelPickerOpen = false

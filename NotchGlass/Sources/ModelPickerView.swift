@@ -45,6 +45,12 @@ struct ModelPickerView: View {
     let selectedProvider: Provider
     /// The id currently in effect within `selectedProvider` (empty = its default).
     let selectedID: String
+    /// When set, the picker is the **second step of a two-step choice**: the provider
+    /// was already picked (Settings' own Provider row), so the list shows only that
+    /// provider's models and the provider filter chip disappears — filtering by
+    /// provider inside a single-provider list would be a control with nothing to do.
+    /// Nil = the flat cross-provider list (the ⌘⇧I picker).
+    var lockedProvider: Provider? = nil
     /// Commit a selection: (provider, model id). Only fires for usable models.
     let onSelect: (Provider, String) -> Void
     /// Set up a keyless model (the "Add key" affordance): the settings pane opens
@@ -107,6 +113,10 @@ struct ModelPickerView: View {
     /// read this rather than `models`, so a filtered picker behaves exactly like an
     /// unfiltered one over a smaller catalog.
     private var scoped: [PickerModel] {
+        // A locked provider outranks the filter chip (which isn't drawn at all in
+        // that mode) — the provider was chosen one row up, and nothing in here may
+        // widen the list back out across providers.
+        if let locked = lockedProvider { return models.filter { $0.provider == locked } }
         guard !providerFilter.isEmpty else { return models }
         return models.filter { providerFilter.contains($0.provider) }
     }
@@ -318,7 +328,11 @@ struct ModelPickerView: View {
         return VStack(spacing: 8) {
             HStack(spacing: 6) {
                 searchField
-                providerFilterChip
+                // Only the cross-provider list needs the filter; a locked picker is
+                // already narrowed to one provider, so the search field takes the row.
+                if lockedProvider == nil {
+                    providerFilterChip
+                }
             }
             ScrollViewReader { proxy in
                 ScrollView(showsIndicators: false) {
