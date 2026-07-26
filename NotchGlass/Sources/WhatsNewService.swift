@@ -64,6 +64,14 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.3.0",
+            date: "2026-07-26",
+            features: [
+                "Point Notch at your own OpenAI-compatible endpoint — Ollama, LM Studio, vLLM, a gateway, or a vendor not listed. The key is optional.",
+                "Ask about your own record: the assistant can search the questions, notes, reminders and agent tasks you've kept here.",
+            ]
+        ),
+        Entry(
             version: "0.2.6",
             date: "2026-07-26",
             features: [
