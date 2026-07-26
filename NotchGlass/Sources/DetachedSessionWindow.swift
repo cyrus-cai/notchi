@@ -3,10 +3,15 @@ import SwiftUI
 
 // MARK: - What a detached window holds
 
-/// One session torn out of the notch into its own window: either a chat thread
-/// (Ask, or a reopened agent-run thread) identified by its history id, or a live
-/// agent task identified by its `AgentTaskManager` id.
+/// One session torn out of the notch into its own window: a chat thread (Ask, or
+/// a reopened agent-run thread) identified by its history id, a live agent task
+/// identified by its `AgentTaskManager` id, or — with no session at all — the
+/// idle prompt itself, torn out as a standalone composer. `.compose` carries no
+/// id on purpose: it is the one page there can only ever be one of, so a second
+/// tear-off focuses the composer already open instead of forking a twin. Sending
+/// its first question promotes it to `.thread` in place (see `adoptThread`).
 enum DetachedSession: Equatable {
+    case compose
     case thread(id: UUID)
     case agentTask(id: UUID)
 
@@ -90,12 +95,15 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
         controllers.first { $0.session == session }
     }
 
-    let session: DetachedSession
+    /// What this window holds *right now* — a composer can become a thread
+    /// mid-life, so it lives in the observable state and every reader (the merge
+    /// zone, the twin check, the root view) goes through here.
+    var session: DetachedSession { state.session }
+    private var threadStore: DetachedThreadStore? { state.threadStore }
     private let face: DetachedCardFace
     private weak var model: NotchModel?
     private var window: NSWindow!
-    private let state = DetachedWindowState()
-    private var threadStore: DetachedThreadStore?
+    private let state: DetachedWindowState
 
     /// Mid-drag machinery (tear-off path only).
     private var dragMonitor: Any?
@@ -125,7 +133,7 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
         }
         let c = DetachedSessionWindowController(session: session, face: face, model: model)
         controllers.append(c)
-        c.makeWindow(at: spawnRect ?? c.centeredDefaultRect())
+        c.makeWindow(at: spawnRect ?? c.centeredDefaultRect(), model: model)
         if reduceMotion {
             c.window.alphaValue = 1
         } else {
@@ -152,24 +160,101 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
         }
         let c = DetachedSessionWindowController(session: session, face: face, model: model)
         controllers.append(c)
-        c.makeWindow(at: spawnRect)
+        c.makeWindow(at: spawnRect, model: model)
         c.beginRide()
     }
 
     private init(session: DetachedSession, face: DetachedCardFace, model: NotchModel) {
-        self.session = session
+        self.state = DetachedWindowState(session: session)
         self.face = face
         self.model = model
         super.init()
         if let threadID = session.threadID {
-            let store = model.adoptDetachedThread(threadID)
-            self.threadStore = store
+            state.threadStore = model.adoptDetachedThread(threadID)
+        }
+        if case .compose = session {
+            // The line the user was already writing rides out with the window.
+            // Read before `completeDetach` clears the panel's box — both entry
+            // points construct the controller first.
+            state.composeDraft = model.text
         }
     }
 
+    /// The composer sent its first question: this window IS that thread now.
+    /// Re-key it, adopt the round's live mirror, and let the root view swap the
+    /// composer for the conversation — same window, in place, no second window
+    /// and no trip back through the notch.
+    private func adoptThread(_ threadID: UUID) {
+        guard let model, state.session == .compose else { return }
+        let store = model.adoptDetachedThread(threadID)
+        state.threadStore = store
+        withAnimation(Self.reduceMotion ? nil : .easeOut(duration: 0.2)) {
+            state.session = .thread(id: threadID)
+        }
+        growIntoThread()
+    }
+
+    /// A composer is a short window (it holds one input line); the conversation
+    /// it just became needs room to write. Grow downward from the same top edge
+    /// so the box the user typed in doesn't move under their eyes.
+    private func growIntoThread() {
+        let frame = window.frame
+        let target = Self.threadWindowSize
+        guard frame.height < target.height || frame.width < target.width else { return }
+        var grown = NSRect(x: frame.minX, y: frame.maxY - max(frame.height, target.height),
+                           width: max(frame.width, target.width),
+                           height: max(frame.height, target.height))
+        if let visible = window.screen?.visibleFrame {
+            grown.origin.x = max(visible.minX + 8, min(grown.origin.x, visible.maxX - grown.width - 8))
+            grown.origin.y = max(visible.minY + 8, min(grown.origin.y, visible.maxY - grown.height - 8))
+        }
+        window.minSize = Self.threadMinSize
+        if Self.reduceMotion {
+            window.setFrame(grown, display: true)
+        } else {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.24
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                window.animator().setFrame(grown, display: true)
+            }
+        }
+    }
+
+    /// The draft wrapped (or a save cue appeared / cleared): grow or shrink the
+    /// slab from its BOTTOM edge, so the box the user is typing in never moves.
+    /// Composer only — once it's a thread the window is the user's to size.
+    private func resizeComposer(to height: CGFloat) {
+        guard state.session == .compose, window != nil else { return }
+        let frame = window.frame
+        guard abs(frame.height - height) > 0.5 else { return }
+        var target = NSRect(x: frame.minX, y: frame.maxY - height,
+                            width: frame.width, height: height)
+        if let visible = window.screen?.visibleFrame, target.minY < visible.minY + 8 {
+            target.origin.y = visible.minY + 8
+        }
+        window.setFrame(target, display: true, animate: false)
+    }
+
+    /// A settled session window's working size, and the floor it may be dragged
+    /// down to. A composer opens far shorter than this (see `makeWindow`).
+    private static let threadWindowSize = NSSize(width: 560, height: 460)
+    private static let threadMinSize = NSSize(width: 420, height: 320)
+    /// Kept BELOW the composer's resting height — a floor above it would have
+    /// AppKit inflate the window the moment it's created.
+    private static let composeMinSize = NSSize(width: 380, height: 96)
+
     // MARK: Window construction
 
-    private func makeWindow(at rect: NSRect) {
+    private func makeWindow(at rect: NSRect, model: NotchModel) {
+        var rect = rect
+        let composing = session == .compose
+        if composing {
+            // A composer is just the input: born as a slab the height of the
+            // prompt row, hanging from the same top edge the panel had, instead
+            // of a session-sized window three-quarters empty.
+            let h = DetachedComposeView.restingHeight
+            rect = NSRect(x: rect.minX, y: rect.maxY - h, width: rect.width, height: h)
+        }
         let w = DetachedWindow(
             contentRect: rect,
             styleMask: [.borderless, .resizable],
@@ -183,7 +268,7 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
         w.isReleasedWhenClosed = false
         w.isMovableByWindowBackground = true
         w.appearance = NSAppearance(named: .darkAqua)
-        w.minSize = NSSize(width: 420, height: 320)
+        w.minSize = composing ? Self.composeMinSize : Self.threadMinSize
         // While being carried it floats above everything, like a piece of the
         // island in the hand. `finishSettle` drops it to its pinned level.
         w.level = .statusBar
@@ -193,8 +278,7 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
         // kept current by the model (`runDetachedRound`).
         let root = DetachedSessionRootView(
             state: state,
-            session: session,
-            threadStore: threadStore,
+            model: model,
             onReattach: { [weak self] in self?.mergeBack(animated: true) },
             onTogglePin: { [weak self] in self?.togglePin() },
             onClose: { [weak self] in self?.window.close() },
@@ -215,7 +299,16 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
             },
             regenerateOptions: { [weak self] in
                 self?.model?.regenerateModelOptions ?? []
-            })
+            },
+            // Enter in the composer: the round runs headless through the panel
+            // pipeline and this window becomes the thread it started.
+            onCompose: { [weak self] line, destination in
+                guard let self, let model = self.model else { return }
+                if let threadID = model.submitDetachedCompose(line, destination: destination) {
+                    self.adoptThread(threadID)
+                }
+            },
+            onComposeHeight: { [weak self] h in self?.resizeComposer(to: h) })
             .environmentObject(Localization.shared)
             // This window's own edges are the wall its hover tooltips clamp to —
             // the island's coordinate space doesn't reach here.
@@ -393,6 +486,7 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
             guard let self else { return }
             model.reattachDetachedSession(self.session,
                                           snapshot: self.threadStore?.turns,
+                                          draft: self.state.composeDraft,
                                           on: display)
             self.window.close()
         }
@@ -435,14 +529,31 @@ final class DetachedWindowState: ObservableObject {
     @Published var phase: Phase = .riding
     @Published var tilt: Double = 0
     @Published var pinned = true
+    /// What the window holds. Mutable because a `.compose` window becomes the
+    /// `.thread` it starts — the same window keeps writing where the composer
+    /// stood, so this can't be fixed at birth.
+    @Published var session: DetachedSession
+    /// The live mirror of the thread being watched — nil while composing.
+    @Published var threadStore: DetachedThreadStore?
+    /// The composer's unsent line: seeded from the panel's box at tear-off, and
+    /// handed back to it on a merge home.
+    @Published var composeDraft = ""
+
+    init(session: DetachedSession) {
+        self.session = session
+    }
 }
 
 /// Root view: the glass slab, wearing the tear-off card while riding the drag
 /// and crossfading into the full session view on landing.
 struct DetachedSessionRootView: View {
     @ObservedObject var state: DetachedWindowState
-    let session: DetachedSession
-    let threadStore: DetachedThreadStore?
+    /// Only the composer talks to the panel model directly (its placeholder, its
+    /// armed bucket, its note-save feedback all live there) — and only IT
+    /// observes it. Held here as a plain reference on purpose: observing the
+    /// model at this level would re-render a streaming thread window on every
+    /// unrelated model publish.
+    let model: NotchModel
     var onReattach: () -> Void
     var onTogglePin: () -> Void
     var onClose: () -> Void
@@ -453,6 +564,10 @@ struct DetachedSessionRootView: View {
     var onRegenerate: () -> Void = {}
     var onRegenerateWith: (String) -> Void = { _ in }
     var regenerateOptions: () -> [(model: String, isCurrent: Bool)] = { [] }
+    /// Enter in the composer face: the line and where it reads as going.
+    var onCompose: (String, NotchModel.Panel) -> Void = { _, _ in }
+    /// The composer's wanted height as its draft wraps — the window follows it.
+    var onComposeHeight: (CGFloat) -> Void = { _ in }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -483,11 +598,16 @@ struct DetachedSessionRootView: View {
 
     @ViewBuilder
     private var sessionBody: some View {
-        if let taskID = session.taskID {
+        if state.session == .compose {
+            DetachedComposeView(state: state, model: model, pinned: state.pinned,
+                                onTogglePin: onTogglePin, onReattach: onReattach,
+                                onClose: onClose, onSubmit: onCompose,
+                                onDesiredHeight: onComposeHeight)
+        } else if let taskID = state.session.taskID {
             DetachedAgentTaskView(taskID: taskID, pinned: state.pinned,
                                   onTogglePin: onTogglePin, onReattach: onReattach,
                                   onClose: onClose)
-        } else if let threadStore {
+        } else if let threadStore = state.threadStore {
             DetachedThreadView(store: threadStore, pinned: state.pinned,
                                onTogglePin: onTogglePin, onReattach: onReattach,
                                onClose: onClose,
@@ -634,6 +754,261 @@ struct DetachedWindowGlass: View {
                     .allowsHitTesting(false)
             )
             .ignoresSafeArea()
+    }
+}
+
+// MARK: - Compose window body
+
+/// The idle prompt, torn out: a standalone composer window. It carries the
+/// panel's own input (`PromptField`, the same inline destination ghost, the same
+/// Tab correction cycle) but keeps its line to itself — the notch's box is
+/// cleared when the composer leaves, so the two never write over each other.
+///
+/// Enter routes exactly as it would in the notch: Note and Remind file through
+/// the identical services (their feedback lands on the model, mirrored below),
+/// an armed Agent bucket spawns its run into the tray, and an Ask starts a round
+/// that this very window then holds — the composer becomes the conversation in
+/// place (`DetachedSessionWindowController.adoptThread`).
+///
+/// It classifies its own text rather than borrowing `model.liveIntent`: that one
+/// reads the *panel's* box, which is empty while this window has the line.
+struct DetachedComposeView: View {
+    @ObservedObject var state: DetachedWindowState
+    @ObservedObject var model: NotchModel
+    var pinned: Bool
+    var onTogglePin: () -> Void
+    var onReattach: () -> Void
+    var onClose: () -> Void
+    var onSubmit: (String, NotchModel.Panel) -> Void
+    /// The height this composer wants right now — the window follows it, so the
+    /// slab grows with a wrapping draft exactly as the notch does.
+    var onDesiredHeight: (CGFloat) -> Void = { _ in }
+
+    @State private var focused = false
+    @State private var caretWidth: CGFloat = 0
+    @State private var caretY: CGFloat = 0
+    @State private var inputHeight: CGFloat = PromptField.lineHeight(for: NotchBody.idleFontSize)
+    /// This window's own read of its own line — see the type comment.
+    @State private var reading: IntentEngine.Reading = .empty
+    @State private var due: Date?
+    /// Tab's manual destination override, scoped to the line being written
+    /// exactly like the panel's (`NotchModel.manualPanelOverride`).
+    @State private var override: NotchModel.Panel?
+
+    /// The window's height with a one-line prompt: the body's insets, the header,
+    /// its gap, and the input row. A wrapped draft grows the window from here.
+    static let restingHeight: CGFloat = 15 + 26 + 10 + NotchBody.idleRowHeight + 14
+
+    /// One feedback line's own height plus its gap — added to the window when a
+    /// save cue is up, so the cue never squeezes the input.
+    private static let feedbackHeight: CGFloat = 8 + 16
+
+    private var desiredHeight: CGFloat {
+        Self.restingHeight
+            + max(0, inputHeight - PromptField.lineHeight(for: NotchBody.idleFontSize))
+            + (feedbackText == nil ? 0 : Self.feedbackHeight)
+    }
+
+    private var draft: String { state.composeDraft }
+
+    private var trimmed: String {
+        draft.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Where Enter sends this line. Same resolution as the panel's
+    /// `effectiveSubmitPanel`: an explicit Tab override beats a confident read,
+    /// which beats the resting "ambiguous → ask" default.
+    private var destination: NotchModel.Panel {
+        if let override { return override }
+        guard reading.confidence >= NotchModel.intentActionFloor else { return .chat }
+        switch reading.intent {
+        case .ask:       return .chat
+        // A future time in a note upgrades it to a reminder — the same rule the
+        // panel applies in `suggestedPanel`.
+        case .note:      return due != nil ? .reminder : .note
+        case .ambiguous: return .chat
+        }
+    }
+
+    /// An armed Agent bucket owns the line regardless of what the classifier
+    /// reads — the same precedence `submitCurrent()` uses.
+    private var goesToAgent: Bool { model.agentComposeActive }
+
+    private var hintLabel: String {
+        if goesToAgent { return L("hint.agent") }
+        switch destination {
+        case .chat:     return L("hint.ask")
+        case .note:     return L("hint.note")
+        case .reminder: return L("hint.remind")
+        }
+    }
+
+    private var hintSuffix: String {
+        goesToAgent ? " " + model.agentArmedEngine.displayName : ""
+    }
+
+    private var hintInk: Color {
+        goesToAgent ? Tokens.agentInk : destination.intentInk
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            composerRow
+                .padding(.top, 10)
+            if let feedback = feedbackText {
+                Text(feedback)
+                    .font(.sf(12))
+                    .tracking(0.2)
+                    .foregroundStyle(model.noteError == nil ? Tokens.text4 : Tokens.text2)
+                    .lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 8)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 15)
+        .padding(.bottom, 14)
+        .onAppear {
+            // Same false→true edge the panel uses to hand an AppKit field
+            // first-responder; the small delay lets the window become key first.
+            focused = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { focused = true }
+        }
+        .onChange(of: desiredHeight) { _, h in onDesiredHeight(h) }
+        // Debounced classification of THIS window's line, mirroring
+        // `NotchModel.scheduleClassification` (140ms, then the engine) plus the
+        // date read that upgrades a timed note to a reminder. `.task(id:)`
+        // cancels the in-flight read on every keystroke, so only the text
+        // actually in the box can ever label it.
+        .task(id: trimmed) {
+            let snapshot = trimmed
+            guard !snapshot.isEmpty else {
+                reading = .empty
+                due = nil
+                return
+            }
+            try? await Task.sleep(nanoseconds: 140_000_000)
+            guard !Task.isCancelled else { return }
+            let read = await IntentEngine.shared.classify(snapshot)
+            let when = await Task.detached {
+                RemindersService.futureDate(in: snapshot)
+                    ?? RemindersService.recurrenceDate(in: snapshot)
+            }.value
+            guard !Task.isCancelled else { return }
+            reading = read
+            due = when
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            WindowCloseButton(close: onClose)
+            Spacer(minLength: 0)
+            WindowTrailingCluster(pinned: pinned, togglePin: onTogglePin,
+                                  reattach: onReattach)
+        }
+        .frame(height: 26)
+    }
+
+    /// The panel's idle input, in a window: the same field, the same trailing
+    /// ghost naming where Enter sends the line, the same glass send button.
+    private var composerRow: some View {
+        HStack(spacing: 12) {
+            ZStack(alignment: .leading) {
+                PromptField(
+                    text: $state.composeDraft,
+                    // Placeholder drawn as a SwiftUI label below so it can fade
+                    // (the native one hard-swaps) — the panel's own trick.
+                    placeholder: "",
+                    fontSize: NotchBody.idleFontSize,
+                    focusTrigger: focused,
+                    maxVisibleLines: NotchBody.promptMaxLines,
+                    onSubmit: send,
+                    // Tab steps the destination when the classifier reads the
+                    // line wrong, exactly as in the notch; always consumed so
+                    // focus never wanders out of the box.
+                    onTab: {
+                        override = Self.nextDestination(after: override ?? destination)
+                        return true
+                    },
+                    onCaretWidth: { caretWidth = $0 },
+                    onCaretY: { caretY = $0 },
+                    onHeightChange: { inputHeight = $0 }
+                )
+                .frame(height: inputHeight)
+                .padding(.trailing, InlineSendHint.reservedTrailingWidth(
+                    label: hintLabel, suffix: hintSuffix, fontSize: NotchBody.idleFontSize))
+                .animation(.smooth(duration: 0.25), value: hintLabel + hintSuffix)
+                .background {
+                    GeometryReader { geo in
+                        InlineSendHint(
+                            label: hintLabel,
+                            suffix: hintSuffix,
+                            fontSize: NotchBody.idleFontSize,
+                            caretWidth: caretWidth,
+                            caretY: caretY,
+                            availableWidth: geo.size.width,
+                            tint: hintInk
+                        )
+                        .frame(height: geo.size.height, alignment: .center)
+                    }
+                    .allowsHitTesting(false)
+                }
+                if draft.isEmpty && caretWidth == 0 {
+                    Text(L(model.idlePlaceholderKey))
+                        .font(.sf(NotchBody.idleFontSize))
+                        .foregroundStyle(Tokens.placeholder)
+                        .lineLimit(1)
+                        .padding(.leading, PromptField.textInset)
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
+                }
+            }
+            .animation(.easeOut(duration: 0.16), value: caretWidth == 0)
+            .animation(.easeOut(duration: 0.16), value: draft.isEmpty)
+
+            if !trimmed.isEmpty {
+                SendButton(compact: true, action: send)
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+            }
+        }
+        .frame(height: max(NotchBody.idleRowHeight,
+                           inputHeight + NotchBody.idleRowHeight
+                               - PromptField.lineHeight(for: NotchBody.idleFontSize)))
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: trimmed.isEmpty)
+        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: inputHeight)
+    }
+
+    /// The note/reminder save cue, mirrored from the model — the writes run
+    /// through the panel's own services, so their feedback lives there.
+    private var feedbackText: String? {
+        if let err = model.noteError { return err }
+        if let cue = model.lastSavedNote { return cue }
+        if model.noteSaving { return L("input.saving") }
+        return nil
+    }
+
+    private func send() {
+        let line = trimmed
+        guard !line.isEmpty else { return }
+        let where_ = destination
+        state.composeDraft = ""
+        override = nil
+        reading = .empty
+        due = nil
+        onSubmit(line, where_)
+    }
+
+    /// Tab's cycle — Ask → Note → Remind → Ask, matching `toggleSubmitPanel`.
+    private static func nextDestination(after current: NotchModel.Panel) -> NotchModel.Panel {
+        switch current {
+        case .chat:     return .note
+        case .note:     return .reminder
+        case .reminder: return .chat
+        }
     }
 }
 

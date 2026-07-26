@@ -905,15 +905,17 @@ final class NotchModel: ObservableObject {
     private var detachHandedOff = false
 
     /// What a tear-off from the current page would carry: the open agent-run
-    /// detail if one is up, else the on-screen thread. Nil when the page has
-    /// nothing detachable (idle prompt, settings, history…).
+    /// detail if one is up, the on-screen thread next, and — with neither — the
+    /// idle prompt itself, which tears out as a standalone composer (`.compose`).
+    /// Nil only on the pages that own the whole body (settings, What's New,
+    /// onboarding), which have nothing to carry.
     var detachableSession: DetachedSession? {
-        guard open, !showOnboarding else { return nil }
+        guard open, !showOnboarding, !showSettings, !showWhatsNew else { return nil }
         if let id = agentDetailTaskID { return .agentTask(id: id) }
-        if mode != .idle, !turns.isEmpty,
-           !showSettings, !showWhatsNew, !showHistory {
+        if mode != .idle, !turns.isEmpty, !showHistory {
             return .thread(id: threadHistoryID)
         }
+        if mode == .idle, turns.isEmpty { return .compose }
         return nil
     }
 
@@ -921,6 +923,14 @@ final class NotchModel: ObservableObject {
     /// window render the same card.
     private func detachedFace(for session: DetachedSession) -> DetachedCardFace {
         switch session {
+        case .compose:
+            // A composer carries no session — the draft in the box is the only
+            // thing it has to show for a face (empty on a bare prompt).
+            return DetachedCardFace(
+                title: text.replacingOccurrences(of: "\n", with: " "),
+                subtitle: L("input.placeholder"),
+                isAgent: agentComposeActive,
+                running: false)
         case .agentTask(let id):
             if let task = AgentTaskManager.shared.tasks.first(where: { $0.id == id }) {
                 return DetachedCardFace(
@@ -1004,6 +1014,13 @@ final class NotchModel: ObservableObject {
     /// going detached, exactly like `newChat`) and fold the shell.
     private func completeDetach(of session: DetachedSession) {
         switch session {
+        case .compose:
+            // The draft left with the window (the controller took a copy at
+            // birth) — clear it here so the folding panel doesn't park it as an
+            // idle draft and hand the same line back on the next open.
+            text = ""
+            showHistory = false
+            highlightedHistoryIndex = nil
         case .agentTask:
             agentDetailTaskID = nil
         case .thread:
@@ -1022,9 +1039,15 @@ final class NotchModel: ObservableObject {
     /// reopens from Recent; `snapshot` is the window's last view of a thread
     /// that never reached history (edge insurance, not the normal path).
     func reattachDetachedSession(_ session: DetachedSession, snapshot: [Turn]?,
+                                 draft: String = "",
                                  on display: CGDirectDisplayID?) {
         openPanel(on: display ?? activeDisplay)
         switch session {
+        case .compose:
+            // Nothing to restore but the line being written — hand the window's
+            // draft back to the prompt (written after `openPanel`, which may
+            // have restored a parked draft of its own).
+            if !draft.isEmpty { text = draft }
         case .agentTask(let id):
             if AgentTaskManager.shared.tasks.contains(where: { $0.id == id }) {
                 agentDetailTaskID = id
@@ -1126,12 +1149,16 @@ final class NotchModel: ObservableObject {
     /// swap the thread into the panel state, let `submit()` arm the round
     /// (it captures its own snapshot + thread id immediately), then restore
     /// the panel exactly as it was and leave the round streaming detached.
-    private func runDetachedRound(threadID: UUID, seed: [Turn], question: String) {
+    /// Returns the thread id the round actually landed on — the caller's id for
+    /// a follow-up, a brand-new one when `submit()` treated the (empty) seed as
+    /// a fresh thread. A compose window uses it to become that thread.
+    @discardableResult
+    private func runDetachedRound(threadID: UUID, seed: [Turn], question: String) -> UUID? {
         // Never stack rounds on one thread from the window: the tear-off
         // dropped the round's task handle, so a second submit couldn't
         // supersede-cancel the first. The field is disabled while streaming;
         // this is the backstop.
-        guard !seed.contains(where: { $0.streaming }) else { return }
+        guard !seed.contains(where: { $0.streaming }) else { return nil }
         let saved = (turns: turns, threadID: threadHistoryID, mode: mode,
                      text: text, task: task, pinned: isAnswerPinned,
                      error: askError, history: showHistory)
@@ -1150,7 +1177,16 @@ final class NotchModel: ObservableObject {
         }
         // Show the fresh question pair in the window right away — the first
         // `syncInFlight` only lands with the first token.
-        detachedThreadStores[threadHistoryID]?.turns = turns
+        if let store = detachedThreadStores[threadHistoryID] {
+            store.turns = turns
+        } else {
+            // A compose window's FIRST question has no mirror yet: mint one here,
+            // already holding the pair, so the window adopts a live thread rather
+            // than an empty one waiting for the first token.
+            detachedThreadStores[threadHistoryID] =
+                DetachedThreadStore(threadID: threadHistoryID, turns: turns)
+        }
+        let landedThreadID = threadHistoryID
         // Hand the round off detached and put the panel back exactly as it was.
         task = saved.task
         turns = saved.turns
@@ -1160,6 +1196,44 @@ final class NotchModel: ObservableObject {
         isAnswerPinned = saved.pinned
         askError = saved.error
         showHistory = saved.history
+        return landedThreadID
+    }
+
+    /// Enter pressed in a detached compose window (the torn-out idle prompt).
+    /// Routes exactly like the notch's own prompt — the window classified its
+    /// own line and hands the destination in — but keeps everything headless:
+    /// Note/Remind file through the identical services (their feedback lands on
+    /// the model, which the window mirrors), an armed Agent bucket spawns its
+    /// run, and an Ask runs the round detached and returns the thread id so the
+    /// window can become that conversation in place.
+    @discardableResult
+    func submitDetachedCompose(_ line: String, destination: Panel) -> UUID? {
+        let q = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return nil }
+        if agentComposeActive {
+            borrowingText(q) { submitAgent() }
+            return nil
+        }
+        switch destination {
+        case .note:
+            borrowingText(q) { submitNote() }
+            return nil
+        case .reminder:
+            borrowingText(q) { submitReminder() }
+            return nil
+        case .chat:
+            return runDetachedRound(threadID: UUID(), seed: [], question: q)
+        }
+    }
+
+    /// Run a panel submit path against a line that isn't in the panel's box:
+    /// park `text`, hand the borrowed line over, then put the panel's own draft
+    /// back (every one of these paths clears `text` itself on the way through).
+    private func borrowingText(_ line: String, _ body: () -> Void) {
+        let saved = text
+        text = line
+        body()
+        text = saved
     }
 
     /// Screens whose panels have registered geometry — the merge zones a

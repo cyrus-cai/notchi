@@ -439,6 +439,22 @@ struct NotchBody: View {
                 // doesn't linger over a line the user is actively rewriting.
                 if model.noteError != nil { model.noteError = nil }
             }
+            // The idle page has no header, so the input row's free strip is its
+            // tear-off grip — see `detachGrip`.
+            .background(detachGrip)
+    }
+
+    /// The idle page's tear-off grip: a transparent sheet laid BEHIND the row,
+    /// so dragging its free strip pulls the prompt out into its own composer
+    /// window (`DetachedSession.compose`) while everything drawn on top keeps
+    /// its own mouse. That layering is the point — a grip wrapped *around* the
+    /// row would be an ancestor of the prompt field, and dragging to select text
+    /// would tear the panel off the bezel. Behind it, the field (and every chip)
+    /// hit-tests first and the grip only ever sees the empty space beside them.
+    private var detachGrip: some View {
+        Color.clear
+            .contentShape(Rectangle())
+            .gesture(detachDragGesture)
     }
 
     /// Take the immersive (input-floats-over-scroll) layout only when the recent
@@ -780,6 +796,10 @@ struct NotchBody: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.top, 10)
+        // The second grip on the idle page (see `detachGrip`): the bucket row's
+        // free strip between the pill and the Recent cluster pulls the whole
+        // prompt out into its own window.
+        .background(detachGrip)
     }
 
     /// Whether the bucket row still has anything to draw. With Recent expanded the
