@@ -908,8 +908,14 @@ struct NotchIsland: View {
         // the whole island (scrim + card), instead of a popover anchored under the
         // Clear pill that landed it near the bottom of the panel. Mounted here so it
         // centers in the full glass body; clipped to the island shape below.
+        //
+        // Gated on THIS display's `isOpen`: `confirmingClear` is one flag on the
+        // shared model, but every screen in `.all` mode hosts its own panel — so
+        // without the gate the card also rendered inside the *resting* notch on the
+        // other screens, where the shape clipped it down to one stray button peeking
+        // out of the black zone.
         .overlay {
-            if model.confirmingClear {
+            if model.confirmingClear, isOpen {
                 ClearHistoryConfirm(
                     lastDayCount: model.historyCountWithinLastDay,
                     totalCount: model.history.count,
