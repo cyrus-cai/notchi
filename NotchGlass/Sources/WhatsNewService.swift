@@ -64,6 +64,13 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.3.2",
+            date: "2026-07-27",
+            fixes: [
+                "The Clear History confirmation no longer shows up in the resting notch on other displays.",
+            ]
+        ),
+        Entry(
             version: "0.3.1",
             date: "2026-07-27",
             features: [
