@@ -171,6 +171,7 @@ struct InlineSettingsView: View {
         case search = "Search"   // search backend + its key
         case notes = "Notes"     // the capture pipeline: note destination + copy sensing
         case general = "General" // how you reach it: shortcut, language, launch at login, + Advanced (proxy)
+        case shortcuts = "Shortcuts" // the keyboard reference — read-only, General owns the editable chord
         case appearance = "Appearance" // where it shows up: screens, full screen, Dock icon
         case about = "About"     // version + self-update
         var id: String { rawValue }
@@ -183,6 +184,7 @@ struct InlineSettingsView: View {
             case .search:     return L("sidebar.search")
             case .notes:      return L("sidebar.notes")
             case .general:    return L("sidebar.general")
+            case .shortcuts:  return L("sidebar.shortcuts")
             case .appearance: return L("sidebar.appearance")
             case .about:      return L("sidebar.about")
             }
@@ -304,6 +306,8 @@ struct InlineSettingsView: View {
                         appLanguageRow
                         launchAtLoginRow
                         advancedSection
+                    case .shortcuts:
+                        shortcutsSection
                     case .appearance:
                         // Two groups, heaviest control first. Where it shows up —
                         // which screens carry an island, whether it also sits in
@@ -341,6 +345,10 @@ struct InlineSettingsView: View {
             // Un-throttled freshness check while the user is actually looking at
             // the Version row (one tiny request; failures stay silent).
             updater.check()
+            // The model chip may be naming a Claude Code alias — resolve it to the
+            // concrete model ("opus" → "Opus 5") without waiting for the picker to
+            // be opened. Self-gating and cache-backed; usually a no-op.
+            catalog.resolveClaudeAliases()
             await refreshModels()
         }
         .onChange(of: orAuth.phase) {
@@ -502,7 +510,8 @@ struct InlineSettingsView: View {
                 // Why the section opened by itself, when it did.
                 if let pending = pendingModel {
                     Text(L("model.pending.hint", pending.provider.displayName,
-                           ModelRatings.prettyName(for: pending.id)))
+                           ModelRatings.prettyName(for: pending.id,
+                                                   provider: pending.provider)))
                         .font(.sf(12))
                         .foregroundStyle(Tokens.text2)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1383,6 +1392,11 @@ struct InlineSettingsView: View {
         if provider == .codex, modelID.isEmpty || modelID == "codex" {
             return provider.defaultModel
         }
+        // Claude Code's retired "claude" account-default sentinel resolves the same
+        // way, to a concrete alias — the picker has no "Default" row to select.
+        if provider == .claudeCode, modelID.isEmpty || modelID == "claude" {
+            return provider.defaultModel
+        }
         return modelID.isEmpty ? provider.defaultModel : modelID
     }
 
@@ -1436,7 +1450,10 @@ struct InlineSettingsView: View {
                                                               provider: provider),
                                    fallback: effectiveModelID)
                             .frame(width: 15, height: 15)
-                        Text(ModelRatings.prettyName(for: effectiveModelID))
+                        // Claude Code's ids are rolling aliases — the chip names the
+                        // concrete model behind one ("Opus 5"), not the family word.
+                        Text(ModelRatings.prettyName(for: effectiveModelID,
+                                                     provider: provider))
                             .font(.sf(13))
                             .foregroundStyle(Tokens.text1)
                             .lineLimit(1)
@@ -1575,8 +1592,7 @@ struct InlineSettingsView: View {
     /// summon shortcut has been forgotten. The choice applies immediately
     /// (AppDelegate adds/removes the status item).
     private var menuBarIconRow: some View {
-        settingRow(label: L("general.menuBarIcon"),
-                   info: L("general.menuBarIcon.hint")) {
+        settingRow(label: L("general.menuBarIcon")) {
             GlassMenu(title: menuBarIconVisibility.label) {
                 ForEach(MenuBarIconVisibility.allCases) { v in
                     Button(v.label) { selectMenuBarIconVisibility(v) }
@@ -1775,8 +1791,7 @@ struct InlineSettingsView: View {
     /// displays (the built-in hardware notch is physical and never hides). The
     /// choice applies immediately — `AppDelegate` re-evaluates on the toggle.
     private var fullscreenAutoHideRow: some View {
-        settingRow(label: L("general.fullscreenAutoHide"),
-                   info: L("general.fullscreenAutoHide.hint")) {
+        settingRow(label: L("general.fullscreenAutoHide")) {
             Toggle("", isOn: Binding(
                 get: { hideInFullscreen },
                 set: { Haptics.levelChange(); selectHideInFullscreen($0) }
@@ -2070,6 +2085,167 @@ struct InlineSettingsView: View {
             .controlSize(.mini)
             .tint(Tokens.text2)
         }
+    }
+
+    // MARK: - Shortcuts
+
+    /// Every chord the app answers to, in one read-only reference — the "help"
+    /// the panel never had. Grouped in the order you meet them (summon it, type
+    /// into it, act on the answer, move the panel around) rather than
+    /// alphabetically, so the list doubles as a tour of what the app can do.
+    ///
+    /// Only the first row is live: it prints whatever summon chord is currently
+    /// recorded, because that one is user-editable one section up in General.
+    /// Every other chord is fixed in `ContentView`'s key catcher (and
+    /// `PromptField`'s key handlers), and these strings are the only place they
+    /// are written down for the user — a chord changed there has to change here
+    /// too, or the reference starts lying.
+    ///
+    /// Chords that do exactly what every Mac app does with them — ⌘, for
+    /// Settings, ⌘W to close a window, ⎋ to back out — are deliberately left
+    /// out. Nobody comes to a reference for those, and they dilute the ones
+    /// worth reading. A row earns its place by teaching something the system
+    /// convention wouldn't.
+    private var shortcutsSection: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                shortcutGroup(L("shortcuts.group.summon"), [
+                    // The one live row: whatever chord is recorded, or nothing to
+                    // draw when summoning is switched off (an "Off" word inside a
+                    // keycap would read as a key you can press).
+                    .init(L("shortcuts.summon"),
+                          summonHotKey.enabled ? [summonHotKey.displayString] : [],
+                          note: summonHotKey.enabled ? nil : L("general.shortcut.off")),
+                ])
+                shortcutGroup(L("shortcuts.group.prompt"), [
+                    .init(L("shortcuts.send"), ["↵"]),
+                    .init(L("shortcuts.sendOther"), ["⌘↵"]),
+                    .init(L("shortcuts.cycleIntent"), ["⇥"]),
+                    .init(L("shortcuts.bucket"), ["⇧⇥"]),
+                    .init(L("shortcuts.recall"), ["↑", "↓"]),
+                    .init(L("shortcuts.slash"), ["/"]),
+                    .init(L("shortcuts.pasteImage"), ["⌘V"]),
+                ])
+                shortcutGroup(L("shortcuts.group.answer"), [
+                    .init(L("shortcuts.copyAnswer"), ["⌘C"]),
+                    .init(L("shortcuts.regenerate"), ["⌘R"]),
+                    .init(L("shortcuts.pin"), ["⌘P", "⌘D"]),
+                    .init(L("shortcuts.newChat"), ["⌘N"]),
+                    .init(L("shortcuts.back"), ["←"]),
+                ])
+                shortcutGroup(L("shortcuts.group.panel"), [
+                    .init(L("shortcuts.filter"), ["⌘F"]),
+                    .init(L("shortcuts.picker"), ["⇧⌘I"]),
+                    .init(L("shortcuts.detach"), ["⌃⇧="]),
+                ])
+            }
+            .padding(.bottom, 18)
+        }
+        // Four groups always outrun the pane, so the list scrolls inside a fixed
+        // frame instead of stretching the island to phone height — the same
+        // treatment (and the same bottom-only taper) the release notes get.
+        .frame(maxHeight: 340)
+        .scrollIndicators(.never)
+        .scrollEdgeFade(top: false, bottom: true, bottomFade: 32)
+    }
+
+    /// One row of the reference: what it does, and the chord(s) that do it. More
+    /// than one chord means genuine alternatives (⌘P *or* ⌘D), joined by "or"
+    /// rather than stacked — the same way the system's own shortcut sheets read.
+    private struct ShortcutEntry {
+        let label: String
+        let chords: [String]
+        /// Shown in place of the keycaps when there's no chord to draw (summoning
+        /// switched off).
+        let note: String?
+
+        init(_ label: String, _ chords: [String], note: String? = nil) {
+            self.label = label
+            self.chords = chords
+            self.note = note
+        }
+    }
+
+    /// One titled block. The description reads down the left edge and the keycaps
+    /// hang off the right, with a hairline between rows — a table, not a list of
+    /// sentences, so the eye can drop straight to the chord it came for.
+    private func shortcutGroup(_ title: String, _ rows: [ShortcutEntry]) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(title)
+                .font(.sf(12.5, weight: .semibold))
+                .foregroundStyle(Tokens.text1)
+                .padding(.bottom, 3)
+            ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
+                if index > 0 {
+                    Rectangle()
+                        .fill(.white.opacity(0.06))
+                        .frame(height: 0.5)
+                }
+                HStack(spacing: 12) {
+                    Text(row.label)
+                        .font(.sf(12.5))
+                        .foregroundStyle(Tokens.text2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 12)
+                    if let note = row.note {
+                        Text(note)
+                            .font(.sf(12))
+                            .foregroundStyle(Tokens.text4)
+                    } else {
+                        HStack(spacing: 6) {
+                            ForEach(Array(row.chords.enumerated()), id: \.offset) { i, chord in
+                                if i > 0 {
+                                    Text(L("shortcuts.or"))
+                                        .font(.sf(11))
+                                        .foregroundStyle(Tokens.text4)
+                                }
+                                HStack(spacing: 3) {
+                                    ForEach(Array(Self.keyCaps(chord).enumerated()), id: \.offset) { _, cap in
+                                        keyCap(cap)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding(.vertical, 7)
+            }
+        }
+    }
+
+    /// Split a written chord ("⇧⌘I", "⌘,") into the individual caps a keyboard
+    /// sheet draws — one per modifier, then the key itself as the last cap. The
+    /// key half is taken whole rather than per-character, so a named key ("Space",
+    /// "F5") from a recorded summon chord stays on one cap instead of exploding
+    /// into letters.
+    private static func keyCaps(_ chord: String) -> [String] {
+        var caps: [String] = []
+        var rest = Substring(chord)
+        while let first = rest.first, "⌃⌥⇧⌘".contains(first) {
+            caps.append(String(first))
+            rest = rest.dropFirst()
+        }
+        if !rest.isEmpty { caps.append(String(rest)) }
+        return caps
+    }
+
+    /// One keycap. Deliberately the same skin as the summon recorder's chip in
+    /// General — that chip *is* a keycap showing a chord, so the reference's caps
+    /// and the editable one read as the same object at two sizes.
+    private func keyCap(_ text: String) -> some View {
+        Text(text)
+            .font(.sf(11, weight: .medium))
+            .foregroundStyle(Tokens.text2)
+            .padding(.horizontal, 6)
+            .frame(minWidth: 24, minHeight: 22)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(.white.opacity(0.07))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(.white.opacity(0.13), lineWidth: 0.5)
+            )
     }
 
     // MARK: - About

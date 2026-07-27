@@ -760,9 +760,10 @@ struct DetachedWindowGlass: View {
 // MARK: - Compose window body
 
 /// The idle prompt, torn out: a standalone composer window. It carries the
-/// panel's own input (`PromptField`, the same inline destination ghost, the same
-/// Tab correction cycle) but keeps its line to itself — the notch's box is
-/// cleared when the composer leaves, so the two never write over each other.
+/// panel's own input (`PromptField`, the same Tab correction cycle, the same
+/// destination spelled out — here on the send button) but keeps its line to
+/// itself — the notch's box is cleared when the composer leaves, so the two
+/// never write over each other.
 ///
 /// Enter routes exactly as it would in the notch: Note and Remind file through
 /// the identical services (their feedback lands on the model, mirrored below),
@@ -786,7 +787,6 @@ struct DetachedComposeView: View {
 
     @State private var focused = false
     @State private var caretWidth: CGFloat = 0
-    @State private var caretY: CGFloat = 0
     @State private var inputHeight: CGFloat = PromptField.lineHeight(for: NotchBody.idleFontSize)
     /// This window's own read of its own line — see the type comment.
     @State private var reading: IntentEngine.Reading = .empty
@@ -841,14 +841,6 @@ struct DetachedComposeView: View {
         case .note:     return L("hint.note")
         case .reminder: return L("hint.remind")
         }
-    }
-
-    private var hintSuffix: String {
-        goesToAgent ? " " + model.agentArmedEngine.displayName : ""
-    }
-
-    private var hintInk: Color {
-        goesToAgent ? Tokens.agentInk : destination.intentInk
     }
 
     var body: some View {
@@ -913,8 +905,8 @@ struct DetachedComposeView: View {
         .frame(height: 26)
     }
 
-    /// The panel's idle input, in a window: the same field, the same trailing
-    /// ghost naming where Enter sends the line, the same glass send button.
+    /// The panel's idle input, in a window: the same field, and a send button that
+    /// names where Enter sends the line.
     private var composerRow: some View {
         HStack(spacing: 12) {
             ZStack(alignment: .leading) {
@@ -935,28 +927,9 @@ struct DetachedComposeView: View {
                         return true
                     },
                     onCaretWidth: { caretWidth = $0 },
-                    onCaretY: { caretY = $0 },
                     onHeightChange: { inputHeight = $0 }
                 )
                 .frame(height: inputHeight)
-                .padding(.trailing, InlineSendHint.reservedTrailingWidth(
-                    label: hintLabel, suffix: hintSuffix, fontSize: NotchBody.idleFontSize))
-                .animation(.smooth(duration: 0.25), value: hintLabel + hintSuffix)
-                .background {
-                    GeometryReader { geo in
-                        InlineSendHint(
-                            label: hintLabel,
-                            suffix: hintSuffix,
-                            fontSize: NotchBody.idleFontSize,
-                            caretWidth: caretWidth,
-                            caretY: caretY,
-                            availableWidth: geo.size.width,
-                            tint: hintInk
-                        )
-                        .frame(height: geo.size.height, alignment: .center)
-                    }
-                    .allowsHitTesting(false)
-                }
                 if draft.isEmpty && caretWidth == 0 {
                     Text(L(model.idlePlaceholderKey))
                         .font(.sf(NotchBody.idleFontSize))
@@ -970,8 +943,11 @@ struct DetachedComposeView: View {
             .animation(.easeOut(duration: 0.16), value: caretWidth == 0)
             .animation(.easeOut(duration: 0.16), value: draft.isEmpty)
 
+            // The window has no bucket row to carry a destination pill, so the send
+            // button spells it out instead: "Note ⏎" / "Remind ⏎" — the same word
+            // the panel's pill would show, on the control Enter maps to.
             if !trimmed.isEmpty {
-                SendButton(compact: true, action: send)
+                SendButton(compact: true, label: hintLabel, action: send)
                     .transition(.scale(scale: 0.6).combined(with: .opacity))
             }
         }

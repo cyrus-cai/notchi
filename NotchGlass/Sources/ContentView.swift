@@ -142,6 +142,27 @@ struct ContentView: View {
                 }
                 return true
             }
+            // ⌃⇧= splits whatever the panel is showing into its own window —
+            // the keyboard twin of the tear-off drag and of the header's
+            // `macwindow.on.rectangle` chip. It works on all three detachable
+            // faces (a draft prompt, a settled thread, an agent run) because
+            // `detachableSession` is the single gate for every route out; when
+            // it says nil (settings, what's new, an open recent list) the chord
+            // falls through to the system rather than fizzling.
+            //
+            // Deliberately NOT ⌘-based: the panel's ⌘ chords are all in-place
+            // actions on the current answer, and every ⌘⇧ letter is spoken for
+            // by the frontmost app underneath. ⌃⇧ is free, and it never
+            // collides with text editing in the prompt field — which matters,
+            // because pulling out a half-typed draft is this chord's main use.
+            // keyCode 24 is `=`.
+            if event.keyCode == 24,
+               event.modifierFlags.contains(.control),
+               event.modifierFlags.contains(.shift),
+               model.detachableSession != nil {
+                model.openDetachedWindow()
+                return true
+            }
             // ⌘N starts a fresh conversation from anywhere in a thread — the
             // keyboard twin of the ← back chevron, but it fires even mid-typing
             // a follow-up (the ⌘ modifier means it never collides with caret
@@ -890,12 +911,14 @@ struct NotchIsland: View {
         .overlay {
             if model.confirmingClear {
                 ClearHistoryConfirm(
+                    lastDayCount: model.historyCountWithinLastDay,
+                    totalCount: model.history.count,
                     onCancel: {
                         withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
                             model.confirmingClear = false
                         }
                     },
-                    onConfirm: {
+                    onConfirm: { scope in
                         // Two beats, not one: the card fades out first while the
                         // island holds its height, THEN the emptied recent list
                         // collapses on the panel's standard module spring. Clearing
@@ -906,7 +929,7 @@ struct NotchIsland: View {
                             model.confirmingClear = false
                         } completion: {
                             withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
-                                model.clearHistory()
+                                model.clearHistory(scope: scope)
                             }
                         }
                     }

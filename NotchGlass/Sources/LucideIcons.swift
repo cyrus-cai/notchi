@@ -66,6 +66,20 @@ enum LucideIcons {
         "M2.992 16.342a2 2 0 0 1 .094 1.167l-1.065 3.29a1 1 0 0 0 1.236 1.168l3.413-.998a2 2 0 0 1 1.099.092 10 10 0 1 0-4.777-4.719",
     ], viewBox: 24)
 
+    /// lucide `pencil-line` — the Note destination. The Ask half of the bucket pill
+    /// wears it whenever the classifier reads the line as a jot, so the pill's mark
+    /// changes with its word instead of leaving a speech bubble beside "Note".
+    static let pencilLine = Mark(paths: [
+        "M12 20h9",
+        "M16.376 3.622a1 1 0 0 1 3.002 3.002L7.368 18.635a2 2 0 0 1-.855.506l-2.872.838a.5.5 0 0 1-.62-.62l.838-2.872a2 2 0 0 1 .506-.854z",
+    ], viewBox: 24)
+
+    /// lucide `bell` — the Remind destination, the third face of that same mark.
+    static let bell = Mark(paths: [
+        "M10.268 21a2 2 0 0 0 3.464 0",
+        "M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326",
+    ], viewBox: 24)
+
     /// lucide `code-xml` — the Agent bucket. Replaces two different SF glyphs that used
     /// to split the same concept between surfaces (`chevron.left.forwardslash.chevron.right`
     /// on the bucket pill, `terminal` on the tear-off card).
@@ -73,6 +87,12 @@ enum LucideIcons {
         "m18 16 4-4-4-4",
         "m6 8-4 4 4 4",
         "m14.5 4-5 16",
+    ], viewBox: 24)
+
+    /// lucide `command` — the ⌘ loop. The keyboard-shortcuts row wears it because
+    /// it *is* the subject: the glyph names the card it opens without a word.
+    static let command = Mark(paths: [
+        "M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3",
     ], viewBox: 24)
 
     /// lucide `settings` — the gear. The source ships this as a path plus a bare

@@ -88,6 +88,12 @@ Or hand it to your coding agent — paste this into **Claude Code / Codex**:
 
 No account · No backend · Free & open source · Native to macOS
 
+## Apple Developer account
+
+Notchi still ships un-notarized because I can't get through Apple's enrollment.
+If you have a Developer account and can help, email
+[xiikii@outlook.com](mailto:xiikii@outlook.com?subject=An%20Apple%20Developer%20account%20for%20Notchi).
+
 ## Requirements
 
 Notchi requires **macOS 14 (Sonoma) or later**. A hardware notch is not

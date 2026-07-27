@@ -432,16 +432,18 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
                 envVarName: "CODEX_CLI_UNUSED")
         case .claudeCode:
             // Not an HTTP backend — `ClaudeCLIService` shells out to the local
-            // `claude` binary; `endpoint` is a never-used placeholder. "claude" is
-            // a sentinel meaning "the account's default model" (no `--model` flag);
-            // the aliases are the CLI's documented `--model` shorthands. The
+            // `claude` binary; `endpoint` is a never-used placeholder. The ids are
+            // the CLI's documented `--model` shorthands. The old "claude" sentinel
+            // ("the account's default model", no `--model` flag) is deliberately
+            // NOT offered any more: a row reading "Default" names nothing you can
+            // point at, and it was a twin of whichever alias it resolved to. The
             // `signupURL` points at the install docs — there's no key to create,
             // and sign-in happens in the user's own terminal (`claude`), never in
             // Notch.
             return ProviderSpec(
                 displayName: "Claude Code",
                 endpoint: "https://code.claude.com/unused",
-                models: ["claude", "opus", "sonnet", "haiku"],
+                models: ["opus", "sonnet", "haiku"],
                 signupHost: "code.claude.com",
                 signupURL: "https://code.claude.com/docs/en/quickstart",
                 envVarName: "CLAUDE_CODE_UNUSED")
@@ -542,6 +544,10 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // The custom endpoint's model is the user's own typed id — a remote
         // manifest has no business overriding someone's private server.
         if self == .custom { return spec.defaultModel }
+        // Claude Code's default is a concrete alias, never the retired "claude"
+        // account-default sentinel — `availableModels` filters it out of the
+        // remote manifest too, so take the head from there.
+        if self == .claudeCode { return availableModels.first ?? spec.defaultModel }
         return RemoteModelManifest.models(for: self)?.first ?? spec.defaultModel
     }
     var availableModels: [String] {
@@ -553,6 +559,14 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // (see `GrokCLIService`), falling back to the single "grok" sentinel.
         if self == .grokCode { return GrokCLIService.availableModelIDs }
         if self == .custom { return spec.availableModels }
+        // Claude Code no longer offers the "claude" account-default sentinel (see
+        // the spec above); a remote manifest written before that still lists it,
+        // so drop it here rather than let a "Default" row back into the picker.
+        if self == .claudeCode {
+            let list = RemoteModelManifest.models(for: self) ?? spec.availableModels
+            let named = list.filter { $0 != "claude" }
+            return named.isEmpty ? spec.availableModels : named
+        }
         return RemoteModelManifest.models(for: self) ?? spec.availableModels
     }
     var signupHost: String      { spec.signupHost }
@@ -2060,6 +2074,20 @@ enum ModelRatings {
         if let slash = s.lastIndex(of: "/") { s = String(s[s.index(after: slash)...]) }
         if let colon = s.firstIndex(of: ":") { s = String(s[..<colon]) }
         return s.prefix(1).uppercased() + s.dropFirst()
+    }
+
+    /// `prettyName`, but for an id read **as `provider` serves it**. The one
+    /// provider that differs is Claude Code, whose ids are the CLI's rolling
+    /// aliases: a chip reading "Opus" names a shelf, not a model, so the alias is
+    /// shown as the concrete model it runs today — "Opus 5" — from the CLI probe's
+    /// cache (`ClaudeCLIService.resolvedModels`). The vendor word is dropped
+    /// because every one of these labels already sits beside the Anthropic mark.
+    /// Until a probe has ever landed, the bare alias stands in.
+    static func prettyName(for id: String, provider: Provider) -> String {
+        guard provider == .claudeCode,
+              let resolved = ClaudeCLIService.resolvedModels[id]
+        else { return prettyName(for: id) }
+        return ClaudeCLIService.shortDisplayName(forResolved: resolved)
     }
 }
 

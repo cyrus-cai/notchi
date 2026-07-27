@@ -266,6 +266,13 @@ enum APIKeyStore {
         if provider == .grokCode, stored.isEmpty || stored == "grok" {
             return provider.defaultModel
         }
+        // Claude Code: same shape again. "claude" is the retired account-default
+        // sentinel a pre-0.3.1 selection may still hold; it no longer appears in
+        // the picker, so resolve it (and an empty override) to the provider's own
+        // default alias — the run then names the model the UI names.
+        if provider == .claudeCode, stored.isEmpty || stored == "claude" {
+            return provider.defaultModel
+        }
         return stored.isEmpty ? nil : stored
     }
 

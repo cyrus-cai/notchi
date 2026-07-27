@@ -41,8 +41,9 @@ struct ClaudeCLIService: AIService {
     /// full ids both work.
     let model: String?
 
-    /// The picker's "claude" row is a sentinel for "account default", not a real
-    /// `--model` value. Normalize it (and empty) to `nil`.
+    /// "claude" is the retired account-default sentinel (the picker no longer
+    /// offers it, and `APIKeyStore` resolves a stored one to a concrete alias) —
+    /// never a real `--model` value. Normalize it, and empty, to `nil`.
     init(model: String? = nil) {
         let m = (model ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         self.model = (m.isEmpty || m == "claude") ? nil : m
@@ -215,6 +216,17 @@ struct ClaudeCLIService: AIService {
         let version = digits.joined(separator: ".")
         let parts = ["Claude"] + words + (version.isEmpty ? [] : [version])
         return parts.joined(separator: " ")
+    }
+
+    /// The same name without the vendor word — "claude-opus-5" → "Opus 5". What
+    /// the chips and menu rows use: they already carry the Anthropic mark (or the
+    /// provider's name beside them), so repeating "Claude" costs width and says
+    /// nothing.
+    static func shortDisplayName(forResolved id: String) -> String {
+        let full = displayName(forResolved: id)
+        let vendor = "Claude "
+        guard full.hasPrefix(vendor), full.count > vendor.count else { return full }
+        return String(full.dropFirst(vendor.count))
     }
 
     /// alias → concrete model id, from the freshest probe that has landed (this

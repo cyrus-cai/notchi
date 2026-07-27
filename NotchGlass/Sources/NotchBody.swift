@@ -58,9 +58,9 @@ struct NotchBody: View {
     @State private var measuredAnswerHeight: CGFloat = 0
     /// Width (pt) of everything the prompt field is currently showing — committed
     /// text plus any in-progress IME composition (pinyin) — reported live by the
-    /// field via `onCaretWidth`. Drives where the inline "— Ask"/"— Note" hint sits,
-    /// so it trails the pinyin as you type rather than anchoring to the committed
-    /// text (which lags a whole composition behind).
+    /// field via `onCaretWidth`. It's how the placeholder knows to get out of the
+    /// way the moment the editor shows anything, including pinyin that hasn't
+    /// committed to `model.text` yet (which lags a whole composition behind).
     @State private var caretWidth: CGFloat = 0
     /// Same live display width, but for the follow-up field. Its placeholder is a
     /// SwiftUI overlay (so the copy can cross-fade — see `followUpPlaceholderLabel`),
@@ -68,12 +68,6 @@ struct NotchBody: View {
     /// anything — including pinyin that hasn't committed to `model.text` yet, which
     /// is exactly when the native placeholder would disappear.
     @State private var followUpCaretWidth: CGFloat = 0
-    /// Where the line the text ends on sits, as an offset from the field's centre —
-    /// `0` while the prompt is one line, one line-height further down per line as a
-    /// long paragraph wraps. Carries the inline hint down with the last line so it
-    /// keeps trailing the caret instead of hanging in the middle of a tall box.
-    @State private var caretY: CGFloat = 0
-    @State private var followUpCaretY: CGFloat = 0
     /// The height the prompt box is asking for: one line at rest, growing with the
     /// wrapped text up to `NotchBody.promptMaxLines`, after which it scrolls inside
     /// itself. The input rows size themselves off these.
@@ -288,13 +282,15 @@ struct NotchBody: View {
     /// body re-reads on the next summon and can never show a stale selection.
     private var selectedProvider: Provider { APIKeyStore.selectedProvider }
 
-    /// The wire id in effect, with the sentinels resolved (an empty override, or Codex's
-    /// legacy "codex", both mean "this provider's default") — mirrors the settings chip.
+    /// The wire id in effect, with the sentinels resolved (an empty override, or a CLI
+    /// backend's legacy "codex" / "grok" / "claude", all mean "this provider's
+    /// default") — mirrors the settings chip.
     private var selectedModelID: String {
         let p = selectedProvider
         let id = APIKeyStore.storedModel(for: p)
         if p == .codex, id.isEmpty || id == "codex" { return p.defaultModel }
         if p == .grokCode, id.isEmpty || id == "grok" { return p.defaultModel }
+        if p == .claudeCode, id.isEmpty || id == "claude" { return p.defaultModel }
         return id.isEmpty ? p.defaultModel : id
     }
 
@@ -370,15 +366,16 @@ struct NotchBody: View {
                 // takes no space here, moves nothing, and is free to overhang the
                 // island's edge.)
 
-                // The bucket row (XII: agent-to-Codex): the Ask|Agent pill as
+                // The bucket row (XII: agent-to-Codex): the destination pill as
                 // fixed chrome below the input, with the folder / model / effort
                 // chips unfurling beside it while Agent is armed — same slot and
-                // glass language as the one-tap presets. Hidden entirely when no
-                // agent CLI is installed, so those users keep today's exact panel.
-                // (Both the Ask|Agent pill and the Recent chevron leave the row while
+                // glass language as the one-tap presets. It rides the panel even
+                // with no agent CLI installed: the pill is now where the routing
+                // (Ask / Note / Remind) shows itself, so it can't be optional.
+                // (Both the pill and the Recent chevron leave the row while
                 // Recent is expanded — the chevron moves to the manage bar's
                 // bottom-right — so the row itself drops out when nothing is left.)
-                if model.agentAvailable && bucketRowHasContent {
+                if bucketRowHasContent {
                     bucketRow
                         .transition(moduleTransition)
                 }
@@ -451,9 +448,13 @@ struct NotchBody: View {
     /// row would be an ancestor of the prompt field, and dragging to select text
     /// would tear the panel off the bezel. Behind it, the field (and every chip)
     /// hit-tests first and the grip only ever sees the empty space beside them.
+    ///
+    /// That invisibility is also why it carries `grabCursor()`: the hand is the
+    /// only thing telling you the strip is grabbable at all.
     private var detachGrip: some View {
         Color.clear
             .contentShape(Rectangle())
+            .grabCursor()
             .gesture(detachDragGesture)
     }
 
@@ -527,10 +528,10 @@ struct NotchBody: View {
                     }
                     idleInputRow
                     // The bucket row rides the immersive header too — but only while
-                    // it still carries something (an active compose). The Ask|Agent
+                    // it still carries something (an active compose). The destination
                     // pill and the Recent chevron both leave it once the list is up,
                     // and an empty row would just pad the header.
-                    if model.agentAvailable && bucketRowHasContent {
+                    if bucketRowHasContent {
                         bucketRow
                     }
                     // Agent status rows do NOT ride the header — they scroll with the
@@ -847,7 +848,9 @@ struct NotchBody: View {
     /// straight from the store like the settings chip, so the chip can never show
     /// a stale model.
     private var askModelChip: some View {
-        AgentComposeChip(title: ModelRatings.prettyName(for: selectedModelID), action: {
+        AgentComposeChip(title: ModelRatings.prettyName(for: selectedModelID,
+                                                        provider: selectedProvider),
+                         action: {
             model.showAskModelPicker = true
         }, icon: { EmptyView() })
         .fixedSize()
@@ -861,6 +864,14 @@ struct NotchBody: View {
                 selectedModelID: selectedModelID,
                 onSelect: { row in
                     ModelCatalogStore.select(provider: row.provider, model: row.id)
+                },
+                // "More models…" hands off to Settings' Model pane — the full
+                // cross-provider catalog the recents menu deliberately doesn't carry.
+                onMoreModels: {
+                    model.settingsSection = "Model"
+                    withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                        model.openSettings()
+                    }
                 },
                 onDone: { model.showAskModelPicker = false })
                 .preferredColorScheme(.dark)
@@ -1417,8 +1428,11 @@ struct NotchBody: View {
             ])
         }
         // The detail header is also the run's tear-off grip — drag the page out
-        // and the task splits into its own window.
+        // and the task splits into its own window. The hand cursor rides the
+        // WHOLE strip, buttons included, because the whole strip really is
+        // draggable: the icons win the tap, the drag arms past its minimum.
         .contentShape(Rectangle())
+        .grabCursor()
         .gesture(detachDragGesture)
     }
 
@@ -1563,6 +1577,18 @@ struct NotchBody: View {
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                     manageExpanded = false
                     model.openWhatsNew(on: nil)
+                }
+            }
+            // The keyboard reference. It lands in Settings → Shortcuts rather than
+            // popping a card of its own: the list is long enough to want the
+            // settings pane's room, and the summon chord it leads with is
+            // *editable* in the section right above it (General), so the two
+            // belong under one roof. Same jump the update row makes to About.
+            manageMenuRow(icon: LucideIcons.command, title: L("recent.menu.shortcuts")) {
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                    manageExpanded = false
+                    model.settingsSection = "Shortcuts"
+                    model.toggleSettings()
                 }
             }
             manageMenuRow(icon: LucideIcons.settings, title: L("recent.menu.settings"), shortcut: "⌘,") {
@@ -2094,11 +2120,17 @@ struct NotchBody: View {
             HStack(spacing: 8) {
                 let label = model.thinkingStatus.isEmpty ? model.currentThinkingWord : model.thinkingStatus
                 ThinkingOrb(state: model.thinkingOrbState)
-                CrossfadeText(text: label, font: 15, color: Tokens.text2)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                WaitElapsedSuffix(since: model.thinkingStartedAt, font: 15)
-                    .fixedSize()
+                // Word and timer share ONE baseline — centering text of two
+                // different sizes floats the smaller suffix ~0.5pt high. Same
+                // pairing as `AssistantTurnView.waitRow`, so the pre-answer wait
+                // and the mid-answer one read identically.
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    CrossfadeText(text: label, font: 15, color: Tokens.text2)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    WaitElapsedSuffix(since: model.thinkingStartedAt, font: 15)
+                        .fixedSize()
+                }
             }
             .padding(.vertical, 5)
             .padding(.horizontal, 2)
@@ -2776,8 +2808,10 @@ struct NotchBody: View {
         // The header's free strip doubles as the tear-off grip: drag the thread
         // out of the notch and it splits into its own window (see
         // `NotchModel.detachDragChanged`). Buttons keep their taps — the drag
-        // only arms past its minimum distance.
+        // only arms past its minimum distance — so the hand cursor covers the
+        // whole strip, which is exactly how far the drag reaches.
         .contentShape(Rectangle())
+        .grabCursor()
         .gesture(detachDragGesture)
     }
 
@@ -2828,10 +2862,9 @@ struct NotchBody: View {
     private func inputRow(placeholder: String, followUp: Bool) -> some View {
         let fontSize: CGFloat = followUp ? NotchBody.followUpFontSize : NotchBody.idleFontSize
         return HStack(spacing: 12) {
-            // The field, with a Siri-style ghost hint trailing the typed text on the
-            // line it ends on. This `inputRow` renders the hint only for the idle
-            // prompt (`!followUp`); the mid-thread field is `followUpRow`, which
-            // carries its own copy of the same hint.
+            // The field and its fading placeholder. Where Enter sends the line is
+            // spelled out by the destination pill on the row below, not by anything
+            // trailing the caret.
             ZStack(alignment: .leading) {
                 PromptField(
                     text: $model.text,
@@ -2899,14 +2932,13 @@ struct NotchBody: View {
                         return model.historyConfirmHighlighted()
                     },
                     // Tab steps where Enter sends this line (Ask → Note →
-                    // Remind →…) when the classifier guessed wrong — the inline
-                    // hint steps with it. Agent is NOT a stop (the bucket pill
-                    // owns that switch). It works on the EMPTY prompt too: the
+                    // Remind →…) when the classifier guessed wrong — the pill
+                    // below steps with it. Agent is NOT a stop (the pill's other
+                    // half owns that switch). It works on the EMPTY prompt too: the
                     // mode is picked before the line is typed, exactly like a `/`
                     // command, and the placeholder ("Write a note…") says which
-                    // one is armed while there are no glyphs for the ghost to
-                    // trail. Always consumed either way, so focus never wanders
-                    // out of the prompt.
+                    // one is armed. Always consumed either way, so focus never
+                    // wanders out of the prompt.
                     onTab: followUp ? { false } : {
                         // Tab picks the highlighted `/` row too — the completion
                         // key doing the completing, before the cycle gets a turn.
@@ -2932,51 +2964,19 @@ struct NotchBody: View {
                         model.handleAgentPasteImage()
                     },
                     // Live width of the last line's committed text + any composing
-                    // pinyin, and how far down that line sits — together they park the
-                    // inline hint right after the caret, wherever the wrapped text has
-                    // carried it. Only the idle prompt feeds these; `followUpRow` owns
-                    // its own tracking and its own hint.
+                    // pinyin — what the overlay placeholder watches so it clears the
+                    // instant the editor shows anything. Only the idle prompt feeds
+                    // this; `followUpRow` owns its own tracking.
                     onCaretWidth: followUp ? { _ in } : { caretWidth = $0 },
-                    onCaretY: followUp ? { _ in } : { caretY = $0 },
                     // The box's own height — one line, or as many as the text has
                     // wrapped to (capped). The row is built around it.
                     onHeightChange: followUp ? { _ in } : { inputHeight = $0 }
                 )
                 .frame(height: followUp ? nil : inputHeight)
-                // Reserve the hint's docking slot at the row's trailing edge: a long
-                // line wraps within this narrower field while "— Ask"/"— Note" holds
-                // in the reserved strip beside it, never overlapped, never lost. The
-                // reserved width follows the current label so short labels don't waste
-                // space; the ZStack animation keeps the resize smooth.
-                // Agent compose owns the whole row (the Ask/Agent bucket words name
-                // the destination already), so it drops the trailing "— Agent Claude"
-                // ghost — no reserved strip, full width for the task description.
-                // The `/` menu owns the row the same way: the word in the box is a
-                // command being picked, not a line being sent, so no ghost and no
-                // reserved strip for one.
-                .padding(.trailing, (followUp || model.agentComposeActive || model.slashMenuOpen) ? 0 : InlineSendHint.reservedTrailingWidth(label: model.submitLabel, suffix: model.submitLabelSuffix, fontSize: fontSize))
-                .animation(.smooth(duration: 0.25), value: model.submitLabel + model.submitLabelSuffix)
-                // The ghost hint shares the FIELD's box (not the row's), so its
-                // coordinates are the ones the field reports the caret in — that's what
-                // lets it ride down to the second line and stay put when the row grows.
-                // Drawn behind the text; the reserved strip above keeps them apart.
-                .background {
-                    if !followUp && !model.agentComposeActive && !model.slashMenuOpen {
-                        GeometryReader { geo in
-                            InlineSendHint(
-                                label: model.submitLabel,
-                                suffix: model.submitLabelSuffix,
-                                fontSize: fontSize,
-                                caretWidth: caretWidth,
-                                caretY: caretY,
-                                availableWidth: geo.size.width,
-                                tint: model.submitInk
-                            )
-                            .frame(height: geo.size.height, alignment: .center)
-                        }
-                        .allowsHitTesting(false)
-                    }
-                }
+                // No trailing ghost, and so no reserved strip beside the text: the
+                // destination is spelled out in the pill below the field (see
+                // `BucketTogglePill`), which leaves the line the full width of the
+                // row to wrap into.
 
                 // The placeholder, drawn as a SwiftUI label over the (natively
                 // placeholder-less) field so its appearance can FADE — on emptying
@@ -3031,29 +3031,15 @@ struct NotchBody: View {
                 }
             }
 
-            // With the destination now spelled out inline beside the caret, the
-            // trailing send pill would just repeat it — so while there's text the
-            // inline hint owns that job and the trailing slot stays empty. When the
-            // field is empty the Recent cluster tucks in there (plus the tack, once
-            // ⌘P has pinned the panel) — and, on the first launch after an update, a
-            // "what's new" cue leads it, the one-tap way into the release notes.
-            if !model.hasText && !followUp {
-                HStack(spacing: 8) {
-                    if whatsNew.unseenVersion != nil {
-                        whatsNewCue
-                            .transition(.opacity)
-                    }
-                    // With a local agent CLI, the bucket row below hosts the Recent
-                    // cluster on the Ask|Agent line; without that row, it rides here
-                    // in the input's trailing slot as before. Either way it hands over
-                    // to the manage bar's bottom-right corner while Recent is up.
-                    if !model.agentAvailable && !recentListShown {
-                        let cluster = idleTrailingCluster
-                        if !cluster.isEmpty {
-                            cluster
-                        }
-                    }
-                }
+            // With the destination spelled out in the pill below, the trailing send
+            // pill would just repeat it — so while there's text this slot stays
+            // empty. When the field is empty it carries, on the first launch after
+            // an update, a "what's new" cue: the one-tap way into the release notes.
+            // (The Recent cluster lives on the bucket row's trailing edge, which is
+            // now always there.)
+            if !model.hasText && !followUp && whatsNew.unseenVersion != nil {
+                whatsNewCue
+                    .transition(.opacity)
             }
         }
         // Grows with the box: the prompt keeps its resting breathing room and the row
@@ -3129,40 +3115,13 @@ struct NotchBody: View {
                     // shows ANYTHING — committed text or still-composing pinyin (which
                     // isn't in `model.text` yet) — matching the native behaviour.
                     onCaretWidth: { followUpCaretWidth = $0 },
-                    onCaretY: { followUpCaretY = $0 },
                     onHeightChange: { followUpHeight = $0 }
                 )
                 .frame(height: followUpHeight)
-                // Reserve the hint's docking slot at the trailing edge, exactly like
-                // the idle row, so typed text wraps within a narrower field and the
-                // "— Ask"/"— Remind" ghost never overlaps it. Width follows the current
-                // label so short labels don't leave a dead strip on the right.
-                .padding(.trailing, InlineSendHint.reservedTrailingWidth(label: model.submitLabel, suffix: model.submitLabelSuffix, fontSize: NotchBody.followUpFontSize))
-                .animation(.smooth(duration: 0.25), value: model.submitLabel + model.submitLabelSuffix)
-                // Same Siri-style ghost hint the idle prompt carries, on the mid-thread
-                // field too: "— Ask"/"— Note"/"— Remind" trailing the caret so a
-                // routed-by-intent follow-up shows its destination, and Tab's correction
-                // step is visible here. It shares the FIELD's box, so it rides down with
-                // the text as the box unfolds. Rendered behind the field and
-                // hit-transparent. Mounted unconditionally: the hint's OWN `visible`
-                // gate (caretWidth > 0, so it covers CJK/IME pre-composition) drives its
-                // materialize in/out — an outer structural `if` would bypass that
-                // dissolve and hard-pop the ghost on the first/last character.
-                .background {
-                    GeometryReader { geo in
-                        InlineSendHint(
-                            label: model.submitLabel,
-                            suffix: model.submitLabelSuffix,
-                            fontSize: NotchBody.followUpFontSize,
-                            caretWidth: followUpCaretWidth,
-                            caretY: followUpCaretY,
-                            availableWidth: geo.size.width,
-                            tint: model.submitInk
-                        )
-                        .frame(height: geo.size.height, alignment: .center)
-                    }
-                    .allowsHitTesting(false)
-                }
+                // No trailing ghost here either — a follow-up is always an ask
+                // anyway (`effectiveSubmitPanel` pins a thread to `.chat`), so the
+                // field keeps its full width and the destination's colour wash below
+                // is all the routing this row has to say.
                 // The placeholder, shown only while the editor is truly empty —
                 // committed text, a bare line break, and in-progress pinyin all
                 // hide it. (Raw `text.isEmpty`, not `hasText`: the latter trims,
@@ -3205,7 +3164,7 @@ struct NotchBody: View {
             RoundedRectangle(cornerRadius: 12)
                 .fill(focused ? Tokens.recessFillLit : Tokens.recessFill)
                 // A whisper of the destination's colour washed over the box while
-                // there's text — the background twin of the tinted "— Note" ghost,
+                // there's text — the quiet twin of the tinted destination pill,
                 // so the field itself leans toward where Enter will send the line.
                 // Fades out on an empty field (destination is just the default).
                 .overlay(
@@ -3220,7 +3179,7 @@ struct NotchBody: View {
                 .strokeBorder(focused ? Tokens.recessRimLit : Tokens.recessRim, lineWidth: 0.5)
         )
         // Flash the field's rim when the destination flips (Ask⇄Note⇄Remind) — the
-        // peripheral twin of the inline "— Ask"/"— Note" word swap, in the NEW
+        // peripheral twin of the pill's word swap, in the NEW
         // destination's colour. Keyed on the intent *category* so a
         // recurrence-suffix edit doesn't pulse.
         .intentChangePulse(on: model.effectiveSubmitPanel,
@@ -3348,7 +3307,7 @@ fileprivate extension NotchModel {
     var submitTint: Color {
         submitGoesToAgent ? Tokens.agentTint : effectiveSubmitPanel.intentTint
     }
-    /// The luminous face — for the inline ghost's word and the rim pulse.
+    /// The luminous face — for the rim pulse and other ink on the dark glass.
     var submitInk: Color {
         submitGoesToAgent ? Tokens.agentInk : effectiveSubmitPanel.intentInk
     }
@@ -3356,7 +3315,7 @@ fileprivate extension NotchModel {
 
 /// The destination colour of an intent — the SAME palette everywhere a
 /// destination shows its face: Ask a cool blue, Note the Notes amber, Remind
-/// the Reminders orange. Read by the inline "— Ask/— Note/— Remind" ghost, the
+/// the Reminders orange. Read by the destination pill under the prompt, the
 /// follow-up field's background wash, and the intent-change rim pulse, so the
 /// input's colour story always matches the filter chips and capture chips.
 extension NotchModel.Panel {
@@ -4306,15 +4265,18 @@ private struct SlashCommandRow: View {
     }
 }
 
-/// The persistent Ask|Agent switch that anchors the bucket row — the panel's
-/// one explicit top-level choice. Ask is the lightweight bucket (the intent
-/// classifier keeps routing note/remind invisibly inside it); Agent arms the
-/// folder-scoped compose. Two words in one glass capsule washed with the
-/// active bucket's colour — the ManageFilterChip recipe: the selected word
-/// bright, the other dim, no thumb, no divider; the wash alone says which side
-/// is live. A plain click is enough of a gate because arming is inert — it
-/// only unfurls the chips row; a run still needs a folder, a typed task, and
-/// an explicit Enter.
+/// The persistent destination pill that anchors the bucket row — the panel's
+/// one explicit top-level choice, and the ONE place where routing shows itself.
+/// Its first half is the live destination: it reads "Ask" at rest and becomes
+/// "Note" / "Remind · Daily" (mark and colour with it) the moment the classifier
+/// — or Tab — points the line somewhere else. Its second half arms the
+/// folder-scoped agent compose, and only exists where an agent CLI does.
+///
+/// Words in one glass capsule washed with the active side's colour — the
+/// ManageFilterChip recipe: the selected word bright, the other dim, no thumb,
+/// no divider; the wash alone says which side is live. A plain click is enough
+/// of a gate because arming is inert — it only unfurls the chips row; a run
+/// still needs a folder, a typed task, and an explicit Enter.
 private struct BucketTogglePill: View {
     @ObservedObject var model: NotchModel
 
@@ -4347,15 +4309,54 @@ private struct BucketTogglePill: View {
         wordPad + iconSlot + labelBoxWidth(title, spelled: spelled) + wordTrailPad
     }
 
+    /// Where Enter sends the line right now, as far as the Ask half is concerned.
+    /// An armed Agent bucket owns the line, so the Ask half falls back to its
+    /// resting face rather than showing a destination it isn't going to use.
+    private var destination: NotchModel.Panel {
+        model.agentComposeActive ? .chat : model.effectiveSubmitPanel
+    }
+
+    /// The Ask half's word — the destination *spelled out*: "Ask", "Note",
+    /// "Remind · Daily". This is the panel's one place where the routing shows
+    /// itself; there is no ghost trailing the caret any more.
+    private var askWord: String {
+        switch destination {
+        case .chat:     return L("hint.ask")
+        case .note:     return L("hint.note")
+        case .reminder: return L("hint.remind") + model.submitLabelSuffix
+        }
+    }
+
+    /// …and its mark, which changes with the word: bubble, pencil, bell.
+    private var askMark: LucideIcons.Mark {
+        switch destination {
+        case .chat:     return LucideIcons.messageCircle
+        case .note:     return LucideIcons.pencilLine
+        case .reminder: return LucideIcons.bell
+        }
+    }
+
     var body: some View {
         let agentOn = model.agentComposeActive
-        let ask = L("hint.ask"), agent = L("hint.agent")
+        let ask = askWord, agent = L("hint.agent")
         HStack(spacing: Self.wordGap) {
-            BucketWord(title: ask, icon: LucideIcons.messageCircle, active: !agentOn) {
+            // `swapKey` is the destination CATEGORY, not the word: it's what the
+            // mark and word roll on, so Ask⇄Note⇄Remind rolls while a
+            // "Remind · Daily"→"Remind · Weekly" suffix edit doesn't (the same
+            // distinction the field's rim pulse already draws).
+            BucketWord(title: ask, icon: askMark, active: !agentOn,
+                       swapKey: destination) {
                 model.setAgentBucket(false)
             }
-            BucketWord(title: agent, icon: LucideIcons.codeXml, active: agentOn) {
-                model.setAgentBucket(true)
+            // The Agent half only exists where an agent CLI does. Without one the
+            // pill is a single word — the live destination, and nothing to switch.
+            if model.agentAvailable {
+                // No key: the Agent half's face never changes, so it has nothing
+                // to roll — it only ever wipes.
+                BucketWord(title: agent, icon: LucideIcons.codeXml, active: agentOn,
+                           swapKey: nil) {
+                    model.setAgentBucket(true)
+                }
             }
         }
         // Horizontal only (the words still stretch to the pill's 30pt height):
@@ -4393,32 +4394,77 @@ private struct BucketTogglePill: View {
         // chipSize) so the pill and the trailing dropdown line up on the row.
         .frame(height: 30)
         .padding(.horizontal, 3)
+        // The glass takes the DESTINATION's colour, not a fixed Ask blue: the pill
+        // is the routing's face now, so Note ambers and Remind oranges the capsule
+        // the way the ghost used to tint its word.
         .glassCapsule(in: Capsule(), brighter: false,
-                      tint: agentOn ? Tokens.agentTint
-                                    : NotchModel.Panel.chat.intentTint)
+                      tint: agentOn ? Tokens.agentTint : destination.intentTint)
         // Fast and all but critically damped. A 30pt switch is not a panel: the
         // old 0.34/0.82 took ~300ms and arrived with a visible bounce, where the
         // tab bar this is modelled on settles a comparable move in ~175ms flat.
         // 0.26/0.86 lands at ~220ms with under half a point of overshoot — quick
         // enough to read as one snap, with just enough spring left to belong to
-        // the rest of the panel.
+        // the rest of the panel. The same spring carries an Ask→Note→Remind word
+        // change, so the capsule resizes on one curve either way.
         .animation(.spring(response: 0.26, dampingFraction: 0.86), value: agentOn)
+        .animation(.spring(response: 0.26, dampingFraction: 0.86), value: ask)
         .accessibilityElement(children: .contain)
     }
 }
 
-/// One word of the bucket pill. Both halves carry their mark (a speech bubble for
-/// Ask, a code bracket `</>` for Agent); the active one spells its name out beside
-/// it, the inactive one collapses to the bare icon — dim, brightening on hover, the
-/// way over to the other side.
+/// One word of the bucket pill. Both halves carry their mark (the destination's —
+/// bubble / pencil / bell — on the first, a code bracket `</>` for Agent); the
+/// active one spells its name out beside it, the inactive one collapses to the bare
+/// icon — dim, brightening on hover, the way over to the other side.
 /// Clicking the active half is a no-op — the pill sets a bucket, never surprises.
+///
+/// **The pill has two switches, so it has two axes.** Changing BUCKET
+/// (Ask⇄Agent) is horizontal: the well glides, one word wipes open while the
+/// other wipes shut. Changing DESTINATION (Ask⇄Note⇄Remind) doesn't move
+/// between halves at all — it substitutes a face in place — so it gets the
+/// vertical one: mark and word roll up together and the new pair rises from
+/// below, while the capsule springs to the new word's width around them. Read
+/// the two side by side and you can tell which switch fired without reading a
+/// single glyph, which is the whole point of spending the second axis on it.
 private struct BucketWord: View {
     var title: String
     var icon: LucideIcons.Mark
     var active: Bool
+    /// What a *roll* is keyed on — the live destination for the Ask half, `nil`
+    /// for the Agent half, whose face is fixed. Keyed on the category rather than
+    /// `title` so the bell doesn't somersault when only the recurrence suffix
+    /// changes; that edit stays a quiet cross-fade inside the word (see
+    /// `contentTransition` below).
+    var swapKey: NotchModel.Panel?
     var action: () -> Void
 
     @State private var hovering = false
+
+    /// How far the outgoing face lifts and the incoming one rises from — small on
+    /// purpose. This is a 30pt pill, not a page: past ~6pt the roll stops reading
+    /// as a substitution and starts reading as something falling through the
+    /// glass. 5pt is enough to give the swap a direction, and still lets a 15pt
+    /// glyph travel inside `rollBox` without the clip biting it.
+    private static let rollTravel: CGFloat = 5
+    /// The vertical room the word's clip leaves for that travel: the 12pt line
+    /// (~15pt tall) plus the roll on both sides. Sized here rather than left to
+    /// the text's own height, because `.clipped()` would otherwise slice the
+    /// rolling glyphs off at their own baseline box.
+    private static let rollBox: CGFloat = 26
+
+    /// The destination swap itself. Asymmetric for the same reason the wipe's ink
+    /// is: share one curve and both faces sit at half opacity through the middle
+    /// of the move — the double exposure this replaced. So the old face is gone in
+    /// ~100ms, before it has travelled far, and the new one comes up just behind
+    /// it. Up-and-out / up-and-in in one direction always: a wheel that turns one
+    /// way reads as "the destination changed", where a reversible roll would keep
+    /// promising an order the classifier doesn't actually walk in.
+    private static let roll = AnyTransition.asymmetric(
+        insertion: .offset(y: rollTravel).combined(with: .opacity)
+            .animation(.easeOut(duration: 0.20).delay(0.04)),
+        removal: .offset(y: -rollTravel).combined(with: .opacity)
+            .animation(.easeIn(duration: 0.10))
+    )
 
     /// The spelled-out word's exact width. `Font.sf` IS the system face, so
     /// `NSFont.systemFont` measures the very glyphs SwiftUI will draw — which turns
@@ -4459,14 +4505,20 @@ private struct BucketWord: View {
     }
 
     private var content: some View {
-        // Nothing here is ever inserted or removed by the flip — that's the whole
-        // point. The mark is permanent on BOTH halves, and the word stays in the
-        // tree too, revealed by an animatable WIDTH (0 ⇄ its measured width) under
-        // a clip. So the switch is one continuous interpolation on the pill's
+        // Nothing here is ever inserted or removed by the BUCKET flip — that's the
+        // whole point. The mark is permanent on BOTH halves, and the word stays in
+        // the tree too, revealed by an animatable WIDTH (0 ⇄ its measured width)
+        // under a clip. So the switch is one continuous interpolation on the pill's
         // spring: the word wipes open beside its mark while the other wipes shut
         // and the well glides between them. A `if active { Text }` instead would
         // pop the label in and out of layout and leave the outgoing word fading
         // outside the flow — the desynced, un-"一镜到底" version of this.
+        //
+        // A DESTINATION change is the one thing that does swap identity, because
+        // it has to: the mark is a Path and two paths can't interpolate. It stays
+        // "one shot" by keeping both faces in the same slot (the ZStacks below)
+        // and rolling them together on one curve — the horizontal geometry never
+        // learns a swap happened, it just springs to the new word's width.
         //
         // The mark is bigger AND heavier than a menu glyph (15/2.0 → 1.25pt of
         // stroke, against the menu's 13/1.75 → 0.95pt), because it carries more: on
@@ -4479,26 +4531,57 @@ private struct BucketWord: View {
         // active side's ink from the shared `foregroundStyle`, so a live mark is
         // exactly as bright as the word beside it.
         HStack(spacing: 0) {
-            LucideIcon(mark: icon, size: 15, weight: 2.0)
-                // Same air around the glyph the SF mark had (11pt in 14), scaled.
-                .frame(minWidth: BucketTogglePill.iconSlot)
-            Text(title)
-                .font(.sf(12, weight: .medium))
-                // Ideal width regardless of the frame below, so the wipe slides the
-                // clip across a fully-typeset word instead of re-wrapping it.
-                .fixedSize()
-                .padding(.leading, BucketTogglePill.labelGap)
-                // The ink is the ONE thing that does NOT ride the pill's spring.
-                // Sharing that curve leaves both words parked at half opacity
-                // through the middle of the flip — two ghosts, the exact opposite
-                // of one continuous shot. So the outgoing word is gone in ~70ms
-                // (before its box has travelled far) and the incoming one comes up
-                // just BEHIND the wipe front, never ahead of it.
-                .opacity(active ? 1 : 0)
-                .animation(active ? .easeOut(duration: 0.16).delay(0.04)
-                                  : .easeIn(duration: 0.07),
-                           value: active)
+            // Two different paths can't interpolate, so a destination change
+            // (bubble→pencil→bell) swaps identity and ROLLS. The ZStack is what
+            // makes that a substitution rather than a shove: identity-swapped
+            // views both live in the layout while the transition runs, and side
+            // by side in the HStack the outgoing mark would push the word along
+            // in front of it.
+            ZStack {
+                LucideIcon(mark: icon, size: 15, weight: 2.0)
+                    .id(swapKey)
+                    .transition(Self.roll)
+            }
+            // Same air around the glyph the SF mark had (11pt in 14), scaled.
+            .frame(minWidth: BucketTogglePill.iconSlot)
+            ZStack(alignment: .leading) {
+                Text(title)
+                    .font(.sf(12, weight: .medium))
+                    // Within ONE destination the word can still change — a
+                    // recurrence suffix ("Remind · Daily"→"· Weekly"). Identity
+                    // holds across that, so it cross-fades in place instead of
+                    // rolling the whole word for an edit the routing didn't make.
+                    .contentTransition(.opacity)
+                    // Ideal width regardless of the frame below, so the wipe slides
+                    // the clip across a fully-typeset word instead of re-wrapping it.
+                    .fixedSize()
+                    .padding(.leading, BucketTogglePill.labelGap)
+                    // The ink is the ONE thing that does NOT ride the pill's spring.
+                    // Sharing that curve leaves both words parked at half opacity
+                    // through the middle of the flip — two ghosts, the exact
+                    // opposite of one continuous shot. So the outgoing word is gone
+                    // in ~70ms (before its box has travelled far) and the incoming
+                    // one comes up just BEHIND the wipe front, never ahead of it.
+                    //
+                    // It lives INSIDE the rolled view on purpose: an
+                    // `.animation(_:value:)` wrapping the `.transition` below would
+                    // put the roll inside a second animation scope, and which curve
+                    // won would then be SwiftUI's business rather than ours. Here
+                    // the two switches own strictly separate modifiers.
+                    .opacity(active ? 1 : 0)
+                    .animation(active ? .easeOut(duration: 0.16).delay(0.04)
+                                      : .easeIn(duration: 0.07),
+                               value: active)
+                    // …and the word rolls on the SAME key and the same beat as the
+                    // mark beside it, so the pair leaves and arrives as one face.
+                    .id(swapKey)
+                    .transition(Self.roll)
+            }
+                // Width is the wipe's (springs with the destination's word length);
+                // the height is the roll's headroom. Both words sit leading-aligned
+                // inside it, so a roll never nudges the mark or the pill's rim.
                 .frame(width: BucketTogglePill.labelBoxWidth(title, spelled: active),
+                       height: Self.rollBox,
                        alignment: .leading)
                 .clipped()
                 // …and the front itself is a gradient, not a razor: the glyph

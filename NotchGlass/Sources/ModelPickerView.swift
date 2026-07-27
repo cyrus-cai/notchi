@@ -30,15 +30,16 @@ struct PickerModel: Identifiable {
 /// The custom cross-provider model picker — a two-pane card shown as a native popover
 /// anchored on the settings model chip: a searchable **flat** list on the left (every
 /// model in one list, no "pick a provider first" step), and a detail pane on the right
-/// with Speed / Intelligence meters, the context window, and the capability flags
-/// (Vision / Tool Use / Reasoning).
+/// with who serves it, the context window, and the capability flags (Vision / Tool
+/// Use / Reasoning).
 ///
-/// Two things drive the design beyond the reference:
-///  · **Availability.** Models whose provider has no key are dimmed and can't be
-///    selected; tapping one (or its inline "Add key") jumps to that provider's setup.
-///  · **The two meters.** The model APIs carry context + capabilities but no
-///    Speed/Intelligence score; those come from `ModelRatings` (a curated table with a
-///    heuristic fallback), so every model reads at a glance as fast-light vs. slow-smart.
+/// **Availability** drives the design beyond the reference: models whose provider has
+/// no key are dimmed and can't be selected; tapping one (or its inline "Add key")
+/// jumps to that provider's setup.
+///
+/// The pane shows only facts the model itself reports. It used to carry two 5-bar
+/// Speed / Intelligence meters fed by a curated table — but a bar count nobody can
+/// read a unit off of ("4 of 5 what?") isn't information, so they're gone.
 struct ModelPickerView: View {
     let models: [PickerModel]
     /// The provider currently in effect — its selected row carries the accent.
@@ -728,7 +729,7 @@ private struct ModelRowView: View {
 
 // MARK: - Detail panel
 
-/// The right-hand pane: the model name, the two meters, who
+/// The right-hand pane: the model name, who
 /// serves it, its context window, and the capability flags — including whether
 /// asking through this provider gets real web search (the steering the old
 /// provider-menu grouping used to do now lives here, next to the model itself).
@@ -763,17 +764,10 @@ private struct DetailPanel: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            // Meters — the two graduated bars, grouped tight so Speed and Intelligence
-            // read as a pair.
-            VStack(alignment: .leading, spacing: 12) {
-                Meter(label: L("model.picker.speed"), value: info.speed)
-                Meter(label: L("model.picker.intelligence"), value: info.intelligence)
-            }
-            .padding(.top, 18)
-
             // Facts (Provider / Context) — a quiet label↔value block, separated from
-            // the meters above by a hairline so the panel breaks into clean registers.
-            Rectangle().fill(.white.opacity(0.07)).frame(height: 0.5).padding(.vertical, 14)
+            // the name above by a hairline so the panel breaks into clean registers.
+            Rectangle().fill(.white.opacity(0.07)).frame(height: 0.5)
+                .padding(.top, 16).padding(.bottom, 14)
 
             VStack(alignment: .leading, spacing: 8) {
                 // Claude Code rows are CLI aliases; show what the alias actually
@@ -1033,16 +1027,15 @@ final class ModelCatalogStore: ObservableObject {
 
     /// A row's title. Claude Code's ids are the CLI's rolling aliases, so a row
     /// would otherwise read "Opus" — a family, not a model; once the probe has
-    /// landed it names the concrete model the alias runs ("Claude Opus 4.8").
-    /// The account-default sentinel ("claude") keeps its "Default" word in front:
-    /// it resolves to whichever alias is the account default today (Opus, as of
-    /// writing), and a bare resolved name would make it that row's twin.
+    /// landed it names the concrete model the alias runs ("Claude Opus 5"). The
+    /// account-default sentinel that used to head that list ("claude", shown as
+    /// "Default · …") is gone — it was a twin of whichever alias it resolved to,
+    /// and "Default" names nothing you can point at.
     private func title(for info: ModelInfo, provider p: Provider) -> String {
         if info.id.isEmpty { return L("model.picker.default") }
         guard p == .claudeCode, let resolved = claudeResolved[info.id]
         else { return info.name }
-        let full = ClaudeCLIService.displayName(forResolved: resolved)
-        return info.id == "claude" ? "\(L("model.picker.default")) · \(full)" : full
+        return ClaudeCLIService.displayName(forResolved: resolved)
     }
 
     /// The rows the cross-provider picker shows: every provider's models in one flat
@@ -1157,6 +1150,9 @@ struct AskRecentModelPickerView: View {
 
     let rows: [Row]
     let onSelect: (Row) -> Void
+    /// The way out of the recents: open Settings' Model pane, where the full
+    /// cross-provider catalog lives. The menu closes on its own first.
+    let onMoreModels: () -> Void
     let onDone: () -> Void
 
     @State private var current: Row
@@ -1165,9 +1161,11 @@ struct AskRecentModelPickerView: View {
     @State private var keyMonitor: Any?
 
     init(rows: [Row], selectedProvider: Provider, selectedModelID: String,
-         onSelect: @escaping (Row) -> Void, onDone: @escaping () -> Void) {
+         onSelect: @escaping (Row) -> Void, onMoreModels: @escaping () -> Void,
+         onDone: @escaping () -> Void) {
         self.rows = rows
         self.onSelect = onSelect
+        self.onMoreModels = onMoreModels
         self.onDone = onDone
         _current = State(initialValue: Row(provider: selectedProvider, id: selectedModelID))
     }
@@ -1176,13 +1174,23 @@ struct AskRecentModelPickerView: View {
         VStack(alignment: .leading, spacing: 2) {
             ForEach(rows, id: \.self) { r in
                 AskRecentModelRow(
-                    label: ModelRatings.prettyName(for: r.id),
+                    label: ModelRatings.prettyName(for: r.id, provider: r.provider),
                     selected: r == current) {
                         // Menu semantics: one click picks and dismisses. Clicking
                         // the already-armed row just dismisses.
                         if r != current { arm(r) }
                         onDone()
                     }
+            }
+            // The tail row out of the recents and into the whole catalog. A
+            // hairline sets it apart from the models above: it isn't a model to
+            // arm, it's a door — and the ↑/↓ cursor deliberately skips it.
+            Rectangle().fill(.white.opacity(0.07))
+                .frame(height: 0.5)
+                .padding(.vertical, 3)
+            AskRecentModelRow(label: L("model.picker.more"), selected: false) {
+                onDone()
+                onMoreModels()
             }
         }
         .padding(8)
@@ -1725,28 +1733,6 @@ private struct EffortSlider: View {
         let idx = min(max(Int((clamped / step).rounded()), 0), positionCount - 1)
         guard idx != currentIndex else { return }
         onSelect(idx == 0 ? nil : rungs[idx - 1])
-    }
-}
-
-/// A five-segment meter (Speed / Intelligence). Filled bars are bright, empty ones
-/// nearly gone — the same graduated-white idiom the rest of the panel uses.
-private struct Meter: View {
-    let label: String
-    let value: Int   // 0…5
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Text(label)
-                .font(.sf(12, weight: .medium))
-                .foregroundStyle(Tokens.text2)
-            HStack(spacing: 4) {
-                ForEach(0..<5, id: \.self) { i in
-                    RoundedRectangle(cornerRadius: 1.5)
-                        .fill(.white.opacity(i < value ? 0.92 : 0.12))
-                        .frame(height: 3.5)
-                }
-            }
-        }
     }
 }
 

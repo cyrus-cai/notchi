@@ -1469,8 +1469,8 @@ final class NotchModel: ObservableObject {
     /// stop — it's the bucket pill's job (`setAgentBucket`). Keeping the
     /// heavyweight mode off an ambient navigation key is what makes mashing Tab
     /// through a wrong note/remind guess safe; a misrouted note costs nothing,
-    /// a misrouted agent arm is a surprise. Tab while armed still steps off —
-    /// the keyboard twin of tapping the pill's Ask half.
+    /// a misrouted agent arm is a surprise. Tab while armed is inert: stepping
+    /// off the Agent bucket is Shift-Tab's job (or the pill's Ask half).
     ///
     /// It also works on the EMPTY prompt, where there is no "current line" yet:
     /// the press arms a destination for the line about to be typed, the same pin
@@ -1478,11 +1478,12 @@ final class NotchModel: ObservableObject {
     /// Since the pin only lifts when the field EMPTIES (`text.didSet`), one armed
     /// on an already-empty field survives right through the typing that follows.
     func toggleSubmitPanel() {
-        if agentComposeActive {
-            exitAgentCompose()
-            manualPanelOverride = .chat
-            return
-        }
+        // Armed on Agent, plain Tab does NOTHING. The Ask → Note → Remind cycle
+        // is a *within-bucket* correction, and the agent compose isn't in that
+        // bucket — a stray Tab there used to tear the whole compose down (folder,
+        // chips, typed task) as a side effect of a key people mash. Leaving the
+        // bucket is Shift-Tab's job (`toggleAgentBucket`) or the pill's Ask half.
+        guard !agentComposeActive else { return }
         switch effectiveSubmitPanel {
         case .chat:     manualPanelOverride = .note
         case .note:     manualPanelOverride = .reminder
@@ -5310,13 +5311,11 @@ final class NotchModel: ObservableObject {
     }
 
     /// Debug-only: put a line into the idle input exactly as if typed, so the
-    /// inline routing hint ("— Ask" / "— Note" / "— Remind") shows for
+    /// destination pill ("Ask" / "Note" / "Remind") shows the routing for
     /// screenshots. `route` pins the destination via the same override Tab uses,
-    /// so the hint reads the intended verb regardless of the classifier's take.
+    /// so the pill reads the intended verb regardless of the classifier's take.
     /// The set is delayed a beat so the prompt field is mounted when the text
-    /// lands — pushing it during the first render drops the caret-width report
-    /// and the inline hint never materializes. Used by the `NOTCH_DEMO_INPUT`
-    /// env path.
+    /// lands. Used by the `NOTCH_DEMO_INPUT` env path.
     func seedDemoInput(_ line: String, route: Panel? = nil) {
         mode = .idle
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
@@ -5630,15 +5629,44 @@ final class NotchModel: ObservableObject {
         return true
     }
 
-    func clearHistory() {
-        // Clearing before the launch load lands must also veto the merge, or the
-        // archive would pop right back once the disk read finishes.
-        if !historyLoaded { historyClearedBeforeLoad = true }
+    /// How much of the archive a Clear wipes. The confirmation only offers the
+    /// choice when the narrow scope is actually narrower — see
+    /// `historyCountWithinLastDay`.
+    enum HistoryClearScope {
+        /// Everything filed in the last 24 hours; older rows stay.
+        case lastDay
+        case all
+    }
+
+    /// The window `.lastDay` wipes.
+    static let historyLastDayWindow: TimeInterval = 24 * 60 * 60
+
+    /// Rows filed within `historyLastDayWindow` — the size of the narrow scope,
+    /// and what tells the confirmation whether there's a choice worth offering.
+    var historyCountWithinLastDay: Int {
+        let cutoff = Date().addingTimeInterval(-Self.historyLastDayWindow)
+        return history.lazy.filter { $0.t >= cutoff }.count
+    }
+
+    func clearHistory(scope: HistoryClearScope = .all) {
+        // Everything filed at/after this instant goes. A full clear reaches all the
+        // way back, which is just `.distantPast` — so both scopes are one cutoff and
+        // one code path.
+        let cutoff: Date = switch scope {
+        case .all: .distantPast
+        case .lastDay: Date().addingTimeInterval(-Self.historyLastDayWindow)
+        }
+        // Clearing before the launch load lands must also reach the rows the read
+        // hasn't handed over yet, or the wiped window pops back once it finishes.
+        armClearBeforeLoad(cutoff)
+
+        let doomed = history.filter { $0.t >= cutoff }
+        guard !doomed.isEmpty || scope == .all else { return }
         // The rows go, so their attachments go with them. (A clear that lands before
         // the load only sees what's in memory; the rest of the store is swept by the
         // prune in `mergeLoadedHistory`, which then finds nothing referencing it.)
-        Self.deleteHistoryImages(history.flatMap(\.imageFiles))
-        history = []
+        Self.deleteHistoryImages(doomed.flatMap(\.imageFiles))
+        history.removeAll { $0.t >= cutoff }
         saveHistory()
     }
 
@@ -5767,8 +5795,17 @@ final class NotchModel: ObservableObject {
     private var historyLoaded = false
     private var historySaveDeferred = false
     /// Set when the user clears history before the launch load lands, so the merge
-    /// can't resurrect the archive it was just asked to destroy.
-    private var historyClearedBeforeLoad = false
+    /// can't resurrect the archive it was just asked to destroy. The value is the
+    /// clear's cutoff — drop everything filed at/after it (`.distantPast` for a full
+    /// clear, a 24h-ago instant for the narrow scope). `nil` = nothing cleared yet.
+    private var historyClearedBeforeLoad: Date?
+
+    /// Records a pre-load clear's reach. Two clears keep the *earlier* cutoff — it's
+    /// the one that removes more, and neither window should come back.
+    private func armClearBeforeLoad(_ cutoff: Date) {
+        guard !historyLoaded else { return }
+        historyClearedBeforeLoad = min(historyClearedBeforeLoad ?? .distantFuture, cutoff)
+    }
     /// The debounced pending save, so a burst of saves collapses to one write and
     /// the terminate flush can run it early.
     private var pendingHistorySave: DispatchWorkItem?
@@ -5797,10 +5834,17 @@ final class NotchModel: ObservableObject {
                 Self.pruneHistoryImages(keeping: referenced)
             }
         }
-        guard !historyClearedBeforeLoad, !loaded.isEmpty else { return }
+        guard !loaded.isEmpty else { return }
+        // A clear that landed before this read finished also owns the rows it never
+        // got to see — apply its cutoff to what came off disk, or the wiped window
+        // reappears. (`.distantPast` = a full clear: nothing survives.)
+        let surviving = historyClearedBeforeLoad.map { cutoff in
+            loaded.filter { $0.t < cutoff }
+        } ?? loaded
+        guard !surviving.isEmpty else { return }
         // Anything already in `history` arrived after launch — newer than
         // everything on disk — so it stays in front (the list is newest-first).
-        history = history + loaded
+        history = history + surviving
     }
 
     nonisolated private static func readHistoryFromDisk() -> [HistoryItem] {

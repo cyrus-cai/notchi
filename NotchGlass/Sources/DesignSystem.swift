@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// The one type + color system the whole notch references — a direct port of the
@@ -75,7 +76,7 @@ enum Tokens {
     // MARK: Source / intent palette
     //
     // The ONE table every surface reads for "which kind of thing is this" — the
-    // inline "— Ask/— Note/— Remind/— Agent" ghost, the Recent filter chips, the
+    // Ask/Note/Remind/Agent destination pill, the Recent filter chips, the
     // capture jump pills, the archive window's chips and bubbles. Each kind has
     // TWO faces: a saturated `…Tint` body for the low-opacity glass WASHES (where
     // saturation survives dilution), and the same hue lifted toward white as
@@ -834,5 +835,46 @@ extension View {
     /// any other island control that wants a hover hint in the panel's own voice.
     func notchTooltip(_ text: String, edge: VerticalEdge = .top, delay: TimeInterval = 0.45) -> some View {
         modifier(NotchTooltip(text: text, edge: edge, delay: delay))
+    }
+}
+
+// MARK: - Grab cursor
+
+/// The hand cursor for a tear-off grip. The grips are deliberately invisible —
+/// transparent sheets behind the content (see `NotchBody.detachGrip`) — so
+/// without a cursor change the only way to find one is to guess and pull. The
+/// open hand is the affordance: cross the strip, the pointer says "pull me."
+///
+/// Push/pop rather than `NSCursor.set()`: a bare `set` is undone by the next
+/// mouse-moved event that finds no cursor rect under the pointer, so the hand
+/// flickers back to the arrow while the cursor is still sitting on the grip.
+/// The `pushed` flag keeps that stack balanced — `onHover` can repeat a value,
+/// and the panel folds (unmounting the grip mid-hover) on every mouse-out,
+/// which would otherwise leave the hand cursor pushed system-wide.
+private struct GrabCursor: ViewModifier {
+    @State private var pushed = false
+
+    func body(content: Content) -> some View {
+        content
+            .onHover { inside in
+                guard inside != pushed else { return }
+                if inside { NSCursor.openHand.push() } else { NSCursor.pop() }
+                pushed = inside
+            }
+            .onDisappear {
+                if pushed {
+                    NSCursor.pop()
+                    pushed = false
+                }
+            }
+    }
+}
+
+extension View {
+    /// Mark a strip as draggable: the pointer becomes an open hand over it.
+    /// Layout-free — it only changes the cursor, never the hit-testing or the
+    /// frame, so it can ride the same transparent sheets the tear-off grips use.
+    func grabCursor() -> some View {
+        modifier(GrabCursor())
     }
 }

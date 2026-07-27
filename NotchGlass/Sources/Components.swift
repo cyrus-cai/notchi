@@ -146,15 +146,14 @@ struct PromptField: NSViewRepresentable {
     var onPasteImage: () -> Bool = { false }
     /// Reports the width (pt) of the LAST line the box is currently *showing* —
     /// committed text PLUS any in-progress IME composition (the pinyin/marked text
-    /// that isn't yet in `text`). The inline hint uses this to sit right after the
-    /// caret, so "— Ask" trails the pinyin live and slides right as more is typed,
-    /// instead of anchoring to the stale committed text. `0` when the box is empty.
-    /// No-op by default.
+    /// that isn't yet in `text`). The overlay placeholder watches it so it clears
+    /// while pinyin is still composing, instead of trailing the stale committed
+    /// text. `0` when the box is empty. No-op by default.
     var onCaretWidth: (CGFloat) -> Void = { _ in }
     /// Reports where that last line sits vertically, as an offset (pt) from the
-    /// box's own centre — so the inline hint can ride down with the text as the box
-    /// grows into a second, third… line. `0` for a single-line prompt (the hint
-    /// stays centred, exactly as before). No-op by default.
+    /// box's own centre — for anything that needs to ride down with the text as the
+    /// box grows into a second, third… line. `0` for a single-line prompt. No-op by
+    /// default (nothing reads it today).
     var onCaretY: (CGFloat) -> Void = { _ in }
     /// Reports the box's current height (pt): one line at rest, growing a line at a
     /// time with the wrapped text, clamped at `maxVisibleLines`. The caller frames
@@ -704,183 +703,6 @@ struct HistorySearchField: NSViewRepresentable {
     }
 }
 
-/// A Siri-style **inline ghost hint** that trails the typed text on the same line,
-/// spelling out where Enter will send it — "— Ask" for a question, "— Note" for a
-/// jot — the way Siri appends a faint "— Ask Siri" after what you've typed. The
-/// classifier (via `NotchModel.submitLabel` / `effectiveSubmitPanel`)
-/// already recomputes that destination on every keystroke; this just *shows* it,
-/// in place, so the routing is visible before you press Return.
-///
-/// It's an overlay, not part of the field: the backing `NSTextField` can't host a
-/// trailing accessory, so we measure the typed text's width with the field's exact
-/// `NSFont` and offset the ghost label by that much inside a leading-aligned
-/// `ZStack`. When the text grows toward the trailing edge, the hint doesn't vanish —
-/// it **docks** at the right edge of the row and holds there while the field scrolls,
-/// so the Ask/Note read is never lost on a long line. The caller reserves that
-/// docking slot in the field itself (`reservedTrailingWidth`), so scrolled text can
-/// never run underneath the docked hint.
-///
-/// Mounted by the caller *over* the same row as its `PromptField`, sharing the
-/// field's `fontSize` so the measurement lines up glyph-for-glyph. Caller passes the
-/// available width (usually the row's own width, via a `GeometryReader`) so the
-/// dock position is known.
-struct InlineSendHint: View {
-    /// "Ask" / "Note" — the destination the classifier currently reads.
-    var label: String
-    /// A softer trailing detail after the destination word — the Ask model name
-    /// ("Ask gpt-4o") or the Remind recurrence ("Remind · Daily"). Rendered a shade
-    /// lighter than the word so it reads as a footnote, not a second destination.
-    var suffix: String = ""
-    /// The field's font size, so the hint matches the body text size exactly.
-    var fontSize: CGFloat
-    /// Width (pt) of everything the field is currently showing — committed text PLUS
-    /// any in-progress IME composition (pinyin) — measured in the field's font by
-    /// `PromptField` (`onCaretWidth`). This is where the caret sits, hence where the
-    /// ghost begins; sourcing it from the editor (not from the committed `text`) is
-    /// what lets "— Ask" trail the pinyin live and slide right as you type.
-    var caretWidth: CGFloat
-    /// How far (pt) the line the text ends on sits from the box's vertical centre —
-    /// `0` on a one-line prompt, one line-height per line as the box grows down. The
-    /// ghost rides down with the text instead of staying pinned to the middle of a
-    /// now-tall box. Also from `PromptField` (`onCaretY`).
-    var caretY: CGFloat = 0
-    /// Width available on the row for text + hint. The hint hides rather than clip
-    /// when the content leaves it no room.
-    var availableWidth: CGFloat
-    /// Left inset of the NSTextField's text (its cell draws ~2pt in from the edge),
-    /// so the ghost lands flush after the glyphs, not 2pt early.
-    var leadingInset: CGFloat = 2
-    /// The destination's colour (Ask blue / Note amber / Remind orange — the same
-    /// palette the filter chips and capture chips wear), painted on the WORD only;
-    /// the leading em dash stays placeholder-grey so the connector reads as
-    /// punctuation and the colour lands on the destination itself. `nil` keeps the
-    /// whole hint in the classic placeholder grey.
-    var tint: Color? = nil
-
-    /// Breathing room between the last glyph and the ghost.
-    private static let gap: CGFloat = 8
-
-    /// Trailing room the caller should reserve INSIDE the field (as trailing
-    /// padding) so text can never scroll under the docked hint. Sized to the *current*
-    /// label ("— Ask", "— Note", "— Remind · Weekly · …") rather than the widest
-    /// possible label, so the field uses all available width when the destination is
-    /// short and no dead strip appears to the right of the ghost. The caller animates
-    /// this padding alongside the hint so Ask→Note→Remind transitions stay smooth.
-    static func reservedTrailingWidth(label: String, suffix: String = "", fontSize: CGFloat) -> CGFloat {
-        return width(of: "— \(label)\(suffix)", fontSize: fontSize) + gap
-    }
-
-    /// SwiftUI lays a `Text` in a line box ~1pt taller than the `NSTextView` the
-    /// field types into (it rounds ascent+descent up as a pair; the layout manager
-    /// doesn't), so centring the hint on the line floats its baseline ~0.5pt ABOVE
-    /// the typed glyphs — the "— Ask" ghost reads a hair too high. Drop it back by
-    /// half that overshoot so the ghost sits on the exact baseline of the text it
-    /// trails. Derived from the font, not a magic pixel, so it holds at any size.
-    private static func baselineDrop(fontSize: CGFloat) -> CGFloat {
-        let f = NSFont.systemFont(ofSize: fontSize)
-        let swiftUILine = (f.ascender - f.descender).rounded(.up)
-        let nsLine = NSLayoutManager().defaultLineHeight(for: f)
-        return max(0, (swiftUILine - nsLine) / 2)
-    }
-
-    var body: some View {
-        // Sit the ghost just past the glyphs, with a small breathing gap — but never
-        // past the dock at the row's trailing edge. A short line reads inline
-        // (Siri-style, right after the caret); as the line grows the hint glides
-        // right until it reaches the dock and holds there, staying visible while the
-        // field scrolls underneath (the caller reserved that slot, so no overlap).
-        // Visibility keys on `caretWidth` (not the committed `text`) so the hint
-        // stays up while pinyin is still composing.
-        //
-        // The dock anchors to the LEFT edge of the reserved strip the caller padded
-        // into the field. Both the field's usable width and the dock reference the SAME
-        // reserved width (now sized to the current label) so the ghost lands flush where
-        // the text area ends — no gap, no overlap — while short labels reclaim the rest
-        // of the row for the editable area.
-        let reserved = Self.reservedTrailingWidth(label: label, suffix: suffix, fontSize: fontSize)
-        let dock = availableWidth - reserved + Self.gap
-        let start = min(leadingInset + caretWidth + Self.gap, dock)
-        let visible = caretWidth > 0
-
-        // Motion notes — tuned to Apple's current language for ghost text:
-        //  · FOLLOW is a critically-damped spring, not a fixed-duration ease. Typing
-        //    retargets the animation every keystroke; a spring merges those
-        //    retargets velocity-continuously (each new target inherits the current
-        //    velocity), where an ease restarts from zero each time and reads as a
-        //    mechanical stutter under fast input. No bounce — the hint is "pulled
-        //    along" behind the caret, it never overshoots past it.
-        //  · APPEAR/DISAPPEAR is a materialize (blur + fade, in place) — the same
-        //    treatment Apple Intelligence uses for ghost text (`.blurReplace` on
-        //    macOS 15; recreated below for our 14 target). Structurally inserting
-        //    the Text (`if visible`) is what keeps the appearance anchored: a freshly
-        //    inserted view is born at its final offset, so it condenses into
-        //    position rather than flying in from wherever the hint last sat.
-        //  · The WORD swap (Ask⇄Note) is a quiet in-place cross-fade
-        //    (`contentTransition`), not a scale/bounce — the meaning changes, the
-        //    object doesn't.
-        return ZStack(alignment: .leading) {
-            if visible {
-                // Match the body text exactly — same size, same (regular) weight as
-                // the field's own glyphs — so the hint reads as a quiet continuation
-                // of the line rather than a smaller label. Only the colour sets it
-                // apart: the whole hint wears the destination's tint at one soft,
-                // uniform strength (dash, word, and trailing detail all the same faded
-                // opacity) so "— Ask gpt-4o" reads as one quiet ghost rather than a
-                // bright destination word with dimmer punctuation around it. Typed
-                // text stays near-white.
-                (Text("— ").foregroundColor(tint.map { $0.opacity(0.42) } ?? Tokens.placeholder)
-                    + Text(label).foregroundColor(tint.map { $0.opacity(0.42) } ?? Tokens.placeholder)
-                    + Text(suffix).foregroundColor(tint.map { $0.opacity(0.42) } ?? Tokens.placeholder.opacity(0.6)))
-                    .font(.sf(fontSize, weight: .regular))
-                    .lineLimit(1)
-                    .fixedSize()
-                    .contentTransition(.opacity)
-                    .animation(.smooth(duration: 0.25), value: label + suffix)
-                    .offset(x: start, y: caretY + Self.baselineDrop(fontSize: fontSize))
-                    .animation(.smooth(duration: 0.25), value: start)
-                    .animation(.smooth(duration: 0.25), value: caretY)
-                    .transition(.materialize)
-            }
-        }
-        .allowsHitTesting(false)
-        // Drives the insertion/removal (materialize) transition above.
-        .animation(.smooth(duration: 0.3), value: visible)
-    }
-
-    /// Measure a string's rendered width in `NSFont.systemFont(ofSize:)` — the same
-    /// font family `PromptField` installs — so the ghost's start matches the real
-    /// caret. Uses AppKit's text sizing (not a SwiftUI `Text` measurement) because
-    /// the field itself is an `NSTextField`; same engine, same metrics.
-    private static func width(of string: String, fontSize: CGFloat) -> CGFloat {
-        guard !string.isEmpty else { return 0 }
-        let font = NSFont.systemFont(ofSize: fontSize)
-        let size = (string as NSString).size(withAttributes: [.font: font])
-        return ceil(size.width)
-    }
-}
-
-/// The two ends of the ghost-text materialize: hidden is a soft transparent haze
-/// (blurred + clear), shown is the sharp resting glyphs. Used via
-/// `AnyTransition.materialize` so insertion condenses the text into place and
-/// removal dissolves it — Apple Intelligence's ghost-text treatment (macOS 15's
-/// `.blurReplace`), recreated with a modifier transition for our macOS 14 target.
-private struct MaterializeEffect: ViewModifier {
-    var shown: Bool
-    func body(content: Content) -> some View {
-        content
-            .opacity(shown ? 1 : 0)
-            .blur(radius: shown ? 0 : 4)
-    }
-}
-
-extension AnyTransition {
-    /// Blur-and-fade in place: condense in on insertion, dissolve out on removal.
-    static let materialize = AnyTransition.modifier(
-        active: MaterializeEffect(shown: false),
-        identity: MaterializeEffect(shown: true)
-    )
-}
-
 /// The send button — a piece of the same **Liquid Glass** as the rest of the
 /// island (native `.glassEffect` on macOS 26+, blur fallback below), brightening
 /// gently on hover rather than flooding to a flat white fill.
@@ -1184,9 +1006,9 @@ struct CaptureJumpButton: View {
 
 /// A one-shot **rim glow** that pulses whenever a watched value changes — the input
 /// field's outer acknowledgement that its *destination* just flipped (Ask → Note →
-/// Remind). The inline "— Ask"/"— Note" ghost already cross-fades the word beside the
-/// caret; this brightens the field's own border for a beat so the change registers in
-/// peripheral vision too, not only where the eye is reading.
+/// Remind). The destination pill below already cross-fades its word; this brightens
+/// the field's own border for a beat so the change registers in peripheral vision
+/// too, not only where the eye is reading.
 ///
 /// Mechanics: brighten instantly (no animation) on the change, then ease back to rest —
 /// a struck-then-settles curve, the same shape the entry kick uses, so the field reads
@@ -1333,8 +1155,16 @@ struct FlowLayout: Layout {
 /// pill (which dropped it down near the bottom of the panel). A dim scrim catches
 /// outside taps to cancel; the card itself floats in the middle of the glass.
 struct ClearHistoryConfirm: View {
+    /// Rows filed in the last 24 hours, and the archive's total. The narrow scope is
+    /// only offered when it's a real choice — with nothing recent (0) or nothing
+    /// *but* recent (== total), both buttons would do the same thing, so the card
+    /// falls back to the plain Cancel / Clear History pair.
+    var lastDayCount: Int
+    var totalCount: Int
     var onCancel: () -> Void
-    var onConfirm: () -> Void
+    var onConfirm: (NotchModel.HistoryClearScope) -> Void
+
+    private var offersScopeChoice: Bool { lastDayCount > 0 && lastDayCount < totalCount }
 
     var body: some View {
         ZStack {
@@ -1349,92 +1179,129 @@ struct ClearHistoryConfirm: View {
                     Text(L("clear.title"))
                         .font(.sf(15, weight: .semibold))
                         .foregroundStyle(Tokens.text1)
-                    Text(L("clear.body"))
+                    Text(L(offersScopeChoice ? "clear.body.scope" : "clear.body"))
                         .font(.sf(12))
                         .foregroundStyle(Tokens.text3)
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                HStack(spacing: 10) {
-                    ConfirmDialogButton(title: L("clear.cancel"), role: .cancel, action: onCancel)
-                    ConfirmDialogButton(title: L("clear.confirm"), role: .destructive, action: onConfirm)
+                if offersScopeChoice {
+                    // Two reaches, stacked mild-first: the day window reads as plain
+                    // glass, "Everything" as red-tinted glass. Cancel drops out of the
+                    // material entirely so three capsules don't read as three peers.
+                    VStack(spacing: 8) {
+                        ConfirmDialogButton(title: L("clear.scope.lastDay"),
+                                            kind: .neutral) { onConfirm(.lastDay) }
+                        ConfirmDialogButton(title: L("clear.scope.all"),
+                                            kind: .destructive) { onConfirm(.all) }
+                        ConfirmDialogButton(title: L("clear.cancel"),
+                                            kind: .quiet,
+                                            action: onCancel)
+                    }
+                } else {
+                    HStack(spacing: 10) {
+                        ConfirmDialogButton(title: L("clear.cancel"), kind: .neutral, action: onCancel)
+                        ConfirmDialogButton(title: L("clear.confirm"), kind: .destructive) { onConfirm(.all) }
+                    }
                 }
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 18)
             .frame(maxWidth: 280)
             .background {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    // Real glass: a thin blur of whatever sits behind the card,
-                    // dropped onto a dark tint so the text keeps its contrast.
-                    .fill(.ultraThinMaterial)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .fill(Color.black.opacity(0.28))
-                    )
-                    // A soft top-down sheen, like light catching the upper edge.
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .fill(
-                                LinearGradient(
-                                    colors: [.white.opacity(0.10), .clear],
-                                    startPoint: .top,
-                                    endPoint: .center
-                                )
-                            )
-                            .blendMode(.plusLighter)
-                    )
-                    // Gradient hairline — bright along the top, fading down the sides.
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .strokeBorder(
-                                LinearGradient(
-                                    colors: [.white.opacity(0.30), .white.opacity(0.08)],
-                                    startPoint: .top,
-                                    endPoint: .bottom
-                                ),
-                                lineWidth: 0.75
-                            )
-                    )
-                    .shadow(color: .black.opacity(0.45), radius: 20, y: 10)
+                // Real Liquid Glass, same recipe as the app's other floating cards
+                // (`GlassPopoverBackground`): `nativeGlass` for the refraction, a
+                // light veil for text contrast — light, not the popovers' occluding
+                // 0.42, because this card floats over the island's *own* glass and
+                // a scrim, so it can stay airy — then the sheen + specular rim that
+                // make it read as a slab of glass rather than a drawn box.
+                let shape = RoundedRectangle(cornerRadius: 22, style: .continuous)
+                ZStack {
+                    shape.fill(.clear)
+                        .nativeGlass(in: shape)
+                        .overlay(shape.fill(Color.black.opacity(0.16)))
+                    shape
+                        .fill(LinearGradient(colors: [.white.opacity(0.12), .clear],
+                                             startPoint: .top, endPoint: .center))
+                        .blendMode(.plusLighter)
+                    shape.strokeBorder(
+                        LinearGradient(colors: [.white.opacity(0.34), .white.opacity(0.08)],
+                                       startPoint: .top, endPoint: .bottom),
+                        lineWidth: 0.75)
+                }
+                .compositingGroup()
+                .shadow(color: .black.opacity(0.40), radius: 22, y: 12)
             }
             .padding(24)
         }
     }
 }
 
-/// A flat, full-width-ish button for the confirmation card — a neutral capsule for
-/// Cancel, a soft-red one for the destructive Clear. Brightens on hover.
+/// A full-width Liquid Glass button for the confirmation card — the app's own
+/// `glassCapsule` material (genuine `.glassEffect` on macOS 26+, blur fallback
+/// below), washed white for a neutral action and red for the destructive one. The
+/// `quiet` kind carries no material at all: it's the Cancel that sits *below*
+/// stacked choices, where a third capsule would read as a third option. Brightens on
+/// hover and gives under the press, like every other glass control in the panel.
 private struct ConfirmDialogButton: View {
     var title: String
-    var role: ButtonRole
+    var kind: Kind
     var action: () -> Void
+
+    enum Kind { case neutral, destructive, quiet }
 
     @State private var hovering = false
 
-    private var isDestructive: Bool { role == .destructive }
+    private var label: Color {
+        switch kind {
+        case .destructive: Tokens.danger
+        case .neutral: Tokens.text1
+        case .quiet: hovering ? Tokens.text1 : Tokens.text3
+        }
+    }
 
     var body: some View {
         Button(action: action) {
             Text(title)
                 .font(.sf(13, weight: .semibold))
-                .foregroundStyle(isDestructive ? Tokens.danger : Tokens.text1)
+                .foregroundStyle(label)
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 9)
-                .background(
-                    RoundedRectangle(cornerRadius: 11, style: .continuous)
-                        .fill(
-                            isDestructive
-                                ? Tokens.danger.opacity(hovering ? 0.26 : 0.16)
-                                : Color.white.opacity(hovering ? 0.16 : 0.09)
-                        )
-                )
-                .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                .padding(.vertical, 10)
+                .glassButtonSkin(kind: kind, hovering: hovering)
+                .contentShape(Capsule())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ConfirmDialogPressStyle())
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+    }
+}
+
+private extension View {
+    /// The capsule's material, split out so the `quiet` kind can opt out of glass
+    /// entirely (a bare hover wash) while the other two share `glassCapsule`.
+    @ViewBuilder
+    func glassButtonSkin(kind: ConfirmDialogButton.Kind, hovering: Bool) -> some View {
+        switch kind {
+        case .quiet:
+            self.background(Capsule().fill(Color.white.opacity(hovering ? 0.08 : 0)))
+        case .neutral:
+            self.glassCapsule(in: Capsule(), brighter: hovering)
+        case .destructive:
+            self.glassCapsule(in: Capsule(), brighter: hovering, tint: Tokens.danger)
+        }
+    }
+}
+
+/// Liquid Glass gives under a press. A touch of squash on the whole capsule, on the
+/// panel's usual short spring — the material's own interactive highlight
+/// (`.glassEffect(.clear.interactive())` inside `glassCapsule`) does the rest.
+private struct ConfirmDialogPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+            .animation(.spring(response: 0.22, dampingFraction: 0.72),
+                       value: configuration.isPressed)
     }
 }
 
@@ -2416,15 +2283,22 @@ struct AssistantTurnView: View {
     private func waitRow(_ line: String) -> some View {
         HStack(spacing: 8) {
             ThinkingOrb(state: orbState)
-            CrossfadeText(text: line, font: baseFont, color: Tokens.text2)
-                .lineLimit(1)
-                .truncationMode(.tail)
-            // The elapsed suffix sits OUTSIDE the dissolving word (a sibling,
-            // fixed size) so the ticking seconds never ride the word-change
-            // transition, and a long activity line truncates while the timer
-            // stays visible.
-            WaitElapsedSuffix(since: thinkingSince, font: baseFont)
-                .fixedSize()
+            // Word and timer sit on ONE shared baseline. Centering them (the
+            // HStack default) doesn't align text of two different sizes: the
+            // smaller suffix's baseline lands ~0.5pt above the word's — a whole
+            // retina pixel of visible float right beside it. The orb keeps the
+            // outer stack's centering; only the two runs of text pair up.
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                CrossfadeText(text: line, font: baseFont, color: Tokens.text2)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                // The elapsed suffix sits OUTSIDE the dissolving word (a sibling,
+                // fixed size) so the ticking seconds never ride the word-change
+                // transition, and a long activity line truncates while the timer
+                // stays visible.
+                WaitElapsedSuffix(since: thinkingSince, font: baseFont)
+                    .fixedSize()
+            }
         }
     }
 

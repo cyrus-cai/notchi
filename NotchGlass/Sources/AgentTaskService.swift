@@ -1013,7 +1013,8 @@ final class AgentTaskManager: ObservableObject {
                                              kind: "agent-recovered-finished")
                 NotificationService.shared.postAgentFinished(
                     engineName: engine.displayName,
-                    folderName: URL(fileURLWithPath: marker.folderPath).lastPathComponent,
+                    prompt: done.exchanges.last?.prompt ?? done.prompt,
+                    failureReason: done.failureReason,
                     success: done.outcome == .success,
                     threadID: done.id)
                 settled.append(done)
@@ -1420,7 +1421,8 @@ final class AgentTaskManager: ObservableObject {
         if t.outcome != .cancelled {
             NotificationService.shared.postAgentFinished(
                 engineName: t.engine.displayName,
-                folderName: t.folder.lastPathComponent,
+                prompt: t.exchanges.last?.prompt ?? t.prompt,
+                failureReason: t.failureReason,
                 success: t.outcome == .success,
                 threadID: t.id)
         }

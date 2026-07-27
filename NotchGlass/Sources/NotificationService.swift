@@ -93,14 +93,25 @@ final class NotificationService: NSObject {
     /// this closes the loop the same way the answer-ready banner does. Tapping it
     /// summons the panel and reopens the run's Recent record (`threadID` — the
     /// history row `recordAgentHistory` filed just before this posts).
-    func postAgentFinished(engineName: String, folderName: String,
+    ///
+    /// - Parameters:
+    ///   - prompt: the task the run started with — the body, because with
+    ///     parallel runs the title's engine name alone doesn't say *which* task
+    ///     just landed, and the prompt is what the user actually remembers.
+    ///   - failureReason: takes the body's place on a failure: once it went
+    ///     wrong, "why" beats "which".
+    func postAgentFinished(engineName: String, prompt: String,
+                              failureReason: String?,
                               success: Bool, threadID: UUID) {
         ensureAuthorization { [weak self] granted in
             guard granted, let self else { return }
             let content = UNMutableNotificationContent()
             content.title = L(success ? "notify.agent.done" : "notify.agent.failed",
                               engineName)
-            content.body = folderName
+            let reason = (failureReason ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            // A failure with no reason still names its task rather than going blank.
+            content.body = (!success && !reason.isEmpty) ? reason : prompt
             content.categoryIdentifier = Self.agentCategory
             content.userInfo = [Self.threadIDKey: threadID.uuidString]
             content.sound = .default

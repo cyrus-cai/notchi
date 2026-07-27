@@ -198,7 +198,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             menu.addItem(empty)
         } else {
             for (index, row) in rows.prefix(AskModelMRU.capacity).enumerated() {
-                let title = "\(ModelRatings.prettyName(for: row.model))  ·  \(row.provider.displayName)"
+                let name = ModelRatings.prettyName(for: row.model, provider: row.provider)
+                let title = "\(name)  ·  \(row.provider.displayName)"
                 let entry = NSMenuItem(title: title, action: #selector(selectModel(_:)),
                                        keyEquivalent: "")
                 entry.target = self
