@@ -64,6 +64,25 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.3.1",
+            date: "2026-07-27",
+            features: [
+                "A Shortcuts pane in Settings lists every chord the app answers to.",
+            ],
+            improvements: [
+                "Where Enter sends the line now reads on the Ask pill instead of trailing the caret.",
+                "Clear History can wipe just the last 24 hours.",
+                "Claude Code names the concrete model — \"Opus 5\", not \"Opus\"; the \"Default\" row is gone.",
+                "The model menu ends in \"More models…\", into the full catalog.",
+                "Model detail drops the Speed / Intelligence bars.",
+                "Agent notifications name the task, or why it failed.",
+                "Tear-off strips show a grab cursor.",
+            ],
+            fixes: [
+                "Tab while composing an agent task no longer tears the compose down.",
+            ]
+        ),
+        Entry(
             version: "0.3.0",
             date: "2026-07-26",
             features: [
