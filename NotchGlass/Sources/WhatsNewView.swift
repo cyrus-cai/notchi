@@ -67,15 +67,17 @@ struct WhatsNewView: View {
                 }
             }
             .padding(.horizontal, 4)
-            .padding(.top, 12)
+            // Breathing room the top taper falls across, so the newest release
+            // rests below the gradient at full strength before any scrolling.
+            .padding(.top, 28)
             .padding(.bottom, 20)
         }
         .frame(maxHeight: maxHeight)
         .scrollIndicators(.never)
-        // The header caps the top, so only the bottom tapers — the bundled history
-        // always outgrows the frame (a spec-less/empty changelog takes `emptyState`
-        // instead), so the notes always dissolve into this bottom edge as they scroll.
-        .scrollEdgeFade(top: false, bottom: true, bottomFade: edgeFade)
+        // Both edges taper — the bundled history always outgrows the frame (a
+        // spec-less/empty changelog takes `emptyState` instead), so the notes
+        // dissolve into the header the same way they dissolve into the bottom.
+        .scrollEdgeFade(top: true, bottom: true, topFade: 28, bottomFade: edgeFade)
     }
 
     /// One release: a quiet meta line (date leading, version trailing — both the

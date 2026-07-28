@@ -2047,16 +2047,18 @@ struct NotchBody: View {
                     historyFooterActions
                 }
             }
-            // In the immersive layout the TOP gets an inset (`immersiveTopReach`):
-            // the runway rows scroll up into, behind the floating input, so the first
-            // row rests *below* the input at idle but can travel up under it. The
-            // compact layout keeps its top tight under the (non-floating) RECENT
-            // header. The bottom inset differs by layout: the immersive list runs its
+            // The immersive TOP runway is NOT padding — it's a safe-area inset on the
+            // ScrollView itself (see `.safeAreaInset` below), because a runway made of
+            // content is a runway SwiftUI can scroll away. The compact layout takes a
+            // short content reserve of its own (only when the list actually scrolls) so
+            // its top taper falls over empty space under the (non-floating) RECENT
+            // header rather than dimming the first row at idle.
+            // The bottom inset differs by layout: the immersive list runs its
             // rows full-height behind the floating manage bar (so the last rows stay
             // visible through/around the buttons) and only needs a little clearance
             // off the rounded corner; the compact list reserves the full edgeFade so
             // its bottom taper falls over empty space, not a row.
-            .padding(.top, immersive ? immersiveTopReach : 0)
+            .padding(.top, immersive ? 0 : (overflowing ? compactTopFade : 0))
             // Immersive: a bottom runway rows scroll DOWN into behind the manage bar
             // (always present — the immersive layout only mounts for an overflowing
             // list). Compact: the edgeFade reserve, only when actually overflowing.
@@ -2065,21 +2067,42 @@ struct NotchBody: View {
         #if DEBUG
         .coordinateSpace(name: "immScroll")
         #endif
+        // The immersive top runway (`immersiveTopReach`): the strip the first row
+        // rests below, and that rows travel up into behind the floating input. It is
+        // a SAFE-AREA INSET rather than `.padding(.top)` on the stack, and that
+        // distinction is the whole fix for a bug that made the list open "covering"
+        // the prompt: as an inset the runway lives OUTSIDE the scrollable content,
+        // so there is nothing there for the scroll view to scroll away.
+        //
+        // As content it was stealable, and got stolen intermittently. A LazyVStack's
+        // content height keeps settling for a second or so after the list opens (rows
+        // materialise and re-measure: 1688 → 1697 → 1703 → 1730pt in a measured
+        // trace), and on every content-size change SwiftUI re-anchors the scroll to
+        // the first *item*. Padding is not an item, so the anchor snapped row 0 to the
+        // very top of the viewport — the offset jumped 0 → 66 in a single frame, with
+        // no scroll gesture anywhere near it — and the top rows came to rest under the
+        // "Type anything…" header. Whether it hit depended on whether one of those
+        // height changes happened to land while the list sat still, which is exactly
+        // why it looked random. Rows still scroll under the header as before: the
+        // inset moves where the content RESTS, not how far it can travel.
+        .safeAreaInset(edge: .top, spacing: 0) {
+            Color.clear.frame(height: immersive ? immersiveTopReach : 0)
+        }
         // Immersive: a tall surface that fills the whole panel; the manage bar floats
         // over its bottom-left. Compact: ~6 rows before the list scrolls, so a short
         // Recent list doesn't reserve a tall empty band. Older rows are a scroll away.
         .frame(maxHeight: immersive ? immersiveListHeight : compactListHeight)
         .scrollIndicators(.never)
-        // Compact: only the bottom fades (the RECENT header caps the top), at the
-        // shared 64pt. Immersive: BOTH edges taper — the top dissolves rows sliding
-        // up behind the input, the bottom dissolves rows sliding DOWN behind the
-        // floating manage bar (so reaching the end reads as rows sliding under the
-        // ⋯ chip, mirroring the top). Each edge's taper length tracks its own
-        // runway (`immersiveTopReach` / `immersiveBottomReach`).
+        // BOTH edges taper in either layout — the top dissolves rows sliding up under
+        // the header (immersive: the floating input), the bottom dissolves rows sliding
+        // DOWN behind the floating manage bar (so reaching the end reads as rows sliding
+        // under the ⋯ chip, mirroring the top). Each edge's taper length tracks its own
+        // runway (`immersiveTopReach` / `immersiveBottomReach`; compact: `compactTopFade`
+        // / `edgeFade`), and the compact top only arms once the list actually overflows.
         .scrollEdgeFade(
-            top: immersive,
+            top: immersive ? true : overflowing,
             bottom: immersive ? true : overflowing,
-            topFade: immersive ? immersiveTopReach : edgeFade,
+            topFade: immersive ? immersiveTopReach : compactTopFade,
             bottomFade: immersive ? immersiveBottomReach : edgeFade
         )
         // Immersive only: frost the rows as they scroll UP into the runway behind the
@@ -2695,6 +2718,14 @@ struct NotchBody: View {
     /// as a cut. The scroll content carries matching top/bottom padding, so the
     /// fade falls across that breathing room rather than over live text.
     private let edgeFade: CGFloat = 64
+
+    /// The compact RECENT list's TOP taper — deliberately shorter than `edgeFade`.
+    /// The compact list is only ~6 rows tall, so mirroring the full 64pt reserve up
+    /// top would spend two rows of the viewport on empty runway. This is just enough
+    /// to swallow a row on its way out under the RECENT header instead of cutting it
+    /// mid-glyph, and the scroll content carries a matching top inset so the first
+    /// row still rests below the gradient at full strength.
+    private let compactTopFade: CGFloat = 24
 
     /// Stable id for the invisible spacer at the very bottom of the thread; the
     /// `ScrollViewReader` scrolls to it to keep the newest text in view.
@@ -3843,17 +3874,19 @@ struct UserQuestionBubble: View {
             if expanded {
                 ScrollView(.vertical, showsIndicators: false) {
                     questionText
-                        // Breathing room the fade falls across, so the last line can
-                        // rest above the taper at full strength when scrolled to the
+                        // Breathing room each fade falls across, so the first / last
+                        // line can rest outside its taper at full strength at either
                         // end (the shared fade discipline — never dim resting text).
+                        .padding(.top, expandedOverflows ? 16 : 0)
                         .padding(.bottom, expandedOverflows ? 28 : 0)
                 }
                 .frame(maxHeight: expandedMaxHeight)
                 // The shared dissolve instead of a hard cut where the text scrolls
-                // past the bubble's edge. Gated on actual overflow — a bubble whose
-                // full text fits sizes to content, and fading it would dim real
-                // lines. Top stays crisp: the first line rests at the very top.
-                .scrollEdgeFade(top: false, bottom: expandedOverflows, fade: 28)
+                // past either of the bubble's edges. Gated on actual overflow — a
+                // bubble whose full text fits sizes to content, and fading it would
+                // dim real lines. A thin feather up top: one line leaving is all it
+                // has to swallow.
+                .scrollEdgeFade(top: expandedOverflows, bottom: expandedOverflows, topFade: 16, bottomFade: 28)
             } else {
                 questionText
             }

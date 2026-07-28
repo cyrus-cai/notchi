@@ -1011,10 +1011,10 @@ struct OpenAICompatAIService: AIService {
 
     // OpenAI-compatible request / streaming-response shapes (only fields we use).
     //
-    // The output-cap field name differs across vendors: MiMo follows OpenAI's
-    // newer `max_completion_tokens`, while DeepSeek uses the classic `max_tokens`.
-    // We encode the same value under whichever key the provider expects, so the
-    // rest of the request stays identical.
+    // No output cap is sent. It used to be, under whichever key the vendor wanted
+    // (`max_completion_tokens` for MiMo, `max_tokens` for everyone else), which is
+    // why the encoder below is key-driven — that machinery now carries only the
+    // fields we still send. See `ReplyTokens` for why the cap went away.
     private struct RequestBody: Encodable {
         let model: String
         let messages: [Message]

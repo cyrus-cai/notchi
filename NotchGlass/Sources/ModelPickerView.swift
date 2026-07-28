@@ -358,16 +358,17 @@ struct ModelPickerView: View {
                         }
                     }
                     .padding(.trailing, 2)
-                    // Breathing room the bottom fade falls across, so the tail row
-                    // (or the fold handle) rests above the taper at full strength.
+                    // Breathing room each fade falls across, so the head row and the
+                    // tail row (or the fold handle) rest outside their taper at full
+                    // strength.
+                    .padding(.top, 24)
                     .padding(.bottom, 40)
                 }
                 // The shared dissolve (`scrollEdgeFade`) where rows scroll past the
-                // column's bottom edge, instead of a hard cut. Bottom only — the
-                // search field caps the top and the first row rests right under it.
-                // The viewport is fixed (the card is 360pt tall), so a short result
-                // list just tapers empty space.
-                .scrollEdgeFade(top: false, bottom: true, fade: 40)
+                // column's edges, instead of a hard cut — a shorter feather under the
+                // search field than at the bottom. The viewport is fixed (the card is
+                // 360pt tall), so a short result list just tapers empty space.
+                .scrollEdgeFade(top: true, bottom: true, topFade: 24, bottomFade: 40)
                 // Scroll only for keyboard moves (scrollToFocused), never for hover —
                 // that's what stopped the list scrolling wildly under the pointer.
                 .onChange(of: focused) {
@@ -558,12 +559,14 @@ struct ModelPickerView: View {
                     section(L("model.picker.configured"), configured, isFirst: true)
                     section(L("model.picker.unconfigured"), unconfigured, isFirst: configured.isEmpty)
                 }
-                // Breathing room the bottom fade falls across at end of scroll.
+                // Breathing room each fade falls across at either end of scroll.
+                .padding(.top, overflowing ? 14 : 0)
                 .padding(.bottom, overflowing ? 24 : 0)
             }
-            // The shared dissolve (`scrollEdgeFade`) at the overflow edge instead of
-            // a hard cut. Bottom only: the pinned "All providers" row caps the top.
-            .scrollEdgeFade(top: false, bottom: overflowing, fade: 24)
+            // The shared dissolve (`scrollEdgeFade`) at both overflow edges instead of
+            // a hard cut. A thin feather up top — the menu is short, so the taper only
+            // has to swallow a row leaving under the pinned "All providers" row.
+            .scrollEdgeFade(top: overflowing, bottom: overflowing, topFade: 14, bottomFade: 24)
             .frame(maxHeight: 218)
         }
         .padding(6)
@@ -1464,14 +1467,15 @@ struct AgentModelPickerView: View {
                                 .animation(Self.selectionSpring, value: i)
                         }
                     }
-                    // Breathing room the bottom fade falls across at end of scroll.
+                    // Breathing room each fade falls across at either end of scroll.
+                    .padding(.top, overflowing ? 14 : 0)
                     .padding(.bottom, overflowing ? 24 : 0)
                 }
-                // The shared dissolve (`scrollEdgeFade`) at the overflow edge instead
+                // The shared dissolve (`scrollEdgeFade`) at both overflow edges instead
                 // of a hard cut. Gated on actual overflow — a short engine list sizes
-                // to content, and fading it would dim real rows. Bottom only: the
-                // first row rests at the very top when scrolled up.
-                .scrollEdgeFade(top: false, bottom: overflowing, fade: 24)
+                // to content, and fading it would dim real rows. A thin feather up top:
+                // the list is short, so the taper only swallows a row on its way out.
+                .scrollEdgeFade(top: overflowing, bottom: overflowing, topFade: 14, bottomFade: 24)
                 .frame(height: listHeight)
                 // Open centered on the current pick — with the fleet of models the
                 // armed one can sit below the fold, and a picker that opens blind to

@@ -4631,15 +4631,17 @@ struct SourcePopoverPanel: View {
                     SourceRow(source: source)
                 }
             }
-            // Breathing room the bottom fade falls across, so the last row rests
-            // above the taper at full strength once scrolled to the end.
+            // Breathing room each fade falls across, so the first / last row rests
+            // outside its taper at full strength at either end of the scroll.
+            .padding(.top, scrolls ? 14 : 0)
             .padding(.bottom, scrolls ? 24 : 0)
         }
         .scrollBounceBehavior(.basedOnSize)
-        // The shared dissolve at the overflow edge (`scrollEdgeFade`) instead of a
+        // The shared dissolve at both overflow edges (`scrollEdgeFade`) instead of a
         // hard cut — only when the list actually scrolls; a short list that fits
-        // stays crisp. Bottom only: the first row rests at the very top.
-        .scrollEdgeFade(top: false, bottom: scrolls, fade: 24)
+        // stays crisp. A thin feather up top, where only a row on its way out needs
+        // swallowing.
+        .scrollEdgeFade(top: scrolls, bottom: scrolls, topFade: 14, bottomFade: 24)
         .frame(height: visibleHeight)
         .padding(.horizontal, 16)
         .padding(.vertical, 14)

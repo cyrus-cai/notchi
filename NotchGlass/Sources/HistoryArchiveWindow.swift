@@ -316,16 +316,17 @@ private struct HistoryArchiveView: View {
                 }
             }
             .padding(.horizontal, 8)
-            .padding(.top, 8)
-            // The edge-fade reserve: end-of-scroll rests the last row above the
-            // taper at full strength, per the shared fade discipline.
+            // The edge-fade reserve, both ends: rest rests the first / last row
+            // outside its taper at full strength, per the shared fade discipline.
+            .padding(.top, 32)
             .padding(.bottom, 64)
         }
-        // The shared dissolve (`scrollEdgeFade`, panel default 64pt) where rows
-        // scroll past the window's bottom edge, instead of a hard cut. Bottom only —
-        // the filter bar caps the top and the first row rests right under it. The
-        // viewport fills the window, so a short list just tapers empty space.
-        .scrollEdgeFade(top: false, bottom: true)
+        // The shared dissolve (`scrollEdgeFade`) where rows scroll past the window's
+        // edges, instead of a hard cut. A shorter feather under the filter bar than
+        // the panel default at the bottom — the top only has to swallow a row on its
+        // way out. The viewport fills the window, so a short list just tapers empty
+        // space.
+        .scrollEdgeFade(top: true, bottom: true, topFade: 32, bottomFade: 64)
     }
 
     private var emptyList: some View {
@@ -509,16 +510,17 @@ private struct HistoryDetailView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding([.horizontal, .top], 16)
-            // The edge-fade reserve: end-of-scroll rests the last bubble above the
-            // taper at full strength, per the shared fade discipline.
+            .padding(.horizontal, 16)
+            // The edge-fade reserve, both ends: rest rests the first / last bubble
+            // outside its taper at full strength, per the shared fade discipline.
+            .padding(.top, 32)
             .padding(.bottom, 64)
         }
-        // The shared dissolve (`scrollEdgeFade`, panel default 64pt) where bubbles
-        // scroll past the pane's bottom edge, instead of a hard cut. Bottom only —
-        // the title bar + hairline cap the top. The viewport fills the pane, so a
-        // short transcript just tapers empty space.
-        .scrollEdgeFade(top: false, bottom: true)
+        // The shared dissolve (`scrollEdgeFade`) where bubbles scroll past the pane's
+        // edges, instead of a hard cut — a shorter feather under the title bar than
+        // the panel default at the bottom. The viewport fills the pane, so a short
+        // transcript just tapers empty space.
+        .scrollEdgeFade(top: true, bottom: true, topFade: 32, bottomFade: 64)
     }
 
     private var capture: some View {

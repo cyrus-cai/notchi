@@ -2182,14 +2182,20 @@ struct InlineSettingsView: View {
                     .init(L("shortcuts.detach"), ["⌃⇧="]),
                 ])
             }
+            // Breathing room each taper falls across, so the first / last group
+            // rests outside the gradient at full strength (the shared fade
+            // discipline — never dim resting text).
+            .padding(.top, 24)
             .padding(.bottom, 18)
         }
         // Four groups always outrun the pane, so the list scrolls inside a fixed
         // frame instead of stretching the island to phone height — the same
-        // treatment (and the same bottom-only taper) the release notes get.
+        // treatment (and the same taper) the release notes get.
         .frame(maxHeight: 340)
         .scrollIndicators(.never)
-        .scrollEdgeFade(top: false, bottom: true, bottomFade: 32)
+        // Both edges taper: rows leaving under the back pill dissolve exactly the
+        // way rows leaving at the bottom do, instead of hard-cutting mid-glyph.
+        .scrollEdgeFade(top: true, bottom: true, topFade: 24, bottomFade: 32)
     }
 
     /// One row of the reference: what it does, and the chord(s) that do it. More
@@ -2304,11 +2310,18 @@ struct InlineSettingsView: View {
             // current" reads as one thought instead of three scattered lines.
             HStack(alignment: .center, spacing: 12) {
                 // App icon, if the bundle carries one — falls back gracefully.
+                // The catalog asset, not `NSApp.applicationIconImage`: on macOS 26
+                // the running app's icon comes back already rendered for the current
+                // appearance, and this panel is dark — which handed back a darkened
+                // squircle wearing the system's specular rim, reading as a white
+                // hairline around the corners. The catalog entry declares no
+                // appearance variants, so reading it directly gives the artwork as
+                // drawn.
                 // The icon ships with the standard macOS ~10% transparent margin
                 // (so the Dock renders it correctly), which would otherwise make it
                 // read small here. Scale up by the inverse of that footprint so the
                 // squircle fills the 44pt frame; the frame clips the bled-out margin.
-                if let icon = NSApp.applicationIconImage {
+                if let icon = NSImage(named: "AppIcon") ?? NSApp.applicationIconImage {
                     Image(nsImage: icon)
                         .resizable()
                         .scaledToFill()

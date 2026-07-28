@@ -64,6 +64,17 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.3.4",
+            date: "2026-07-29",
+            improvements: [
+                "Lists now dissolve at their top edge the way they already did at the bottom — Recent, the model picker, Shortcuts, the archive, and these notes.",
+            ],
+            fixes: [
+                "Recent no longer opens with its first rows resting under the prompt.",
+                "The app icon in About no longer carries a white rim on its corners.",
+            ]
+        ),
+        Entry(
             version: "0.3.3",
             date: "2026-07-28",
             improvements: [
