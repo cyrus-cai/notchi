@@ -243,8 +243,16 @@ struct ContentView: View {
                     return true
                 }
                 // Settings open → first Esc folds back to the prompt, not a full
-                // close (mirrors the recent-list step-out below).
+                // close (mirrors the recent-list step-out below). A pushed
+                // sub-page (Shortcuts, under About) gets its own step first, so
+                // Esc walks the same floors as the header's back pill.
                 if model.showSettings {
+                    if let parent = InlineSettingsView.Section(rawValue: model.settingsSection)?.parent {
+                        withAnimation(.easeOut(duration: 0.16)) {
+                            model.settingsSection = parent.rawValue
+                        }
+                        return true
+                    }
                     withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                         model.closeSettings()
                     }

@@ -655,25 +655,38 @@ private struct NotchTooltip: ViewModifier {
     /// authority — that's the view whose clip actually chops the capsule.
     ///
     /// A ScrollView around the anchor can clip *tighter* than that, so it narrows
-    /// the box further — but only when it genuinely encloses the anchor. That
-    /// guard is the whole point: `bounds(of: .scrollView)` answers for the nearest
-    /// scroll view in the ANCESTRY, and returns a box even when the anchor sits
-    /// outside its visible rect. The header cluster (which lives above the
+    /// the box further — but only when the scroll box is actually the anchor's own.
+    /// That guard is the whole point: `bounds(of: .scrollView)` answers for the
+    /// nearest scroll view in the ANCESTRY, and returns a box even when the anchor
+    /// sits outside its visible rect. The header cluster (which lives above the
     /// conversation scroll, not in it) was getting back a box lying entirely to
     /// its left — `maxX` negative — and dutifully shoving its tip ~180pt off
     /// target. Reading the scroll view alone, as this used to, also silently
     /// dropped the island wall on the footer icons: the scroll box measured wider
     /// than the 600pt island, so the left-most tip "fit" and was never nudged —
     /// which is exactly how it ended up sliced off at the island's edge.
+    ///
+    /// The test is OVERLAP, not containment. Containment (`minX <= 0 && maxX >=
+    /// width`) looks stricter and safer, but it dropped the scroll wall on exactly
+    /// the icon that needs it: the answer footer's left-most button carries a -5pt
+    /// lead inset (it optically aligns its 11pt glyph in a 22pt hit-frame with the
+    /// text above), so the icon starts 5pt LEFT of the scroll's own left edge. The
+    /// scroll box then failed "straddles it on both sides", the capsule clamped to
+    /// the island instead — 14pt outside the scroll viewport — and the long-answer
+    /// (scrolling) layout chopped its left cap off against the scroll's clip. An
+    /// overlap test keeps rejecting the header case (a box entirely to one side)
+    /// while still claiming a scroll the anchor merely straddles by a few points.
     private static func resolvedBounds(_ g: GeometryProxy) -> (minX: CGFloat, maxX: CGFloat) {
         guard let clip = g.bounds(of: .named(TooltipCoordinateSpace.clipBox)) else {
             return (-.greatestFiniteMagnitude, .greatestFiniteMagnitude)
         }
         var minX = clip.minX, maxX = clip.maxX
-        // `0..<g.size.width` IS the anchor in this space, so "encloses the anchor"
-        // is just: the scroll box straddles it on both sides.
+        // `0..<g.size.width` × `0..<g.size.height` IS the anchor in this space, so
+        // "this scroll is the one clipping me" is: its box overlaps the anchor on
+        // both axes. A box lying off to one side (the header cluster's) doesn't.
         if let scroll = g.bounds(of: .scrollView),
-           scroll.minX <= 0, scroll.maxX >= g.size.width {
+           scroll.maxX > 0, scroll.minX < g.size.width,
+           scroll.maxY > 0, scroll.minY < g.size.height {
             minX = max(minX, scroll.minX)
             maxX = min(maxX, scroll.maxX)
         }
@@ -714,6 +727,32 @@ private struct NotchTooltip: ViewModifier {
             .onPreferenceChange(TooltipBoundsKey.self) { b in
                 boundMinX = b.minX; boundMaxX = b.maxX; anchorWidth = b.anchorWidth
             }
+            // Measure the capsule BEFORE it is ever shown — a hidden, zero-footprint
+            // copy that only exists to report its size. The measurement used to live
+            // on the visible capsule inside the overlay, which meant `tipWidth` was
+            // still 0 on the frame the tip appeared: `horizontalNudge` had nothing to
+            // clamp with, so the capsule was drawn CENTRED on its icon and only
+            // slid clear on a later pass. On the left-most footer icon that first
+            // frame hangs ~50pt off the island's edge and gets chopped — the
+            // "left side is cut off" bug. Measuring up front means the very first
+            // frame is already in its clamped place. (`.hidden()` still lays out,
+            // and a background never affects the anchor's own layout.)
+            .background(
+                TooltipLabel.sizedText(text)
+                    .background(
+                        GeometryReader { g in
+                            Color.clear
+                                .preference(key: TooltipHeightKey.self,
+                                            value: g.size.height)
+                                .preference(key: TooltipWidthKey.self,
+                                            value: g.size.width)
+                        }
+                    )
+                    .hidden()
+                    .allowsHitTesting(false)
+            )
+            .onPreferenceChange(TooltipHeightKey.self) { if $0 > 0 { tipHeight = $0 } }
+            .onPreferenceChange(TooltipWidthKey.self) { if $0 > 0 { tipWidth = $0 } }
             // Anchor the tip's near edge to the control's matching edge, then push
             // it fully CLEAR of the control by its own measured height plus a gap —
             // so the capsule sits above (or below) the icon, never on top of it.
@@ -723,20 +762,9 @@ private struct NotchTooltip: ViewModifier {
                 if shown {
                     TooltipLabel(text: text)
                         // Let it size to its text without being clipped to the
-                        // anchor's width, and measure that height + width for the
-                        // vertical clearance and the horizontal clamp.
+                        // anchor's width; the hidden twin above already reported
+                        // that size, so the offsets below are right from frame one.
                         .fixedSize()
-                        .background(
-                            GeometryReader { g in
-                                Color.clear
-                                    .preference(key: TooltipHeightKey.self,
-                                                value: g.size.height)
-                                    .preference(key: TooltipWidthKey.self,
-                                                value: g.size.width)
-                            }
-                        )
-                        .onPreferenceChange(TooltipHeightKey.self) { tipHeight = $0 }
-                        .onPreferenceChange(TooltipWidthKey.self) { tipWidth = $0 }
                         // Clear the control entirely (height + a 6pt gap), and slide
                         // sideways by `horizontalNudge` so a capsule centred on a
                         // near-the-edge icon doesn't spill off the panel.
@@ -800,8 +828,12 @@ private struct TooltipBoundsKey: PreferenceKey {
 private struct TooltipLabel: View {
     let text: String
 
-    var body: some View {
-        let shape = Capsule(style: .continuous)
+    /// The capsule's content at its exact final size, without the glass behind it.
+    /// Split out so `NotchTooltip` can pre-measure a tip it isn't showing yet
+    /// (see its hidden measuring backdrop) without building a whole glass wafer —
+    /// and so the measured size can never drift from the drawn one.
+    @ViewBuilder
+    static func sizedText(_ text: String) -> some View {
         Text(text)
             .font(.sf(11, weight: .medium))
             .tracking(0.1)
@@ -810,6 +842,11 @@ private struct TooltipLabel: View {
             .fixedSize()
             .padding(.horizontal, 9)
             .padding(.vertical, 5)
+    }
+
+    var body: some View {
+        let shape = Capsule(style: .continuous)
+        Self.sizedText(text)
             .background(
                 ZStack {
                     shape.fill(.clear)

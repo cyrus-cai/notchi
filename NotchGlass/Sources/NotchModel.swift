@@ -270,6 +270,14 @@ final class NotchModel: ObservableObject {
         /// can't come back from disk stuck mid-answer.
         var pending: Bool = false
 
+        /// True on a row whose last round produced no answer — the model returned
+        /// nothing, or the stream died before the first token. The row is kept
+        /// anyway (the question is the user's, and deleting it is how a whole
+        /// conversation used to disappear from Recent); this is what lets it read
+        /// as failed instead of passing for an ordinary answer. `a` carries the
+        /// reason. Persisted, so the marker survives a relaunch.
+        var failed: Bool = false
+
         /// The turns to restore on reopen: the saved thread when present, else a
         /// two-turn thread rebuilt from the legacy `q`/`a` fields. A note/reminder
         /// capture has no conversation at all — never synthesize a ghost assistant
@@ -306,7 +314,7 @@ final class NotchModel: ObservableObject {
         // item has always had them.
         enum CodingKeys: String, CodingKey {
             case id, q, a, t, turns, title, source, link, agentOutcome, agentResume,
-                 agentInterrupted
+                 agentInterrupted, failed
         }
 
         init(from decoder: Decoder) throws {
@@ -327,6 +335,9 @@ final class NotchModel: ObservableObject {
             // resume button.
             agentInterrupted = try c.decodeIfPresent(Bool.self, forKey: .agentInterrupted)
                 ?? (agentResume != nil)
+            // Rows saved before failed rows were kept at all are, by definition,
+            // rows that succeeded.
+            failed = try c.decodeIfPresent(Bool.self, forKey: .failed) ?? false
         }
 
         /// Content search for the `search_history` tool — every place the user's own
@@ -4564,20 +4575,19 @@ final class NotchModel: ObservableObject {
                         self.notifyAnswerReady(threadID: threadID, question: q, answer: saved)
                     }
                 } else {
-                    // Failed before any text arrived (refused connection, bad key): no
-                    // partial round worth saving. Drop the pending placeholder this
-                    // round parked in Recent so the question doesn't linger stuck on
-                    // the three dots — whether or not it's still on screen.
-                    self.settlePending(threadID)
-                    // A detached window mirroring this thread must not sit on a
-                    // spinner forever: settle its mirror with the failure reason
-                    // in the answer slot (the panel path below shows the same).
-                    if self.detachedThreadStores[threadID] != nil {
-                        if let i = thread.firstIndex(where: { $0.id == answerID }) {
-                            thread[i].text = error.localizedDescription
-                        }
-                        self.detachedThreadStores[threadID]?.settle(with: thread)
+                    // Failed before any text arrived (refused connection, bad key):
+                    // there's no answer to keep — but the QUESTION is the user's and
+                    // must survive. File the row marked failed, carrying the real
+                    // reason, instead of deleting it: a round that fails should leave
+                    // a trace you can reopen and re-ask, not erase itself from Recent.
+                    // `persistThread` also settles any detached mirror on this same
+                    // text, so a mirroring window never sits on a spinner.
+                    if let i = thread.firstIndex(where: { $0.id == answerID }) {
+                        thread[i].text = error.localizedDescription
+                        thread[i].isError = true
+                        thread[i].streaming = false
                     }
+                    self.persistThread(thread, threadID: threadID, answer: "")
                     if self.isOnScreen(answerID: answerID) {
                         // Surface the REAL reason (XII-85) — `ServiceError` already
                         // localizes to e.g. "Anthropic · HTTP 401" — and raise an
@@ -5180,14 +5190,37 @@ final class NotchModel: ObservableObject {
     /// text). The recent row shows the first question + latest answer; reopening
     /// it restores every turn.
     private func persistThread(_ thread: [Turn], threadID: UUID, answer ans: String) {
-        // A detached window following this thread freezes on the final state —
-        // caret gone, no stale activity line — whatever happens below.
-        detachedThreadStores[threadID]?.settle(with: thread)
+        var thread = thread
         let trimmed = ans.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Nothing worth keeping (a stream that errored before any text): drop the
-        // pending placeholder that `submit` parked here, so the question doesn't
-        // linger in Recent stuck on the three dots forever.
-        guard !trimmed.isEmpty else { settlePending(threadID); return }
+        // No answer came back — the model returned nothing (a leaked tool call the
+        // harness couldn't recover, an empty completion) or the stream died before
+        // the first token. This used to DELETE the row, which took the user's
+        // question with it: the thread vanished from Recent and, once the app quit,
+        // there was no trace it had ever been asked. Keep the row and mark it
+        // failed instead. The body is whatever reason the answer turn already
+        // holds (the XII-85 error text), else a plain "no answer" line.
+        let failed = trimmed.isEmpty
+        var body = trimmed
+        if failed {
+            let reason = thread.last(where: { $0.role == "assistant" })?.text
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            body = reason.isEmpty ? L("error.noAnswer") : reason
+            // Settle the snapshot too, so reopening the row shows the same reason
+            // rather than an empty bubble — and flag it `isError` so `wireContext`
+            // keeps it out of the next round's wire copy (the model must never see
+            // a failure line as something it once said).
+            if let i = thread.lastIndex(where: { $0.role == "assistant" }) {
+                if thread[i].text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    thread[i].text = body
+                }
+                thread[i].isError = true
+                thread[i].streaming = false
+            }
+        }
+        // A detached window following this thread freezes on the final state —
+        // caret gone, no stale activity line — whatever happens below. Settled
+        // after the patch above so a failed round mirrors the reason, not a blank.
+        detachedThreadStores[threadID]?.settle(with: thread)
 
         let firstQ = thread.first(where: { $0.role == "user" })?.text ?? ""
         // One history entry per conversation: if this thread already has a row
@@ -5196,8 +5229,9 @@ final class NotchModel: ObservableObject {
         // previously generated title so follow-ups don't wipe it.
         let existing = history.first(where: { $0.id == threadID })
         let existingTitle = existing?.title
-        var item = HistoryItem(id: threadID, q: firstQ, a: trimmed, t: Date(), turns: thread)
+        var item = HistoryItem(id: threadID, q: firstQ, a: body, t: Date(), turns: thread)
         item.title = existingTitle
+        item.failed = failed
         // A chat follow-up on a reopened agent thread updates the SAME row — it
         // must keep the row's agent identity (source, folder link, outcome,
         // resume handle) rather than silently demoting it to a plain `.ask`.
@@ -5226,8 +5260,11 @@ final class NotchModel: ObservableObject {
         // (Kimi/GLM/MiniMax) and can 429 the next real answer. A thread that
         // drifts to a new topic still gets re-titled within a round or two;
         // a missing title is always generated regardless of round parity.
+        // A failed round has no answer to summarize, and spending a whole extra
+        // request on the round that just failed is the wrong moment for it — the
+        // row falls back to the question, which is exactly what it should show.
         let atMilestone = thread.count > 2 && thread.count % 4 == 0
-        if existingTitle == nil || atMilestone {
+        if !failed, existingTitle == nil || atMilestone {
             Task { [weak self] in
                 guard let self, let title = await self.generateTitle(for: thread) else { return }
                 await MainActor.run {

@@ -36,12 +36,32 @@ routes it: a question to AI, a note to keep, or a reminder with a time.
 - **Remind** — anything with a time in it lands in Apple Reminders, due date
   already set.
 
+<img src=".github/shots/verb-ask.jpg" width="860" alt="Asking a question in the notch: the answer streams in below the prompt." />
+
+<table>
+<tr>
+<td><img src=".github/shots/verb-note-saved.jpg" alt="Added to Notes" /></td>
+<td><img src=".github/shots/verb-remind-saved.jpg" alt="Added to Reminders" /></td>
+</tr>
+</table>
+
 ## More than a text box.
 
 Notchi searches the web and cites its sources, answers questions about an image
 you copied, and does exact arithmetic instead of guessing at it. Copy a line
 anywhere on the Mac and it rides into the panel as a quote — ready to summarize,
 proofread, translate, or turn into a reminder.
+
+<table>
+<tr>
+<td><img src=".github/shots/power-search.jpg" alt="A web-searched answer with its source cited." /></td>
+<td><img src=".github/shots/power-vision.jpg" alt="A question about a copied image, answered." /></td>
+</tr>
+<tr>
+<td><img src=".github/shots/power-math.jpg" alt="Exact arithmetic: a tip split three ways." /></td>
+<td><img src=".github/shots/power-clip.jpg" alt="Copied text arrives as a quote with Remind, Summarize, Proofread, Translate." /></td>
+</tr>
+</table>
 
 ## Hand it a whole task.
 
@@ -50,6 +70,10 @@ project folder, type the task, and it drives your locally installed **Claude
 Code**, **Codex**, or **Grok** CLI — your own sign-in, your own plan. The run
 keeps going while the notch is closed: what the agent is doing on the left ear,
 elapsed time on the right.
+
+<img src=".github/shots/agent-compose.jpg" width="860" alt="Handing a task to the agent: project folder and model shown under the prompt." />
+
+<img src=".github/shots/agent-notch.jpg" width="660" alt="The closed notch showing the agent editing, with elapsed time." />
 
 ## Native, not bolted on.
 

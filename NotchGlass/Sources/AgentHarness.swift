@@ -240,6 +240,28 @@ struct ToolRegistry: Sendable {
 /// await point (the surrounding `Task` is cancelled on supersede / panel close,
 /// exactly as the plain path), and bounds itself with `maxIterations` so a model
 /// that loops forever on tools can't pin the task open.
+/// The one failure the harness raises on its own behalf.
+///
+/// It exists so "the model returned nothing" can travel as an *error* instead of
+/// as a successful empty string, which is the difference between a round the user
+/// can see failed and one that quietly files itself as finished. Downstream, an
+/// error reaches `NotchModel`'s catch: the row carries a real reason, the turn is
+/// flagged `isError` (so the next round's wire copy never replays it as model
+/// speech), the panel offers a retry, and a diagnostics breadcrumb is left behind.
+/// A successful empty answer got none of that — it just wrote a blank.
+enum AgentHarnessError: LocalizedError {
+    /// Two turns running produced nothing visible — the second with every tool
+    /// withdrawn and an explicit instruction to answer in words. There is nothing
+    /// to show and nothing left to try.
+    case noAnswer
+
+    var errorDescription: String? {
+        switch self {
+        case .noAnswer: return L("error.noAnswer")
+        }
+    }
+}
+
 struct AgentHarness {
     let service: AgentCapableService
     let registry: ToolRegistry
@@ -247,6 +269,29 @@ struct AgentHarness {
     /// cap is a runaway-loop backstop, after which we force a final no-tools turn so
     /// the user still gets a closing answer instead of a dangling tool request.
     var maxIterations: Int = 8
+
+    /// Ceiling on *search* rounds specifically, hit well before `maxIterations`.
+    ///
+    /// Search is the only tool prone to spiralling: on a question the web can't
+    /// cleanly answer, the model reads a page of near-miss results, rewords the
+    /// query, and goes again — each round optimistic, none converging. Left to the
+    /// global cap it burns every iteration, and the one round it finally has to
+    /// answer in is the *last* one: tools vanish, the context is at its fattest,
+    /// and the turn has to produce a final answer from a standing start. That is
+    /// exactly the round we saw come back blank.
+    ///
+    /// So search gets its own, earlier ceiling. Past it the search tool is simply
+    /// no longer advertised — while several rounds of budget remain — so the model
+    /// loses the ability to search *before* it loses the room to compose. Every
+    /// other tool stays; `read_page` in particular is how a model *escapes* a
+    /// fruitless search (open the one promising result and read it), not another
+    /// lap of it.
+    ///
+    /// Three is measured, not guessed: the question that prompted this answered
+    /// cleanly in four searches on a good run, and spent 8–10 on the runs that
+    /// came back empty. Anything a fourth search would have added, a fourth
+    /// *rewording* of the same fruitless query would not.
+    var maxSearchRounds: Int = 3
 
     /// Minimum on-screen time for the tool-activity line, so a fast tool (clipboard
     /// and time return in milliseconds) still shows a full, readable cue instead of
@@ -314,12 +359,31 @@ struct AgentHarness {
         // `searchStopNudge`. Counts only search rounds because only search is prone
         // to the loop; a clipboard/time read never spirals.
         var searchRounds = 0
+        // Whether the "this turn produced no answer" recovery has already been
+        // spent. It is allowed exactly once per run: a second silent turn means the
+        // model isn't going to speak, and looping on it would only trade a blank
+        // answer for a hang. See the empty-close guard below.
+        var emptyCloseRetried = false
+        // Set by that guard. The next turn must be a plain spoken answer, so it runs
+        // with no tools at all — regardless of where the iteration count stands, and
+        // regardless of which ceilings would otherwise still allow one.
+        var forceNoTools = false
 
         while true {
             try Task.checkCancellation()
-            // Past the cap, advertise no tools: the model is forced to answer from
-            // what it has, guaranteeing a terminating turn.
-            let toolsThisTurn = iteration >= maxIterations ? [] : registry.specs
+            // Past the global cap, advertise no tools: the model is forced to answer
+            // from what it has, guaranteeing a terminating turn. Past the *search*
+            // ceiling — which lands several rounds earlier — withdraw only the
+            // searcher, so the model still has `read_page` (and the rest) to finish
+            // the job with, and still has rounds left to do it in.
+            let toolsThisTurn: [ToolSpec]
+            if forceNoTools || iteration >= maxIterations {
+                toolsThisTurn = []
+            } else if searchRounds >= maxSearchRounds {
+                toolsThisTurn = registry.specs.filter { !Self.isSearchTool($0.name) }
+            } else {
+                toolsThisTurn = registry.specs
+            }
 
             var assistantText = ""
             var pendingCalls: [ToolInvocation] = []
@@ -382,6 +446,31 @@ struct AgentHarness {
                 onText(tail)
             }
 
+            // A model that wrote its tool call as *text* markup instead of sending a
+            // structured `tool_call` (DeepSeek's `<｜tool▁calls▁begin｜>…` is the one
+            // we keep seeing) leaves this turn with nothing at all: the filter above
+            // swallowed the markup, and no call arrived. Left alone the harness would
+            // return an empty answer — a blank notch, and the search the model asked
+            // for never ran. So recover the call out of the swallowed markup and let
+            // the round proceed exactly as if the provider had encoded it properly:
+            // the user gets the right answer, not a shorter one.
+            //
+            // Only when the model didn't ALSO send a real call (never run a tool
+            // twice), and only for tools advertised on THIS turn. Matching against
+            // what was advertised — not merely what the registry owns — is what
+            // makes a withdrawal actually stick: past the search ceiling (and past
+            // the cap, where nothing at all is offered) the model keeps asking for
+            // the searcher out of momentum, and honoring that leaked call would
+            // quietly reopen the very loop the withdrawal just closed.
+            if pendingCalls.isEmpty, !toolsThisTurn.isEmpty {
+                let advertised = Set(toolsThisTurn.map(\.name))
+                let recovered = markupFilter.recoveredCalls { advertised.contains($0) }
+                for (i, call) in recovered.enumerated() {
+                    pendingCalls.append(ToolInvocation(id: "leaked_\(iteration)_\(i)",
+                                                       name: call.name, input: call.input))
+                }
+            }
+
             // Whether the provider stopped because it hit the token limit (OpenAI
             // `"length"` / Anthropic `"max_tokens"`) rather than finishing cleanly.
             // Two very different failure modes ride this flag, handled below.
@@ -390,13 +479,45 @@ struct AgentHarness {
             // No tool calls (or we suppressed them at the cap) → the model is done.
             if pendingCalls.isEmpty {
                 onActivity(nil, .composing)
+
+                // …done, but did it actually SAY anything? Trimmed, because
+                // whitespace is not an answer: a turn that streamed two newlines
+                // reads as finished here and lands downstream as a blank row, exactly
+                // like a turn that streamed nothing at all.
+                //
+                // Returning on a blank is what produced the empty notch: the round
+                // was filed as a *successful* answer that happened to be empty, so
+                // nothing upstream could tell it apart from a real reply. A round must
+                // end with an answer or an error — never with silence. So give the
+                // model one more turn, stripped of tools and told plainly what we saw;
+                // if that comes back empty too, fail loudly instead of quietly.
+                if assistantText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    guard !emptyCloseRetried else { throw AgentHarnessError.noAnswer }
+                    emptyCloseRetried = true
+                    forceNoTools = true
+                    // Why the turn was silent, when we can tell: a tool call written
+                    // as text leaves its name in the markup the filter swallowed. This
+                    // reads the leak purely to DESCRIBE it — the call is never run
+                    // here, which is the whole point of having withdrawn the tool.
+                    let leaked = markupFilter
+                        .recoveredCalls { registry.tool(named: $0) != nil }
+                        .first?.name
+                    // An empty assistant turn is rejected by the providers, so stand in
+                    // a marker the model reads as its own silence — same device as the
+                    // truncation replay below.
+                    convo.append(AgentMessage(kind: .text(role: "assistant", text: "[no output]")))
+                    convo.append(AgentMessage(kind: .text(role: "user",
+                                                          text: Self.emptyTurnNote(leaked: leaked))))
+                    iteration += 1
+                    continue
+                }
+
                 // A clean stop → done. But if the model ran out of budget mid-answer,
                 // the visible text is cut off mid-sentence with no sign to the user.
                 // Append a short marker so the reply doesn't just trail off as if
-                // complete. (Only when we actually streamed something — a truncated
-                // *empty* turn is the malformed-response case the stream layer already
-                // retries, not ours to annotate.)
-                if truncated && !assistantText.isEmpty {
+                // complete. (The blank-and-truncated case never reaches here — it's
+                // the silence above, which earns a real retry rather than a marker.)
+                if truncated {
                     onText(L("error.truncated"))
                 }
                 return
@@ -485,7 +606,7 @@ struct AgentHarness {
             let didSearchThisRound = pendingCalls.contains { Self.isSearchTool($0.name) }
             if didSearchThisRound,
                let nudge = Self.searchStopNudge(priorSearchRounds: searchRounds,
-                                                cap: maxIterations) {
+                                                cap: maxSearchRounds) {
                 for i in resultsToSend.indices where Self.isSearchTool(resultsToSend[i].name) {
                     resultsToSend[i].result += nudge
                 }
@@ -525,17 +646,50 @@ struct AgentHarness {
             || name == "exa_search" || name == "keenable_search"
     }
 
+    /// The note handed to a model whose turn produced no answer at all: what we saw,
+    /// and what to do instead. English for the same reason `searchStopNudge` is —
+    /// every provider, CJK models included, follows an English directive most
+    /// reliably, exactly as the tool descriptions are English.
+    ///
+    /// Naming the leaked tool is what makes this worth sending. A model told only
+    /// "you produced nothing" will often produce nothing again — it has no idea what
+    /// it did wrong. Told "the `exa_search` call you wrote as text cannot run", it
+    /// has something specific to correct, and the obvious correction is to speak.
+    ///
+    /// The last sentence matters as much as the first: a model that searched and
+    /// found nothing will sometimes rather say nothing than admit the miss, and
+    /// silence is precisely the failure we're closing. So "I couldn't find it" is
+    /// named explicitly as an acceptable answer.
+    private static func emptyTurnNote(leaked name: String?) -> String {
+        let seen: String
+        if let name {
+            seen = "Your previous message contained no answer — only a `\(name)` tool call "
+                 + "written as plain text, which cannot be executed."
+        } else {
+            seen = "Your previous message contained no answer text at all."
+        }
+        return "[System note] " + seen
+             + " No tools are available on this turn. Reply to the user now, in your own "
+             + "words, from what you already have. If you could not find the answer, say "
+             + "so plainly — that is a valid answer. An empty reply is not."
+    }
+
     /// An escalating "stop searching, answer now" nudge appended to each search
     /// result's text, keyed by how many search rounds have already happened. This is
     /// the cure for the runaway-search loop: when a query has no clean answer on the
     /// web (e.g. "南昌一月气温", where every result is near-miss climate filler with no
     /// hard number), a model left to its own devices keeps *rewording and re-searching*
     /// forever — each round it sees fresh-but-still-inconclusive results and optimistically
-    /// tries again, burning every iteration until the cap forces an empty close. The fix
-    /// is to gently raise the pressure to answer from what's in hand, so the model
-    /// *chooses* to stop (and say "I couldn't find it" if need be) instead of being
-    /// hard-cut. Pressure ramps with the round count rather than slamming a wall, so a
-    /// genuinely multi-step query that legitimately needs 3–4 searches isn't strangled.
+    /// tries again. The nudge raises the pressure to answer from what's in hand, so the
+    /// model *chooses* to stop (and say "I couldn't find it" if need be) rather than
+    /// being hard-cut. Pressure ramps with the round count rather than slamming a wall,
+    /// so a query that legitimately needs two or three searches isn't strangled.
+    ///
+    /// It is persuasion, not enforcement — a model deep in tool-calling momentum reads
+    /// tool output as *data*, and can talk itself past any amount of politeness. The
+    /// enforcement is `maxSearchRounds` withdrawing the tool outright; this is what
+    /// makes the model arrive there having already decided to answer, instead of being
+    /// surprised by a capability vanishing mid-thought.
     ///
     /// Returned text is the instruction the *model* reads, so it is deliberately
     /// English (and not run through `L()`): every provider — domestic CJK models
@@ -543,23 +697,26 @@ struct AgentHarness {
     /// the tool descriptions are English. `priorSearchRounds` is the number of search
     /// rounds already completed *before* this one (0 on the first search → no nudge).
     ///
-    /// `cap` is the harness's `maxIterations`; the final-warning tier keys off "this is
-    /// the last round before tools are withdrawn" so the wording matches reality.
+    /// `cap` is the harness's `maxSearchRounds` — the *search* ceiling, not the global
+    /// iteration cap. Keying the final tier off the ceiling that actually withdraws the
+    /// tool is what keeps the warning honest: it fires on the round after which search
+    /// really does disappear, so the model is told the truth about its last chance.
     private static func searchStopNudge(priorSearchRounds: Int, cap: Int) -> String? {
         // The round about to be appended is search #(priorSearchRounds + 1). The harness
-        // withdraws tools entirely once `iteration >= cap`, so the last round in which a
-        // search can still be issued is round `cap`. One short blank line separates the
-        // nudge from the results so it reads as a distinct instruction, not result text.
+        // stops advertising the searcher once `searchRounds >= cap`, so the last round in
+        // which a search can still be issued is round `cap`. One short blank line separates
+        // the nudge from the results so it reads as a distinct instruction, not result text.
         let thisRound = priorSearchRounds + 1
         let nudge: String
         if thisRound < 2 {
             return nil  // first search: let it run clean, no pressure yet
         } else if thisRound >= cap {
-            // Last round a search can still be issued — after this the harness withdraws
-            // tools, so make the deadline explicit.
-            nudge = "This is your last chance to search. On the next turn you must give "
-                  + "the user an answer — even if that answer is that you could not find "
-                  + "reliable information on this. Do not search again."
+            // Last round a search can still be issued — after this the searcher is gone
+            // from the tool list, so say so plainly rather than implying it's a choice.
+            nudge = "That was your last search — the search tool is no longer available "
+                  + "to you. Answer the user now from what you already have, or read one "
+                  + "page you have already found if a single fact is still missing. If the "
+                  + "answer isn't in these results, say plainly that you could not find it."
         } else if thisRound == 2 {
             nudge = "You have already searched once. Prefer answering from the results "
                   + "you now have; search again only if a specific, essential fact is "
@@ -694,9 +851,16 @@ struct AgentHarness {
 /// query text nested inside) is junk to the user, and a well-behaved turn won't
 /// resume prose after starting one. A lone trailing `<` is held back until the
 /// next chunk (or `flush`) disambiguates whether it began an opener.
+///
+/// Swallowed is not the same as discarded: the markup is *kept* (`captured`) so
+/// the harness can reconstruct the tool call the model was really asking for —
+/// see `recoveredCalls`. Hiding the soup from the user is right; losing the call
+/// inside it is what turned a leaked turn into a blank answer.
 private struct ToolMarkupFilter {
     private var suppressing = false   // saw `<|` — swallow the rest of the turn
     private var heldBracket = false   // last char was a bare `<`, decision pending
+    /// Everything swallowed from the opener onward, verbatim, for `recoveredCalls`.
+    private var captured = ""
 
     /// The opener's second character: the ASCII vertical bar or its fullwidth
     /// twin. Matching both is what makes the filter catch the Chinese-tokenizer
@@ -705,14 +869,18 @@ private struct ToolMarkupFilter {
 
     /// Feed one streamed chunk; returns the portion safe to show the user.
     mutating func feed(_ piece: String) -> String {
-        if suppressing { return "" }
+        if suppressing { captured += piece; return "" }
         var out = ""
         // A `<` carried over from the previous chunk: decide it now.
         var s = Substring(piece)
         if heldBracket {
             heldBracket = false
             if let first = s.first {
-                if Self.isPipe(first) { suppressing = true; return out }  // `<|` → leak begins
+                if Self.isPipe(first) {                 // `<|` → leak begins
+                    suppressing = true
+                    captured += "<" + piece             // the held `<` opened it
+                    return out
+                }
                 out.append("<")                                          // stray `<`, keep it
             } else {
                 heldBracket = true                                  // still nothing after `<`
@@ -728,6 +896,7 @@ private struct ToolMarkupFilter {
             }
             if Self.isPipe(s[after]) {      // `<|` → start of leaked markup
                 suppressing = true
+                captured += s[lt...]
                 return out
             }
             out.append("<")                 // a `<` not followed by `|` is real text
@@ -741,5 +910,128 @@ private struct ToolMarkupFilter {
     mutating func flush() -> String? {
         defer { heldBracket = false }
         return heldBracket ? "<" : nil
+    }
+
+    /// The tool calls hiding inside the markup this turn swallowed, decoded into
+    /// real invocations. Empty when nothing leaked, when the block was cut off
+    /// mid-JSON, or when it named nothing `isKnownTool` recognizes — a call the
+    /// registry can't run is never guessed into existence.
+    func recoveredCalls(isKnownTool: (String) -> Bool) -> [(name: String, input: [String: Any])] {
+        LeakedToolCall.parse(captured, isKnownTool: isKnownTool)
+    }
+}
+
+/// Reads a leaked tool-call block back into the call the model meant to make.
+///
+/// The wire shape varies by vendor, but the leak always reduces to the same two
+/// things sitting in the text: the tool's **name** and its **arguments JSON**,
+/// separated by the model's own control tokens. DeepSeek's is
+///
+///     <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>keenable_search
+///     ```json
+///     {"query": "…"}
+///     ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+///
+/// so rather than pattern-match one vendor's token spelling, we drop every
+/// `<｜…｜>` marker, walk the remaining text for balanced JSON objects, and take
+/// the nearest preceding word that the registry actually knows as the tool name.
+/// That skips the scaffolding words (`function`, the ```` ```json ```` fence) for
+/// free and — because an unknown name is never accepted — cannot invent a call
+/// out of prose that merely contains braces.
+private enum LeakedToolCall {
+    static func parse(_ markup: String,
+                      isKnownTool: (String) -> Bool) -> [(name: String, input: [String: Any])] {
+        guard !markup.isEmpty else { return [] }
+        let payload = strippingMarkers(markup)
+        var out: [(name: String, input: [String: Any])] = []
+        var cursor = payload.startIndex
+        while let object = nextObject(in: payload, from: cursor) {
+            let preceding = payload[cursor..<object.start]
+            cursor = object.end
+            guard let name = lastKnownName(in: preceding, isKnownTool: isKnownTool),
+                  let data = String(payload[object.start..<object.end]).data(using: .utf8),
+                  let input = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { continue }
+            out.append((name: name, input: input))
+        }
+        return out
+    }
+
+    private static func isPipe(_ c: Character) -> Bool { c == "|" || c == "\u{FF5C}" }
+
+    /// Drop every `<｜…｜>` control marker, leaving a space in its place so the
+    /// words on either side can't glue into one token. An unterminated marker means
+    /// the block was cut off — everything after it is markup, so stop there.
+    private static func strippingMarkers(_ s: String) -> String {
+        var out = ""
+        var i = s.startIndex
+        while i < s.endIndex {
+            if s[i] == "<" {
+                let after = s.index(after: i)
+                if after < s.endIndex, isPipe(s[after]) {
+                    guard let close = s[after...].firstIndex(of: ">") else { break }
+                    out.append(" ")
+                    i = s.index(after: close)
+                    continue
+                }
+            }
+            out.append(s[i])
+            i = s.index(after: i)
+        }
+        return out
+    }
+
+    /// The next balanced `{…}` at or after `from`, honoring quoted strings and
+    /// escapes so a brace inside an argument value can't close the object early.
+    /// `nil` when there is none, or when one opens and never closes (a truncated
+    /// leak — running it on half its arguments is worse than not running it).
+    private static func nextObject(in s: String,
+                                   from: String.Index) -> (start: String.Index, end: String.Index)? {
+        var i = from
+        while i < s.endIndex, s[i] != "{" { i = s.index(after: i) }
+        guard i < s.endIndex else { return nil }
+        let start = i
+        var depth = 0
+        var inString = false
+        var escaped = false
+        while i < s.endIndex {
+            let c = s[i]
+            if inString {
+                if escaped { escaped = false }
+                else if c == "\\" { escaped = true }
+                else if c == "\"" { inString = false }
+            } else {
+                switch c {
+                case "\"": inString = true
+                case "{":  depth += 1
+                case "}":
+                    depth -= 1
+                    if depth == 0 { return (start, s.index(after: i)) }
+                default:   break
+                }
+            }
+            i = s.index(after: i)
+        }
+        return nil
+    }
+
+    /// The last word before the arguments that names a tool the registry has.
+    /// Scanning backwards is what makes the scaffolding harmless: in
+    /// `function … keenable_search … json {`, `json` is tried first, rejected,
+    /// and the real name is the next one back.
+    private static func lastKnownName(in text: Substring,
+                                      isKnownTool: (String) -> Bool) -> String? {
+        var tokens: [String] = []
+        var current = ""
+        for ch in text {
+            if ch == "$" || ch == "_" || ch == "-" || ch == "." || ch.isLetter || ch.isNumber {
+                current.append(ch)
+            } else if !current.isEmpty {
+                tokens.append(current)
+                current = ""
+            }
+        }
+        if !current.isEmpty { tokens.append(current) }
+        return tokens.reversed().first(where: isKnownTool)
     }
 }

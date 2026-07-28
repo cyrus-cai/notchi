@@ -54,25 +54,41 @@ protocol AIService: Sendable {
     func stream(system: String, messages: [ChatMessage]) -> AsyncThrowingStream<String, Error>
 }
 
-/// Reply-length budgets, in tokens. A normal turn is short (the 90-word persona
-/// cap); a clipboard-enriched turn lets the model use up to 200 words for a
-/// summary/translation of the copied text, which needs a bigger wire ceiling than
-/// the default — at 1024 a long clip (≤1500 chars) + question + 200-word answer
-/// was being truncated mid-thought (XII-91).
+/// The one place a wire output cap is still spoken about.
+///
+/// Notch does **not** cap output length on the wire. Reply length is a matter of
+/// style, and it is already set where style belongs: the persona says "keep it
+/// under 90 words" (`notchSystemPrompt`). `max_tokens` cannot express that — it
+/// isn't a request for brevity, it's a guillotine, and it falls mid-sentence.
+///
+/// The cap we used to send (a flat 1024) never once shortened an answer: a
+/// 90-word reply is ~150 tokens, five to eight times under it. The only thing it
+/// ever did was cut off models that *think*, because on a reasoning model
+/// `max_tokens` is not the answer's budget — reasoning and answer come out of one
+/// pot. Measured on the wire, one question, cap vs no cap:
+///
+///   · `deepseek-v4-flash`         1024 → 1542 chars of reasoning, answer strangled
+///                                        at 79 chars, `finish_reason: length`
+///                                 none → answers fully, `finish_reason: stop`
+///   · `thinkingmachines/inkling`  1024 → **zero** content, `finish_reason: length`
+///                                        (which the stream layer can only report
+///                                        as "unexpected response")
+///                                 none → answers fully, `finish_reason: stop`
+///
+/// And no provider we hold a key for (DeepSeek, GLM, OpenRouter, Vercel) applies a
+/// stingy default when the field is absent — every one finished cleanly. So the
+/// field is simply not sent.
 enum ReplyTokens {
-    static let standard = 1024
-    static let enriched = 2048
-
-    /// The suffix appended to the system prompt on a clipboard-enriched turn (see
-    /// `NotchModel.submit`). Single source of truth so the wire `max_tokens` can be
-    /// raised for exactly the turns whose prompt was widened to 200 words.
-    static let enrichedMarker = "\nFor this turn you may use up to 200 words."
-
-    /// The `max_tokens` to send for a turn with this system prompt: the larger
-    /// budget when the prompt carries the enriched-turn marker, otherwise standard.
-    static func budget(forSystem system: String) -> Int {
-        system.contains(enrichedMarker) ? enriched : standard
-    }
+    /// Anthropic is the exception, and only because its Messages API *requires*
+    /// `max_tokens` — omitting it is a 400. So this is a ceiling in the "nothing
+    /// should ever legitimately reach it" sense, not a length knob: high enough
+    /// that thinking plus a 90-word answer never comes close, low enough to stay
+    /// within what every Claude model accepts as a max output.
+    ///
+    /// Untested here — this machine has no Anthropic key, so unlike the numbers
+    /// above this one rests on the documented output ceiling rather than on a
+    /// measurement of our own.
+    static let anthropicRequiredCeiling = 8192
 }
 
 /// Auto-retry for transient streaming failures. The very first Ask after
@@ -619,16 +635,6 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    /// JSON key for the output-token cap. MiMo follows OpenAI's newer
-    /// `max_completion_tokens`; everyone else uses the classic `max_tokens`.
-    /// (Unused by the Anthropic client, which always sends `max_tokens`.)
-    var maxTokensField: String {
-        switch self {
-        case .mimo:     return "max_completion_tokens"
-        default:        return "max_tokens"
-        }
-    }
-
     /// Vendor-specific extras sent with every chat request. OpenRouter's two
     /// optional attribution headers identify the app (its docs ask nicely);
     /// everyone else needs nothing beyond auth.
@@ -927,8 +933,6 @@ struct OpenAICompatAIService: AIService {
                         let body = RequestBody(
                             model: model,
                             messages: chat,
-                            maxTokens: ReplyTokens.budget(forSystem: system),
-                            tokenFieldName: provider.maxTokensField,
                             temperature: 0.7,
                             stream: true,
                             fallbackModels: provider == .openrouter
@@ -1014,8 +1018,6 @@ struct OpenAICompatAIService: AIService {
     private struct RequestBody: Encodable {
         let model: String
         let messages: [Message]
-        let maxTokens: Int
-        let tokenFieldName: String
         let temperature: Double
         let stream: Bool
         /// OpenRouter's server-side failover chain (`models`), primary first —
@@ -1036,7 +1038,6 @@ struct OpenAICompatAIService: AIService {
             var c = encoder.container(keyedBy: DynamicKey.self)
             try c.encode(model, forKey: DynamicKey("model"))
             try c.encode(messages, forKey: DynamicKey("messages"))
-            try c.encode(maxTokens, forKey: DynamicKey(tokenFieldName))
             try c.encode(temperature, forKey: DynamicKey("temperature"))
             try c.encode(stream, forKey: DynamicKey("stream"))
             if let fallbackModels {
@@ -1140,7 +1141,7 @@ struct AnthropicAIService: AIService {
                             model: model,
                             system: system,
                             messages: messages.map { .init(role: $0.role, content: $0.content, image: $0.image) },
-                            maxTokens: ReplyTokens.budget(forSystem: system),
+                            maxTokens: ReplyTokens.anthropicRequiredCeiling,
                             stream: true
                         )
                         req.httpBody = try JSONEncoder().encode(body)
@@ -2580,7 +2581,6 @@ extension OpenAICompatAIService: AgentCapableService {
                         var body: [String: Any] = [
                             "model": effectiveModel,
                             "messages": Self.wireMessages(system: system, messages: messages),
-                            provider.maxTokensField: ReplyTokens.budget(forSystem: system),
                             "temperature": 0.7,
                             "stream": true,
                         ]
@@ -2821,7 +2821,7 @@ extension AnthropicAIService: AgentCapableService {
                             "model": model,
                             "system": system,
                             "messages": Self.wireMessages(messages),
-                            "max_tokens": ReplyTokens.budget(forSystem: system),
+                            "max_tokens": ReplyTokens.anthropicRequiredCeiling,
                             "stream": true,
                         ]
                         if !wireTools.isEmpty { body["tools"] = wireTools }

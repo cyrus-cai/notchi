@@ -936,6 +936,40 @@ struct GlassTextButton: View {
     }
 }
 
+/// The panel header's back control as **one whole piece of Liquid Glass** —
+/// chevron and panel title live inside a single glass capsule instead of a bare
+/// glyph sitting next to a loose caption. The header then reads as one physical
+/// affordance you press, in the same material as every other chip on the island,
+/// rather than two unrelated marks that happen to share a row.
+struct PanelBackPill: View {
+    var title: String
+    var action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: "chevron.left")
+                    .font(.sf(10.5, weight: .semibold))
+                Text(title)
+                    .font(.sf(11, weight: .semibold))
+                    .tracking(0.4)
+                    .lineLimit(1)
+            }
+            .foregroundStyle(hovering ? Tokens.text1 : Tokens.text3)
+            .padding(.leading, 8)
+            .padding(.trailing, 11)
+            .frame(height: 26)
+            .glassCapsule(in: Capsule(), brighter: hovering)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(GlassPressStyle())
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+    }
+}
+
 /// The panel header's back chevron — the one control that walks a full-panel
 /// module (Settings, What's New, the first-run guide) back where it came from.
 /// A quiet 26pt glyph over the same soft capsule wash every other row-level
@@ -1408,6 +1442,26 @@ struct ThinkingOrb: View {
         .frame(width: size, height: size)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.35), value: state)
         .accessibilityHidden(true)
+    }
+}
+
+extension View {
+    /// Center a fixed-size glyph (the orb) on the OPTICAL middle of the text it
+    /// sits beside, rather than on its line box.
+    ///
+    /// `HStack`'s default `.center` aligns the two *boxes*, and a text box is
+    /// not centered on its own glyphs: the line box grows to whatever font
+    /// actually renders the run, and a mixed Latin/CJK line falls back to
+    /// PingFang, whose ascent/descent are both far taller than the glyphs
+    /// themselves. The orb then floats visibly above the words it belongs to.
+    ///
+    /// Anchoring to the baseline instead makes the pairing metric-independent:
+    /// the orb's centre lands 0.36em above the baseline — the midpoint of SF's
+    /// cap height (0.72em) and, within a third of a point, of the CJK ideographic
+    /// square (−0.12em…0.88em). So Latin, Chinese, and a line mixing both all
+    /// read centred against the same orb.
+    func centeredOnTextGlyphs(fontSize: CGFloat) -> some View {
+        alignmentGuide(.firstTextBaseline) { d in d.height / 2 + fontSize * 0.36 }
     }
 }
 
@@ -2281,13 +2335,14 @@ struct AssistantTurnView: View {
     /// pre-text overlay and the mid-answer activity row, so the two states render
     /// identically and hand off without a visual seam.
     private func waitRow(_ line: String) -> some View {
-        HStack(spacing: 8) {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
             ThinkingOrb(state: orbState)
+                .centeredOnTextGlyphs(fontSize: baseFont)
             // Word and timer sit on ONE shared baseline. Centering them (the
             // HStack default) doesn't align text of two different sizes: the
             // smaller suffix's baseline lands ~0.5pt above the word's — a whole
-            // retina pixel of visible float right beside it. The orb keeps the
-            // outer stack's centering; only the two runs of text pair up.
+            // retina pixel of visible float right beside it. The orb rides the
+            // same baseline, optically centred on the glyphs.
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 CrossfadeText(text: line, font: baseFont, color: Tokens.text2)
                     .lineLimit(1)

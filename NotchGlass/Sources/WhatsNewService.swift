@@ -64,6 +64,18 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.3.3",
+            date: "2026-07-28",
+            improvements: [
+                "The keyboard reference moved to About → Shortcuts, and the About links read as grouped rows.",
+            ],
+            fixes: [
+                "Answers no longer come back empty. Three things caused it: a search that kept rewording itself until no room was left to answer, a tool call the model wrote as plain text so nothing ran, and a length cap that cut reasoning models off before they spoke. Search now steps aside after three rounds, a call written as text still runs, the cap is gone — and a round that still ends silent is retried once, then kept in Recent marked Failed instead of vanishing with your question.",
+                "Tooltips no longer flash off-centre or get clipped on the left-most icon.",
+                "The thinking orb sits level with the word beside it on Chinese lines.",
+            ]
+        ),
+        Entry(
             version: "0.3.2",
             date: "2026-07-27",
             fixes: [

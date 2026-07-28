@@ -171,10 +171,23 @@ struct InlineSettingsView: View {
         case search = "Search"   // search backend + its key
         case notes = "Notes"     // the capture pipeline: note destination + copy sensing
         case general = "General" // how you reach it: shortcut, language, launch at login, + Advanced (proxy)
-        case shortcuts = "Shortcuts" // the keyboard reference — read-only, General owns the editable chord
+        case shortcuts = "Shortcuts" // the keyboard reference — a sub-page under About, not a sidebar row
         case appearance = "Appearance" // where it shows up: screens, full screen, Dock icon
         case about = "About"     // version + self-update
         var id: String { rawValue }
+
+        /// A sub-page rather than a category: reached by a row *inside* another
+        /// section, drawn across the whole panel with the sidebar stepped aside,
+        /// and left by the header's back arrow. It keeps its own raw value so the
+        /// "…" menu can still deep-link straight to it.
+        var isDetail: Bool { self == .shortcuts }
+
+        /// The section a sub-page sits under — where back (and ⎋) returns to.
+        /// `nil` for the top-level categories, whose back leaves settings.
+        var parent: Section? { self == .shortcuts ? .about : nil }
+
+        /// The sidebar's rows: every category, minus the sub-pages.
+        static var sidebarCases: [Section] { allCases.filter { !$0.isDetail } }
 
         /// The sidebar label, localized. The raw value stays English (a stable
         /// identity); this is what the user actually reads.
@@ -258,77 +271,34 @@ struct InlineSettingsView: View {
         VStack(alignment: .leading, spacing: 0) {
             header
 
-            HStack(alignment: .top, spacing: 0) {
-                sidebar
+            if section.isDetail {
+                // A pushed sub-page (the Shortcuts reference under About): the
+                // category column steps aside and the page takes the whole panel,
+                // so it reads as one level deeper rather than another tab. The
+                // header's back pill — now carrying this page's name — walks out.
+                paneContent
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 8)
+                    .padding(.top, 12)
+            } else {
+                HStack(alignment: .top, spacing: 0) {
+                    sidebar
 
-                // Hairline column boundary, full height of whichever side is taller
-                // (the .fixedSize on the HStack is what lets the greedy rectangle
-                // resolve to the content height instead of expanding forever).
-                Rectangle()
-                    .fill(.white.opacity(0.08))
-                    .frame(width: 0.5)
-                    .frame(maxHeight: .infinity)
+                    // Hairline column boundary, full height of whichever side is taller
+                    // (the .fixedSize on the HStack is what lets the greedy rectangle
+                    // resolve to the content height instead of expanding forever).
+                    Rectangle()
+                        .fill(.white.opacity(0.08))
+                        .frame(width: 0.5)
+                        .frame(maxHeight: .infinity)
 
-                VStack(alignment: .leading, spacing: 14) {
-                    switch section {
-                    case .model:
-                        // Two steps, in the order you make them: pick the backend,
-                        // then pick one of *its* models. The API key stays supporting
-                        // cast — folded into `keySection`, which only unfolds when the
-                        // choice actually needs a key (or the user opens it by hand).
-                        providerRow
-                        modelRow
-                        keySection
-                        customInstructionsRow
-                    case .search:
-                        searchBackendRow
-                            // No stored pick yet → commit the shown default so the
-                            // UI and what actually runs never disagree.
-                            .onAppear {
-                                if searchBackend == nil { selectSearchBackend(selectedBackend) }
-                            }
-                        // Only the picked backend's key row shows — like the model
-                        // section, one choice, one field to fill.
-                        switch selectedBackend {
-                        case .keenable: keenableKeyRow
-                        case .exa:      exaKeyRow
-                        }
-                    case .notes:
-                        // The capture pipeline in one place: where a jot files,
-                        // then the closed-notch copy sensing that feeds it.
-                        noteDestinationRow
-                        copySenseRow
-                    case .general:
-                        // How you reach it: the summon chord, the language it
-                        // speaks, whether it's there from login — then the
-                        // folded Advanced block for the plumbing (proxy).
-                        shortcutRow
-                        appLanguageRow
-                        launchAtLoginRow
-                        advancedSection
-                    case .shortcuts:
-                        shortcutsSection
-                    case .appearance:
-                        // Two groups, heaviest control first. Where it shows up —
-                        // which screens carry an island, whether it also sits in
-                        // the Dock and the menu bar — then how it behaves once
-                        // there: yielding to full screen, animating on background
-                        // work.
-                        placementRow
-                        dockIconRow
-                        menuBarIconRow
-                        fullscreenAutoHideRow
-                        liveActivityRow
-                    case .about:
-                        aboutSection
-                    }
+                    paneContent
+                        .padding(.leading, 14)
                 }
-                .padding(.leading, 14)
-                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 8)
+                .padding(.top, 12)
             }
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(.horizontal, 8)
-            .padding(.top, 12)
         }
         .task {
             // A keyless model picked in the ⌘⇧I picker sent us here: adopt the pick,
@@ -371,11 +341,74 @@ struct InlineSettingsView: View {
         }
     }
 
+    /// The open section's pane. Lives apart from `body` because it is drawn in
+    /// two different frames — in the right-hand column beside the sidebar for a
+    /// category, or across the whole panel for a pushed sub-page — and the switch
+    /// itself should not have to know which.
+    @ViewBuilder
+    private var paneContent: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            switch section {
+            case .model:
+                // Two steps, in the order you make them: pick the backend,
+                // then pick one of *its* models. The API key stays supporting
+                // cast — folded into `keySection`, which only unfolds when the
+                // choice actually needs a key (or the user opens it by hand).
+                providerRow
+                modelRow
+                keySection
+                customInstructionsRow
+            case .search:
+                searchBackendRow
+                    // No stored pick yet → commit the shown default so the
+                    // UI and what actually runs never disagree.
+                    .onAppear {
+                        if searchBackend == nil { selectSearchBackend(selectedBackend) }
+                    }
+                // Only the picked backend's key row shows — like the model
+                // section, one choice, one field to fill.
+                switch selectedBackend {
+                case .keenable: keenableKeyRow
+                case .exa:      exaKeyRow
+                }
+            case .notes:
+                // The capture pipeline in one place: where a jot files,
+                // then the closed-notch copy sensing that feeds it.
+                noteDestinationRow
+                copySenseRow
+            case .general:
+                // How you reach it: the summon chord, the language it
+                // speaks, whether it's there from login — then the
+                // folded Advanced block for the plumbing (proxy).
+                shortcutRow
+                appLanguageRow
+                launchAtLoginRow
+                advancedSection
+            case .shortcuts:
+                shortcutsSection
+            case .appearance:
+                // Two groups, heaviest control first. Where it shows up —
+                // which screens carry an island, whether it also sits in
+                // the Dock and the menu bar — then how it behaves once
+                // there: yielding to full screen, animating on background
+                // work.
+                placementRow
+                dockIconRow
+                menuBarIconRow
+                fullscreenAutoHideRow
+                liveActivityRow
+            case .about:
+                aboutSection
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
     // MARK: - Sidebar
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 2) {
-            ForEach(Section.allCases) { s in
+            ForEach(Section.sidebarCases) { s in
                 SidebarItem(
                     title: s.title,
                     selected: section == s,
@@ -438,16 +471,21 @@ struct InlineSettingsView: View {
 
     // MARK: - Header
 
+    /// The back pill names wherever you are and walks out of it: on a category
+    /// that's "Settings" → leave settings; on a pushed sub-page it takes the
+    /// page's own name and steps back one level to the section that owns it,
+    /// so the pill never skips a floor.
     private var header: some View {
         HStack(spacing: 10) {
-            PanelBackButton {
-                withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
-                    model.closeSettings()
+            PanelBackPill(title: section.isDetail ? section.title : L("settings.title")) {
+                if let parent = section.parent {
+                    withAnimation(.easeOut(duration: 0.16)) { section = parent }
+                } else {
+                    withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                        model.closeSettings()
+                    }
                 }
             }
-
-            Text(L("settings.title"))
-                .captionLabel()
 
             Spacer()
         }
@@ -2094,8 +2132,13 @@ struct InlineSettingsView: View {
     /// into it, act on the answer, move the panel around) rather than
     /// alphabetically, so the list doubles as a tour of what the app can do.
     ///
+    /// A sub-page under About rather than a sidebar category: it's a thing you
+    /// consult once, not a place you keep settings, so it earns a row you enter
+    /// (About → Shortcuts) instead of a permanent column entry. The "…" menu's
+    /// keyboard-shortcuts row still deep-links straight here.
+    ///
     /// Only the first row is live: it prints whatever summon chord is currently
-    /// recorded, because that one is user-editable one section up in General.
+    /// recorded, because that one is user-editable over in General.
     /// Every other chord is fixed in `ContentView`'s key catcher (and
     /// `PromptField`'s key handlers), and these strings are the only place they
     /// are written down for the user — a chord changed there has to change here
@@ -2401,38 +2444,50 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// Quiet text-button links inside one card, split into two labelled groups
-    /// so they read as structure rather than four bare buttons: the release
-    /// trail (What's New / Releases) up top, the outward links (source on
-    /// GitHub, the privacy policy) below a hairline. Same understated language
-    /// as the Model footer's signup host. "What's New" lives here as the fixed,
-    /// always-available way into the notes, independent of the once-per-version
-    /// idle cue.
+    /// The links, as the two grouped lists macOS itself would draw: full-width
+    /// rows in an inset card, a hairline between them, and a trailing mark
+    /// saying where the row goes — `›` for the pages that open inside the
+    /// panel, `↗` for the ones that hand off to a browser or a mail compose.
+    /// The old shape (tiny captions over rows of bare text buttons) read like a
+    /// web footer: nothing was tappable-looking, nothing lined up, and the one
+    /// row that drilled deeper looked like the ones that left the app.
+    ///
+    /// No leading glyphs. Six one-word rows don't need illustrating, and the
+    /// only symbols that fit them are the cutesy kind (a sparkle for release
+    /// notes, a raised hand for a privacy page) — the word already says it
+    /// better than any of them.
+    ///
+    /// Two cards instead of three captions, split on exactly the line the
+    /// trailing marks already draw: the pages that open *here* (release notes,
+    /// the keyboard reference) above, everything that leaves for a browser or a
+    /// mail compose below. The gap between them carries the grouping, so no
+    /// label has to.
     private var aboutLinks: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            aboutLinkGroup(L("about.group.updates"), [
-                (L("about.whatsNew"), {
+        VStack(alignment: .leading, spacing: 10) {
+            aboutCard([
+                // "What's New" lives here as the fixed, always-available way into
+                // the notes, independent of the once-per-version idle cue.
+                AboutRow(title: L("about.whatsNew"), leaves: false) {
                     withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                         model.openWhatsNew(on: nil)
                     }
-                }),
-                (L("about.releases"), {
-                    NSWorkspace.shared.open(UpdaterService.releasesPage)
-                }),
+                },
+                AboutRow(title: L("sidebar.shortcuts"), leaves: false) {
+                    withAnimation(.easeOut(duration: 0.16)) { section = .shortcuts }
+                },
             ])
 
-            Divider()
-                .overlay(.white.opacity(0.08))
-                .padding(.vertical, 10)
-
-            aboutLinkGroup(L("about.group.more"), [
-                (L("about.github"), {
+            aboutCard([
+                AboutRow(title: L("about.releases"), leaves: true) {
+                    NSWorkspace.shared.open(UpdaterService.releasesPage)
+                },
+                AboutRow(title: L("about.github"), leaves: true) {
                     NSWorkspace.shared.open(URL(string: "https://github.com/\(UpdaterService.repo)")!)
-                }),
-                (L("about.privacy"), {
+                },
+                AboutRow(title: L("about.privacy"), leaves: true) {
                     NSWorkspace.shared.open(URL(string: "https://www.notch.website/privacy")!)
-                }),
-                (L("about.feedback"), {
+                },
+                AboutRow(title: L("about.feedback"), leaves: true) {
                     let mailto = URL(string: "mailto:\(Self.feedbackEmail)?subject=Notch%20Feedback")!
                     // Route the compose to the desktop Mail.app specifically —
                     // a plain mailto: hands off to whatever the default handler
@@ -2443,34 +2498,87 @@ struct InlineSettingsView: View {
                     } else {
                         NSWorkspace.shared.open(mailto)
                     }
-                }),
+                },
             ])
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 13)
+    }
+
+    /// One row of an About list: a label and the mark for where it goes.
+    /// `leaves` is the whole distinction — true hands off to another app (`↗`),
+    /// false pushes a page inside the panel (`›`).
+    private struct AboutRow: Identifiable {
+        let id = UUID()
+        let title: String
+        let leaves: Bool
+        let action: () -> Void
+
+        init(title: String, leaves: Bool, action: @escaping () -> Void) {
+            self.title = title
+            self.leaves = leaves
+            self.action = action
+        }
+    }
+
+    /// One inset card of rows. The card clips its content, so a row's hover wash
+    /// runs the full width and takes the card's own corners at the ends — the
+    /// way a grouped list highlights in System Settings, rather than a floating
+    /// pill inside a box. Separators are inset to the label's left edge, the
+    /// way a grouped table's are.
+    private func aboutCard(_ rows: [AboutRow]) -> some View {
+        VStack(spacing: 0) {
+            ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                if index > 0 {
+                    Rectangle()
+                        .fill(.white.opacity(0.07))
+                        .frame(height: 0.5)
+                        .padding(.leading, 12)
+                }
+                AboutLinkRow(row: row)
+            }
+        }
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 12)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(.white.opacity(0.04))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(.white.opacity(0.08), lineWidth: 0.5)
         )
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
-    /// One captioned group inside the About links card: a faint section label
-    /// over its row of links, so each pair announces what it's for.
-    private func aboutLinkGroup(_ caption: String, _ links: [(String, () -> Void)]) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Text(caption)
-                .font(.sf(10.5))
-                .foregroundStyle(Tokens.text4)
-            HStack(spacing: 16) {
-                ForEach(Array(links.enumerated()), id: \.offset) { _, link in
-                    aboutLink(link.0, action: link.1)
+    /// The row itself. Its own view because the hover wash needs local state,
+    /// and because every row in both cards has to be the exact same height and
+    /// column geometry for the list to read as a list.
+    private struct AboutLinkRow: View {
+        let row: AboutRow
+        @State private var hovering = false
+
+        var body: some View {
+            Button(action: row.action) {
+                HStack(spacing: 9) {
+                    Text(row.title)
+                        .font(.sf(12.5, weight: .medium))
+                        .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
+                        .lineLimit(1)
+                    Spacer(minLength: 12)
+                    // Fixed trailing column so `↗` and `›` — different glyph
+                    // widths — still end on the same rail down the right edge.
+                    Image(systemName: row.leaves ? "arrow.up.right" : "chevron.right")
+                        .font(.system(size: row.leaves ? 9.5 : 10, weight: .semibold))
+                        .foregroundStyle(Tokens.text4)
+                        .opacity(hovering ? 1 : 0.55)
+                        .frame(width: 11, alignment: .trailing)
                 }
+                .padding(.horizontal, 12)
+                .frame(height: 34)
+                .background(.white.opacity(hovering ? 0.05 : 0))
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
         }
     }
 

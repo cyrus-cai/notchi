@@ -1968,10 +1968,21 @@ struct NotchBody: View {
                                 // will land once the answer settles in place.
                                 RecentPendingDots()
                             } else if item.source.isThread {
-                                Text(relativeTime(item.t))
-                                    .font(.sf(11).monospacedDigit())
-                                    .tracking(0.2)
-                                    .foregroundStyle(Tokens.text4)
+                                HStack(spacing: 6) {
+                                    // A round that produced no answer keeps its row
+                                    // (the question is the user's), so the row has to
+                                    // say so — otherwise it reads as an ordinary
+                                    // answer until you open it.
+                                    if item.failed {
+                                        Text(L("recent.badge.failed"))
+                                            .font(.sf(11, weight: .medium))
+                                            .foregroundStyle(Tokens.danger.opacity(0.9))
+                                    }
+                                    Text(relativeTime(item.t))
+                                        .font(.sf(11).monospacedDigit())
+                                        .tracking(0.2)
+                                        .foregroundStyle(Tokens.text4)
+                                }
                             } else {
                                 // The jump to Notes/Reminders lives on its OWN button,
                                 // not the row body — tapping the row must never yank the
@@ -2117,9 +2128,10 @@ struct NotchBody: View {
             // (the first question and a follow-up used to start differently for
             // no reason). The elapsed suffix is a sibling, not part of the
             // dissolving word, so the ticking seconds never ride the word swap.
-            HStack(spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 let label = model.thinkingStatus.isEmpty ? model.currentThinkingWord : model.thinkingStatus
                 ThinkingOrb(state: model.thinkingOrbState)
+                    .centeredOnTextGlyphs(fontSize: 15)
                 // Word and timer share ONE baseline — centering text of two
                 // different sizes floats the smaller suffix ~0.5pt high. Same
                 // pairing as `AssistantTurnView.waitRow`, so the pre-answer wait
