@@ -35,12 +35,14 @@ struct NotchBody: View {
     /// removal badge only appears while its own thumbnail is hovered, so the
     /// strip rests as clean previews instead of a row of close buttons.
     @State private var hoveredComposeImageIndex: Int? = nil
-    /// The agent model+effort chip's title, frozen while its quick picker is up.
-    /// A live pick re-titles the chip, the chip resizes, and the moved anchor
-    /// trips `SettledPopover`'s re-glue — the open card visibly dismisses and
-    /// pops again. Freezing the label keeps the anchor still for the whole
-    /// session; the chip catches up the moment the card closes.
-    @State private var agentChipFrozenTitle: String? = nil
+    /// Where the agent model+effort card hangs from: half the chip's width, i.e.
+    /// the point under its centre — **frozen for as long as the card is up**.
+    /// The chip re-titles live while you pick ("Opus 5 medium" → "Sonnet 5
+    /// high"), so its width moves underneath; the card must not slide with it.
+    /// The chips row is leading-packed, so the chip's leading edge stays put and
+    /// a held offset from it is a genuinely static anchor. Nil = not measured
+    /// yet (the card can be armed by ⌘⇧I before the chip ever mounts).
+    @State private var agentChipAnchorX: CGFloat? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Drives the custom field's first-responder. Set shortly after the panel
     /// opens so the caret lands without a click (the AppDelegate has just made
@@ -212,6 +214,9 @@ struct NotchBody: View {
         .onChange(of: model.showAskModelPicker) { _, open in
             model.isModelPickerOpen = open
         }
+        .onChange(of: model.showAgentFolderPicker) { _, open in
+            model.isModelPickerOpen = open
+        }
         .onChange(of: model.open) { _, isOpen in
             if isOpen {
                 refocusInput()
@@ -308,13 +313,7 @@ struct NotchBody: View {
 
     private var idleView: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // The guided first run leads on a fresh install — it owns the whole body
-            // like settings/What's New, in the same glass and spring, and hands back
-            // to the prompt when finished or skipped (see `OnboardingView`).
-            if model.showOnboarding {
-                OnboardingView(model: model)
-                    .transition(moduleTransition)
-            } else if model.showSettings {
+            if model.showSettings {
                 // Settings owns the whole body when open — the "Ask anything" prompt is
                 // hidden, since you're configuring the app, not asking a question. Its
                 // own "‹ SETTINGS" header carries the way back (gear / Esc / chevron).
@@ -847,11 +846,33 @@ struct NotchBody: View {
     /// the island the way the keyboard-summoned pickers do. Reads the selection
     /// straight from the store like the settings chip, so the chip can never show
     /// a stale model.
+    ///
+    /// With nothing configured it names the gap instead — "Choose model…" in the
+    /// danger ink, the one chip in the row that is reporting a problem rather than
+    /// a setting. It used to print the selected provider's *default* model there,
+    /// which meant a fresh install advertised "Gpt-5.5" with no key behind it: the
+    /// one place that should have said "set this up" was the place claiming it
+    /// already was.
+    ///
+    /// Where the tap goes then depends on what's already on the machine. A signed-in
+    /// `codex` / `claude` / `grok` CLI is a *working backend that needs no key* — so
+    /// if any are there, the menu lists them (tagged CLI) and one click is the whole
+    /// setup. Only with none of them does it fall through to Settings.
     private var askModelChip: some View {
-        AgentComposeChip(title: ModelRatings.prettyName(for: selectedModelID,
-                                                        provider: selectedProvider),
+        AgentComposeChip(title: model.isConfigured
+                            ? ModelRatings.prettyName(for: selectedModelID,
+                                                      provider: selectedProvider)
+                            : L("model.choose"),
+                         tint: model.isConfigured ? nil : Tokens.danger.opacity(0.62),
                          action: {
-            model.showAskModelPicker = true
+            if model.isConfigured || !availableCLIProviders.isEmpty {
+                model.showAskModelPicker = true
+            } else {
+                model.settingsSection = "Model"
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                    model.openSettings()
+                }
+            }
         }, icon: { EmptyView() })
         .fixedSize()
         // Settle-gated like the body-hung pickers: a pick changes the chip's
@@ -884,7 +905,19 @@ struct NotchBody: View {
     /// and providers that can't serve right now, capped at the MRU's five. No
     /// padding: fewer than five recents just means a shorter menu — every row is
     /// something the user actually used or picked, never a catalog filler.
+    ///
+    /// With nothing configured there are no recents worth listing — the "selection
+    /// in effect" is a provider default nobody chose and every MRU slot is empty —
+    /// so the menu becomes the CLI offer instead: whichever of the local agent CLIs
+    /// is installed and signed in, ready to use as-is.
     private var askRecentModelRows: [AskRecentModelPickerView.Row] {
+        guard model.isConfigured else {
+            return availableCLIProviders.map {
+                AskRecentModelPickerView.Row(provider: $0,
+                                             id: APIKeyStore.effectiveModel(for: $0)
+                                                 ?? $0.defaultModel)
+            }
+        }
         var rows = [AskRecentModelPickerView.Row(provider: selectedProvider, id: selectedModelID)]
         for e in AskModelMRU.entries {
             let row = AskRecentModelPickerView.Row(provider: e.provider, id: e.model)
@@ -892,6 +925,28 @@ struct NotchBody: View {
             rows.append(row)
         }
         return Array(rows.prefix(AskModelMRU.capacity))
+    }
+
+    /// The agent CLIs that are installed *and* signed in right now — real backends
+    /// that need no key, so with nothing else configured they are the shortest way
+    /// out of an unusable Ask. Each service's `isAvailable` is a warm cache after
+    /// the launch warm-up, so reading it during a render costs nothing.
+    private var availableCLIProviders: [Provider] {
+        var out: [Provider] = []
+        if ClaudeCLIService.isAvailable { out.append(.claudeCode) }
+        if CodexCLIService.isAvailable { out.append(.codex) }
+        if GrokCLIService.isAvailable { out.append(.grokCode) }
+        return out
+    }
+
+    /// The folder chip menu's rows: the project in effect first, then the other
+    /// recently worked-in ones (`AgentFolderMRU`, dead paths already dropped). No
+    /// padding — every row is a project the user actually worked in.
+    private var agentFolderRows: [URL] {
+        var rows: [URL] = []
+        if let current = model.agentComposeFolder { rows.append(current) }
+        for f in AgentFolderMRU.entries where !rows.contains(f) { rows.append(f) }
+        return Array(rows.prefix(AgentFolderMRU.capacity))
     }
 
     /// The agent compose chips beside the pill: the task's three facts as glass
@@ -906,58 +961,106 @@ struct NotchBody: View {
                                         model.agentComposeFolder?.lastPathComponent)
                                     ?? L("agent.folder.choose"),
                                 action: {
-                model.pickAgentFolder()
+                // With projects to switch between, the chip is a menu like its
+                // model neighbours; with nothing to list (first-ever agent, or a
+                // single remembered project) a one-row menu would be theatre —
+                // go straight to the file panel.
+                if agentFolderRows.count > 1 {
+                    model.showAgentFolderPicker = true
+                } else {
+                    model.pickAgentFolder()
+                }
             }, icon: { EmptyView() })
             .fixedSize()
+            // Same settle-gated, chip-hung popover as the model menus — a pick
+            // resizes the chip, and the gate re-glues the tail to where it lands.
+            .modifier(SettledPopover(isPresented: $model.showAgentFolderPicker) {
+                AgentFolderPickerView(
+                    folders: agentFolderRows,
+                    selected: model.agentComposeFolder,
+                    onSelect: { model.selectAgentFolder($0) },
+                    onBrowse: { model.pickAgentFolder() },
+                    onDone: { model.showAgentFolderPicker = false })
+                    .preferredColorScheme(.dark)
+                    .modifier(GlassPopoverBackground(cornerRadius: 14, veilOpacity: 0, glassTint: 0.14))
+            })
 
             // Model + reasoning effort read as ONE chip — "Claude Opus xhigh".
             // Clicking it opens the same model+effort quick picker ⌘⇧I summons,
             // not an NSMenu — so both front doors land on one card and behave
             // identically.
-            AgentComposeChip(title: agentChipFrozenTitle ?? agentModelEffortTitle, action: {
+            // The title tracks the armed pick LIVE — a model or effort chosen in
+            // the open card re-titles the chip on the spot, no waiting for the
+            // card to close. The card itself stays exactly where it opened: it
+            // doesn't hang off the chip (whose width moves with the title) but
+            // off the frozen point below — see `agentChipAnchorX`.
+            AgentComposeChip(title: agentModelEffortTitle, action: {
                 model.showAgentPicker = true
             }, icon: { EmptyView() })
             .fixedSize()
-            // Freeze the title while the card is up (the card itself shows the
-            // armed pick), covering both front doors — the chip tap and ⌘⇧I.
-            // This runs in the same update as SettledPopover's own close, so
-            // the unfreeze resize lands only after `shown` is already false.
-            .onChange(of: model.showAgentPicker) { _, open in
-                agentChipFrozenTitle = open ? agentModelEffortTitle : nil
-            }
-            // ⌘⇧I can arm the flag while the island (and this chip) is still
-            // unmounted — the onChange above never fires then, so seed the
-            // freeze on mount.
-            .onAppear {
-                if model.showAgentPicker { agentChipFrozenTitle = agentModelEffortTitle }
-            }
-            // Hung off the chip itself, exactly like the Ask chip's menu — the
-            // card pops from the control that opened it instead of floating
-            // detached under the island. Settle-gated so a pick that resizes the
-            // chip re-glues the tail to where the chip lands.
-            .modifier(SettledPopover(isPresented: $model.showAgentPicker) {
-                AgentModelPickerView(
-                    choices: AgentEngine.available.flatMap(\.modelChoices),
-                    selectedEngine: model.agentArmedEngine,
-                    selectedModelID: model.agentModelID,
-                    selectedEffort: model.agentEffort,
-                    onSelectModel: { choice in
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                            model.selectAgentModel(choice)
+            // The card hangs off a 1pt probe pinned under the chip's centre —
+            // a point, not the chip's own frame. Same place the card has always
+            // opened (bottom edge, centred), but re-titling the chip can't drag
+            // it sideways or trip `SettledPopover`'s re-glue, which would blink
+            // the card shut and open mid-pick. Placed with `.position` (a real
+            // layout placement the popover's anchor rect follows) — `.offset`
+            // is a render-time transform the anchor ignores, which lands the
+            // card at the chip's leading edge instead. In the background, so
+            // the chip's own button keeps every click. The settle gate still
+            // earns its keep for the island moving underneath (⌘⇧I mid-spring).
+            .background {
+                GeometryReader { g in
+                    Color.clear
+                        .frame(width: 1, height: 1)
+                        .modifier(SettledPopover(isPresented: $model.showAgentPicker) {
+                            AgentModelPickerView(
+                                choices: AgentEngine.available.flatMap(\.modelChoices),
+                                selectedEngine: model.agentArmedEngine,
+                                selectedModelID: model.agentModelID,
+                                selectedEffort: model.agentEffort,
+                                onSelectModel: { choice in
+                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                        model.selectAgentModel(choice)
+                                    }
+                                },
+                                // Same spring as the model pick, so the chip's title
+                                // (and width) catches the new effort as a glide
+                                // rather than a jump.
+                                onSelectEffort: { effort in
+                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                        model.agentEffort = effort
+                                    }
+                                },
+                                onDone: { model.showAgentPicker = false })
+                                // Resolve the Claude aliases to concrete model names ("opus" →
+                                // "Claude Opus 4.8") so the rows can say what they actually run;
+                                // cached + TTL'd, so this is usually a no-op, and the labels fill
+                                // in reactively when a real probe lands.
+                                .task { catalog.resolveClaudeAliases() }
+                                .preferredColorScheme(.dark)
+                                // A thinner veil than the standard popover — this card reads as
+                                // transparent Liquid Glass, the wallpaper refracting through it.
+                                .modifier(GlassPopoverBackground(cornerRadius: 14, veilOpacity: 0, glassTint: 0.14))
+                        })
+                        // The chip's bottom-centre — where the card has always
+                        // hung from — held at the width the chip had when it opened.
+                        .position(x: agentChipAnchorX ?? g.size.width / 2,
+                                  y: g.size.height)
+                        // Track the centre while the card is down; hold it still
+                        // for as long as the card is up.
+                        .onChange(of: g.size.width, initial: true) { _, w in
+                            guard !model.showAgentPicker || agentChipAnchorX == nil
+                            else { return }
+                            agentChipAnchorX = w / 2
                         }
-                    },
-                    onSelectEffort: { model.agentEffort = $0 },
-                    onDone: { model.showAgentPicker = false })
-                    // Resolve the Claude aliases to concrete model names ("opus" →
-                    // "Claude Opus 4.8") so the rows can say what they actually run;
-                    // cached + TTL'd, so this is usually a no-op, and the labels fill
-                    // in reactively when a real probe lands.
-                    .task { catalog.resolveClaudeAliases() }
-                    .preferredColorScheme(.dark)
-                    // A thinner veil than the standard popover — this card reads as
-                    // transparent Liquid Glass, the wallpaper refracting through it.
-                    .modifier(GlassPopoverBackground(cornerRadius: 14, veilOpacity: 0, glassTint: 0.14))
-            })
+                        // Catch up once the card is gone: the title (and with it
+                        // the chip's width) may well have changed under it, and
+                        // the next open has to hang off the NEW centre.
+                        .onChange(of: model.showAgentPicker) { _, open in
+                            if !open { agentChipAnchorX = g.size.width / 2 }
+                        }
+                }
+            }
         }
     }
 
@@ -1671,8 +1774,8 @@ struct NotchBody: View {
     }
 
     /// One full-width action row of the manage menu — icon, label, optional
-    /// trailing shortcut hint — with the same gentle hover wash the history rows
-    /// use, so the menu reads as part of the same surface.
+    /// trailing shortcut hint — with the plain white hover wash the other glass
+    /// popover menus use (see `ManageMenuRowStyle`).
     private func manageMenuRow(
         icon: LucideIcons.Mark, title: String, shortcut: String? = nil,
         action: @escaping () -> Void
@@ -1697,7 +1800,7 @@ struct NotchBody: View {
             .padding(.vertical, 7)
             .contentShape(Rectangle())
         }
-        .buttonStyle(HistoryRowStyle())
+        .buttonStyle(ManageMenuRowStyle())
     }
 
     /// The collapsed-state reminder that a source filter is narrowing the list:
@@ -2018,10 +2121,19 @@ struct NotchBody: View {
                     // that drives the list's other module motion. Paired with the
                     // `withAnimation` around the delete below; the removal edge is what
                     // SwiftUI plays this transition against.
+                    //
+                    // …except during a bulk Clear (`bulkClearing`), where the sideways
+                    // slide is the wrong verb: it says "this one row, swept out", and a
+                    // whole 24-hour window playing it at once read as a curtain wiping
+                    // across the list. A clear isn't per-row — the rows just stop
+                    // existing — so they dissolve in place and only the gap closing
+                    // carries the motion.
                     .transition(
-                        .move(edge: .leading)
-                            .combined(with: .opacity)
-                            .combined(with: .scale(scale: 0.96, anchor: .leading))
+                        model.bulkClearing
+                            ? .opacity.combined(with: .scale(scale: 0.97))
+                            : .move(edge: .leading)
+                                .combined(with: .opacity)
+                                .combined(with: .scale(scale: 0.96, anchor: .leading))
                     )
                     // Right-click a row to drop just that entry (Clear still wipes
                     // the whole list). Single-item delete needs no confirmation —
@@ -2263,7 +2375,7 @@ struct NotchBody: View {
                 // Floating follow-up: only the clipped + configured + no-error case.
                 // Error / unconfigured states keep their rows as siblings below (an
                 // actionable error must never be hidden behind the scroll).
-                if isAnswerClipped && model.askError == nil && model.isConfigured {
+                if isAnswerClipped && model.visibleAskError == nil && model.isConfigured {
                     followUpRow
                         // Lift off the viewport bottom so a sliver of dissolved
                         // content shows beneath the box rather than it sitting flush.
@@ -2304,7 +2416,9 @@ struct NotchBody: View {
 
             // A failed Ask gets an actionable capsule right under the answer (XII-85):
             // "Open Settings" when there's no key to retry with, "Try again" otherwise.
-            if let askError = model.askError {
+            // Scoped to the round that failed (`visibleAskError`) — a failure in one
+            // conversation must not replace another conversation's follow-up input.
+            if let askError = model.visibleAskError {
                 errorActionRow(askError)
                     .padding(.top, isAnswerClipped ? 8 : 24)
                     .transition(.opacity)
@@ -3298,6 +3412,28 @@ struct HistoryRowStyle: ButtonStyle {
     }
 }
 
+/// Hover wash for a row sitting on a floating GLASS CARD — the ⋯ manage menu.
+/// `HistoryRowStyle` can't do this job here: its highlight is mostly a
+/// `.thinMaterial` plate, and a material laid over a `glassEffect` card samples
+/// the same backdrop the card already samples, so the wash all but vanishes and
+/// the row reads as having no hover at all. Plain white instead — the same
+/// treatment the other glass popover menus use (`AskRecentModelRow`,
+/// `AgentModelRow`), at the card's inner corner radius (14 card − 6 padding).
+struct ManageMenuRowStyle: ButtonStyle {
+    @State private var hovering = false
+    func makeBody(configuration: Configuration) -> some View {
+        let wash: Double = configuration.isPressed ? 0.10 : (hovering ? 0.06 : 0)
+        return configuration.label
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(.white.opacity(wash))
+            )
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
+    }
+}
+
 /// The ONE colour a source wears wherever it shows a face — the Recent filter
 /// chips, the collapsed active-filter tag, the capture rows' "open in Notes /
 /// Reminders" pill, and every one of the archive window's chips, rows and
@@ -3975,13 +4111,16 @@ private struct AgentChipFace<Icon: View>: View {
     var icon: Icon
     var title: String
     var hovering: Bool
+    /// Overrides the resting ink. Used when the chip is reporting something wrong
+    /// rather than naming a setting — the Ask chip with no model configured.
+    var tint: Color? = nil
 
     var body: some View {
         HStack(spacing: 5) {
             icon
             Text(title)
                 .font(.sf(12, weight: .light))
-                .foregroundStyle(hovering ? Tokens.text2 : Tokens.text4)
+                .foregroundStyle(tint ?? (hovering ? Tokens.text2 : Tokens.text4))
                 .lineLimit(1)
         }
         .padding(.horizontal, 8)
@@ -3993,6 +4132,7 @@ private struct AgentChipFace<Icon: View>: View {
 /// A compose chip that fires an action on tap (the folder chip).
 struct AgentComposeChip<Icon: View>: View {
     var title: String
+    var tint: Color? = nil
     var action: () -> Void
     @ViewBuilder var icon: () -> Icon
 
@@ -4000,7 +4140,7 @@ struct AgentComposeChip<Icon: View>: View {
 
     var body: some View {
         Button(action: action) {
-            AgentChipFace(icon: icon(), title: title, hovering: hovering)
+            AgentChipFace(icon: icon(), title: title, hovering: hovering, tint: tint)
         }
         .buttonStyle(GlassPressStyle())
         .onHover { hovering = $0 }

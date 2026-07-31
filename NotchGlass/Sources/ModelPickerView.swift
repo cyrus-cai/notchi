@@ -1095,6 +1095,115 @@ final class ModelCatalogStore: ObservableObject {
     }
 }
 
+// MARK: - Agent folder recents quick menu
+
+/// The agent compose's "recently worked-in projects" memory — the folder chip's
+/// twin of `AskModelMRU`. Fed by every folder that becomes the compose's (a pick,
+/// a drop), newest first, persisted in UserDefaults. Folders that have since been
+/// moved or deleted are dropped on read rather than offered as dead rows.
+enum AgentFolderMRU {
+    static let capacity = 6
+    private static let defaultsKey = "agent_folder_mru"
+
+    /// Newest first, existing-on-disk only.
+    static var entries: [URL] {
+        (UserDefaults.standard.stringArray(forKey: defaultsKey) ?? [])
+            .filter { FileManager.default.fileExists(atPath: $0) }
+            .map { URL(fileURLWithPath: $0, isDirectory: true) }
+    }
+
+    static func record(_ folder: URL) {
+        let path = folder.path
+        guard !path.isEmpty else { return }
+        var list = (UserDefaults.standard.stringArray(forKey: defaultsKey) ?? [])
+        list.removeAll { $0 == path }
+        list.insert(path, at: 0)
+        UserDefaults.standard.set(Array(list.prefix(capacity)), forKey: defaultsKey)
+    }
+}
+
+/// What the agent compose's folder chip opens: the Ask recents menu's exact card,
+/// listing the projects most recently worked in — a click switches the compose to
+/// that folder and dismisses. The tail row ("Change folder") is the way out into
+/// the real NSOpenPanel, mirroring the model menu's "More models…" door.
+struct AgentFolderPickerView: View {
+    let folders: [URL]
+    let selected: URL?
+    let onSelect: (URL) -> Void
+    /// Open the full folder panel. The menu closes on its own first.
+    let onBrowse: () -> Void
+    let onDone: () -> Void
+
+    @State private var current: URL?
+    /// See `ModelPickerView.installKeyMonitor` — a local keyDown monitor is the only
+    /// reliable way to own the arrow keys inside a popover.
+    @State private var keyMonitor: Any?
+
+    init(folders: [URL], selected: URL?, onSelect: @escaping (URL) -> Void,
+         onBrowse: @escaping () -> Void, onDone: @escaping () -> Void) {
+        self.folders = folders
+        self.selected = selected
+        self.onSelect = onSelect
+        self.onBrowse = onBrowse
+        self.onDone = onDone
+        _current = State(initialValue: selected)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(folders, id: \.self) { f in
+                AskRecentModelRow(label: f.lastPathComponent, selected: f == current) {
+                    // Menu semantics: one click picks and dismisses. Clicking the
+                    // already-armed row just dismisses.
+                    if f != current { arm(f) }
+                    onDone()
+                }
+            }
+            // The door out of the recents and into the file panel — not a folder
+            // to arm, so the ↑/↓ cursor deliberately skips it.
+            Rectangle().fill(.white.opacity(0.07))
+                .frame(height: 0.5)
+                .padding(.vertical, 3)
+            AskRecentModelRow(label: L("agent.folder.switch"), selected: false) {
+                onDone()
+                onBrowse()
+            }
+        }
+        .padding(8)
+        .frame(width: 190)
+        .onAppear(perform: installKeyMonitor)
+        .onDisappear(perform: removeKeyMonitor)
+    }
+
+    private func arm(_ f: URL) {
+        current = f
+        onSelect(f)
+    }
+
+    private func installKeyMonitor() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            switch event.keyCode {
+            case 126: step(-1); return nil               // ↑
+            case 125: step(1);  return nil               // ↓
+            case 36, 76, 53: onDone(); return nil        // Return / keypad Enter / Esc
+            default: return event
+            }
+        }
+    }
+
+    private func removeKeyMonitor() {
+        if let m = keyMonitor { NSEvent.removeMonitor(m) }
+        keyMonitor = nil
+    }
+
+    private func step(_ delta: Int) {
+        guard !folders.isEmpty else { return }
+        let cur = current.flatMap { folders.firstIndex(of: $0) } ?? -1
+        arm(folders[min(max(cur + delta, 0), folders.count - 1)])
+    }
+}
+
 // MARK: - Ask recents quick menu
 
 /// The Ask side's "recently used models" memory: the (provider, model) pairs most
@@ -1178,6 +1287,10 @@ struct AskRecentModelPickerView: View {
             ForEach(rows, id: \.self) { r in
                 AskRecentModelRow(
                     label: ModelRatings.prettyName(for: r.id, provider: r.provider),
+                    // Backends driven by the user's own signed-in CLI wear the tag:
+                    // in a list that otherwise means "a key we hold", it says where
+                    // this one actually runs and why it needed no setup.
+                    tagged: r.provider.isCLI,
                     selected: r == current) {
                         // Menu semantics: one click picks and dismisses. Clicking
                         // the already-armed row just dismisses.
@@ -1191,7 +1304,7 @@ struct AskRecentModelPickerView: View {
             Rectangle().fill(.white.opacity(0.07))
                 .frame(height: 0.5)
                 .padding(.vertical, 3)
-            AskRecentModelRow(label: L("model.picker.more"), selected: false) {
+            AskRecentModelRow(label: L("model.picker.more"), tagged: false, selected: false) {
                 onDone()
                 onMoreModels()
             }
@@ -1236,6 +1349,8 @@ struct AskRecentModelPickerView: View {
 /// since these rows mix providers.
 private struct AskRecentModelRow: View {
     let label: String
+    /// Marks a backend that runs through a local CLI rather than a key.
+    var tagged: Bool = false
     let selected: Bool
     let onTap: () -> Void
 
@@ -1249,6 +1364,16 @@ private struct AskRecentModelRow: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 6)
+            if tagged {
+                Text("CLI")
+                    .font(.sf(9, weight: .semibold))
+                    .tracking(0.4)
+                    .foregroundStyle(Tokens.text3)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1.5)
+                    .background(RoundedRectangle(cornerRadius: 4)
+                        .fill(.white.opacity(0.10)))
+            }
         }
         .padding(.horizontal, 8)
         .frame(height: 25)

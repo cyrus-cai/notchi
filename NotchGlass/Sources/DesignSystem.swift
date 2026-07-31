@@ -114,7 +114,6 @@ enum Tokens {
     static let openWidthResult: CGFloat = 600
     static let openWidthSettings: CGFloat = 580   // inline settings form
     static let openWidthWhatsNew: CGFloat = 600   // release-notes reading column
-    static let openWidthOnboarding: CGFloat = 720  // first-run guide: left controls + right demo pane
 }
 
 /// The panel's **recessed** control surface: a faint white floor plus a hairline
@@ -619,8 +618,10 @@ private struct NotchTooltip: ViewModifier {
     @State private var shown = false
     /// Measured height of the capsule, so the offset clears the control exactly.
     @State private var tipHeight: CGFloat = 24
-    /// Measured width of the capsule, so it can be nudged clear of a container wall.
-    @State private var tipWidth: CGFloat = 0
+    /// Measured width of the capsule laid out on ONE line, with no wall in the
+    /// way. Compared against `availableWidth` to decide whether this tip has to
+    /// wrap at all; when it doesn't, this is the capsule's drawn width.
+    @State private var naturalWidth: CGFloat = 0
     /// The anchor's own width, and the horizontal bounds of its clip container
     /// (see `resolvedBounds`) — both in the anchor's local space, so
     /// `horizontalNudge` can keep the centred capsule inside the walls.
@@ -629,6 +630,26 @@ private struct NotchTooltip: ViewModifier {
     @State private var boundMaxX: CGFloat = .greatestFiniteMagnitude
     /// Cancels a pending show if the cursor leaves before `delay` elapses.
     @State private var showTask: Task<Void, Never>?
+
+    /// Wall-to-wall room the capsule may occupy, minus the same 6pt margin
+    /// `horizontalNudge` clamps to. `.infinity` when no clip box answered — the
+    /// tip then sizes to its text on one line, as it always has.
+    private var availableWidth: CGFloat {
+        guard boundMinX > -.greatestFiniteMagnitude,
+              boundMaxX < .greatestFiniteMagnitude,
+              boundMaxX > boundMinX else { return .infinity }
+        return max(boundMaxX - boundMinX - 12, 80)
+    }
+
+    /// A tip whose one-line form is wider than the room between the walls has to
+    /// wrap: sliding it sideways can clear one wall, but nothing fits a capsule
+    /// wider than the box inside the box. The intro row's CC BY credit is a full
+    /// sentence and lands here; every short hint keeps its one-line capsule.
+    private var wraps: Bool { naturalWidth > 0 && naturalWidth > availableWidth }
+
+    /// The capsule's drawn width — its natural one-line width, or exactly the
+    /// available room when it has to wrap.
+    private var tipWidth: CGFloat { wraps ? availableWidth : naturalWidth }
 
     /// How far to shift the capsule horizontally so it never spills past its clip
     /// container. Zero when the naturally-centred capsule already fits; positive =
@@ -703,6 +724,9 @@ private struct NotchTooltip: ViewModifier {
                     showTask = Task {
                         try? await Task.sleep(for: .seconds(d))
                         if !Task.isCancelled, hovering {
+                            if ProcessInfo.processInfo.environment["NOTCH_TIP_DEBUG"] == "1" {
+                                FileHandle.standardError.write(Data("[tip] box=\(boundMinX)…\(boundMaxX) anchor=\(anchorWidth) natural=\(naturalWidth) avail=\(availableWidth) wraps=\(wraps) h=\(tipHeight) nudge=\(horizontalNudge)\n".utf8))
+                            }
                             withAnimation(.easeOut(duration: 0.14)) { shown = true }
                         }
                     }
@@ -737,22 +761,39 @@ private struct NotchTooltip: ViewModifier {
             // "left side is cut off" bug. Measuring up front means the very first
             // frame is already in its clamped place. (`.hidden()` still lays out,
             // and a background never affects the anchor's own layout.)
+            //
+            // Two twins, because "does this even fit?" and "how tall is it once
+            // it doesn't" are different measurements. The first lays the text out
+            // on one line with no wall in the way (`.fixedSize()`, so it reports
+            // the size it WANTS rather than the 11pt icon it hangs off) — that
+            // width decides `wraps`. The second is the capsule as it will
+            // actually be drawn, and reports the height the offset must clear.
             .background(
                 TooltipLabel.sizedText(text)
+                    .fixedSize()
                     .background(
                         GeometryReader { g in
-                            Color.clear
-                                .preference(key: TooltipHeightKey.self,
-                                            value: g.size.height)
-                                .preference(key: TooltipWidthKey.self,
-                                            value: g.size.width)
+                            Color.clear.preference(key: TooltipWidthKey.self,
+                                                   value: g.size.width)
+                        }
+                    )
+                    .hidden()
+                    .allowsHitTesting(false)
+            )
+            .background(
+                TooltipLabel.sizedText(text, width: wraps ? availableWidth : nil)
+                    .fixedSize()
+                    .background(
+                        GeometryReader { g in
+                            Color.clear.preference(key: TooltipHeightKey.self,
+                                                   value: g.size.height)
                         }
                     )
                     .hidden()
                     .allowsHitTesting(false)
             )
             .onPreferenceChange(TooltipHeightKey.self) { if $0 > 0 { tipHeight = $0 } }
-            .onPreferenceChange(TooltipWidthKey.self) { if $0 > 0 { tipWidth = $0 } }
+            .onPreferenceChange(TooltipWidthKey.self) { if $0 > 0 { naturalWidth = $0 } }
             // Anchor the tip's near edge to the control's matching edge, then push
             // it fully CLEAR of the control by its own measured height plus a gap —
             // so the capsule sits above (or below) the icon, never on top of it.
@@ -760,7 +801,7 @@ private struct NotchTooltip: ViewModifier {
             // then lifts the whole capsule up past the icon. (Mirror for `.bottom`.)
             .overlay(alignment: edge == .top ? .top : .bottom) {
                 if shown {
-                    TooltipLabel(text: text)
+                    TooltipLabel(text: text, width: wraps ? availableWidth : nil)
                         // Let it size to its text without being clipped to the
                         // anchor's width; the hidden twin above already reported
                         // that size, so the offsets below are right from frame one.
@@ -827,26 +868,59 @@ private struct TooltipBoundsKey: PreferenceKey {
 /// than the old flat 0.62 while still occluding enough to stay legible.
 private struct TooltipLabel: View {
     let text: String
+    /// An exact capsule width for a tip that has to wrap, or `nil` for the
+    /// ordinary one-line capsule that sizes to its own text.
+    let width: CGFloat?
+
+    init(text: String, width: CGFloat? = nil) {
+        self.text = text
+        self.width = width
+    }
+
+    /// Horizontal padding inside the capsule, on each side.
+    static let hPadding: CGFloat = 9
 
     /// The capsule's content at its exact final size, without the glass behind it.
     /// Split out so `NotchTooltip` can pre-measure a tip it isn't showing yet
-    /// (see its hidden measuring backdrop) without building a whole glass wafer —
+    /// (see its hidden measuring backdrops) without building a whole glass wafer —
     /// and so the measured size can never drift from the drawn one.
+    ///
+    /// With no `width`, the old behaviour exactly: one line, sized to the text.
+    /// With one, an EXACT frame — not `maxWidth`, which is the trap here: a
+    /// flexible frame under `.fixedSize()` gets a nil proposal, hands the Text a
+    /// nil proposal too, and the Text answers with its full one-line width; the
+    /// frame then reports the clamped width while the text inside it stays laid
+    /// out long and spills out both ends. A fixed frame proposes its own width
+    /// down no matter what the parent proposed, so the text actually wraps.
     @ViewBuilder
-    static func sizedText(_ text: String) -> some View {
-        Text(text)
+    static func sizedText(_ text: String, width: CGFloat? = nil) -> some View {
+        let base = Text(text)
             .font(.sf(11, weight: .medium))
             .tracking(0.1)
             .foregroundStyle(Tokens.text2)
-            .lineLimit(1)
-            .fixedSize()
-            .padding(.horizontal, 9)
-            .padding(.vertical, 5)
+        if let width {
+            base
+                .multilineTextAlignment(.leading)
+                .frame(width: max(width - hPadding * 2, 80), alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, hPadding)
+                .padding(.vertical, 5)
+        } else {
+            base
+                .lineLimit(1)
+                .fixedSize()
+                .padding(.horizontal, hPadding)
+                .padding(.vertical, 5)
+        }
     }
 
     var body: some View {
-        let shape = Capsule(style: .continuous)
-        Self.sizedText(text)
+        // A rounded rect at the one-line capsule's own radius — identical to
+        // `Capsule` for a single line, but a two-line tip keeps square-ish ends
+        // instead of blowing its corners out into half-circles that eat into the
+        // text.
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        Self.sizedText(text, width: width)
             .background(
                 ZStack {
                     shape.fill(.clear)

@@ -620,93 +620,27 @@ struct DetachedSessionRootView: View {
     }
 }
 
-/// The window header's leading control — the NATIVE red traffic light on the
-/// top-left. The window is borderless, so AppKit gives it no titlebar buttons;
-/// a standalone standard close button is hosted here instead and wired to the
-/// same close path as the ⌘W equivalent. The fixed frames matter: without
-/// them SwiftUI treats the representable as flexible and lets it swallow the
-/// whole header (the light is ~14×16pt; the outer 26pt square keeps the
-/// header's chip rhythm).
+/// The window header's leading control — the close ×. The window is
+/// borderless, so AppKit gives it no titlebar buttons; this is wired to the
+/// same close path as the ⌘W equivalent.
+///
+/// It used to host AppKit's *standard* red traffic light, the loudest pixel in
+/// a header that is otherwise all quiet glass — and the one control here
+/// speaking a different language than everything around it. It's now the same
+/// species as `WindowTrailingCluster` on the other end: one glass segment,
+/// same 26pt chip, same 11pt semibold glyph, so the two ends of the header
+/// balance instead of clashing.
 private struct WindowCloseButton: View {
     var close: () -> Void
 
     var body: some View {
-        TrafficLightClose(close: close)
-            .frame(width: 14, height: 16)
-            .frame(width: 26, height: 26)
+        GlassSegmentCluster(segments: [
+            .init(tooltip: L("detached.close"), action: close) {
+                Image(systemName: "xmark")
+                    .font(.sf(11, weight: .semibold))
+            }
+        ])
     }
-}
-
-private struct TrafficLightClose: NSViewRepresentable {
-    var close: () -> Void
-
-    func makeCoordinator() -> Coordinator { Coordinator(close: close) }
-
-    func makeNSView(context: Context) -> TrafficLightHostView {
-        let host = TrafficLightHostView()
-        if let button = NSWindow.standardWindowButton(.closeButton,
-                                                      for: [.titled, .closable]) {
-            button.target = context.coordinator
-            button.action = #selector(Coordinator.fire)
-            host.install(button)
-        }
-        return host
-    }
-
-    func updateNSView(_ view: TrafficLightHostView, context: Context) {
-        context.coordinator.close = close
-    }
-
-    @MainActor final class Coordinator: NSObject {
-        var close: () -> Void
-        init(close: @escaping () -> Void) { self.close = close }
-        @objc func fire() { close() }
-    }
-}
-
-/// Hosts the standalone traffic light and answers AppKit's `_mouseInGroup:`
-/// from its own hover tracking — that's what lights the × glyph inside the
-/// red disc on hover, exactly as in a real titlebar (a lone standard button
-/// has no titlebar group to ask, so without this the glyph never appears).
-private final class TrafficLightHostView: NSView {
-    private var hovering = false
-    private weak var button: NSButton?
-
-    func install(_ button: NSButton) {
-        self.button = button
-        addSubview(button)
-        setFrameSize(button.frame.size)
-    }
-
-    override var intrinsicContentSize: NSSize { button?.frame.size ?? .zero }
-
-    /// Whatever size SwiftUI settles on, the light itself sits dead center.
-    override func layout() {
-        super.layout()
-        guard let button else { return }
-        button.setFrameOrigin(NSPoint(x: (bounds.width - button.frame.width) / 2,
-                                      y: (bounds.height - button.frame.height) / 2))
-    }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        trackingAreas.forEach(removeTrackingArea)
-        addTrackingArea(NSTrackingArea(rect: bounds,
-                                       options: [.mouseEnteredAndExited, .activeAlways],
-                                       owner: self))
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        hovering = true
-        button?.needsDisplay = true
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        hovering = false
-        button?.needsDisplay = true
-    }
-
-    @objc private func _mouseInGroup(_ button: NSButton) -> Bool { hovering }
 }
 
 /// The window header's trailing control — reattach + pin in one glass capsule,

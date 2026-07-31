@@ -42,13 +42,14 @@
 		A1000078 /* Localization.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000079 /* Localization.swift */; };
 		A1000080 /* WhatsNewService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000081 /* WhatsNewService.swift */; };
 		A10000C0 /* OnboardingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000C1 /* OnboardingService.swift */; };
-		A10000C2 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000C3 /* OnboardingView.swift */; };
+		A10000C2 /* IntroAnimation.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000C3 /* IntroAnimation.swift */; };
 		A10000C4 /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000C5 /* NotificationService.swift */; };
 		A1000082 /* WhatsNewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000083 /* WhatsNewView.swift */; };
 		A10003AA /* HistoryArchiveWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10003BB /* HistoryArchiveWindow.swift */; };
 		A1000066 /* IntentExamples.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000067 /* IntentExamples.swift */; };
 		A1000071 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1000070 /* Assets.xcassets */; };
 		A10004A1 /* Fonts in Resources */ = {isa = PBXBuildFile; fileRef = A10004A0 /* Fonts */; };
+		A10004B1 /* intro-sunrise.m4a in Resources */ = {isa = PBXBuildFile; fileRef = A10004B0 /* intro-sunrise.m4a */; };
 		A1000710 /* AgentHarness.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000720 /* AgentHarness.swift */; };
 		A1000711 /* AgentTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000721 /* AgentTools.swift */; };
 /* End PBXBuildFile section */
@@ -80,7 +81,7 @@
 		A1000079 /* Localization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Localization.swift; sourceTree = "<group>"; };
 		A1000081 /* WhatsNewService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhatsNewService.swift; sourceTree = "<group>"; };
 		A10000C1 /* OnboardingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingService.swift; sourceTree = "<group>"; };
-		A10000C3 /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
+		A10000C3 /* IntroAnimation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntroAnimation.swift; sourceTree = "<group>"; };
 		A10000C5 /* NotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationService.swift; sourceTree = "<group>"; };
 		A1000083 /* WhatsNewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhatsNewView.swift; sourceTree = "<group>"; };
 		A10003BB /* HistoryArchiveWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryArchiveWindow.swift; sourceTree = "<group>"; };
@@ -99,6 +100,7 @@
 		A100000B /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A1000070 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A10004A0 /* Fonts */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Fonts; sourceTree = "<group>"; };
+		A10004B0 /* intro-sunrise.m4a */ = {isa = PBXFileReference; lastKnownFileType = file; path = "intro-sunrise.m4a"; sourceTree = "<group>"; };
 		A1000100 /* NotchGlass.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NotchGlass.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -158,7 +160,7 @@
 				A1000079 /* Localization.swift */,
 				A1000081 /* WhatsNewService.swift */,
 				A10000C1 /* OnboardingService.swift */,
-				A10000C3 /* OnboardingView.swift */,
+				A10000C3 /* IntroAnimation.swift */,
 				A10000C5 /* NotificationService.swift */,
 				A1000083 /* WhatsNewView.swift */,
 				A10003BB /* HistoryArchiveWindow.swift */,
@@ -185,6 +187,7 @@
 				A100000B /* Info.plist */,
 				A1000070 /* Assets.xcassets */,
 				A10004A0 /* Fonts */,
+				A10004B0 /* intro-sunrise.m4a */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -257,6 +260,7 @@
 			files = (
 				A1000071 /* Assets.xcassets in Resources */,
 				A10004A1 /* Fonts in Resources */,
+				A10004B1 /* intro-sunrise.m4a in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -292,7 +296,7 @@
 				A1000078 /* Localization.swift in Sources */,
 				A1000080 /* WhatsNewService.swift in Sources */,
 				A10000C0 /* OnboardingService.swift in Sources */,
-				A10000C2 /* OnboardingView.swift in Sources */,
+				A10000C2 /* IntroAnimation.swift in Sources */,
 				A10000C4 /* NotificationService.swift in Sources */,
 				A1000082 /* WhatsNewView.swift in Sources */,
 				A10003AA /* HistoryArchiveWindow.swift in Sources */,
@@ -347,13 +351,20 @@
 				CLANG_ANALYZER_NONNULL = YES;
 				CLANG_ENABLE_MODULES = YES;
 				CLANG_ENABLE_OBJC_ARC = YES;
-				COPY_PHASE_STRIP = NO;
+				COPY_PHASE_STRIP = YES;
+				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEPLOYMENT_POSTPROCESSING = YES;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				GCC_OPTIMIZATION_LEVEL = s;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				SDKROOT = macosx;
+				SEPARATE_STRIP = YES;
+				STRIPFLAGS = "-rSTx";
+				STRIP_INSTALLED_PRODUCT = YES;
+				STRIP_STYLE = all;
+				STRIP_SWIFT_SYMBOLS = YES;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 			};
@@ -374,7 +385,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.3.4;
+				MARKETING_VERSION = 0.4.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -397,7 +408,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.3.4;
+				MARKETING_VERSION = 0.4.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;

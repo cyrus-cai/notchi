@@ -91,6 +91,35 @@ enum ReplyTokens {
     static let anthropicRequiredCeiling = 8192
 }
 
+/// The one place sampling knobs are still spoken about.
+///
+/// Notch does **not** send `temperature`. Same reasoning as `ReplyTokens`: reply
+/// character is a matter of style, and style is already set where it belongs —
+/// `notchSystemPrompt`. A flat 0.7 was never solving anything; it just rode along
+/// on every request as a leftover default.
+///
+/// It was also actively breaking models. OpenAI locks the reasoning line to the
+/// default (1) from `gpt-5.5` onward, so any explicit value is a hard 400 — not a
+/// warning, not a clamp. Measured on the wire with the same key, one question,
+/// with vs. without the field:
+///
+///   · `gpt-5.6-terra` / `gpt-5.6-luna`  0.7 → 400 "Unsupported value:
+///                                             'temperature' ... Only the default
+///                                             (1) value is supported"
+///                                      none → streams normally
+///   · `gpt-5.5`                          0.7 → same 400 (and it's the first entry
+///                                             in the bundled shortlist)
+///   · `gpt-5.4` / `gpt-5.4-mini`         0.7 → still accepted
+///
+/// So the breakage moves with the model roster, and a per-model allow/deny list
+/// would have to be re-litigated on every OpenAI release for a knob we don't want
+/// in the first place. The field is simply not sent — every provider's default is
+/// fine for a 90-word answer.
+///
+/// No members: unlike `ReplyTokens` there is no value left to hold, so this is a
+/// greppable anchor for the request builders that cite it.
+enum SamplingKnobs {}
+
 /// Auto-retry for transient streaming failures. The very first Ask after
 /// onboarding (and any cold request) can hit a one-off that has nothing to do
 /// with the user's setup: a dropped connection, a slow-first-token timeout, a
@@ -549,6 +578,16 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     // website, see `RemoteModelManifest`), so the shortlist and the default a
     // fresh install uses can move without an app release; the bundled spec is
     // the offline fallback.
+    /// Backends that are driven by the user's own signed-in CLI rather than a key
+    /// we hold: nothing to paste, and "configured" means the binary is installed
+    /// and logged in (see each service's `isAvailable`).
+    var isCLI: Bool {
+        switch self {
+        case .codex, .claudeCode, .grokCode: return true
+        default: return false
+        }
+    }
+
     var defaultModel: String {
         // Codex's model isn't a curated shortlist — it's whatever the user's own
         // `codex` is configured to run (read from ~/.codex/config.toml), so the
@@ -933,7 +972,6 @@ struct OpenAICompatAIService: AIService {
                         let body = RequestBody(
                             model: model,
                             messages: chat,
-                            temperature: 0.7,
                             stream: true,
                             fallbackModels: provider == .openrouter
                                 ? OpenRouterFreeModels.serverFallbacks(primary: model) : nil
@@ -1014,11 +1052,11 @@ struct OpenAICompatAIService: AIService {
     // No output cap is sent. It used to be, under whichever key the vendor wanted
     // (`max_completion_tokens` for MiMo, `max_tokens` for everyone else), which is
     // why the encoder below is key-driven — that machinery now carries only the
-    // fields we still send. See `ReplyTokens` for why the cap went away.
+    // fields we still send. See `ReplyTokens` for why the cap went away, and
+    // `SamplingKnobs` for why `temperature` went with it.
     private struct RequestBody: Encodable {
         let model: String
         let messages: [Message]
-        let temperature: Double
         let stream: Bool
         /// OpenRouter's server-side failover chain (`models`), primary first —
         /// see `OpenRouterFreeModels.serverFallbacks`. `nil` for every other
@@ -1038,7 +1076,6 @@ struct OpenAICompatAIService: AIService {
             var c = encoder.container(keyedBy: DynamicKey.self)
             try c.encode(model, forKey: DynamicKey("model"))
             try c.encode(messages, forKey: DynamicKey("messages"))
-            try c.encode(temperature, forKey: DynamicKey("temperature"))
             try c.encode(stream, forKey: DynamicKey("stream"))
             if let fallbackModels {
                 try c.encode(fallbackModels, forKey: DynamicKey("models"))
@@ -2521,6 +2558,51 @@ private enum AgentWire {
     }
 }
 
+/// Models that refuse to run function tools *while reasoning* on the legacy
+/// `/v1/chat/completions` endpoint.
+///
+/// OpenAI's `gpt-5.6-*` answers a tool request with a 400: "Function tools with
+/// reasoning_effort are not supported for … in /v1/chat/completions. To use
+/// function tools, use /v1/responses or set reasoning_effort to 'none'." No value
+/// of the field helps except `none` — `low`/`medium` fail identically — so unlike
+/// `temperature` (`SamplingKnobs`) this one can't be fixed by *not* sending a
+/// field: the model needs to be told to stop reasoning. Measured on the wire, one
+/// tool-bearing request per model:
+///
+///   · `gpt-5.6-luna` / `-terra`  no field / low / medium → 400
+///                                `"none"`                → streams, tools work
+///   · `gpt-5.5`, `gpt-5.4`, `-mini`  no field            → streams (they reason
+///                                                          *and* call tools fine)
+///
+/// So it can't be sent unconditionally either — that would silently drop reasoning
+/// on every model that doesn't need it. And a hardcoded model list is exactly the
+/// thing that rots on the next OpenAI release. Instead this is **learned from the
+/// 400 itself**: the vendor names the requirement, we honor it and replay the same
+/// turn once, then remember the model id so the round-trip is paid once per launch.
+/// A model id nobody has heard of yet needs no code change.
+private enum ToolReasoningOptOut {
+    private static let lock = NSLock()
+    private static var models: Set<String> = []
+
+    /// Whether an error body is the vendor asking for `reasoning_effort: "none"`
+    /// because the request carried tools. Both terms are required so the unrelated
+    /// "unsupported value for reasoning_effort" 400 doesn't match.
+    static func isSignal(_ body: String) -> Bool {
+        let b = body.lowercased()
+        return b.contains("reasoning_effort") && b.contains("tools")
+    }
+
+    static func remember(_ model: String) {
+        lock.lock(); defer { lock.unlock() }
+        models.insert(model)
+    }
+
+    static func applies(to model: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return models.contains(model)
+    }
+}
+
 extension OpenAICompatAIService: AgentCapableService {
     func streamTurn(system: String,
                     messages: [AgentMessage],
@@ -2534,6 +2616,9 @@ extension OpenAICompatAIService: AgentCapableService {
                 // if empty. See `OpenAICompatAIService.stream` for the rationale.
                 var emittedAny = false
                 var attempt = 0
+                // Flipped by the 400 below (or preset for a model we already
+                // learned about) — see `ToolReasoningOptOut`.
+                var noReasoning = false
                 while true {
                     do {
                         var req = URLRequest(url: provider.endpoint)
@@ -2578,13 +2663,20 @@ extension OpenAICompatAIService: AgentCapableService {
                         var wireTools = Self.wireTools(tools)
                         if let searchTool { wireTools.append(searchTool) }
 
+                        // No `temperature` — see `SamplingKnobs`.
                         var body: [String: Any] = [
                             "model": effectiveModel,
                             "messages": Self.wireMessages(system: system, messages: messages),
-                            "temperature": 0.7,
                             "stream": true,
                         ]
-                        if !wireTools.isEmpty { body["tools"] = wireTools }
+                        if !wireTools.isEmpty {
+                            body["tools"] = wireTools
+                            // Only for a model that has told us it can't do both —
+                            // never a blanket "stop reasoning". See `ToolReasoningOptOut`.
+                            if noReasoning || ToolReasoningOptOut.applies(to: effectiveModel) {
+                                body["reasoning_effort"] = "none"
+                            }
+                        }
                         for (k, v) in bodyExtras { body[k] = v }
                         // OpenRouter server-side failover for free models: `models`
                         // is the priority chain OpenRouter walks on its own when an
@@ -2603,6 +2695,15 @@ extension OpenAICompatAIService: AgentCapableService {
                         }
                         guard (200..<300).contains(http.statusCode) else {
                             let bodyText = await Self.drainErrorBody(bytes.lines)
+                            // The vendor telling us this model won't run tools while
+                            // it reasons. Learn it and replay the same turn once with
+                            // reasoning off, rather than surfacing a dead error.
+                            if http.statusCode == 400, !wireTools.isEmpty, !noReasoning,
+                               ToolReasoningOptOut.isSignal(bodyText) {
+                                ToolReasoningOptOut.remember(effectiveModel)
+                                noReasoning = true
+                                continue
+                            }
                             throw ServiceError.http(provider: provider.displayName,
                                                     status: http.statusCode, body: bodyText)
                         }

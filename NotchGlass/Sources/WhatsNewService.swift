@@ -64,6 +64,26 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.4.0",
+            date: "2026-07-31",
+            features: [
+                "First launch plays a short intro instead of the three-step setup guide. About can replay it.",
+            ],
+            improvements: [
+                "Notchi is 4.9 MB on disk, down from 14.6.",
+                "With nothing set up, Ask reads “Choose model…” and lists any signed-in CLI.",
+                "Settings rows and picker cards highlight on hover.",
+                "The detached window's close button matches the header's other controls.",
+                "Clearing history starts animating as soon as you confirm.",
+            ],
+            fixes: [
+                "The newest OpenAI models no longer fail outright — Notchi stopped sending a temperature they reject.",
+                "Tools work on gpt-5.6.",
+                "A failed answer's “Try again” no longer appears in other conversations.",
+                "Long tooltips wrap instead of running off the panel.",
+            ]
+        ),
+        Entry(
             version: "0.3.4",
             date: "2026-07-29",
             improvements: [

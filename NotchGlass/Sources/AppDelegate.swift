@@ -233,6 +233,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         rebuildPanels()
 
+        // The one and only first run: the screen goes black, the mark becomes a
+        // real 3D object, spins once and flies into the notch — and the panel
+        // opens on the chat prompt where it lands (see `IntroAnimation`). Deferred
+        // a beat so the panels have settled into place first; the intro then owns
+        // the screen until it hands back.
+        if OnboardingService.shared.showIntro, let screen = preferredScreen() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+                guard let self else { return }
+                NSApp.activate(ignoringOtherApps: true)
+                IntroAnimation.shared.play(on: screen, veiled: { [weak self] in
+                    // Once the veil is opaque the resting island is invisible
+                    // anyway — take it off the screen for the rest of the intro.
+                    // Left up, it is the only key-capable window we own while a
+                    // full-screen `.screenSaver` overlay is in front, so AppKit
+                    // records it as the app's key window on activation while the
+                    // window server refuses to grant it. That wedged pair
+                    // (`NSApp.keyWindow === panel` but `isKeyWindow == false`)
+                    // makes every later `makeKey` a silent no-op, and the prompt
+                    // opens unfocused. Ordered out, it can't be picked — so the
+                    // `makeKeyAndOrderFront` that brings it back at the end of the
+                    // intro is a first request, and it lands.
+                    guard let self, let id = screen.displayID else { return }
+                    self.panels[id]?.orderOut(nil)
+                }) {
+                    OnboardingService.shared.markIntroDone()
+                    withAnimation(.spring(response: 0.46, dampingFraction: 0.78)) {
+                        self.model.mode = .idle
+                        self.model.openPanel(on: screen.displayID)
+                    }
+                }
+            }
+        }
+
         // When the panel opens (on hover), make the active screen's panel the
         // key window so keystrokes land in the prompt field immediately — no
         // extra click needed — and ALSO activate the app itself. Key status
@@ -253,25 +286,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak self] isOpen, active in
                 guard let self else { return }
                 if isOpen {
-                    // First open ever retires the gesture glow (its job — getting the
-                    // user to the panel — is done). A no-op after the first time.
-                    OnboardingService.shared.markPanelOpened()
-                    // …and on a fresh install, the panel opens straight into the
-                    // guided first run. Deferred a runloop turn so it rides the same
-                    // open spring rather than racing the expand's first frame. Guarded
-                    // so it never overrides a panel the user opened INTO settings /
-                    // What's New (e.g. ⌘,) — only a plain idle open leads with the guide.
-                    if OnboardingService.shared.showGuide {
-                        DispatchQueue.main.async {
-                            guard self.model.open,
-                                  !self.model.showSettings,
-                                  !self.model.showWhatsNew,
-                                  OnboardingService.shared.showGuide else { return }
-                            withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
-                                self.model.openOnboarding(on: active)
-                            }
-                        }
-                    }
                     // This fires synchronously inside the hover handler ($open
                     // publishes on willSet) — BEFORE SwiftUI commits the open
                     // animation's first frame. The key-window dance does

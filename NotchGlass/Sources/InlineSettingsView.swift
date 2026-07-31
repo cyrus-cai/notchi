@@ -184,7 +184,7 @@ struct InlineSettingsView: View {
 
         /// The section a sub-page sits under — where back (and ⎋) returns to.
         /// `nil` for the top-level categories, whose back leaves settings.
-        var parent: Section? { self == .shortcuts ? .about : nil }
+        var parent: Section? { isDetail ? .about : nil }
 
         /// The sidebar's rows: every category, minus the sub-pages.
         static var sidebarCases: [Section] { allCases.filter { !$0.isDetail } }
@@ -1586,9 +1586,9 @@ struct InlineSettingsView: View {
 
     private func placementCard(_ p: DisplayPlacement) -> some View {
         let selected = placement == p
-        return Button {
+        return PickerCard(selected: selected) {
             selectPlacement(p)
-        } label: {
+        } content: {
             VStack(spacing: 7) {
                 HStack(alignment: .bottom, spacing: 8) {
                     MiniDisplay(kind: .laptop, hasIsland: true)
@@ -1602,20 +1602,7 @@ struct InlineSettingsView: View {
                     .foregroundStyle(selected ? Tokens.text1 : Tokens.text3)
                     .lineLimit(1)
             }
-            .padding(.vertical, 8)
-            .frame(width: 108)
-            .background(
-                RoundedRectangle(cornerRadius: 9)
-                    .fill(.white.opacity(selected ? 0.10 : 0.04))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 9)
-                    .strokeBorder(.white.opacity(selected ? 0.40 : 0.10),
-                                  lineWidth: selected ? 1 : 0.5)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 9))
         }
-        .buttonStyle(.plain)
     }
 
     private func selectPlacement(_ newValue: DisplayPlacement) {
@@ -1675,9 +1662,9 @@ struct InlineSettingsView: View {
 
     private func dockIconCard(_ v: DockIconVisibility) -> some View {
         let selected = dockIconVisibility == v
-        return Button {
+        return PickerCard(selected: selected) {
             selectDockIconVisibility(v)
-        } label: {
+        } content: {
             VStack(spacing: 7) {
                 MiniDock(hasIcon: v == .shown)
                     // The unselected diagram dims as a whole so the lit tile
@@ -1688,20 +1675,7 @@ struct InlineSettingsView: View {
                     .foregroundStyle(selected ? Tokens.text1 : Tokens.text3)
                     .lineLimit(1)
             }
-            .padding(.vertical, 8)
-            .frame(width: 108)
-            .background(
-                RoundedRectangle(cornerRadius: 9)
-                    .fill(.white.opacity(selected ? 0.10 : 0.04))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 9)
-                    .strokeBorder(.white.opacity(selected ? 0.40 : 0.10),
-                                  lineWidth: selected ? 1 : 0.5)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 9))
         }
-        .buttonStyle(.plain)
     }
 
     private func selectDockIconVisibility(_ newValue: DockIconVisibility) {
@@ -2488,6 +2462,13 @@ struct InlineSettingsView: View {
                 AboutRow(title: L("sidebar.shortcuts"), leaves: false) {
                     withAnimation(.easeOut(duration: 0.16)) { section = .shortcuts }
                 },
+                // The first-run intro, on demand. The ⓘ carries the music credit
+                // its CC BY 4.0 licence asks for — attached to the row that
+                // actually plays the music, rather than as a paragraph below.
+                AboutRow(title: L("about.replayIntro"), leaves: false,
+                         info: L("about.music")) {
+                    replayIntro()
+                },
             ])
 
             aboutCard([
@@ -2516,6 +2497,26 @@ struct InlineSettingsView: View {
         }
     }
 
+    /// Play the first-run intro again: collapse the panel so the animation owns
+    /// the screen the way it does on a cold launch, then land back on the idle
+    /// prompt where it always lands. The once-ever flag is untouched — this is a
+    /// replay, not a reset.
+    private func replayIntro() {
+        let display = model.activeDisplay
+        let screen = NSScreen.screens.first { $0.displayID == display } ?? NSScreen.main
+        guard let screen else { return }
+        model.fullClose()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) {
+            NSApp.activate(ignoringOtherApps: true)
+            IntroAnimation.shared.play(on: screen) {
+                withAnimation(.spring(response: 0.46, dampingFraction: 0.78)) {
+                    model.mode = .idle
+                    model.openPanel(on: screen.displayID)
+                }
+            }
+        }
+    }
+
     /// One row of an About list: a label and the mark for where it goes.
     /// `leaves` is the whole distinction — true hands off to another app (`↗`),
     /// false pushes a page inside the panel (`›`).
@@ -2523,20 +2524,34 @@ struct InlineSettingsView: View {
         let id = UUID()
         let title: String
         let leaves: Bool
+        /// An ⓘ before the trailing mark, carrying this text on hover. Only for
+        /// the fine print a row implies but shouldn't spell out — the intro's
+        /// CC BY 4.0 credit, which the licence needs readable but which reads as
+        /// noise sitting under the cards as a paragraph.
+        let info: String?
         let action: () -> Void
 
-        init(title: String, leaves: Bool, action: @escaping () -> Void) {
+        init(title: String, leaves: Bool, info: String? = nil, action: @escaping () -> Void) {
             self.title = title
             self.leaves = leaves
+            self.info = info
             self.action = action
         }
     }
 
-    /// One inset card of rows. The card clips its content, so a row's hover wash
-    /// runs the full width and takes the card's own corners at the ends — the
-    /// way a grouped list highlights in System Settings, rather than a floating
-    /// pill inside a box. Separators are inset to the label's left edge, the
-    /// way a grouped table's are.
+    /// One inset card of rows. A row's hover wash runs the full width and takes
+    /// the card's own corners at the ends — the way a grouped list highlights in
+    /// System Settings, rather than a floating pill inside a box. Separators are
+    /// inset to the label's left edge, the way a grouped table's are.
+    ///
+    /// The end rows shape their OWN wash instead of the card clipping the stack.
+    /// A `clipShape` here would be the simpler way to round those two washes, but
+    /// it also chops anything a row draws outside the card — which is exactly how
+    /// the ⓘ tooltip on the Replay-intro row lost its left half: the capsule was
+    /// correctly clamped inside the island, then clipped again at the card's own
+    /// left edge. Nothing inside a clip can escape it, so the clip has to go.
+    private static let aboutCardRadius: CGFloat = 12
+
     private func aboutCard(_ rows: [AboutRow]) -> some View {
         VStack(spacing: 0) {
             ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
@@ -2546,19 +2561,20 @@ struct InlineSettingsView: View {
                         .frame(height: 0.5)
                         .padding(.leading, 12)
                 }
-                AboutLinkRow(row: row)
+                AboutLinkRow(row: row,
+                             isFirst: index == 0,
+                             isLast: index == rows.count - 1)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: Self.aboutCardRadius, style: .continuous)
                 .fill(.white.opacity(0.04))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: Self.aboutCardRadius, style: .continuous)
                 .strokeBorder(.white.opacity(0.08), lineWidth: 0.5)
         )
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     /// The row itself. Its own view because the hover wash needs local state,
@@ -2566,7 +2582,20 @@ struct InlineSettingsView: View {
     /// column geometry for the list to read as a list.
     private struct AboutLinkRow: View {
         let row: AboutRow
+        /// Which end of the card this row sits at — the wash rounds the two
+        /// corners the card does there, and stays square everywhere else.
+        var isFirst = false
+        var isLast = false
         @State private var hovering = false
+
+        private var washShape: UnevenRoundedRectangle {
+            let r = InlineSettingsView.aboutCardRadius
+            return UnevenRoundedRectangle(topLeadingRadius: isFirst ? r : 0,
+                                          bottomLeadingRadius: isLast ? r : 0,
+                                          bottomTrailingRadius: isLast ? r : 0,
+                                          topTrailingRadius: isFirst ? r : 0,
+                                          style: .continuous)
+        }
 
         var body: some View {
             Button(action: row.action) {
@@ -2575,6 +2604,17 @@ struct InlineSettingsView: View {
                         .font(.sf(12.5, weight: .medium))
                         .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
                         .lineLimit(1)
+                    // The ⓘ sits with the label it annotates, not out on the
+                    // trailing rail where it would read as a second action. The
+                    // hint rides `notchTooltip` like every other one in the app —
+                    // AppKit's `.help` bubble never fires on this non-activating
+                    // panel, and wouldn't match the glass if it did.
+                    if let info = row.info {
+                        Image(systemName: "info.circle")
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundStyle(Tokens.text4)
+                            .notchTooltip(info)
+                    }
                     Spacer(minLength: 12)
                     // Fixed trailing column so `↗` and `›` — different glyph
                     // widths — still end on the same rail down the right edge.
@@ -2586,7 +2626,7 @@ struct InlineSettingsView: View {
                 }
                 .padding(.horizontal, 12)
                 .frame(height: 34)
-                .background(.white.opacity(hovering ? 0.05 : 0))
+                .background(washShape.fill(.white.opacity(hovering ? 0.05 : 0)))
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -2954,6 +2994,39 @@ struct GlassMenu<Content: View>: View {
 /// flags to `onCapture`. Swallowing the event while recording keeps Esc/Space
 /// from leaking into the panel underneath. The monitor is torn down the moment
 /// `active` flips false or the view disappears — no global tap, no leak.
+/// The shared shell behind the placement and Dock-icon picker cards: fixed
+/// width, rounded fill + hairline border, and a hover lift that brightens both
+/// by the same step the About rows use — so an unselected card answers the
+/// pointer instead of sitting dead until it's clicked.
+private struct PickerCard<Content: View>: View {
+    let selected: Bool
+    let action: () -> Void
+    @ViewBuilder let content: () -> Content
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            content()
+                .padding(.vertical, 8)
+                .frame(width: 108)
+                .background(
+                    RoundedRectangle(cornerRadius: 9)
+                        .fill(.white.opacity((selected ? 0.10 : 0.04) + (hovering ? 0.05 : 0)))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 9)
+                        .strokeBorder(.white.opacity((selected ? 0.40 : 0.10) + (hovering ? 0.10 : 0)),
+                                      lineWidth: selected ? 1 : 0.5)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 9))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
+    }
+}
+
 /// A miniature display glyph for the placement picker: a screen with a bright
 /// pill on its top edge when it carries a notch island, over a laptop deck or a
 /// monitor stand so the pair reads as built-in vs. external at a glance.

@@ -9,9 +9,6 @@ struct ContentView: View {
     /// hover-to-open never fires during a drag (the tracking area sees no
     /// mouseEntered), so the drop target itself unfurls the panel.
     @State private var agentDropTargeted = false
-    /// First-run state — drives the breathing gesture hint under the resting notch
-    /// on the very first launch (see `OnboardingService`).
-    @ObservedObject private var onboarding = OnboardingService.shared
     /// The live string store. Observing it here, at the root of every panel, plus
     /// the `.id(loc.language)` below, rebuilds the whole SwiftUI subtree when the
     /// App Language changes — so every `L(_:)` lookup re-evaluates at once, no
@@ -67,21 +64,6 @@ struct ContentView: View {
                         model.openPanel(on: metrics.displayID)
                     }
                 }
-
-            // First-run gesture hint: a slow breathing glow under the resting notch
-            // with one line ("hover — or ⌘,"). Like the thinking dots, it's a
-            // free-floating sibling shown ONLY while collapsed, and only on the very
-            // first launch — it dies the first time the panel opens and never
-            // returns (see `OnboardingService`). Suppressed if the panel is already
-            // open or while the thinking dots own the same spot.
-            if onboarding.showGestureHint,
-               !model.isOpen(on: metrics.displayID),
-               !model.thinking {
-                NotchGestureHint(hasHardwareNotch: metrics.hasHardwareNotch)
-                    .offset(y: metrics.restHeight)
-                    .transition(.opacity)
-                    .allowsHitTesting(false)
-            }
         }
         .frame(width: metrics.canvasWidth, alignment: .top)
         .ignoresSafeArea()
@@ -91,9 +73,6 @@ struct ContentView: View {
         // handing off, not animating "into" anything).
         .animation(.spring(response: 0.34, dampingFraction: 0.78), value: model.thinking)
         .animation(.easeInOut(duration: 0.2), value: model.isOpen(on: metrics.displayID))
-        // Fade the first-run gesture hint out (rather than snapping) the moment the
-        // panel opens for the first time and `markPanelOpened()` retires it.
-        .animation(.easeInOut(duration: 0.3), value: onboarding.showGestureHint)
         .background(KeyEventCatcher { event in
             // ⌘↵ submits the current line to the *other family* — Ask ⇄ Capture
             // (Note/Remind) — the one-key correction for when the inline hint reads
@@ -102,7 +81,7 @@ struct ContentView: View {
             // applies to follow-ups, and it needs text to send. keyCode 36 is Return.
             if event.keyCode == 36, event.modifierFlags.contains(.command),
                model.mode == .idle, model.hasText,
-               !model.showOnboarding, !model.showSettings, !model.showWhatsNew {
+               !model.showSettings, !model.showWhatsNew {
                 model.submitOtherFamily()
                 return true
             }
@@ -134,7 +113,7 @@ struct ContentView: View {
             if event.keyCode == 34,
                event.modifierFlags.contains(.command),
                event.modifierFlags.contains(.shift),
-               !model.showOnboarding, !model.showSettings, !model.showWhatsNew {
+               !model.showSettings, !model.showWhatsNew {
                 if model.agentAvailable {
                     model.showAgentPicker = true
                 } else {
@@ -234,14 +213,6 @@ struct ContentView: View {
                 if withAnimation(.spring(response: 0.34, dampingFraction: 0.82), {
                     model.dismissSlashMenu()
                 }) { return true }
-                // Guided first run open → Esc skips it (returns to the prompt and
-                // records it done, like the header's Skip).
-                if model.showOnboarding {
-                    withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
-                        model.closeOnboarding()
-                    }
-                    return true
-                }
                 // Settings open → first Esc folds back to the prompt, not a full
                 // close (mirrors the recent-list step-out below). A pushed
                 // sub-page (Shortcuts, under About) gets its own step first, so
@@ -329,61 +300,6 @@ struct ContentView: View {
     private func fieldEditorIsFirstResponder() -> Bool {
         guard let responder = NSApp.keyWindow?.firstResponder else { return false }
         return responder is NSText
-    }
-}
-
-/// The first-run gesture hint: a slow breathing glow centered under the resting
-/// notch, with one line teaching the summon affordance. Quiet and in-character —
-/// the glow uses the same cool top / warm-neutral palette as the glass edge light,
-/// not a loud accent colour, so it reads as the notch itself inviting a hover
-/// rather than a banner stuck on top. It shows only on the very first launch and
-/// fades away the first time the panel opens (`OnboardingService.markPanelOpened`).
-private struct NotchGestureHint: View {
-    /// On a notched Mac the glow points at the hardware notch and the line names
-    /// the hover. On a notch-less screen (external display / older Mac) there's no
-    /// notch to hover, so the glow is dropped and the line names ⌘, alone.
-    let hasHardwareNotch: Bool
-
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var breathing = false
-
-    var body: some View {
-        VStack(spacing: 9) {
-            if hasHardwareNotch {
-                // A soft cool-white radial bloom, hinged to the notch's bottom edge.
-                // It breathes between a dim rest and a brighter peak — slow enough to
-                // read as ambient, never as a blinking cursor.
-                Ellipse()
-                    .fill(
-                        RadialGradient(
-                            colors: [
-                                Color.white.opacity(0.22),
-                                Color.white.opacity(0.0),
-                            ],
-                            center: .top,
-                            startRadius: 0,
-                            endRadius: 70
-                        )
-                    )
-                    .frame(width: Tokens.notchWidth + 64, height: 44)
-                    .scaleEffect(x: 1, y: breathing ? 1.12 : 0.9, anchor: .top)
-                    .opacity(breathing ? 0.9 : 0.35)
-                    .blur(radius: 6)
-            }
-
-            Text(hasHardwareNotch
-                 ? L("onboarding.gestureHint")
-                 : L("onboarding.gestureHint.noNotch"))
-                .font(.sf(12.5))
-                .tracking(0.2)
-                .foregroundStyle(Tokens.text2)
-        }
-        .onAppear {
-            guard !reduceMotion else { return }
-            withAnimation(.easeInOut(duration: 2.2).repeatForever(autoreverses: true)) {
-                breathing = true
-            }
-        }
     }
 }
 
@@ -933,17 +849,31 @@ struct NotchIsland: View {
                         }
                     },
                     onConfirm: { scope in
-                        // Two beats, not one: the card fades out first while the
+                        // Two beats, not one: the card leaves first while the
                         // island holds its height, THEN the emptied recent list
                         // collapses on the panel's standard module spring. Clearing
                         // immediately (and outside the transaction) yanked the
                         // island short mid-dismiss, re-centering and clipping the
                         // still-fading card — a visible jump.
-                        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                        //
+                        // The confirm exit is a short ease-out, NOT the spring the
+                        // Cancel path uses, and beat two is chained off a matching
+                        // delay rather than the spring's completion: waiting for a
+                        // 0.34-response spring to settle put ~half a second of dead
+                        // air between the click and anything moving, so the list
+                        // looked like it cleared on a delayed hard cut. You clicked;
+                        // the card should be gone and the rows already going.
+                        model.bulkClearing = true      // arms the rows' dissolve —
+                        // recorded a full render BEFORE the removal below, because a
+                        // removal transition comes from the view's last render.
+                        withAnimation(.easeOut(duration: 0.16)) {
                             model.confirmingClear = false
-                        } completion: {
+                        }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
                             withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                                 model.clearHistory(scope: scope)
+                            } completion: {
+                                model.bulkClearing = false
                             }
                         }
                     }

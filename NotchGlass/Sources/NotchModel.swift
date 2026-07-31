@@ -453,6 +453,11 @@ final class NotchModel: ObservableObject {
     /// hangs the popover off the panel body like the other two pickers.
     @Published var showAskModelPicker = false
 
+    /// The agent compose's folder chip menu — the recently worked-in projects
+    /// (`AgentFolderMRU`), with the file panel as its tail row. Hung off the chip
+    /// itself, exactly like the two model menus.
+    @Published var showAgentFolderPicker = false
+
     /// The agent task whose detail page is open — the full-page work trail a
     /// status row's tap opens while its run is live (a settled row opens its
     /// Recent record instead, which shows the same trail). `nil` = no detail
@@ -966,10 +971,10 @@ final class NotchModel: ObservableObject {
     /// What a tear-off from the current page would carry: the open agent-run
     /// detail if one is up, the on-screen thread next, and — with neither — the
     /// idle prompt itself, which tears out as a standalone composer (`.compose`).
-    /// Nil only on the pages that own the whole body (settings, What's New,
-    /// onboarding), which have nothing to carry.
+    /// Nil only on the pages that own the whole body (settings, What's New),
+    /// which have nothing to carry.
     var detachableSession: DetachedSession? {
-        guard open, !showOnboarding, !showSettings, !showWhatsNew else { return nil }
+        guard open, !showSettings, !showWhatsNew else { return nil }
         if let id = agentDetailTaskID { return .agentTask(id: id) }
         if mode != .idle, !turns.isEmpty, !showHistory {
             return .thread(id: threadHistoryID)
@@ -2009,6 +2014,14 @@ final class NotchModel: ObservableObject {
     /// or a generic line (XII-85). Carries the real, human-readable reason (e.g.
     /// "Anthropic · HTTP 401") and whether the likely fix is to set up a key (no key
     /// configured) versus retry (transient/network). `nil` when there's no error.
+    ///
+    /// **Never read this directly for rendering or acting — use `visibleAskError`.**
+    /// This is raw storage for the round that failed, and it outlives that round's
+    /// time on screen (nothing clears it on `newChat` / `openHistory` /
+    /// `attachInFlightRound` / a reopened parked session). Read unscoped, a failure
+    /// in one conversation followed the user into every *other* conversation they
+    /// opened: the stale "Try again" capsule took the place of that thread's
+    /// follow-up input, and tapping it re-ran the innocent thread's last question.
     @Published var askError: AskError? = nil
 
     /// The shape of an Ask failure the result view renders into a capsule action.
@@ -2019,6 +2032,24 @@ final class NotchModel: ObservableObject {
         /// True when no model/key is configured — the action should be "open
         /// Settings" rather than "retry" (retrying without a key can't succeed).
         let needsSetup: Bool
+        /// The assistant turn this failure belongs to — the round's own error
+        /// bubble. What binds the error state to ONE conversation: the capsule only
+        /// renders while that exact turn is the on-screen thread's (see
+        /// `visibleAskError`), so switching threads leaves it behind.
+        let answerID: UUID
+    }
+
+    /// The failure the result view may act on: `askError`, but only while the turn
+    /// it belongs to is still the one on screen. Every navigation away (a new chat,
+    /// reopening another Recent row, reattaching a detached round, restoring a
+    /// parked session) swaps `turns`, so the id stops matching and the capsule
+    /// disappears with the conversation that earned it — the follow-up input comes
+    /// back for the thread the user is actually looking at. Reopening the failed
+    /// thread brings it back (the error turn persists with its id), which is right:
+    /// the retry belongs to that round.
+    var visibleAskError: AskError? {
+        guard let error = askError, isOnScreen(answerID: error.answerID) else { return nil }
+        return error
     }
 
     /// The pasteboard's `changeCount` as of the last moment the notch was *resting*
@@ -2135,16 +2166,22 @@ final class NotchModel: ObservableObject {
     /// Like settings, it owns the whole idle body when true and the back chevron /
     /// Esc returns to the prompt. Mutually exclusive with `showSettings`.
     @Published var showWhatsNew = false
-    /// The guided first-run flow — opens automatically the first time the panel
-    /// opens on a fresh install (see `OnboardingService`). Like settings and What's
-    /// New, it owns the whole idle body while true; `OnboardingService.finishGuide()`
-    /// clears it. Mutually exclusive with the other body modules.
-    @Published var showOnboarding = false
     /// Arms the destructive "Clear recent history?" confirmation. Lives on the
     /// model (not the view) so the Clear pill can raise it while the centered
     /// confirmation card is mounted on the *island* — so it sits in the middle of
     /// the whole glass panel rather than anchored under the pill near the bottom.
     @Published var confirmingClear = false
+    /// Armed for the length of a confirmed Clear, and read by the recent rows to
+    /// pick their removal transition. A single right-click → Delete slides *one*
+    /// row out sideways, which reads as "that one, gone"; the same motion played
+    /// by five or twelve rows at once reads as a curtain wipe. So a bulk clear
+    /// dissolves its rows in place instead and lets the gap close on the spring.
+    ///
+    /// It has to be a separate beat from the removal: SwiftUI takes a removal
+    /// transition from the view's LAST render before it disappears, so setting
+    /// this in the same transaction that empties the array would still play the
+    /// single-delete slide.
+    @Published var bulkClearing = false
     /// The open settings category (raw value of `InlineSettingsView.Section`),
     /// held here rather than as view-local `@State` so it survives the panel
     /// subtree rebuild an App Language switch triggers (root `.id(loc.language)`).
@@ -2868,11 +2905,11 @@ final class NotchModel: ObservableObject {
         if !open {
             // One trackpad tap on the closed→open edge only — hover re-enters and
             // display migrations while already open stay silent, as do the
-            // programmatic opens (settings / What's New / onboarding), which can
+            // programmatic opens (settings / What's New), which can
             // fire without the cursor on the island.
             Haptics.alignment()
             pasteboardChangeCountAtOpen = pasteboardChangeCountAtRest
-            if mode == .idle, turns.isEmpty, !showOnboarding, let round = inFlightRounds.last {
+            if mode == .idle, turns.isEmpty, let round = inFlightRounds.last {
                 // A round is still streaming in the background — the busy
                 // extension is out, and hovering the working notch should land
                 // on the answer being written, not on the idle prompt with the
@@ -3013,33 +3050,6 @@ final class NotchModel: ObservableObject {
     /// Leave What's New and return to the idle prompt (panel stays open).
     func closeWhatsNew() {
         showWhatsNew = false
-    }
-
-    /// Open the guided first-run flow in place of the prompt — the path the first
-    /// panel-open takes on a fresh install. Mirrors `openWhatsNew`: it folds the
-    /// other body modules away (they share the same slot) and keeps the panel open.
-    func openOnboarding(on display: CGDirectDisplayID? = nil) {
-        entryVelocity = .zero
-        if let display { activeDisplay = display }
-        if !open {
-            pasteboardChangeCountAtOpen = pasteboardChangeCountAtRest
-        }
-        closing = false
-        cancelLeaveWatch()
-        open = true
-        mode = .idle
-        showOnboarding = true
-        showWhatsNew = false
-        showSettings = false
-        showHistory = false
-        highlightedHistoryIndex = nil
-    }
-
-    /// Leave the guide and return to the idle prompt (panel stays open). Records the
-    /// guide as done so it never leads again.
-    func closeOnboarding() {
-        OnboardingService.shared.finishGuide()
-        showOnboarding = false
     }
 
     /// Toggle the pin on the answer currently on screen. Pinned → the pointer can
@@ -3231,6 +3241,7 @@ final class NotchModel: ObservableObject {
         showModelPicker = false
         showAgentPicker = false
         showAskModelPicker = false
+        showAgentFolderPicker = false
         text = ""; turns = []
         showHistory = false
         showSettings = false
@@ -3345,6 +3356,7 @@ final class NotchModel: ObservableObject {
         withAnimation(.smooth(duration: 0.3)) {
             if let folder {
                 lastAgentFolder = folder
+                AgentFolderMRU.record(folder)
                 agentComposeFolder = folder
             } else if agentComposeFolder == nil {
                 agentComposeFolder = lastAgentFolder
@@ -3463,7 +3475,6 @@ final class NotchModel: ObservableObject {
     /// settings), the drop lands it on the idle prompt — that's where the task
     /// gets written; a thread on screen files into Recent like ⌘N.
     func handleAgentFolderDrop(_ url: URL) {
-        guard !showOnboarding else { return }
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
               isDirectory.boolValue else { return }
@@ -3497,13 +3508,21 @@ final class NotchModel: ObservableObject {
                 guard let self else { return }
                 self.isFolderPickerOpen = false
                 if response == .OK, let url = panel.url {
-                    self.lastAgentFolder = url
-                    withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
-                        self.agentComposeFolder = url
-                    }
+                    self.selectAgentFolder(url)
                     completion?(url)
                 }
             }
+        }
+    }
+
+    /// Point the compose at `url` — the one path every folder change goes through
+    /// (the file panel's OK, and the chip menu's recent rows), so the remembered
+    /// project and the recents list can never drift from what the chip shows.
+    func selectAgentFolder(_ url: URL) {
+        lastAgentFolder = url
+        AgentFolderMRU.record(url)
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+            agentComposeFolder = url
         }
     }
 
@@ -4604,7 +4623,9 @@ final class NotchModel: ObservableObject {
                         // retry must not send the error text as model speech (XII-88).
                         self.markTurnError(id: answerID)
                         self.markFinished(id: answerID)
-                        self.askError = AskError(message: reason, needsSetup: !self.isConfigured)
+                        self.askError = AskError(message: reason,
+                                                 needsSetup: !self.isConfigured,
+                                                 answerID: answerID)
                         self.mode = .result
                         // Metadata-only breadcrumb (no prompt/answer/key) — see DiagnosticsLog.
                         DiagnosticsLog.shared.record(
@@ -4675,7 +4696,10 @@ final class NotchModel: ObservableObject {
     /// `submit()` so it streams a fresh answer into a clean pair. No-op when there's
     /// nothing to retry.
     func retryLastAsk() {
-        guard askError != nil else { return }
+        // Gated on the *visible* error: a retry may only ever re-run the round that
+        // actually failed on this screen, never the last question of whatever
+        // conversation the user has since opened.
+        guard visibleAskError != nil else { return }
         askError = nil
         resubmitLastQuestion()
     }
@@ -5705,6 +5729,15 @@ final class NotchModel: ObservableObject {
         Self.deleteHistoryImages(doomed.flatMap(\.imageFiles))
         history.removeAll { $0.t >= cutoff }
         saveHistory()
+
+        // The keyboard highlight indexes into the *visible* slice, and a partial
+        // clear pulls rows out from the TOP of it — so a stale index would leave
+        // the selection sitting on a completely different row (it looked like the
+        // highlight teleported down the list as the rows above it vanished), or
+        // past the end entirely. Nothing survives a Clear as "the selected row",
+        // so release it — and fold the list once it's empty, like `deleteHistory`.
+        highlightedHistoryIndex = nil
+        if recentVisible.isEmpty { showHistory = false }
     }
 
     /// Drop a single recent item by id (right-click → Delete on its row). Keeps the
@@ -5983,9 +6016,6 @@ final class NotchModel: ObservableObject {
         // What's New is a reading surface — give it the same comfortable column
         // as the result view. Also shows only over idle, so it wins like settings.
         if showWhatsNew { return Tokens.openWidthWhatsNew }
-        // The guided first run is a two-column layout (left controls + right demo
-        // pane), so it gets its own wider width. Shows only over idle.
-        if showOnboarding { return Tokens.openWidthOnboarding }
         switch mode {
         case .result: return Tokens.openWidthResult
         // A follow-up loads with the thread already on screen (shown via the result
