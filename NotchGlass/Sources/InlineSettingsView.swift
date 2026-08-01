@@ -237,6 +237,11 @@ struct InlineSettingsView: View {
     /// this optimistic flag if the OS refuses.
     @State private var launchAtLogin: Bool = LaunchAtLogin.isEnabled
 
+    /// How eagerly the resting notch opens under the pointer — mirrors the
+    /// persisted value; writes go through `selectHoverSensitivity`. Read live by
+    /// `NotchModel.hoverEntered`, so a change applies to the very next hover.
+    @State private var hoverSensitivity: HoverSensitivity = .current
+
     /// Whether the island auto-hides while a full-screen app covers its screen —
     /// mirrors the persisted value; writes go through `selectHideInFullscreen`,
     /// which nudges `AppDelegate` to re-evaluate immediately.
@@ -381,6 +386,7 @@ struct InlineSettingsView: View {
                 // speaks, whether it's there from login — then the
                 // folded Advanced block for the plumbing (proxy).
                 shortcutRow
+                hoverSensitivityRow
                 appLanguageRow
                 launchAtLoginRow
                 advancedSection
@@ -1913,6 +1919,27 @@ struct InlineSettingsView: View {
             let line = ProxyConfig.statusLine()
             await MainActor.run { proxyStatus = line }
         }
+    }
+
+    /// How readily the resting notch unfurls when the pointer reaches it. Sits
+    /// under the shortcut because it answers the same question — how you get in.
+    /// A menu rather than cards: the three steps are one scale, and the row
+    /// belongs to the quiet end of General, not on a diagram's worth of weight.
+    private var hoverSensitivityRow: some View {
+        settingRow(label: L("general.hoverSensitivity"),
+                   info: L("general.hoverSensitivity.hint")) {
+            GlassMenu(title: hoverSensitivity.label) {
+                ForEach(HoverSensitivity.allCases) { s in
+                    Button(s.label) { selectHoverSensitivity(s) }
+                }
+            }
+        }
+    }
+
+    private func selectHoverSensitivity(_ newValue: HoverSensitivity) {
+        guard newValue != hoverSensitivity else { return }
+        hoverSensitivity = newValue
+        HoverSensitivity.current = newValue
     }
 
     private func selectHideInFullscreen(_ newValue: Bool) {

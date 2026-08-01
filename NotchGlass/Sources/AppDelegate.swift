@@ -985,7 +985,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.registerPanelFrame(
             frame,
             restHeight: hasNotch ? screen.safeAreaInsets.top + 1 : Self.menuBarHeight(of: screen),
+            hardwareNotchWidth: Self.hardwareNotchWidth(of: screen),
             for: id)
+    }
+
+    /// The width of the screen's physical notch, measured from the gap between
+    /// the two menu bar areas macOS lays items out in. Nil on screens with no
+    /// cutout (external displays, non-notched Macs) — there the drawn island IS
+    /// the notch, so the hover judgement falls back to the drawn width.
+    ///
+    /// Measured rather than assumed: `Tokens.notchWidth` is a drawing constant
+    /// (192pt) chosen to overshoot the real cutout (~185pt on a 14"), and using
+    /// it to decide hovers put a few points of the judgement zone on live menu
+    /// bar to either side.
+    private static func hardwareNotchWidth(of screen: NSScreen) -> CGFloat? {
+        guard let left = screen.auxiliaryTopLeftArea,
+              let right = screen.auxiliaryTopRightArea else { return nil }
+        let width = right.minX - left.maxX
+        return width > 0 ? width : nil
     }
 
     /// The resting-zone height for a notch-less screen: match the menu bar so
@@ -1065,6 +1082,43 @@ enum HideNotchInFullscreen {
     static var isEnabled: Bool {
         get { UserDefaults.standard.object(forKey: key) as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: key) }
+    }
+}
+
+/// How eagerly the resting notch unfurls under the pointer — persisted in
+/// `UserDefaults`, edited in Settings → General, consumed by
+/// `NotchModel.hoverEntered`.
+///
+/// It exists because the resting hover strip spans the menu bar's full height,
+/// so travelling along the bar past the notch kept unfurling the panel over
+/// whatever the user was reaching for. The two steps are the two honest answers
+/// to "should passing over count?": only if you didn't blow straight through, or
+/// always.
+enum HoverSensitivity: String, CaseIterable, Identifiable {
+    /// The default. Hover opens, except on a fast near-horizontal crossing,
+    /// which is handed to the entry watch and opens only if the pointer settles.
+    case balanced
+    /// Hover opens on contact, whatever the approach looked like.
+    case instant
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .balanced: return L("hover.balanced")
+        case .instant:  return L("hover.instant")
+        }
+    }
+
+    private static let key = "hoverSensitivity"
+
+    /// Defaults to `.balanced`; an unknown stored value falls back to it too.
+    static var current: HoverSensitivity {
+        get {
+            UserDefaults.standard.string(forKey: key)
+                .flatMap(HoverSensitivity.init(rawValue:)) ?? .balanced
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: key) }
     }
 }
 

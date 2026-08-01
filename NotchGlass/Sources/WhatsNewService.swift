@@ -64,6 +64,16 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.4.3",
+            date: "2026-08-01",
+            features: [
+                "Sensitivity in Settings → General sets how easily hover opens the notch.",
+            ],
+            fixes: [
+                "Moving the mouse across the notch no longer opens it.",
+            ]
+        ),
+        Entry(
             version: "0.4.2",
             date: "2026-08-01",
             improvements: [

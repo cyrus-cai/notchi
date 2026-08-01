@@ -844,10 +844,20 @@ final class NotchModel: ObservableObject {
     /// menu-bar height on notch-less screens) — registered alongside the panel
     /// frame so the resting notch rect can be computed without live layout.
     private var restHeights: [CGDirectDisplayID: CGFloat] = [:]
+    /// Per-display width of the REAL hardware notch (measured from the screen's
+    /// auxiliary top areas), nil on screens that have none. The hover judgement
+    /// is made against this, never against `Tokens.notchWidth`: the drawn island
+    /// is deliberately a few points wider than the cutout so its black always
+    /// covers the bezel, and those few points hang over live menu bar — hovering
+    /// them must not open the panel.
+    private var hardwareNotchWidths: [CGDirectDisplayID: CGFloat] = [:]
 
-    func registerPanelFrame(_ frame: CGRect, restHeight: CGFloat, for display: CGDirectDisplayID) {
+    func registerPanelFrame(_ frame: CGRect, restHeight: CGFloat,
+                            hardwareNotchWidth: CGFloat?,
+                            for display: CGDirectDisplayID) {
         panelScreenFrames[display] = frame
         restHeights[display] = restHeight
+        hardwareNotchWidths[display] = hardwareNotchWidth
     }
 
     /// Deliberately a plain var write — this fires per frame during the island's
@@ -892,13 +902,20 @@ final class NotchModel: ObservableObject {
     /// reference for enter events on a closed panel: during the collapse the
     /// live frame is mid-sweep and would validate exactly the synthetic enters
     /// the sweep generates.
+    ///
+    /// The width is the MEASURED hardware notch (`hardwareNotchWidths`), falling
+    /// back to the drawn constant only on screens with no cutout to measure. The
+    /// drawn island is 192pt against a ~185pt physical notch, so trusting the
+    /// design constant here made ~3.5pt of live menu bar on each shoulder open
+    /// the panel on contact.
     private func pointerInsideRestingNotch(on display: CGDirectDisplayID?, slop: CGFloat) -> Bool? {
         guard let display,
               let panel = panelScreenFrames[display],
               let restHeight = restHeights[display] else { return nil }
-        var rect = CGRect(x: panel.midX - Tokens.notchWidth / 2,
+        let width = hardwareNotchWidths[display] ?? Tokens.notchWidth
+        var rect = CGRect(x: panel.midX - width / 2,
                           y: panel.maxY - restHeight,
-                          width: Tokens.notchWidth,
+                          width: width,
                           height: restHeight)
         // While the resting notch is flexed into its ears — background work's
         // verb/clock, the finished-count badge, or the copy-sense hint — those
@@ -920,11 +937,93 @@ final class NotchModel: ObservableObject {
     ///   · Panel open → test against the live island frame with generous slop
     ///     (an honest re-entry during the close dissolve must still cancel it).
     /// Unknown geometry (nil) falls back to trusting the event.
+    ///
+    /// On the closed→open edge two further gates apply, both aimed at the same
+    /// complaint: reaching for a menu bar item near the notch kept unfurling the
+    /// panel over it. See `cursorReallyEntered` and `isMenuBarSweep`.
     func hoverEntered(on display: CGDirectDisplayID?, velocity: CGVector) {
-        let inside = open ? pointerInsideIsland(on: display, slop: 16)
-                          : pointerInsideRestingNotch(on: display, slop: 8)
-        if inside == false { return }
+        if open {
+            if pointerInsideIsland(on: display, slop: 16) == false { return }
+            openPanel(on: display, velocity: velocity)
+            return
+        }
+        if pointerInsideRestingNotch(on: display, slop: 0) == false { return }
+        let sensitivity = HoverSensitivity.current
+        // The pointer has to have DONE the entering. A stationary cursor can be
+        // handed a mouseEntered by AppKit whenever the tracked geometry moves
+        // under it — and the resting notch's geometry moves on its own: the busy
+        // verb/clock and the copy-sense hint flex the ears out by tens of points,
+        // straight over the menu bar. That is the island arriving at the cursor,
+        // not the cursor arriving at the island, and it must not open anything.
+        // (`collapseOnLeave` has carried the mirror of this test for exits all
+        // along; this is the missing half.)
+        guard MouseVelocityTracker.shared.cursorMoved(within: 0.2) else { return }
+        // A fast, near-horizontal crossing is someone travelling ALONG the menu
+        // bar to a target on the other side of the notch — the single biggest
+        // source of accidental unfurls, since the resting hover strip spans the
+        // menu bar's full height. Don't open on contact; hand it to the entry
+        // watch, which opens the moment that pointer actually settles here and
+        // stays quiet if it just keeps going. `.instant` skips this reading and
+        // takes any arrival at face value.
+        if sensitivity == .balanced, Self.isMenuBarSweep(velocity) {
+            armEntryWatch(display: display)
+            return
+        }
         openPanel(on: display, velocity: velocity)
+    }
+
+    /// Above this speed (points/second) a crossing is fast enough that the
+    /// pointer is travelling *through* rather than arriving.
+    private static let sweepSpeed: CGFloat = 900
+
+    /// A fast crossing whose direction is dominated by the horizontal — the
+    /// signature of a menu bar traverse. A normal approach comes up from the
+    /// content below, so its vertical component keeps it out of this test.
+    private static func isMenuBarSweep(_ v: CGVector) -> Bool {
+        let speed = (v.dx * v.dx + v.dy * v.dy).squareRoot()
+        guard speed >= sweepSpeed else { return false }
+        return abs(v.dx) > 2.5 * abs(v.dy)
+    }
+
+    /// Poll interval of the entry watch. Short enough that a sweep which does
+    /// stop on the notch still feels like it opened on contact.
+    private static let entryWatchTick: TimeInterval = 0.1
+    private var entryWatchTask: Task<Void, Never>?
+
+    private func cancelEntryWatch() {
+        entryWatchTask?.cancel()
+        entryWatchTask = nil
+    }
+
+    /// Watch a sweep that's currently over the resting notch: open if it settles
+    /// here, dissolve if it leaves. Deliberately a poll rather than a fixed
+    /// delay — at sweep speed the pointer is still inside the notch 150ms later,
+    /// so "wait, then check once" would open on exactly the pass-throughs this
+    /// is meant to ignore.
+    private func armEntryWatch(display: CGDirectDisplayID?) {
+        entryWatchTask?.cancel()
+        entryWatchTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(NotchModel.entryWatchTick * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            self.recheckEntryWatch(display: display)
+        }
+    }
+
+    private func recheckEntryWatch(display: CGDirectDisplayID?) {
+        entryWatchTask = nil
+        guard !open else { return }
+        // Gone — it really was a pass-through. No enter event is needed to end
+        // the watch: leaving the rect is the answer.
+        guard pointerInsideRestingNotch(on: display, slop: 0) != false else { return }
+        // Still travelling. Keep watching: the sweep may yet stop here.
+        if MouseVelocityTracker.shared.cursorMoved(within: 0.12, threshold: 12) {
+            armEntryWatch(display: display)
+            return
+        }
+        // Settled on the notch — that's an arrival, whatever the entry looked
+        // like. It opens on the calm unfurl, which is what a stopped cursor
+        // should get anyway.
+        openPanel(on: display, velocity: MouseVelocityTracker.shared.entryVelocity())
     }
 
     // MARK: - Detached session windows (tear-off / 分裂)
@@ -2943,8 +3042,10 @@ final class NotchModel: ObservableObject {
                 savedIdleDraft = ""
             }
         }
-        // A hover re-entry supersedes any pending leave watch.
+        // A hover re-entry supersedes any pending leave watch — and any pending
+        // entry watch has just been answered (by itself or by another route in).
         cancelLeaveWatch()
+        cancelEntryWatch()
         // Re-entering during the close dissolve cancels it: clear the flag so the
         // content (held mounted while `open` is true) springs back to full opacity
         // instead of completing its fade, and the pending `beginClose` timer no-ops.
@@ -3073,6 +3174,10 @@ final class NotchModel: ObservableObject {
     /// (the deferred fold re-checks, so continued typing keeps deferring; a
     /// hover re-entry or keyboard summon cancels it via `leaveRecheckTask`).
     func collapseOnLeave(from display: CGDirectDisplayID? = nil, sequenced: Bool = true) {
+        // The pointer left: a sweep being watched for a possible arrival has its
+        // answer. Cleared before the `open` guard — the watch only ever exists
+        // while the panel is CLOSED, so leaving it to the guard would strand it.
+        cancelEntryWatch()
         // Nothing to fold on a resting notch — and a stale deferred fold must
         // never fire `fullClose` on an already-closed panel (that would wipe a
         // freshly parked session).
