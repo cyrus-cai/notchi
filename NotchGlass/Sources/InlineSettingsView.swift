@@ -170,9 +170,9 @@ struct InlineSettingsView: View {
         case model = "Model"     // provider, API key, model override
         case search = "Search"   // search backend + its key
         case notes = "Notes"     // the capture pipeline: note destination + copy sensing
+        case appearance = "Appearance" // where it shows up: screens, full screen, Dock icon
         case general = "General" // how you reach it: shortcut, language, launch at login, + Advanced (proxy)
         case shortcuts = "Shortcuts" // the keyboard reference — a sub-page under About, not a sidebar row
-        case appearance = "Appearance" // where it shows up: screens, full screen, Dock icon
         case about = "About"     // version + self-update
         var id: String { rawValue }
 
@@ -2314,8 +2314,8 @@ struct InlineSettingsView: View {
                 Spacer(minLength: 0)
             }
 
-            // 2 — Links, grouped inside a card so they read as one "more about
-            // Notch" block rather than four bare buttons loose on the panel.
+            // 2 — Where else to go: the pages that open here, then the rail of
+            // places that leave.
             aboutLinks
         }
     }
@@ -2433,13 +2433,13 @@ struct InlineSettingsView: View {
     /// notes, a raised hand for a privacy page) — the word already says it
     /// better than any of them.
     ///
-    /// Two cards instead of three captions, split on exactly the line the
-    /// trailing marks already draw: the pages that open *here* (release notes,
-    /// the keyboard reference) above, everything that leaves for a browser or a
-    /// mail compose below. The gap between them carries the grouping, so no
-    /// label has to.
+    /// Only the pages that open *here* earn a row. Everything that leaves for a
+    /// browser or a mail compose is a place you visit once, and four of them in
+    /// a second card cost more height than the whole identity block above — so
+    /// they collapse into one rail of hairline-separated links, the same shape
+    /// the version and its update action already make one line up.
     private var aboutLinks: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             aboutCard([
                 // "What's New" lives here as the fixed, always-available way into
                 // the notes, independent of the once-per-version idle cue.
@@ -2460,12 +2460,14 @@ struct InlineSettingsView: View {
                 },
             ])
 
-            aboutCard([
-                AboutRow(title: L("about.releases"), leaves: true) {
-                    NSWorkspace.shared.open(UpdaterService.releasesPage)
-                },
+            aboutRail([
                 AboutRow(title: L("about.github"), leaves: true) {
                     NSWorkspace.shared.open(URL(string: "https://github.com/\(UpdaterService.repo)")!)
+                },
+                // The maker, between the project's own pages and the two support
+                // links — a credit, not a destination the app needs.
+                AboutRow(title: "X", leaves: true) {
+                    NSWorkspace.shared.open(URL(string: "https://x.com/cyrusss_7")!)
                 },
                 AboutRow(title: L("about.privacy"), leaves: true) {
                     NSWorkspace.shared.open(URL(string: "https://www.notch.website/privacy")!)
@@ -2483,6 +2485,45 @@ struct InlineSettingsView: View {
                     }
                 },
             ])
+        }
+    }
+
+    /// The outbound links as one line. Aligned to the card labels above so it
+    /// reads as the block's own footing rather than something loose under it,
+    /// and separated by the identity row's hairline so the two rails in this
+    /// pane are visibly the same device.
+    private func aboutRail(_ items: [AboutRow]) -> some View {
+        HStack(spacing: 8) {
+            ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                if index > 0 {
+                    Rectangle()
+                        .fill(.white.opacity(0.12))
+                        .frame(width: 0.5, height: 10)
+                }
+                AboutRailLink(row: item)
+            }
+        }
+        .padding(.horizontal, 12)
+    }
+
+    /// One link on the rail. Quiet at rest, and it takes the label's own colour
+    /// on hover — the only affordance a bare word gets, so it has to be the same
+    /// one the rows use.
+    private struct AboutRailLink: View {
+        let row: AboutRow
+        @State private var hovering = false
+
+        var body: some View {
+            Button(action: row.action) {
+                Text(row.title)
+                    .font(.sf(11.5, weight: .medium))
+                    .foregroundStyle(hovering ? Tokens.text2 : Tokens.text4)
+                    .lineLimit(1)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
         }
     }
 

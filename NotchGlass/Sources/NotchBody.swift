@@ -74,6 +74,9 @@ struct NotchBody: View {
     /// wrapped text up to `NotchBody.promptMaxLines`, after which it scrolls inside
     /// itself. The input rows size themselves off these.
     @State private var inputHeight: CGFloat = PromptField.lineHeight(for: NotchBody.idleFontSize)
+    /// Cursor over the bucket row's "what's new" chip — brightens its glass, in the
+    /// same step the Recent chevron beside it takes (see `whatsNewCue`).
+    @State private var whatsNewHovered = false
     @State private var followUpHeight: CGFloat = PromptField.lineHeight(for: NotchBody.followUpFontSize)
     /// The live agent-detail page's own follow-up line — kept separate from the
     /// idle prompt's `model.text` so a line typed while watching a run doesn't
@@ -781,9 +784,18 @@ struct NotchBody: View {
             let runningLive = agentManager.runningTasks.count > 0
             if (!model.hasText || runningLive) && !recentListShown {
                 let cluster = idleTrailingCluster
-                if !cluster.isEmpty {
+                // The first-launch-after-update cue rides the same trailing edge,
+                // just inside the Recent chevron — glass beside glass. It keeps the
+                // row alive on its own when the cluster has nothing to draw (a first
+                // run with no history and no pin).
+                let showsCue = !model.hasText && whatsNew.unseenVersion != nil
+                if !cluster.isEmpty || showsCue {
                     Spacer(minLength: 8)
-                    cluster
+                    if showsCue {
+                        whatsNewCue
+                            .transition(.scale(scale: 0.7).combined(with: .opacity))
+                    }
+                    if !cluster.isEmpty { cluster }
                 }
             }
         }
@@ -3182,15 +3194,9 @@ struct NotchBody: View {
             }
 
             // With the destination spelled out in the pill below, the trailing send
-            // pill would just repeat it — so while there's text this slot stays
-            // empty. When the field is empty it carries, on the first launch after
-            // an update, a "what's new" cue: the one-tap way into the release notes.
-            // (The Recent cluster lives on the bucket row's trailing edge, which is
-            // now always there.)
-            if !model.hasText && !followUp && whatsNew.unseenVersion != nil {
-                whatsNewCue
-                    .transition(.opacity)
-            }
+            // pill would just repeat it — so this slot stays empty. The "what's new"
+            // cue moved down to the bucket row's trailing edge, beside the Recent
+            // chevron, where the panel's other glass chips live.
         }
         // Grows with the box: the prompt keeps its resting breathing room and the row
         // gains a line's height for every line the text wraps to, so the panel unfolds
@@ -3205,9 +3211,11 @@ struct NotchBody: View {
         .background(SlashMenuHost(model: model, open: !followUp && model.slashMenuOpen))
     }
 
-    /// The first-launch-after-update cue: a quiet "what's new" pill in the idle
-    /// input's trailing slot. Tapping it opens the release-notes panel, and
-    /// `openWhatsNew` marks this version seen, so the cue shows once.
+    /// The first-launch-after-update cue: a "what's new" chip on the bucket row's
+    /// trailing edge, immediately left of the Recent chevron. Same glass language as
+    /// the chevron cluster's "N running" capsule (`glassCapsule` + `GlassPressStyle`),
+    /// so the two sit on that edge as one family. Tapping it opens the release-notes
+    /// panel, and `openWhatsNew` marks this version seen, so the cue shows once.
     private var whatsNewCue: some View {
         Button {
             withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
@@ -3215,14 +3223,19 @@ struct NotchBody: View {
             }
         } label: {
             Text(L("whatsnew.cue"))
-                .font(.sf(12, weight: .medium))
+                .font(.sf(11.5, weight: .semibold))
                 .lineLimit(1)
-                .foregroundStyle(Tokens.text3)
-                .padding(.horizontal, 9)
-                .frame(height: 26)
-                .contentShape(Capsule(style: .continuous))
+                .foregroundStyle(whatsNewHovered ? Tokens.text1 : Tokens.text2)
+                .padding(.horizontal, 10)
+                // The cluster's chip height — the cue lines up with the chevron
+                // beside it instead of sitting a hair short.
+                .frame(height: 30)
+                .glassCapsule(in: Capsule(), brighter: whatsNewHovered)
+                .contentShape(Capsule())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(GlassPressStyle())
+        .onHover { whatsNewHovered = $0 }
+        .animation(.easeOut(duration: 0.18), value: whatsNewHovered)
     }
 
     private var followUpRow: some View {

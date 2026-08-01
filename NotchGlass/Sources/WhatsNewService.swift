@@ -64,6 +64,18 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.4.2",
+            date: "2026-08-01",
+            improvements: [
+                "About's outbound links are one line — GitHub, X, Privacy, Feedback.",
+                "Appearance sits above General in Settings.",
+                "The What's New cue is a glass chip beside Recent.",
+            ],
+            fixes: [
+                "The sources popover shows all four rows instead of three between blank bands.",
+            ]
+        ),
+        Entry(
             version: "0.4.1",
             date: "2026-08-01",
             improvements: [

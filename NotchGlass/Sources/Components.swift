@@ -4606,6 +4606,12 @@ struct SourcePopoverPanel: View {
     private static let visibleRows = 4
     private static let rowHeight: CGFloat = 18
     private static let rowSpacing: CGFloat = 7
+    // Runways the edge fades taper across when the list scrolls. They live INSIDE
+    // the scroll viewport (as content padding), so they double as the card's
+    // vertical padding — see `cardPadding` below.
+    private static let topRunway: CGFloat = 14
+    private static let bottomRunway: CGFloat = 24
+    private static let cardPadding: CGFloat = 14
 
     /// Transparent hover bridge below the card, spanning the gap down to the
     /// badge's top edge. Without it the cursor crosses a dead strip on its way
@@ -4618,13 +4624,21 @@ struct SourcePopoverPanel: View {
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
+        let scrolls = sources.count > Self.visibleRows
         // Cap the visible height at `visibleRows` rows; shorter lists size down to
         // their own content (no empty space, no scroll). Computing the height
         // explicitly — rather than letting `.fixedSize` measure it — lets the
         // ScrollView scroll the overflow once there are more rows than fit.
+        //
+        // The runways count toward that height. They're content padding, so they
+        // occupy the viewport: leaving them out capped the viewport at bare row
+        // math and the runways then ate it from both ends — the 4th row fell out
+        // of view and the card read as two blank bands squeezing three rows.
+        let topRunway = scrolls ? Self.topRunway : 0
+        let bottomRunway = scrolls ? Self.bottomRunway : 0
         let shownRows = CGFloat(min(sources.count, Self.visibleRows))
-        let visibleHeight = max(0, shownRows * Self.rowHeight + (shownRows - 1) * Self.rowSpacing)
-        let scrolls = sources.count > Self.visibleRows
+        let rowsHeight = max(0, shownRows * Self.rowHeight + (shownRows - 1) * Self.rowSpacing)
+        let visibleHeight = rowsHeight + topRunway + bottomRunway
         ScrollView(.vertical, showsIndicators: scrolls) {
             VStack(alignment: .leading, spacing: Self.rowSpacing) {
                 ForEach(sources) { source in
@@ -4633,18 +4647,22 @@ struct SourcePopoverPanel: View {
             }
             // Breathing room each fade falls across, so the first / last row rests
             // outside its taper at full strength at either end of the scroll.
-            .padding(.top, scrolls ? 14 : 0)
-            .padding(.bottom, scrolls ? 24 : 0)
+            .padding(.top, topRunway)
+            .padding(.bottom, bottomRunway)
         }
         .scrollBounceBehavior(.basedOnSize)
         // The shared dissolve at both overflow edges (`scrollEdgeFade`) instead of a
         // hard cut — only when the list actually scrolls; a short list that fits
         // stays crisp. A thin feather up top, where only a row on its way out needs
         // swallowing.
-        .scrollEdgeFade(top: scrolls, bottom: scrolls, topFade: 14, bottomFade: 24)
+        .scrollEdgeFade(top: scrolls, bottom: scrolls,
+                        topFade: Self.topRunway, bottomFade: Self.bottomRunway)
         .frame(height: visibleHeight)
         .padding(.horizontal, 16)
-        .padding(.vertical, 14)
+        // A scrolling list already carries its own vertical inset (the runways) —
+        // stacking the card's padding on top of it doubled the gap above the first
+        // row. Only a short, runway-less list needs the card padding here.
+        .padding(.vertical, scrolls ? 0 : Self.cardPadding)
         // A fixed width gives the rows a definite bound to truncate long titles
         // against (instead of stretching the popup to the longest line).
         .frame(width: 350, alignment: .leading)
