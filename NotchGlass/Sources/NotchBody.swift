@@ -167,40 +167,33 @@ struct NotchBody: View {
         .padding(.top, 15)
         .padding(.bottom, 22)
         .frame(maxWidth: .infinity, alignment: .leading)
-        // The cross-provider model-config card — opened by the Ask bucket's model chip
+        // The cross-provider model chooser — opened by the Ask bucket's model chip
         // (`askModelChip`), the settings chip, and ⌘⇧I's fallback when no agent CLI is
         // installed. It hangs under the panel body rather than off the chip so all three
-        // front doors land the same card right below the island, where the eye already is.
-        // Routed through SettledPopover (not a bare `.popover`): NSPopover pins
-        // itself to the anchor's frame at present time only, so firing while the
-        // island's open spring is still moving left the card visibly torn off
-        // the glass. The gate waits for the body to stand still, then presents.
-        .modifier(SettledPopover(isPresented: $model.showModelPicker) {
-            ModelPickerView(
-                models: catalog.rows(selected: selectedProvider),
-                selectedProvider: selectedProvider,
-                selectedID: selectedModelID,
-                onSelect: { prov, id in
-                    ModelCatalogStore.select(provider: prov, model: id)
-                    model.showModelPicker = false
-                },
-                onConfigure: { m in
-                    // "Add key" on a greyed model: the picker can't take a key, so
-                    // hand the pick to Settings — it opens on that provider's key
-                    // row and commits the model the moment the key lands. The active
-                    // backend stays untouched until then.
-                    model.pendingModelSetup = .init(provider: m.provider, id: m.info.id)
-                    model.showModelPicker = false
-                    withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
-                        model.openSettings()
-                    }
-                })
-                .task { await catalog.loadAll() }
-                .preferredColorScheme(.dark)
-                .modifier(GlassPopoverBackground(cornerRadius: 14))
-        })
+        // front doors land it right below the island, where the eye already is.
+        .modelMenu(isPresented: $model.showModelPicker,
+                   models: catalog.rows(selected: selectedProvider),
+                   selectedProvider: selectedProvider,
+                   selectedID: selectedModelID,
+                   centered: true,
+                   onSelect: { prov, id in
+                       ModelCatalogStore.select(provider: prov, model: id)
+                   },
+                   onConfigure: { m in
+                       // "Add key" on a keyless model: the menu can't take a key, so
+                       // hand the pick to Settings — it opens on that provider's key
+                       // row and commits the model the moment the key lands. The active
+                       // backend stays untouched until then.
+                       model.pendingModelSetup = .init(provider: m.provider, id: m.info.id)
+                       withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                           model.openSettings()
+                       }
+                   })
         .onChange(of: model.showModelPicker) { _, open in
-            // The popover is its own window, outside the island's tracking area —
+            // A menu is a snapshot of the catalog it was built from — refresh the live
+            // models on open so the *next* one is current (the bundled list shows now).
+            if open { Task { await catalog.loadAll() } }
+            // The menu is its own window, outside the island's tracking area —
             // suspend the leave-collapse while it's up, exactly as the settings
             // picker does, or moving the pointer into the card folds the panel away.
             model.isModelPickerOpen = open

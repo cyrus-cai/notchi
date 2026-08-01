@@ -1469,8 +1469,8 @@ struct InlineSettingsView: View {
     }
 
     /// Step two: **which of that provider's models.** The picker card is the same
-    /// one the ⌘⇧I summon opens, locked to the chosen provider — search, the fold,
-    /// and the detail pane all work over that provider's catalog alone.
+    /// one the ⌘⇧I summon opens, locked to the chosen provider — its search and its
+    /// fold both work over that provider's catalog alone.
     private var modelRow: some View {
         settingRow(label: L("model.label")) {
             HStack(spacing: 6) {
@@ -1509,42 +1509,31 @@ struct InlineSettingsView: View {
                 }
                 .buttonStyle(.plain)
                 .fixedSize()
-                .popover(isPresented: $modelPickerOpen, arrowEdge: .bottom) {
-                    ModelPickerView(
-                        models: catalog.rows(selected: provider),
-                        selectedProvider: provider,
-                        selectedID: effectiveModelID,
-                        // The provider is settled one row up — this list is its
-                        // models only.
-                        lockedProvider: provider,
-                        onSelect: { prov, id in
-                            selectAcrossProviders(provider: prov, model: id)
-                            modelPickerOpen = false
-                        },
-                        onConfigure: { m in
-                            // "Add key" on a greyed model: remember the pick, open
-                            // the key section on that provider, and select the
-                            // model the moment its key lands. The active backend
-                            // stays untouched until then.
-                            pendingModel = PendingModel(provider: m.provider, id: m.info.id)
-                            setKeyScope(m.provider)
-                            withAnimation(.easeOut(duration: 0.16)) { keySectionOpen = true }
-                            modelPickerOpen = false
-                        })
-                    .task {
-                        // Fill the list with each keyed provider's live models the
-                        // moment the picker opens (bundled lists show instantly).
-                        await catalog.loadAll()
-                    }
-                    .preferredColorScheme(.dark)
-                    // Back the popover with the panel's smoked Liquid Glass (same
-                    // recipe as the quick-tools popover) so the card refracts like
-                    // the island while still occluding whatever it hangs over —
-                    // radius 14 to match the picker card.
-                    .modifier(GlassPopoverBackground(cornerRadius: 14))
-                }
+                // The system's own menu, dropped from the chip — the provider is
+                // settled one row up, so it lists that provider's models flat.
+                .modelMenu(isPresented: $modelPickerOpen,
+                           models: catalog.rows(selected: provider),
+                           selectedProvider: provider,
+                           selectedID: effectiveModelID,
+                           lockedProvider: provider,
+                           onSelect: { prov, id in
+                               selectAcrossProviders(provider: prov, model: id)
+                           },
+                           onConfigure: { m in
+                               // "Add key" on a keyless model: remember the pick, open
+                               // the key section on that provider, and select the
+                               // model the moment its key lands. The active backend
+                               // stays untouched until then.
+                               pendingModel = PendingModel(provider: m.provider, id: m.info.id)
+                               setKeyScope(m.provider)
+                               withAnimation(.easeOut(duration: 0.16)) { keySectionOpen = true }
+                           })
                 .onChange(of: modelPickerOpen) {
-                    // Suspend the panel's leave-collapse while the popover is up so
+                    // Fill the list with each keyed provider's live models when the
+                    // menu opens (the bundled list shows now; the refresh lands for
+                    // the next open).
+                    if modelPickerOpen { Task { await catalog.loadAll() } }
+                    // Suspend the panel's leave-collapse while the menu is up so
                     // moving the pointer into it (a separate window) never folds the
                     // settings out from under it.
                     model.isModelPickerOpen = modelPickerOpen

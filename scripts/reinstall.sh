@@ -112,11 +112,39 @@ if ! $launched; then
   if pgrep -x Notchi >/dev/null 2>&1; then
     launched=true
   else
-    ( "$dest/Contents/MacOS/Notchi" >/dev/null 2>&1 & )
+    # Cut every tie to this shell's terminal before spawning. Leaving stdin on
+    # the tty is what made this path deadly: a background-process-group child
+    # that reads the terminal takes SIGTTIN and lands in state `T` (stopped) —
+    # a process that exists, satisfies the pgrep check below, and never draws a
+    # frame. From the outside that is exactly "the app won't open".
+    nohup "$dest/Contents/MacOS/Notchi" </dev/null >/dev/null 2>&1 &
+    disown 2>/dev/null || true
   fi
 fi
 sleep 1
 pgrep -x Notchi >/dev/null || die "Could not launch ${dest}."
+
+# Being in the process table is not being running. A stopped instance (STAT `T`)
+# passes the check above while the app is dead on screen, so verify the state and
+# recover: resume it, and if it won't stay resumed, hand the launch back to
+# LaunchServices, which parents the app to launchd instead of to this shell.
+pid="$(pgrep -x Notchi | head -1)"
+case "$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ')" in
+  T*)
+    info "Instance came up suspended — resuming…"
+    kill -CONT "$pid" 2>/dev/null || true
+    sleep 1
+    case "$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ')" in
+      T*)
+        kill -9 "$pid" 2>/dev/null || true
+        sleep 1
+        open "$dest" 2>/dev/null || true
+        sleep 2
+        pgrep -x Notchi >/dev/null || die "Could not launch ${dest} (stayed suspended)."
+        ;;
+    esac
+    ;;
+esac
 
 ok "Reinstalled ${APP_NAME} from local build."
 printf '%sDone.%s Hover your notch to wake it.\n' "$bold" "$reset"

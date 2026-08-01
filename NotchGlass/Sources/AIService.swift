@@ -1402,6 +1402,126 @@ enum RemoteModelManifest {
     }
 }
 
+// MARK: - Catalog hygiene (modality + snapshot collapse)
+
+/// Which `/v1/models` entries are **not** reachable through `chat/completions`,
+/// decided from the id alone. This is the fallback tier of `Entry.isChatModel` —
+/// the one that carries every vendor shipping no modality field at all, which is
+/// all of them except Vercel and OpenRouter.
+///
+/// Deliberately a table of **modality words**, never of model names. "embedding"
+/// and "whisper" still mean the same thing years from now, while `gpt-5.5` is
+/// stale within a quarter — so model names stay in the places that update
+/// themselves (the remote manifest and the live catalog) and only this
+/// vocabulary is compiled in.
+///
+/// Erring toward keeping: a wrongly-dropped chat model is invisible, while a
+/// wrongly-kept image model is one dead row. So "vision" and "instruct" are
+/// *absent* on purpose — `qwen-vl`, `llama-3-instruct` and friends are genuine
+/// chat models.
+enum ModalityFilter {
+    private static let nonChatMarkers = [
+        // Retrieval
+        "embed", "rerank",
+        // Speech in / out
+        "tts", "whisper", "transcribe", "audio", "speech", "voice", "realtime",
+        // Image generation
+        "dall-e", "image", "cogview", "wanx",
+        // Video / music generation
+        "video", "sora", "music",
+        // Classification
+        "moderation",
+        // Legacy completion-only engines that still sit in OpenAI's catalog
+        "babbage", "davinci",
+    ]
+
+    static func isNonChat(_ id: String) -> Bool {
+        let lower = id.lowercased()
+        return nonChatMarkers.contains { lower.contains($0) }
+    }
+}
+
+/// Collapses a vendor's dated snapshots down to one row per model.
+///
+/// Vendors publish the same model several times over — a rolling alias plus every
+/// pinned build behind it (`gpt-4o`, `gpt-4o-2024-11-20`, `gpt-4o-2024-08-06`;
+/// `claude-sonnet-4-5`, `claude-sonnet-4-5-20250929`). All of them answer, so none
+/// can be filtered by capability, yet a picker showing four rows for one model is
+/// just noise.
+///
+/// Purely structural — no model names anywhere, so it needs no upkeep as lineups
+/// turn over. `-preview` / `-exp` are deliberately **not** collapsed: `o1-preview`
+/// and `o1` are different models, and merging them would hide one.
+enum ModelSnapshots {
+    /// `id` with its dated / revision / `-latest` suffix removed — the rolling
+    /// alias form. Returns `id` unchanged when it carries no such suffix.
+    static func base(of id: String) -> String {
+        var parts = id.split(separator: "-", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count > 1 else { return id }
+        func digits(_ s: String) -> Bool { !s.isEmpty && s.allSatisfy(\.isNumber) }
+
+        if parts.last?.lowercased() == "latest" {
+            // `chatgpt-4o-latest` → `chatgpt-4o`
+            parts.removeLast()
+        } else if parts.count > 3, digits(parts[parts.count - 1]), parts[parts.count - 1].count == 2,
+                  digits(parts[parts.count - 2]), parts[parts.count - 2].count == 2,
+                  digits(parts[parts.count - 3]), parts[parts.count - 3].count == 4 {
+            // `gpt-4o-2024-08-06` → `gpt-4o`
+            parts.removeLast(3)
+        } else if let last = parts.last, digits(last), [3, 4, 8].contains(last.count) {
+            // `claude-3-5-sonnet-20240620`, `gpt-4-0613`, `gemini-1.5-pro-002`
+            parts.removeLast()
+        }
+        return parts.joined(separator: "-")
+    }
+
+    /// One entry per model, in the catalog's own order (first sighting wins the
+    /// slot, so the list doesn't reshuffle around the collapse).
+    static func collapse(_ entries: [ModelCatalog.ModelList.Entry]) -> [ModelCatalog.ModelList.Entry] {
+        var pick: [String: ModelCatalog.ModelList.Entry] = [:]
+        var order: [String] = []
+        for entry in entries {
+            let key = base(of: entry.id)
+            guard let held = pick[key] else {
+                pick[key] = entry
+                order.append(key)
+                continue
+            }
+            pick[key] = preferred(held, entry, base: key)
+        }
+        return order.compactMap { pick[$0] }
+    }
+
+    /// Which of two siblings represents the model. The rolling alias always wins —
+    /// it's the id that keeps pointing at the vendor's current build, so it can
+    /// never go stale. Failing that, the newest one; failing timestamps, the id
+    /// that sorts last (date suffixes sort chronologically).
+    private static func preferred(_ a: ModelCatalog.ModelList.Entry,
+                                  _ b: ModelCatalog.ModelList.Entry,
+                                  base: String) -> ModelCatalog.ModelList.Entry {
+        if a.id == base { return a }
+        if b.id == base { return b }
+        switch (a.createdDate, b.createdDate) {
+        case let (x?, y?): return x >= y ? a : b
+        case (_?, nil):    return a
+        case (nil, _?):    return b
+        case (nil, nil):   return a.id >= b.id ? a : b
+        }
+    }
+}
+
+extension ISO8601DateFormatter {
+    /// Anthropic's `created_at` ("2025-02-19T00:00:00Z"), and the same with
+    /// fractional seconds — formatters are expensive to build, so both are made
+    /// once and shared.
+    static let modelCatalog = ISO8601DateFormatter()
+    static let modelCatalogFractional: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+}
+
 // MARK: - Live model catalog (hot-updated, no app release needed)
 
 /// Fetches the *live* list of models a provider currently serves, so the Settings
@@ -1515,10 +1635,12 @@ enum ModelCatalog {
             guard let http = response as? HTTPURLResponse,
                   (200..<300).contains(http.statusCode) else { return nil }
             let list = try JSONDecoder().decode(ModelList.self, from: data)
-            // Drop the non-chat modalities before anything else looks at the catalog
-            // (see `Entry.isChatModel`) — the picker, the featured split and the
-            // shortlist all inherit the filter from this one place.
-            let entries = list.data.filter { !$0.id.isEmpty && $0.isChatModel }
+            // Clean the catalog before anything else looks at it — the picker, the
+            // featured split and the shortlist all inherit from this one place.
+            // Two passes: drop what chat can't call (`Entry.isChatModel`), then
+            // collapse each model's dated snapshots into one row (`ModelSnapshots`).
+            let entries = ModelSnapshots.collapse(
+                list.data.filter { !$0.id.isEmpty && $0.isChatModel })
             // id → rich metadata, so the reordered/​filtered id lists below can
             // carry their `ModelInfo` along without re-decoding.
             let byID = Dictionary(entries.map { ($0.id, ModelInfo(entry: $0, provider: provider)) },
@@ -1592,23 +1714,57 @@ enum ModelCatalog {
             /// every other vendor's `/v1/models`, which lists chat models only.
             /// See `isChatModel`.
             let type: String?
+            /// Release timestamp — the one *auto-updating* "how new is this model"
+            /// signal vendors actually serve, and what lets the picker surface a
+            /// brand-new flagship before anyone edits the curated manifest.
+            /// OpenAI / OpenRouter give a unix `created`; Anthropic an ISO-8601
+            /// `created_at`. Vendors that publish neither (Kimi, MiniMax, MiMo)
+            /// leave both nil and fall back to catalog order — an honest degrade,
+            /// and their catalogs are small enough that ordering barely matters.
+            let created: Double?
+            let createdAt: String?
 
-            /// Whether this entry can actually be called through `chat/completions`.
+            /// The two timestamp spellings resolved to one date, `nil` when the
+            /// vendor ships neither.
+            var createdDate: Date? {
+                if let created, created > 0 { return Date(timeIntervalSince1970: created) }
+                guard let createdAt, !createdAt.isEmpty else { return nil }
+                return ISO8601DateFormatter.modelCatalog.date(from: createdAt)
+                    ?? ISO8601DateFormatter.modelCatalogFractional.date(from: createdAt)
+            }
+
+            /// Whether this entry can actually be called through `chat/completions`,
+            /// decided from the strongest signal the payload carries.
             ///
-            /// Vercel's gateway serves its **whole** catalog from one endpoint — of
-            /// its ~300 entries only ~200 are `language` models; the rest are image,
-            /// video, embedding, reranking, transcription, speech and realtime models
-            /// that no chat request can reach, on any plan. They have no business in a
-            /// model picker, so they never enter the list.
+            /// A vendor's `/v1/models` is its **whole** catalog, not its chat
+            /// catalog: embeddings, TTS, transcription, image generation, moderation
+            /// and realtime models all ride along, and none of them can serve a chat
+            /// request on any plan. They have no business in a model picker.
             ///
-            /// A missing `type` means the vendor doesn't classify its models (every
-            /// provider but Vercel) — those catalogs are chat-only already, so the
-            /// absence must read as "keep", never as "drop".
-            var isChatModel: Bool { type == nil || type == "language" }
+            /// Three tiers, best evidence first:
+            ///  1. `type` — Vercel classifies every entry, so it's the last word.
+            ///  2. `output_modalities` — OpenRouter declares what a model emits; one
+            ///     that emits images or audio isn't a chat model.
+            ///  3. the id itself — every first-party vendor (OpenAI, Gemini, Qwen,
+            ///     GLM, …) ships *no* classification at all, so the modality has to
+            ///     be read off the name (`ModalityFilter`). The old code treated a
+            ///     missing `type` as "keep", which is why OpenAI's picker arrived
+            ///     carrying its entire non-chat catalog.
+            var isChatModel: Bool {
+                if let type { return type == "language" }
+                if let out = architecture?.outputModalities, !out.isEmpty {
+                    return out.contains("text")
+                }
+                return !ModalityFilter.isNonChat(id)
+            }
 
             struct Architecture: Decodable {
                 let inputModalities: [String]?
-                enum CodingKeys: String, CodingKey { case inputModalities = "input_modalities" }
+                let outputModalities: [String]?
+                enum CodingKeys: String, CodingKey {
+                    case inputModalities = "input_modalities"
+                    case outputModalities = "output_modalities"
+                }
             }
             struct Pricing: Decodable {
                 let prompt: String?
@@ -1619,9 +1775,10 @@ enum ModelCatalog {
             }
 
             enum CodingKeys: String, CodingKey {
-                case id, name, description, architecture, pricing, reasoning, type
+                case id, name, description, architecture, pricing, reasoning, type, created
                 case contextLength = "context_length"
                 case supportedParameters = "supported_parameters"
+                case createdAt = "created_at"
             }
         }
     }
@@ -1649,6 +1806,11 @@ struct ModelInfo: Identifiable, Equatable, Sendable {
     let reasoning: Bool
     /// A short tier tag ("Adv. AI" / "Pro") or `nil` for the plain rows.
     let tier: Tier?
+    /// When the vendor published this model, when it says. Not shown anywhere —
+    /// it's the ranking signal that keeps the picker's shortlist current without
+    /// a manifest edit (see `ModelCatalogStore.shortlistIDs`). `nil` for vendors
+    /// that ship no timestamp, and for rows built from a bare id.
+    let created: Date?
     /// 0–5 filled bars each, curated where known and heuristic otherwise.
     let speed: Int
     let intelligence: Int
@@ -1686,6 +1848,7 @@ struct ModelInfo: Identifiable, Equatable, Sendable {
         self.speed = rating.speed
         self.intelligence = rating.intelligence
         self.tier = rating.tier
+        self.created = entry.createdDate
     }
 
     /// Build from a bare id (providers whose `/v1/models` gives no metadata, or the
@@ -1704,6 +1867,7 @@ struct ModelInfo: Identifiable, Equatable, Sendable {
         self.speed = rating.speed
         self.intelligence = rating.intelligence
         self.tier = rating.tier
+        self.created = nil
     }
 }
 
