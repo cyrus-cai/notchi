@@ -64,6 +64,13 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.4.1",
+            date: "2026-08-01",
+            improvements: [
+                "Choosing a model is a menu now — one level per provider, listing chat models only, one row each, newest first.",
+            ]
+        ),
+        Entry(
             version: "0.4.0",
             date: "2026-07-31",
             features: [
