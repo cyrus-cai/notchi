@@ -6,35 +6,37 @@
 
 **Your notch, always ready.**
 
-A beautifully simple way to **save a note**, **set a reminder**, or
-**ask AI** — right from your Mac's notch.
+A beautifully simple place to **ask**, **save a note**, **set a reminder**, or
+**hand a task to an agent** — right from your Mac's notch.
 
 [notch.website](https://www.notch.website) ·
 [Release Notes](https://www.notch.website/releases)
 
-Fully open source · Built in Liquid Glass
+Fully open source · Built in Liquid Glass · No Notchi account
 
 <!-- Demo video: open this file in GitHub's web editor and drag the .mp4 in
      here — GitHub hosts and embeds it automatically. -->
 
 </div>
 
-Notchi is a free, open-source macOS app that turns the notch at the top of the
-screen into a place to type. What you write becomes a note in Apple Notes, a
-reminder in Apple Reminders, an AI answer under your own provider key, or a
-coding-agent run on a project folder. No account, no backend.
+Notchi is a free, open-source macOS app that turns the space at the top of your
+screen into a place to think and act. Type one line and it can become an AI
+answer, a note, a timed reminder, or a coding-agent task. There is no Notchi
+account and no backend that receives your data.
 
-## You type. It sorts.
+## One line. Four places it can go.
 
-Type the thought the way it arrived — half-formed is fine. Notchi reads it and
-routes it: a question to AI, a note to keep, or a reminder with a time.
+Type the thought the way it arrived — half-formed is fine. Notchi can infer
+whether it belongs in Ask, Notes, or Reminders; press `/` or `Tab` to choose a
+destination yourself, including Agent mode.
 
-- **Ask** — the answer streams into the panel; you never leave what you're
-  doing.
-- **Note** — anything that reads like something to keep (a name, an idea, a
-  number) lands in Apple Notes.
-- **Remind** — anything with a time in it lands in Apple Reminders, due date
+- **Ask** — stream an answer without leaving what you are doing.
+- **Note** — save something worth keeping to Apple Notes, or to daily Markdown
+  files in a folder you choose.
+- **Remind** — turn a time-bound thought into an Apple Reminder with its due date
   already set.
+- **Agent** — give a coding task and a project folder to Codex, Claude Code, or
+  Grok.
 
 <img src=".github/shots/verb-ask.jpg" width="860" alt="Asking a question in the notch: the answer streams in below the prompt." />
 
@@ -45,49 +47,95 @@ routes it: a question to AI, a note to keep, or a reminder with a time.
 </tr>
 </table>
 
-## More than a text box.
+Copy a line anywhere on your Mac and it arrives as quoted context — ready to
+summarize, proofread, translate, save, or turn into a reminder. If clipboard
+sensing is enabled, copying a note or reminder candidate and pressing `⌘C`
+again files it without opening the panel.
 
-Notchi searches the web and cites its sources, answers questions about an image
-you copied, and does exact arithmetic instead of guessing at it. Copy a line
-anywhere on the Mac and it rides into the panel as a quote — ready to summarize,
-proofread, translate, or turn into a reminder.
+## Ask with the context that matters.
+
+Notchi searches the web, reads useful result pages, and cites the sources it
+used. It does exact arithmetic rather than guessing, renders Markdown and
+LaTeX-style math cleanly, and previews linked images and PDFs inline.
+
+Paste one or more screenshots into Ask with `⌘V` when using a vision-capable
+model. Each image is visibly attached, can be removed before sending, and is
+never silently picked up from the clipboard. You can also ask Notchi to search
+your local record of past questions, notes, reminders, and agent tasks.
 
 <table>
 <tr>
 <td><img src=".github/shots/power-search.jpg" alt="A web-searched answer with its source cited." /></td>
-<td><img src=".github/shots/power-vision.jpg" alt="A question about a copied image, answered." /></td>
+<td><img src=".github/shots/power-vision.jpg" alt="A question about a pasted image, answered." /></td>
 </tr>
 <tr>
 <td><img src=".github/shots/power-math.jpg" alt="Exact arithmetic: a tip split three ways." /></td>
-<td><img src=".github/shots/power-clip.jpg" alt="Copied text arrives as a quote with Remind, Summarize, Proofread, Translate." /></td>
+<td><img src=".github/shots/power-clip.jpg" alt="Copied text arrives as context with actions to remind, summarize, proofread, or translate." /></td>
 </tr>
 </table>
 
+Answers stay as conversations: follow up, regenerate, copy plain text or
+Markdown, pin a result, or pull the session into a standalone window. Recent
+keeps the latest work close; the searchable History window keeps the rest.
+
 ## Hand it a whole task.
 
-Notchi is also a front end for the coding agents you already have. Point it at a
-project folder, type the task, and it drives your locally installed **Claude
-Code**, **Codex**, or **Grok** CLI — your own sign-in, your own plan. The run
-keeps going while the notch is closed: what the agent is doing on the left ear,
-elapsed time on the right.
+Notchi is also a front end for the coding agents you already use. Choose a
+project folder, describe the task, and it drives your locally installed
+**Codex**, **Claude Code**, or **Grok** CLI under your own sign-in and plan.
+Paste screenshots or mockups into the task when they help explain the work.
+
+The task continues while the notch is closed. Its current step and elapsed time
+remain visible in the closed notch, and Notchi notifies you when it finishes or
+needs attention. Agent runs live alongside chats in Recent and History, support
+follow-up instructions, and can be resumed after restarting Notchi.
 
 <img src=".github/shots/agent-compose.jpg" width="860" alt="Handing a task to the agent: project folder and model shown under the prompt." />
 
-<img src=".github/shots/agent-notch.jpg" width="660" alt="The closed notch showing the agent editing, with elapsed time." />
+<img src=".github/shots/agent-notch.jpg" width="660" alt="The closed notch showing an agent at work, with elapsed time." />
 
-## Native, not bolted on.
+## Your model, your connection.
 
-Notchi is drawn in the same Liquid Glass material as the rest of macOS — same
-blur, same edge light, same spring — so it feels like part of the system, not
-something stuck on top.
+Use the AI service you prefer: OpenRouter, Vercel AI Gateway, OpenAI,
+Anthropic, Google Gemini, DeepSeek, Qwen, Kimi, GLM, MiniMax, MiMo, or an
+OpenAI-compatible endpoint of your own. The latter works with local and
+self-hosted tools such as Ollama, LM Studio, vLLM, and gateways; its key is
+optional.
 
-## Your model. Your key.
+You can also chat through the locally installed, signed-in Codex, Claude Code,
+or Grok CLI — no API key is stored by Notchi for those connections. Model choice
+is one searchable picker, with provider grouping and live catalogs where a
+provider supports them. Web search can use the configured provider path or an
+Exa or Keenable key.
 
-Sorting happens on your Mac. Then your question goes to the provider you
-picked, signed with your own key. Questions go straight to your provider —
-nothing passes through our servers.
+## Made to disappear until you need it.
 
-OpenAI · Anthropic · Google Gemini · DeepSeek · Qwen · Kimi · GLM · MiniMax · MiMo
+Hover the notch, use the optional menu-bar icon, or set a global summon
+shortcut (double-tap `⌥` by default). Tear the composer or any conversation out
+into its own window, then drag it back to the notch when you are done.
+
+Notchi is drawn in macOS Liquid Glass — same blur, edge light, and spring — so
+it feels like part of the system rather than an overlay. Choose the original
+app icon or a liquid-metal icon that follows macOS light and dark appearance.
+It works on external displays and on Macs without a physical notch by drawing a
+virtual one; it can hide that island while an external display is full-screen.
+
+Settings cover language (English, Simplified and Traditional Chinese, Japanese,
+and Korean), launch at login, appearance, shortcuts, proxies, model
+connections, and the destination for notes. General also shows the live macOS
+permission state for Notes automation, Reminders, and notifications, with a
+direct way to grant missing access.
+
+## Privacy
+
+Notchi has no account, analytics, or server that stores your prompts, notes,
+reminders, clipboard, or history. It routes local actions on your Mac.
+
+For AI features, the prompt — plus only the text or images you intentionally
+attach as context — goes directly from your Mac to the provider or CLI you
+selected. Web-search requests go to the search service you configured. API keys
+stay in local Notchi preferences; local history and attached-image copies stay
+on your Mac until you delete them.
 
 ## Install
 
@@ -97,7 +145,7 @@ Via Homebrew:
 brew install --cask cyrus-cai/lofi-lab/notchi
 ```
 
-Or with the one-line script:
+Or with the one-line installer:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/cyrus-cai/notchi/master/install.sh | bash
@@ -110,64 +158,87 @@ Or hand it to your coding agent — paste this into **Claude Code / Codex**:
 > It is a free, open-source menu-bar app (https://github.com/cyrus-cai/notchi).
 > After it finishes, confirm Notchi is installed in /Applications and launch it.
 
-No account · No backend · Free & open source · Native to macOS
-
-## Apple Developer account
-
-Notchi still ships un-notarized because I can't get through Apple's enrollment.
-If you have a Developer account and can help, email
+Notchi currently ships un-notarized because I can't get through Apple's
+Developer enrollment. If you have a Developer account and can help, email
 [xiikii@outlook.com](mailto:xiikii@outlook.com?subject=An%20Apple%20Developer%20account%20for%20Notchi).
 
 ## Requirements
 
-Notchi requires **macOS 14 (Sonoma) or later**. A hardware notch is not
-required — on a Mac without one, and on external displays, Notchi draws its own
-notch in the same place. Asking AI takes an API key from a provider you choose;
-running a coding agent takes the Claude Code, Codex, or Grok CLI already
-installed and signed in.
+Notchi requires **macOS 14 (Sonoma) or later**. A hardware notch is optional.
+Ask needs a connected AI provider or a signed-in Codex, Claude Code, or Grok
+CLI. Agent mode needs the corresponding CLI installed, signed in, and a project
+folder you authorize it to work in. Apple Notes, Reminders, and notifications
+ask for their respective macOS permissions only when you use those features.
 
 ## Questions
 
 **What is Notchi?**
-Notchi is a macOS app that lets you type into the notch. One text field routes
-what you write to Apple Notes, Apple Reminders, an AI model, or a coding agent,
-without opening another app.
+
+Notchi is a macOS app that lets you type into the notch. It routes what you
+write to AI, Apple Notes or Markdown files, Apple Reminders, or a coding agent
+without requiring a separate app window.
 
 **Does Notchi work on a Mac without a notch?**
-Yes. On a Mac without a notch, and on external displays, Notchi draws a virtual
-notch at the top of the screen and behaves the same.
 
-**Is Notchi free?**
-Yes. Notchi is free and open source, and everything it does today stays free.
-There is no subscription.
+Yes. On Macs without a notch and on external displays, Notchi draws a virtual
+notch at the top of the display and behaves the same way.
 
-**Do I need an account?**
-No. Notchi has no account and no backend of its own. Notes and reminders are
-written straight into Apple's own apps on your Mac.
+**Do I need an account or an API key?**
 
-**Do I need my own API key?**
-For the AI features, yes. You paste a key from OpenAI, Anthropic, Google Gemini,
-DeepSeek, Qwen, Kimi, GLM, MiniMax, or MiMo, and requests go from your Mac
-directly to that provider. Notes and reminders need no key.
+Notchi itself has no account. For hosted AI, connect a provider with its API
+key or supported sign-in flow. Alternatively, use Codex, Claude Code, or Grok
+through a locally installed CLI that is already signed in. Notes and reminders
+do not need a provider connection.
 
-**Can Notchi run Claude Code or Codex?**
-Yes. Notchi runs the official Claude Code, Codex, or Grok CLI already installed
-on your Mac, under your own sign-in, and shows the run's live status in the
-closed notch.
+**Can I use local models?**
+
+Yes. Add any OpenAI-compatible endpoint in Settings; this is intended for
+Ollama, LM Studio, vLLM, self-hosted gateways, and providers Notchi does not
+list. A key is optional for custom endpoints.
+
+**Can I ask about screenshots or images?**
+
+Yes, with a vision-capable Ask model. Paste images directly with `⌘V`; attach
+multiple images, remove any one before sending, or send an image without typed
+text. Notchi never attaches an image merely because it happens to be on your
+clipboard.
+
+**Can Notchi run Codex, Claude Code, or Grok?**
+
+Yes. Agent mode runs the official CLI you already installed and signed in to,
+inside the project folder you choose. It can keep working after the notch is
+closed, accepts follow-up instructions, and exposes a one-tap resume path after
+a Notchi restart.
 
 **Where does my data go?**
-Nowhere but the provider you picked. Notchi has no servers, no accounts, and no
-analytics; your clipboard, prompts, notes, and reminders stay on your Mac.
+
+Notchi does not operate a user-data backend. AI prompts and deliberately added
+context go to the provider or CLI you selected; web-search requests go to the
+configured search service. Notes, reminders, local history, clipboard contents,
+and local files otherwise remain on your Mac.
+
+**Why does Notchi ask for system permissions?**
+
+Apple requires permission for Notes automation, Reminders, and notifications.
+Settings → General shows each status and can open the relevant macOS prompt or
+System Settings page. Choose Markdown notes to save notes in a folder without
+Apple Notes automation.
+
+**Is Notchi free?**
+
+Yes. Notchi is free and open source, with no subscription. Any costs from an AI
+provider, search service, or coding-agent plan are between you and that service.
 
 **How do I uninstall Notchi?**
-`brew uninstall --cask cyrus-cai/lofi-lab/notchi`, or drag Notchi out of
+
+Run `brew uninstall --cask cyrus-cai/lofi-lab/notchi`, or drag Notchi out of
 `/Applications`.
 
 ## Developers
 
 Open `NotchGlass.xcodeproj` (Xcode 16+), or run `./scripts/reinstall.sh` for
-the build → reinstall → relaunch loop. The model seam is `AIService.swift`;
-the on-device Ask/Note router is `IntentEngine.swift`.
+the build → reinstall → relaunch loop. The model seam is `AIService.swift`; the
+on-device Ask/Note router is `IntentEngine.swift`.
 
 ## License
 
