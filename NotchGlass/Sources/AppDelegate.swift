@@ -428,6 +428,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             #endif
         }
         #if DEBUG
+        // NOTCH_DEMO_UPDATE=<version> pins the updater to "a build is waiting", so
+        // the "Update to X" chips (idle bucket row + recent manage bar) can be
+        // posed without a real newer release. Screenshot aid only.
+        if let v = env["NOTCH_DEMO_UPDATE"], !v.isEmpty {
+            UpdaterService.shared._debugPinAvailable(v)
+        }
         // NOTCH_DEMO_AGENT_RUN=<activity line> seeds one RUNNING agent card
         // (prompt via NOTCH_DEMO_AGENT_PROMPT, elapsed seconds via
         // NOTCH_DEMO_AGENT_ELAPSED, default 3m40s). With NOTCH_OPEN=1 the row
@@ -1091,12 +1097,21 @@ enum HideNotchInFullscreen {
 ///
 /// It exists because the resting hover strip spans the menu bar's full height,
 /// so travelling along the bar past the notch kept unfurling the panel over
-/// whatever the user was reaching for. The two steps are the two honest answers
-/// to "should passing over count?": only if you didn't blow straight through, or
-/// always.
+/// whatever the user was reaching for. The three steps are three answers to
+/// "does arriving sideways count as arriving?": never on its own, only if you
+/// didn't blow straight through, or always.
+///
+/// Declared low→high; the picker renders `allCases` in this order.
 enum HoverSensitivity: String, CaseIterable, Identifiable {
-    /// The default. Hover opens, except on a fast near-horizontal crossing,
-    /// which is handed to the entry watch and opens only if the pointer settles.
+    /// Anything arriving within 45° of horizontal is deferred to the entry watch
+    /// at almost any speed, not just at sweep speed — so drifting along the menu
+    /// bar only opens the panel if the pointer actually stops on the notch. A
+    /// steeper approach (coming up from the content below) still opens on
+    /// contact; that direction is never a menu bar reach.
+    case low
+    /// The default. Hover opens, except on a fast crossing within 25° of
+    /// horizontal, which is handed to the entry watch and opens only if the
+    /// pointer settles.
     case balanced
     /// Hover opens on contact, whatever the approach looked like.
     case instant
@@ -1105,8 +1120,26 @@ enum HoverSensitivity: String, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
+        case .low:      return L("hover.low")
         case .balanced: return L("hover.balanced")
         case .instant:  return L("hover.instant")
+        }
+    }
+
+    /// Degrees off horizontal, each side, within which an approach is deferred to
+    /// the entry watch instead of opening on contact. Zero defers nothing.
+    ///
+    /// Lives with the sensitivity cases so the gate that reads the entry vector
+    /// (`NotchModel.isMenuBarSweep`) gets its threshold from the selected policy.
+    var blockedAngle: Double {
+        switch self {
+        // 45° is the natural ceiling: it's exactly "the approach travelled
+        // further sideways than downward". Past it the gate would start
+        // deferring approaches that are more vertical than horizontal, which no
+        // menu bar reach ever is.
+        case .low:      return 45
+        case .balanced: return 25
+        case .instant:  return 0
         }
     }
 

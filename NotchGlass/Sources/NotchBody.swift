@@ -77,6 +77,11 @@ struct NotchBody: View {
     /// Cursor over the bucket row's "what's new" chip — brightens its glass, in the
     /// same step the Recent chevron beside it takes (see `whatsNewCue`).
     @State private var whatsNewHovered = false
+    /// Cursor over an "Update to X" chip — one per host (the idle prompt's bucket
+    /// row, the recent list's manage bar); they're never on screen together, but
+    /// separate flags keep the hover honest either way (see `updateCue`).
+    @State private var updateCueIdleHovered = false
+    @State private var updateCueBarHovered = false
     @State private var followUpHeight: CGFloat = PromptField.lineHeight(for: NotchBody.followUpFontSize)
     /// The live agent-detail page's own follow-up line — kept separate from the
     /// idle prompt's `model.text` so a line typed while watching a run doesn't
@@ -788,9 +793,21 @@ struct NotchBody: View {
                 // just inside the Recent chevron — glass beside glass. It keeps the
                 // row alive on its own when the cluster has nothing to draw (a first
                 // run with no history and no pin).
+                // A waiting build says so in words right here, on the home page —
+                // not as a dot behind the ⋯ menu (see `updateCue`).
+                let pending = model.hasText ? nil : pendingUpdateVersion
+                // One chip on that edge, never two: an update waiting outranks the
+                // notes for the build already running, so "What's New" stands down
+                // until the update is taken.
                 let showsCue = !model.hasText && whatsNew.unseenVersion != nil
-                if !cluster.isEmpty || showsCue {
+                                && pending == nil
+                if !cluster.isEmpty || showsCue || pending != nil {
                     Spacer(minLength: 8)
+                    if let pending {
+                        updateCue(version: pending, height: 30,
+                                  hovered: $updateCueIdleHovered)
+                            .transition(.scale(scale: 0.7).combined(with: .opacity))
+                    }
                     if showsCue {
                         whatsNewCue
                             .transition(.scale(scale: 0.7).combined(with: .opacity))
@@ -1586,9 +1603,23 @@ struct NotchBody: View {
     /// `immersiveHistoryView` as an overlay across the bottom of the scroll frame.
     private var manageBar: some View {
         HStack(spacing: 6) {
-            // The single ⋯ chip. It only toggles the menu. The passive update dot
-            // rides on it (the update action lives behind Settings, one level down).
+            // The single ⋯ chip. It only toggles the menu.
             moreEntry
+
+            // A waiting build sits OUTSIDE the menu, next to the ⋯ — spelled out,
+            // one tap, no digging. It stays put while the menu is up (the menu
+            // floats above this row, covering nothing), and the menu drops its own
+            // update row meanwhile (see `updateMenuRow`), so the action lives in
+            // exactly one place.
+            if let pending = pendingUpdateVersion {
+                updateCue(version: pending, height: 34,
+                          hovered: $updateCueBarHovered)
+                    .transition(
+                        .move(edge: .leading)
+                            .combined(with: .opacity)
+                            .combined(with: .scale(scale: 0.9, anchor: .leading))
+                    )
+            }
 
             // Active-filter chip: visible while a source filter narrows the list
             // and the menu is folded away. Tinted with the source's colour; the ×
@@ -1641,9 +1672,18 @@ struct NotchBody: View {
         .padding(.horizontal, 2)
     }
 
+    /// The version of a build that's downloaded and waiting, if any — what the
+    /// "Update to X" chips print. Nil at every other phase (idle, checking,
+    /// updating, failed), which is what keeps the chips off the rows until there
+    /// is actually something to install.
+    private var pendingUpdateVersion: String? {
+        if case .available(let v) = updater.phase { return v }
+        return nil
+    }
+
     /// The ⋯ entry: a single Liquid Glass chip that pops the manage menu up above
-    /// itself. Carries the passive update dot (the update action itself sits
-    /// behind Settings, one level in).
+    /// itself. No update badge — a waiting build gets its own chip beside this one
+    /// (see `updateCue`) rather than a dot to decode.
     private var moreEntry: some View {
         // ⋯ when closed; × once the menu is up, so the chip reads as "dismiss"
         // while the popup is showing.
@@ -1654,14 +1694,6 @@ struct NotchBody: View {
         ) {
             withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
                 manageExpanded.toggle()
-            }
-        }
-        .overlay(alignment: .topTrailing) {
-            if case .available = updater.phase {
-                Circle()
-                    .fill(Tokens.text2)
-                    .frame(width: 5, height: 5)
-                    .offset(x: -1, y: 1)
             }
         }
     }
@@ -1747,24 +1779,19 @@ struct NotchBody: View {
         .shadow(color: .black.opacity(0.35), radius: 16, y: 8)
     }
 
-    /// The update row of the manage menu:
-    ///   • "Update to X" when a newer build is already waiting — a tap installs
-    ///     it and dismisses the menu (the app relaunches, so nothing stays to
-    ///     look at);
-    ///   • otherwise "Check for updates" — a tap jumps to Settings → About with
-    ///     a user-initiated check already running (the same path as the app
-    ///     menu's "Check for Updates…"), so the spinner, the "up to date" note,
-    ///     or the Update button land in the About slot built to show them
-    ///     instead of the menu pantomiming the check in place.
+    /// The update row of the manage menu — "Check for updates", a tap jumps to
+    /// Settings → About with a user-initiated check already running (the same path
+    /// as the app menu's "Check for Updates…"), so the spinner, the "up to date"
+    /// note, or the Update button land in the About slot built to show them instead
+    /// of the menu pantomiming the check in place.
+    ///
+    /// Once a build IS waiting the row drops out entirely: the "Update to X" chip
+    /// on the bar outside owns that action now (see `updateCue`), and repeating it
+    /// in here would be the same tap twice.
     @ViewBuilder
     private var updateMenuRow: some View {
-        if case .available(let v) = updater.phase {
-            manageMenuRow(icon: LucideIcons.circleFadingArrowUp, title: L("about.update.to", v)) {
-                withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
-                    manageExpanded = false
-                }
-                updater.update()
-            }
+        if pendingUpdateVersion != nil {
+            EmptyView()
         } else {
             manageMenuRow(icon: LucideIcons.circleFadingArrowUp,
                           title: L("recent.menu.checkForUpdates")) {
@@ -3236,6 +3263,38 @@ struct NotchBody: View {
         .buttonStyle(GlassPressStyle())
         .onHover { whatsNewHovered = $0 }
         .animation(.easeOut(duration: 0.18), value: whatsNewHovered)
+    }
+
+    /// The "Update to X" chip: the waiting-update action promoted OUT of the ⋯
+    /// menu onto the surfaces themselves — the idle prompt's bucket row and the
+    /// recent list's manage bar. A new build is the one thing worth surfacing,
+    /// and a 5pt dot on the ⋯ chip asked the user to go looking for it. Same
+    /// glass capsule as the "what's new" cue beside it, plus the arrow-up mark
+    /// the About row uses, so the chip reads as the update family wherever it
+    /// lands. Tapping installs and relaunches.
+    ///
+    /// `height` matches whichever row hosts it — 30 on the bucket row, 34 on the
+    /// manage bar — so the chip lines up with the chevron / ⋯ beside it.
+    private func updateCue(version: String, height: CGFloat,
+                           hovered: Binding<Bool>) -> some View {
+        Button {
+            updater.update()
+        } label: {
+            HStack(spacing: 5) {
+                LucideIcon(mark: LucideIcons.circleFadingArrowUp, size: 12)
+                Text(L("about.update.to", version))
+                    .font(.sf(11.5, weight: .semibold))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(hovered.wrappedValue ? Tokens.text1 : Tokens.text2)
+            .padding(.horizontal, 10)
+            .frame(height: height)
+            .glassCapsule(in: Capsule(), brighter: hovered.wrappedValue)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(GlassPressStyle())
+        .onHover { hovered.wrappedValue = $0 }
+        .animation(.easeOut(duration: 0.18), value: hovered.wrappedValue)
     }
 
     private var followUpRow: some View {

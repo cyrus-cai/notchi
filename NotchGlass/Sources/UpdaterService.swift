@@ -89,7 +89,7 @@ final class UpdaterService: ObservableObject {
     /// reality while the user is actually looking at it. One HEAD-sized request;
     /// failures leave the phase untouched (the cue is strictly nice-to-have).
     func check() {
-        guard !checking, phase != .updating else { return }
+        guard !checking, !demoPinned, phase != .updating else { return }
         checking = true
         Task {
             defer { checking = false }
@@ -150,6 +150,20 @@ final class UpdaterService: ObservableObject {
     private static func sleep(nanoseconds: UInt64) async {
         try? await Task.sleep(nanoseconds: nanoseconds)
     }
+
+    #if DEBUG
+    /// Screenshot aid (`NOTCH_DEMO_UPDATE=<version>`): pin the phase to "a build
+    /// is waiting" without a real release to find. The pin also mutes the real
+    /// checks, which would otherwise flip the phase back to `.upToDate` a second
+    /// or two later, mid-pose. Debug builds only — see `AppDelegate`.
+    func _debugPinAvailable(_ version: String) {
+        demoPinned = true
+        phase = .available(version)
+    }
+    private var demoPinned = false
+    #else
+    private let demoPinned = false
+    #endif
 
     /// Numeric dot-component comparison: "1.0.10" beats "1.0.9", "1.1" beats "1.0.2".
     static func isNewer(_ candidate: String, than current: String) -> Bool {

@@ -963,26 +963,39 @@ final class NotchModel: ObservableObject {
         // source of accidental unfurls, since the resting hover strip spans the
         // menu bar's full height. Don't open on contact; hand it to the entry
         // watch, which opens the moment that pointer actually settles here and
-        // stays quiet if it just keeps going. `.instant` skips this reading and
-        // takes any arrival at face value.
-        if sensitivity == .balanced, Self.isMenuBarSweep(velocity) {
+        // stays quiet if it just keeps going.
+        if Self.isMenuBarSweep(velocity, at: sensitivity) {
             armEntryWatch(display: display)
             return
         }
         openPanel(on: display, velocity: velocity)
     }
 
-    /// Above this speed (points/second) a crossing is fast enough that the
-    /// pointer is travelling *through* rather than arriving.
-    private static let sweepSpeed: CGFloat = 900
-
-    /// A fast crossing whose direction is dominated by the horizontal — the
-    /// signature of a menu bar traverse. A normal approach comes up from the
-    /// content below, so its vertical component keeps it out of this test.
-    private static func isMenuBarSweep(_ v: CGVector) -> Bool {
+    /// Whether this entry reads as travel ALONG the menu bar rather than an
+    /// arrival at the notch — the shape of approach each sensitivity refuses to
+    /// take at face value. Both levels that test anything key on the same two
+    /// facts, just at different tolerances: how flat the approach was, and how
+    /// fast. A normal approach comes up from the content below, so its vertical
+    /// component keeps it out of the test at every level.
+    ///
+    /// The cone comes from `HoverSensitivity.blockedAngle` (degrees off
+    /// horizontal); only the speed floor is tuning that lives here. The levels
+    /// nest on both axes —
+    /// `.low` takes the wider cone AND the lower floor — so lowering the setting
+    /// can only ever defer more entries, never fewer.
+    private static func isMenuBarSweep(_ v: CGVector, at sensitivity: HoverSensitivity) -> Bool {
+        let minSpeed: CGFloat
+        switch sensitivity {
+        case .instant:  return false
+        case .balanced: minSpeed = 900
+        case .low:      minSpeed = 150
+        }
         let speed = (v.dx * v.dx + v.dy * v.dy).squareRoot()
-        guard speed >= sweepSpeed else { return false }
-        return abs(v.dx) > 2.5 * abs(v.dy)
+        guard speed >= minSpeed else { return false }
+        // |dx| : |dy| beyond 1/tan(angle) ⇒ the approach came in flatter than
+        // the cone's edge.
+        let flatness = CGFloat(1 / tan(sensitivity.blockedAngle * .pi / 180))
+        return abs(v.dx) > flatness * abs(v.dy)
     }
 
     /// Poll interval of the entry watch. Short enough that a sweep which does

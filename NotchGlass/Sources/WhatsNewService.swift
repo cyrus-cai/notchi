@@ -64,6 +64,14 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.4.4",
+            date: "2026-08-02",
+            improvements: [
+                "Hover sensitivity now has Low, Balanced, and Instant levels.",
+                "Available updates appear as an Update to X button in Recent and the home row.",
+            ]
+        ),
+        Entry(
             version: "0.4.3",
             date: "2026-08-01",
             features: [
