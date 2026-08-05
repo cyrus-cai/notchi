@@ -660,7 +660,8 @@ private struct WindowTrailingCluster: View {
                     .font(.sf(11, weight: .semibold))
             },
             .init(engaged: pinned,
-                  tooltip: L(pinned ? "result.unpin" : "result.pin"),
+                  tooltip: shortcutHelp(pinned ? "result.unpin" : "result.pin",
+                                        action: .pin),
                   action: togglePin) {
                 Image(systemName: "pin")
                     .font(.sf(12.5, weight: .semibold))
@@ -1272,4 +1273,3 @@ struct DetachedAgentTaskView: View {
         manager.followUp(taskID: task.id, prompt: line)
     }
 }
-

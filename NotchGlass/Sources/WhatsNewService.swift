@@ -64,6 +64,26 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.5.0",
+            date: "2026-08-05",
+            features: [
+                "Shortcuts is its own Settings section — rebind the summon chord and every panel action.",
+                "Prompt shortcuts: bind a chord to a prompt and run it on selected text in any app.",
+                "Ask can change Notch's own settings; every change is confirmed on a card first.",
+                "AnySearch joins the search backends — works without a key, add one for higher limits.",
+                "French and Spanish interfaces.",
+                "General shows live system permission status and lets you grant missing access.",
+            ],
+            improvements: [
+                "Ask shows images only after you paste them, with multi-image attachments and per-image removal.",
+                "About links to GitHub, X, and the licenses.",
+                "What's New links out to the full release archive.",
+            ],
+            fixes: [
+                "Accessibility permission survives updates — builds now carry a stable signing identity.",
+            ]
+        ),
+        Entry(
             version: "0.4.4",
             date: "2026-08-02",
             improvements: [

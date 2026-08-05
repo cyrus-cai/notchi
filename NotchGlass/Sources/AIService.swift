@@ -20,11 +20,11 @@ extension URLRequest {
 struct ChatMessage: Sendable, Equatable {
     let role: String   // "user" | "assistant"
     let content: String
-    /// A copied image riding this turn (XII-121), already downsampled and
-    /// base64-encoded for the wire; `nil` for the ordinary text-only turn. Each
-    /// client encodes it in its own vendor shape (Anthropic `source` block /
-    /// OpenAI-style `image_url` data URI).
-    var image: ChatImage? = nil
+    /// Images explicitly pasted into this turn, already downsampled and
+    /// base64-encoded for the wire. Each client encodes every image in its own
+    /// vendor shape (Anthropic `source` blocks / OpenAI-style `image_url` data
+    /// URIs). Empty for an ordinary text-only turn.
+    var images: [ChatImage] = []
 }
 
 /// A wire-ready image attachment: the base64 payload plus its mime type. Built
@@ -239,6 +239,17 @@ answer from the results.
 - What the user copied ("this", "what I copied") → read_clipboard.
 - Exact arithmetic → calculate.
 - The current clock time → current_datetime (today's date is already stated above).
+- This Notch app's own preferences — viewing settings, changing language, icons, \
+launch at login, appearance, notes, shortcuts, model/provider, search, keys, proxy, \
+or other Settings values → manage_app_settings. For an explicit change, call it \
+directly; it presents its own single confirmation card before writing, so do not \
+also call ask_user to confirm. If the requested value is not supported, do not \
+merely explain or list alternatives: call manage_app_settings with action=open and \
+the corresponding section so the user lands on the available choices. Questions \
+about the app's keyboard shortcuts or hotkeys → action=shortcuts; use its live \
+reference instead of recalling key combinations from memory. Rebinding a chord, \
+or adding, retargeting and deleting a prompt shortcut, goes through the same \
+tool: read action=shortcuts first, then update with the scope it reports.
 - The user's own past activity in this app — "what did I work on today", "what \
 have I recorded", "what did I ask you yesterday", "summarize my week", "did I \
 ever note anything about X" → search_history. It reads their own questions, \
@@ -272,6 +283,8 @@ func notchSystemPromptDated(customInstructions: String? = nil) -> String {
     case .zhHant: fmt.locale = Foundation.Locale(identifier: "zh_Hant")
     case .ja:     fmt.locale = Foundation.Locale(identifier: "ja_JP")
     case .ko:     fmt.locale = Foundation.Locale(identifier: "ko_KR")
+    case .fr:     fmt.locale = Foundation.Locale(identifier: "fr_FR")
+    case .es:     fmt.locale = Foundation.Locale(identifier: "es_ES")
     }
     var prompt = "Today is \(fmt.string(from: Date())).\n\n" + notchSystemPrompt
     // The user's own preferences (XII-137), appended AFTER the built-in persona so
@@ -950,7 +963,7 @@ struct OpenAICompatAIService: AIService {
                 // System prompt first, then the running conversation verbatim —
                 // so a follow-up is answered with every prior turn in context.
                 let chat = [Message(role: "system", content: system)]
-                    + messages.map { Message(role: $0.role, content: $0.content, image: $0.image) }
+                    + messages.map { Message(role: $0.role, content: $0.content, images: $0.images) }
 
                 // Retry the connect/first-token phase on a transient blip (network
                 // drop, timeout, 429, 5xx, or a stream that finishes with zero
@@ -1085,7 +1098,7 @@ struct OpenAICompatAIService: AIService {
     private struct Message: Encodable {
         let role: String
         let content: String
-        var image: ChatImage? = nil
+        var images: [ChatImage] = []
 
         private enum CodingKeys: String, CodingKey { case role, content }
         private enum PartKeys: String, CodingKey {
@@ -1100,7 +1113,7 @@ struct OpenAICompatAIService: AIService {
         func encode(to encoder: Encoder) throws {
             var c = encoder.container(keyedBy: CodingKeys.self)
             try c.encode(role, forKey: .role)
-            guard let image else {
+            guard !images.isEmpty else {
                 try c.encode(content, forKey: .content)
                 return
             }
@@ -1108,10 +1121,12 @@ struct OpenAICompatAIService: AIService {
             var textPart = parts.nestedContainer(keyedBy: PartKeys.self)
             try textPart.encode("text", forKey: .type)
             try textPart.encode(content, forKey: .text)
-            var imagePart = parts.nestedContainer(keyedBy: PartKeys.self)
-            try imagePart.encode("image_url", forKey: .type)
-            var url = imagePart.nestedContainer(keyedBy: PartKeys.self, forKey: .imageUrl)
-            try url.encode("data:\(image.mediaType);base64,\(image.base64)", forKey: .url)
+            for image in images {
+                var imagePart = parts.nestedContainer(keyedBy: PartKeys.self)
+                try imagePart.encode("image_url", forKey: .type)
+                var url = imagePart.nestedContainer(keyedBy: PartKeys.self, forKey: .imageUrl)
+                try url.encode("data:\(image.mediaType);base64,\(image.base64)", forKey: .url)
+            }
         }
     }
     /// One `chat.completion.chunk` event. `delta.content` is the incremental
@@ -1177,7 +1192,7 @@ struct AnthropicAIService: AIService {
                         let body = RequestBody(
                             model: model,
                             system: system,
-                            messages: messages.map { .init(role: $0.role, content: $0.content, image: $0.image) },
+                            messages: messages.map { .init(role: $0.role, content: $0.content, images: $0.images) },
                             maxTokens: ReplyTokens.anthropicRequiredCeiling,
                             stream: true
                         )
@@ -1260,7 +1275,7 @@ struct AnthropicAIService: AIService {
     private struct Message: Encodable {
         let role: String
         let content: String
-        var image: ChatImage? = nil
+        var images: [ChatImage] = []
 
         private enum CodingKeys: String, CodingKey { case role, content }
         private enum PartKeys: String, CodingKey { case type, text, source }
@@ -1276,17 +1291,19 @@ struct AnthropicAIService: AIService {
         func encode(to encoder: Encoder) throws {
             var c = encoder.container(keyedBy: CodingKeys.self)
             try c.encode(role, forKey: .role)
-            guard let image else {
+            guard !images.isEmpty else {
                 try c.encode(content, forKey: .content)
                 return
             }
             var parts = c.nestedUnkeyedContainer(forKey: .content)
-            var imagePart = parts.nestedContainer(keyedBy: PartKeys.self)
-            try imagePart.encode("image", forKey: .type)
-            var source = imagePart.nestedContainer(keyedBy: SourceKeys.self, forKey: .source)
-            try source.encode("base64", forKey: .type)
-            try source.encode(image.mediaType, forKey: .mediaType)
-            try source.encode(image.base64, forKey: .data)
+            for image in images {
+                var imagePart = parts.nestedContainer(keyedBy: PartKeys.self)
+                try imagePart.encode("image", forKey: .type)
+                var source = imagePart.nestedContainer(keyedBy: SourceKeys.self, forKey: .source)
+                try source.encode("base64", forKey: .type)
+                try source.encode(image.mediaType, forKey: .mediaType)
+                try source.encode(image.base64, forKey: .data)
+            }
             var textPart = parts.nestedContainer(keyedBy: PartKeys.self)
             try textPart.encode("text", forKey: .type)
             try textPart.encode(content, forKey: .text)
@@ -1368,6 +1385,15 @@ enum RemoteModelManifest {
 
         var req = URLRequest(url: manifestURL)
         req.timeoutInterval = 10
+        // Lets the server break these fetches down by release. CFNetwork's default
+        // User-Agent carries CFBundleVersion — a flat build number that doesn't move
+        // with `MARKETING_VERSION` — so without this header every install looks
+        // identical and "how many users are still on an old version" is unanswerable.
+        // Read from `Bundle` directly rather than via `UpdaterService.currentVersion`:
+        // that accessor is @MainActor and this runs off the main actor.
+        req.setValue(
+            Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0",
+            forHTTPHeaderField: "X-Notchi-Version")
         guard let (data, response) = try? await ProxyConfig.urlSession.data(for: req),
               let http = response as? HTTPURLResponse,
               (200..<300).contains(http.statusCode),

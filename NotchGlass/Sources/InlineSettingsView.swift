@@ -1,6 +1,89 @@
 import AppKit
 import Carbon.HIToolbox
+import Carbon.OpenScripting
+import EventKit
 import SwiftUI
+import UserNotifications
+
+/// A common vocabulary for the TCC-backed capabilities shown in General. Some
+/// frameworks use different native enums, but the settings UI only needs these
+/// four user-facing states.
+private enum SettingsPermissionStatus: Equatable {
+    case checking
+    case notDetermined
+    case denied
+    case granted
+    case unavailable
+
+    var label: String {
+        switch self {
+        case .checking:      return L("permissions.status.checking")
+        case .notDetermined: return L("permissions.status.notGranted")
+        case .denied:        return L("permissions.status.denied")
+        case .granted:       return L("permissions.status.granted")
+        case .unavailable:   return L("permissions.status.unavailable")
+        }
+    }
+
+    var pillLabel: String {
+        switch self {
+        case .notDetermined, .unavailable: return L("permissions.action.allow")
+        case .denied:                      return L("permissions.action.settings")
+        case .checking, .granted:           return label
+        }
+    }
+}
+
+/// A deliberately neutral system-style status capsule. Permission state is not
+/// an alert or a score: granted rests in quiet grey, while a missing permission
+/// uses the same shape as its action instead of introducing traffic-light color.
+private struct PermissionStatusPill: View {
+    let status: SettingsPermissionStatus
+    let action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Group {
+            if status == .granted || status == .checking {
+                pillLabel
+            } else {
+                Button(action: action) { pillLabel }
+                    .buttonStyle(.plain)
+                    .onHover { hovering = $0 }
+            }
+        }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+    }
+
+    private var pillLabel: some View {
+        Text(status.pillLabel)
+            .font(.sf(11, weight: .semibold))
+            .foregroundStyle(missing
+                             ? Color.red.opacity(hovering ? 0.88 : 0.72)
+                             : (hovering ? Tokens.text1 : Tokens.text2))
+            .padding(.horizontal, 11)
+            .frame(height: 28)
+            .background(
+                Capsule()
+                    .fill(missing
+                          ? Color.red.opacity(hovering ? 0.14 : 0.09)
+                          : Color.white.opacity(hovering ? 0.12 : 0.07))
+            )
+            .overlay(
+                Capsule()
+                    .strokeBorder(missing
+                                  ? Color.red.opacity(hovering ? 0.22 : 0.15)
+                                  : Color.white.opacity(hovering ? 0.15 : 0.08),
+                                  lineWidth: 0.5)
+            )
+            .contentShape(Capsule())
+    }
+
+    private var missing: Bool {
+        status != .granted && status != .checking
+    }
+}
 
 /// Settings rendered *inside* the notch panel, in place of the recent list —
 /// not a separate window. Carries the same logic as the old native `SettingsView`
@@ -9,9 +92,6 @@ import SwiftUI
 /// reads as part of the island. The gear and ⌘, both swap the RECENT block for
 /// this; the back chevron returns to the idle prompt.
 struct InlineSettingsView: View {
-    /// Where About → Feedback writes to.
-    static let feedbackEmail = "xiikii@outlook.com"
-
     @ObservedObject var model: NotchModel
     /// Self-update state (shared app-wide — the gear badge reads the same object).
     /// Drives the Version row: a quiet number normally, an Update action when a
@@ -84,7 +164,7 @@ struct InlineSettingsView: View {
     /// True while `EXA_API_KEY` forces the Exa key — field is then informational.
     private var exaEnvOverride: Bool { APIKeyStore.hasExaEnvOverride() }
 
-    /// The user's chosen search backend (Keenable / Exa). Pick one and that's what
+    /// The user's chosen search backend. Pick one and that's what
     /// runs — like the model picker, one choice with no "Default" / native fallback.
     /// `nil` only until the user (or the Search tab's first appearance) settles it on
     /// a concrete backend; `selectedBackend` fills that gap for display.
@@ -108,6 +188,28 @@ struct InlineSettingsView: View {
     /// The stored Keenable key rendered safe for display (same masking as Exa).
     private var maskedKeenableKey: String {
         let key = APIKeyStore.currentKeenableKey() ?? APIKeyStore.storedKeenableKey()
+        guard key.count > 12 else { return String(repeating: "•", count: max(key.count, 8)) }
+        return "\(key.prefix(4))••••••••\(key.suffix(4))"
+    }
+
+    /// AnySearch can run anonymously; its optional key only raises quota and
+    /// concurrency limits. Start in the summary state even when no key exists so
+    /// the row clearly says that anonymous access is already active.
+    @State private var anySearchKey: String = APIKeyStore.storedAnySearchKey()
+    @State private var editingAnySearchKey = false
+    @State private var anySearchSaved = false
+    private var anySearchEnvOverride: Bool { APIKeyStore.hasAnySearchEnvOverride() }
+
+    private var canSaveAnySearch: Bool {
+        guard !anySearchEnvOverride else { return false }
+        return editingAnySearchKey
+            && anySearchKey != APIKeyStore.storedAnySearchKey()
+    }
+
+    private var maskedAnySearchKey: String {
+        guard let key = APIKeyStore.currentAnySearchKey(), !key.isEmpty else {
+            return L("model.anysearchAnonymous")
+        }
         guard key.count > 12 else { return String(repeating: "•", count: max(key.count, 8)) }
         return "\(key.prefix(4))••••••••\(key.suffix(4))"
     }
@@ -171,16 +273,15 @@ struct InlineSettingsView: View {
         case search = "Search"   // search backend + its key
         case notes = "Notes"     // the capture pipeline: note destination + copy sensing
         case appearance = "Appearance" // where it shows up: screens, full screen, Dock icon
-        case general = "General" // how you reach it: shortcut, language, launch at login, + Advanced (proxy)
-        case shortcuts = "Shortcuts" // the keyboard reference — a sub-page under About, not a sidebar row
+        case general = "General" // language, launch at login, hover, + Advanced (proxy)
+        case shortcuts = "Shortcuts" // editable keyboard controls, its own top-level settings category
         case about = "About"     // version + self-update
+        case licenses = "Licenses" // third-party attribution and licences
         var id: String { rawValue }
 
-        /// A sub-page rather than a category: reached by a row *inside* another
-        /// section, drawn across the whole panel with the sidebar stepped aside,
-        /// and left by the header's back arrow. It keeps its own raw value so the
-        /// "…" menu can still deep-link straight to it.
-        var isDetail: Bool { self == .shortcuts }
+        /// A sub-page rather than a category: reached from About, drawn across
+        /// the whole panel, and left through the header's back pill or Esc.
+        var isDetail: Bool { self == .licenses }
 
         /// The section a sub-page sits under — where back (and ⎋) returns to.
         /// `nil` for the top-level categories, whose back leaves settings.
@@ -200,6 +301,7 @@ struct InlineSettingsView: View {
             case .shortcuts:  return L("sidebar.shortcuts")
             case .appearance: return L("sidebar.appearance")
             case .about:      return L("sidebar.about")
+            case .licenses:   return L("about.licenses")
             }
         }
     }
@@ -255,22 +357,41 @@ struct InlineSettingsView: View {
     /// refreshed when the chooser commits a new pick.
     @State private var notesFolderDisplay: String = FileNotesService.folderDisplayPath
 
-    /// The global summon shortcut — mirrors the persisted value; writes go through
-    /// `commitSummonHotKey` so `AppDelegate` re-registers the Carbon hot key.
+    /// All editable shortcuts live together in the Shortcuts category. The
+    /// summon chord re-registers globally; product actions are read live by the
+    /// panel key catcher.
     @State private var summonHotKey: SummonHotKey = .current
-    /// True while the recorder is armed and listening for the next chord. Drives
-    /// the "Recording…" affordance and gates the local `NSEvent` monitor.
-    @State private var recordingHotKey = false
-    /// A transient hint shown under the row when a chord is rejected (e.g. no
-    /// modifier), cleared on the next successful record or when recording ends.
-    @State private var hotKeyHint: String?
+    @State private var appShortcuts: [AppShortcutAction: ShortcutChord] = AppShortcutStore.current
+    /// User-authored global bindings are intentionally only a shortcut and one
+    /// prompt. Their UUID exists solely so SwiftUI and AppDelegate can track rows.
+    @State private var promptShortcuts: [PromptShortcut] = PromptShortcutStore.current
+    /// The delete affordance stays out of the resting row until its pointer is
+    /// nearby. Keeping the button's frame mounted prevents the fields from
+    /// shifting when it fades in.
+    @State private var hoveredPromptShortcutID: UUID?
+    @State private var hoveredShortcutRow: EditableShortcut?
+    /// At most one row records at a time. Hints belong to their row so a conflict
+    /// stays visually attached to the shortcut that needs attention.
+    @State private var recordingShortcut: EditableShortcut?
+    @State private var shortcutHints: [EditableShortcut: String] = [:]
 
     /// Whether the General pane's folded Advanced block is open.
     @State private var advancedSectionOpen = false
+    /// Permissions are diagnostic/recovery controls rather than everyday
+    /// preferences, so they stay folded until the user needs them.
+    @State private var permissionsSectionOpen = false
 
     /// What the proxy field resolves to right now — filled in asynchronously by
     /// `refreshProxyStatus` because detection may spawn a login shell.
     @State private var proxyStatus: String = ""
+
+    /// Live macOS authorization state for the three protected capabilities the
+    /// app actually uses. These are refreshed whenever General appears and when
+    /// Notchi becomes active again, so a change made in System Settings is
+    /// reflected without relaunching.
+    @State private var remindersPermission: SettingsPermissionStatus = .checking
+    @State private var notesPermission: SettingsPermissionStatus = .checking
+    @State private var notificationsPermission: SettingsPermissionStatus = .checking
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -375,6 +496,7 @@ struct InlineSettingsView: View {
                 switch selectedBackend {
                 case .keenable: keenableKeyRow
                 case .exa:      exaKeyRow
+                case .anysearch: anySearchKeyRow
                 }
             case .notes:
                 // The capture pipeline in one place: where a jot files,
@@ -382,13 +504,10 @@ struct InlineSettingsView: View {
                 noteDestinationRow
                 copySenseRow
             case .general:
-                // How you reach it: the summon chord, the language it
-                // speaks, whether it's there from login — then the
-                // folded Advanced block for the plumbing (proxy).
-                shortcutRow
                 hoverSensitivityRow
                 appLanguageRow
                 launchAtLoginRow
+                permissionsSection
                 advancedSection
             case .shortcuts:
                 shortcutsSection
@@ -405,6 +524,8 @@ struct InlineSettingsView: View {
                 liveActivityRow
             case .about:
                 aboutSection
+            case .licenses:
+                licensesSection
             }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -869,6 +990,7 @@ struct InlineSettingsView: View {
         switch b {
         case .keenable: return L("search.backend.keenable")
         case .exa:      return L("search.backend.exa")
+        case .anysearch: return L("search.backend.anysearch")
         }
     }
 
@@ -1060,6 +1182,95 @@ struct InlineSettingsView: View {
         var text = AttributedString(L("model.exaHint"))
         var host = AttributedString(L("model.exaHint.host"))
         host.link = URL(string: "https://exa.ai")
+        host.foregroundColor = Tokens.text2
+        text.append(host)
+        return text
+    }
+
+    /// Optional AnySearch key. With no key the summary remains actionable and
+    /// says "Anonymous tier"; authenticated requests use the same masked/edit
+    /// lifecycle as the other standalone search backends.
+    private var anySearchKeyRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                HStack(spacing: 3) {
+                    Text(L("model.anysearchApiKey"))
+                        .font(.sf(13, weight: .medium))
+                        .foregroundStyle(Tokens.text2)
+                        .lineLimit(1)
+                    if !anySearchEnvOverride {
+                        SettingInfo(anySearchHintText)
+                    }
+                }
+                .frame(width: 100, alignment: .leading)
+
+                ZStack(alignment: .leading) {
+                    if editingAnySearchKey {
+                        if anySearchKey.isEmpty {
+                            Text(L("model.anysearchPasteKey"))
+                                .font(.sf(13))
+                                .foregroundStyle(Tokens.text2)
+                                .allowsHitTesting(false)
+                        }
+                        TextField("", text: $anySearchKey)
+                            .textFieldStyle(.plain)
+                            .font(.sf(13))
+                            .foregroundStyle(Tokens.text1)
+                            .disabled(anySearchEnvOverride)
+                            .onSubmit { saveAnySearchKey() }
+                            .onChange(of: anySearchKey) { model.noteUserTyping() }
+                    } else {
+                        Text(maskedAnySearchKey)
+                            .font(.sf(13))
+                            .foregroundStyle(Tokens.text2)
+                            .lineLimit(1)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .frame(height: 34)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(.white.opacity(editingAnySearchKey ? 0.06 : 0.03))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .strokeBorder(.white.opacity(editingAnySearchKey ? 0.12 : 0.07), lineWidth: 0.5)
+                )
+                .opacity(anySearchEnvOverride ? 0.5 : 1)
+
+                if editingAnySearchKey {
+                    SettingActionButton(title: L("model.cancel")) { stopEditingAnySearchKey() }
+                } else if !anySearchEnvOverride {
+                    SettingActionButton(
+                        title: APIKeyStore.storedAnySearchKey().isEmpty
+                            ? L("model.addKey") : L("model.change")
+                    ) { editingAnySearchKey = true }
+                }
+                if editingAnySearchKey || canSaveAnySearch || anySearchSaved {
+                    SettingActionButton(
+                        title: anySearchSaved ? L("model.saved") : L("model.save"),
+                        tone: canSaveAnySearch || anySearchSaved ? Tokens.text2 : Tokens.text4
+                    ) { saveAnySearchKey() }
+                        .disabled(!canSaveAnySearch && !anySearchSaved)
+                        .animation(.easeOut(duration: 0.2), value: anySearchSaved)
+                }
+            }
+
+            if anySearchEnvOverride {
+                Text(L("model.footer.env", "ANYSEARCH_API_KEY"))
+                    .font(.sf(11))
+                    .foregroundStyle(Tokens.text4)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 88)
+            }
+        }
+    }
+
+    private var anySearchHintText: AttributedString {
+        var text = AttributedString(L("model.anysearchHint"))
+        var host = AttributedString(L("model.anysearchHint.host"))
+        host.link = URL(string: "https://www.anysearch.com/console/api-keys")
         host.foregroundColor = Tokens.text2
         text.append(host)
         return text
@@ -1427,6 +1638,25 @@ struct InlineSettingsView: View {
         withAnimation(.easeOut(duration: 0.16)) { editingKeenableKey = false }
     }
 
+    private func saveAnySearchKey() {
+        APIKeyStore.saveAnySearchKey(anySearchKey)
+        anySearchKey = APIKeyStore.storedAnySearchKey()
+        NotificationCenter.default.post(name: .aiBackendChanged, object: nil)
+        withAnimation(.easeOut(duration: 0.16)) { editingAnySearchKey = false }
+        withAnimation(.easeOut(duration: 0.2)) { anySearchSaved = true }
+        Task {
+            try? await Task.sleep(nanoseconds: 1_400_000_000)
+            await MainActor.run {
+                withAnimation(.easeOut(duration: 0.2)) { anySearchSaved = false }
+            }
+        }
+    }
+
+    private func stopEditingAnySearchKey() {
+        anySearchKey = APIKeyStore.storedAnySearchKey()
+        withAnimation(.easeOut(duration: 0.16)) { editingAnySearchKey = false }
+    }
+
     /// The wire id in effect: the saved override, or the provider's default when
     /// the sentinel empty string is stored.
     private var effectiveModelID: String {
@@ -1554,6 +1784,8 @@ struct InlineSettingsView: View {
 
     // MARK: - General
 
+    // MARK: - Privacy
+
     /// Which screens carry a notch island. External monitors get a virtual
     /// notch that nests inside their menu bar; the choice applies immediately
     /// (AppDelegate listens and rebuilds the per-screen panels).
@@ -1607,27 +1839,6 @@ struct InlineSettingsView: View {
         NotificationCenter.default.post(name: .displayPlacementChanged, object: nil)
     }
 
-    /// Whether the app puts its icon in the menu bar. Shown by default — it's the
-    /// one handle that works when the notch is behind a full-screen app and the
-    /// summon shortcut has been forgotten. The choice applies immediately
-    /// (AppDelegate adds/removes the status item).
-    private var menuBarIconRow: some View {
-        settingRow(label: L("general.menuBarIcon")) {
-            GlassMenu(title: menuBarIconVisibility.label) {
-                ForEach(MenuBarIconVisibility.allCases) { v in
-                    Button(v.label) { selectMenuBarIconVisibility(v) }
-                }
-            }
-        }
-    }
-
-    private func selectMenuBarIconVisibility(_ newValue: MenuBarIconVisibility) {
-        guard newValue != menuBarIconVisibility else { return }
-        menuBarIconVisibility = newValue
-        MenuBarIconVisibility.current = newValue
-        NotificationCenter.default.post(name: .menuBarIconVisibilityChanged, object: nil)
-    }
-
     /// Whether the app shows a Dock icon. Off by default — the notch overlay is a
     /// menu-bar-less accessory — but some users want one place to relaunch or quit
     /// it from. The choice applies immediately (AppDelegate flips the activation
@@ -1671,6 +1882,27 @@ struct InlineSettingsView: View {
                     .lineLimit(1)
             }
         }
+    }
+
+    /// Whether the app puts its icon in the menu bar. Shown by default — it's the
+    /// one handle that works when the notch is behind a full-screen app and the
+    /// summon shortcut has been forgotten. The choice applies immediately
+    /// (AppDelegate adds/removes the status item).
+    private var menuBarIconRow: some View {
+        settingRow(label: L("general.menuBarIcon")) {
+            GlassMenu(title: menuBarIconVisibility.label) {
+                ForEach(MenuBarIconVisibility.allCases) { v in
+                    Button(v.label) { selectMenuBarIconVisibility(v) }
+                }
+            }
+        }
+    }
+
+    private func selectMenuBarIconVisibility(_ newValue: MenuBarIconVisibility) {
+        guard newValue != menuBarIconVisibility else { return }
+        menuBarIconVisibility = newValue
+        MenuBarIconVisibility.current = newValue
+        NotificationCenter.default.post(name: .menuBarIconVisibilityChanged, object: nil)
     }
 
     private func selectDockIconVisibility(_ newValue: DockIconVisibility) {
@@ -1747,8 +1979,6 @@ struct InlineSettingsView: View {
                 Text(L("general.customInstructions"))
                     .font(.sf(13))
                     .foregroundStyle(Tokens.text1)
-                // What this field does, collapsed behind an ⓘ beside its title.
-                SettingInfo(L("general.customInstructions.hint"))
             }
             ZStack(alignment: .topLeading) {
                 if model.customInstructions.isEmpty {
@@ -1791,6 +2021,206 @@ struct InlineSettingsView: View {
             .controlSize(.mini)
             .tint(Tokens.text2)
         }
+    }
+
+    // MARK: - System permissions
+
+    /// The protected capabilities Notchi currently consumes. Keeping the list in
+    /// General makes the system's invisible TCC state explicit, and the trailing
+    /// action gives every missing permission a recovery path in the same place.
+    private var permissionsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Button {
+                withAnimation(.easeOut(duration: 0.16)) { permissionsSectionOpen.toggle() }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "chevron.right")
+                        .font(.sf(9, weight: .semibold))
+                        .rotationEffect(.degrees(permissionsSectionOpen ? 90 : 0))
+                    Text(L("permissions.title"))
+                        .font(.sf(12, weight: .medium))
+                }
+                .foregroundStyle(Tokens.text3)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if permissionsSectionOpen {
+                VStack(alignment: .leading, spacing: 9) {
+                    permissionRow(label: L("permissions.reminders"),
+                                  status: remindersPermission) {
+                        requestRemindersPermission()
+                    }
+                    permissionRow(label: L("permissions.notes"),
+                                  status: notesPermission) {
+                        requestNotesPermission()
+                    }
+                    permissionRow(label: L("permissions.notifications"),
+                                  status: notificationsPermission) {
+                        requestNotificationsPermission()
+                    }
+                }
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .clipped()
+        .onAppear { refreshPermissions() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            refreshPermissions()
+        }
+    }
+
+    private func permissionRow(label: String,
+                               status: SettingsPermissionStatus,
+                               action: @escaping () -> Void) -> some View {
+        HStack(spacing: 12) {
+            Text(label)
+                .font(.sf(13, weight: .medium))
+                .foregroundStyle(Tokens.text2)
+                .lineLimit(1)
+            Spacer(minLength: 12)
+            PermissionStatusPill(status: status, action: action)
+        }
+    }
+
+    private func refreshPermissions() {
+        remindersPermission = Self.remindersStatus()
+
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            let status = Self.notificationsStatus(settings.authorizationStatus)
+            Task { @MainActor in notificationsPermission = status }
+        }
+
+        refreshNotesPermission()
+    }
+
+    private static func remindersStatus() -> SettingsPermissionStatus {
+        switch EKEventStore.authorizationStatus(for: .reminder) {
+        case .authorized, .fullAccess: return .granted
+        case .notDetermined:           return .notDetermined
+        case .denied, .restricted:     return .denied
+        case .writeOnly:               return .denied
+        @unknown default:              return .unavailable
+        }
+    }
+
+    private static func notificationsStatus(
+        _ status: UNAuthorizationStatus
+    ) -> SettingsPermissionStatus {
+        switch status {
+        case .authorized, .provisional, .ephemeral: return .granted
+        case .notDetermined:                       return .notDetermined
+        case .denied:                              return .denied
+        @unknown default:                          return .unavailable
+        }
+    }
+
+    private func requestRemindersPermission() {
+        guard remindersPermission != .denied else {
+            openPrivacySettings("Privacy_Reminders")
+            return
+        }
+        remindersPermission = .checking
+        EKEventStore().requestFullAccessToReminders { _, _ in
+            Task { @MainActor in remindersPermission = Self.remindersStatus() }
+        }
+    }
+
+    private func requestNotificationsPermission() {
+        guard notificationsPermission != .denied else {
+            openSystemSettings("com.apple.Notifications-Settings.extension")
+            return
+        }
+        notificationsPermission = .checking
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in
+            UNUserNotificationCenter.current().getNotificationSettings { settings in
+                let status = Self.notificationsStatus(settings.authorizationStatus)
+                Task { @MainActor in notificationsPermission = status }
+            }
+        }
+    }
+
+    /// Apple Events is the one protected API without a public status query for a
+    /// dormant target. `AEDeterminePermission…` requires Notes to be running, so
+    /// launch it quietly (never activate it or open a window), then ask TCC for
+    /// the live state without prompting.
+    private func refreshNotesPermission() {
+        notesPermission = .checking
+        withRunningNotes { app in
+            guard let app else {
+                notesPermission = .unavailable
+                return
+            }
+            determineNotesPermission(for: app, ask: false)
+        }
+    }
+
+    private func requestNotesPermission() {
+        guard notesPermission != .denied else {
+            openPrivacySettings("Privacy_Automation")
+            return
+        }
+        notesPermission = .checking
+        withRunningNotes { app in
+            guard let app else {
+                notesPermission = .unavailable
+                return
+            }
+            determineNotesPermission(for: app, ask: true)
+        }
+    }
+
+    /// Supply a running Notes process without bringing it to the foreground.
+    /// Existing instances are reused; otherwise the app is launched without
+    /// activation because the AE permission API only accepts a live target.
+    private func withRunningNotes(_ completion: @escaping (NSRunningApplication?) -> Void) {
+        if let running = NSRunningApplication.runningApplications(
+            withBundleIdentifier: "com.apple.Notes").first {
+            completion(running)
+            return
+        }
+        guard let url = NSWorkspace.shared.urlForApplication(
+            withBundleIdentifier: "com.apple.Notes") else {
+            completion(nil)
+            return
+        }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = false
+        configuration.addsToRecentItems = false
+        NSWorkspace.shared.openApplication(at: url, configuration: configuration) { app, _ in
+            Task { @MainActor in completion(app) }
+        }
+    }
+
+    /// This call can block behind the secure consent sheet, so it always runs off
+    /// the main thread. The result is then translated back onto the view state.
+    private func determineNotesPermission(for app: NSRunningApplication, ask: Bool) {
+        let pid = app.processIdentifier
+        DispatchQueue.global(qos: .userInitiated).async {
+            let target = NSAppleEventDescriptor(processIdentifier: pid)
+            let result = AEDeterminePermissionToAutomateTarget(
+                target.aeDesc,
+                AEEventClass(typeWildCard),
+                AEEventID(typeWildCard),
+                ask)
+            let status: SettingsPermissionStatus
+            switch result {
+            case noErr:                              status = .granted
+            case OSStatus(errAEEventNotPermitted):  status = .denied
+            case OSStatus(errAEEventWouldRequireUserConsent): status = .notDetermined
+            default:                                 status = .unavailable
+            }
+            Task { @MainActor in notesPermission = status }
+        }
+    }
+
+    private func openPrivacySettings(_ anchor: String) {
+        openSystemSettings("com.apple.preference.security?\(anchor)")
+    }
+
+    private func openSystemSettings(_ pane: String) {
+        guard let url = URL(string: "x-apple.systempreferences:\(pane)") else { return }
+        NSWorkspace.shared.open(url)
     }
 
     /// Whether the island tucks away while a full-screen app covers its screen.
@@ -1963,109 +2393,6 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// The global summon shortcut. The chip shows the current trigger — the
-    /// default reads as ⌥⌥ (double-tap ⌥). Click it to record a chord instead; the
-    /// adjacent menu toggles it off (hover-only summon) or resets to double-tap ⌥.
-    /// A rejected chord (no modifier, or a reserved combo) surfaces a one-line hint
-    /// rather than silently doing nothing.
-    private var shortcutRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            settingRow(label: L("general.shortcut")) {
-                HStack(alignment: .center, spacing: 6) {
-                    Button(action: toggleRecording) {
-                        Text(recordingHotKey
-                             ? L("general.shortcut.recording")
-                             : (summonHotKey.enabled ? summonHotKey.displayString
-                                                     : L("general.shortcut.off")))
-                            .font(.sf(13, weight: recordingHotKey ? .semibold : .regular))
-                            .foregroundStyle(recordingHotKey ? Tokens.text1 : Tokens.text2)
-                            .frame(minWidth: 64)
-                            .padding(.horizontal, 11)
-                            .frame(height: 30)
-                            .background(
-                                RoundedRectangle(cornerRadius: 9)
-                                    .fill(.white.opacity(recordingHotKey ? 0.12 : 0.06))
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 9)
-                                    .strokeBorder(
-                                        .white.opacity(recordingHotKey ? 0.45 : 0.12),
-                                        lineWidth: recordingHotKey ? 1 : 0.5
-                                    )
-                            )
-                            .contentShape(RoundedRectangle(cornerRadius: 9))
-                    }
-                    .buttonStyle(.plain)
-
-                    GlassMenu(title: "") {
-                        Button(L("general.shortcut.reset")) { resetSummonHotKey() }
-                        Button(L("general.shortcut.disable")) { disableSummonHotKey() }
-                    }
-                    // Pin to the chip's height: SwiftUI's `Menu` chrome otherwise
-                    // makes the control a hair taller than its 30pt label, so it
-                    // sat misaligned next to the shortcut chip.
-                    .frame(height: 30)
-                    .fixedSize()
-                }
-            }
-            if let hint = hotKeyHint {
-                Text(hint)
-                    .font(.sf(11))
-                    .foregroundStyle(Tokens.text3)
-                    .padding(.leading, 76)
-            }
-        }
-        // The recorder grabs the next chord via a local event monitor; tear it
-        // down if the view goes away mid-recording so it never leaks.
-        .background(HotKeyRecorder(active: recordingHotKey, onCapture: captureChord))
-    }
-
-    private func toggleRecording() {
-        hotKeyHint = nil
-        recordingHotKey.toggle()
-    }
-
-    /// Validate and commit a recorded chord. Requires a "real" modifier (⌘/⌥/⌃) —
-    /// a bare key or shift-only chord would fire far too easily — and refuses the
-    /// ⌘, that already opens Settings.
-    private func captureChord(keyCode: UInt32, flags: NSEvent.ModifierFlags) {
-        let mods = SummonHotKey.carbonModifiers(from: flags)
-        let realModifierMask = UInt32(cmdKey) | UInt32(optionKey) | UInt32(controlKey)
-        let hasRealModifier = (mods & realModifierMask) != 0
-        guard hasRealModifier else {
-            hotKeyHint = L("general.shortcut.needModifier")
-            return
-        }
-        // Don't let the user shadow ⌘, (opens Settings).
-        if keyCode == UInt32(kVK_ANSI_Comma), mods == UInt32(cmdKey) {
-            hotKeyHint = L("general.shortcut.reserved")
-            return
-        }
-        recordingHotKey = false
-        hotKeyHint = nil
-        commitSummonHotKey(SummonHotKey(keyCode: keyCode, modifiers: mods, enabled: true))
-    }
-
-    private func resetSummonHotKey() {
-        recordingHotKey = false
-        hotKeyHint = nil
-        commitSummonHotKey(.defaultConfig)
-    }
-
-    private func disableSummonHotKey() {
-        recordingHotKey = false
-        hotKeyHint = nil
-        var off = summonHotKey
-        off.enabled = false
-        commitSummonHotKey(off)
-    }
-
-    private func commitSummonHotKey(_ newValue: SummonHotKey) {
-        summonHotKey = newValue
-        SummonHotKey.current = newValue
-        NotificationCenter.default.post(name: .summonHotKeyChanged, object: nil)
-    }
-
     /// The interface language. `System` follows the Mac; the explicit picks
     /// (English / 简体中文 / 繁體中文 / 日本語 / 한국어) each named in their own
     /// script. Switching
@@ -2117,22 +2444,9 @@ struct InlineSettingsView: View {
 
     // MARK: - Shortcuts
 
-    /// Every chord the app answers to, in one read-only reference — the "help"
-    /// the panel never had. Grouped in the order you meet them (summon it, type
-    /// into it, act on the answer, move the panel around) rather than
-    /// alphabetically, so the list doubles as a tour of what the app can do.
-    ///
-    /// A sub-page under About rather than a sidebar category: it's a thing you
-    /// consult once, not a place you keep settings, so it earns a row you enter
-    /// (About → Shortcuts) instead of a permanent column entry. The "…" menu's
-    /// keyboard-shortcuts row still deep-links straight here.
-    ///
-    /// Only the first row is live: it prints whatever summon chord is currently
-    /// recorded, because that one is user-editable over in General.
-    /// Every other chord is fixed in `ContentView`'s key catcher (and
-    /// `PromptField`'s key handlers), and these strings are the only place they
-    /// are written down for the user — a chord changed there has to change here
-    /// too, or the reference starts lying.
+    /// One first-class settings category for every keyboard control. Product
+    /// actions are editable in place; text-field conventions remain read-only so
+    /// Return, arrows, paste and `/` continue to behave predictably.
     ///
     /// Chords that do exactly what every Mac app does with them — ⌘, for
     /// Settings, ⌘W to close a window, ⎋ to back out — are deliberately left
@@ -2142,35 +2456,14 @@ struct InlineSettingsView: View {
     private var shortcutsSection: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                shortcutGroup(L("shortcuts.group.summon"), [
-                    // The one live row: whatever chord is recorded, or nothing to
-                    // draw when summoning is switched off (an "Off" word inside a
-                    // keycap would read as a key you can press).
-                    .init(L("shortcuts.summon"),
-                          summonHotKey.enabled ? [summonHotKey.displayString] : [],
-                          note: summonHotKey.enabled ? nil : L("general.shortcut.off")),
-                ])
-                shortcutGroup(L("shortcuts.group.prompt"), [
-                    .init(L("shortcuts.send"), ["↵"]),
-                    .init(L("shortcuts.sendOther"), ["⌘↵"]),
-                    .init(L("shortcuts.cycleIntent"), ["⇥"]),
-                    .init(L("shortcuts.bucket"), ["⇧⇥"]),
-                    .init(L("shortcuts.recall"), ["↑", "↓"]),
-                    .init(L("shortcuts.slash"), ["/"]),
-                    .init(L("shortcuts.pasteImage"), ["⌘V"]),
-                ])
-                shortcutGroup(L("shortcuts.group.answer"), [
-                    .init(L("shortcuts.copyAnswer"), ["⌘C"]),
-                    .init(L("shortcuts.regenerate"), ["⌘R"]),
-                    .init(L("shortcuts.pin"), ["⌘P", "⌘D"]),
-                    .init(L("shortcuts.newChat"), ["⌘N"]),
-                    .init(L("shortcuts.back"), ["←"]),
-                ])
-                shortcutGroup(L("shortcuts.group.panel"), [
-                    .init(L("shortcuts.filter"), ["⌘F"]),
-                    .init(L("shortcuts.picker"), ["⇧⌘I"]),
-                    .init(L("shortcuts.detach"), ["⌃⇧="]),
-                ])
+                promptShortcutsGroup
+                ForEach(Array(AppShortcutReference.groups(
+                    summonHotKey: summonHotKey,
+                    shortcuts: appShortcuts
+                ).enumerated()),
+                        id: \.offset) { _, group in
+                    shortcutGroup(group.title, group.entries)
+                }
             }
             // Breathing room each taper falls across, so the first / last group
             // rests outside the gradient at full strength (the shared fade
@@ -2186,29 +2479,177 @@ struct InlineSettingsView: View {
         // Both edges taper: rows leaving under the back pill dissolve exactly the
         // way rows leaving at the bottom do, instead of hard-cutting mid-glyph.
         .scrollEdgeFade(top: true, bottom: true, topFade: 24, bottomFade: 32)
+        // One monitor serves every row. Switching chips changes only the target;
+        // leaving the pane dismantles the monitor automatically.
+        .background(HotKeyRecorder(active: recordingShortcut != nil,
+                                   onCapture: captureShortcut,
+                                   onCancel: { recordingShortcut = nil }))
+        // Leaving the pane ends recording outright. The armed target used to
+        // survive in `@State` while the monitor was dismantled, so coming back
+        // silently re-armed the old row and the next chord landed on it.
+        .onDisappear { recordingShortcut = nil }
+        // Chat can rebind any of these too (`manage_app_settings`). Re-read the
+        // stores when it does, so the pane never shows a binding that is no
+        // longer the one the app is registering.
+        .onReceive(NotificationCenter.default.publisher(for: .summonHotKeyChanged)) { _ in
+            summonHotKey = .current
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .appShortcutsChanged)) { _ in
+            appShortcuts = AppShortcutStore.current
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .promptShortcutsChanged)) { _ in
+            promptShortcuts = PromptShortcutStore.current
+        }
     }
 
-    /// One row of the reference: what it does, and the chord(s) that do it. More
-    /// than one chord means genuine alternatives (⌘P *or* ⌘D), joined by "or"
-    /// rather than stacked — the same way the system's own shortcut sheets read.
-    private struct ShortcutEntry {
-        let label: String
-        let chords: [String]
-        /// Shown in place of the keycaps when there's no chord to draw (summoning
-        /// switched off).
-        let note: String?
+    /// The minimal editor for selection-driven Chat shortcuts: one prompt field,
+    /// one global chord, and delete. There is no separate name because the prompt
+    /// itself is the only thing the binding needs to say.
+    private var promptShortcutsGroup: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Text(L("shortcuts.promptAction"))
+                    .font(.sf(12.5, weight: .semibold))
+                    .foregroundStyle(Tokens.text1)
+                Spacer(minLength: 8)
+                Button {
+                    let binding = PromptShortcut()
+                    withAnimation(.easeOut(duration: 0.16)) {
+                        promptShortcuts.append(binding)
+                    }
+                    PromptShortcutStore.save(promptShortcuts)
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.sf(10.5, weight: .semibold))
+                        .foregroundStyle(Tokens.text2)
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(ShortcutChipStyle())
+                .help(L("shortcuts.promptAction.add"))
+            }
+            .padding(.bottom, promptShortcuts.isEmpty ? 0 : 3)
 
-        init(_ label: String, _ chords: [String], note: String? = nil) {
-            self.label = label
-            self.chords = chords
-            self.note = note
+            if promptShortcuts.isEmpty {
+                Text(L("shortcuts.promptAction.empty"))
+                    .font(.sf(11.5))
+                    .foregroundStyle(Tokens.text4)
+                    .padding(.top, 5)
+            } else {
+                ForEach(Array(promptShortcuts.enumerated()), id: \.element.id) { index, binding in
+                    if index > 0 {
+                        Rectangle()
+                            .fill(.white.opacity(0.06))
+                            .frame(height: 0.5)
+                    }
+                    promptShortcutRow(binding)
+                        .padding(.vertical, 7)
+                }
+            }
         }
+    }
+
+    private func promptShortcutRow(_ binding: PromptShortcut) -> some View {
+        let target = EditableShortcut.prompt(binding.id)
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 7) {
+                ZStack(alignment: .leading) {
+                    if binding.prompt.isEmpty {
+                        Text(L("shortcuts.promptAction.placeholder"))
+                            .font(.sf(12.5))
+                            .foregroundStyle(Tokens.text4)
+                            .allowsHitTesting(false)
+                    }
+                    TextField("", text: promptBinding(for: binding.id))
+                        .textFieldStyle(.plain)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .font(.sf(12.5))
+                        .foregroundStyle(Tokens.text1)
+                }
+                .padding(.horizontal, 9)
+                .frame(minHeight: 28)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.06)))
+                .overlay(RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(.white.opacity(0.11), lineWidth: 0.5))
+
+                // Delete sits inboard of the chord so every trailing chip in the
+                // pane — editable or read-only — lands on the same right edge.
+                Button { deletePromptShortcut(binding.id) } label: {
+                    Image(systemName: "trash")
+                        .font(.sf(10.5, weight: .medium))
+                        .foregroundStyle(Tokens.text4)
+                        .frame(width: 24, height: 28)
+                }
+                .buttonStyle(.plain)
+                .opacity(hoveredPromptShortcutID == binding.id ? 1 : 0)
+                .allowsHitTesting(hoveredPromptShortcutID == binding.id)
+                .help(L("shortcuts.promptAction.delete"))
+
+                Button {
+                    shortcutHints[target] = nil
+                    recordingShortcut = recordingShortcut == target ? nil : target
+                } label: {
+                    Text(recordingShortcut == target
+                         ? L("general.shortcut.recording")
+                         : (binding.shortcut?.displayString ?? L("shortcuts.promptAction.set")))
+                        .font(.sf(11.5, weight: recordingShortcut == target ? .semibold : .medium))
+                        .foregroundStyle(recordingShortcut == target ? Tokens.text1 : Tokens.text2)
+                        .padding(.horizontal, 10)
+                        .frame(minWidth: 48, minHeight: 28)
+                }
+                .buttonStyle(ShortcutChipStyle(active: recordingShortcut == target))
+            }
+            if let hint = shortcutHints[target] {
+                Text(hint)
+                    .font(.sf(11))
+                    .foregroundStyle(Tokens.text3)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+        }
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: Tokens.hoverFade)) {
+                if hovering {
+                    hoveredPromptShortcutID = binding.id
+                } else if hoveredPromptShortcutID == binding.id {
+                    hoveredPromptShortcutID = nil
+                }
+            }
+        }
+    }
+
+    private func promptBinding(for id: UUID) -> Binding<String> {
+        Binding(
+            get: { promptShortcuts.first(where: { $0.id == id })?.prompt ?? "" },
+            set: { value in
+                guard let index = promptShortcuts.firstIndex(where: { $0.id == id }) else { return }
+                let wasReady = promptShortcuts[index].isReady
+                promptShortcuts[index].prompt = value
+                model.noteUserTyping()
+                PromptShortcutStore.save(promptShortcuts)
+                if wasReady != promptShortcuts[index].isReady {
+                    NotificationCenter.default.post(name: .promptShortcutsChanged, object: nil)
+                }
+            }
+        )
+    }
+
+    private func deletePromptShortcut(_ id: UUID) {
+        let target = EditableShortcut.prompt(id)
+        if recordingShortcut == target { recordingShortcut = nil }
+        shortcutHints[target] = nil
+        withAnimation(.easeOut(duration: 0.16)) {
+            promptShortcuts.removeAll { $0.id == id }
+        }
+        PromptShortcutStore.save(promptShortcuts)
+        NotificationCenter.default.post(name: .promptShortcutsChanged, object: nil)
     }
 
     /// One titled block. The description reads down the left edge and the keycaps
     /// hang off the right, with a hairline between rows — a table, not a list of
     /// sentences, so the eye can drop straight to the chord it came for.
-    private func shortcutGroup(_ title: String, _ rows: [ShortcutEntry]) -> some View {
+    private func shortcutGroup(_ title: String, _ rows: [AppShortcutReference.Entry]) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             Text(title)
                 .font(.sf(12.5, weight: .semibold))
@@ -2220,36 +2661,216 @@ struct InlineSettingsView: View {
                         .fill(.white.opacity(0.06))
                         .frame(height: 0.5)
                 }
-                HStack(spacing: 12) {
-                    Text(row.label)
-                        .font(.sf(12.5))
-                        .foregroundStyle(Tokens.text2)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer(minLength: 12)
-                    if let note = row.note {
-                        Text(note)
-                            .font(.sf(12))
-                            .foregroundStyle(Tokens.text4)
-                    } else {
-                        HStack(spacing: 6) {
-                            ForEach(Array(row.chords.enumerated()), id: \.offset) { i, chord in
-                                if i > 0 {
-                                    Text(L("shortcuts.or"))
-                                        .font(.sf(11))
-                                        .foregroundStyle(Tokens.text4)
-                                }
-                                HStack(spacing: 3) {
-                                    ForEach(Array(Self.keyCaps(chord).enumerated()), id: \.offset) { _, cap in
-                                        keyCap(cap)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 12) {
+                        Text(row.label)
+                            .font(.sf(12.5))
+                            .foregroundStyle(row.editable == nil ? Tokens.text3 : Tokens.text2)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 12)
+                        if let editable = row.editable {
+                            editableShortcutControl(editable, row: row)
+                        } else if let note = row.note {
+                            Text(note)
+                                .font(.sf(12))
+                                .foregroundStyle(Tokens.text4)
+                        } else {
+                            HStack(spacing: 6) {
+                                ForEach(Array(row.chords.enumerated()), id: \.offset) { i, chord in
+                                    if i > 0 {
+                                        Text(L("shortcuts.or"))
+                                            .font(.sf(11))
+                                            .foregroundStyle(Tokens.text4)
+                                    }
+                                    HStack(spacing: 3) {
+                                        ForEach(Array(Self.keyCaps(chord).enumerated()), id: \.offset) { _, cap in
+                                            keyCap(cap, readOnly: true)
+                                        }
                                     }
                                 }
                             }
                         }
                     }
+                    if let editable = row.editable, let hint = shortcutHints[editable] {
+                        Text(hint)
+                            .font(.sf(11))
+                            .foregroundStyle(Tokens.text3)
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                    }
                 }
                 .padding(.vertical, 7)
+                .contentShape(Rectangle())
+                .onHover { hovering in
+                    guard let editable = row.editable else { return }
+                    withAnimation(.easeOut(duration: Tokens.hoverFade)) {
+                        if hovering {
+                            hoveredShortcutRow = editable
+                        } else if hoveredShortcutRow == editable {
+                            hoveredShortcutRow = nil
+                        }
+                    }
+                }
             }
         }
+    }
+
+    @ViewBuilder
+    private func editableShortcutControl(
+        _ target: EditableShortcut,
+        row: AppShortcutReference.Entry
+    ) -> some View {
+        HStack(spacing: 5) {
+            // Reset is inboard of the chord and only surfaces on hover: the chord
+            // chip keeps the same right edge as every read-only row's keycaps,
+            // and a resting row never carries a second control.
+            if shortcutIsModified(target) {
+                Button {
+                    resetShortcut(target)
+                } label: {
+                    Image(systemName: "arrow.counterclockwise")
+                        .font(.sf(10.5, weight: .semibold))
+                        .foregroundStyle(Tokens.text3)
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(ShortcutChipStyle(rest: 0.055, restStroke: 0.1))
+                .help(L("shortcuts.reset"))
+                .opacity(hoveredShortcutRow == target ? 1 : 0)
+                .allowsHitTesting(hoveredShortcutRow == target)
+                .transition(.scale(scale: 0.72).combined(with: .opacity))
+            }
+
+            Button {
+                shortcutHints[target] = nil
+                recordingShortcut = recordingShortcut == target ? nil : target
+            } label: {
+                Text(recordingShortcut == target
+                     ? L("general.shortcut.recording")
+                     : (row.note ?? row.chords.first ?? L("general.shortcut.off")))
+                    .font(.sf(11.5, weight: recordingShortcut == target ? .semibold : .medium))
+                    .foregroundStyle(recordingShortcut == target ? Tokens.text1 : Tokens.text2)
+                    .padding(.horizontal, 10)
+                    .frame(minWidth: 48, minHeight: 24)
+            }
+            .buttonStyle(ShortcutChipStyle(active: recordingShortcut == target))
+            // Turning off the global summon remains available without leaving a
+            // permanent trailing control in every default row.
+            .contextMenu {
+                if target == .summon, summonHotKey.enabled {
+                    Button(L("general.shortcut.disable")) { disableSummonHotKey() }
+                }
+            }
+        }
+        .animation(.easeOut(duration: 0.16), value: shortcutIsModified(target))
+    }
+
+    private func shortcutIsModified(_ target: EditableShortcut) -> Bool {
+        switch target {
+        case .summon:
+            return summonHotKey != .defaultConfig
+        case .action(let action):
+            return (appShortcuts[action] ?? action.defaultChord) != action.defaultChord
+        case .prompt:
+            return false
+        }
+    }
+
+    /// Recorder validation is deliberately shared for summon and local actions:
+    /// one real modifier is required, and a chord may have exactly one owner.
+    private func captureShortcut(keyCode: UInt32, flags: NSEvent.ModifierFlags) {
+        guard let target = recordingShortcut else { return }
+        let chord = ShortcutChord(keyCode: keyCode,
+                                  modifiers: SummonHotKey.carbonModifiers(from: flags))
+        let realModifierMask = UInt32(cmdKey) | UInt32(optionKey) | UInt32(controlKey)
+        guard chord.modifiers & realModifierMask != 0 else {
+            shortcutHints[target] = L("general.shortcut.needModifier")
+            return
+        }
+
+        let owner: String? = switch target {
+        case .summon:
+            AppShortcutStore.conflictOwner(for: chord, editingSummon: true)
+        case .action(let action):
+            AppShortcutStore.conflictOwner(for: chord, editingAction: action)
+        case .prompt:
+            AppShortcutStore.conflictOwner(for: chord)
+        }
+        if let owner {
+            shortcutHints[target] = L("shortcuts.conflict.usedBy", owner)
+            return
+        }
+        if case .prompt(let id) = target,
+           promptShortcuts.contains(where: { $0.id != id && $0.shortcut == chord }) {
+            shortcutHints[target] = L("shortcuts.conflict.usedBy",
+                                      L("shortcuts.promptAction"))
+            return
+        }
+
+        let unchangedGlobal: Bool = switch target {
+        case .summon:
+            summonHotKey.enabled && !summonHotKey.isDoubleTap
+                && summonHotKey.keyCode == chord.keyCode
+                && summonHotKey.modifiers == chord.modifiers
+        case .prompt(let id):
+            promptShortcuts.first(where: { $0.id == id })?.shortcut == chord
+        case .action:
+            true
+        }
+        let needsGlobalProbe: Bool = switch target {
+        case .summon, .prompt: true
+        case .action: false
+        }
+        if needsGlobalProbe, !unchangedGlobal,
+           !HotKey.isAvailable(keyCode: chord.keyCode,
+                               modifiers: chord.modifiers) {
+            shortcutHints[target] = L("shortcuts.conflict.usedBy",
+                                      L("shortcuts.reserved.system"))
+            return
+        }
+
+        shortcutHints[target] = nil
+        recordingShortcut = nil
+        switch target {
+        case .summon:
+            commitSummonHotKey(SummonHotKey(keyCode: chord.keyCode,
+                                            modifiers: chord.modifiers,
+                                            enabled: true))
+        case .action(let action):
+            AppShortcutStore.set(chord, for: action)
+            appShortcuts[action] = chord
+        case .prompt(let id):
+            guard let index = promptShortcuts.firstIndex(where: { $0.id == id }) else { return }
+            promptShortcuts[index].shortcut = chord
+            PromptShortcutStore.save(promptShortcuts)
+            NotificationCenter.default.post(name: .promptShortcutsChanged, object: nil)
+        }
+    }
+
+    private func resetShortcut(_ target: EditableShortcut) {
+        recordingShortcut = nil
+        shortcutHints[target] = nil
+        switch target {
+        case .summon:
+            commitSummonHotKey(.defaultConfig)
+        case .action(let action):
+            AppShortcutStore.reset(action)
+            appShortcuts[action] = action.defaultChord
+        case .prompt:
+            break
+        }
+    }
+
+    private func disableSummonHotKey() {
+        recordingShortcut = nil
+        shortcutHints[.summon] = nil
+        var off = summonHotKey
+        off.enabled = false
+        commitSummonHotKey(off)
+    }
+
+    private func commitSummonHotKey(_ newValue: SummonHotKey) {
+        summonHotKey = newValue
+        SummonHotKey.current = newValue
+        NotificationCenter.default.post(name: .summonHotKeyChanged, object: nil)
     }
 
     /// Split a written chord ("⇧⌘I", "⌘,") into the individual caps a keyboard
@@ -2271,19 +2892,23 @@ struct InlineSettingsView: View {
     /// One keycap. Deliberately the same skin as the summon recorder's chip in
     /// General — that chip *is* a keycap showing a chord, so the reference's caps
     /// and the editable one read as the same object at two sizes.
-    private func keyCap(_ text: String) -> some View {
+    private func keyCap(_ text: String, readOnly: Bool = false) -> some View {
         Text(text)
             .font(.sf(11, weight: .medium))
-            .foregroundStyle(Tokens.text2)
-            .padding(.horizontal, 6)
+            .foregroundStyle(readOnly ? Tokens.text4 : Tokens.text2)
+            .padding(.horizontal, 7)
             .frame(minWidth: 24, minHeight: 22)
             .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(.white.opacity(0.07))
+                Capsule()
+                    .fill(.white.opacity(readOnly ? 0.025 : 0.07))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .strokeBorder(.white.opacity(0.13), lineWidth: 0.5)
+                Capsule()
+                    .strokeBorder(
+                        .white.opacity(readOnly ? 0.075 : 0.13),
+                        style: StrokeStyle(lineWidth: 0.5,
+                                           dash: readOnly ? [2, 2] : [])
+                    )
             )
     }
 
@@ -2344,6 +2969,16 @@ struct InlineSettingsView: View {
             // 2 — Where else to go: the pages that open here, then the rail of
             // places that leave.
             aboutLinks
+
+            // 3 — Attribution. Not one of the things you *do* from About, so it
+            // sits below the rail as a footnote — the last line of the pane, in
+            // the place a colophon belongs.
+            AboutFootnoteLink(title: L("about.licenses")) {
+                withAnimation(.easeOut(duration: 0.16)) {
+                    section = .licenses
+                }
+            }
+            .padding(.top, 2)
         }
     }
 
@@ -2447,104 +3082,232 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// The links, as the two grouped lists macOS itself would draw: full-width
-    /// rows in an inset card, a hairline between them, and a trailing mark
-    /// saying where the row goes — `›` for the pages that open inside the
-    /// panel, `↗` for the ones that hand off to a browser or a mail compose.
-    /// The old shape (tiny captions over rows of bare text buttons) read like a
-    /// web footer: nothing was tappable-looking, nothing lined up, and the one
-    /// row that drilled deeper looked like the ones that left the app.
-    ///
-    /// No leading glyphs. Six one-word rows don't need illustrating, and the
-    /// only symbols that fit them are the cutesy kind (a sparkle for release
-    /// notes, a raised hand for a privacy page) — the word already says it
-    /// better than any of them.
-    ///
-    /// Only the pages that open *here* earn a row. Everything that leaves for a
-    /// browser or a mail compose is a place you visit once, and four of them in
-    /// a second card cost more height than the whole identity block above — so
-    /// they collapse into one rail of hairline-separated links, the same shape
-    /// the version and its update action already make one line up.
+    /// GitHub and X lead the About actions. The four quieter product/support
+    /// destinations remain directly visible underneath — no nested menu and no
+    /// trip back to the prompt's More menu.
     private var aboutLinks: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            aboutCard([
-                // "What's New" lives here as the fixed, always-available way into
-                // the notes, independent of the once-per-version idle cue.
-                AboutRow(title: L("about.whatsNew"), leaves: false) {
+        VStack(spacing: 0) {
+            HStack(spacing: 9) {
+                AboutSocialButton(kind: .github,
+                                  title: L("about.starGithub")) {
+                    NSWorkspace.shared.open(URL(string: "https://github.com/\(UpdaterService.repo)")!)
+                }
+                AboutSocialButton(kind: .x,
+                                  title: L("about.followX")) {
+                    NSWorkspace.shared.open(URL(string: "https://x.com/cyrusss_7")!)
+                }
+            }
+
+            VStack(spacing: 0) {
+                AboutUtilityButton(title: L("about.whatsNew"), leaves: false) {
                     withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                         model.openWhatsNew(on: nil)
                     }
-                },
-                AboutRow(title: L("sidebar.shortcuts"), leaves: false) {
-                    withAnimation(.easeOut(duration: 0.16)) { section = .shortcuts }
-                },
-                // The first-run intro, on demand. The ⓘ carries the music credit
-                // its CC BY 4.0 licence asks for — attached to the row that
-                // actually plays the music, rather than as a paragraph below.
-                AboutRow(title: L("about.replayIntro"), leaves: false,
-                         info: L("about.music")) {
-                    replayIntro()
-                },
-            ])
+                }
 
-            aboutRail([
-                AboutRow(title: L("about.github"), leaves: true) {
-                    NSWorkspace.shared.open(URL(string: "https://github.com/\(UpdaterService.repo)")!)
-                },
-                // The maker, between the project's own pages and the two support
-                // links — a credit, not a destination the app needs.
-                AboutRow(title: "X", leaves: true) {
-                    NSWorkspace.shared.open(URL(string: "https://x.com/cyrusss_7")!)
-                },
-                AboutRow(title: L("about.privacy"), leaves: true) {
+                aboutUtilitySeparator
+
+                AboutUtilityButton(title: L("about.replayIntro"), leaves: false) {
+                    replayIntro()
+                }
+
+                aboutUtilitySeparator
+
+                AboutUtilityButton(title: L("about.privacy"), leaves: true) {
                     NSWorkspace.shared.open(URL(string: "https://www.notch.website/privacy")!)
-                },
-                AboutRow(title: L("about.feedback"), leaves: true) {
-                    let mailto = URL(string: "mailto:\(Self.feedbackEmail)?subject=Notch%20Feedback")!
-                    // Route the compose to the desktop Mail.app specifically —
-                    // a plain mailto: hands off to whatever the default handler
-                    // is (often web Gmail / nothing), which isn't what we want.
-                    // Fall back to the default handler only if Mail is absent.
-                    if let mail = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.mail") {
-                        NSWorkspace.shared.open([mailto], withApplicationAt: mail, configuration: NSWorkspace.OpenConfiguration())
-                    } else {
-                        NSWorkspace.shared.open(mailto)
-                    }
-                },
-            ])
+                }
+
+                aboutUtilitySeparator
+
+                AboutUtilityButton(title: L("about.feedback"), leaves: true) {
+                    NSWorkspace.shared.open(URL(string: "https://github.com/\(UpdaterService.repo)/issues")!)
+                }
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .fill(.white.opacity(0.035))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .strokeBorder(.white.opacity(0.07), lineWidth: 0.5)
+                    .allowsHitTesting(false)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+            .padding(.top, 12)
         }
     }
 
-    /// The outbound links as one line. Aligned to the card labels above so it
-    /// reads as the block's own footing rather than something loose under it,
-    /// and separated by the identity row's hairline so the two rails in this
-    /// pane are visibly the same device.
-    private func aboutRail(_ items: [AboutRow]) -> some View {
-        HStack(spacing: 8) {
-            ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                if index > 0 {
-                    Rectangle()
-                        .fill(.white.opacity(0.12))
-                        .frame(width: 0.5, height: 10)
+    private var aboutUtilitySeparator: some View {
+        Rectangle()
+            .fill(.white.opacity(0.065))
+            .frame(height: 0.5)
+            .padding(.leading, 11)
+    }
+
+    /// Attribution stays on its own level instead of hiding behind the replay
+    /// button's hover help. This makes the bundled recording's author, source,
+    /// licence, and the fact that it was edited continuously visible.
+    private var licensesSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(L("about.music"))
+                .font(.sf(13, weight: .medium))
+                .foregroundStyle(Tokens.text1)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 12) {
+                aboutLink("classicals.de") {
+                    NSWorkspace.shared.open(URL(string: "https://www.classicals.de")!)
                 }
-                AboutRailLink(row: item)
+                aboutLink("CC BY 4.0") {
+                    NSWorkspace.shared.open(URL(string: "https://creativecommons.org/licenses/by/4.0/")!)
+                }
             }
         }
-        .padding(.horizontal, 12)
     }
 
-    /// One link on the rail. Quiet at rest, and it takes the label's own colour
-    /// on hover — the only affordance a bare word gets, so it has to be the same
-    /// one the rows use.
-    private struct AboutRailLink: View {
-        let row: AboutRow
+    private enum AboutSocialKind {
+        case github, x
+    }
+
+    /// The site's Star button translated to native SwiftUI: on hover the brand
+    /// mark exits through the top while the action glyph rises from below. X
+    /// uses the same grammar with a blue follow glyph, so the pair feels related
+    /// without adding decorative particles around either mark.
+    private struct AboutSocialButton: View {
+        let kind: AboutSocialKind
+        let title: String
+        let action: () -> Void
+
+        @State private var hovering = false
+
+        private var accent: Color {
+            kind == .github
+                ? Color(red: 245 / 255, green: 166 / 255, blue: 35 / 255)
+                : Color(red: 0.46, green: 0.72, blue: 1.00)
+        }
+
+        var body: some View {
+            Button(action: action) {
+                HStack(spacing: 9) {
+                    ZStack {
+                        brandMark
+                            .foregroundStyle(Tokens.text2)
+                            .opacity(hovering ? 0 : 1)
+                            .offset(y: hovering ? -13 : 0)
+                            .scaleEffect(hovering ? 0.8 : 1)
+
+                        Image(systemName: kind == .github ? "star.fill" : "person.crop.circle.badge.plus")
+                            .font(.system(size: kind == .github ? 13 : 14,
+                                          weight: .semibold))
+                            .foregroundStyle(accent)
+                            .opacity(hovering ? 1 : 0)
+                            .offset(y: hovering ? 0 : 13)
+                            .scaleEffect(hovering ? 1 : 0.8)
+
+                    }
+                    .frame(width: 17, height: 17)
+
+                    Text(title)
+                        .font(.sf(12, weight: .medium))
+                        .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
+                        .lineLimit(1)
+
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 13)
+                .frame(maxWidth: .infinity, minHeight: 36, maxHeight: 36)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(.white.opacity(hovering ? 0.075 : 0.04))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(.white.opacity(hovering ? 0.16 : 0.08), lineWidth: 0.5)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+            .buttonStyle(AboutSocialPressStyle())
+            .scaleEffect(hovering ? 1.02 : 1)
+            .onHover { hovering = $0 }
+            .animation(.easeInOut(duration: 0.2), value: hovering)
+            .animation(.spring(response: 0.3, dampingFraction: 0.72), value: hovering)
+        }
+
+        @ViewBuilder
+        private var brandMark: some View {
+            switch kind {
+            case .github:
+                Image("GitHubMark")
+                    .renderingMode(.template)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 16, height: 16)
+            case .x:
+                Image("XMark")
+                    .renderingMode(.template)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 14, height: 14)
+            }
+        }
+    }
+
+    private struct AboutSocialPressStyle: ButtonStyle {
+        func makeBody(configuration: Configuration) -> some View {
+            configuration.label
+                .scaleEffect(configuration.isPressed ? 0.96 : 1)
+                .animation(.spring(response: 0.22, dampingFraction: 0.68),
+                           value: configuration.isPressed)
+        }
+    }
+
+    /// One of the four secondary About destinations. They return to the original
+    /// one-action-per-row rhythm, grouped together underneath the social row.
+    private struct AboutUtilityButton: View {
+        let title: String
+        let leaves: Bool
+        let action: () -> Void
+
         @State private var hovering = false
 
         var body: some View {
-            Button(action: row.action) {
-                Text(row.title)
-                    .font(.sf(11.5, weight: .medium))
-                    .foregroundStyle(hovering ? Tokens.text2 : Tokens.text4)
+            Button(action: action) {
+                HStack(spacing: 8) {
+                    Text(title)
+                        .font(.sf(11.5, weight: .medium))
+                        .foregroundStyle(hovering ? Tokens.text1 : Tokens.text3)
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    Image(systemName: leaves ? "arrow.up.right" : "chevron.right")
+                        .font(.system(size: leaves ? 8.5 : 9, weight: .semibold))
+                        .foregroundStyle(Tokens.text4)
+                        .opacity(hovering ? 1 : 0.6)
+                }
+                .padding(.horizontal, 11)
+                .frame(maxWidth: .infinity, minHeight: 33, maxHeight: 33)
+                .background(Color.white.opacity(hovering ? 0.05 : 0))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
+        }
+    }
+
+    /// The colophon link under the rail: the rows' hover grammar (quiet text
+    /// brightening to text1) with none of their chrome — no row height, no
+    /// chevron — so it reads as a footnote rather than a fifth action.
+    private struct AboutFootnoteLink: View {
+        let title: String
+        let action: () -> Void
+
+        @State private var hovering = false
+
+        var body: some View {
+            Button(action: action) {
+                Text(title)
+                    .font(.sf(11, weight: .medium))
+                    .foregroundStyle(hovering ? Tokens.text1 : Tokens.text4)
                     .lineLimit(1)
                     .contentShape(Rectangle())
             }
@@ -2554,10 +3317,8 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// Play the first-run intro again: collapse the panel so the animation owns
-    /// the screen the way it does on a cold launch, then land back on the idle
-    /// prompt where it always lands. The once-ever flag is untouched — this is a
-    /// replay, not a reset.
+    /// Play the first-run intro again from About. The once-ever flag is left
+    /// untouched — this is an on-demand replay, not an onboarding reset.
     private func replayIntro() {
         let display = model.activeDisplay
         let screen = NSScreen.screens.first { $0.displayID == display } ?? NSScreen.main
@@ -2571,124 +3332,6 @@ struct InlineSettingsView: View {
                     model.openPanel(on: screen.displayID)
                 }
             }
-        }
-    }
-
-    /// One row of an About list: a label and the mark for where it goes.
-    /// `leaves` is the whole distinction — true hands off to another app (`↗`),
-    /// false pushes a page inside the panel (`›`).
-    private struct AboutRow: Identifiable {
-        let id = UUID()
-        let title: String
-        let leaves: Bool
-        /// An ⓘ before the trailing mark, carrying this text on hover. Only for
-        /// the fine print a row implies but shouldn't spell out — the intro's
-        /// CC BY 4.0 credit, which the licence needs readable but which reads as
-        /// noise sitting under the cards as a paragraph.
-        let info: String?
-        let action: () -> Void
-
-        init(title: String, leaves: Bool, info: String? = nil, action: @escaping () -> Void) {
-            self.title = title
-            self.leaves = leaves
-            self.info = info
-            self.action = action
-        }
-    }
-
-    /// One inset card of rows. A row's hover wash runs the full width and takes
-    /// the card's own corners at the ends — the way a grouped list highlights in
-    /// System Settings, rather than a floating pill inside a box. Separators are
-    /// inset to the label's left edge, the way a grouped table's are.
-    ///
-    /// The end rows shape their OWN wash instead of the card clipping the stack.
-    /// A `clipShape` here would be the simpler way to round those two washes, but
-    /// it also chops anything a row draws outside the card — which is exactly how
-    /// the ⓘ tooltip on the Replay-intro row lost its left half: the capsule was
-    /// correctly clamped inside the island, then clipped again at the card's own
-    /// left edge. Nothing inside a clip can escape it, so the clip has to go.
-    private static let aboutCardRadius: CGFloat = 12
-
-    private func aboutCard(_ rows: [AboutRow]) -> some View {
-        VStack(spacing: 0) {
-            ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
-                if index > 0 {
-                    Rectangle()
-                        .fill(.white.opacity(0.07))
-                        .frame(height: 0.5)
-                        .padding(.leading, 12)
-                }
-                AboutLinkRow(row: row,
-                             isFirst: index == 0,
-                             isLast: index == rows.count - 1)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: Self.aboutCardRadius, style: .continuous)
-                .fill(.white.opacity(0.04))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: Self.aboutCardRadius, style: .continuous)
-                .strokeBorder(.white.opacity(0.08), lineWidth: 0.5)
-        )
-    }
-
-    /// The row itself. Its own view because the hover wash needs local state,
-    /// and because every row in both cards has to be the exact same height and
-    /// column geometry for the list to read as a list.
-    private struct AboutLinkRow: View {
-        let row: AboutRow
-        /// Which end of the card this row sits at — the wash rounds the two
-        /// corners the card does there, and stays square everywhere else.
-        var isFirst = false
-        var isLast = false
-        @State private var hovering = false
-
-        private var washShape: UnevenRoundedRectangle {
-            let r = InlineSettingsView.aboutCardRadius
-            return UnevenRoundedRectangle(topLeadingRadius: isFirst ? r : 0,
-                                          bottomLeadingRadius: isLast ? r : 0,
-                                          bottomTrailingRadius: isLast ? r : 0,
-                                          topTrailingRadius: isFirst ? r : 0,
-                                          style: .continuous)
-        }
-
-        var body: some View {
-            Button(action: row.action) {
-                HStack(spacing: 9) {
-                    Text(row.title)
-                        .font(.sf(12.5, weight: .medium))
-                        .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
-                        .lineLimit(1)
-                    // The ⓘ sits with the label it annotates, not out on the
-                    // trailing rail where it would read as a second action. The
-                    // hint rides `notchTooltip` like every other one in the app —
-                    // AppKit's `.help` bubble never fires on this non-activating
-                    // panel, and wouldn't match the glass if it did.
-                    if let info = row.info {
-                        Image(systemName: "info.circle")
-                            .font(.system(size: 10.5, weight: .medium))
-                            .foregroundStyle(Tokens.text4)
-                            .notchTooltip(info)
-                    }
-                    Spacer(minLength: 12)
-                    // Fixed trailing column so `↗` and `›` — different glyph
-                    // widths — still end on the same rail down the right edge.
-                    Image(systemName: row.leaves ? "arrow.up.right" : "chevron.right")
-                        .font(.system(size: row.leaves ? 9.5 : 10, weight: .semibold))
-                        .foregroundStyle(Tokens.text4)
-                        .opacity(hovering ? 1 : 0.55)
-                        .frame(width: 11, alignment: .trailing)
-                }
-                .padding(.horizontal, 12)
-                .frame(height: 34)
-                .background(washShape.fill(.white.opacity(hovering ? 0.05 : 0)))
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .onHover { hovering = $0 }
-            .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
         }
     }
 
@@ -2866,6 +3509,38 @@ struct InlineSettingsView: View {
             try? await Task.sleep(nanoseconds: 1_800_000_000)
             withAnimation(.easeOut(duration: 0.3)) { saved = false }
         }
+    }
+}
+
+/// The trailing chips in the Shortcuts pane — chord recorders, reset, add. Fully
+/// rounded like every other affordance on the island (`PanelBackPill`), and they
+/// answer the pointer: wash and hairline brighten on hover, the same easeOut fade
+/// every hover on the panel uses. Recording keeps its own brighter, ringed state,
+/// which outranks hover so an armed chip never dims when the pointer leaves.
+private struct ShortcutChipStyle: ButtonStyle {
+    /// The armed / recording chip: brighter wash and a full-weight ring.
+    var active: Bool = false
+    /// Resting wash and hairline, for chips that sit quieter than a chord (reset).
+    var rest: Double = 0.07
+    var restStroke: Double = 0.13
+
+    @State private var hovering = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(
+                Capsule().fill(.white.opacity(
+                    active ? 0.12 : (hovering ? rest + 0.055 : rest)))
+            )
+            .overlay(
+                Capsule().strokeBorder(
+                    .white.opacity(active ? 0.45 : (hovering ? restStroke + 0.11 : restStroke)),
+                    lineWidth: active ? 1 : 0.5)
+            )
+            .contentShape(Capsule())
+            .opacity(configuration.isPressed ? 0.72 : 1)
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
     }
 }
 
@@ -3084,6 +3759,52 @@ private struct PickerCard<Content: View>: View {
     }
 }
 
+/// A miniature screen with a Dock strip along its bottom edge, for the Dock-icon
+/// picker: the "Shown" card lights this app's tile inside the strip, the "Hidden"
+/// card leaves the strip without it. Same drawing language as `MiniDisplay` so
+/// the two diagrams read as a family.
+private struct MiniDock: View {
+    let hasIcon: Bool
+
+    var body: some View {
+        VStack(spacing: 1) {
+            ZStack(alignment: .bottom) {
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(.white.opacity(0.08))
+                RoundedRectangle(cornerRadius: 3)
+                    .strokeBorder(.white.opacity(0.35), lineWidth: 1)
+                dock
+                    .padding(.bottom, 2)
+            }
+            .frame(width: 40, height: 23)
+            RoundedRectangle(cornerRadius: 1)
+                .fill(.white.opacity(0.35))
+                .frame(width: 46, height: 2)
+        }
+    }
+
+    private var dock: some View {
+        HStack(spacing: 2) {
+            tile(bright: false)
+            tile(bright: false)
+            if hasIcon { tile(bright: true) }
+            tile(bright: false)
+        }
+        .padding(.horizontal, 2.5)
+        .padding(.vertical, 1.5)
+        .background(
+            RoundedRectangle(cornerRadius: 2.5)
+                .fill(.white.opacity(0.16))
+        )
+    }
+
+    private func tile(bright: Bool) -> some View {
+        RoundedRectangle(cornerRadius: 1)
+            .fill(.white.opacity(bright ? 0.95 : 0.38))
+            .frame(width: 4, height: 4)
+    }
+}
+
 /// A miniature display glyph for the placement picker: a screen with a bright
 /// pill on its top edge when it carries a notch island, over a laptop deck or a
 /// monitor stand so the pair reads as built-in vs. external at a glance.
@@ -3140,66 +3861,20 @@ private struct MiniDisplay: View {
     }
 }
 
-/// A miniature screen with a Dock strip along its bottom edge, for the Dock-icon
-/// picker: the "Shown" card lights this app's tile inside the strip, the "Hidden"
-/// card leaves the strip without it. Same drawing language as `MiniDisplay` two
-/// rows up so the two diagrams read as a family.
-private struct MiniDock: View {
-    /// Whether the option being drawn puts this app in the Dock — the lit tile is
-    /// the whole point of the diagram.
-    let hasIcon: Bool
-
-    var body: some View {
-        VStack(spacing: 1) {
-            ZStack(alignment: .bottom) {
-                RoundedRectangle(cornerRadius: 3)
-                    .fill(.white.opacity(0.08))
-                RoundedRectangle(cornerRadius: 3)
-                    .strokeBorder(.white.opacity(0.35), lineWidth: 1)
-                dock
-                    .padding(.bottom, 2)
-            }
-            .frame(width: 40, height: 23)
-            // The laptop deck, a touch wider than the lid — as in `MiniDisplay`.
-            RoundedRectangle(cornerRadius: 1)
-                .fill(.white.opacity(0.35))
-                .frame(width: 46, height: 2)
-        }
-    }
-
-    private var dock: some View {
-        HStack(spacing: 2) {
-            tile(bright: false)
-            tile(bright: false)
-            if hasIcon { tile(bright: true) }
-            tile(bright: false)
-        }
-        .padding(.horizontal, 2.5)
-        .padding(.vertical, 1.5)
-        .background(
-            RoundedRectangle(cornerRadius: 2.5)
-                .fill(.white.opacity(0.16))
-        )
-    }
-
-    private func tile(bright: Bool) -> some View {
-        RoundedRectangle(cornerRadius: 1)
-            .fill(.white.opacity(bright ? 0.95 : 0.38))
-            .frame(width: 4, height: 4)
-    }
-}
-
 private struct HotKeyRecorder: NSViewRepresentable {
     var active: Bool
     var onCapture: (UInt32, NSEvent.ModifierFlags) -> Void
+    var onCancel: () -> Void
 
     func makeNSView(context: Context) -> NSView {
         context.coordinator.onCapture = onCapture
+        context.coordinator.onCancel = onCancel
         return NSView(frame: .zero)
     }
 
     func updateNSView(_: NSView, context: Context) {
         context.coordinator.onCapture = onCapture
+        context.coordinator.onCancel = onCancel
         context.coordinator.setActive(active)
     }
 
@@ -3211,13 +3886,22 @@ private struct HotKeyRecorder: NSViewRepresentable {
 
     final class Coordinator {
         var onCapture: ((UInt32, NSEvent.ModifierFlags) -> Void)?
+        var onCancel: (() -> Void)?
         private var monitor: Any?
 
         func setActive(_ active: Bool) {
             if active, monitor == nil {
+                // Announce first: the global hot keys must be unregistered before
+                // the monitor goes up, or the chords Notch owns still never arrive.
+                ShortcutRecording.setActive(true)
                 monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                    // Esc cancels recording without committing anything.
-                    guard event.keyCode != UInt16(kVK_Escape) else { return nil }
+                    // Esc cancels recording without committing anything. Clearing
+                    // the armed target is the whole point — leaving it armed makes
+                    // the *next* keystroke anywhere land on that row.
+                    guard event.keyCode != UInt16(kVK_Escape) else {
+                        self?.onCancel?()
+                        return nil
+                    }
                     let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
                     self?.onCapture?(UInt32(event.keyCode), flags)
                     return nil // swallow — don't let the chord reach the panel
@@ -3225,11 +3909,15 @@ private struct HotKeyRecorder: NSViewRepresentable {
             } else if !active, let m = monitor {
                 NSEvent.removeMonitor(m)
                 monitor = nil
+                ShortcutRecording.setActive(false)
             }
         }
 
         deinit {
-            if let m = monitor { NSEvent.removeMonitor(m) }
+            if let m = monitor {
+                NSEvent.removeMonitor(m)
+                ShortcutRecording.setActive(false)
+            }
         }
     }
 }

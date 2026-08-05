@@ -981,11 +981,40 @@ private struct GrabCursor: ViewModifier {
     }
 }
 
+/// The plain arrow, re-asserted for a control that sits INSIDE a `grabCursor()`
+/// strip. The grip's hand is pushed for the whole strip, so a button riding on it
+/// inherits "pull me" when it means "click me". Pushing the arrow on top of that
+/// stack wins while the pointer is on the control and pops straight back to the
+/// hand on the way out — same balanced push/pop discipline as `GrabCursor`.
+private struct ArrowCursor: ViewModifier {
+    @State private var pushed = false
+
+    func body(content: Content) -> some View {
+        content
+            .onHover { inside in
+                guard inside != pushed else { return }
+                if inside { NSCursor.arrow.push() } else { NSCursor.pop() }
+                pushed = inside
+            }
+            .onDisappear {
+                if pushed {
+                    NSCursor.pop()
+                    pushed = false
+                }
+            }
+    }
+}
+
 extension View {
     /// Mark a strip as draggable: the pointer becomes an open hand over it.
     /// Layout-free — it only changes the cursor, never the hit-testing or the
     /// frame, so it can ride the same transparent sheets the tear-off grips use.
     func grabCursor() -> some View {
         modifier(GrabCursor())
+    }
+
+    /// Keep the normal pointer over a control that lives on a `grabCursor()` strip.
+    func arrowCursor() -> some View {
+        modifier(ArrowCursor())
     }
 }

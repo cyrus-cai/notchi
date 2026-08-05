@@ -284,14 +284,14 @@ struct GrokCLIService: AIService {
             }
 
             // Unified searcher (XII: "grok must use MY search tool"). When the
-            // user picked a client-side search backend (Keenable / Exa) in
+            // user picked a client-side search backend in
             // Settings, that promise — one searcher replaces every provider's
             // native search — must hold for grok too. Grok's own agent loop can't
             // be handed a harness tool, but it CAN be handed an MCP server, so:
             //  · the workdir becomes a STABLE dir (not per-turn ephemeral) whose
             //    `.grok/config.toml` declares an MCP stdio server = this very app
             //    binary relaunched headless (`GrokSearchMCPServer`), bridging to
-            //    the same Keenable/Exa tools the harness uses;
+            //    the same search tools the harness uses;
             //  · `--trust` marks that dir trusted (repo-level MCP config only
             //    applies to trusted folders; headless can't prompt). The dir is
             //    stable precisely so the trust-store gains ONE entry, not one per
@@ -445,7 +445,7 @@ struct GrokCLIService: AIService {
 extension GrokCLIService {
     /// The MCP server name declared in the per-turn `.grok/config.toml`. Grok
     /// namespaces MCP tools as `<server>__<tool>`, so the model sees the search
-    /// tool as `notch_search__keenable_search` / `notch_search__exa_search`.
+    /// tool as `notch_search__<backend>_search`.
     private static let mcpServerName = "notch_search"
 
     /// The stable working directory for unified-search turns —
@@ -498,7 +498,7 @@ extension GrokCLIService {
     /// prompt names the one sanctioned searcher (reachable via grok's
     /// search_tool/use_tool MCP meta-tools) and explicitly bans the workaround.
     static func searchDirective(for backend: APIKeyStore.SearchBackend) -> String {
-        let tool = "\(mcpServerName)__\(backend == .exa ? "exa_search" : "keenable_search")"
+        let tool = "\(mcpServerName)__\(unifiedToolName(for: backend))"
         return """
         \n\nWeb search: the built-in web_search tool is disabled in this session. \
         The ONLY way to search the web is the MCP tool `\(tool)` — discover it \
@@ -508,13 +508,21 @@ extension GrokCLIService {
         only to read a specific page that a search result surfaced.
         """
     }
+
+    static func unifiedToolName(for backend: APIKeyStore.SearchBackend) -> String {
+        switch backend {
+        case .exa:       return "exa_search"
+        case .keenable:  return "keenable_search"
+        case .anysearch: return "anysearch_search"
+        }
+    }
 }
 
 // MARK: - MCP stdio server mode
 
 /// The headless personality of this very app binary: launched as
 /// `Notch --grok-search-mcp` it speaks MCP over stdio and serves exactly one
-/// tool — the unified web searcher (Keenable / Exa), backed by the *same*
+/// tool — the selected unified web searcher, backed by the *same*
 /// tool implementations and stored keys the in-app agent harness uses. Grok
 /// spawns it per session from the config `GrokCLIService.writeMCPConfig` lays
 /// down; it must never touch AppKit (see `NotchGlassMain`). Protocol surface is
@@ -554,8 +562,8 @@ enum GrokSearchMCPServer {
                 ])
             case "tools/list":
                 guard let id else { break }
-                let toolName = APIKeyStore.resolvedSearchBackend() == .exa
-                    ? "exa_search" : "keenable_search"
+                let toolName = APIKeyStore.resolvedSearchBackend()
+                    .map { GrokCLIService.unifiedToolName(for: $0) } ?? "search_unavailable"
                 reply(id: id, result: ["tools": [[
                     "name": toolName,
                     "description": webSearchToolDescription,
@@ -598,6 +606,8 @@ enum GrokSearchMCPServer {
                     box.text = try await ExaWebSearchTool().execute(["query": query])
                 case .keenable:
                     box.text = try await KeenableWebSearchTool().execute(["query": query])
+                case .anysearch:
+                    box.text = try await AnySearchWebSearchTool().execute(["query": query])
                 case nil:
                     box.text = "Error: no search backend is configured; tell the user "
                              + "to pick one in Notch's settings."

@@ -640,10 +640,11 @@ struct AgentHarness {
     /// follow-up "reading the results" gap is worth narrating with a "composing…"
     /// cue. `lookup_web` is GLM's client search tool (deliberately not named
     /// `web_search` to avoid colliding with GLM's builtin); `$web_search` is Kimi's
-    /// builtin echo; `keenable_search` / `exa_search` are the unified client searchers.
+    /// builtin echo; the vendor-named tools are the unified client searchers.
     private static func isSearchTool(_ name: String) -> Bool {
         name == "lookup_web" || name == "$web_search"
             || name == "exa_search" || name == "keenable_search"
+            || name == "anysearch_search"
     }
 
     /// The note handed to a model whose turn produced no answer at all: what we saw,
@@ -742,7 +743,7 @@ struct AgentHarness {
     static func orbState(for calls: [ToolInvocation], isRepeatRound: Bool) -> OrbState {
         if let first = calls.first, calls.count == 1 {
             switch first.name {
-            case "lookup_web", "$web_search", "exa_search", "keenable_search":
+            case "lookup_web", "$web_search", "exa_search", "keenable_search", "anysearch_search":
                 return isRepeatRound ? .solving : .searching
             case "read_page":
                 // Reading a page keeps its own wait line ("Reading example.com")
@@ -792,7 +793,7 @@ struct AgentHarness {
     private func activityLabel(for calls: [ToolInvocation], isRepeatRound: Bool) -> String {
         if let first = calls.first, calls.count == 1 {
             switch first.name {
-            case "lookup_web", "$web_search", "exa_search", "keenable_search":
+            case "lookup_web", "$web_search", "exa_search", "keenable_search", "anysearch_search":
                 // Name what it's actually looking up once the arguments have
                 // landed — the same move `read_page` makes with its host. At
                 // `toolCallStarted` they're still streaming, so the generic line

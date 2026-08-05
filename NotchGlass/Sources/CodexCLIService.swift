@@ -31,7 +31,7 @@ import Foundation
 /// Notch's own tool harness stays out of its way (the turn dispatcher falls back to
 /// the plain `stream` path for a non-agent service).
 ///
-/// Known v1 limitation: a copied image (`ChatMessage.image`) is not forwarded — Codex
+/// Known v1 limitation: pasted images (`ChatMessage.images`) are not forwarded — Codex
 /// is text-only here. The picker's Codex row uses the id "codex", which reads as
 /// non-vision, so no image thumbnail is offered for it in the first place.
 struct CodexCLIService: AIService {

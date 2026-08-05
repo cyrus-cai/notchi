@@ -1,17 +1,19 @@
 import Foundation
 import AppKit
+import Carbon.HIToolbox
 
 // MARK: - Built-in agent tools
 //
 // The deliberately small tool surface: read what the user already copied, tell
 // the time, do exact arithmetic, search the user's own Notch archive, ask the
-// user a clarifying question, run a web search, and read a web page's text. All
-// read-only — no file-system writes, no shell, no computer-use; those
-// high-blast-radius surfaces are intentionally out of scope. The harness
-// advertises exactly this set; growing it is a matter of adding a `NotchTool`
-// and registering it (see `ToolRegistry.standard(for:)`, or — for a tool that
-// needs the live model, like `search_history` / `ask_user` — the per-round
-// append in `NotchModel.submit`).
+// user a clarifying question, run a web search, read a web page's text, and
+// manage this app's own preferences. The settings tool is the single narrow
+// write surface and has a mandatory in-app confirmation gate; there are still no
+// file-system writes, shell, or computer-use tools. The harness advertises
+// exactly this set; growing it is a matter of adding a `NotchTool` and
+// registering it (see `ToolRegistry.standard(for:)`, or — for a tool that needs
+// the live model, like `search_history` / `ask_user` / `manage_app_settings` —
+// the per-round append in `NotchModel.submit`).
 
 /// Current local date and time. The notch assistant has no clock of its own
 /// (the model's knowledge has a cutoff), so any "what day is it / how long until
@@ -39,6 +41,8 @@ struct DateTimeTool: NotchTool {
         case .zhHant: fmt.locale = Foundation.Locale(identifier: "zh_Hant")
         case .ja:     fmt.locale = Foundation.Locale(identifier: "ja_JP")
         case .ko:     fmt.locale = Foundation.Locale(identifier: "ko_KR")
+        case .fr:     fmt.locale = Foundation.Locale(identifier: "fr_FR")
+        case .es:     fmt.locale = Foundation.Locale(identifier: "es_ES")
         }
         let tz = TimeZone.current
         return "\(fmt.string(from: now)) (timezone \(tz.identifier), UTC offset \(tz.secondsFromGMT() / 3600))"
@@ -369,6 +373,189 @@ struct AskUserTool: NotchTool {
             return "Error: give at least 2 distinct options for the user to choose from."
         }
         return try await present(question, Array(options.prefix(4)))
+    }
+}
+
+// MARK: - App settings
+
+/// Provider-neutral request passed from `manage_app_settings` into the live
+/// `NotchModel`. Keeping the tool itself UI-agnostic mirrors `AskUserTool`: the
+/// model owns both the confirmation card and the handful of published settings
+/// that must update immediately rather than only on the next launch.
+struct AppSettingsRequest: Sendable {
+    enum Action: String, Sendable { case list, shortcuts, update, open }
+
+    struct Change: Sendable {
+        let setting: String
+        let value: String
+        let scope: String?
+        /// Free instruction text, used only by `prompt_shortcut` — that setting
+        /// binds a chord *and* the sentence it runs, which no scalar value can
+        /// carry without inventing an escaping scheme.
+        let prompt: String?
+
+        init(setting: String, value: String, scope: String?, prompt: String? = nil) {
+            self.setting = setting
+            self.value = value
+            self.scope = scope
+            self.prompt = prompt
+        }
+    }
+
+    let action: Action
+    let changes: [Change]
+    let section: String?
+}
+
+/// Read or change Notch's own preferences from the chat composer. Reads are
+/// immediate; writes are deliberately routed through `NotchModel`, which shows
+/// one in-answer Confirm/Cancel card and only commits after Confirm is tapped.
+/// A batch is one request and therefore one confirmation — "hide both icons and
+/// don't launch at login" should never make the user approve three times.
+struct ManageAppSettingsTool: NotchTool {
+    let name = "manage_app_settings"
+    let description = """
+    Reads, opens, or changes this Notch app's settings. Use this whenever the user asks in \
+    natural language to view, enable, disable, or change a Notch preference. For \
+    an explicit change, call action=update directly: the tool itself always shows \
+    exactly one Confirm/Cancel card before writing, so NEVER ask for a separate \
+    confirmation with ask_user and never claim success before reading the result. \
+    Put multiple requested changes in one call so they share one confirmation.
+
+    Supported setting ids and values:
+    - app_language: system, english, chinese_simplified, chinese_traditional, japanese, korean, french, spanish
+    - dock_icon / menu_bar_icon: shown or hidden
+    - launch_at_login / hide_in_fullscreen / live_activity / copy_sense: true or false
+    - display_placement: all or built_in
+    - hover_sensitivity: low, balanced, or instant
+    - note_destination: apple_notes or markdown_folder; notes_folder: absolute path
+    - summon_shortcut: disabled, default, double_option, double_command, double_control, double_shift, or a chord such as command+shift+k
+    - action_shortcut: a chord such as command+shift+c, or default to restore the shipped one. \
+    scope is required: copy_answer, regenerate, pin, new_chat, filter, picker, or detach
+    - prompt_shortcut: a global chord such as option+s that runs one saved instruction on \
+    whatever text is selected in any app. Value is the chord, or remove to delete a binding, \
+    or keep to edit only its text. `prompt` carries the instruction and is required when \
+    creating one. `scope` picks an existing binding by its current chord (option+s) or by a \
+    distinctive part of its prompt; omit scope to create a new binding.
+    - custom_instructions: text (empty clears it); proxy: URL/host, or auto to clear the manual proxy
+    - ai_provider: openrouter, vercel, openai, codex, claude_code, grok_code, anthropic, gemini, deepseek, qwen, glm, kimi, minimax, mimo, custom
+    - ai_model: model id or default; optional scope is a provider (defaults to the active provider)
+    - api_key: key text or empty to remove; scope is the provider (defaults to active). Never read keys back.
+    - search_backend: native, keenable, exa, or anysearch
+    - search_api_key: key text or empty to remove; scope must be keenable, exa, or anysearch. Never read keys back.
+    - custom_provider_name / custom_provider_url / custom_provider_model: text (empty clears it)
+
+    action=list returns every current value (keys only report configured/not configured). \
+    action=shortcuts returns the complete localized keyboard-shortcut reference, including \
+    the user's current summon shortcut, every editable action with its scope id, and the \
+    user's prompt shortcuts. Use it whenever the user asks what shortcuts, hotkeys, or key \
+    commands the app supports, and ALWAYS read it before changing action_shortcut or \
+    prompt_shortcut so the scope you send points at a binding that really exists. \
+    action=open opens the relevant in-app Settings page without changing anything; \
+    section must be model, search, notes, general, appearance, shortcuts, or about. Use open \
+    when the user asks for an unsupported value (for example an interface language \
+    the app does not offer), so they land on the real available choices instead of \
+    receiving only a textual refusal. Opening a page needs no confirmation. \
+    For action=update, `changes` is required. Each change has setting, value, and \
+    optional scope. Use canonical values above even when the user speaks another language.
+    """
+    let schema: [String: Any] = [
+        "type": "object",
+        "properties": [
+            "action": [
+                "type": "string",
+                "enum": ["list", "shortcuts", "update", "open"],
+                "description": "List current settings, return the shortcut reference, open a settings page, or request a confirmed update.",
+            ],
+            "section": [
+                "type": "string",
+                "enum": ["model", "search", "notes", "general", "appearance", "shortcuts", "about"],
+                "description": "The page to open when action=open.",
+            ],
+            "changes": [
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 12,
+                "items": [
+                    "type": "object",
+                    "properties": [
+                        "setting": ["type": "string", "description": "A supported setting id."],
+                        "value": [
+                            "oneOf": [["type": "string"], ["type": "boolean"]],
+                            "description": "The new string or boolean value.",
+                        ],
+                        "scope": [
+                            "type": "string",
+                            "description": "Provider/backend, the action id for action_shortcut, or the binding selector for prompt_shortcut.",
+                        ],
+                        "prompt": [
+                            "type": "string",
+                            "description": "The instruction a prompt_shortcut runs on the selection. Only used by prompt_shortcut.",
+                        ],
+                    ],
+                    "required": ["setting", "value"],
+                ],
+            ],
+        ],
+        "required": ["action"],
+    ]
+
+    let handle: @Sendable (AppSettingsRequest) async throws -> String
+
+    func execute(_ input: [String: Any]) async throws -> String {
+        guard let rawAction = input["action"] as? String,
+              let action = AppSettingsRequest.Action(rawValue: rawAction) else {
+            return "Error: action must be list, shortcuts, open, or update."
+        }
+        if action == .list {
+            return try await handle(AppSettingsRequest(action: .list, changes: [], section: nil))
+        }
+        if action == .shortcuts {
+            return try await handle(AppSettingsRequest(action: .shortcuts, changes: [], section: nil))
+        }
+        if action == .open {
+            guard let section = (input["section"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines), !section.isEmpty else {
+                return "Error: action=open requires a section."
+            }
+            return try await handle(AppSettingsRequest(action: .open, changes: [],
+                                                       section: section))
+        }
+
+        guard let rawChanges = input["changes"] as? [Any], !rawChanges.isEmpty else {
+            return "Error: action=update requires at least one change."
+        }
+        guard rawChanges.count <= 12 else {
+            return "Error: one confirmed update can contain at most 12 changes."
+        }
+        var changes: [AppSettingsRequest.Change] = []
+        for raw in rawChanges {
+            guard let item = raw as? [String: Any],
+                  let setting = (item["setting"] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !setting.isEmpty,
+                  let value = Self.stringValue(item["value"]) else {
+                return "Error: every change needs a setting and a string or boolean value."
+            }
+            let scope = (item["scope"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            // A prompt is user copy: trim nothing but the surrounding whitespace,
+            // and let an explicitly empty string through as "no prompt given".
+            let prompt = (item["prompt"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            changes.append(.init(setting: setting, value: value,
+                                 scope: scope?.isEmpty == false ? scope : nil,
+                                 prompt: prompt?.isEmpty == false ? prompt : nil))
+        }
+        return try await handle(AppSettingsRequest(action: .update, changes: changes,
+                                                   section: nil))
+    }
+
+    private static func stringValue(_ value: Any?) -> String? {
+        if let value = value as? String { return value }
+        if let value = value as? Bool { return value ? "true" : "false" }
+        if let value = value as? NSNumber { return value.stringValue }
+        return nil
     }
 }
 
@@ -1079,6 +1266,112 @@ struct KeenableWebSearchTool: SourcedTool {
     }
 }
 
+/// Provider-agnostic web search via **AnySearch**
+/// (`https://api.anysearch.com/v1/search`). AnySearch supports anonymous REST
+/// access, so this tool is active as soon as the backend is selected; an optional
+/// `ANYSEARCH_API_KEY` / stored key is sent as a Bearer token for higher limits.
+/// The unified endpoint routes an untagged query to the appropriate sources and
+/// returns both compact snippets and cleaned page content.
+struct AnySearchWebSearchTool: SourcedTool {
+    let name = "anysearch_search"
+    let description = webSearchToolDescription
+    let schema: [String: Any] = [
+        "type": "object",
+        "properties": [
+            "query": ["type": "string", "description": "The search query."]
+        ],
+        "required": ["query"],
+    ]
+
+    private static let endpoint = URL(string: "https://api.anysearch.com/v1/search")!
+    private static let timeout: TimeInterval = 15
+    private static let maxResults = 6
+
+    func execute(_ input: [String: Any]) async throws -> String {
+        try await runSourced(input).text
+    }
+
+    func runSourced(_ input: [String: Any]) async throws -> (text: String, sources: [WebSource]) {
+        guard let query = (input["query"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !query.isEmpty else {
+            return ("Error: empty search query.", [])
+        }
+
+        var req = URLRequest(url: Self.endpoint)
+        req.httpMethod = "POST"
+        req.timeoutInterval = Self.timeout
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let key = APIKeyStore.currentAnySearchKey() {
+            req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        }
+        req.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "query": query,
+            "max_results": Self.maxResults,
+            "format": "json",
+        ])
+
+        do {
+            let (data, response) = try await ProxyConfig.urlSession.data(for: req)
+            guard let http = response as? HTTPURLResponse,
+                  (200..<300).contains(http.statusCode) else {
+                return ("Search failed (HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)).", [])
+            }
+            return Self.parse(data, query: query)
+        } catch {
+            return ("Search failed: \(error.localizedDescription)", [])
+        }
+    }
+
+    /// Parse `{ code, message, data: { results: [{title,url,snippet,content}] } }`
+    /// into the same model text + source badges used by the other searchers.
+    private static func parse(_ data: Data, query: String) -> (text: String, sources: [WebSource]) {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return ("Search failed: AnySearch returned an unreadable response.", [])
+        }
+        if let code = obj["code"] as? NSNumber, code.intValue != 0 {
+            let message = (obj["message"] as? String) ?? "unknown API error"
+            return ("Search failed: \(message)", [])
+        }
+        guard let payload = obj["data"] as? [String: Any],
+              let results = payload["results"] as? [[String: Any]], !results.isEmpty else {
+            let miss = "The search returned no results for \"\(query)\". Do not fabricate "
+                     + "an answer — tell the user the search found nothing on this."
+            return (miss, [])
+        }
+
+        let top = results.prefix(maxResults)
+        let blocks = top.enumerated().map { (i, r) -> String in
+            let title = (r["title"] as? String) ?? "(untitled)"
+            let link = (r["url"] as? String).flatMap { $0.isEmpty ? nil : "\n   \($0)" } ?? ""
+            var snippet = snippetText(from: r)
+            if snippet.count > 500 { snippet = String(snippet.prefix(500)) + "…" }
+            return "[\(i + 1)] \(title)\n   \(snippet)\(link)"
+        }
+        let text = "Web search results for \"\(query)\":\n\n" + blocks.joined(separator: "\n\n")
+
+        var seen = Set<String>()
+        let sources: [WebSource] = top.compactMap { r in
+            guard let link = r["url"] as? String,
+                  let scheme = URL(string: link)?.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https",
+                  !seen.contains(link) else { return nil }
+            seen.insert(link)
+            return WebSource(title: (r["title"] as? String) ?? link, url: link, date: nil)
+        }
+        return (text, sources)
+    }
+
+    private static func snippetText(from result: [String: Any]) -> String {
+        for key in ["snippet", "content"] {
+            if let value = result[key] as? String {
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { return trimmed }
+            }
+        }
+        return ""
+    }
+}
+
 /// Fetches one web page and returns its readable text. The companion to web
 /// search: search surfaces *which* page has the answer (title + short snippet),
 /// but the snippet often doesn't contain the specific fact the user asked for.
@@ -1267,13 +1560,13 @@ extension ToolRegistry {
     ///    `$web_search` passthrough is added so the harness can echo the call back.
     /// (The defunct DuckDuckGo `WebSearchTool` was removed — see XII-116/XII-118.)
     ///
-    /// **Unified searcher (optional, keyed, user-chosen).** A single client-side
+    /// **Unified searcher (optional, user-chosen).** A single client-side
     /// search tool can replace every provider's native search — the server-search
     /// gate in `streamTurn` and the GLM/Kimi client tools below all defer to it.
     /// Which one is the user's choice, not a hard-coded vendor preference:
     /// `APIKeyStore.resolvedSearchBackend()` maps their picked search backend
-    /// (Keenable / Exa) plus whether it's keyed to the tool that runs. When it
-    /// returns `nil` (nothing picked, or the pick has no key), the provider's own
+    /// (Keenable / Exa / AnySearch) to the tool that runs and enforces key
+    /// requirements where applicable. When it returns `nil`, the provider's own
     /// native search (GLM client tool / Kimi echo / server-side search) stays in play.
     static func standard(for provider: Provider) -> ToolRegistry {
         var tools: [NotchTool] = [
@@ -1287,6 +1580,8 @@ extension ToolRegistry {
             tools.append(ExaWebSearchTool())
         case .keenable:
             tools.append(KeenableWebSearchTool())
+        case .anysearch:
+            tools.append(AnySearchWebSearchTool())
         // No client searcher picked (or the pick has no key) — the provider's own
         // native search stays in play.
         case nil:

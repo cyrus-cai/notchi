@@ -251,6 +251,10 @@ struct PromptField: NSViewRepresentable {
         // hint and the row size are SwiftUI state changes.
         let composing = tv.hasMarkedText()
         if !composing, tv.string != text {
+            // A recall / submit / other model-side replacement starts a genuinely
+            // new layout. Do not carry the IME wrap floor from the previous draft
+            // into it (programmatic storage edits do not call `textDidChange`).
+            context.coordinator.resetHeightStabilization()
             // Set the storage rather than `.string` so the glyphs carry our font and
             // ink outright — a plain string assignment leans on typing attributes and
             // can land unstyled.
@@ -364,6 +368,16 @@ struct PromptField: NSViewRepresentable {
         private var lastHeight: CGFloat = -1
         private var lastCaretWidth: CGFloat = -1
         private var lastCaretY: CGFloat = .greatestFiniteMagnitude
+        /// Pinyin/kana marked text is commonly wider than the glyph eventually
+        /// committed. At a line boundary it can therefore wrap to line N+1, then
+        /// snap back to line N as soon as the candidate is chosen. Remember the
+        /// tallest layout reached by the active composition and hold that height
+        /// after commit until committed text really reaches it. The next IME word
+        /// normally does so; meanwhile the row no longer pumps up and down for each
+        /// syllable near the boundary.
+        private var wasComposing = false
+        private var compositionPeakHeight: CGFloat = 0
+        private var heldCompositionHeight: CGFloat?
         init(_ parent: PromptField) { self.parent = parent }
         deinit { NotificationCenter.default.removeObserver(self) }
 
@@ -401,11 +415,22 @@ struct PromptField: NSViewRepresentable {
 
         func textDidEndEditing(_ notification: Notification) {
             // Restore the resting level now that this box is done editing.
-            ((notification.object as? NSTextView)?.window as? NotchPanel)?.endFieldEditing()
+            guard let tv = notification.object as? PromptTextView else { return }
+            (tv.window as? NotchPanel)?.endFieldEditing()
+            // Once the caret leaves, there is no following composition to bridge
+            // into. Return a provisional extra line to its real content height.
+            resetHeightStabilization()
+            report(for: tv)
         }
 
         func textDidChange(_ notification: Notification) {
             guard let tv = notification.object as? PromptTextView else { return }
+            // A non-IME edit (plain typing, delete, paste) is an explicit new
+            // layout decision and may shrink normally. An IME commit arrives while
+            // `wasComposing` is still true; that edge deliberately keeps the floor.
+            if !tv.hasMarkedText(), !wasComposing {
+                resetHeightStabilization()
+            }
             parent.text = tv.string
             // Belt-and-suspenders: macOS can re-arm prediction as you type, so keep
             // it disabled on every change (cheap idempotent set).
@@ -442,6 +467,14 @@ struct PromptField: NSViewRepresentable {
             }
         }
 
+        /// Drop only the IME wrap hysteresis. `lastHeight` stays intact so the next
+        /// report publishes the real height when it differs from the held value.
+        func resetHeightStabilization() {
+            wasComposing = false
+            compositionPeakHeight = 0
+            heldCompositionHeight = nil
+        }
+
         /// Lay the text out and push up the two numbers the row is built from: the
         /// box's height (clamped to the line cap) and where the last line ENDS — its
         /// width, and its vertical offset from the box's centre. Everything is read
@@ -459,7 +492,42 @@ struct PromptField: NSViewRepresentable {
                 used = max(used, layout.extraLineFragmentRect.maxY)
             }
             let cap = line * CGFloat(max(1, parent.maxVisibleLines))
-            let height = min(max(used, line), cap).rounded(.up)
+            let measuredHeight = min(max(used, line), cap).rounded(.up)
+
+            // Stabilize the IME boundary case described above. Growing is immediate
+            // so marked text and its caret remain visible. Shrinking is deferred
+            // only when the just-committed candidate is narrower than its marked
+            // spelling; ordinary edits never acquire this floor.
+            let composing = tv.hasMarkedText()
+            if composing {
+                if !wasComposing {
+                    // Carry only an IME floor from the previous syllable. Using
+                    // `lastHeight` here would also carry a stale height across a
+                    // programmatic recall/submit before its deferred re-measure.
+                    compositionPeakHeight = max(
+                        measuredHeight, heldCompositionHeight ?? 0)
+                } else {
+                    compositionPeakHeight = max(compositionPeakHeight, measuredHeight)
+                }
+            } else if wasComposing {
+                if compositionPeakHeight > measuredHeight + 0.5 {
+                    heldCompositionHeight = max(
+                        heldCompositionHeight ?? 0, compositionPeakHeight)
+                }
+                compositionPeakHeight = 0
+            }
+            wasComposing = composing
+
+            var height = measuredHeight
+            if let held = heldCompositionHeight {
+                if measuredHeight >= held - 0.5 {
+                    // Committed text has naturally occupied the provisional line;
+                    // from here the real measurement owns the height again.
+                    heldCompositionHeight = nil
+                } else {
+                    height = held
+                }
+            }
 
             // The scroller exists only once the text has capped out and truly
             // scrolls. Kept OFF otherwise so transient mid-animation layouts can't
@@ -859,22 +927,36 @@ struct GlassSegmentCluster: View {
     /// header at the top of its panel/window, so the tip drops DOWN by default —
     /// floating it up would run it off the top edge.
     var tipEdge: VerticalEdge = .bottom
+    /// Drop the glass pill and render the glyphs bare. For the panel's result
+    /// header, where these chips are hover-only chrome: a slab of glass appearing
+    /// and vanishing with the pointer reads as the panel twitching, while bare
+    /// marks just arrive. Without the pill the glyphs carry their own resting
+    /// dimming (the glass used to do it) and stand further apart, since nothing
+    /// binds them into one control any more.
+    var glass: Bool = true
 
     // Identity is by index (stable across rebuilds), so the hover highlight
     // survives re-renders — a per-segment UUID would churn and drop it.
     @State private var hoveredIndex: Int? = nil
 
     var body: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: glass ? 2 : 6) {
             ForEach(Array(segments.enumerated()), id: \.offset) { index, seg in
                 let hovering = hoveredIndex == index
                 Button(action: seg.action) {
                     seg.glyph
-                        .foregroundStyle(.white)
+                        // Glassed: pure white, the pill behind carries the resting
+                        // dimming. Bare: the glyph does it itself, and rests QUIET —
+                        // the answer-footer icons' level (text3), not a second row of
+                        // bright chrome competing with the text. Direct hover (or a
+                        // live pin) brings it up to full ink.
+                        .foregroundStyle(glass ? Tokens.ink
+                                              : (hovering || seg.engaged ? Tokens.text1
+                                                                         : Tokens.text3))
                         .frame(width: chip, height: chip)
                         .background(
                             Circle().fill(.white.opacity(
-                                seg.engaged ? 0.20 : (hovering ? 0.12 : 0)))
+                                seg.engaged ? 0.20 : (hovering && glass ? 0.12 : 0)))
                         )
                         .contentShape(Circle())
                 }
@@ -893,15 +975,17 @@ struct GlassSegmentCluster: View {
                 .accessibilityLabel(seg.tooltip)
             }
         }
-        .padding(3)
+        .padding(glass ? 3 : 0)
         // The whole cluster is the chip: glass carries ALL the resting dimming
         // (rendered behind the glyphs, so they stay pure white even at rest) and
         // lights fully when hovered or while a segment is engaged.
         .background {
-            let lit = hoveredIndex != nil || segments.contains { $0.engaged }
-            Color.clear
-                .glassCapsule(in: Capsule(), brighter: lit)
-                .opacity(lit ? 1 : 0.55)
+            if glass {
+                let lit = hoveredIndex != nil || segments.contains { $0.engaged }
+                Color.clear
+                    .glassCapsule(in: Capsule(), brighter: lit)
+                    .opacity(lit ? 1 : 0.55)
+            }
         }
         .animation(.easeOut(duration: 0.18), value: hoveredIndex)
         .animation(.easeOut(duration: 0.18), value: segments.map(\.engaged))
@@ -2358,7 +2442,8 @@ struct AssistantTurnView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading,
+               spacing: pendingQuestion != nil && !hasText ? 0 : 6) {
             // The answer — the SAME view whether streaming or settled, so the
             // stream→settle edge never rebuilds it. While streaming it reflows in
             // place as `text` grows; once settled it's identical but selectable.
@@ -2379,6 +2464,13 @@ struct AssistantTurnView: View {
                 // so the wait overlay has somewhere to sit and the bubble doesn't
                 // pop from zero-height to one-line when the first token lands.
                 .frame(minHeight: showWait ? baseFont * 1.6 : 0, alignment: .leading)
+                // A choice card replaces the pre-answer wait completely. The empty
+                // Markdown renderer otherwise keeps an intrinsic line box even
+                // though its source is empty, leaving a conspicuous blank band
+                // between the user bubble and the card.
+                .frame(height: pendingQuestion != nil && !hasText ? 0 : nil,
+                       alignment: .topLeading)
+                .clipped()
                 // The pre-stream wait: mood word, or the tool-activity line while a
                 // tool runs. An overlay (not a sibling) so it never shifts the
                 // answer; both layers stay mounted and cross-fade on their own
@@ -2423,7 +2515,7 @@ struct AssistantTurnView: View {
                 UserQuestionCard(question: pendingQuestion) { option in
                     onChooseOption?(pendingQuestion.id, option)
                 }
-                .padding(.top, 2)
+                .padding(.top, hasText ? 2 : 0)
                 .transition(.opacity)
             }
 
@@ -2465,7 +2557,8 @@ struct AssistantTurnView: View {
                         // (headings, `**bold**`, lists, code fences). The paired
                         // plain-text button below strips that formatting.
                         AnswerFooterButton(icon: "doc.on.doc",
-                                           help: L("result.copyMarkdown"),
+                                           help: shortcutHelp("result.copyMarkdown",
+                                                              action: .copyAnswer),
                                            rowHovered: turnHovered,
                                            confirms: true) {
                             NSPasteboard.general.clearContents()
@@ -2495,9 +2588,11 @@ struct AssistantTurnView: View {
                     }
                     if let onRegenerate {
                         AnswerFooterButton(icon: "arrow.clockwise",
-                                           help: regenerateModels.isEmpty
-                                               ? L("result.regenerate")
-                                               : L("result.regenerate.menu"),
+                                           help: shortcutHelp(
+                                               regenerateModels.isEmpty
+                                                   ? "result.regenerate"
+                                                   : "result.regenerate.menu",
+                                               action: .regenerate),
                                            rowHovered: turnHovered) {
                             onRegenerate()
                         }
@@ -2595,16 +2690,23 @@ struct UserQuestionCard: View {
                 .font(.sf(13, weight: .medium))
                 .foregroundStyle(Tokens.text1)
                 .fixedSize(horizontal: false, vertical: true)
-            VStack(alignment: .leading, spacing: 5) {
-                // Options are de-duplicated by the tool before they get here, so
-                // the string itself is a safe ForEach id.
-                ForEach(question.options, id: \.self) { option in
-                    UserQuestionOptionRow(title: option) { choose(option) }
+            if question.inlineOptions {
+                HStack(spacing: 6) {
+                    optionRows(centered: true)
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 5) {
+                    optionRows(centered: false)
                 }
             }
         }
         .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        // Confirmation cards are small decisions, not full-width forms: let the
+        // question + two compact actions determine their width and align the
+        // resulting card with the answer text. Longer clarifying questions keep
+        // the original full-column layout so their option labels can wrap.
+        .frame(maxWidth: question.inlineOptions ? nil : .infinity,
+               alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(Color.white.opacity(0.05))
@@ -2614,12 +2716,27 @@ struct UserQuestionCard: View {
                 .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
         )
     }
+
+    /// Options are de-duplicated by the tool before they get here, so the string
+    /// itself is a safe `ForEach` id.
+    @ViewBuilder
+    private func optionRows(centered: Bool) -> some View {
+        ForEach(question.options, id: \.self) { option in
+            UserQuestionOptionRow(
+                title: option,
+                centered: centered,
+                fullyRounded: centered
+            ) { choose(option) }
+        }
+    }
 }
 
 /// One tappable option row on the question card. Full-width and left-aligned so
 /// the whole line is the target; brightens on hover like the other quiet controls.
 private struct UserQuestionOptionRow: View {
     var title: String
+    var centered = false
+    var fullyRounded = false
     var action: () -> Void
     @State private var hovering = false
 
@@ -2629,14 +2746,20 @@ private struct UserQuestionOptionRow: View {
                 .font(.sf(12.5))
                 .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
                 .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(minWidth: centered ? 92 : nil,
+                       maxWidth: centered ? nil : .infinity,
+                       alignment: centered ? .center : .leading)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 7)
                 .background(
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    RoundedRectangle(cornerRadius: fullyRounded ? 999 : 9,
+                                     style: .continuous)
                         .fill(Color.white.opacity(hovering ? 0.13 : 0.07))
                 )
-                .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .contentShape(
+                    RoundedRectangle(cornerRadius: fullyRounded ? 999 : 9,
+                                     style: .continuous)
+                )
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }

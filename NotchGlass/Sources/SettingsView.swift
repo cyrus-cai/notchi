@@ -33,6 +33,16 @@ extension Notification.Name {
     /// Posted after the user changes the global summon shortcut (Settings →
     /// General), so `AppDelegate` re-registers the Carbon hot key immediately.
     static let summonHotKeyChanged = Notification.Name("summonHotKeyChanged")
+    /// Posted after a prompt shortcut is added, removed, or re-recorded, so the
+    /// live set of global Carbon hot keys follows the Shortcuts pane immediately.
+    static let promptShortcutsChanged = Notification.Name("promptShortcutsChanged")
+    /// Posted after an in-app action chord is rebound or reset from chat, so an
+    /// open Shortcuts pane redraws instead of showing the pre-change binding.
+    static let appShortcutsChanged = Notification.Name("appShortcutsChanged")
+    /// Posted when the Shortcuts pane starts or stops listening for a chord, so
+    /// every global hot key stands down and the recorder can actually observe the
+    /// keys Notch itself owns (see `ShortcutRecording`).
+    static let shortcutRecordingChanged = Notification.Name("shortcutRecordingChanged")
     /// Posted by the Recent list's "See all" action, so `AppDelegate` can open the
     /// standalone History window showing the complete, uncapped archive.
     static let openHistoryArchiveRequested = Notification.Name("openHistoryArchiveRequested")

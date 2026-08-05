@@ -105,8 +105,8 @@ optional.
 You can also chat through the locally installed, signed-in Codex, Claude Code,
 or Grok CLI — no API key is stored by Notchi for those connections. Model choice
 is one searchable picker, with provider grouping and live catalogs where a
-provider supports them. Web search can use the configured provider path or an
-Exa or Keenable key.
+provider supports them. Web search can use the configured provider path, Exa,
+Keenable, or AnySearch (including AnySearch's keyless anonymous tier).
 
 ## Made to disappear until you need it.
 
@@ -115,10 +115,9 @@ shortcut (double-tap `⌥` by default). Tear the composer or any conversation ou
 into its own window, then drag it back to the notch when you are done.
 
 Notchi is drawn in macOS Liquid Glass — same blur, edge light, and spring — so
-it feels like part of the system rather than an overlay. Choose the original
-app icon or a liquid-metal icon that follows macOS light and dark appearance.
-It works on external displays and on Macs without a physical notch by drawing a
-virtual one; it can hide that island while an external display is full-screen.
+it feels like part of the system rather than an overlay. It works on external
+displays and on Macs without a physical notch by drawing a virtual one; it can
+hide that island while an external display is full-screen.
 
 Settings cover language (English, Simplified and Traditional Chinese, Japanese,
 and Korean), launch at login, appearance, shortcuts, proxies, model

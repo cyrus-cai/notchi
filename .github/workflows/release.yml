@@ -48,10 +48,58 @@ jobs:
           sudo xcode-select -s /Applications/Xcode_26.5.app
           xcodebuild -version
 
+      # Signing with a real certificate is what keeps the app's designated
+      # requirement stable across releases. With the previous ad-hoc signature
+      # the DR was a bare `cdhash H"..."` — the hash of one exact binary — so
+      # every release invalidated the TCC record behind the Accessibility grant
+      # and users had to re-authorise the app each time. See
+      # scripts/make-signing-cert.sh.
+      - name: Import signing certificate
+        env:
+          CERT_P12_BASE64: ${{ secrets.SIGNING_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
+        run: |
+          if [ -z "$CERT_P12_BASE64" ] || [ -z "$CERT_PASSWORD" ]; then
+            echo "::error::Missing SIGNING_CERT_P12 / SIGNING_CERT_PASSWORD secrets. Run scripts/make-signing-cert.sh locally and upload them. Refusing to publish an ad-hoc-signed build: it would reset every user's Accessibility permission."
+            exit 1
+          fi
+          KEYCHAIN="$RUNNER_TEMP/notchi-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          echo "SIGN_KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+
+          echo "$CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/id.p12"
+          security import "$RUNNER_TEMP/id.p12" -k "$KEYCHAIN" \
+            -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+
+          # A self-signed certificate that is merely present is NOT usable:
+          # `find-identity` reports CSSMERR_TP_NOT_TRUSTED and codesign fails with
+          # "no identity found". It has to be trusted for the codeSign policy.
+          openssl pkcs12 -in "$RUNNER_TEMP/id.p12" -clcerts -nokeys \
+            -passin "pass:$CERT_PASSWORD" -out "$RUNNER_TEMP/cert.pem" -legacy 2>/dev/null \
+            || openssl pkcs12 -in "$RUNNER_TEMP/id.p12" -clcerts -nokeys \
+                 -passin "pass:$CERT_PASSWORD" -out "$RUNNER_TEMP/cert.pem"
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign \
+            -k /Library/Keychains/System.keychain "$RUNNER_TEMP/cert.pem"
+
+          # codesign resolves identities through the search list.
+          security list-keychains -d user -s "$KEYCHAIN" \
+            $(security list-keychains -d user | tr -d '"')
+
+          rm -f "$RUNNER_TEMP/id.p12"
+          security find-identity -v -p codesigning "$KEYCHAIN"
+
       - name: Build (Release)
         run: |
           # Stamp the tag into the bundle (Info.plist reads $(MARKETING_VERSION));
           # the in-app updater compares this version against the latest release.
+          # Signing is deliberately left off here and done in the next step, so
+          # that CI and the local dev loop go through the exact same script.
           xcodebuild \
             -project NotchGlass.xcodeproj \
             -scheme NotchGlass \
@@ -61,15 +109,31 @@ jobs:
             CODE_SIGN_IDENTITY="-" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
             build
 
-      - name: Package
+      - name: Sign
+        env:
+          NOTCHI_SIGN_KEYCHAIN: ${{ env.SIGN_KEYCHAIN }}
+          # No ad-hoc fallback in CI. A silently ad-hoc-signed release is the
+          # exact regression this whole change exists to prevent.
+          NOTCHI_SIGN_REQUIRED: "1"
         run: |
           APP="build/Build/Products/Release/Notchi.app"
           test -d "$APP" || { echo "::error::App not found at $APP"; exit 1; }
-          # Ad-hoc sign so the app has a stable signature (still not notarized).
-          codesign --force --deep --sign - "$APP" || true
+          ./scripts/codesign-app.sh "$APP"
+
+      - name: Package
+        run: |
+          APP="build/Build/Products/Release/Notchi.app"
           # Zip preserving the bundle (ditto, not zip, for correct macOS metadata).
           ditto -c -k --keepParent "$APP" "Notchi-${GITHUB_REF_NAME}.zip"
           ls -la Notchi-*.zip
+
+      - name: Clean up keychain
+        if: always()
+        run: |
+          if [ -n "${SIGN_KEYCHAIN:-}" ] && [ -f "$SIGN_KEYCHAIN" ]; then
+            security list-keychains -d user -s $(security list-keychains -d user | tr -d '"' | grep -v "$SIGN_KEYCHAIN") || true
+            security delete-keychain "$SIGN_KEYCHAIN" || true
+          fi
 
       - name: Publish Release
         uses: softprops/action-gh-release@v2

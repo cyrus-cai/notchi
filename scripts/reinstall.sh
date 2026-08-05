@@ -61,6 +61,19 @@ built_dir="$(xcodebuild -project "$PROJECT" -scheme "$SCHEME" -configuration "$C
 src="$built_dir/$APP_NAME"
 [ -d "$src" ] || die "Built app not found at $src."
 
+# --- sign ------------------------------------------------------------------
+# Sign the dev build with the same certificate CI uses. Xcode's default
+# "Sign to Run Locally" is an ad-hoc signature whose designated requirement is
+# the binary's own hash, so every reinstall used to invalidate the Accessibility
+# grant — the toggle stayed on in System Settings while the permission silently
+# stopped working. Signing with the shared certificate gives Debug and Release
+# an identical DR, so one grant covers both and survives every rebuild.
+#
+# This is best-effort locally: without the certificate the script falls back to
+# ad-hoc (with a warning) so the dev loop still works. Run
+# scripts/make-signing-cert.sh once to stop the permission drops.
+./scripts/codesign-app.sh --debug "$src"
+
 # --- stop the running instance ---------------------------------------------
 # Kill any running copy so the replace can't hit a busy bundle and the relaunch
 # starts the new build clean. (No error if nothing is running.)

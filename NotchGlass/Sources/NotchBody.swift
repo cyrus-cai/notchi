@@ -83,6 +83,11 @@ struct NotchBody: View {
     @State private var updateCueIdleHovered = false
     @State private var updateCueBarHovered = false
     @State private var followUpHeight: CGFloat = PromptField.lineHeight(for: NotchBody.followUpFontSize)
+    /// A thread opened by a prompt shortcut keeps its follow-up input folded into a
+    /// small floating button (see `followUpButton`) until this flips — the run is a
+    /// one-shot on a selection, so an always-open composer would cost a row of
+    /// height nobody asked for. Reset whenever the thread changes underneath it.
+    @State private var followUpExpanded = false
     /// The live agent-detail page's own follow-up line — kept separate from the
     /// idle prompt's `model.text` so a line typed while watching a run doesn't
     /// leak into the fresh-chat box the page falls back to when the task ends.
@@ -274,7 +279,16 @@ struct NotchBody: View {
             if isEmpty {
                 measuredAnswerHeight = 0
                 model.lastMeasuredAnswerHeight = 0
+                // A thread leaving the screen re-folds the shortcut follow-up, so the
+                // next shortcut run opens on its button rather than an unfolded field
+                // it inherited from the previous answer.
+                followUpExpanded = false
             }
+        }
+        // A fresh prompt-shortcut run (hotkey pressed again while the panel is up)
+        // re-folds too — same reason, without waiting for `turns` to empty.
+        .onChange(of: model.fromPromptShortcut) { _, isShortcut in
+            if isShortcut { followUpExpanded = false }
         }
         .onAppear {
             if model.open {
@@ -347,12 +361,15 @@ struct NotchBody: View {
                     if let recall = model.recallPosition {
                         recallCounterLine(recall)
                             .transition(moduleTransition)
-                    } else if let image = model.pendingClipboardImage {
-                        clipboardImagePreviewLine(image)
-                            .transition(moduleTransition)
+                    } else if !model.askComposeImages.isEmpty {
+                        composeImagesAttachedLine(model.askComposeImages) {
+                            model.removeAskComposeImage(at: $0)
+                        }
+                        .padding(.bottom, 8)
+                        .transition(moduleTransition)
                     }
                 } else if !model.agentComposeImages.isEmpty {
-                    agentImagesAttachedLine(model.agentComposeImages) {
+                    composeImagesAttachedLine(model.agentComposeImages) {
                         model.removeAgentComposeImage(at: $0)
                     }
                     .padding(.bottom, 8)
@@ -518,13 +535,16 @@ struct NotchBody: View {
                     // active agent compose shows its pasted attachment instead.
                     if model.agentComposeActive {
                         if !model.agentComposeImages.isEmpty {
-                            agentImagesAttachedLine(model.agentComposeImages) {
+                            composeImagesAttachedLine(model.agentComposeImages) {
                                 model.removeAgentComposeImage(at: $0)
                             }
                             .padding(.bottom, 8)
                         }
-                    } else if let image = model.pendingClipboardImage {
-                        clipboardImagePreviewLine(image)
+                    } else if !model.askComposeImages.isEmpty {
+                        composeImagesAttachedLine(model.askComposeImages) {
+                            model.removeAskComposeImage(at: $0)
+                        }
+                        .padding(.bottom, 8)
                     }
                     idleInputRow
                     // The bucket row rides the immersive header too — but only while
@@ -631,31 +651,6 @@ struct NotchBody: View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// The copied-IMAGE preview (XII-121): a small thumbnail + caption above the
-    /// prompt, shown when the clipboard holds pixels
-    /// (a screenshot, a copied bitmap). The first-turn Ask attaches this image to
-    /// the wire message, so the preview is exactly "what the model will see".
-    private func clipboardImagePreviewLine(_ image: NSImage) -> some View {
-        HStack(spacing: 6) {
-            Image(nsImage: image)
-                .resizable()
-                .aspectRatio(contentMode: .fill)
-                .frame(width: 34, height: 24)
-                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
-                )
-            Text(L("clip.imageCopied"))
-                .font(.sf(11))
-                .tracking(0.2)
-                .foregroundStyle(Tokens.text4)
-                .lineLimit(1)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.bottom, 8)
-    }
-
     /// How many thumbnails the attached strip shows before folding the rest into
     /// a "+N" chip. The real cap is `NotchModel.agentImageLimit` (20) — far more
     /// than fits across a 540pt panel, so the strip shows the first few and the
@@ -668,8 +663,8 @@ struct NotchBody: View {
     /// ⌘Vs and need an explicit way back out, one at a time. The run hands exactly
     /// these images to the agent. Shared with the settled card's follow-up field,
     /// which clears its own attachments — hence the injected remove action.
-    private func agentImagesAttachedLine(_ images: [NSImage],
-                                         onRemove: @escaping (Int) -> Void) -> some View {
+    private func composeImagesAttachedLine(_ images: [NSImage],
+                                           onRemove: @escaping (Int) -> Void) -> some View {
         HStack(spacing: 6) {
             ForEach(Array(images.prefix(Self.agentThumbStripMax).enumerated()),
                     id: \.offset) { index, image in
@@ -1545,7 +1540,7 @@ struct NotchBody: View {
                     Image(systemName: "folder")
                         .font(.sf(12, weight: .semibold))
                 },
-                .init(tooltip: L("detached.open"),
+                .init(tooltip: shortcutHelp("detached.open", action: .detach),
                       action: { model.openDetachedWindow() }) {
                     Image(systemName: "macwindow.on.rectangle")
                         .font(.sf(12, weight: .semibold))
@@ -2373,6 +2368,18 @@ struct NotchBody: View {
     /// and `conversationScroll` all share the identical boolean without duplication.
     private var isAnswerClipped: Bool { measuredAnswerHeight > answerMaxHeight }
 
+    /// True while the follow-up input is folded into a glyph on the header's glass
+    /// pill — a thread the user landed on by hitting a prompt shortcut on a
+    /// selection (translate this, explain this), where the answer is the whole
+    /// point and a standing composer is just a row of empty height. One tap on the
+    /// pill's speech-bubble unfolds the real field
+    /// (`followUpExpanded`), and typing a line at all retires the fold for good
+    /// (`NotchModel.submit` clears `fromPromptShortcut`).
+    private var followUpIsFolded: Bool {
+        model.fromPromptShortcut && !followUpExpanded && !model.hasText
+            && model.visibleAskError == nil && model.isConfigured
+    }
+
     private var resultView: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Short layout only: the header sits as a sibling above the thread.
@@ -2406,8 +2413,11 @@ struct NotchBody: View {
 
                 // Floating follow-up: only the clipped + configured + no-error case.
                 // Error / unconfigured states keep their rows as siblings below (an
-                // actionable error must never be hidden behind the scroll).
-                if isAnswerClipped && model.visibleAskError == nil && model.isConfigured {
+                // actionable error must never be hidden behind the scroll). A folded
+                // shortcut thread renders no composer at all here — its entry is the
+                // glyph on the header's glass pill (see `resultHeader`).
+                if isAnswerClipped && !followUpIsFolded
+                    && model.visibleAskError == nil && model.isConfigured {
                     followUpRow
                         // Lift off the viewport bottom so a sliver of dissolved
                         // content shows beneath the box rather than it sitting flush.
@@ -2454,8 +2464,10 @@ struct NotchBody: View {
                 errorActionRow(askError)
                     .padding(.top, isAnswerClipped ? 8 : 24)
                     .transition(.opacity)
-            } else if !isAnswerClipped {
+            } else if !isAnswerClipped && !followUpIsFolded {
                 // Short layout: follow-up input (or setup CTA) as a sibling, as before.
+                // (Folded shortcut button excluded — it floats inside the ZStack so
+                // it never pushes the panel taller.)
                 Group {
                     if model.isConfigured {
                         followUpRow
@@ -2748,7 +2760,7 @@ struct NotchBody: View {
     /// to jump. This is the common case (most answers fit under `answerMaxHeight`).
     private var growingConversation: some View {
         VStack(alignment: .leading, spacing: 16) {
-            ForEach(model.turns) { turn in
+            ForEach(model.turns.filter { !$0.hidesUserBubble }) { turn in
                 turnView(turn)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .id(turn.id)
@@ -2777,7 +2789,7 @@ struct NotchBody: View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    ForEach(model.turns) { turn in
+                    ForEach(model.turns.filter { !$0.hidesUserBubble }) { turn in
                         turnView(turn)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .id(turn.id)
@@ -2980,19 +2992,48 @@ struct NotchBody: View {
     // here); a pin button trails top-right. Pinning holds the panel open when the
     // pointer leaves, so the answer can be read without hovering it (see
     // `NotchModel.collapseOnLeave`).
+    /// Whether the result header's trailing chips (follow-up / detach / pin) are
+    /// showing: only under the pointer, or while the answer is pinned — see the
+    /// note at their use site.
+    private var headerChipsShown: Bool { model.pointerInside || model.isAnswerPinned }
+
     private var resultHeader: some View {
         HStack(spacing: 10) {
             backButton
             Spacer(minLength: 0)
-            ResultTrailingCluster(
-                pinned: model.isAnswerPinned,
-                togglePin: {
-                    withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
-                        model.toggleAnswerPin()
-                    }
-                },
-                detach: { model.openDetachedWindow() }
-            )
+            // A folded shortcut thread's follow-up entry: its own module, set
+            // apart from the detach/pin pair by the header's wider 10pt gap.
+            // Same species (one-segment `GlassSegmentCluster`), separate group —
+            // it's a composer, not a view action, so it doesn't join their pair.
+            Group {
+                if followUpIsFolded {
+                    followUpChip
+                        .transition(.opacity.combined(with: .scale(scale: 0.8)))
+                }
+                ResultTrailingCluster(
+                    pinned: model.isAnswerPinned,
+                    togglePin: {
+                        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                            model.toggleAnswerPin()
+                        }
+                    },
+                    detach: { model.openDetachedWindow() }
+                )
+            }
+            // These are buttons sitting on the header's tear-off grip, which pushes
+            // the open-hand cursor for the whole strip — take the plain arrow back
+            // over the glyphs so they say "click" rather than "pull".
+            .arrowCursor()
+            // Hover-only chrome: at rest the header carries nothing but the back
+            // chevron, so an answer read from across the desk is just the answer.
+            // The chips fade in the moment the pointer is on the island and fade
+            // back out when it leaves. They keep their slot either way (opacity,
+            // not removal), so nothing shifts as they appear.
+            // A PINNED answer is the exception — the tack is the only thing saying
+            // "this is staying open", and it earns its place with the pointer away.
+            .opacity(headerChipsShown ? 1 : 0)
+            .allowsHitTesting(headerChipsShown)
+            .animation(.easeOut(duration: Tokens.hoverFade), value: headerChipsShown)
         }
         // The header's free strip doubles as the tear-off grip: drag the thread
         // out of the notch and it splits into its own window (see
@@ -3002,6 +3043,26 @@ struct NotchBody: View {
         .contentShape(Rectangle())
         .grabCursor()
         .gesture(detachDragGesture)
+    }
+
+    /// The folded follow-up's entry point (shortcut threads only): one speech
+    /// bubble in the header, standing apart from the detach/pin pair. Tapping it unfolds the real composer below, with the
+    /// caret already in it.
+    private var followUpChip: some View {
+        GlassSegmentCluster(segments: [
+            .init(tooltip: L("result.followUp"), action: {
+                withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                    followUpExpanded = true
+                }
+                // The field mounts with this tap; give it the caret without a
+                // second click (the same drop-then-raise the clipped crossover
+                // uses).
+                refocusInput()
+            }) {
+                Image(systemName: "bubble.left")
+                    .font(.sf(12, weight: .semibold))
+            }
+        ], glass: false)
     }
 
     /// The tear-off drag: raw translation goes to the model, which arms the
@@ -3129,6 +3190,10 @@ struct NotchBody: View {
                     // one is armed. Always consumed either way, so focus never
                     // wanders out of the prompt.
                     onTab: followUp ? { false } : {
+                        guard let event = NSApp.currentEvent,
+                              ReservedAppShortcut.cycleIntent.matches(event) else {
+                            return false
+                        }
                         // Tab picks the highlighted `/` row too — the completion
                         // key doing the completing, before the cycle gets a turn.
                         if withAnimation(.spring(response: 0.34, dampingFraction: 0.82), {
@@ -3142,15 +3207,17 @@ struct NotchBody: View {
                     // wanders out of the prompt; a no-op that stays on Ask when
                     // no agent CLI is installed.
                     onBackTab: followUp ? nil : {
+                        guard let event = NSApp.currentEvent,
+                              ReservedAppShortcut.bucket.matches(event) else {
+                            return false
+                        }
                         model.toggleAgentBucket()
                         return true
                     },
-                    // ⌘V while composing an agent task attaches a pixels-only
-                    // clipboard (a screenshot) as the task's image; any clipboard
-                    // carrying text pastes as text, exactly as before. No-op
-                    // outside the agent compose.
+                    // ⌘V explicitly attaches a clipboard image to the current Ask
+                    // or Agent compose. Ordinary text keeps the native paste path.
                     onPasteImage: followUp ? { false } : {
-                        model.handleAgentPasteImage()
+                        model.handleComposePasteImage()
                     },
                     // Live width of the last line's committed text + any composing
                     // pinyin — what the overlay placeholder watches so it clears the
@@ -3330,6 +3397,10 @@ struct NotchBody: View {
                     // matching the idle prompt. Empty-field Tab is still swallowed so
                     // focus never wanders out of the field.
                     onTab: {
+                        guard let event = NSApp.currentEvent,
+                              ReservedAppShortcut.cycleIntent.matches(event) else {
+                            return false
+                        }
                         if model.hasText { model.toggleSubmitPanel() }
                         return true
                     },
@@ -3819,7 +3890,7 @@ struct IdleTrailingCluster: View {
             // open, and clicking it lets go.
             if pinned {
                 segment(.pin, engaged: true, action: togglePin,
-                        tooltip: L("result.unpin")) {
+                        tooltip: shortcutHelp("result.unpin", action: .pin)) {
                     // A pinned pin tips upright, the way a pushed-in tack sits.
                     Image(systemName: "pin")
                 }
@@ -3925,22 +3996,24 @@ struct IdleTrailingCluster: View {
 struct ResultTrailingCluster: View {
     var pinned: Bool
     var togglePin: () -> Void
-    /// Tear-off action. When set, a detach chip rides the same glass pill as the
-    /// pin, to its left — so both trailing actions share one piece of glass
-    /// rather than the detach glyph floating bare beside it.
+    /// Tear-off action. When set, a detach chip joins the pin, to its left — the
+    /// two view actions read as one pair (tight 6pt spacing), set apart from the
+    /// composer chip further left by the header's wider 10pt gap.
     var detach: (() -> Void)? = nil
 
     var body: some View {
         GlassSegmentCluster(segments: {
             var segs: [GlassSegmentCluster.Segment] = []
             if let detach {
-                segs.append(.init(tooltip: L("detached.open"), action: detach) {
+                segs.append(.init(tooltip: shortcutHelp("detached.open", action: .detach),
+                                  action: detach) {
                     Image(systemName: "macwindow.on.rectangle")
                         .font(.sf(12, weight: .semibold))
                 })
             }
             segs.append(.init(engaged: pinned,
-                              tooltip: L(pinned ? "result.unpin" : "result.pin"),
+                              tooltip: shortcutHelp(pinned ? "result.unpin" : "result.pin",
+                                                    action: .pin),
                               action: togglePin) {
                 // A pinned pin tips upright, the way a pushed-in tack sits — a small
                 // physical cue that it's engaged, on top of the engaged tint.
@@ -3949,7 +4022,7 @@ struct ResultTrailingCluster: View {
                     .rotationEffect(.degrees(pinned ? 0 : 32))
             })
             return segs
-        }())
+        }(), glass: false)
     }
 }
 

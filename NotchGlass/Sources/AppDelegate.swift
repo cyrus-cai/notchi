@@ -124,6 +124,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// General recorder changes the config; both `nil` while disabled.
     private var summonHotKey: HotKey?
     private var summonDoubleTap: DoubleTapModifierMonitor?
+    /// Every complete user-authored `[shortcut, prompt]` binding. The closure for
+    /// each registration captures only its stable id and reads the current prompt
+    /// at fire time, so editing prompt text needs no hot-key churn.
+    private var promptHotKeys: [UUID: HotKey] = [:]
+
+    /// True while a prompt shortcut's selection capture is still in flight — the
+    /// web-content path can wait a few hundred ms for a browser to build its
+    /// accessibility tree, and a chord repeated inside that window must be ignored
+    /// rather than start a second round.
+    private var isCapturingSelection = false
 
     /// The app that was frontmost right before the panel opened. The open path
     /// activates Notch (see the `$open` observer) so accessibility-based input
@@ -673,6 +683,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // other app). It posts the same request the in-panel gear does, so both
         // share one open path.
         settingsHotKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            // Installed at launch, so it runs ahead of the Shortcuts recorder's
+            // monitor and would swallow ⌘, before it could ever be recorded.
+            guard !ShortcutRecording.isActive else { return event }
             if event.keyCode == UInt16(kVK_ANSI_Comma),
                event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command {
                 NotificationCenter.default.post(name: .openSettingsRequested, object: nil)
@@ -696,6 +709,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.registerSummonHotKey()
             }
         }
+        registerPromptHotKeys()
+        NotificationCenter.default.addObserver(
+            forName: .promptShortcutsChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.registerPromptHotKeys()
+            }
+        }
+        // Recording a chord takes every global registration offline for the
+        // duration: a live Carbon hot key eats its own chord before any app sees
+        // a key event, so the recorder could never observe the keys Notch already
+        // owns. Both sets are rebuilt from the (possibly just-changed) stores when
+        // recording ends.
+        NotificationCenter.default.addObserver(
+            forName: .shortcutRecordingChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.registerSummonHotKey()
+                self?.registerPromptHotKeys()
+            }
+        }
     }
 
     /// (Re)register the global summon shortcut from the persisted config. Dropping
@@ -705,7 +743,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         summonHotKey = nil
         summonDoubleTap = nil
         let config = SummonHotKey.current
-        guard config.enabled else { return }
+        guard config.enabled, !ShortcutRecording.isActive else { return }
 
         let fire: () -> Void = { [weak self] in
             guard let self else { return }
@@ -719,6 +757,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                        action: fire)
         } else {
             summonHotKey = HotKey(keyCode: config.keyCode, modifiers: config.modifiers, action: fire)
+        }
+    }
+
+    /// Replace the complete dynamic registration set. Dropping the old dictionary
+    /// unregisters every prior Carbon hot key through `HotKey.deinit`, then each
+    /// ready row claims its new chord exactly once.
+    private func registerPromptHotKeys() {
+        promptHotKeys.removeAll()
+        guard !ShortcutRecording.isActive else { return }
+        for binding in PromptShortcutStore.current where binding.isReady {
+            guard let chord = binding.shortcut else { continue }
+            let id = binding.id
+            guard let hotKey = HotKey(keyCode: chord.keyCode,
+                                      modifiers: chord.modifiers,
+                                      action: { [weak self] in
+                self?.runPromptShortcut(id: id)
+            }) else { continue }
+            promptHotKeys[id] = hotKey
+        }
+    }
+
+    /// Capture the outside selection before opening Notch (activation changes the
+    /// system focused element), then start a fresh Chat and submit immediately.
+    /// Missing/unsupported selections deliberately do not fall back to clipboard.
+    private func runPromptShortcut(id: UUID) {
+        guard let binding = PromptShortcutStore.shortcut(id: id), binding.isReady else { return }
+        // The capture can now take a beat (waking a browser's accessibility tree),
+        // so a second chord during that beat must not start a second round.
+        guard !isCapturingSelection else { return }
+        isCapturingSelection = true
+        // The capture answers immediately for a native app; over web content it may
+        // have to wake the app's accessibility tree first and call back a beat later
+        // (see `SelectedTextCapture.current(completion:)`). Nothing activates Notch
+        // until the text is in hand either way, so the user keeps focus — and their
+        // selection — for the whole wait.
+        SelectedTextCapture.current { [weak self] result in
+            guard let self else { return }
+            self.isCapturingSelection = false
+            switch result {
+            case .text(let selectedText):
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                    self.model.runPromptShortcut(prompt: binding.prompt,
+                                                 selectedText: selectedText,
+                                                 on: self.displayForSummon())
+                }
+            case .permissionRequired:
+                // A previous denial suppresses macOS's one-time alert. Always take the
+                // user to the exact privacy pane as the deterministic recovery path.
+                guard let url = URL(string:
+                    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+                else { return }
+                NSWorkspace.shared.open(url)
+            case .noSelection:
+                return
+            }
         }
     }
 

@@ -186,13 +186,49 @@ enum APIKeyStore {
     /// Whether Keenable search is active (a key is available from env or Settings).
     static var keenableActive: Bool { currentKeenableKey() != nil }
 
-    /// Which web-search backend the user picks. Just the two keyed backends — like
-    /// the model picker, you choose one and that's the one that runs (no fallback
-    /// to the other, no auto-tiebreaker). `nil` (no pick) means "use the provider's
-    /// own native search", the search-side analogue of the model row's Default.
+    // AnySearch is a standalone search backend whose REST API also supports an
+    // anonymous free tier. A key is therefore optional: when present it raises
+    // the quota/concurrency limits, and when absent requests simply omit the
+    // Authorization header.
+    private static let anySearchDefaultsKey = "aux_key.anysearch"
+    private static let anySearchEnvVar = "ANYSEARCH_API_KEY"
+
+    /// The effective AnySearch key right now: `ANYSEARCH_API_KEY` env var →
+    /// stored entry. `nil` means the selected backend uses anonymous access.
+    static func currentAnySearchKey() -> String? {
+        if let env = ProcessInfo.processInfo.environment[anySearchEnvVar],
+           !env.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return env
+        }
+        let stored = storedAnySearchKey()
+        return stored.isEmpty ? nil : stored
+    }
+
+    static func storedAnySearchKey() -> String {
+        UserDefaults.standard.string(forKey: anySearchDefaultsKey) ?? ""
+    }
+
+    static func hasAnySearchEnvOverride() -> Bool {
+        let env = ProcessInfo.processInfo.environment[anySearchEnvVar]
+        return env?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    }
+
+    static func saveAnySearchKey(_ key: String) {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            UserDefaults.standard.removeObject(forKey: anySearchDefaultsKey)
+        } else {
+            UserDefaults.standard.set(trimmed, forKey: anySearchDefaultsKey)
+        }
+    }
+
+    /// Which web-search backend the user picks. Like the model picker, you choose
+    /// one and that's the one that runs (no cross-backend fallback or automatic
+    /// tiebreaker). `nil` means "use the provider's own native search".
     enum SearchBackend: String, CaseIterable, Identifiable {
         case keenable
         case exa
+        case anysearch
         var id: String { rawValue }
     }
 
@@ -214,18 +250,21 @@ enum APIKeyStore {
         }
     }
 
-    /// The backend that actually runs: the user's pick when it has a key, else `nil`
-    /// — there's no cross-backend fallback, a keyless pick simply hands back to the
-    /// provider's own native search. `nil` also when nothing is picked.
+    /// The backend that actually runs. Exa and Keenable require a configured key;
+    /// AnySearch is usable anonymously and therefore resolves without one. A
+    /// keyless keyed-backend pick hands back to the provider's native search.
     static func resolvedSearchBackend() -> SearchBackend? {
         switch preferredSearchBackend {
         case .exa:      return exaActive ? .exa : nil
         case .keenable: return keenableActive ? .keenable : nil
+        // AnySearch explicitly supports anonymous REST requests, so selecting it
+        // is enough to make it the unified backend; a key only upgrades limits.
+        case .anysearch: return .anysearch
         case nil:       return nil
         }
     }
 
-    /// Whether a unified client-side searcher (Exa or Keenable) is standing in for
+    /// Whether a unified client-side searcher is standing in for
     /// every provider's native search. Gates the server-search suppression in
     /// `streamTurn`: when false, the provider's own native search stays in play.
     static var unifiedSearchActive: Bool { resolvedSearchBackend() != nil }

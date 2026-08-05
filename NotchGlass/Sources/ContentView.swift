@@ -74,15 +74,47 @@ struct ContentView: View {
         .animation(.spring(response: 0.34, dampingFraction: 0.78), value: model.thinking)
         .animation(.easeInOut(duration: 0.2), value: model.isOpen(on: metrics.displayID))
         .background(KeyEventCatcher { event in
+            // This catcher is installed when the panel is built, so it runs ahead
+            // of the Shortcuts recorder's monitor and any chord it consumes never
+            // reaches the recorder. While a chord is being recorded the panel
+            // ignores the keyboard entirely — including Esc, which the recorder
+            // uses to cancel.
+            if ShortcutRecording.isActive { return false }
             // ⌘↵ submits the current line to the *other family* — Ask ⇄ Capture
             // (Note/Remind) — the one-key correction for when the inline hint reads
             // the line wrong (see NotchModel.submitOtherFamily; Tab remains the
             // precise three-way pick). Fresh prompt only: intent routing never
             // applies to follow-ups, and it needs text to send. keyCode 36 is Return.
-            if event.keyCode == 36, event.modifierFlags.contains(.command),
+            if ReservedAppShortcut.sendOther.matches(event),
                model.mode == .idle, model.hasText,
-               !model.showSettings, !model.showWhatsNew {
+               !model.showSettings, !model.showWhatsNew, !model.showHistory {
                 model.submitOtherFamily()
+                return true
+            }
+            // The prompt's two destination switches are customizable too. They
+            // stay scoped to the live composer so the same chord remains free in
+            // settings, history search, and detached task detail fields.
+            if ReservedAppShortcut.cycleIntent.matches(event),
+               !model.showSettings, !model.showWhatsNew,
+               !model.showHistory, model.agentDetailTaskID == nil,
+               fieldEditorIsFirstResponder() {
+                if model.mode == .idle {
+                    if withAnimation(.spring(response: 0.34, dampingFraction: 0.82), {
+                        model.confirmSlashCommand()
+                    }) { return true }
+                    model.toggleSubmitPanel()
+                    return true
+                }
+                if model.mode == .result {
+                    if model.hasText { model.toggleSubmitPanel() }
+                    return true
+                }
+            }
+            if ReservedAppShortcut.bucket.matches(event),
+               model.mode == .idle, !model.showSettings, !model.showWhatsNew,
+               !model.showHistory, model.agentDetailTaskID == nil,
+               fieldEditorIsFirstResponder() {
+                model.toggleAgentBucket()
                 return true
             }
             // ⌘F summons the recent-list filter. The chip is gone — this is the only
@@ -90,7 +122,7 @@ struct ContentView: View {
             // field's own > 6 render gate). If the list is collapsed, open it first so
             // the field has somewhere to land; if the filter's already up, ⌘F is a
             // no-op rather than a toggle (Esc clears/closes it — see below).
-            if event.keyCode == 3, event.modifierFlags.contains(.command),
+            if AppShortcutStore.matches(.filter, event: event),
                !model.showSettings, model.history.count > 6 {
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                     if !model.showHistory { model.showHistory = true }
@@ -110,9 +142,7 @@ struct ContentView: View {
             // With no agent CLI installed there are no dials to show, so the chord
             // falls back to the cross-provider chat picker rather than opening an
             // empty card.
-            if event.keyCode == 34,
-               event.modifierFlags.contains(.command),
-               event.modifierFlags.contains(.shift),
+            if AppShortcutStore.matches(.picker, event: event),
                !model.showSettings, !model.showWhatsNew {
                 if model.agentAvailable {
                     model.showAgentPicker = true
@@ -135,9 +165,7 @@ struct ContentView: View {
             // collides with text editing in the prompt field — which matters,
             // because pulling out a half-typed draft is this chord's main use.
             // keyCode 24 is `=`.
-            if event.keyCode == 24,
-               event.modifierFlags.contains(.control),
-               event.modifierFlags.contains(.shift),
+            if AppShortcutStore.matches(.detach, event: event),
                model.detachableSession != nil {
                 model.openDetachedWindow()
                 return true
@@ -148,8 +176,8 @@ struct ContentView: View {
             // movement or text entry, so unlike bare ← it needn't gate on an
             // empty field). No-op on the idle prompt — already a fresh chat.
             // keyCode 45 is N.
-            if event.keyCode == 45, event.modifierFlags.contains(.command),
-               model.mode != .idle {
+            if AppShortcutStore.matches(.newChat, event: event),
+               model.mode != .idle, !model.showSettings, !model.showWhatsNew {
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                     model.newChat()
                 }
@@ -163,23 +191,18 @@ struct ContentView: View {
             // responder, ⌘C/⌘S/⌘R fall through to the system (⌘C copies the
             // selection/line, etc.). ⌘P/⌘D handle their own state below.
             //   ⌘C (8)  = copy the whole answer     ⌘R (15) = regenerate
-            if event.modifierFlags.contains(.command),
-               model.mode == .result, !model.showSettings, !model.showWhatsNew,
+            if model.mode == .result, !model.showSettings, !model.showWhatsNew,
                !model.isStreaming, !fieldEditorIsFirstResponder() {
-                switch event.keyCode {
-                case 8:   // C — copy the whole answer (no manual selection to honour;
-                          // the field editor guard above already ceded ⌘C while typing)
-                    if let answer = model.lastAnswerText {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(answer, forType: .string)
-                        model.rebaselineClipboardAfterInAppWrite()
-                        return true
-                    }
-                case 15:  // R — regenerate the last answer
+                if AppShortcutStore.matches(.copyAnswer, event: event),
+                   let answer = model.lastAnswerText {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(answer, forType: .string)
+                    model.rebaselineClipboardAfterInAppWrite()
+                    return true
+                }
+                if AppShortcutStore.matches(.regenerate, event: event) {
                     model.regenerateLastAnswer()
                     return true
-                default:
-                    break
                 }
             }
             // ⌘P (and ⌘D) pins/unpins the panel — the keyboard twin of the pin
@@ -187,7 +210,7 @@ struct ContentView: View {
             // → the panel stays open when the pointer leaves (see
             // NotchModel.collapseOnLeave). Not over settings / what's new (those own
             // no pin), so both fall through to the system there. keyCode 35 is P, 2 is D.
-            if event.keyCode == 35 || event.keyCode == 2, event.modifierFlags.contains(.command),
+            if AppShortcutStore.matches(.pin, event: event),
                model.mode != .load, !model.showSettings, !model.showWhatsNew {
                 withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
                     model.toggleAnswerPin()
@@ -279,7 +302,11 @@ struct ContentView: View {
             // agent-detail page renders in `.idle` mode, so admit it explicitly
             // (via agentDetailTaskID) — otherwise ← is dead there and only the
             // header chevron backs out.
+            // A *bare* ← only: ⌥←/⌃← are ordinary editing (and recordable) chords,
+            // and the settings / what's new pages own no thread to back out of.
             if event.keyCode == 123,
+               SummonHotKey.carbonModifiers(from: event.modifierFlags) == 0,
+               !model.showSettings, !model.showWhatsNew,
                model.mode != .idle || model.agentDetailTaskID != nil,
                !model.hasText {
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
@@ -1005,6 +1032,8 @@ struct NotchIsland: View {
                 }
         })
         .onHover { inside in
+            // Hover-only chrome (the result header's trailing chips) reads this.
+            model.pointerInside = inside
             if inside {
                 model.hoverEntered(on: metrics.displayID,
                                    velocity: MouseVelocityTracker.shared.entryVelocity())
@@ -1178,4 +1207,3 @@ struct KeyEventCatcher: NSViewRepresentable {
         deinit { if let m = monitor { NSEvent.removeMonitor(m) } }
     }
 }
-

@@ -42,6 +42,8 @@ final class UpdaterService: ObservableObject {
 
     static let repo = "cyrus-cai/notchi"
     static var releasesPage: URL { URL(string: "https://github.com/\(repo)/releases/latest")! }
+    /// The canonical, complete release-note history on the Notchi website.
+    static let releaseNotesPage = URL(string: "https://www.notch.website/releases")!
 
     /// The running app's marketing version. CI stamps the release tag into
     /// Info.plist via `MARKETING_VERSION`; local builds carry the pbxproj value.

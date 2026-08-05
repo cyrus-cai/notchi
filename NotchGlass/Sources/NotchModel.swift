@@ -1,6 +1,7 @@
 import SwiftUI
 import Combine
 import AppKit   // NSWorkspace — opening Notes/Reminders for a Recent capture
+import Carbon.HIToolbox
 import UniformTypeIdentifiers   // UTType — is a pasted file URL an image? (agent ⌘V)
 
 /// Images loaded back out of the history store (`NotchModel.historyImage(named:)`),
@@ -89,6 +90,10 @@ final class NotchModel: ObservableObject {
         var role: String     // "user" | "assistant"
         var text: String
         var streaming: Bool = false
+        /// The prompt-shortcut request still belongs to the transcript and wire
+        /// context, but its generated instruction + selected-text payload is an
+        /// implementation detail and should not render as a user bubble.
+        var hidesUserBubble: Bool = false
         /// True on the *user* turn whose message was enriched with the clipboard, so
         /// the result view can show a permanent "based on what you copied" trace above
         /// it — not a flag that flashes during load and vanishes. Always false on
@@ -149,9 +154,11 @@ final class NotchModel: ObservableObject {
         var agentLog: [AgentLogEntry]? = nil
 
         init(id: UUID = UUID(), role: String, text: String,
-             streaming: Bool = false, usedClipboard: Bool = false) {
+             streaming: Bool = false, usedClipboard: Bool = false,
+             hidesUserBubble: Bool = false) {
             self.id = id; self.role = role; self.text = text
             self.streaming = streaming; self.usedClipboard = usedClipboard
+            self.hidesUserBubble = hidesUserBubble
         }
 
         // Same defensive decode as `HistoryItem` (see the long note there): turns
@@ -161,7 +168,7 @@ final class NotchModel: ObservableObject {
         // it. `decodeIfPresent` + defaults is what keeps old saved conversations
         // loadable. `role`/`text` are required — every saved turn has them.
         // `toolActivity` is deliberately absent: it's runtime-only UI state.
-        enum CodingKeys: String, CodingKey { case id, role, text, streaming, usedClipboard, sources, isError, regenModel, answerModel, imageFiles, isAgent, agentLog }
+        enum CodingKeys: String, CodingKey { case id, role, text, streaming, hidesUserBubble, usedClipboard, sources, isError, regenModel, answerModel, imageFiles, isAgent, agentLog }
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -169,6 +176,7 @@ final class NotchModel: ObservableObject {
             role         = try c.decode(String.self, forKey: .role)
             text         = try c.decode(String.self, forKey: .text)
             streaming    = try c.decodeIfPresent(Bool.self, forKey: .streaming) ?? false
+            hidesUserBubble = try c.decodeIfPresent(Bool.self, forKey: .hidesUserBubble) ?? false
             usedClipboard = try c.decodeIfPresent(Bool.self, forKey: .usedClipboard) ?? false
             sources      = try c.decodeIfPresent([WebSource].self, forKey: .sources) ?? []
             isError      = try c.decodeIfPresent(Bool.self, forKey: .isError) ?? false
@@ -430,6 +438,22 @@ final class NotchModel: ObservableObject {
     /// `submit`, a `fullClose`), so a pin never leaks onto the next conversation.
     @Published var isAnswerPinned = false
 
+    /// Whether the pointer is currently over the open island. Maintained by the
+    /// island's own `.onHover` (and seeded from the real pointer position on the
+    /// closed→open edge, for a keyboard summon that lands under a resting cursor).
+    /// The result header's trailing chips read it so they can rest INVISIBLE and
+    /// fade in only under the cursor — at a glance the answer is all there is.
+    @Published var pointerInside = false
+
+    /// This thread was opened by a user-defined prompt shortcut (`runPromptShortcut`)
+    /// rather than by typing into the panel. Such a run is a one-shot — the user
+    /// hit a hotkey on a selection and wants to read the answer — so the result
+    /// view collapses its follow-up input into a small floating button that costs
+    /// no height, and only expands into the full field when tapped. Cleared
+    /// wherever the page changes underneath it (`newChat`, `fullClose`, a fresh
+    /// typed `submit`), so it never leaks onto the next conversation.
+    @Published var fromPromptShortcut = false
+
     /// The model picker popover (anchored to the model chip in settings) is open.
     /// While set, `collapseOnLeave` bails exactly as it does for a pinned answer: the
     /// popover is a separate window outside the island's tracking area, so moving the
@@ -527,13 +551,19 @@ final class NotchModel: ObservableObject {
     /// exits — an attachment belongs to the task being written, not the mode.
     @Published var agentComposeImages: [NSImage] = []
 
+    /// Images explicitly ⌘V-pasted into an ordinary Ask. Kept separate from the
+    /// system clipboard: copying an image never changes the UI or silently sends
+    /// pixels. Each paste appends, and submit clears exactly this round's set.
+    @Published var askComposeImages: [NSImage] = []
+
     /// How many images one agent round may carry. Both CLIs take far more —
     /// codex's `-i` is variadic (OpenAI accepts 500 images / 50MB per request)
     /// and claude's stream-json takes 100 image blocks — but Anthropic imposes a
     /// stricter per-image dimension cap on requests holding MORE than 20 images,
     /// so 20 is the line where neither engine needs special handling. (Screenshots
     /// encode at a 1568px long side anyway, well inside even that stricter cap.)
-    static let agentImageLimit = 20
+    static let composeImageLimit = 20
+    static let agentImageLimit = composeImageLimit
 
     /// The last project chosen for an agent Codex task. Kept separately so the
     /// folder picker can reopen there even after the user explicitly exits agent
@@ -740,6 +770,10 @@ final class NotchModel: ObservableObject {
         /// so the result view lands in the right (short vs clipped) layout on
         /// its very first frame.
         var measuredAnswerHeight: CGFloat
+        /// Whether the thread was opened by a prompt shortcut — parked so a
+        /// close+reopen lands back on the FOLDED follow-up (a header chip) instead
+        /// of silently promoting the thread to a standing composer.
+        var fromPromptShortcut: Bool
     }
 
     private var parkedSession: ParkedSession? = nil
@@ -1206,6 +1240,7 @@ final class NotchModel: ObservableObject {
             text = ""
             mode = .idle
             isAnswerPinned = false
+            fromPromptShortcut = false
         }
         beginClose()
     }
@@ -1845,6 +1880,69 @@ final class NotchModel: ObservableObject {
         "Reminiscing...", "Fading...", "Echoing...", "Searching...", "Wondering...",
     ]
 
+    /// The handful of rounds that already name their own job: a translation that
+    /// says "Whispering…" is hiding what it is plainly doing. These are the verbs
+    /// people fire at a selection — the prompt-shortcut work — so the wait word
+    /// says the work instead of a mood, pinned for the whole round (no rotation).
+    ///
+    /// Cues are imperative verbs in the languages the app ships in (EN / 简 / 繁 /
+    /// 日 / 한 / ES), matched anywhere in the line: the instruction can sit either
+    /// side of the quoted text ("翻译一下：…", "… translate to Japanese"). Verbs
+    /// only, on purpose — a question *about* a translation ("who did the best
+    /// translation of Dante") keeps the mood rotation. Order is priority, so
+    /// "translate and summarize this" reads "Translating…".
+    ///
+    /// Deliberately NOT here: write / draft / plan / brainstorm and the rest of
+    /// the generation asks. Those are the ordinary conversation, and pinning every
+    /// one of them to a literal verb would retire the mood words entirely.
+    static let taskWords: [(word: String, cues: [String])] = [
+        ("Translating...", [
+            "translate", "translating",
+            "翻译", "翻譯", "译成", "譯成", "译为", "譯為", "转译", "轉譯",
+            "翻訳", "번역",
+            "traduce", "tradúce", "traducir", "traduzca",
+        ]),
+        // "summar" on purpose: covers summarize / summarise / summary / summaries
+        // in one cue. Spanish keeps the verb forms only — bare "resume" is the
+        // English noun ("review my resume"), which is not a summary request.
+        ("Summarizing...", [
+            "summar", "tl;dr", "tldr", "recap",
+            "总结", "總結", "摘要", "概括", "归纳", "歸納",
+            "要約", "요약",
+            "resumir", "resumen",
+        ]),
+        ("Proofreading...", [
+            "proofread", "typos",
+            "校对", "校對", "校正", "纠错", "糾錯", "错别字", "錯別字",
+            "誤字", "교정",
+            "corrige los errores",
+        ]),
+        ("Rewriting...", [
+            "rewrite", "reword", "rephrase", "paraphrase",
+            "改写", "改寫", "重写", "重寫", "润色", "潤色", "改一下措辞",
+            "書き直", "다시 써",
+            "reescribe", "reescribir", "reformula",
+        ]),
+        ("Explaining...", [
+            "explain", "eli5",
+            "解释", "解釋", "讲解", "講解", "说明一下", "說明一下",
+            "解説", "설명",
+            "explica", "explique",
+        ]),
+    ]
+
+    /// The pinned wait word for this question, or nil when it's an ordinary round
+    /// that should roll a mood word.
+    static func taskWord(for question: String) -> String? {
+        let q = question.lowercased()
+        return taskWords.first { entry in entry.cues.contains { q.contains($0) } }?.word
+    }
+
+    /// Non-nil while this round's wait word is pinned to a task word (see
+    /// `taskWords`) — the reroll returns it unchanged and the rotation timer
+    /// never starts. Cleared when the round ends.
+    private var pinnedThinkingWord: String? = nil
+
     /// The current rotating thinking word. Re-rolled at the start of each answer and
     /// every `thinkingWordInterval` while the wait is on screen, avoiding an immediate
     /// repeat. This is the *mood word only* — it is NOT the thing the UI displays
@@ -1907,8 +2005,13 @@ final class NotchModel: ObservableObject {
     /// activity label, which now lives in its own row.
     var currentThinkingWord: String { thinkingWord }
 
-    /// Pick a fresh thinking word, avoiding an immediate repeat.
+    /// Pick a fresh thinking word, avoiding an immediate repeat. A pinned task word
+    /// wins outright — the round says what it's doing and never drifts off it.
     private func rerollThinkingWord() {
+        if let pinnedThinkingWord {
+            thinkingWord = pinnedThinkingWord
+            return
+        }
         let pool = NotchModel.thinkingWords.filter { $0 != thinkingWord }
         thinkingWord = pool.randomElement() ?? NotchModel.thinkingWords.randomElement() ?? thinkingWord
     }
@@ -1924,13 +2027,21 @@ final class NotchModel: ObservableObject {
     /// first token lands or the round ends.
     private var thinkingWordTimer: Timer? = nil
 
-    func startThinkingWordRotation() {
+    /// `question` is the line this round is answering: a task-shaped one (translate,
+    /// summarize, …) pins the wait word to that job instead of rolling a mood word.
+    func startThinkingWordRotation(for question: String = "") {
         thinkingWordTimer?.invalidate()
         thinkingActivity = nil
         thinkingStartedAt = Date()
         // Each round starts in pure-dots mode; only a tool flips it into word mode.
         hasUsedToolThisRound = false
+        pinnedThinkingWord = Self.taskWord(for: question)
         rerollThinkingWord()
+        // A pinned word is the whole round's word — nothing to rotate.
+        guard pinnedThinkingWord == nil else {
+            thinkingWordTimer = nil
+            return
+        }
         let t = Timer(timeInterval: NotchModel.thinkingWordInterval, repeats: true) { [weak self] _ in
             self?.rerollThinkingWord()
         }
@@ -1945,6 +2056,7 @@ final class NotchModel: ObservableObject {
         thinkingActivity = nil
         thinkingStartedAt = nil
         hasUsedToolThisRound = false
+        pinnedThinkingWord = nil
     }
 
     /// The first-token freeze: stop the mood-word rotation (the pre-stream wait
@@ -1970,6 +2082,1007 @@ final class NotchModel: ObservableObject {
         thinkingActivityOrb = orb
     }
 
+    // MARK: - Natural-language app settings
+
+    /// A validated setting update. Validation happens for the whole batch before
+    /// the confirmation card appears, so the card never promises a change that we
+    /// already know is malformed. The payload retains typed values for the commit;
+    /// `summary` is deliberately safe to show (API keys are never echoed).
+    private struct PreparedAppSettingChange {
+        enum Payload {
+            case language(AppLanguage)
+            case dockIcon(DockIconVisibility)
+            case menuBarIcon(MenuBarIconVisibility)
+            case launchAtLogin(Bool)
+            case placement(DisplayPlacement)
+            case hideInFullscreen(Bool)
+            case liveActivity(Bool)
+            case hoverSensitivity(HoverSensitivity)
+            case noteDestination(NoteDestination)
+            case notesFolder(String)
+            case copySense(Bool)
+            case shortcut(SummonHotKey)
+            /// `nil` chord ⇒ restore the shipped default for that action.
+            case actionShortcut(AppShortcutAction, ShortcutChord?)
+            /// The whole resulting row — new binding or edited existing one.
+            case promptShortcut(PromptShortcut)
+            case promptShortcutRemoval(UUID)
+            case customInstructions(String)
+            case proxy(String)
+            case aiProvider(Provider)
+            case aiModel(Provider, String)
+            case apiKey(Provider, String)
+            case searchBackend(APIKeyStore.SearchBackend?)
+            case searchAPIKey(APIKeyStore.SearchBackend, String)
+            case customProviderName(String)
+            case customProviderURL(String)
+            case customProviderModel(String)
+        }
+
+        let key: String
+        let summary: String
+        let payload: Payload
+        let isNoOp: Bool
+    }
+
+    private enum AppSettingValidationError: LocalizedError {
+        case message(String)
+        var errorDescription: String? {
+            if case .message(let message) = self { return message }
+            return nil
+        }
+    }
+
+    /// At most one settings write can own a round's confirmation card. Models are
+    /// instructed to batch, but this runtime gate keeps a malformed multi-call
+    /// turn from showing two confirmations or racing two writes anyway.
+    private var settingsConfirmationAnswers: Set<UUID> = []
+
+    /// Entry point injected into `ManageAppSettingsTool` for this answer round.
+    /// Listing is read-only and returns immediately. Every update — including a
+    /// multi-setting batch — suspends on the same in-answer choice card used by
+    /// `ask_user`, then commits only when the positive option is tapped.
+    func handleAppSettingsRequest(answerID: UUID,
+                                  request: AppSettingsRequest) async throws -> String {
+        if request.action == .list { return appSettingsSnapshot() }
+        if request.action == .shortcuts { return appShortcutSnapshot() }
+        if request.action == .open {
+            guard let requested = request.section,
+                  openAppSettingsSection(requested) else {
+                return "Error: section must be model, search, notes, general, appearance, shortcuts, or about."
+            }
+            return "Opened the \(requested) settings page so the user can review the available choices."
+        }
+
+        guard settingsConfirmationAnswers.insert(answerID).inserted else {
+            return "Error: another settings update is already awaiting confirmation in this answer. Combine all requested changes into one manage_app_settings call."
+        }
+        defer { settingsConfirmationAnswers.remove(answerID) }
+
+        var prepared: [PreparedAppSettingChange] = []
+        var seen = Set<String>()
+        let batchProvider = request.changes
+            .first { Self.settingToken($0.setting) == "ai_provider" }
+            .flatMap { Self.parseProvider($0.value) }
+            ?? APIKeyStore.selectedProvider
+        for raw in request.changes {
+            let change: PreparedAppSettingChange
+            do {
+                change = try prepareAppSettingChange(raw, defaultProvider: batchProvider)
+            } catch {
+                // An unsupported value is most useful when it lands the user on
+                // the actual control and its real choices. This also catches a
+                // model that attempted `update` instead of the advertised `open`
+                // fallback, so the UX does not depend on perfect tool selection.
+                if let section = Self.appSettingsSection(for: raw.setting) {
+                    _ = openAppSettingsSection(section)
+                    return "\(error.localizedDescription) Opened the \(section) settings page so the user can review the available choices."
+                }
+                throw error
+            }
+            guard seen.insert(change.key).inserted else {
+                throw AppSettingValidationError.message(
+                    "The same setting appears more than once in this update: \(change.key).")
+            }
+            prepared.append(change)
+        }
+
+        let effective = prepared.filter { !$0.isNoOp }
+        guard !effective.isEmpty else {
+            return "No change was needed; those settings already have the requested values."
+        }
+
+        let copy = appSettingsConfirmationCopy()
+        let lines = effective.map(\.summary).joined(separator: "\n")
+        let choice = try await awaitUserChoice(
+            answerID: answerID,
+            question: copy.question + "\n" + lines,
+            options: [copy.cancel, copy.confirm],
+            inlineOptions: true)
+        guard choice == "The user chose: \"\(copy.confirm)\"" else {
+            return "Cancelled. No settings were changed."
+        }
+
+        // Login-item registration is the only commit that can fail. Do it before
+        // the infallible UserDefaults writes so a refusal cannot leave half a batch
+        // applied after the user approved the whole summary.
+        for change in effective {
+            if case .launchAtLogin(let enabled) = change.payload {
+                try LaunchAtLogin.setEnabled(enabled)
+            }
+        }
+
+        var refreshAI = false
+        for change in effective {
+            switch change.payload {
+            case .language(let value):
+                Localization.shared.language = value
+            case .dockIcon(let value):
+                DockIconVisibility.current = value
+                NotificationCenter.default.post(name: .dockIconVisibilityChanged, object: nil)
+            case .menuBarIcon(let value):
+                MenuBarIconVisibility.current = value
+                NotificationCenter.default.post(name: .menuBarIconVisibilityChanged, object: nil)
+            case .launchAtLogin:
+                break // committed first because this one can throw
+            case .placement(let value):
+                DisplayPlacement.current = value
+                NotificationCenter.default.post(name: .displayPlacementChanged, object: nil)
+            case .hideInFullscreen(let enabled):
+                HideNotchInFullscreen.isEnabled = enabled
+                NotificationCenter.default.post(name: .hideNotchInFullscreenChanged, object: nil)
+            case .liveActivity(let enabled):
+                liveActivityEnabled = enabled
+            case .hoverSensitivity(let value):
+                HoverSensitivity.current = value
+            case .noteDestination(let value):
+                NoteDestination.current = value
+            case .notesFolder(let path):
+                FileNotesService.folderPath = path
+            case .copySense(let enabled):
+                copySenseEnabled = enabled
+            case .shortcut(let value):
+                SummonHotKey.current = value
+                NotificationCenter.default.post(name: .summonHotKeyChanged, object: nil)
+            case .actionShortcut(let action, let chord):
+                if let chord {
+                    AppShortcutStore.set(chord, for: action)
+                } else {
+                    AppShortcutStore.reset(action)
+                }
+                NotificationCenter.default.post(name: .appShortcutsChanged, object: nil)
+            case .promptShortcut(let binding):
+                // Re-read the list per change: a batch may touch several rows, and
+                // each write must land on the state its predecessors left behind.
+                var list = PromptShortcutStore.current
+                if let index = list.firstIndex(where: { $0.id == binding.id }) {
+                    list[index] = binding
+                } else {
+                    list.append(binding)
+                }
+                PromptShortcutStore.save(list)
+                NotificationCenter.default.post(name: .promptShortcutsChanged, object: nil)
+            case .promptShortcutRemoval(let id):
+                var list = PromptShortcutStore.current
+                list.removeAll { $0.id == id }
+                PromptShortcutStore.save(list)
+                NotificationCenter.default.post(name: .promptShortcutsChanged, object: nil)
+            case .customInstructions(let value):
+                customInstructions = value
+            case .proxy(let value):
+                proxyURL = value
+            case .aiProvider(let provider):
+                APIKeyStore.selectedProvider = provider
+                refreshAI = true
+            case .aiModel(let provider, let modelID):
+                APIKeyStore.saveModel(modelID, for: provider)
+                if !modelID.isEmpty { AskModelMRU.record(provider: provider, model: modelID) }
+                refreshAI = true
+            case .apiKey(let provider, let key):
+                APIKeyStore.save(key, for: provider)
+                refreshAI = true
+            case .searchBackend(let backend):
+                APIKeyStore.preferredSearchBackend = backend
+                refreshAI = true
+            case .searchAPIKey(let backend, let key):
+                switch backend {
+                case .exa:      APIKeyStore.saveExaKey(key)
+                case .keenable: APIKeyStore.saveKeenableKey(key)
+                case .anysearch: APIKeyStore.saveAnySearchKey(key)
+                }
+                refreshAI = true
+            case .customProviderName(let value):
+                CustomProvider.name = value
+                refreshAI = true
+            case .customProviderURL(let value):
+                CustomProvider.baseURL = value
+                refreshAI = true
+            case .customProviderModel(let value):
+                CustomProvider.model = value
+                refreshAI = true
+            }
+        }
+        if refreshAI {
+            NotificationCenter.default.post(name: .aiBackendChanged, object: nil)
+        }
+        return "Settings updated after confirmation: "
+            + effective.map(\.summary).joined(separator: "; ") + "."
+    }
+
+    /// Route canonical setting ids onto the category that owns their UI control.
+    /// Kept beside the tool handler so adding a setting means adding its write and
+    /// fallback destination in the same place.
+    private static func appSettingsSection(for setting: String) -> String? {
+        switch settingToken(setting) {
+        case "model", "ai_provider", "ai_model", "api_key",
+             "custom_provider_name", "custom_provider_url", "custom_provider_model",
+             "custom_instructions":
+            return "model"
+        case "search", "search_backend", "search_api_key":
+            return "search"
+        case "notes", "note_destination", "notes_folder", "copy_sense":
+            return "notes"
+        case "general", "app_language", "launch_at_login", "hover_sensitivity", "proxy":
+            return "general"
+        case "shortcuts", "summon_shortcut", "action_shortcut", "prompt_shortcut":
+            return "shortcuts"
+        case "appearance", "dock_icon", "menu_bar_icon", "display_placement",
+             "hide_in_fullscreen", "live_activity":
+            return "appearance"
+        case "about":
+            return "about"
+        default:
+            return nil
+        }
+    }
+
+    /// Open the inline Settings surface directly on one category. This is a
+    /// navigation-only capability: it writes no preference and therefore never
+    /// enters the confirmation path.
+    @discardableResult
+    private func openAppSettingsSection(_ requested: String) -> Bool {
+        let section: InlineSettingsView.Section
+        switch Self.settingToken(requested) {
+        case "model":      section = .model
+        case "search":     section = .search
+        case "notes":      section = .notes
+        case "general":    section = .general
+        case "appearance": section = .appearance
+        case "shortcuts":  section = .shortcuts
+        case "about":      section = .about
+        default: return false
+        }
+        settingsSection = section.rawValue
+        openSettings()
+        return true
+    }
+
+    /// A complete, secret-safe snapshot for questions such as "what are my app
+    /// settings?". Stable ids and canonical values make it easy for the model to
+    /// answer in the user's language without guessing how a localized UI label
+    /// maps back onto a future update call.
+    private func appSettingsSnapshot() -> String {
+        let provider = APIKeyStore.selectedProvider
+        let modelID = APIKeyStore.storedModel(for: provider)
+        let shortcut = SummonHotKey.current
+        let backend = APIKeyStore.preferredSearchBackend?.rawValue ?? "native"
+        let providerKey = APIKeyStore.current(for: provider) == nil ? "not_configured" : "configured"
+        let exaKey = APIKeyStore.currentExaKey() == nil ? "not_configured" : "configured"
+        let keenableKey = APIKeyStore.currentKeenableKey() == nil ? "not_configured" : "configured"
+        let anySearchKey = APIKeyStore.currentAnySearchKey() == nil ? "not_configured" : "configured"
+        // Both shortcut families are scoped lists rather than scalars, so they
+        // read the same way api_key/ai_model do: one line per addressable target.
+        let actionShortcuts = AppShortcutAction.allCases.map {
+            "action_shortcut[\($0.token)]=\(AppShortcutStore.chord(for: $0).displayString)"
+        }
+        let promptShortcuts = PromptShortcutStore.current.map { binding in
+            let chord = binding.shortcut?.displayString ?? "unassigned"
+            return "prompt_shortcut[\(chord)]=\(binding.prompt)"
+        }
+        return [
+            "app_language=\(Self.languageToken(AppLanguage.current))",
+            "dock_icon=\(DockIconVisibility.current.rawValue)",
+            "menu_bar_icon=\(MenuBarIconVisibility.current.rawValue)",
+            "launch_at_login=\(LaunchAtLogin.isEnabled)",
+            "display_placement=\(Self.placementToken(DisplayPlacement.current))",
+            "hide_in_fullscreen=\(HideNotchInFullscreen.isEnabled)",
+            "live_activity=\(liveActivityEnabled)",
+            "hover_sensitivity=\(HoverSensitivity.current.rawValue)",
+            "note_destination=\(Self.noteDestinationToken(NoteDestination.current))",
+            "notes_folder=\(FileNotesService.folderPath)",
+            "copy_sense=\(copySenseEnabled)",
+            "summon_shortcut=\(shortcut.enabled ? shortcut.displayString : "disabled")",
+            "custom_instructions=\(customInstructions.isEmpty ? "(empty)" : customInstructions)",
+            "proxy=\(proxyURL.isEmpty ? "auto" : proxyURL)",
+            "ai_provider=\(Self.providerToken(provider))",
+            "ai_model=\(modelID.isEmpty ? "default" : modelID)",
+            "api_key[\(Self.providerToken(provider))]=\(providerKey)",
+            "search_backend=\(backend)",
+            "search_api_key[exa]=\(exaKey)",
+            "search_api_key[keenable]=\(keenableKey)",
+            "search_api_key[anysearch]=\(anySearchKey)",
+            "custom_provider_name=\(CustomProvider.name.isEmpty ? "(empty)" : CustomProvider.name)",
+            "custom_provider_url=\(CustomProvider.baseURL.isEmpty ? "(empty)" : CustomProvider.baseURL)",
+            "custom_provider_model=\(CustomProvider.model.isEmpty ? "(empty)" : CustomProvider.model)",
+        ].joined(separator: "\n")
+        + "\n" + (actionShortcuts + promptShortcuts).joined(separator: "\n")
+    }
+
+    /// A localized, live reference for shortcut questions asked in chat. It is
+    /// derived from the exact catalog rendered by Settings, so the model never
+    /// needs to remember key combinations and the configurable summon chord is
+    /// always the one the user currently has selected.
+    private func appShortcutSnapshot() -> String {
+        let reference = AppShortcutReference.groups().map { group in
+            let entries = group.entries.map { entry in
+                let binding = entry.chords.isEmpty
+                    ? (entry.note ?? L("general.shortcut.off"))
+                    : entry.chords.joined(separator: " \(L("shortcuts.or")) ")
+                // Editable rows carry the id an update has to scope to; a fixed
+                // row carries none, which is exactly what "not editable" means.
+                let scope: String
+                switch entry.editable {
+                case .summon: scope = " [setting=summon_shortcut]"
+                case .action(let action): scope = " [setting=action_shortcut scope=\(action.token)]"
+                case .prompt, nil: scope = ""
+                }
+                return "- \(entry.label): \(binding)\(scope)"
+            }
+            return (["\(group.title):"] + entries).joined(separator: "\n")
+        }.joined(separator: "\n\n")
+
+        let prompts = PromptShortcutStore.current
+        let promptLines: [String] = prompts.isEmpty
+            ? ["(none)"]
+            : prompts.map { binding in
+                let chord = binding.shortcut?.displayString ?? L("general.shortcut.off")
+                return "- \(chord): \(binding.prompt) [setting=prompt_shortcut scope=\(chord)]"
+            }
+        return reference + "\n\n"
+            + (["\(L("shortcuts.promptAction")):"] + promptLines).joined(separator: "\n")
+    }
+
+    private func prepareAppSettingChange(
+        _ raw: AppSettingsRequest.Change,
+        defaultProvider: Provider
+    ) throws -> PreparedAppSettingChange {
+        let setting = Self.settingToken(raw.setting)
+        let value = raw.value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let scoped = raw.scope?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        func made(_ key: String, _ label: String, _ displayValue: String,
+                  _ payload: PreparedAppSettingChange.Payload,
+                  noOp: Bool) -> PreparedAppSettingChange {
+            .init(key: key, summary: "\(label) → \(confirmationDisplay(displayValue))",
+                  payload: payload, isNoOp: noOp)
+        }
+
+        switch setting {
+        case "app_language":
+            guard let newValue = Self.parseLanguage(value) else {
+                throw invalidValue(setting, "system, english, chinese_simplified, chinese_traditional, japanese, korean, french, or spanish")
+            }
+            return made(setting, L("general.appLanguage"), newValue.label,
+                        .language(newValue), noOp: newValue == AppLanguage.current)
+
+        case "dock_icon":
+            guard let newValue = Self.parseDockVisibility(value) else {
+                throw invalidValue(setting, "shown or hidden")
+            }
+            return made(setting, L("general.dockIcon"), newValue.label,
+                        .dockIcon(newValue), noOp: newValue == DockIconVisibility.current)
+
+        case "menu_bar_icon":
+            guard let newValue = Self.parseMenuBarVisibility(value) else {
+                throw invalidValue(setting, "shown or hidden")
+            }
+            return made(setting, L("general.menuBarIcon"), newValue.label,
+                        .menuBarIcon(newValue), noOp: newValue == MenuBarIconVisibility.current)
+
+        case "launch_at_login":
+            guard let enabled = Self.parseBoolean(value) else { throw invalidBoolean(setting) }
+            return made(setting, L("general.launchAtLogin"), localizedToggle(enabled),
+                        .launchAtLogin(enabled), noOp: enabled == LaunchAtLogin.isEnabled)
+
+        case "display_placement":
+            guard let newValue = Self.parsePlacement(value) else {
+                throw invalidValue(setting, "all or built_in")
+            }
+            return made(setting, L("general.showOn"), newValue.label,
+                        .placement(newValue), noOp: newValue == DisplayPlacement.current)
+
+        case "hide_in_fullscreen":
+            guard let enabled = Self.parseBoolean(value) else { throw invalidBoolean(setting) }
+            return made(setting, L("general.fullscreenAutoHide"), localizedToggle(enabled),
+                        .hideInFullscreen(enabled), noOp: enabled == HideNotchInFullscreen.isEnabled)
+
+        case "live_activity":
+            guard let enabled = Self.parseBoolean(value) else { throw invalidBoolean(setting) }
+            return made(setting, L("appearance.liveActivity"), localizedToggle(enabled),
+                        .liveActivity(enabled), noOp: enabled == liveActivityEnabled)
+
+        case "hover_sensitivity":
+            guard let newValue = HoverSensitivity(rawValue: Self.settingToken(value)) else {
+                throw invalidValue(setting, "low, balanced, or instant")
+            }
+            return made(setting, L("general.hoverSensitivity"), newValue.label,
+                        .hoverSensitivity(newValue), noOp: newValue == HoverSensitivity.current)
+
+        case "note_destination":
+            guard let newValue = Self.parseNoteDestination(value) else {
+                throw invalidValue(setting, "apple_notes or markdown_folder")
+            }
+            return made(setting, L("general.noteDestination"), newValue.label,
+                        .noteDestination(newValue), noOp: newValue == NoteDestination.current)
+
+        case "notes_folder":
+            let path = (value as NSString).expandingTildeInPath
+            guard path.hasPrefix("/") else {
+                throw AppSettingValidationError.message("notes_folder must be an absolute path.")
+            }
+            return made(setting, "Notes folder", (path as NSString).abbreviatingWithTildeInPath,
+                        .notesFolder(path), noOp: path == FileNotesService.folderPath)
+
+        case "copy_sense":
+            guard let enabled = Self.parseBoolean(value) else { throw invalidBoolean(setting) }
+            return made(setting, L("general.copySense"), localizedToggle(enabled),
+                        .copySense(enabled), noOp: enabled == copySenseEnabled)
+
+        case "summon_shortcut":
+            guard let shortcut = Self.parseShortcut(value) else {
+                throw invalidValue(setting, "disabled, default, double_option, double_command, double_control, double_shift, or a chord like command+shift+k")
+            }
+            return made(setting, L("general.shortcut"),
+                        shortcut.enabled ? shortcut.displayString : L("general.shortcut.off"),
+                        .shortcut(shortcut), noOp: shortcut == SummonHotKey.current)
+
+        case "action_shortcut":
+            guard let scoped, let action = AppShortcutAction.parse(scoped) else {
+                throw AppSettingValidationError.message(
+                    "action_shortcut requires scope=copy_answer, regenerate, pin, new_chat, filter, picker, or detach.")
+            }
+            if ["default", "reset", "restore"].contains(Self.settingToken(value)) {
+                return made("\(setting)[\(action.token)]", action.label,
+                            action.defaultChord.displayString, .actionShortcut(action, nil),
+                            noOp: AppShortcutStore.chord(for: action) == action.defaultChord)
+            }
+            guard let chord = Self.parseChord(value) else {
+                throw invalidValue(setting, "default or a chord like command+shift+c")
+            }
+            // The same validator the Shortcuts pane runs, so a chord the recorder
+            // would reject can't slip in through chat instead.
+            if let owner = AppShortcutStore.conflictOwner(for: chord, editingAction: action) {
+                throw AppSettingValidationError.message(
+                    "\(chord.displayString) is already used by \(owner).")
+            }
+            if let owner = Self.promptShortcutOwner(for: chord) {
+                throw AppSettingValidationError.message(
+                    "\(chord.displayString) is already used by the prompt shortcut “\(owner)”.")
+            }
+            return made("\(setting)[\(action.token)]", action.label, chord.displayString,
+                        .actionShortcut(action, chord),
+                        noOp: AppShortcutStore.chord(for: action) == chord)
+
+        case "prompt_shortcut":
+            return try preparePromptShortcut(value: value, scope: scoped, prompt: raw.prompt)
+
+        case "custom_instructions":
+            guard value.count <= Self.customInstructionsLimit else {
+                throw AppSettingValidationError.message(
+                    "custom_instructions is limited to \(Self.customInstructionsLimit) characters.")
+            }
+            let shown = value.isEmpty ? localizedCleared() : value
+            return made(setting, L("general.customInstructions"), shown,
+                        .customInstructions(value), noOp: value == customInstructions)
+
+        case "proxy":
+            let cleared = ["", "auto", "automatic", "system", "default"].contains(Self.settingToken(value))
+            guard cleared || ProxyConfig.normalize(value) != nil else {
+                throw AppSettingValidationError.message(
+                    "proxy must be auto or a valid HTTP/HTTPS/SOCKS proxy host or URL.")
+            }
+            let proxy = cleared ? "" : value
+            return made(setting, L("network.proxy"), proxy.isEmpty ? "Auto" : proxy,
+                        .proxy(proxy), noOp: proxy == proxyURL)
+
+        case "ai_provider":
+            guard let provider = Self.parseProvider(value) else {
+                throw invalidValue(setting, "a supported provider id")
+            }
+            return made(setting, L("model.provider"), provider.displayName,
+                        .aiProvider(provider), noOp: provider == APIKeyStore.selectedProvider)
+
+        case "ai_model":
+            let provider = try scopedProvider(scoped, defaultProvider: defaultProvider)
+            let modelID = ["", "default", "automatic", "auto"].contains(Self.settingToken(value)) ? "" : value
+            let shown = modelID.isEmpty ? "Default (\(provider.defaultModel))" : modelID
+            return made("\(setting)[\(provider.rawValue)]", L("model.label"), shown,
+                        .aiModel(provider, modelID),
+                        noOp: modelID == APIKeyStore.storedModel(for: provider))
+
+        case "api_key":
+            let provider = try scopedProvider(scoped, defaultProvider: defaultProvider)
+            guard !provider.isCLI else {
+                throw AppSettingValidationError.message(
+                    "\(provider.displayName) uses its signed-in CLI account, not an API key setting.")
+            }
+            guard !APIKeyStore.hasEnvOverride(for: provider) else {
+                throw AppSettingValidationError.message(
+                    "\(provider.displayName)'s API key is controlled by \(provider.envVarName), so the app setting cannot override it.")
+            }
+            let key = Self.isClearToken(value) ? "" : value
+            return made("\(setting)[\(provider.rawValue)]", "\(provider.displayName) \(L("model.apiKey"))",
+                        key.isEmpty ? localizedCleared() : localizedConfigured(),
+                        .apiKey(provider, key), noOp: key == APIKeyStore.stored(for: provider))
+
+        case "search_backend":
+            guard let backend = Self.parseSearchBackend(value) else {
+                throw invalidValue(setting, "native, keenable, exa, or anysearch")
+            }
+            let shown: String
+            switch backend {
+            case .exa:      shown = "Exa"
+            case .keenable: shown = "Keenable"
+            case .anysearch: shown = "AnySearch"
+            case nil:       shown = L("search.backend.native")
+            }
+            return made(setting, L("search.backend"), shown, .searchBackend(backend),
+                        noOp: backend == APIKeyStore.preferredSearchBackend)
+
+        case "search_api_key":
+            guard let backend = Self.parseConcreteSearchBackend(scoped ?? "") else {
+                throw AppSettingValidationError.message(
+                    "search_api_key requires scope=exa, scope=keenable, or scope=anysearch.")
+            }
+            let hasEnv: Bool
+            switch backend {
+            case .exa:       hasEnv = APIKeyStore.hasExaEnvOverride()
+            case .keenable:  hasEnv = APIKeyStore.hasKeenableEnvOverride()
+            case .anysearch: hasEnv = APIKeyStore.hasAnySearchEnvOverride()
+            }
+            guard !hasEnv else {
+                throw AppSettingValidationError.message(
+                    "The \(backend.rawValue) key is controlled by an environment variable, so the app setting cannot override it.")
+            }
+            let key = Self.isClearToken(value) ? "" : value
+            let stored: String
+            switch backend {
+            case .exa:       stored = APIKeyStore.storedExaKey()
+            case .keenable:  stored = APIKeyStore.storedKeenableKey()
+            case .anysearch: stored = APIKeyStore.storedAnySearchKey()
+            }
+            return made("\(setting)[\(backend.rawValue)]", "\(backend.rawValue.capitalized) API key",
+                        key.isEmpty ? localizedCleared() : localizedConfigured(),
+                        .searchAPIKey(backend, key), noOp: key == stored)
+
+        case "custom_provider_name":
+            return made(setting, L("model.custom.name"), value.isEmpty ? localizedCleared() : value,
+                        .customProviderName(value), noOp: value == CustomProvider.name)
+
+        case "custom_provider_url":
+            guard value.isEmpty || CustomProvider.normalized(value) != nil else {
+                throw AppSettingValidationError.message("custom_provider_url is not a valid endpoint URL.")
+            }
+            return made(setting, L("model.custom.url"), value.isEmpty ? localizedCleared() : value,
+                        .customProviderURL(value), noOp: value == CustomProvider.baseURL)
+
+        case "custom_provider_model":
+            return made("ai_model[custom]", L("model.custom.model"), value.isEmpty ? localizedCleared() : value,
+                        .customProviderModel(value), noOp: value == CustomProvider.model)
+
+        default:
+            throw AppSettingValidationError.message("Unsupported app setting: \(raw.setting).")
+        }
+    }
+
+    /// The one setting that carries two fields: a prompt shortcut is a chord
+    /// *plus* the sentence it runs on the selection. Chat can create one, retarget
+    /// an existing chord, rewrite its text, or delete it — every path lands on the
+    /// same stored row the Shortcuts pane edits, and on the same validation.
+    private func preparePromptShortcut(value: String, scope: String?,
+                                       prompt: String?) throws -> PreparedAppSettingChange {
+        let list = PromptShortcutStore.current
+        let existing = try scope.map { try Self.resolvePromptShortcut($0, in: list) }
+        let token = Self.settingToken(value)
+        let label = L("shortcuts.promptAction")
+
+        if ["remove", "delete", "off", "none", "clear"].contains(token) {
+            guard let existing else {
+                throw AppSettingValidationError.message(
+                    "Removing a prompt shortcut needs scope set to its chord or a distinctive part of its prompt.")
+            }
+            let chord = existing.shortcut?.displayString ?? L("shortcuts.promptAction.set")
+            return .init(key: "prompt_shortcut[\(existing.id)]",
+                         summary: "\(label) \(chord) → \(localizedRemoved())",
+                         payload: .promptShortcutRemoval(existing.id), isNoOp: false)
+        }
+
+        var updated = existing ?? PromptShortcut()
+        if !["keep", "same", "unchanged"].contains(token) {
+            guard let chord = Self.parseChord(value) else {
+                throw invalidValue("prompt_shortcut",
+                                   "a chord like option+s, or keep, or remove")
+            }
+            if let owner = AppShortcutStore.conflictOwner(for: chord) {
+                throw AppSettingValidationError.message(
+                    "\(chord.displayString) is already used by \(owner).")
+            }
+            if let owner = Self.promptShortcutOwner(for: chord, excluding: updated.id) {
+                throw AppSettingValidationError.message(
+                    "\(chord.displayString) already runs the prompt shortcut \"\(owner)\".")
+            }
+            // A prompt shortcut is global, so the chord has to be one macOS will
+            // actually hand over — the same probe the recorder runs.
+            if existing?.shortcut != chord,
+               !HotKey.isAvailable(keyCode: chord.keyCode, modifiers: chord.modifiers) {
+                throw AppSettingValidationError.message(
+                    "\(chord.displayString) is claimed by macOS or another app, so it cannot be registered.")
+            }
+            updated.shortcut = chord
+        } else if existing == nil {
+            throw AppSettingValidationError.message(
+                "prompt_shortcut=keep only edits an existing binding; send a chord to create one.")
+        }
+
+        if let prompt { updated.prompt = prompt }
+        guard !updated.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw AppSettingValidationError.message(
+                "A new prompt shortcut needs `prompt`: the instruction the chord runs on the selected text.")
+        }
+        guard updated.prompt.count <= Self.customInstructionsLimit else {
+            throw AppSettingValidationError.message(
+                "A prompt shortcut is limited to \(Self.customInstructionsLimit) characters.")
+        }
+        let chord = updated.shortcut?.displayString ?? L("shortcuts.promptAction.set")
+        return .init(key: "prompt_shortcut[\(updated.id)]",
+                     summary: "\(label) \(chord) → \(confirmationDisplay(updated.prompt))",
+                     payload: .promptShortcut(updated), isNoOp: existing == updated)
+    }
+
+    private func scopedProvider(_ scope: String?, defaultProvider: Provider) throws -> Provider {
+        guard let scope, !scope.isEmpty else { return defaultProvider }
+        guard let provider = Self.parseProvider(scope) else {
+            throw AppSettingValidationError.message("Unknown provider scope: \(scope).")
+        }
+        return provider
+    }
+
+    private func invalidValue(_ setting: String, _ expected: String) -> AppSettingValidationError {
+        .message("Invalid value for \(setting); expected \(expected).")
+    }
+
+    private func invalidBoolean(_ setting: String) -> AppSettingValidationError {
+        invalidValue(setting, "true or false")
+    }
+
+    /// User-provided free text belongs in the confirmation, but never as a
+    /// multi-line pseudo-row that could visually impersonate another change.
+    private func confirmationDisplay(_ raw: String) -> String {
+        let singleLine = raw.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        guard singleLine.count > 120 else { return singleLine }
+        return String(singleLine.prefix(119)) + "…"
+    }
+
+    private func localizedToggle(_ enabled: Bool) -> String {
+        switch Localization.shared.language.resolved {
+        case .zhHans: return enabled ? "开启" : "关闭"
+        case .zhHant: return enabled ? "開啟" : "關閉"
+        case .ja:     return enabled ? "オン" : "オフ"
+        case .ko:     return enabled ? "켬" : "끔"
+        case .fr:     return enabled ? "Activé" : "Désactivé"
+        case .es:     return enabled ? "Activado" : "Desactivado"
+        case .en:     return enabled ? "On" : "Off"
+        }
+    }
+
+    private func localizedCleared() -> String {
+        switch Localization.shared.language.resolved {
+        case .zhHans: return "清除"
+        case .zhHant: return "清除"
+        case .ja:     return "消去"
+        case .ko:     return "지우기"
+        case .fr:     return "Effacer"
+        case .es:     return "Borrar"
+        case .en:     return "Clear"
+        }
+    }
+
+    private func localizedRemoved() -> String {
+        switch Localization.shared.language.resolved {
+        case .zhHans: return "删除"
+        case .zhHant: return "刪除"
+        case .ja:     return "削除"
+        case .ko:     return "삭제"
+        case .fr:     return "Supprimer"
+        case .es:     return "Eliminar"
+        case .en:     return "Remove"
+        }
+    }
+
+    private func localizedConfigured() -> String {
+        switch Localization.shared.language.resolved {
+        case .zhHans: return "已配置（密钥不会显示）"
+        case .zhHant: return "已設定（金鑰不會顯示）"
+        case .ja:     return "設定済み（キーは表示しません）"
+        case .ko:     return "구성됨(키는 표시하지 않음)"
+        case .fr:     return "Configurée (clé masquée)"
+        case .es:     return "Configurada (clave oculta)"
+        case .en:     return "Configured (key hidden)"
+        }
+    }
+
+    private func appSettingsConfirmationCopy() -> (question: String, confirm: String, cancel: String) {
+        switch Localization.shared.language.resolved {
+        case .zhHans: return ("确认更改以下设置？", "确认", "取消")
+        case .zhHant: return ("確認更改以下設定？", "確認", "取消")
+        case .ja:     return ("次の設定を変更しますか？", "確認", "キャンセル")
+        case .ko:     return ("다음 설정을 변경할까요?", "확인", "취소")
+        case .fr:     return ("Confirmer ces changements ?", "Confirmer", "Annuler")
+        case .es:     return ("¿Confirmar estos cambios?", "Confirmar", "Cancelar")
+        case .en:     return ("Confirm these setting changes?", "Confirm", "Cancel")
+        }
+    }
+
+    private static func settingToken(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "-", with: "_")
+            .replacingOccurrences(of: " ", with: "_")
+    }
+
+    private static func parseBoolean(_ raw: String) -> Bool? {
+        switch settingToken(raw) {
+        case "true", "on", "yes", "enabled", "enable", "show", "shown": return true
+        case "false", "off", "no", "disabled", "disable", "hide", "hidden": return false
+        default: return nil
+        }
+    }
+
+    private static func parseLanguage(_ raw: String) -> AppLanguage? {
+        switch settingToken(raw) {
+        case "system", "auto", "default": return .system
+        case "english", "en": return .english
+        case "chinese_simplified", "simplified_chinese", "zh_hans": return .chineseSimplified
+        case "chinese_traditional", "traditional_chinese", "zh_hant": return .chineseTraditional
+        case "japanese", "ja": return .japanese
+        case "korean", "ko": return .korean
+        case "french", "fr": return .french
+        case "spanish", "es": return .spanish
+        default: return nil
+        }
+    }
+
+    private static func languageToken(_ language: AppLanguage) -> String {
+        switch language {
+        case .system:             return "system"
+        case .english:            return "english"
+        case .chineseSimplified:  return "chinese_simplified"
+        case .chineseTraditional: return "chinese_traditional"
+        case .japanese:           return "japanese"
+        case .korean:             return "korean"
+        case .french:             return "french"
+        case .spanish:            return "spanish"
+        }
+    }
+
+    private static func parseDockVisibility(_ raw: String) -> DockIconVisibility? {
+        switch settingToken(raw) {
+        case "shown", "show", "visible", "on", "true": return .shown
+        case "hidden", "hide", "invisible", "off", "false": return .hidden
+        default: return nil
+        }
+    }
+
+    private static func parseMenuBarVisibility(_ raw: String) -> MenuBarIconVisibility? {
+        switch settingToken(raw) {
+        case "shown", "show", "visible", "on", "true": return .shown
+        case "hidden", "hide", "invisible", "off", "false": return .hidden
+        default: return nil
+        }
+    }
+
+    private static func parsePlacement(_ raw: String) -> DisplayPlacement? {
+        switch settingToken(raw) {
+        case "all", "all_screens", "every_screen": return .all
+        case "built_in", "builtin", "main", "main_screen": return .builtIn
+        default: return nil
+        }
+    }
+
+    private static func placementToken(_ placement: DisplayPlacement) -> String {
+        placement == .all ? "all" : "built_in"
+    }
+
+    private static func parseNoteDestination(_ raw: String) -> NoteDestination? {
+        switch settingToken(raw) {
+        case "apple_notes", "notes", "apple": return .appleNotes
+        case "markdown_folder", "markdown", "folder", "files": return .markdownFolder
+        default: return nil
+        }
+    }
+
+    private static func noteDestinationToken(_ value: NoteDestination) -> String {
+        value == .appleNotes ? "apple_notes" : "markdown_folder"
+    }
+
+    private static func parseProvider(_ raw: String) -> Provider? {
+        switch settingToken(raw) {
+        case "openrouter", "open_router": return .openrouter
+        case "vercel": return .vercel
+        case "openai", "open_ai": return .openai
+        case "codex": return .codex
+        case "claudecode", "claude_code": return .claudeCode
+        case "grokcode", "grok_code": return .grokCode
+        case "anthropic", "claude": return .anthropic
+        case "gemini", "google": return .gemini
+        case "deepseek", "deep_seek": return .deepseek
+        case "qwen": return .qwen
+        case "glm", "zhipu": return .glm
+        case "kimi", "moonshot": return .kimi
+        case "minimax", "mini_max": return .minimax
+        case "mimo", "xiaomi": return .mimo
+        case "custom", "custom_provider": return .custom
+        default: return nil
+        }
+    }
+
+    private static func providerToken(_ provider: Provider) -> String {
+        switch provider {
+        case .claudeCode: return "claude_code"
+        case .grokCode:   return "grok_code"
+        default:          return provider.rawValue
+        }
+    }
+
+    /// Optional search backends need a nested optional: nil means a recognized
+    /// `native` request, while an outer nil means the text was invalid.
+    private static func parseSearchBackend(_ raw: String) -> APIKeyStore.SearchBackend?? {
+        switch settingToken(raw) {
+        case "native", "default", "provider", "auto": return .some(nil)
+        case "exa": return .some(.exa)
+        case "keenable": return .some(.keenable)
+        case "anysearch", "any_search": return .some(.anysearch)
+        default: return nil
+        }
+    }
+
+    private static func parseConcreteSearchBackend(_ raw: String) -> APIKeyStore.SearchBackend? {
+        switch settingToken(raw) {
+        case "exa": return .exa
+        case "keenable": return .keenable
+        case "anysearch", "any_search": return .anysearch
+        default: return nil
+        }
+    }
+
+    private static func isClearToken(_ raw: String) -> Bool {
+        let token = settingToken(raw)
+        return token.isEmpty || ["clear", "remove", "delete", "none"].contains(token)
+    }
+
+    private static func parseShortcut(_ raw: String) -> SummonHotKey? {
+        let token = settingToken(raw)
+        if ["disabled", "disable", "off", "none"].contains(token) {
+            var shortcut = SummonHotKey.current
+            shortcut.enabled = false
+            return shortcut
+        }
+        if ["default", "double_option", "double_alt", "option_option"].contains(token) {
+            return .defaultConfig
+        }
+        let doubles: [String: UInt32] = [
+            "double_command": UInt32(cmdKey), "double_cmd": UInt32(cmdKey),
+            "double_control": UInt32(controlKey), "double_ctrl": UInt32(controlKey),
+            "double_shift": UInt32(shiftKey),
+        ]
+        if let modifier = doubles[token] {
+            return SummonHotKey(keyCode: 0, modifiers: 0,
+                                doubleTapModifier: modifier, enabled: true)
+        }
+
+        guard let chord = parseChord(raw) else { return nil }
+        guard AppShortcutStore.conflictOwner(for: chord, editingSummon: true) == nil else {
+            return nil
+        }
+        return SummonHotKey(keyCode: chord.keyCode, modifiers: chord.modifiers,
+                            doubleTapModifier: 0, enabled: true)
+    }
+
+    /// Written chord → the Carbon pair the recorder would have produced. Accepts
+    /// glyphs (`⌘⇧K`), words (`command+shift+k`), spaces or dashes as separators.
+    /// `nil` when it names no real key or carries no real modifier — the same
+    /// floor the Shortcuts pane enforces, so both entry paths accept exactly the
+    /// same set of chords.
+    private static func parseChord(_ raw: String) -> ShortcutChord? {
+        var chord = raw.lowercased()
+        let replacements = [
+            "⌘": "command+", "⌥": "option+", "⌃": "control+", "⇧": "shift+",
+            "cmd": "command", "alt": "option", "ctrl": "control",
+        ]
+        for (from, to) in replacements { chord = chord.replacingOccurrences(of: from, with: to) }
+        chord = chord.replacingOccurrences(of: "-", with: "+")
+        chord = chord.replacingOccurrences(of: " ", with: "+")
+        let parts = chord.split(separator: "+").map(String.init).filter { !$0.isEmpty }
+        guard let keyName = parts.last, let keyCode = shortcutKeyCode(keyName) else { return nil }
+        var modifiers: UInt32 = 0
+        for part in parts.dropLast() {
+            switch part {
+            case "command": modifiers |= UInt32(cmdKey)
+            case "option":  modifiers |= UInt32(optionKey)
+            case "control": modifiers |= UInt32(controlKey)
+            case "shift":   modifiers |= UInt32(shiftKey)
+            default: return nil
+            }
+        }
+        let real = UInt32(cmdKey) | UInt32(optionKey) | UInt32(controlKey)
+        guard modifiers & real != 0 else { return nil }
+        return ShortcutChord(keyCode: keyCode, modifiers: modifiers)
+    }
+
+    /// The prompt a chord is already bound to, if any — prompt shortcuts live in
+    /// their own list, so `AppShortcutStore.conflictOwner` cannot see them.
+    private static func promptShortcutOwner(for chord: ShortcutChord,
+                                            excluding id: UUID? = nil) -> String? {
+        PromptShortcutStore.current
+            .first { $0.id != id && $0.shortcut == chord }
+            .map { $0.prompt.isEmpty ? L("shortcuts.promptAction") : $0.prompt }
+            .map { $0.count > 40 ? String($0.prefix(39)) + "…" : $0 }
+    }
+
+    /// Find the binding a `scope` selector points at: its id, its current chord,
+    /// or a distinctive part of its prompt. Ambiguity throws rather than guessing
+    /// which of the user's bindings to overwrite.
+    private static func resolvePromptShortcut(_ selector: String,
+                                              in list: [PromptShortcut]) throws -> PromptShortcut {
+        let trimmed = selector.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let id = UUID(uuidString: trimmed), let hit = list.first(where: { $0.id == id }) {
+            return hit
+        }
+        if let chord = parseChord(trimmed), let hit = list.first(where: { $0.shortcut == chord }) {
+            return hit
+        }
+        let needle = trimmed.lowercased()
+        let matches = list.filter { $0.prompt.lowercased().contains(needle) }
+        if let only = matches.first, matches.count == 1 { return only }
+        if matches.count > 1 {
+            throw AppSettingValidationError.message(
+                "scope \"\(trimmed)\" matches \(matches.count) prompt shortcuts; use the chord of the one you mean.")
+        }
+        throw AppSettingValidationError.message(
+            "No prompt shortcut matches scope \"\(trimmed)\". Call action=shortcuts to see the existing ones.")
+    }
+
+    private static func shortcutKeyCode(_ raw: String) -> UInt32? {
+        let named: [String: Int] = [
+            "space": kVK_Space, "return": kVK_Return, "enter": kVK_Return,
+            "tab": kVK_Tab, "escape": kVK_Escape, "esc": kVK_Escape,
+            "delete": kVK_Delete, "backspace": kVK_Delete,
+            "left": kVK_LeftArrow, "right": kVK_RightArrow,
+            "up": kVK_UpArrow, "down": kVK_DownArrow,
+            "f1": kVK_F1, "f2": kVK_F2, "f3": kVK_F3, "f4": kVK_F4,
+            "f5": kVK_F5, "f6": kVK_F6, "f7": kVK_F7, "f8": kVK_F8,
+            "f9": kVK_F9, "f10": kVK_F10, "f11": kVK_F11, "f12": kVK_F12,
+        ]
+        if let code = named[raw] { return UInt32(code) }
+        let ansi: [String: Int] = [
+            "a": kVK_ANSI_A, "b": kVK_ANSI_B, "c": kVK_ANSI_C, "d": kVK_ANSI_D,
+            "e": kVK_ANSI_E, "f": kVK_ANSI_F, "g": kVK_ANSI_G, "h": kVK_ANSI_H,
+            "i": kVK_ANSI_I, "j": kVK_ANSI_J, "k": kVK_ANSI_K, "l": kVK_ANSI_L,
+            "m": kVK_ANSI_M, "n": kVK_ANSI_N, "o": kVK_ANSI_O, "p": kVK_ANSI_P,
+            "q": kVK_ANSI_Q, "r": kVK_ANSI_R, "s": kVK_ANSI_S, "t": kVK_ANSI_T,
+            "u": kVK_ANSI_U, "v": kVK_ANSI_V, "w": kVK_ANSI_W, "x": kVK_ANSI_X,
+            "y": kVK_ANSI_Y, "z": kVK_ANSI_Z,
+            "0": kVK_ANSI_0, "1": kVK_ANSI_1, "2": kVK_ANSI_2, "3": kVK_ANSI_3,
+            "4": kVK_ANSI_4, "5": kVK_ANSI_5, "6": kVK_ANSI_6, "7": kVK_ANSI_7,
+            "8": kVK_ANSI_8, "9": kVK_ANSI_9,
+            ",": kVK_ANSI_Comma, ".": kVK_ANSI_Period, "/": kVK_ANSI_Slash,
+            ";": kVK_ANSI_Semicolon, "'": kVK_ANSI_Quote, "[": kVK_ANSI_LeftBracket,
+            "]": kVK_ANSI_RightBracket, "\\": kVK_ANSI_Backslash,
+            "-": kVK_ANSI_Minus, "=": kVK_ANSI_Equal, "`": kVK_ANSI_Grave,
+        ]
+        return ansi[raw].map(UInt32.init)
+    }
+
     // MARK: - Ask-the-user questions (the `ask_user` tool)
 
     /// One clarifying question the model posed mid-answer via the `ask_user` tool,
@@ -1983,6 +3096,9 @@ final class NotchModel: ObservableObject {
         let answerID: UUID
         let question: String
         let options: [String]
+        /// Confirmation actions are compact peers and sit side by side. Ordinary
+        /// clarifying answers can be longer, so they keep the stacked layout.
+        let inlineOptions: Bool
     }
 
     /// Questions currently awaiting an answer, oldest first. Almost always 0 or 1
@@ -2018,7 +3134,8 @@ final class NotchModel: ObservableObject {
     /// user's tap, the timeout, or the round's cancellation resumes it — whichever
     /// comes first. Main-actor isolated (with the resolution paths), so the park
     /// and every resume are serialized and none can be lost.
-    func awaitUserChoice(answerID: UUID, question: String, options: [String]) async throws -> String {
+    func awaitUserChoice(answerID: UUID, question: String, options: [String],
+                         inlineOptions: Bool = false) async throws -> String {
         let questionID = UUID()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { cont in
@@ -2031,7 +3148,8 @@ final class NotchModel: ObservableObject {
                 userChoiceContinuations[questionID] = cont
                 pendingUserQuestions.append(PendingUserQuestion(
                     id: questionID, answerID: answerID,
-                    question: question, options: options))
+                    question: question, options: options,
+                    inlineOptions: inlineOptions))
                 // Timeout backstop: an unanswered question (user walked away, panel
                 // stayed closed) must not hang the round forever — resolve with an
                 // explicit "no answer" the model is told to proceed on. Unstructured
@@ -2188,21 +3306,10 @@ final class NotchModel: ObservableObject {
     /// on the closed→open edge.
     private var pasteboardChangeCountAtRest = NSPasteboard.general.changeCount
 
-    /// The clipboard IMAGE available to attach to an Ask (XII-121) — a screenshot
-    /// (⇧⌘⌃4) or any copied bitmap. Non-nil only when the ACTIVE MODEL reads
-    /// images (`Provider.modelSupportsVision` — a text-only model never shows the
-    /// thumbnail), the clipboard is fresh (same changeCount gate as the text
-    /// path), and it holds NO eligible text — a copied string keeps today's text
-    /// behaviour untouched. Drives the thumbnail preview above the idle prompt;
-    /// the first-turn submit re-reads the pasteboard itself.
-    @Published var pendingClipboardImage: NSImage? = nil
-
-    /// The encoded image riding the current thread (XII-121), so follow-ups
-    /// re-attach it and "how do I fix it?" still sees the screenshot the thread
-    /// started from. Keyed by thread id — a new chat's fresh id simply stops
-    /// matching, so this never leaks across conversations. Session-only (not
-    /// persisted with history).
-    private var threadImage: (threadID: UUID, image: ChatImage)? = nil
+    /// The encoded images riding the current thread, so follow-ups still see every
+    /// screenshot from the opening question. Keyed by thread id so attachments
+    /// never leak across conversations.
+    private var threadImages: (threadID: UUID, images: [ChatImage])? = nil
 
     /// The live conversation rendered in the result view — alternating user and
     /// assistant `Turn`s. A follow-up appends to this rather than replacing it, so
@@ -2554,78 +3661,6 @@ final class NotchModel: ObservableObject {
     func rebaselineClipboardAfterInAppWrite() {
         pasteboardChangeCountAtOpen = NSPasteboard.general.changeCount
         senseLastChangeCount = pasteboardChangeCountAtOpen
-        refreshPendingClipboard()
-    }
-
-    /// Read the current pasteboard and update `pendingClipboardImage` for the idle
-    /// UI (XII-121). Called on the closed→open edge and after any in-app pasteboard
-    /// write, so the thumbnail stays in sync with what an Ask would actually attach.
-    func refreshPendingClipboard() {
-        guard let image = clipboardImageIfEligible() else {
-            pendingClipboardImage = nil
-            pendingPreviewChangeCount = nil
-            return
-        }
-        // The pasteboard hands back the FULL-resolution bitmap — a Retina
-        // screenshot runs tens of MB decoded — and the idle strip only draws it
-        // at 34×24pt. Publishing the raw image made SwiftUI decode all of it on
-        // the main thread at first draw, i.e. mid-open-spring (this refresh runs
-        // from `openPanel`), which is exactly the copy-screenshot-then-hover flow
-        // stuttering on its first frames. Downsample on a background task and
-        // publish a thumbnail-sized copy instead; the submit path is untouched —
-        // it re-reads the pasteboard itself (`clipboardImageIfEligible` at
-        // submit time) and always encodes from the full-resolution original.
-        let count = NSPasteboard.general.changeCount
-        // Same clip as the preview already built (hover re-enters call this
-        // repeatedly) — don't re-decode the identical image.
-        guard count != pendingPreviewChangeCount else { return }
-        pendingPreviewChangeCount = count
-        Task.detached(priority: .userInitiated) { [weak self] in
-            let preview = NotchModel.previewThumbnail(image) ?? image
-            await MainActor.run {
-                guard let self, self.pendingPreviewChangeCount == count else { return }
-                self.pendingClipboardImage = preview
-            }
-        }
-    }
-
-    /// The pasteboard `changeCount` the current preview thumbnail was built from
-    /// (or is being built from — set before the decode task is spawned, so a
-    /// burst of refreshes can't stack duplicate decodes). `nil` when no preview
-    /// is showing.
-    private var pendingPreviewChangeCount: Int? = nil
-
-    /// Downsample a pasteboard image to preview size — called on a background
-    /// task by `refreshPendingClipboard` (offscreen bitmap drawing is safe off
-    /// the main thread; same pattern as `encodeJPEGForVision`). 160px on the
-    /// long side is ~2.3× the 34×24pt slot at Retina scale, so the fill-crop
-    /// stays crisp while the decode-at-draw cost becomes negligible.
-    nonisolated static func previewThumbnail(_ image: NSImage, maxSide: Int = 160) -> NSImage? {
-        guard let tiff = image.tiffRepresentation,
-              let rep = NSBitmapImageRep(data: tiff) else { return nil }
-        let w = rep.pixelsWide, h = rep.pixelsHigh
-        guard w > 0, h > 0 else { return nil }
-        let scale = min(1.0, Double(maxSide) / Double(max(w, h)))
-        let outW = max(1, Int(Double(w) * scale))
-        let outH = max(1, Int(Double(h) * scale))
-        guard let resized = NSBitmapImageRep(
-            bitmapDataPlanes: nil, pixelsWide: outW, pixelsHigh: outH,
-            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
-            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
-        ) else { return nil }
-        // Draw in pixel space: pin the rep's point size to its pixel size so the
-        // NSImage draw isn't rescaled by a Retina points-vs-pixels factor.
-        resized.size = NSSize(width: outW, height: outH)
-        NSGraphicsContext.saveGraphicsState()
-        if let ctx = NSGraphicsContext(bitmapImageRep: resized) {
-            NSGraphicsContext.current = ctx
-            image.draw(in: NSRect(x: 0, y: 0, width: outW, height: outH),
-                       from: .zero, operation: .copy, fraction: 1.0)
-        }
-        NSGraphicsContext.restoreGraphicsState()
-        let out = NSImage(size: NSSize(width: outW, height: outH))
-        out.addRepresentation(resized)
-        return out
     }
 
     // MARK: - Clipboard sense (copy → hint on the resting notch → ⌘C again to file)
@@ -3015,6 +4050,12 @@ final class NotchModel: ObservableObject {
         // pre-open resting value forward is what lets that copy-then-open read as
         // fresh in `clipboardContextIfEligible`.
         if !open {
+            // Seed the hover flag from where the pointer really is: a hover-open
+            // already had `.onHover` set it, but a hot-key summon under a resting
+            // cursor gets no fresh enter event, and its chips would stay hidden
+            // with the pointer sitting right on them. Unknown geometry falls back
+            // to "shown" — the pre-hide behaviour.
+            pointerInside = pointerInsideIsland(on: display, slop: 16) ?? true
             // One trackpad tap on the closed→open edge only — hover re-enters and
             // display migrations while already open stay silent, as do the
             // programmatic opens (settings / What's New), which can
@@ -3067,7 +4108,6 @@ final class NotchModel: ObservableObject {
         // An open retires a visible sense hint (the panel takes over the screen),
         // while a saving/saved narration settles on its own timer, just unseen.
         if case .hinting = clipboardSense { senseCancelHint() }
-        refreshPendingClipboard()
     }
 
     /// Toggle the panel from a global hot key: open it on `display` if resting,
@@ -3092,11 +4132,6 @@ final class NotchModel: ObservableObject {
             showWhatsNew = false
             showHistory = false
             highlightedHistoryIndex = nil
-        } else {
-            // The provider/model may have changed in there — recompute the
-            // clipboard-image eligibility (XII-121) so the thumbnail appears or
-            // disappears to match the model the next Ask will actually hit.
-            refreshPendingClipboard()
         }
     }
 
@@ -3120,7 +4155,6 @@ final class NotchModel: ObservableObject {
         closing = false
         cancelLeaveWatch()
         open = true
-        refreshPendingClipboard()
         mode = .idle
         showSettings = true
         showWhatsNew = false
@@ -3131,8 +4165,6 @@ final class NotchModel: ObservableObject {
     /// Leave settings and return to the idle prompt (panel stays open).
     func closeSettings() {
         showSettings = false
-        // Same model-gate recompute as `toggleSettings` (XII-121).
-        refreshPendingClipboard()
     }
 
     /// Open the panel straight into the "What's New" release notes — the path ⌘↵,
@@ -3152,7 +4184,6 @@ final class NotchModel: ObservableObject {
         closing = false
         cancelLeaveWatch()
         open = true
-        refreshPendingClipboard()
         mode = .idle
         showWhatsNew = true
         showSettings = false
@@ -3330,7 +4361,8 @@ final class NotchModel: ObservableObject {
                             threadHistoryID: threadHistoryID,
                             showSettings: showSettings, showWhatsNew: showWhatsNew,
                             showHistory: showHistory, closedAt: Date(),
-                            measuredAnswerHeight: lastMeasuredAnswerHeight)
+                            measuredAnswerHeight: lastMeasuredAnswerHeight,
+                            fromPromptShortcut: fromPromptShortcut)
             : nil
         // The measurement now lives in the park (if any). Zero the live mirror so
         // every non-restore open (fresh idle, settings, a different thread) seeds
@@ -3354,6 +4386,7 @@ final class NotchModel: ObservableObject {
         savedIdleDraft = (mode == .idle && hasText) ? text : ""
         mode = .idle
         isAnswerPinned = false
+        fromPromptShortcut = false
         isModelPickerOpen = false
         isFolderPickerOpen = false
         showModelPicker = false
@@ -3383,12 +4416,6 @@ final class NotchModel: ObservableObject {
         // during the session (handoff copy, code-block copy, in-panel ⌘C) is
         // already accounted for and can never hint on the way out.
         senseLastChangeCount = pasteboardChangeCountAtRest
-        // Drop the preview so the resting panel stays minimal; the next open will
-        // re-evaluate and surface anything fresh. The changeCount token goes with
-        // it, or the re-evaluation would see "same clip, already previewed" and
-        // skip rebuilding the thumbnail it just dropped.
-        pendingClipboardImage = nil
-        pendingPreviewChangeCount = nil
     }
 
     /// "Back" / start a new conversation: drop the current Q&A from the screen and
@@ -3411,6 +4438,7 @@ final class NotchModel: ObservableObject {
         lastMeasuredAnswerHeight = 0
         mode = .idle
         isAnswerPinned = false
+        fromPromptShortcut = false
         agentDetailTaskID = nil
         text = ""; turns = []
         showHistory = false
@@ -3435,6 +4463,34 @@ final class NotchModel: ObservableObject {
 
     // MARK: - Submit
 
+    /// A user-defined global prompt shortcut: open on the requested display,
+    /// discard any page the panel happened to be showing, and submit the bound
+    /// instruction against the already-captured outside selection immediately.
+    /// `openPanel` comes first so its reattach-on-open behavior can settle; the
+    /// following `newChat` then guarantees this action starts its own conversation.
+    func runPromptShortcut(prompt: String, selectedText: String,
+                           on display: CGDirectDisplayID?) {
+        let instruction = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !instruction.isEmpty,
+              !selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return }
+
+        mode = .idle
+        openPanel(on: display)
+        newChat()
+        text = """
+        \(instruction)
+
+        <selected_text>
+        \(selectedText)
+        </selected_text>
+        """
+        // Mark the thread as shortcut-driven BEFORE submitting: the result view
+        // reads this to collapse its follow-up input into a floating button.
+        fromPromptShortcut = true
+        submit(hideUserBubble: true)
+    }
+
     /// The single Enter entry point the input field calls. There's only one surface
     /// — the chat input — so this never changes what the panel looks like; it just
     /// routes the line by **intent**:
@@ -3456,8 +4512,12 @@ final class NotchModel: ObservableObject {
         if agentComposeActive { submitAgent(); return }
         switch effectiveSubmitPanel {
         case .chat:     submit()
-        case .note:     submitNote()
-        case .reminder: submitReminder()
+        case .note:
+            askComposeImages = []
+            submitNote()
+        case .reminder:
+            askComposeImages = []
+            submitReminder()
         }
     }
 
@@ -3522,16 +4582,18 @@ final class NotchModel: ObservableObject {
         }
     }
 
-    /// ⌘V in the prompt while composing an agent task: a clipboard carrying an
-    /// IMAGE attaches it to the task instead of pasting text. Each paste APPENDS,
-    /// so ⌘V twice sends two screenshots. Returns `true` when consumed; a
-    /// clipboard with no image falls through to the normal paste, so copying a
-    /// path or a snippet keeps working exactly as before. A paste past the limit
-    /// is still consumed (it was an image, and pasting its bytes as text would be
-    /// nonsense) — it just doesn't attach.
-    func handleAgentPasteImage() -> Bool {
-        guard agentComposeActive, let image = Self.pasteboardImage() else { return false }
-        guard agentComposeImages.count < Self.agentImageLimit else { return true }
+    /// ⌘V in the prompt attaches a clipboard image to the active compose. Ask and
+    /// Agent keep separate attachment sets, but share the same explicit-paste,
+    /// append, cap, and delete interaction. Text-only clipboards fall through to
+    /// the editor's ordinary paste behavior.
+    func handleComposePasteImage() -> Bool {
+        guard let image = Self.pasteboardImage() else { return false }
+        if agentComposeActive {
+            guard agentComposeImages.count < Self.composeImageLimit else { return true }
+        } else {
+            guard activeModelSupportsVision else { return false }
+            guard askComposeImages.count < Self.composeImageLimit else { return true }
+        }
         // A pasted image is real input, exactly like typed text — so fold the
         // Recent list the same way the `text` setter does. Without this the
         // list lingers open over the compose until the user also types
@@ -3539,7 +4601,14 @@ final class NotchModel: ObservableObject {
         collapseHistory()
         noteUserTyping()
         withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
-            agentComposeImages.append(image)
+            if agentComposeActive {
+                agentComposeImages.append(image)
+            } else {
+                // An image attachment is an explicit Ask intent; don't let a short
+                // caption such as "save this" silently route the pixels to Notes.
+                manualPanelOverride = .chat
+                askComposeImages.append(image)
+            }
         }
         return true
     }
@@ -3584,6 +4653,13 @@ final class NotchModel: ObservableObject {
         guard agentComposeImages.indices.contains(index) else { return }
         withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
             agentComposeImages.remove(at: index)
+        }
+    }
+
+    func removeAskComposeImage(at index: Int) {
+        guard askComposeImages.indices.contains(index) else { return }
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+            askComposeImages.remove(at: index)
         }
     }
 
@@ -3979,10 +5055,9 @@ final class NotchModel: ObservableObject {
     }
 
     /// The clipboard string that's *available* as fresh outside context, or `nil`
-    /// when the clipboard itself isn't a candidate. Consumers today: the deictic
-    /// note capture ("save this" folds the copied URL/snippet into the note body)
-    /// and the image gate (`clipboardImageIfEligible` only offers a thumbnail when
-    /// no eligible text clip exists). Available means: the user copied for *this*
+    /// when the clipboard itself isn't a candidate. Used by deictic note capture
+    /// ("save this" folds the copied URL/snippet into the note body). Available
+    /// means: the user copied for *this*
     /// session — the `changeCount` has moved past its pre-open resting baseline, which
     /// covers the intended copy-THEN-open flow (the baseline is the count from before
     /// the open; see `pasteboardChangeCountAtOpen`) as well as a copy made while the
@@ -4050,15 +5125,6 @@ final class NotchModel: ObservableObject {
         let model = APIKeyStore.effectiveModel(for: provider) ?? provider.defaultModel
         guard provider != .codex, provider != .claudeCode, provider != .grokCode else { return false }
         return Provider.modelSupportsVision(model)
-    }
-
-    private func clipboardImageIfEligible() -> NSImage? {
-        guard activeModelSupportsVision else { return nil }
-        let pb = NSPasteboard.general
-        guard pb.changeCount != pasteboardChangeCountAtOpen else { return nil }
-        guard clipboardContextIfEligible() == nil else { return nil }
-        guard let image = NSImage(pasteboard: pb), image.isValid else { return nil }
-        return image
     }
 
     /// Downsample + encode an attached image (XII-121): long side capped at 1568px
@@ -4195,9 +5261,17 @@ final class NotchModel: ObservableObject {
         return messages
     }
 
-    func submit() {
-        let q = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !q.isEmpty else { return }
+    func submit(hideUserBubble: Bool = false) {
+        // A line the user actually typed ends the shortcut's one-shot character —
+        // from here the thread is an ordinary conversation, so the follow-up input
+        // goes back to being a full field instead of a collapsed button.
+        if !hideUserBubble { fromPromptShortcut = false }
+        var q = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pastedImages = askComposeImages
+        if q.isEmpty {
+            guard !pastedImages.isEmpty else { return }
+            q = Self.agentImageOnlyPrompt(count: pastedImages.count)
+        }
         // A follow-up on an agent thread whose CLI session is still resumable
         // goes back to the AGENT, not the chat model: the result view is the
         // run's conversation, so Enter there means "next instruction". Only
@@ -4229,6 +5303,7 @@ final class NotchModel: ObservableObject {
                                ?? APIKeyStore.effectiveModel(for: askProvider)
                                ?? askProvider.defaultModel)
         text = ""
+        askComposeImages = []
         showHistory = false
         highlightedHistoryIndex = nil
 
@@ -4253,7 +5328,8 @@ final class NotchModel: ObservableObject {
         // Append this question and an empty assistant turn it'll stream into. On a
         // first question `turns` is empty (fresh thread); on a follow-up the prior
         // turns are already here, so the new pair just extends the conversation.
-        let questionTurn = Turn(role: "user", text: q)
+        let questionTurn = Turn(role: "user", text: q,
+                                hidesUserBubble: hideUserBubble)
         // Held so the deferred image encode below can find this exact turn again —
         // by id, never by index, since the thread on screen may have moved on (a new
         // chat, a reopened row) by the time the JPEG lands.
@@ -4275,39 +5351,23 @@ final class NotchModel: ObservableObject {
 
         let system = notchSystemPromptDated(customInstructions: customInstructions)
 
-        // Clipboard IMAGE injection (XII-121). A first turn with a fresh copied
-        // image (and no eligible text clip — see `clipboardImageIfEligible`)
-        // attaches it to the wire message so vision models can see it; the
-        // on-screen bubble keeps just the question. The encoded image is also
-        // parked on the thread so follow-ups re-attach it — "how do I fix it?"
-        // still sees the screenshot the thread started from. Image rounds skip
-        // the agent harness below (the tool wire doesn't carry image blocks),
-        // taking the plain stream instead.
+        // Explicitly pasted images attach to the newest wire message. The encoded
+        // set is also parked on the thread so follow-ups still see every image.
+        // Image rounds skip the agent harness (its tool wire has no image blocks).
         var imageAttached = false
-        var pendingVisionImage: NSImage? = nil
-        if firstTurn, let image = clipboardImageIfEligible() {
-            // The actual encode is deferred into the round's task and runs on a
-            // detached (background) task there — it's real CPU that used to run
-            // synchronously right here, on the main thread, at the exact moment
-            // the user pressed ⏎. The harness choice below only needs to know an
-            // image is coming; the bytes land in `context` before anything streams.
-            // (If the encode then fails — unreadable bitmap — the round degrades
-            // to plain text, same as the old `encodeForVision(...) == nil` path.)
-            pendingVisionImage = image
+        let pendingVisionImages = pastedImages
+        if !pendingVisionImages.isEmpty {
             imageAttached = true
-            // Same permanent "based on what you copied" trace the text clip gets.
-            // Stamped before `seedThread` is captured below, so it rides into the
-            // saved snapshot exactly like the text-clip stamp above.
             if turns.count >= 2 { turns[turns.count - 2].usedClipboard = true }
-        } else if !firstTurn, let parked = threadImage, parked.threadID == threadHistoryID,
+        } else if !firstTurn, let parked = threadImages, parked.threadID == threadHistoryID,
                   let firstUser = context.firstIndex(where: { $0.role == "user" }) {
-            context[firstUser].image = parked.image
+            context[firstUser].images = parked.images
             imageAttached = true
         }
 
         // Fresh thinking word for this answer's pre-stream wait, rotating slowly
         // while we wait so a long search/compose round doesn't freeze on one word.
-        startThinkingWordRotation()
+        startThinkingWordRotation(for: q)
         // Light the thinking dots for this round (cleared on the first token or when
         // the round ends) — they ride beside the notch even if the panel folds away.
         thinking = true
@@ -4370,36 +5430,31 @@ final class NotchModel: ObservableObject {
             // the suspension is invisible beyond the thinking dots it happens under.
             // The same bytes are parked in the image store, so the row this round
             // settles into keeps the picture it was asked about.
-            var savedImageFile: String? = nil
-            if let image = pendingVisionImage {
-                let jpeg = await Task.detached(priority: .userInitiated) {
-                    Self.encodeJPEGForVision(image)
+            var savedImageFiles: [String] = []
+            if !pendingVisionImages.isEmpty {
+                let jpegs = await Task.detached(priority: .userInitiated) {
+                    pendingVisionImages.compactMap { Self.encodeJPEGForVision($0) }
                 }.value
-                if let jpeg {
-                    let encoded = ChatImage(base64: jpeg.base64EncodedString(),
-                                            mediaType: "image/jpeg")
-                    context[context.count - 1].image = encoded
-                    // Park it on the thread so follow-ups re-attach it (unchanged
-                    // from the synchronous version).
-                    self.threadImage = (threadID: threadID, image: encoded)
-                    savedImageFile = await Task.detached(priority: .utility) {
-                        Self.storeHistoryImage(jpeg)
+                let encoded = jpegs.map {
+                    ChatImage(base64: $0.base64EncodedString(), mediaType: "image/jpeg")
+                }
+                if !encoded.isEmpty {
+                    context[context.count - 1].images = encoded
+                    self.threadImages = (threadID: threadID, images: encoded)
+                    savedImageFiles = await Task.detached(priority: .utility) {
+                        jpegs.compactMap { Self.storeHistoryImage($0) }
                     }.value
-                    // Stamp the on-screen turn too, so the thumbnail shows on the
-                    // question the moment the answer starts writing — not only after
-                    // the row is reopened from Recent.
-                    if let file = savedImageFile,
-                       let i = self.turns.firstIndex(where: { $0.id == questionID }) {
-                        self.turns[i].imageFiles = [file]
+                    if let i = self.turns.firstIndex(where: { $0.id == questionID }) {
+                        self.turns[i].imageFiles = savedImageFiles
                     }
                 }
             }
             var thread = seedThread
             // …and on the snapshot that actually gets persisted — `seedThread` was
             // captured before the encode finished, so it still has the bare question.
-            if let file = savedImageFile,
+            if !savedImageFiles.isEmpty,
                let i = thread.firstIndex(where: { $0.id == questionID }) {
-                thread[i].imageFiles = [file]
+                thread[i].imageFiles = savedImageFiles
             }
             // Hoisted out of `do` so the error `catch` can read whatever streamed
             // before the failure — a mid-stream drop that already produced text must
@@ -4535,9 +5590,17 @@ final class NotchModel: ObservableObject {
                 //  · `ask_user` — its suspension is owned by the model
                 //    (`awaitUserChoice`), keyed to THIS round's answer turn so the
                 //    question card renders under the answer it interrupts;
+                //  · `manage_app_settings` — reads the live model-backed preferences
+                //    and reuses this round's question card as its mandatory write
+                //    confirmation gate;
                 //  · `search_history` — reads the archive off `history`, which is
                 //    main-actor state on this object.
                 var agentTools = ToolRegistry.standard(for: APIKeyStore.selectedProvider).tools
+                agentTools.append(ManageAppSettingsTool { [weak self] request in
+                    guard let self else { throw CancellationError() }
+                    return try await self.handleAppSettingsRequest(answerID: answerID,
+                                                                   request: request)
+                })
                 agentTools.append(AskUserTool { [weak self] question, options in
                     guard let self else { throw CancellationError() }
                     return try await self.awaitUserChoice(answerID: answerID,
@@ -4585,6 +5648,8 @@ final class NotchModel: ObservableObject {
                         },
                         onSources: { [weak self] roundSources in
                             guard let self else { return }
+                            if !roundSources.isEmpty {
+                            }
                             // Accumulate sources across rounds onto the snapshot
                             // (so they persist with the thread) and, when on screen,
                             // the live turn (so the badge appears). Deduped by URL.
@@ -5221,6 +6286,10 @@ final class NotchModel: ObservableObject {
         turns = restored
         threadHistoryID = parked.threadHistoryID
         text = parked.text
+        // Restore the shortcut origin with the thread: `fullClose` cleared it, and
+        // without handing it back the reopened answer would come up with a full
+        // follow-up field where the user left a folded chip.
+        fromPromptShortcut = parked.fromPromptShortcut
         // Hand the parked height measurement back BEFORE `open` flips and the
         // body mounts, so NotchBody's first frame already renders the correct
         // short-vs-clipped layout (see `lastMeasuredAnswerHeight`). A thread that
@@ -5550,6 +6619,9 @@ final class NotchModel: ObservableObject {
     }
 
     func openHistory(_ item: HistoryItem) {
+        // Opening a saved thread replaces the idle draft; its unsent attachments
+        // must not hide off-screen and ride the next follow-up by surprise.
+        askComposeImages = []
         // Still answering: this row is a placeholder whose live stream runs
         // detached — reattach the stream to the screen (the same move as
         // hovering the busy notch) so tapping the row lands on the answer as
@@ -5587,17 +6659,21 @@ final class NotchModel: ObservableObject {
         // started from instead of asking about nothing. The saved JPEG is already
         // the downsampled one that went out the first time. Only when the model on
         // duty now reads images at all — a text-only model gets the thread's text.
-        threadImage = activeModelSupportsVision ? Self.parkedImage(for: item) : nil
+        threadImages = activeModelSupportsVision ? Self.parkedImages(for: item) : nil
         mode = .result
     }
 
-    /// The image a saved thread carries, rebuilt from the store as a wire attachment
-    /// (see `threadImage`). `nil` when the thread had none, or its file is gone.
-    private static func parkedImage(for item: HistoryItem) -> (threadID: UUID, image: ChatImage)? {
-        guard let file = item.conversation.first(where: { $0.role == "user" })?.imageFiles.first,
-              let jpeg = try? Data(contentsOf: historyImageURL(file)) else { return nil }
-        return (threadID: item.id,
-                image: ChatImage(base64: jpeg.base64EncodedString(), mediaType: "image/jpeg"))
+    /// Images a saved thread carries, rebuilt from the history image store.
+    private static func parkedImages(for item: HistoryItem)
+        -> (threadID: UUID, images: [ChatImage])?
+    {
+        let files = item.conversation.first(where: { $0.role == "user" })?.imageFiles ?? []
+        let images = files.compactMap { file -> ChatImage? in
+            guard let jpeg = try? Data(contentsOf: historyImageURL(file)) else { return nil }
+            return ChatImage(base64: jpeg.base64EncodedString(), mediaType: "image/jpeg")
+        }
+        guard !images.isEmpty else { return nil }
+        return (threadID: item.id, images: images)
     }
 
     /// Jump a Note/Reminder capture out to its app — the DELIBERATE exit, fired

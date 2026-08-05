@@ -24,6 +24,18 @@ struct WhatsNewView: View {
     /// frame edge, matching the recent list's `edgeFade`.
     private let edgeFade: CGFloat = 64
 
+    /// Keep the in-notch reader focused on the latest changes. The website is
+    /// the complete archive once the bundled history grows beyond this point.
+    private let inAppEntryLimit = 10
+
+    private var displayedEntries: [WhatsNewService.Entry] {
+        Array(service.entries.prefix(inAppEntryLimit))
+    }
+
+    private var hasMoreEntries: Bool {
+        service.entries.count > inAppEntryLimit
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
@@ -60,24 +72,35 @@ struct WhatsNewView: View {
     // MARK: - Release list
 
     private var releaseList: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 34) {
-                ForEach(service.entries) { entry in
-                    releaseSection(entry)
+        VStack(alignment: .leading, spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 34) {
+                    ForEach(displayedEntries) { entry in
+                        releaseSection(entry)
+                    }
+
+                    if hasMoreEntries {
+                        Button(L("whatsnew.viewAllReleaseNotes")) {
+                            NSWorkspace.shared.open(UpdaterService.releaseNotesPage)
+                        }
+                        .buttonStyle(.plain)
+                        .font(.sf(11.5, weight: .medium))
+                        .foregroundStyle(Tokens.text2)
+                        .frame(maxWidth: .infinity)
+                    }
                 }
+                .padding(.horizontal, 4)
+                // Breathing room the top taper falls across, so the newest release
+                // rests below the gradient at full strength before any scrolling.
+                .padding(.top, 28)
+                .padding(.bottom, 20)
             }
-            .padding(.horizontal, 4)
-            // Breathing room the top taper falls across, so the newest release
-            // rests below the gradient at full strength before any scrolling.
-            .padding(.top, 28)
-            .padding(.bottom, 20)
+            .frame(maxHeight: maxHeight)
+            .scrollIndicators(.never)
+            // Both edges taper, so the notes dissolve into the header the same
+            // way they dissolve into the bottom.
+            .scrollEdgeFade(top: true, bottom: true, topFade: 28, bottomFade: edgeFade)
         }
-        .frame(maxHeight: maxHeight)
-        .scrollIndicators(.never)
-        // Both edges taper — the bundled history always outgrows the frame (a
-        // spec-less/empty changelog takes `emptyState` instead), so the notes
-        // dissolve into the header the same way they dissolve into the bottom.
-        .scrollEdgeFade(top: true, bottom: true, topFade: 28, bottomFade: edgeFade)
     }
 
     /// One release: a quiet meta line (date leading, version trailing — both the
@@ -171,7 +194,7 @@ struct WhatsNewView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             Button(L("whatsnew.viewReleases")) {
-                NSWorkspace.shared.open(UpdaterService.releasesPage)
+                NSWorkspace.shared.open(UpdaterService.releaseNotesPage)
             }
             .buttonStyle(.plain)
             .font(.sf(11.5, weight: .medium))
