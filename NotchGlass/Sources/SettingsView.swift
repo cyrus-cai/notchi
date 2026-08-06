@@ -46,4 +46,10 @@ extension Notification.Name {
     /// Posted by the Recent list's "See all" action, so `AppDelegate` can open the
     /// standalone History window showing the complete, uncapped archive.
     static let openHistoryArchiveRequested = Notification.Name("openHistoryArchiveRequested")
+    /// Posted when a CLI service's launch resolution lands (the `claude` / `codex` /
+    /// `grok` / `cmd` binary probe finished), so the views that asked `isAvailable`
+    /// while the answer was still unknown redraw with the real one. See
+    /// `resolvedBinaryIfReady()` — availability reads never block a render, so this
+    /// is what closes the loop.
+    static let cliAvailabilityResolved = Notification.Name("cliAvailabilityResolved")
 }

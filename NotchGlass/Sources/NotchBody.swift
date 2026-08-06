@@ -184,8 +184,14 @@ struct NotchBody: View {
         // (`askModelChip`), the settings chip, and ⌘⇧I's fallback when no agent CLI is
         // installed. It hangs under the panel body rather than off the chip so all three
         // front doors land it right below the island, where the eye already is.
+        //
+        // The rows are built only while the menu is actually up: `rows` walks every
+        // provider (each one's `ready` check, then the whole catalog's fold and sort),
+        // and this modifier sits on the panel body — so an unfurl used to pay for a
+        // menu nobody asked for. The body re-runs when `showModelPicker` flips, which
+        // is before the presenter reads them.
         .modelMenu(isPresented: $model.showModelPicker,
-                   models: catalog.rows(selected: selectedProvider),
+                   models: model.showModelPicker ? catalog.rows(selected: selectedProvider) : [],
                    selectedProvider: selectedProvider,
                    selectedID: selectedModelID,
                    centered: true,

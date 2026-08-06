@@ -2450,11 +2450,16 @@ final class NotchModel: ObservableObject {
         let value = raw.value.trimmingCharacters(in: .whitespacesAndNewlines)
         let scoped = raw.scope?.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        func made(_ key: String, _ label: String, _ displayValue: String,
+        /// Each change is one plain sentence the user can read straight through —
+        /// "Dock icon will change to Hidden" — not a `Label → value` pair. A `nil`
+        /// display value means the field is being emptied, which is its own
+        /// sentence: "will change to Clear" isn't a thing anyone says.
+        func made(_ key: String, _ label: String, _ displayValue: String?,
                   _ payload: PreparedAppSettingChange.Payload,
                   noOp: Bool) -> PreparedAppSettingChange {
-            .init(key: key, summary: "\(label) → \(confirmationDisplay(displayValue))",
-                  payload: payload, isNoOp: noOp)
+            let summary = displayValue.map { changeSentence(label, confirmationDisplay($0)) }
+                ?? clearedSentence(label)
+            return .init(key: key, summary: summary, payload: payload, isNoOp: noOp)
         }
 
         switch setting {
@@ -2571,8 +2576,7 @@ final class NotchModel: ObservableObject {
                 throw AppSettingValidationError.message(
                     "custom_instructions is limited to \(Self.customInstructionsLimit) characters.")
             }
-            let shown = value.isEmpty ? localizedCleared() : value
-            return made(setting, L("general.customInstructions"), shown,
+            return made(setting, L("general.customInstructions"), value.isEmpty ? nil : value,
                         .customInstructions(value), noOp: value == customInstructions)
 
         case "proxy":
@@ -2611,9 +2615,13 @@ final class NotchModel: ObservableObject {
                     "\(provider.displayName)'s API key is controlled by \(provider.envVarName), so the app setting cannot override it.")
             }
             let key = Self.isClearToken(value) ? "" : value
-            return made("\(setting)[\(provider.rawValue)]", "\(provider.displayName) \(L("model.apiKey"))",
-                        key.isEmpty ? localizedCleared() : localizedConfigured(),
-                        .apiKey(provider, key), noOp: key == APIKeyStore.stored(for: provider))
+            let keyLabel = "\(provider.displayName) \(L("model.apiKey"))"
+            // The key itself never appears in the confirmation, so a stored key
+            // gets its own sentence rather than a value to "change to".
+            return .init(key: "\(setting)[\(provider.rawValue)]",
+                         summary: key.isEmpty ? clearedSentence(keyLabel) : keySetSentence(keyLabel),
+                         payload: .apiKey(provider, key),
+                         isNoOp: key == APIKeyStore.stored(for: provider))
 
         case "search_backend":
             guard let backend = Self.parseSearchBackend(value) else {
@@ -2651,23 +2659,24 @@ final class NotchModel: ObservableObject {
             case .keenable:  stored = APIKeyStore.storedKeenableKey()
             case .anysearch: stored = APIKeyStore.storedAnySearchKey()
             }
-            return made("\(setting)[\(backend.rawValue)]", "\(backend.rawValue.capitalized) API key",
-                        key.isEmpty ? localizedCleared() : localizedConfigured(),
-                        .searchAPIKey(backend, key), noOp: key == stored)
+            let keyLabel = "\(backend.rawValue.capitalized) API key"
+            return .init(key: "\(setting)[\(backend.rawValue)]",
+                         summary: key.isEmpty ? clearedSentence(keyLabel) : keySetSentence(keyLabel),
+                         payload: .searchAPIKey(backend, key), isNoOp: key == stored)
 
         case "custom_provider_name":
-            return made(setting, L("model.custom.name"), value.isEmpty ? localizedCleared() : value,
+            return made(setting, L("model.custom.name"), value.isEmpty ? nil : value,
                         .customProviderName(value), noOp: value == CustomProvider.name)
 
         case "custom_provider_url":
             guard value.isEmpty || CustomProvider.normalized(value) != nil else {
                 throw AppSettingValidationError.message("custom_provider_url is not a valid endpoint URL.")
             }
-            return made(setting, L("model.custom.url"), value.isEmpty ? localizedCleared() : value,
+            return made(setting, L("model.custom.url"), value.isEmpty ? nil : value,
                         .customProviderURL(value), noOp: value == CustomProvider.baseURL)
 
         case "custom_provider_model":
-            return made("ai_model[custom]", L("model.custom.model"), value.isEmpty ? localizedCleared() : value,
+            return made("ai_model[custom]", L("model.custom.model"), value.isEmpty ? nil : value,
                         .customProviderModel(value), noOp: value == CustomProvider.model)
 
         default:
@@ -2693,7 +2702,7 @@ final class NotchModel: ObservableObject {
             }
             let chord = existing.shortcut?.displayString ?? L("shortcuts.promptAction.set")
             return .init(key: "prompt_shortcut[\(existing.id)]",
-                         summary: "\(label) \(chord) → \(localizedRemoved())",
+                         summary: removedSentence("\(label) \(chord)"),
                          payload: .promptShortcutRemoval(existing.id), isNoOp: false)
         }
 
@@ -2735,7 +2744,8 @@ final class NotchModel: ObservableObject {
         }
         let chord = updated.shortcut?.displayString ?? L("shortcuts.promptAction.set")
         return .init(key: "prompt_shortcut[\(updated.id)]",
-                     summary: "\(label) \(chord) → \(confirmationDisplay(updated.prompt))",
+                     summary: promptRunSentence("\(label) \(chord)",
+                                                confirmationDisplay(updated.prompt)),
                      payload: .promptShortcut(updated), isNoOp: existing == updated)
     }
 
@@ -2775,39 +2785,71 @@ final class NotchModel: ObservableObject {
         }
     }
 
-    private func localizedCleared() -> String {
+    // MARK: - Confirmation sentences
+    //
+    // A pending change is written as one ordinary sentence — "Dock icon will
+    // change to Hidden" — because the confirmation card reads as a question the
+    // app is asking, not as a table of fields. Four shapes cover every setting:
+    // a new value, an emptied field, a deleted binding, and a stored key (whose
+    // value is never shown).
+
+    private func changeSentence(_ label: String, _ value: String) -> String {
         switch Localization.shared.language.resolved {
-        case .zhHans: return "清除"
-        case .zhHant: return "清除"
-        case .ja:     return "消去"
-        case .ko:     return "지우기"
-        case .fr:     return "Effacer"
-        case .es:     return "Borrar"
-        case .en:     return "Clear"
+        case .zhHans: return "\(label)将改为\(value)"
+        case .zhHant: return "\(label)將改為\(value)"
+        case .ja:     return "\(label)を\(value)に変更します"
+        case .ko:     return "\(label)을 \(value)(으)로 변경합니다"
+        case .fr:     return "\(label) passera à \(value)"
+        case .es:     return "\(label) cambiará a \(value)"
+        case .en:     return "\(label) will change to \(value)"
         }
     }
 
-    private func localizedRemoved() -> String {
+    private func clearedSentence(_ label: String) -> String {
         switch Localization.shared.language.resolved {
-        case .zhHans: return "删除"
-        case .zhHant: return "刪除"
-        case .ja:     return "削除"
-        case .ko:     return "삭제"
-        case .fr:     return "Supprimer"
-        case .es:     return "Eliminar"
-        case .en:     return "Remove"
+        case .zhHans: return "\(label)将被清空"
+        case .zhHant: return "\(label)將被清空"
+        case .ja:     return "\(label)を消去します"
+        case .ko:     return "\(label)을 비웁니다"
+        case .fr:     return "\(label) sera effacé"
+        case .es:     return "\(label) se borrará"
+        case .en:     return "\(label) will be cleared"
         }
     }
 
-    private func localizedConfigured() -> String {
+    private func removedSentence(_ label: String) -> String {
         switch Localization.shared.language.resolved {
-        case .zhHans: return "已配置（密钥不会显示）"
-        case .zhHant: return "已設定（金鑰不會顯示）"
-        case .ja:     return "設定済み（キーは表示しません）"
-        case .ko:     return "구성됨(키는 표시하지 않음)"
-        case .fr:     return "Configurée (clé masquée)"
-        case .es:     return "Configurada (clave oculta)"
-        case .en:     return "Configured (key hidden)"
+        case .zhHans: return "\(label)将被删除"
+        case .zhHant: return "\(label)將被刪除"
+        case .ja:     return "\(label)を削除します"
+        case .ko:     return "\(label)을 삭제합니다"
+        case .fr:     return "\(label) sera supprimé"
+        case .es:     return "\(label) se eliminará"
+        case .en:     return "\(label) will be removed"
+        }
+    }
+
+    private func keySetSentence(_ label: String) -> String {
+        switch Localization.shared.language.resolved {
+        case .zhHans: return "\(label)将被设置（密钥不会显示）"
+        case .zhHant: return "\(label)將被設定（金鑰不會顯示）"
+        case .ja:     return "\(label)を設定します（キーは表示しません）"
+        case .ko:     return "\(label)을 설정합니다(키는 표시하지 않음)"
+        case .fr:     return "\(label) sera enregistrée (clé masquée)"
+        case .es:     return "\(label) se guardará (clave oculta)"
+        case .en:     return "\(label) will be set (key hidden)"
+        }
+    }
+
+    private func promptRunSentence(_ label: String, _ prompt: String) -> String {
+        switch Localization.shared.language.resolved {
+        case .zhHans: return "\(label) 将运行：\(prompt)"
+        case .zhHant: return "\(label) 將執行：\(prompt)"
+        case .ja:     return "\(label) は次を実行します：\(prompt)"
+        case .ko:     return "\(label) 이(가) 다음을 실행합니다: \(prompt)"
+        case .fr:     return "\(label) exécutera : \(prompt)"
+        case .es:     return "\(label) ejecutará: \(prompt)"
+        case .en:     return "\(label) will run: \(prompt)"
         }
     }
 

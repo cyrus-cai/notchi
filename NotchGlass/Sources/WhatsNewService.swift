@@ -64,6 +64,16 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.5.3",
+            date: "2026-08-06",
+            features: [
+                "Ask's confirmation cards are now Liquid Glass dialogs: each change reads as a full sentence — \"Dock icon will change to Hidden\" — in every language Notchi speaks.",
+            ],
+            fixes: [
+                "The first hover after a relaunch no longer freezes the notch: CLI availability is probed in the background, and the panel catches up the moment it lands.",
+            ]
+        ),
+        Entry(
             version: "0.5.2",
             date: "2026-08-06",
             fixes: [

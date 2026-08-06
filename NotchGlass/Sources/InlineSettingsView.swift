@@ -1478,7 +1478,7 @@ struct InlineSettingsView: View {
     /// the OAuth flow in Terminal itself, and Notch just uses the cached tokens.
     @ViewBuilder
     private var codexAccountRow: some View {
-        let installed = CodexCLIService.resolveBinary() != nil
+        let installed = CodexCLIService.resolvedBinaryIfReady() != nil
         let signedIn = CodexCLIService.authExists()
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
@@ -1523,7 +1523,7 @@ struct InlineSettingsView: View {
     /// in Terminal themselves. Install link only when the CLI is missing.
     @ViewBuilder
     private var claudeAccountRow: some View {
-        let installed = ClaudeCLIService.resolveBinary() != nil
+        let installed = ClaudeCLIService.resolvedBinaryIfReady() != nil
         let signedIn = ClaudeCLIService.authExists()
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
@@ -1562,7 +1562,7 @@ struct InlineSettingsView: View {
     /// run in a terminal). Install link only when the CLI is missing.
     @ViewBuilder
     private var grokAccountRow: some View {
-        let installed = GrokCLIService.resolveBinary() != nil
+        let installed = GrokCLIService.resolvedBinaryIfReady() != nil
         let signedIn = GrokCLIService.authExists()
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
@@ -1605,7 +1605,7 @@ struct InlineSettingsView: View {
     /// and points at the terminal command. Install link only when the CLI is missing.
     @ViewBuilder
     private var commandCodeAccountRow: some View {
-        let installed = CommandCodeCLIService.resolveBinary() != nil
+        let installed = CommandCodeCLIService.resolvedBinaryIfReady() != nil
         let signedIn = CommandCodeCLIService.authExists()
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {

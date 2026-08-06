@@ -301,7 +301,19 @@ final class ModelCatalogStore: ObservableObject {
     /// while the first (seconds of CLI spawns) is still in flight.
     private var claudeResolveInFlight = false
 
-    private init() {}
+    /// Bumped when a CLI's launch resolution lands. Availability reads are
+    /// non-blocking (`resolvedBinaryIfReady`), so a view that rendered before the
+    /// probe finished drew the CLI providers as unavailable — this republishes the
+    /// store so those rows come back with the real answer.
+    @Published private(set) var cliGeneration = 0
+
+    private init() {
+        NotificationCenter.default.addObserver(
+            forName: .cliAvailabilityResolved, object: nil, queue: .main
+        ) { _ in
+            MainActor.assumeIsolated { ModelCatalogStore.shared.cliGeneration &+= 1 }
+        }
+    }
 
     /// How many of OpenRouter's usage-ranked free models ride in the picker's unfolded
     /// view. The auto-router sits above them, outside the cap.

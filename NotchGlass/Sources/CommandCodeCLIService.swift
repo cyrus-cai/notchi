@@ -79,8 +79,19 @@ struct CommandCodeCLIService: AIService {
     /// "no binary". Resolution shells out, so it's cached for the process lifetime —
     /// warm it off-main at launch via `warmUp()`.
     private static var cachedBinary: String??
+    /// Guards `warmingUp` only. Deliberately NOT `resolveLock`: that one is held for
+    /// the whole probe, so taking it here would put the render right back into the
+    /// wait this exists to avoid. This one is never held across work.
+    private static let warmLock = NSLock()
+    /// Set once a `warmUp()` is in flight, so repeated availability reads during the
+    /// first resolution don't each queue another probe.
+    private static var warmingUp = false
 
     /// The resolved Command Code binary path, or `nil` if none works. Cached.
+    ///
+    /// **Blocking** — it spawns the CLI on a cold cache, and it waits on the lock the
+    /// launch warm-up holds while its own spawn runs. Never call it from a SwiftUI
+    /// render or anywhere else on the main thread: use `resolvedBinaryIfReady()`.
     static func resolveBinary() -> String? {
         resolveLock.lock(); defer { resolveLock.unlock() }
         if let cached = cachedBinary { return cached }
@@ -89,12 +100,43 @@ struct CommandCodeCLIService: AIService {
         return resolved
     }
 
+    /// The resolved binary **without ever waiting**: the answer if the resolution has
+    /// already landed, else `nil` (and a warm-up kicked off), never a block.
+    ///
+    /// This is the render-safe read, and it exists because "warm it up off-main" does
+    /// not on its own keep the main thread out of the resolution — it only moves who
+    /// holds `resolveLock`. `probeModels` runs `cmd --list-models`, a Node CLI cold
+    /// start of ~2s; a `body` that called `resolveBinary()` while that was in flight
+    /// sat on the mutex for the whole spawn. That is exactly the first hover after a
+    /// relaunch, and it read as the notch refusing to open.
+    static func resolvedBinaryIfReady() -> String? {
+        var known: String?? = nil
+        if resolveLock.try() {
+            known = cachedBinary
+            resolveLock.unlock()
+        }
+        if let known { return known }
+        warmUp()
+        return nil
+    }
+
     /// Resolve the binary (and, with it, the model catalog) off the main thread, so
     /// the first `isAvailable` / `defaultModel` call during a SwiftUI render reads a
-    /// warm cache instead of spawning a process on the main thread.
+    /// warm cache instead of spawning a process on the main thread. Idempotent: a
+    /// second call while the first is still probing is a no-op.
     static func warmUp() {
+        warmLock.lock()
+        guard !warmingUp else { warmLock.unlock(); return }
+        warmingUp = true
+        warmLock.unlock()
         DispatchQueue.global(qos: .utility).async {
             _ = resolveBinary()
+            warmLock.lock(); warmingUp = false; warmLock.unlock()
+            // Anything that read `isAvailable` as "not yet known" while this ran now
+            // has a real answer to redraw with.
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .cliAvailabilityResolved, object: nil)
+            }
         }
     }
 
@@ -141,7 +183,11 @@ struct CommandCodeCLIService: AIService {
     /// Whether Command Code can actually answer right now: the binary resolves AND
     /// the user has signed in. Drives the picker (the provider is selectable only
     /// when true) and the Settings status row.
-    static var isAvailable: Bool { resolveBinary() != nil && authExists() }
+    ///
+    /// Reads the resolution **non-blockingly** — this is called from `body`. Until the
+    /// launch probe lands it answers "no"; `.cliAvailabilityResolved` then redraws
+    /// whoever asked.
+    static var isAvailable: Bool { resolvedBinaryIfReady() != nil && authExists() }
 
     // MARK: - Model catalog
 

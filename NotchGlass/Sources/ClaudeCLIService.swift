@@ -72,8 +72,19 @@ struct ClaudeCLIService: AIService {
     /// `--version` output of the resolved binary, captured by the same spawn that
     /// vetted it — see `binaryFingerprint()`.
     private static var cachedVersion: String?
+    /// Guards `warmingUp` only. Deliberately NOT `resolveLock`: that one is held for
+    /// the whole probe, so taking it here would put the render right back into the
+    /// wait this exists to avoid. This one is never held across work.
+    private static let warmLock = NSLock()
+    /// Set once a `warmUp()` is in flight, so repeated availability reads during the
+    /// first resolution don't each queue another probe.
+    private static var warmingUp = false
 
     /// The resolved `claude` binary path, or `nil` if none works. Cached.
+    ///
+    /// **Blocking** — a cold cache spawns `--version` (and may probe the shell PATH),
+    /// and it waits on the lock the launch warm-up holds while doing exactly that.
+    /// Never call it on the main thread: renders use `resolvedBinaryIfReady()`.
     static func resolveBinary() -> String? {
         resolveLock.lock(); defer { resolveLock.unlock() }
         if let cached = cachedBinary { return cached }
@@ -95,11 +106,35 @@ struct ClaudeCLIService: AIService {
         return "\(path)|\(version)"
     }
 
+    /// The resolved binary **without ever waiting**: the answer if the resolution has
+    /// already landed, else `nil` (and a warm-up kicked off), never a block. The
+    /// render-safe read — see `CommandCodeCLIService.resolvedBinaryIfReady()` for why
+    /// warming up off-main is not by itself enough to keep `body` out of the probe.
+    static func resolvedBinaryIfReady() -> String? {
+        var known: String?? = nil
+        if resolveLock.try() {
+            known = cachedBinary
+            resolveLock.unlock()
+        }
+        if let known { return known }
+        warmUp()
+        return nil
+    }
+
     /// Resolve the binary off the main thread so the first `isAvailable` read
-    /// during a SwiftUI render hits a warm cache.
+    /// during a SwiftUI render hits a warm cache. Idempotent: a second call while
+    /// the first is still probing is a no-op.
     static func warmUp() {
+        warmLock.lock()
+        guard !warmingUp else { warmLock.unlock(); return }
+        warmingUp = true
+        warmLock.unlock()
         DispatchQueue.global(qos: .utility).async {
             _ = resolveBinary()
+            warmLock.lock(); warmingUp = false; warmLock.unlock()
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .cliAvailabilityResolved, object: nil)
+            }
         }
     }
 
@@ -149,7 +184,9 @@ struct ClaudeCLIService: AIService {
     }
 
     /// Whether Claude Code can answer right now: binary resolves AND signed in.
-    static var isAvailable: Bool { resolveBinary() != nil && authExists() }
+    /// Reads the resolution non-blockingly (this runs inside `body`); until the
+    /// launch probe lands it answers "no" and `.cliAvailabilityResolved` redraws.
+    static var isAvailable: Bool { resolvedBinaryIfReady() != nil && authExists() }
 
     // MARK: - Resolved model names
 
