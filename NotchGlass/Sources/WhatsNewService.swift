@@ -64,6 +64,13 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.5.2",
+            date: "2026-08-06",
+            fixes: [
+                "The Prompt action add button is no longer clipped at the top of the Shortcuts pane.",
+            ]
+        ),
+        Entry(
             version: "0.5.1",
             date: "2026-08-06",
             features: [

@@ -2618,15 +2618,22 @@ struct InlineSettingsView: View {
     /// before a shortcut can be edited.
     private var promptShortcutsGroup: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // The title carries the exact height of every other group's title, and
+            // The title keeps the text position of every other group's title, and
             // the add chip hangs in an OVERLAY rather than in the row: a 24pt
             // button inside the HStack made this one header 24pt tall, so its text
             // sat ~5pt lower than "Summoning" below it and the block opened with a
             // band of air above the words.
+            //
+            // The header still RESERVES the chip's full height, with the text
+            // pinned to the top of that box. This group is the first thing in the
+            // Shortcuts pane, so its title sits at y=0 of the scroll content — a
+            // 24pt chip centred on a ~15pt line overflowed ~5pt above the scroll
+            // view's edge, which clipped the chip's upper arc clean off.
             Text(L("shortcuts.promptAction"))
                 .font(.sf(12.5, weight: .semibold))
                 .foregroundStyle(Tokens.text1)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(maxWidth: .infinity, minHeight: Self.promptAddChipSize,
+                       alignment: .topLeading)
                 .overlay(alignment: .trailing) {
                     Button {
                         withAnimation(Tokens.stackSpring) {
@@ -2637,18 +2644,22 @@ struct InlineSettingsView: View {
                         Image(systemName: "plus")
                             .font(.sf(10.5, weight: .semibold))
                             .foregroundStyle(Tokens.text2)
-                            .frame(width: 24, height: 24)
+                            .frame(width: Self.promptAddChipSize,
+                                   height: Self.promptAddChipSize)
                     }
                     .buttonStyle(ShortcutChipStyle())
                     .help(L("shortcuts.promptAction.add"))
                 }
-                .padding(.bottom, 3)
 
+            // The header box already carries ~9pt of slack below the title text
+            // (the chip's height minus the line's); these top pads add the rest of
+            // the clearance, so the title reads as a section header rather than as
+            // a label stuck to the first row.
             if promptShortcuts.isEmpty {
                 Text(L("shortcuts.promptAction.empty"))
                     .font(.sf(11.5))
                     .foregroundStyle(Tokens.text4)
-                    .padding(.top, 5)
+                    .padding(.top, 10)
             } else {
                 VStack(alignment: .leading, spacing: 5) {
                     ForEach(promptShortcuts) { binding in
@@ -2656,13 +2667,17 @@ struct InlineSettingsView: View {
                             .transition(.opacity.combined(with: .move(edge: .top)))
                     }
                 }
-                .padding(.top, 6)
+                .padding(.top, 10)
             }
         }
     }
 
     /// Field and chord chip share one height so a row reads as a single control.
     private static let promptRowHeight: CGFloat = 28
+
+    /// The header's add chip — smaller than a row's chips, and the height the
+    /// title row reserves so the pane's top edge never shaves it.
+    private static let promptAddChipSize: CGFloat = 24
 
     private func promptShortcutRow(_ binding: PromptShortcut) -> some View {
         let target = EditableShortcut.prompt(binding.id)

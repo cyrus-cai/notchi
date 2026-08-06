@@ -23,8 +23,10 @@ Package.resolved
 Icon
 ._*
 
-# Claude Code local state
+# Agent local state — never published
 .claude/
+.codex/
+.commandcode/
 
 # Internal working docs — kept local only, never published
 AGENTS.md
