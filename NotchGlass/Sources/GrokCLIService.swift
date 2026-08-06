@@ -98,8 +98,9 @@ struct GrokCLIService: AIService {
         for p in candidatePaths where fm.isExecutableFile(atPath: p) {
             if smokeTest(p) { return p }
         }
-        // Fall back to the user's login-shell PATH (honours a non-standard install).
-        if let p = loginShellWhich(), smokeTest(p) { return p }
+        // Fall back to the user's shell PATH (honours a non-standard or
+        // version-manager install) — see `ShellEnvironment`.
+        if let p = ShellEnvironment.which(["grok"]), smokeTest(p) { return p }
         return nil
     }
 
@@ -108,28 +109,12 @@ struct GrokCLIService: AIService {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: path)
         p.arguments = ["--version"]
+        p.environment = ShellEnvironment.childEnvironment(for: path)
         p.standardOutput = Pipe()
         p.standardError = Pipe()
         do { try p.run() } catch { return false }
         p.waitUntilExit()
         return p.terminationStatus == 0
-    }
-
-    private static func loginShellWhich() -> String? {
-        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: shell)
-        p.arguments = ["-lc", "command -v grok"]
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = Pipe()
-        do { try p.run() } catch { return nil }
-        p.waitUntilExit()
-        guard p.terminationStatus == 0 else { return nil }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        let path = String(data: data, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return (path?.isEmpty == false) ? path : nil
     }
 
     /// The Grok home directory (`~/.grok`) where OAuth tokens and the model cache
@@ -258,9 +243,7 @@ struct GrokCLIService: AIService {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: binary)
         p.arguments = ["login"]
-        var env = ProcessInfo.processInfo.environment
-        if env["HOME"] == nil { env["HOME"] = NSHomeDirectory() }
-        ProxyConfig.apply(to: &env)
+        p.environment = ShellEnvironment.childEnvironment(for: binary)
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
         do { try p.run() } catch { return false }
@@ -379,10 +362,7 @@ struct GrokCLIService: AIService {
             // environment, and inject the proxy (a GUI app inherits launchd's
             // environment, which carries none — without it the CLI connects
             // directly and fails behind a proxy).
-            var env = ProcessInfo.processInfo.environment
-            if env["HOME"] == nil { env["HOME"] = NSHomeDirectory() }
-            ProxyConfig.apply(to: &env)
-            process.environment = env
+            process.environment = ShellEnvironment.childEnvironment(for: binary)
 
             let outPipe = Pipe(), errPipe = Pipe()
             process.standardOutput = outPipe

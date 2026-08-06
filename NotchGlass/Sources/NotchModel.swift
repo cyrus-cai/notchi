@@ -2913,6 +2913,7 @@ final class NotchModel: ObservableObject {
         case "codex": return .codex
         case "claudecode", "claude_code": return .claudeCode
         case "grokcode", "grok_code": return .grokCode
+        case "commandcode", "command_code": return .commandCode
         case "anthropic", "claude": return .anthropic
         case "gemini", "google": return .gemini
         case "deepseek", "deep_seek": return .deepseek
@@ -2930,6 +2931,7 @@ final class NotchModel: ObservableObject {
         switch provider {
         case .claudeCode: return "claude_code"
         case .grokCode:   return "grok_code"
+        case .commandCode: return "command_code"
         default:          return provider.rawValue
         }
     }
@@ -7108,7 +7110,24 @@ final class NotchModel: ObservableObject {
         guard !surviving.isEmpty else { return }
         // Anything already in `history` arrived after launch — newer than
         // everything on disk — so it stays in front (the list is newest-first).
-        history = history + surviving
+        //
+        // De-duped BY ID, in-memory wins. A run can settle before this merge lands
+        // (an agent run resumed at launch files its record right away), and
+        // `recordAgentHistory`'s "replace the row for this task id" only sees the
+        // in-memory half — the disk copy of that same id hasn't arrived yet. A raw
+        // concat then leaves two rows carrying the SAME id, which the Recent list's
+        // `ForEach(id: \.element.id)` renders as undefined results: one of the two
+        // draws as a blank row. Keeping the first occurrence of each id also heals
+        // an archive that already picked up such a pair on an earlier launch.
+        history = Self.dedupedByID(history + surviving)
+    }
+
+    /// Newest-first list with each `id` kept once, at its earliest (newest) position.
+    /// `history` must never hold two items sharing an id: rows are keyed by it in
+    /// every list, and `deleteHistory`/`openHistory` look items up by it.
+    private static func dedupedByID(_ items: [HistoryItem]) -> [HistoryItem] {
+        var seen = Set<UUID>()
+        return items.filter { seen.insert($0.id).inserted }
     }
 
     nonisolated private static func readHistoryFromDisk() -> [HistoryItem] {

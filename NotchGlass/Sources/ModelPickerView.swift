@@ -320,6 +320,7 @@ final class ModelCatalogStore: ObservableObject {
         case .codex:      return CodexCLIService.isAvailable
         case .claudeCode: return ClaudeCLIService.isAvailable
         case .grokCode:   return GrokCLIService.isAvailable
+        case .commandCode: return CommandCodeCLIService.isAvailable
         // The user's own endpoint needs a URL and a model, not necessarily a key.
         case .custom:     return CustomProvider.isConfigured
         default:          return APIKeyStore.current(for: p) != nil
@@ -420,6 +421,21 @@ final class ModelCatalogStore: ObservableObject {
             }.value
             if ids != ["grok"] {
                 liveByProvider[.grokCode] = ids.map { ModelInfo(id: $0, vendor: "xAI") }
+            }
+        }
+        // Command Code is keyless too, and an aggregator: its catalog comes from the
+        // CLI (`cmd --list-models`), and each id names its OWN vendor — Anthropic,
+        // OpenAI, Qwen … — so the rows carry the right mark instead of one house
+        // brand. Never publish the bare sentinel (the no-catalog fallback).
+        if liveByProvider[.commandCode] == nil {
+            let ids = await Task.detached(priority: .userInitiated) { () -> [String] in
+                CommandCodeCLIService.refreshModels()
+                return CommandCodeCLIService.availableModelIDs
+            }.value
+            if ids != [CommandCodeCLIService.defaultSentinel] {
+                liveByProvider[.commandCode] = ids.map {
+                    ModelInfo(id: $0, vendor: ModelRatings.vendor(for: $0))
+                }
             }
         }
         // Claude Code's alias→concrete-id mapping, the CLI twin of the fetches
@@ -925,6 +941,12 @@ struct AgentEngineMark: View {
                     .fill(tint, style: FillStyle(eoFill: true))
                     .frame(width: size, height: size)
             }
+        case .commandCode:
+            if let mark = VendorLogos.mark(for: "Command Code") {
+                SVGPathShape(pathData: mark.path, viewBox: mark.viewBox)
+                    .fill(tint, style: FillStyle(eoFill: true))
+                    .frame(width: size, height: size)
+            }
         }
     }
 }
@@ -986,18 +1008,19 @@ struct AgentModelPickerView: View {
         return out
     }
 
-    /// The card's content width. The floor (174) is the two-engine design; past
-    /// that, the width is DERIVED from the bottom bar's real minimum — its engine
-    /// marks (18pt each, 10pt spacing), the 8pt spacer, the 92pt effort slider and
-    /// its own 16pt padding — because the bar is the card's one rigid row. A third
-    /// engine (Grok) pushed that minimum to 190 while the card stayed fixed at
-    /// 174: the bar overflowed, SwiftUI centered the spill, and the whole content
-    /// column slid 8pt out of the popover's margins (the 边距乱 bug). Deriving the
-    /// width keeps the card exactly as designed at two engines and simply grows it
-    /// when the bar genuinely needs more.
+    /// The card's content width. The floor (174) is the original design; past that,
+    /// the width is DERIVED from the bottom bar's real minimum — the engine
+    /// dropdown at its widest engine name, the 8pt spacer, the 92pt effort slider
+    /// and its own 16pt padding — because the bar is the card's one rigid row.
+    /// (Historically the marks row pushed that minimum past a hard-coded 174 once
+    /// Grok joined: the bar overflowed, SwiftUI centered the spill, and the whole
+    /// content column slid 8pt out of the popover's margins — the 边距乱 bug.) The
+    /// dropdown is measured at the widest name rather than the current one, so
+    /// flipping GPT → Command Code doesn't resize the card under the pointer.
     private var cardWidth: CGFloat {
-        let marks = CGFloat(engines.count) * 18 + CGFloat(max(0, engines.count - 1)) * 10
-        return max(174, marks + 8 + 92 + 16)
+        let chip = engines.map { GlassMenu<EmptyView>.compactWidth(for: chipTitle(for: $0)) }
+            .max() ?? 0
+        return max(174, chip + 8 + 92 + 16)
     }
 
     /// The list's content: only the armed engine's models. The other engine's fleet
@@ -1019,7 +1042,17 @@ struct AgentModelPickerView: View {
         case .codex:  return "GPT"
         case .claude: return "Claude"
         case .grok:   return "Grok"
+        // No family to name — the rows under it are Claude, GPT, Qwen, Kimi …, so
+        // the caption is the account they all run through.
+        case .commandCode: return "Command Code"
         }
+    }
+
+    /// The dropdown chip's label. Same family name, abbreviated where the full one
+    /// would stretch the card's one rigid row ("Command Code" → "Cmd"); the menu
+    /// that drops out of the chip still spells it out.
+    private func chipTitle(for e: AgentEngine) -> String {
+        e == .commandCode ? "Cmd" : groupTitle(for: e)
     }
 
     /// The row title inside a group: the caption already names the family, so
@@ -1028,7 +1061,10 @@ struct AgentModelPickerView: View {
     /// Grok is exempt: its models are bare version numbers, and a row reading
     /// just "4.5" says nothing — "Grok 4.5" stays whole.
     private func shortLabel(_ c: AgentModelChoice) -> String {
-        if c.engine == .grok { return c.label }
+        // Grok's models are bare version numbers ("4.5" alone says nothing), and
+        // Command Code's span a dozen families the caption can't stand in for —
+        // both keep their labels whole.
+        if c.engine == .grok || c.engine == .commandCode { return c.label }
         let family = groupTitle(for: c.engine).lowercased()
         for sep in ["-", " "] {
             let p = family + sep
@@ -1049,21 +1085,21 @@ struct AgentModelPickerView: View {
         c.engine == selectedEngine && c.id == selectedModelID
     }
 
-    /// Whether the model list actually outgrows the 200pt cap and scrolls — the
-    /// gate for the shared edge fade below. Row math, no geometry read: 25pt rows
-    /// at 2pt spacing → 8+ rows overflow.
-    private var overflowing: Bool { engineChoices.count >= 8 }
+    /// The list window is a FIXED four rows for every engine. Sizing it to content
+    /// made the card jump on every engine flip — Grok (1 row) → Claude (3) → the
+    /// Command Code fleet (20) resized the popover under the pointer each time,
+    /// and the rows the pointer was aimed at moved out from under it. Four rows is
+    /// the window; anything shorter leaves air, anything longer scrolls.
+    private static let listRows = 4
+    /// Rows are a fixed 25pt at 2pt spacing, so the height is pure arithmetic —
+    /// DEMANDED explicitly rather than `.frame(maxHeight:)`, because a flexible
+    /// ScrollView inside an NSPopover just accepts whatever height the popover
+    /// last proposed and clips.
+    private var listHeight: CGFloat { CGFloat(Self.listRows) * 27 - 2 }
 
-    /// The list's height, DEMANDED explicitly rather than `.frame(maxHeight:)`:
-    /// rows are fixed 25pt at 2pt spacing, so it's pure arithmetic. A flexible
-    /// ScrollView inside an NSPopover accepts whatever height the popover last
-    /// proposed — flipping Grok (1 row) → Claude (3 rows) left the window at the
-    /// short height and the taller list clipped to a single visible row (the
-    /// armed one, which `scrollTo` had centered). An explicit height forces the
-    /// popover to re-size with the list in both directions.
-    private var listHeight: CGFloat {
-        max(0, min(CGFloat(engineChoices.count) * 27 - 2, 200))
-    }
+    /// Whether the list actually outgrows the window and scrolls — the gate for
+    /// the edge fades below.
+    private var overflowing: Bool { engineChoices.count > Self.listRows }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -1130,16 +1166,21 @@ struct AgentModelPickerView: View {
             Rectangle().fill(.white.opacity(0.07)).frame(height: 0.5)
                 .padding(.vertical, 6)
 
-            // One bottom bar, two things: the engine switch (each engine's real
-            // brand mark; tap to flip the whole list) on the left, and the plainest
-            // possible effort slider — detent dots and a thumb, leftmost = the CLI
-            // default, the top rung's dot lit in the agent tint — on the right.
-            // No captions, no readouts. ←/→ still steps the effort.
+            // One bottom bar, two things: the engine dropdown — the same GlassMenu
+            // chip the settings pane uses, spelling out the engine in words rather
+            // than asking the user to decode brand marks — on the left, and the
+            // plainest possible effort slider (detent dots and a thumb, leftmost =
+            // the CLI default, the top rung's dot lit in the agent tint) on the
+            // right. No captions, no readouts. ←/→ still steps the effort.
             HStack(spacing: 0) {
-                HStack(spacing: 10) {
+                GlassMenu(title: chipTitle(for: selectedEngine), compact: true) {
                     ForEach(engines, id: \.self) { e in
-                        EngineSwitchMark(engine: e, selected: e == selectedEngine) {
-                            switchEngine(e)
+                        Button { switchEngine(e) } label: {
+                            if e == selectedEngine {
+                                Label(groupTitle(for: e), systemImage: "checkmark")
+                            } else {
+                                Text(groupTitle(for: e))
+                            }
                         }
                     }
                 }
@@ -1279,29 +1320,6 @@ private struct AgentModelRow: View {
         .onHover { hovering = $0 }
         .onTapGesture(perform: onTap)
         .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
-    }
-}
-
-/// One engine of the bottom bar's switch: the engine's real brand mark, bright when
-/// it owns the list, dimmed otherwise, warming on hover. Just the mark — no pill,
-/// no rim; the tap target is padded invisibly to row height.
-private struct EngineSwitchMark: View {
-    let engine: AgentEngine
-    let selected: Bool
-    let onTap: () -> Void
-
-    @State private var hovering = false
-
-    var body: some View {
-        AgentEngineMark(engine: engine, size: 13,
-                        tint: selected ? Tokens.text1 : Tokens.text3)
-            .opacity(selected ? 1 : hovering ? 0.85 : 0.55)
-            .frame(width: 18, height: 25)
-            .contentShape(Rectangle())
-            .onHover { hovering = $0 }
-            .onTapGesture(perform: onTap)
-            .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
-            .animation(.easeOut(duration: 0.12), value: selected)
     }
 }
 

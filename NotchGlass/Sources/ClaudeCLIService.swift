@@ -108,9 +108,9 @@ struct ClaudeCLIService: AIService {
         for p in candidatePaths where fm.isExecutableFile(atPath: p) {
             if let v = smokeTest(p) { return (p, v) }
         }
-        // Fall back to the user's login-shell PATH (npm-global and other
-        // non-standard installs).
-        if let p = loginShellWhich(), let v = smokeTest(p) { return (p, v) }
+        // Fall back to the user's shell PATH (npm-global, a node version manager,
+        // and other non-standard installs) — see `ShellEnvironment`.
+        if let p = ShellEnvironment.which(["claude"]), let v = smokeTest(p) { return (p, v) }
         return nil
     }
 
@@ -122,6 +122,7 @@ struct ClaudeCLIService: AIService {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: path)
         p.arguments = ["--version"]
+        p.environment = ShellEnvironment.childEnvironment(for: path)
         let out = Pipe()
         p.standardOutput = out
         p.standardError = Pipe()
@@ -132,23 +133,6 @@ struct ClaudeCLIService: AIService {
         let version = String(data: data, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return version.isEmpty ? "unknown" : version
-    }
-
-    private static func loginShellWhich() -> String? {
-        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: shell)
-        p.arguments = ["-lc", "command -v claude"]
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = Pipe()
-        do { try p.run() } catch { return nil }
-        p.waitUntilExit()
-        guard p.terminationStatus == 0 else { return nil }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        let path = String(data: data, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return (path?.isEmpty == false) ? path : nil
     }
 
     /// Whether the user has signed in to Claude Code. This checks only the
@@ -302,9 +286,7 @@ struct ClaudeCLIService: AIService {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: binary)
         p.arguments = args
-        var env = ProcessInfo.processInfo.environment
-        if env["HOME"] == nil { env["HOME"] = NSHomeDirectory() }
-        ProxyConfig.apply(to: &env)
+        var env = ShellEnvironment.childEnvironment(for: binary)
         env["DISABLE_AUTOUPDATER"] = "1"
         p.environment = env
 
@@ -404,11 +386,10 @@ struct ClaudeCLIService: AIService {
             process.executableURL = URL(fileURLWithPath: binary)
             process.arguments = args
             process.currentDirectoryURL = workDir
-            var env = ProcessInfo.processInfo.environment
-            if env["HOME"] == nil { env["HOME"] = NSHomeDirectory() }
-            // A GUI app inherits launchd's environment, which carries no proxy —
-            // without this the CLI connects directly and fails behind one.
-            ProxyConfig.apply(to: &env)
+            // A GUI app inherits launchd's environment: no proxy, and a PATH that
+            // can't find the CLI's own `node`. `ShellEnvironment` fixes both, and
+            // guarantees HOME so the CLI finds its auth file.
+            var env = ShellEnvironment.childEnvironment(for: binary)
             // Don't let an embedded one-shot turn kick off the CLI's background
             // auto-update check.
             env["DISABLE_AUTOUPDATER"] = "1"

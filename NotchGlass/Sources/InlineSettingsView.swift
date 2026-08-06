@@ -402,17 +402,20 @@ struct InlineSettingsView: View {
                 // category column steps aside and the page takes the whole panel,
                 // so it reads as one level deeper rather than another tab. The
                 // header's back pill — now carrying this page's name — walks out.
+                // No `.fixedSize(vertical:)` needed here: alone in the column, the
+                // pane's own exact height (content, capped at Recent's) is the
+                // whole page height.
                 paneContent
-                    .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 8)
                     .padding(.top, 12)
             } else {
                 HStack(alignment: .top, spacing: 0) {
                     sidebar
 
-                    // Hairline column boundary, full height of whichever side is taller
-                    // (the .fixedSize on the HStack is what lets the greedy rectangle
-                    // resolve to the content height instead of expanding forever).
+                    // Hairline column boundary, full height of whichever side is
+                    // taller. `maxHeight: .infinity` makes it greedy on its own —
+                    // the `fixedSize` below is what resolves it to the columns'
+                    // height instead of every point the panel can offer.
                     Rectangle()
                         .fill(.white.opacity(0.08))
                         .frame(width: 0.5)
@@ -421,6 +424,10 @@ struct InlineSettingsView: View {
                     paneContent
                         .padding(.leading, 14)
                 }
+                // Take the columns' own height, nothing more: the pane already
+                // carries an exact height (content, capped at Recent's), so this
+                // no longer unfolds the scroll — it only stops the greedy divider
+                // (and the scroll behind it) from stretching the island.
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, 8)
                 .padding(.top, 12)
@@ -467,14 +474,46 @@ struct InlineSettingsView: View {
         }
     }
 
+    /// The settings body's height — FIXED, one number for every pane. It's sized
+    /// so the island is exactly as tall in Settings as it is on Recent: the
+    /// immersive recent layout's prompt FLOATS over its scroll surface, so that
+    /// whole view is its 320pt list, while Settings stacks a back-pill header
+    /// (12 + 26 + 4) and a 12pt gap above its pane, and that chrome comes out of
+    /// the same budget. Short panes leave air at the bottom; long ones scroll. It
+    /// used to track each pane's measured content height, which meant the island
+    /// resized on every category switch (and re-measured on every layout pass) —
+    /// a fixed frame is both steadier to look at and cheaper to draw.
+    private static let headerChrome: CGFloat = 12 + 26 + 4 + 12
+    private var settingsPaneHeight: CGFloat {
+        NotchBody.immersiveListHeight - Self.headerChrome
+    }
+
+    /// Scroll anchor for the key section — the one pane area whose unfold can
+    /// push its own fields past the pane's height cap.
+    private static let keySectionAnchor = "settings.keySection"
+
+    /// Whether the open pane is scrolled off its top — all the top taper needs to
+    /// know. A Bool, not the live offset: driving the gradient's LENGTH from the
+    /// offset rebuilt the pane's mask on every scroll tick, which is what made
+    /// scrolling crawl. This flips once.
+    @State private var paneScrolledOffTop = false
+
     /// The open section's pane. Lives apart from `body` because it is drawn in
     /// two different frames — in the right-hand column beside the sidebar for a
     /// category, or across the whole panel for a pushed sub-page — and the switch
     /// itself should not have to know which.
+    ///
+    /// Every category scrolls inside ONE shared frame (see
+    /// `settingsPaneHeight`) instead of stretching the island taller: the
+    /// Shortcuts reference used to be the only pane with its own fixed-height
+    /// scroll; now the whole settings body rides the same ceiling and the same
+    /// edge tapers.
     @ViewBuilder
     private var paneContent: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            switch section {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    switch section {
             case .model:
                 // Two steps, in the order you make them: pick the backend,
                 // then pick one of *its* models. The API key stays supporting
@@ -527,8 +566,45 @@ struct InlineSettingsView: View {
             case .licenses:
                 licensesSection
             }
+            }
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+            // No top runway: the first row starts level with the sidebar's first
+            // item, and the top taper only exists once the pane is scrolled (see
+            // `paneScrolledOffTop`), so nothing resting is ever dimmed. The bottom
+            // keeps its runway — that edge tapers at all times.
+            .padding(.bottom, 20)
+            // Zero-size probe on the scroll CONTENT: it reads the real clip view's
+            // offset. Only the crossing matters, so state changes at most once per
+            // scroll gesture rather than on every tick.
+            .onScrollOffsetChange { offset in
+                let off = offset > 0.5
+                if off != paneScrolledOffTop { paneScrolledOffTop = off }
+            }
+            }
+            .scrollIndicators(.never)
+            // One fixed height for every pane (see `settingsPaneHeight`) — the
+            // island never resizes between categories, and a greedy ScrollView
+            // never gets to claim the whole panel.
+            .frame(height: settingsPaneHeight)
+            // A required setup unfolds the key section past the pane's height
+            // cap — snap the scroller to it so what just appeared is in view
+            // (the anchor lives on `keySection`). The first frame of the unfold
+            // lands silently: the animation here would otherwise double the
+            // section's own `.easeOut` and stall the open.
+            .onChange(of: setupRequired) { _, required in
+                guard required, section == .model else { return }
+                DispatchQueue.main.async { proxy.scrollTo(Self.keySectionAnchor, anchor: .top) }
+            }
+            // The top taper exists only once the pane is actually scrolled: a
+            // permanent one dimmed the first row of every pane before the user had
+            // scrolled anything, and the fade is there to dissolve rows leaving
+            // past the back pill — nothing is leaving while the pane sits at top.
+            .scrollEdgeFade(top: paneScrolledOffTop, bottom: true,
+                            topFade: 24, bottomFade: 32)
+            // A pane swap starts at the top again; the observer only reports on
+            // the next bounds change, so clear the flag here.
+            .onChange(of: section) { paneScrolledOffTop = false }
         }
-        .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
     // MARK: - Sidebar
@@ -716,20 +792,25 @@ struct InlineSettingsView: View {
                     claudeAccountRow
                 } else if keyScope == .grokCode {
                     grokAccountRow
+                } else if keyScope == .commandCode {
+                    commandCodeAccountRow
                 } else if keyScope == .openrouter && !manualKeyEntry && !envOverride {
                     openRouterAccountRow
                 } else {
                     keyRow
                 }
 
-                // Codex / Claude Code have no key to fetch — their own rows carry the
+                // The CLI backends have no key to fetch — their own rows carry the
                 // sign-in copy, so the generic "get a key at …" footer is wrong for
                 // them and suppressed.
-                if keyScope != .codex && keyScope != .claudeCode && keyScope != .grokCode {
+                if !keyScope.isCLI {
                     footer
                 }
             }
         }
+        // The scroller's anchor (see `paneContent`): a required setup unfolding
+        // this block past the pane's height cap snaps it into view.
+        .id(Self.keySectionAnchor)
         .animation(.easeOut(duration: 0.16), value: expanded)
     }
 
@@ -1509,6 +1590,45 @@ struct InlineSettingsView: View {
             Text(installed
                  ? (signedIn ? L("grok.status.hint.ready") : L("grok.status.hint.login"))
                  : L("grok.status.hint.install"))
+                .font(.sf(12))
+                .foregroundStyle(Tokens.text3)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.leading, 76)
+        }
+    }
+
+    // MARK: - Command Code sign-in status
+
+    /// Command Code is keyless like the rest, and — like Claude, unlike Grok — has NO
+    /// in-app sign-in: `cmd login` renders an interactive terminal UI that needs a
+    /// real TTY, so there is nothing Notch can usefully spawn. The row reports state
+    /// and points at the terminal command. Install link only when the CLI is missing.
+    @ViewBuilder
+    private var commandCodeAccountRow: some View {
+        let installed = CommandCodeCLIService.resolveBinary() != nil
+        let signedIn = CommandCodeCLIService.authExists()
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Text(L("model.account"))
+                    .font(.sf(13, weight: .medium))
+                    .foregroundStyle(Tokens.text2)
+                    .frame(width: 64, alignment: .leading)
+
+                if !installed {
+                    // No CLI yet → link to the install docs.
+                    codexPillButton(L("commandcode.status.get")) {
+                        NSWorkspace.shared.open(Provider.commandCode.signupURL)
+                    }
+                } else {
+                    statusPill(ok: signedIn,
+                               message: L(signedIn ? "commandcode.status.connected"
+                                                   : "commandcode.status.signedOut"))
+                }
+            }
+
+            Text(installed
+                 ? (signedIn ? L("commandcode.status.hint.ready") : L("commandcode.status.hint.login"))
+                 : L("commandcode.status.hint.install"))
                 .font(.sf(12))
                 .foregroundStyle(Tokens.text3)
                 .fixedSize(horizontal: false, vertical: true)
@@ -2454,31 +2574,21 @@ struct InlineSettingsView: View {
     /// worth reading. A row earns its place by teaching something the system
     /// convention wouldn't.
     private var shortcutsSection: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                promptShortcutsGroup
-                ForEach(Array(AppShortcutReference.groups(
-                    summonHotKey: summonHotKey,
-                    shortcuts: appShortcuts
-                ).enumerated()),
-                        id: \.offset) { _, group in
-                    shortcutGroup(group.title, group.entries)
-                }
+        VStack(alignment: .leading, spacing: 18) {
+            promptShortcutsGroup
+            ForEach(Array(AppShortcutReference.groups(
+                summonHotKey: summonHotKey,
+                shortcuts: appShortcuts
+            ).enumerated()),
+                    id: \.offset) { _, group in
+                shortcutGroup(group.title, group.entries)
             }
-            // Breathing room each taper falls across, so the first / last group
-            // rests outside the gradient at full strength (the shared fade
-            // discipline — never dim resting text).
-            .padding(.top, 24)
-            .padding(.bottom, 18)
         }
-        // Four groups always outrun the pane, so the list scrolls inside a fixed
-        // frame instead of stretching the island to phone height — the same
-        // treatment (and the same taper) the release notes get.
-        .frame(maxHeight: 340)
-        .scrollIndicators(.never)
-        // Both edges taper: rows leaving under the back pill dissolve exactly the
-        // way rows leaving at the bottom do, instead of hard-cutting mid-glyph.
-        .scrollEdgeFade(top: true, bottom: true, topFade: 24, bottomFade: 32)
+        // No top runway: this pane starts flush with the sidebar's first item,
+        // like every other one. The top taper only exists once the pane is
+        // actually scrolled (see `paneContent`), so resting rows are never dimmed
+        // and no pane has to buy its way out of the gradient with empty space.
+        .padding(.bottom, 18)
         // One monitor serves every row. Switching chips changes only the target;
         // leaving the pane dismantles the monitor automatically.
         .background(HotKeyRecorder(active: recordingShortcut != nil,
@@ -2502,32 +2612,37 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// The minimal editor for selection-driven Chat shortcuts: one prompt field,
-    /// one global chord, and delete. There is no separate name because the prompt
-    /// itself is the only thing the binding needs to say.
+    /// Prompt shortcuts are a flat list, one row per shortcut, and every row is
+    /// its own editor: type the prompt on the left, set the chord on the right.
+    /// There is no folded pile and no per-row expand step — nothing to open
+    /// before a shortcut can be edited.
     private var promptShortcutsGroup: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                Text(L("shortcuts.promptAction"))
-                    .font(.sf(12.5, weight: .semibold))
-                    .foregroundStyle(Tokens.text1)
-                Spacer(minLength: 8)
-                Button {
-                    let binding = PromptShortcut()
-                    withAnimation(.easeOut(duration: 0.16)) {
-                        promptShortcuts.append(binding)
+            // The title carries the exact height of every other group's title, and
+            // the add chip hangs in an OVERLAY rather than in the row: a 24pt
+            // button inside the HStack made this one header 24pt tall, so its text
+            // sat ~5pt lower than "Summoning" below it and the block opened with a
+            // band of air above the words.
+            Text(L("shortcuts.promptAction"))
+                .font(.sf(12.5, weight: .semibold))
+                .foregroundStyle(Tokens.text1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .overlay(alignment: .trailing) {
+                    Button {
+                        withAnimation(Tokens.stackSpring) {
+                            promptShortcuts.append(PromptShortcut())
+                        }
+                        PromptShortcutStore.save(promptShortcuts)
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.sf(10.5, weight: .semibold))
+                            .foregroundStyle(Tokens.text2)
+                            .frame(width: 24, height: 24)
                     }
-                    PromptShortcutStore.save(promptShortcuts)
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.sf(10.5, weight: .semibold))
-                        .foregroundStyle(Tokens.text2)
-                        .frame(width: 24, height: 24)
+                    .buttonStyle(ShortcutChipStyle())
+                    .help(L("shortcuts.promptAction.add"))
                 }
-                .buttonStyle(ShortcutChipStyle())
-                .help(L("shortcuts.promptAction.add"))
-            }
-            .padding(.bottom, promptShortcuts.isEmpty ? 0 : 3)
+                .padding(.bottom, 3)
 
             if promptShortcuts.isEmpty {
                 Text(L("shortcuts.promptAction.empty"))
@@ -2535,28 +2650,31 @@ struct InlineSettingsView: View {
                     .foregroundStyle(Tokens.text4)
                     .padding(.top, 5)
             } else {
-                ForEach(Array(promptShortcuts.enumerated()), id: \.element.id) { index, binding in
-                    if index > 0 {
-                        Rectangle()
-                            .fill(.white.opacity(0.06))
-                            .frame(height: 0.5)
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(promptShortcuts) { binding in
+                        promptShortcutRow(binding)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
                     }
-                    promptShortcutRow(binding)
-                        .padding(.vertical, 7)
                 }
+                .padding(.top, 6)
             }
         }
     }
 
+    /// Field and chord chip share one height so a row reads as a single control.
+    private static let promptRowHeight: CGFloat = 28
+
     private func promptShortcutRow(_ binding: PromptShortcut) -> some View {
         let target = EditableShortcut.prompt(binding.id)
+        let hovered = hoveredPromptShortcutID == binding.id
         return VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 7) {
+            HStack(spacing: 5) {
                 ZStack(alignment: .leading) {
                     if binding.prompt.isEmpty {
                         Text(L("shortcuts.promptAction.placeholder"))
                             .font(.sf(12.5))
                             .foregroundStyle(Tokens.text4)
+                            .lineLimit(1)
                             .allowsHitTesting(false)
                     }
                     TextField("", text: promptBinding(for: binding.id))
@@ -2567,24 +2685,27 @@ struct InlineSettingsView: View {
                         .foregroundStyle(Tokens.text1)
                 }
                 .padding(.horizontal, 9)
-                .frame(minHeight: 28)
+                .frame(height: Self.promptRowHeight)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.06)))
                 .overlay(RoundedRectangle(cornerRadius: 8)
                     .strokeBorder(.white.opacity(0.11), lineWidth: 0.5))
 
-                // Delete sits inboard of the chord so every trailing chip in the
-                // pane — editable or read-only — lands on the same right edge.
+                // Delete sits inboard of the chord and only surfaces on hover, the
+                // same call the reset control makes in the rows above: a resting row
+                // carries exactly one control, and the chord keeps the right edge.
                 Button { deletePromptShortcut(binding.id) } label: {
                     Image(systemName: "trash")
                         .font(.sf(10.5, weight: .medium))
-                        .foregroundStyle(Tokens.text4)
-                        .frame(width: 24, height: 28)
+                        .foregroundStyle(Tokens.text3)
+                        // Square frame so the chip style's capsule resolves to a
+                        // true circle rather than a vertical oval.
+                        .frame(width: Self.promptRowHeight, height: Self.promptRowHeight)
                 }
-                .buttonStyle(.plain)
-                .opacity(hoveredPromptShortcutID == binding.id ? 1 : 0)
-                .allowsHitTesting(hoveredPromptShortcutID == binding.id)
+                .buttonStyle(ShortcutChipStyle(rest: 0.055, restStroke: 0.1))
                 .help(L("shortcuts.promptAction.delete"))
+                .opacity(hovered ? 1 : 0)
+                .allowsHitTesting(hovered)
 
                 Button {
                     shortcutHints[target] = nil
@@ -2596,7 +2717,7 @@ struct InlineSettingsView: View {
                         .font(.sf(11.5, weight: recordingShortcut == target ? .semibold : .medium))
                         .foregroundStyle(recordingShortcut == target ? Tokens.text1 : Tokens.text2)
                         .padding(.horizontal, 10)
-                        .frame(minWidth: 48, minHeight: 28)
+                        .frame(minWidth: 48, minHeight: Self.promptRowHeight)
                 }
                 .buttonStyle(ShortcutChipStyle(active: recordingShortcut == target))
             }
@@ -2639,7 +2760,8 @@ struct InlineSettingsView: View {
         let target = EditableShortcut.prompt(id)
         if recordingShortcut == target { recordingShortcut = nil }
         shortcutHints[target] = nil
-        withAnimation(.easeOut(duration: 0.16)) {
+        if hoveredPromptShortcutID == id { hoveredPromptShortcutID = nil }
+        withAnimation(Tokens.stackSpring) {
             promptShortcuts.removeAll { $0.id == id }
         }
         PromptShortcutStore.save(promptShortcuts)
@@ -3682,34 +3804,64 @@ struct SettingInfo: View {
 /// plain `Button`s that mutate the bound selection.
 struct GlassMenu<Content: View>: View {
     var title: String
+    /// Tighter fitting for dense rows — the agent card's 25pt bottom bar. The
+    /// default is the settings pane's size, where these chips live in 34pt rows.
+    var compact: Bool = false
     @ViewBuilder var content: () -> Content
 
     @State private var hovering = false
 
+    private typealias Metrics = (font: CGFloat, chevron: CGFloat, gap: CGFloat,
+                                 height: CGFloat, lead: CGFloat, trail: CGFloat)
+
+    /// The compact fitting, one place: a 20pt pill that sits inside a 25pt bar.
+    /// Its corner is always height/2 — fully round, the same capsule the effort
+    /// slider's thumb and the compose row's chips use.
+    // Computed, not stored: a generic type can't hold static storage.
+    private static var compactMetrics: Metrics { (11.5, 8, 5, 20, 10, 8) }
+    private static var regularMetrics: Metrics { (13, 10, 7, 30, 11, 9) }
+
+    private var metrics: Metrics { compact ? Self.compactMetrics : Self.regularMetrics }
+    /// Fully round for the compact pill; the settings pane's larger chip keeps its
+    /// squircle, where a capsule would fight the rounded-rect fields beside it.
+    private var radius: CGFloat { compact ? metrics.height / 2 : 9 }
+
+    /// The width a compact chip needs for `title`, measured in the face SwiftUI
+    /// will draw it in. Callers that must size a rigid row around the chip (the
+    /// agent card's bottom bar) can then do arithmetic instead of a geometry read.
+    static func compactWidth(for title: String) -> CGFloat {
+        let m = compactMetrics
+        let font = NSFont.systemFont(ofSize: m.font, weight: .medium)
+        let text = NSAttributedString(string: title, attributes: [.font: font]).size().width
+        // text + gap + chevron glyph + both paddings
+        return ceil(text) + m.gap + 10 + m.lead + m.trail
+    }
+
     var body: some View {
-        Menu {
+        let m = metrics
+        return Menu {
             content()
         } label: {
-            HStack(spacing: 7) {
+            HStack(spacing: m.gap) {
                 if !title.isEmpty {
                     Text(title)
-                        .font(.sf(13))
+                        .font(.sf(m.font, weight: compact ? .medium : .regular))
                         .foregroundStyle(Tokens.text1)
                         .lineLimit(1)
                         .truncationMode(.tail)
                 }
                 Image(systemName: "chevron.up.chevron.down")
-                    .font(.sf(10, weight: .semibold))
+                    .font(.sf(m.chevron, weight: .semibold))
                     .foregroundStyle(Tokens.text3)
             }
             // Icon-only (empty title) pills get symmetric padding so the chevron
             // sits centered; labelled pills keep the tighter trailing inset.
-            .padding(.leading, title.isEmpty ? 9 : 11)
-            .padding(.trailing, 9)
-            .frame(height: 30)
-            .recessedSurface(in: RoundedRectangle(cornerRadius: 9, style: .continuous),
+            .padding(.leading, title.isEmpty ? m.trail : m.lead)
+            .padding(.trailing, m.trail)
+            .frame(height: m.height)
+            .recessedSurface(in: RoundedRectangle(cornerRadius: radius, style: .continuous),
                              lit: hovering)
-            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
         }
         .menuStyle(.button)
         .buttonStyle(.plain)

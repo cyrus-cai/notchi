@@ -59,6 +59,10 @@ enum Tokens {
     /// pointer. (These two used to be five values between 0.12 and 0.18, assigned
     /// per-site rather than per-species.)
     static let rowFade: TimeInterval = 0.12
+    /// Cards fanning out of — or gathering back into — a stack, the way a
+    /// Notification Center group opens. Springy enough that the pile reads as
+    /// physical, damped enough that it never wobbles.
+    static let stackSpring = Animation.spring(response: 0.34, dampingFraction: 0.86)
 
     // Danger accent — used sparingly for genuine errors and destructive actions
     // (update failure, a destructive menu item). Success/confirmation states stay

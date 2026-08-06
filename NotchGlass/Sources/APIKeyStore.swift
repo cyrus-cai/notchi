@@ -305,6 +305,13 @@ enum APIKeyStore {
         if provider == .grokCode, stored.isEmpty || stored == "grok" {
             return provider.defaultModel
         }
+        // Command Code: same shape once more — an empty override or the
+        // "commandcode" sentinel both mean "use the CLI's own default model"
+        // (read from the catalog `cmd --list-models` prints).
+        if provider == .commandCode,
+           stored.isEmpty || stored == CommandCodeCLIService.defaultSentinel {
+            return provider.defaultModel
+        }
         // Claude Code: same shape again. "claude" is the retired account-default
         // sentinel a pre-0.3.1 selection may still hold; it no longer appears in
         // the picker, so resolve it (and an empty override) to the provider's own

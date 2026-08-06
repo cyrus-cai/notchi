@@ -64,6 +64,22 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.6.0",
+            date: "2026-08-06",
+            features: [
+                "Command Code joins the engines — one account, one sign-in, and about fifty models from a dozen labs to pick from.",
+                "CLIs installed by nvm, fnm, volta or another version manager are now found and run correctly.",
+            ],
+            improvements: [
+                "The agent picker's engine control is a dropdown that names each engine, and the card grows to fit it.",
+                "Settings keeps one steady height and scrolls inside the panel, with a soft fade at the top edge.",
+                "A history entry that settled twice now collapses to one row.",
+            ],
+            fixes: [
+                "A resumed agent run no longer leaves a blank row in Recent.",
+            ]
+        ),
+        Entry(
             version: "0.5.0",
             date: "2026-08-05",
             features: [

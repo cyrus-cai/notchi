@@ -8,12 +8,14 @@ enum AgentEngine: String, CaseIterable {
     case codex
     case claude
     case grok
+    case commandCode
 
     var displayName: String {
         switch self {
         case .codex:  return "Codex"
         case .claude: return "Claude"
         case .grok:   return "Grok"
+        case .commandCode: return "Command Code"
         }
     }
 
@@ -23,6 +25,7 @@ enum AgentEngine: String, CaseIterable {
         case .codex:  return CodexCLIService.isAvailable
         case .claude: return ClaudeCLIService.isAvailable
         case .grok:   return GrokCLIService.isAvailable
+        case .commandCode: return CommandCodeCLIService.isAvailable
         }
     }
 
@@ -35,6 +38,9 @@ enum AgentEngine: String, CaseIterable {
         case .codex:  return "codex resume \(session)"
         case .claude: return "claude --resume \(session)"
         case .grok:   return "grok --resume \(session)"
+        // A headless Command Code session is hidden from the interactive picker but
+        // opens fine when its id is named outright.
+        case .commandCode: return "cmd --resume \(session)"
         }
     }
 
@@ -104,6 +110,18 @@ enum AgentEngine: String, CaseIterable {
             return listed.map {
                 AgentModelChoice(engine: self, id: $0.id, label: $0.displayName)
             }
+        case .commandCode:
+            // Command Code's catalog is the widest of the four (an aggregator: ~50
+            // models across a dozen labs), read from the CLI itself — see
+            // `CommandCodeCLIService`. Same empty-cache fallback as Grok's: an
+            // available engine must never have an empty section.
+            let listed = CommandCodeCLIService.listedModels
+            if listed.isEmpty {
+                return [AgentModelChoice(engine: self, id: nil, label: displayName)]
+            }
+            return listed.map {
+                AgentModelChoice(engine: self, id: $0.id, label: $0.displayName)
+            }
         }
     }
 }
@@ -145,6 +163,13 @@ extension AgentEngine {
             // Grok's `--reasoning-effort` ladder (the standard rungs; grok also
             // accepts none/minimal, which have no AgentEffort case).
             return [.low, .medium, .high, .xhigh, .max]
+        case .commandCode:
+            // `--effort` is per-model on an aggregator — its Claude and GPT rows take
+            // the full ladder, but a DeepSeek row takes only high/max and plenty take
+            // none at all — and the CLI's model list doesn't publish which. So the
+            // menu offers the documented common rungs; a model that doesn't reason
+            // simply ignores the flag.
+            return [.low, .medium, .high]
         case .codex:
             let models = CodexCLIService.listedModels
             let picked = modelID.flatMap { id in models.first { $0.id == id } }
@@ -568,6 +593,8 @@ final class AgentTaskManager: ObservableObject {
         case .codex:  return CodexCLIService.authExists() ? CodexCLIService.resolveBinary() : nil
         case .claude: return ClaudeCLIService.authExists() ? ClaudeCLIService.resolveBinary() : nil
         case .grok:   return GrokCLIService.authExists() ? GrokCLIService.resolveBinary() : nil
+        case .commandCode:
+            return CommandCodeCLIService.authExists() ? CommandCodeCLIService.resolveBinary() : nil
         }
     }
 
@@ -577,6 +604,7 @@ final class AgentTaskManager: ObservableObject {
         case .codex:  return CodexAgentStreamState()
         case .claude: return ClaudeAgentStreamState()
         case .grok:   return GrokAgentStreamState()
+        case .commandCode: return CommandCodeAgentStreamState()
         }
     }
 
@@ -586,6 +614,7 @@ final class AgentTaskManager: ObservableObject {
         case .codex:  return CodexError.spawnFailed(detail).errorDescription
         case .claude: return ClaudeCodeError.spawnFailed(detail).errorDescription
         case .grok:   return GrokError.spawnFailed(detail).errorDescription
+        case .commandCode: return CommandCodeError.spawnFailed(detail).errorDescription
         }
     }
 
@@ -690,6 +719,20 @@ final class AgentTaskManager: ObservableObject {
             if let resumeSession { args += ["--resume", resumeSession] }
             if let model { args += ["-m", model] }
             if let effort { args += ["--reasoning-effort", effort.rawValue] }
+        case .commandCode:
+            // `--yolo` is what lets file writes and shell commands run unattended:
+            // headless denies both by default, and with no TTY there is nobody to
+            // approve them (the twin of codex's workspace-write, claude's
+            // acceptEdits and grok's --always-approve). `--trust` skips the
+            // first-run project-trust prompt and `--skip-onboarding` the taste
+            // onboarding — both would otherwise block a run with no TTY. The
+            // session persists (no `--no-session`), so a follow-up rides
+            // `--resume <id>`, the id parsed from `run_start`.
+            args = ["-p", "--output-format", "json",
+                    "--yolo", "--trust", "--skip-onboarding", "--no-auto-update"]
+            if let resumeSession { args += ["--resume", resumeSession] }
+            if let model { args += ["-m", model] }
+            if let effort { args += ["--effort", effort.rawValue] }
         }
 
         let p = Process()
@@ -1201,6 +1244,9 @@ final class AgentTaskManager: ObservableObject {
         }
         if engine == .grok, GrokError.isAuthFailure(reason) {
             return L("grok.error.authExpired")
+        }
+        if engine == .commandCode, CommandCodeError.isAuthFailure(reason) {
+            return L("commandcode.error.authExpired")
         }
         return reason
     }
@@ -2064,6 +2110,229 @@ private final class GrokAgentStreamState: AgentEventParser {
             var residue = AgentProgress()
             _ = drainLines(into: &residue)
         }
+        let tail = stderrTail
+            .split(separator: "\n")
+            .map(String.init)
+            .last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })
+            ?? ""
+        return AgentSnapshot(finalMessage: finalMessage, failure: failure,
+                             stderrTail: tail, sawTerminal: sawTerminal)
+    }
+}
+
+/// The **Command Code** dialect (`cmd -p --output-format json`). The richest of the
+/// four: every agent event is forwarded as its own `{"type":"event","event":{…}}`
+/// frame, so the full work trail is available — `tool_running` opens an entry,
+/// `tool_completed` attaches its output, `model_request_*` names the model and the
+/// turn's token usage, `run_start` hands over the session id `cmd --resume`
+/// continues. The stream closes with one `{"type":"result",…}` line whose
+/// `finalText` is authoritative for the report and whose `subtype` decides
+/// success/failure.
+private final class CommandCodeAgentStreamState: AgentEventParser {
+    private let lock = NSLock()
+    private var buffer = Data()
+    private var stderrTail = ""
+    private var finalMessage = ""
+    private var streamedText = ""
+    private var failure: String?
+    private var sawTerminal = false
+    /// toolCallId → the log entry it opened, so `tool_completed` can attach the
+    /// tool's output to the entry `tool_running` created.
+    private var openEntries: [String: UUID] = [:]
+    /// toolCallId → tool name, so a completion knows what it completed (an error or
+    /// denial event may not carry the name).
+    private var openTools: [String: String] = [:]
+    /// The report is emitted as a work-trail entry once, with the result line.
+    private var emittedReport = false
+
+    func ingest(_ data: Data) -> AgentProgress? {
+        lock.lock(); defer { lock.unlock() }
+        buffer.append(data)
+        var progress = AgentProgress()
+        return drainLines(into: &progress) ? progress : nil
+    }
+
+    /// Parse every complete (newline-terminated) line into `progress`. Caller holds
+    /// the lock.
+    private func drainLines(into progress: inout AgentProgress) -> Bool {
+        var any = false
+        while let nl = buffer.firstIndex(of: 0x0A) {
+            let line = buffer.subdata(in: buffer.startIndex..<nl)
+            buffer.removeSubrange(buffer.startIndex...nl)
+            guard !line.isEmpty,
+                  let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+                  let type = obj["type"] as? String
+            else { continue }
+            switch type {
+            case "event":
+                guard let event = obj["event"] as? [String: Any] else { continue }
+                if ingest(event: event, into: &progress) { any = true }
+            case "result":
+                sawTerminal = true
+                if let sid = obj["sessionId"] as? String, !sid.isEmpty {
+                    progress.sessionID = sid
+                    any = true
+                }
+                if let usage = obj["usage"] as? [String: Any],
+                   let input = usage["inputTokens"] as? Int, input > 0 {
+                    progress.contextUsed = input
+                    any = true
+                }
+                if let text = obj["finalText"] as? String, !text.isEmpty {
+                    finalMessage = text
+                }
+                if (obj["subtype"] as? String) == "error" {
+                    failure = (obj["error"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                        ?? "unknown error"
+                }
+                let report = finalMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !emittedReport, !report.isEmpty {
+                    emittedReport = true
+                    progress.entries.append(AgentLogEntry(
+                        id: UUID(), title: String(report.prefix(500)), mono: false))
+                    any = true
+                }
+            default:
+                break
+            }
+        }
+        return any
+    }
+
+    /// One `AgentEvent` frame. Returns whether it moved anything user-visible.
+    private func ingest(event: [String: Any], into progress: inout AgentProgress) -> Bool {
+        guard let type = event["type"] as? String else { return false }
+        switch type {
+        case "run_start":
+            // The handle `cmd --resume` continues from — emitted up front, so a
+            // follow-up stays possible even if the round is later interrupted.
+            guard let sid = event["sessionId"] as? String, !sid.isEmpty else { return false }
+            progress.sessionID = sid
+            return true
+        case "model_request_start":
+            guard let model = event["model"] as? String, !model.isEmpty else { return false }
+            progress.model = model
+            return true
+        case "model_request_end":
+            // `inputTokens` is the request's full prompt = what the turn occupied of
+            // the context window (the same semantic codex's `input_tokens` carries).
+            guard let usage = event["usage"] as? [String: Any],
+                  let input = usage["inputTokens"] as? Int, input > 0 else { return false }
+            progress.contextUsed = input
+            return true
+        case "text_delta":
+            guard let delta = event["delta"] as? String, !delta.isEmpty else { return false }
+            streamedText += delta
+            // Rolling ticker: the tail of the report as it's written, so the
+            // collapsed card shows motion between tool calls.
+            let flat = streamedText
+                .replacingOccurrences(of: "\n", with: " ")
+                .trimmingCharacters(in: .whitespaces)
+            progress.activity = String(flat.suffix(80))
+            return true
+        case "thinking_start", "thinking_delta":
+            progress.activity = L("agent.thinking")
+            return true
+        case "tool_running":
+            guard let id = event["toolCallId"] as? String,
+                  let name = event["toolName"] as? String else { return false }
+            openTools[id] = name
+            let title = Self.title(tool: name, description: event["description"] as? String)
+            progress.activity = String(title.prefix(80))
+            if openEntries[id] == nil {
+                let entry = AgentLogEntry(id: UUID(), title: String(title.prefix(200)),
+                                          mono: Self.isMono(tool: name))
+                openEntries[id] = entry.id
+                progress.entries.append(entry)
+            }
+            return true
+        case "tool_completed":
+            guard let id = event["toolCallId"] as? String else { return false }
+            let name = (event["toolName"] as? String) ?? openTools[id] ?? ""
+            openTools[id] = nil
+            // A write / edit is a changed file — what the run's summary counts.
+            if ["write_file", "edit_file"].contains(name), let path = Self.path(in: event) {
+                progress.changedFiles.append((path as NSString).lastPathComponent)
+            }
+            guard let entryID = openEntries.removeValue(forKey: id) else { return true }
+            let output = Self.text(inResultOf: event["result"])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !output.isEmpty {
+                progress.details.append((entryID, String(output.suffix(2000))))
+            }
+            return true
+        case "tool_errored", "tool_denied":
+            guard let id = event["toolCallId"] as? String else { return false }
+            openTools[id] = nil
+            guard let entryID = openEntries.removeValue(forKey: id) else { return true }
+            guard let detail = event["error"] as? String, !detail.isEmpty else { return true }
+            progress.details.append((entryID, String(detail.suffix(2000))))
+            return true
+        case "run_error":
+            sawTerminal = true
+            failure = (event["error"] as? String)
+                ?? ((event["error"] as? [String: Any])?["message"] as? String)
+                ?? "unknown error"
+            return false
+        default:
+            return false   // turn_start / message_update / subagent_* / …
+        }
+    }
+
+    /// The work-trail title for a tool call. The CLI composes its own one-line
+    /// `description` for each call ("Read src/App.swift", "npm test") — that is the
+    /// best label available; the tool name is the fallback when it sends none.
+    private static func title(tool: String, description: String?) -> String {
+        let d = (description ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard d.isEmpty else {
+            return ["shell_command", "powershell"].contains(tool) ? "$ " + d : d
+        }
+        return tool
+    }
+
+    /// Terminal-ish entries (commands, files, searches) render monospaced; the
+    /// conversational tools read as prose. Mirrors the codex/claude parsers.
+    private static func isMono(tool: String) -> Bool {
+        !["ask_user_question", "todo_write", "enter_plan_mode", "exit_plan_mode"]
+            .contains(tool)
+    }
+
+    /// The file a write/edit touched, from the call's own input when the event
+    /// carries it back.
+    private static func path(in event: [String: Any]) -> String? {
+        guard let input = event["input"] as? [String: Any],
+              let p = (input["file_path"] as? String) ?? (input["path"] as? String),
+              !p.isEmpty
+        else { return nil }
+        return p
+    }
+
+    /// Flatten a tool result's content blocks (`[{"type":"text","text":…}]`) into one
+    /// string; a bare string result passes through.
+    private static func text(inResultOf result: Any?) -> String {
+        if let s = result as? String { return s }
+        guard let blocks = result as? [[String: Any]] else { return "" }
+        return blocks.compactMap { $0["text"] as? String }.joined(separator: "\n")
+    }
+
+    func appendStderr(_ data: Data) {
+        guard let s = String(data: data, encoding: .utf8) else { return }
+        lock.lock(); defer { lock.unlock() }
+        stderrTail += s
+        if stderrTail.count > 2000 { stderrTail = String(stderrTail.suffix(2000)) }
+    }
+
+    func finish() -> AgentSnapshot {
+        lock.lock(); defer { lock.unlock() }
+        // The result line is the LAST line, so a stream killed mid-flush leaves it
+        // unterminated in the buffer — terminate it and give it one final parse.
+        if !buffer.isEmpty {
+            buffer.append(0x0A)
+            var residue = AgentProgress()
+            _ = drainLines(into: &residue)
+        }
+        // A run cut short before its result line still has whatever it streamed.
+        if finalMessage.isEmpty { finalMessage = streamedText }
         let tail = stderrTail
             .split(separator: "\n")
             .map(String.init)

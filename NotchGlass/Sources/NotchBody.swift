@@ -311,6 +311,9 @@ struct NotchBody: View {
         if p == .codex, id.isEmpty || id == "codex" { return p.defaultModel }
         if p == .grokCode, id.isEmpty || id == "grok" { return p.defaultModel }
         if p == .claudeCode, id.isEmpty || id == "claude" { return p.defaultModel }
+        if p == .commandCode, id.isEmpty || id == CommandCodeCLIService.defaultSentinel {
+            return p.defaultModel
+        }
         return id.isEmpty ? p.defaultModel : id
     }
 
@@ -953,6 +956,7 @@ struct NotchBody: View {
         if ClaudeCLIService.isAvailable { out.append(.claudeCode) }
         if CodexCLIService.isAvailable { out.append(.codex) }
         if GrokCLIService.isAvailable { out.append(.grokCode) }
+        if CommandCodeCLIService.isAvailable { out.append(.commandCode) }
         return out
     }
 
@@ -1114,6 +1118,9 @@ struct NotchBody: View {
         case .codex:  family = "gpt"
         case .claude: family = "claude"
         case .grok:   family = "grok"
+        // Command Code fronts a dozen labs — there is no one family word to drop,
+        // and the vendor is exactly what tells its models apart.
+        case .commandCode: return label
         }
         for sep in ["-", " "] {
             let p = family + sep
@@ -1340,6 +1347,13 @@ struct NotchBody: View {
     /// Stable id for the tail spacer the detail scroll follows while streaming.
     private static let agentDetailBottomID = "agent-detail-bottom"
 
+    /// The detail scroll's height. Tuned so the whole page (26pt header + 10 gap
+    /// + this + 10 gap + 39pt follow-up row = 320pt) matches the immersive
+    /// history layout, whose 320pt list is the only thing that opens the island
+    /// (its input header floats as an overlay, taking no layout height) — the
+    /// agent page must never make the island taller than the recent list does.
+    private let agentDetailScrollHeight: CGFloat = 235
+
     /// A live run's detail page: the task prompt, then the full work trail —
     /// the agent's narration as prose, each tool call a collapsible mono row —
     /// with the activity ticker at the tail while it works, and the final
@@ -1430,7 +1444,7 @@ struct NotchBody: View {
                     proxy.scrollTo(Self.agentDetailBottomID, anchor: .bottom)
                 }
             }
-            .frame(height: 330)
+            .frame(height: agentDetailScrollHeight)
 
             // A live follow-up box, same as the detached agent window carries. The
             // run is mid-reply, so Enter can't interrupt it — the line queues and
@@ -2005,7 +2019,10 @@ struct NotchBody: View {
     /// compact 220 so the recent list fills the panel and reads as one continuous
     /// surface flowing under the header. The manage bar floats over its bottom-left;
     /// rows run their whole height behind it. Older rows are a scroll (or ↓) away.
-    private let immersiveListHeight: CGFloat = 320
+    /// Static so Settings can size its own body against it (see
+    /// `InlineSettingsView.settingsPaneMaxHeight`) — switching between the two
+    /// must not resize the island, and two hand-tuned numbers would drift.
+    static let immersiveListHeight: CGFloat = 320
 
     /// Height of the compact scroll region, and the two content measurements the
     /// compact overflow test weighs against it: one recent row (9pt padding on each
@@ -2230,7 +2247,7 @@ struct NotchBody: View {
         // Immersive: a tall surface that fills the whole panel; the manage bar floats
         // over its bottom-left. Compact: ~6 rows before the list scrolls, so a short
         // Recent list doesn't reserve a tall empty band. Older rows are a scroll away.
-        .frame(maxHeight: immersive ? immersiveListHeight : compactListHeight)
+        .frame(maxHeight: immersive ? Self.immersiveListHeight : compactListHeight)
         .scrollIndicators(.never)
         // BOTH edges taper in either layout — the top dissolves rows sliding up under
         // the header (immersive: the floating input), the bottom dissolves rows sliding

@@ -43,6 +43,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if provider == .grokCode {
             return GrokCLIService(model: APIKeyStore.effectiveModel(for: .grokCode))
         }
+        // Command Code is the same keyless pattern — the user's own `cmd login`
+        // account, no key of ours. See `CommandCodeCLIService`.
+        if provider == .commandCode {
+            return CommandCodeCLIService(model: APIKeyStore.effectiveModel(for: .commandCode))
+        }
         // A custom endpoint is gated on being *configured* (URL + model), not on a
         // key: a local server authenticates nobody, so an empty key is a normal
         // setup there and the request simply goes out without an auth header.
@@ -78,6 +83,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if provider == .grokCode {
             return GrokCLIService(model: model)
         }
+        if provider == .commandCode {
+            return CommandCodeCLIService(model: model)
+        }
         if provider.isOpenAICompatible {
             return OpenAICompatAIService(provider: provider, apiKey: apiKey, model: model)
         } else {
@@ -95,6 +103,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if provider == .codex { return CodexCLIService.isAvailable }
         if provider == .claudeCode { return ClaudeCLIService.isAvailable }
         if provider == .grokCode { return GrokCLIService.isAvailable }
+        if provider == .commandCode { return CommandCodeCLIService.isAvailable }
         // The custom endpoint is "configured" when it has a URL and a model id —
         // its key is optional (see `CustomProvider`).
         if provider == .custom { return CustomProvider.isConfigured }
@@ -208,12 +217,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // approach vector — the entry physics in `NotchIsland` feed on it.
         MouseVelocityTracker.shared.start()
 
+        // Read the user's shell PATH first — every CLI lookup below needs it, and
+        // it costs an interactive login shell, so it must not land on the main
+        // thread mid-render.
+        ShellEnvironment.warmUp()
         // Resolve the `codex` / `claude` / `grok` binaries off-main now, so the first time
         // Settings asks `isAvailable` (a SwiftUI render) it reads a warm cache
         // instead of paying the `--version` smoke-test spawn on the main thread.
         CodexCLIService.warmUp()
         ClaudeCLIService.warmUp()
         GrokCLIService.warmUp()
+        CommandCodeCLIService.warmUp()
         // Same reason: resolving the proxy may spawn a login shell, and the first
         // agent run must not wait on it.
         ProxyConfig.warmUp()

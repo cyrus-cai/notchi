@@ -92,9 +92,9 @@ struct CodexCLIService: AIService {
         for p in candidatePaths where fm.isExecutableFile(atPath: p) {
             if smokeTest(p) { return p }
         }
-        // Fall back to the user's login-shell PATH (honours a homebrew/npm install
-        // that isn't at a standard absolute location).
-        if let p = loginShellWhich(), smokeTest(p) { return p }
+        // Fall back to the user's shell PATH (honours a homebrew/npm/version-manager
+        // install that isn't at a standard absolute location) — see `ShellEnvironment`.
+        if let p = ShellEnvironment.which(["codex"]), smokeTest(p) { return p }
         return nil
     }
 
@@ -105,28 +105,12 @@ struct CodexCLIService: AIService {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: path)
         p.arguments = ["--version"]
+        p.environment = ShellEnvironment.childEnvironment(for: path)
         p.standardOutput = Pipe()
         p.standardError = Pipe()
         do { try p.run() } catch { return false }
         p.waitUntilExit()
         return p.terminationStatus == 0
-    }
-
-    private static func loginShellWhich() -> String? {
-        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: shell)
-        p.arguments = ["-lc", "command -v codex"]
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = Pipe()
-        do { try p.run() } catch { return nil }
-        p.waitUntilExit()
-        guard p.terminationStatus == 0 else { return nil }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        let path = String(data: data, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return (path?.isEmpty == false) ? path : nil
     }
 
     /// The Codex home directory (`$CODEX_HOME`, else `~/.codex`) where the OAuth
@@ -234,10 +218,7 @@ struct CodexCLIService: AIService {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: binary)
         p.arguments = ["app-server"]
-        var env = ProcessInfo.processInfo.environment
-        if env["HOME"] == nil { env["HOME"] = NSHomeDirectory() }
-        ProxyConfig.apply(to: &env)
-        p.environment = env
+        p.environment = ShellEnvironment.childEnvironment(for: binary)
         let inPipe = Pipe(), outPipe = Pipe()
         p.standardInput = inPipe
         p.standardOutput = outPipe
@@ -284,10 +265,7 @@ struct CodexCLIService: AIService {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: binary)
         p.arguments = ["login"]
-        var env = ProcessInfo.processInfo.environment
-        if env["HOME"] == nil { env["HOME"] = NSHomeDirectory() }
-        ProxyConfig.apply(to: &env)
-        p.environment = env
+        p.environment = ShellEnvironment.childEnvironment(for: binary)
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
         do { try p.run() } catch { return false }
@@ -329,10 +307,7 @@ struct CodexCLIService: AIService {
             // reason the proxy has to be injected: `--ignore-user-config` means the
             // proxy keys in ~/.codex/config.toml don't apply either, so the
             // environment is the only channel left.
-            var env = ProcessInfo.processInfo.environment
-            if env["HOME"] == nil { env["HOME"] = NSHomeDirectory() }
-            ProxyConfig.apply(to: &env)
-            process.environment = env
+            process.environment = ShellEnvironment.childEnvironment(for: binary)
 
             let outPipe = Pipe(), inPipe = Pipe(), errPipe = Pipe()
             process.standardOutput = outPipe

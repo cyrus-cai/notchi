@@ -404,6 +404,12 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     // `XAI_API_KEY`), billed to their xAI / SuperGrok plan. Not an HTTP endpoint —
     // it shells out to the local `grok` binary (see `GrokCLIService`).
     case grokCode
+    // Command Code (commandcode.ai), the same keyless pattern again — but an
+    // *aggregator* rather than one vendor's CLI: the user's own `cmd login`
+    // account fronts ~50 models across Anthropic / OpenAI / Google / xAI / Qwen /
+    // Kimi / …, billed to their Command Code plan. Not an HTTP endpoint — it
+    // shells out to the local `cmd` binary (see `CommandCodeCLIService`).
+    case commandCode
     case anthropic
     case gemini
     case deepseek
@@ -518,6 +524,20 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
                 signupHost: "docs.x.ai",
                 signupURL: "https://docs.x.ai/docs/cli",
                 envVarName: "GROK_CLI_UNUSED")
+        case .commandCode:
+            // Not an HTTP backend — `CommandCodeCLIService` shells out to the local
+            // `cmd` binary; `endpoint` is a never-used placeholder. The single
+            // "commandcode" model id is a sentinel meaning "the CLI's own default
+            // model" (no `-m` flag); the real list is the catalog `cmd --list-models`
+            // prints. The `signupURL` points at the install/sign-in docs — there's no
+            // key to create; sign-in is `cmd login` in the user's own terminal.
+            return ProviderSpec(
+                displayName: "Command Code",
+                endpoint: "https://commandcode.ai/unused",
+                models: [CommandCodeCLIService.defaultSentinel],
+                signupHost: "commandcode.ai",
+                signupURL: "https://commandcode.ai/docs/quickstart",
+                envVarName: "COMMAND_CODE_CLI_UNUSED")
         case .gemini:
             return ProviderSpec(
                 displayName: "Google Gemini",
@@ -596,7 +616,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     /// and logged in (see each service's `isAvailable`).
     var isCLI: Bool {
         switch self {
-        case .codex, .claudeCode, .grokCode: return true
+        case .codex, .claudeCode, .grokCode, .commandCode: return true
         default: return false
         }
     }
@@ -609,6 +629,9 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // Grok's model likewise isn't a curated shortlist — it's the account's own,
         // read from the CLI's model cache (see `GrokCLIService`).
         if self == .grokCode { return GrokCLIService.defaultModel }
+        // Command Code's list is the catalog its own CLI prints, so its default is
+        // whichever row that catalog marks — never a curated shortlist of ours.
+        if self == .commandCode { return CommandCodeCLIService.defaultModel }
         // The custom endpoint's model is the user's own typed id — a remote
         // manifest has no business overriding someone's private server.
         if self == .custom { return spec.defaultModel }
@@ -626,6 +649,9 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // Grok's list is the account's real models from `~/.grok/models_cache.json`
         // (see `GrokCLIService`), falling back to the single "grok" sentinel.
         if self == .grokCode { return GrokCLIService.availableModelIDs }
+        // Command Code's list is the account's real catalog from `cmd --list-models`
+        // (see `CommandCodeCLIService`), falling back to the single sentinel.
+        if self == .commandCode { return CommandCodeCLIService.availableModelIDs }
         if self == .custom { return spec.availableModels }
         // Claude Code no longer offers the "claude" account-default sentinel (see
         // the spec above); a remote manifest written before that still lists it,
@@ -658,7 +684,9 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         switch self {
         // The gateways front other people's models, and a custom endpoint could be
         // serving anything at all — in both cases the id has to speak for itself.
-        case .openrouter, .vercel, .custom: return nil
+        // Command Code is the third of that kind — a CLI account that fronts ~50
+        // models from a dozen labs, so its ids name their own vendor.
+        case .openrouter, .vercel, .custom, .commandCode: return nil
         case .openai, .codex:         return "OpenAI"
         case .anthropic, .claudeCode: return "Anthropic"
         case .grokCode:               return "xAI"
@@ -682,8 +710,8 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // Anthropic speaks its native protocol; Codex and Claude Code aren't HTTP
         // at all (subprocesses). All are routed to their own client, never the
         // shared one.
-        case .anthropic, .codex, .claudeCode, .grokCode: return false
-        default:                                         return true
+        case .anthropic, .codex, .claudeCode, .grokCode, .commandCode: return false
+        default:                                                      return true
         }
     }
 
@@ -713,8 +741,8 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // way — the turn dispatcher takes the plain `stream` path for them. Every
         // other provider exposes a function-calling API the harness can drive.
         switch self {
-        case .codex, .claudeCode, .grokCode: return false
-        default:                             return true
+        case .codex, .claudeCode, .grokCode, .commandCode: return false
+        default:                                           return true
         }
     }
 
@@ -832,11 +860,11 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     /// data, with no way to reach current information. The Settings provider menu
     /// uses this to demote the no-search vendors into a "not recommended" submenu.
     var supportsWebSearch: Bool {
-        // Codex, Claude Code and Grok search the web themselves as part of their
-        // agent loops, so they earn the "Web search" chip even though Notch injects
-        // nothing (`serverSearch == nil`).
+        // The CLI backends (Codex, Claude Code, Grok, Command Code) search the web
+        // themselves as part of their agent loops, so they earn the "Web search" chip
+        // even though Notch injects nothing (`serverSearch == nil`).
         serverSearch != nil || self == .glm || self == .codex || self == .claudeCode
-            || self == .grokCode
+            || self == .grokCode || self == .commandCode
     }
 }
 
@@ -1620,9 +1648,10 @@ enum ModelCatalog {
     /// in the Settings UI does today). A failed fetch is never cached, so the
     /// next call — cache or no — always gets a real retry.
     static func fetch(for provider: Provider, apiKey: String, force: Bool = false) async -> Result? {
-        // Codex / Grok have no `/v1/models` endpoint (they're local subprocesses, not
-        // HTTP), so there's nothing to fetch — their model lists come from the CLIs.
-        if provider == .codex || provider == .grokCode { return nil }
+        // Codex / Grok / Command Code have no `/v1/models` endpoint (they're local
+        // subprocesses, not HTTP), so there's nothing to fetch — their model lists
+        // come from the CLIs themselves.
+        if provider == .codex || provider == .grokCode || provider == .commandCode { return nil }
         if !force, let hit = withCacheLock({ cache[provider] }),
            hit.apiKey == apiKey, Date().timeIntervalSince(hit.fetchedAt) < ttl {
             return hit.result
