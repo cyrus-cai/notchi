@@ -64,7 +64,7 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
-            version: "0.6.0",
+            version: "0.5.1",
             date: "2026-08-06",
             features: [
                 "Command Code joins the engines — one account, one sign-in, and about fifty models from a dozen labs to pick from.",
