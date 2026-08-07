@@ -4031,7 +4031,7 @@ struct ResultTrailingCluster: View {
                 segs.append(.init(tooltip: shortcutHelp("detached.open", action: .detach),
                                   action: detach) {
                     Image(systemName: "macwindow.on.rectangle")
-                        .font(.sf(12, weight: .semibold))
+                        .font(.sf(10.5, weight: .medium))
                 })
             }
             segs.append(.init(engaged: pinned,
@@ -4041,11 +4041,16 @@ struct ResultTrailingCluster: View {
                 // A pinned pin tips upright, the way a pushed-in tack sits — a small
                 // physical cue that it's engaged, on top of the engaged tint.
                 Image(systemName: "pin")
-                    .font(.sf(12.5, weight: .semibold))
+                    .font(.sf(11, weight: .medium))
                     .rotationEffect(.degrees(pinned ? 0 : 32))
             })
             return segs
         }(), glass: false)
+        // Hover-only chrome sitting right beside the answer: it should be
+        // findable, not loud. This drops the bare cluster's own levels onto the
+        // history footer's meta pair — text4 at rest, text2 under the pointer —
+        // without giving this one caller a private tint API.
+        .opacity(0.72)
     }
 }
 

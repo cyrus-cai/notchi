@@ -939,6 +939,13 @@ struct GlassSegmentCluster: View {
     // survives re-renders — a per-segment UUID would churn and drop it.
     @State private var hoveredIndex: Int? = nil
 
+    /// With one glassed segment the pill *is* the segment: its own brightening
+    /// already answers "the pointer is here", so the per-segment round highlight
+    /// would only draw a second circle inside the capsule — two nested pieces of
+    /// glass for one control (the detached window's close ×). The highlight earns
+    /// its keep only when there are siblings to tell apart.
+    private var segmentHighlight: Bool { !glass || segments.count > 1 }
+
     var body: some View {
         HStack(spacing: glass ? 2 : 6) {
             ForEach(Array(segments.enumerated()), id: \.offset) { index, seg in
@@ -956,7 +963,9 @@ struct GlassSegmentCluster: View {
                         .frame(width: chip, height: chip)
                         .background(
                             Circle().fill(.white.opacity(
-                                seg.engaged ? 0.20 : (hovering && glass ? 0.12 : 0)))
+                                segmentHighlight
+                                    ? (seg.engaged ? 0.20 : (hovering && glass ? 0.12 : 0))
+                                    : 0))
                         )
                         .contentShape(Circle())
                 }

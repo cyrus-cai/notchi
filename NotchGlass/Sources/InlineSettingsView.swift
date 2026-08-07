@@ -381,6 +381,10 @@ struct InlineSettingsView: View {
     /// preferences, so they stay folded until the user needs them.
     @State private var permissionsSectionOpen = false
 
+    /// Whether the pointer is over a disclosure chip (the key section's and the
+    /// folded settings blocks' glass pill) — the chip brightens under the cursor.
+    @State private var hoveringDisclosure = false
+
     /// What the proxy field resolves to right now — filled in asynchronously by
     /// `refreshProxyStatus` because detection may spawn a login shell.
     @State private var proxyStatus: String = ""
@@ -410,7 +414,11 @@ struct InlineSettingsView: View {
                     .padding(.top, 12)
             } else {
                 HStack(alignment: .top, spacing: 0) {
+                    // The sidebar drops by the pane's runway too, so the first
+                    // category stays level with the pane's first row — the runway
+                    // moves BOTH columns down, it doesn't stagger them.
                     sidebar
+                        .padding(.top, Self.paneTopRunway)
 
                     // Hairline column boundary, full height of whichever side is
                     // taller. `maxHeight: .infinity` makes it greedy on its own —
@@ -492,6 +500,12 @@ struct InlineSettingsView: View {
     /// push its own fields past the pane's height cap.
     private static let keySectionAnchor = "settings.keySection"
 
+    /// The empty inset above the pane's first row, and the length of the top
+    /// taper that dissolves into it. The runway is the longer of the two on
+    /// purpose: a fade that outreaches its runway lands on live content.
+    private static let paneTopRunway: CGFloat = 14
+    private static let paneTopFade: CGFloat = 12
+
     /// Whether the open pane is scrolled off its top — all the top taper needs to
     /// know. A Bool, not the live offset: driving the gradient's LENGTH from the
     /// offset rebuilt the pane's mask on every scroll tick, which is what made
@@ -568,10 +582,16 @@ struct InlineSettingsView: View {
             }
             }
             .frame(maxWidth: .infinity, alignment: .topLeading)
-            // No top runway: the first row starts level with the sidebar's first
-            // item, and the top taper only exists once the pane is scrolled (see
-            // `paneScrolledOffTop`), so nothing resting is ever dimmed. The bottom
-            // keeps its runway — that edge tapers at all times.
+            // A top RUNWAY — the whole right-hand pane rests a little lower than the
+            // sidebar's first item, and this inset is what the top taper dissolves
+            // into. It has to outlast the taper (see `paneTopFade`), or the fade
+            // lands on live content the instant the pane moves: About's masthead
+            // (a 44pt icon beside the app name, the tallest first row in the app)
+            // went half-transparent on a stray trackpad nudge, which read as
+            // something covering the top of the pane. With the runway, a small
+            // scroll eats empty space first and the rows stay solid. The bottom
+            // keeps its own runway — that edge tapers at all times.
+            .padding(.top, Self.paneTopRunway)
             .padding(.bottom, 20)
             // Zero-size probe on the scroll CONTENT: it reads the real clip view's
             // offset. Only the crossing matters, so state changes at most once per
@@ -586,6 +606,11 @@ struct InlineSettingsView: View {
             // island never resizes between categories, and a greedy ScrollView
             // never gets to claim the whole panel.
             .frame(height: settingsPaneHeight)
+            // Key the scroll container by the open section: each category gets
+            // its OWN scroll state, so leaving Model scrolled halfway doesn't
+            // carry that offset into General (and vice versa) — a fresh scroll
+            // always starts at the top of its own content.
+            .id(section)
             // A required setup unfolds the key section past the pane's height
             // cap — snap the scroller to it so what just appeared is in view
             // (the anchor lives on `keySection`). The first frame of the unfold
@@ -599,8 +624,10 @@ struct InlineSettingsView: View {
             // permanent one dimmed the first row of every pane before the user had
             // scrolled anything, and the fade is there to dissolve rows leaving
             // past the back pill — nothing is leaving while the pane sits at top.
+            // Kept shorter than the runway above it so it always has empty space
+            // to dissolve into rather than the first row.
             .scrollEdgeFade(top: paneScrolledOffTop, bottom: true,
-                            topFade: 24, bottomFade: 32)
+                            topFade: Self.paneTopFade, bottomFade: 32)
             // A pane swap starts at the top again; the observer only reports on
             // the next bounds change, so clear the flag here.
             .onChange(of: section) { paneScrolledOffTop = false }
@@ -742,10 +769,26 @@ struct InlineSettingsView: View {
                     Text(L("model.keys.section"))
                         .font(.sf(12, weight: .medium))
                 }
-                .foregroundStyle(Tokens.text3)
-                .contentShape(Rectangle())
+                .foregroundStyle(Tokens.text1)
+                .padding(.horizontal, 10)
+                .frame(height: 26)
+                // The disclosure's own glass chip — a translucent pill that
+                // brightens under the pointer, so the fold itself reads as a
+                // control on the panel's glass rather than a bare line of text.
+                .background(
+                    Capsule()
+                        .fill(.white.opacity(hoveringDisclosure ? 0.12 : 0.06))
+                )
+                .overlay(
+                    Capsule()
+                        .strokeBorder(.white.opacity(hoveringDisclosure ? 0.22 : 0.12),
+                                      lineWidth: 0.5)
+                )
+                .contentShape(Capsule())
             }
             .buttonStyle(.plain)
+            .onHover { hoveringDisclosure = $0 }
+            .animation(.easeOut(duration: Tokens.hoverFade), value: hoveringDisclosure)
 
             if expanded {
                 // Why the section opened by itself, when it did.
@@ -2037,8 +2080,7 @@ struct InlineSettingsView: View {
     /// and summarize, with no Automation prompt. The folder sub-row (current path
     /// + chooser) only appears while the Markdown destination is active.
     private var noteDestinationRow: some View {
-        settingRow(label: L("general.noteDestination"),
-                   info: L("general.noteDestination.hint")) {
+        settingRow(label: L("general.noteDestination")) {
             // Path sub-row lives in the row's content column so it left-aligns
             // with the menu above it — no guessed label-width offset.
             VStack(alignment: .leading, spacing: 8) {
@@ -2160,10 +2202,26 @@ struct InlineSettingsView: View {
                     Text(L("permissions.title"))
                         .font(.sf(12, weight: .medium))
                 }
-                .foregroundStyle(Tokens.text3)
-                .contentShape(Rectangle())
+                .foregroundStyle(Tokens.text1)
+                .padding(.horizontal, 10)
+                .frame(height: 26)
+                // The disclosure's own glass chip — a translucent pill that
+                // brightens under the pointer, so the fold itself reads as a
+                // control on the panel's glass rather than a bare line of text.
+                .background(
+                    Capsule()
+                        .fill(.white.opacity(hoveringDisclosure ? 0.12 : 0.06))
+                )
+                .overlay(
+                    Capsule()
+                        .strokeBorder(.white.opacity(hoveringDisclosure ? 0.22 : 0.12),
+                                      lineWidth: 0.5)
+                )
+                .contentShape(Capsule())
             }
             .buttonStyle(.plain)
+            .onHover { hoveringDisclosure = $0 }
+            .animation(.easeOut(duration: Tokens.hoverFade), value: hoveringDisclosure)
 
             if permissionsSectionOpen {
                 VStack(alignment: .leading, spacing: 9) {
@@ -2394,10 +2452,26 @@ struct InlineSettingsView: View {
                     Text(L("general.advanced"))
                         .font(.sf(12, weight: .medium))
                 }
-                .foregroundStyle(Tokens.text3)
-                .contentShape(Rectangle())
+                .foregroundStyle(Tokens.text1)
+                .padding(.horizontal, 10)
+                .frame(height: 26)
+                // The disclosure's own glass chip — a translucent pill that
+                // brightens under the pointer, so the fold itself reads as a
+                // control on the panel's glass rather than a bare line of text.
+                .background(
+                    Capsule()
+                        .fill(.white.opacity(hoveringDisclosure ? 0.12 : 0.06))
+                )
+                .overlay(
+                    Capsule()
+                        .strokeBorder(.white.opacity(hoveringDisclosure ? 0.22 : 0.12),
+                                      lineWidth: 0.5)
+                )
+                .contentShape(Capsule())
             }
             .buttonStyle(.plain)
+            .onHover { hoveringDisclosure = $0 }
+            .animation(.easeOut(duration: Tokens.hoverFade), value: hoveringDisclosure)
 
             if advancedSectionOpen {
                 proxyRow
@@ -3233,6 +3307,14 @@ struct InlineSettingsView: View {
                                   title: L("about.followX")) {
                     NSWorkspace.shared.open(URL(string: "https://x.com/cyrusss_7")!)
                 }
+                // Takes exactly the width its title needs; the two flexible
+                // buttons beside it divide what's left.
+                AboutSocialButton(kind: .coffee,
+                                  title: L("about.buyCoffee")) {
+                    NSWorkspace.shared.open(URL(string: "https://buymeacoffee.com/cyrus007")!)
+                }
+                .fixedSize(horizontal: true, vertical: false)
+                Spacer(minLength: 0)
             }
 
             VStack(spacing: 0) {
@@ -3303,13 +3385,14 @@ struct InlineSettingsView: View {
     }
 
     private enum AboutSocialKind {
-        case github, x
+        case github, x, coffee
     }
 
     /// The site's Star button translated to native SwiftUI: on hover the brand
     /// mark exits through the top while the action glyph rises from below. X
-    /// uses the same grammar with a blue follow glyph, so the pair feels related
-    /// without adding decorative particles around either mark.
+    /// uses the same grammar with X's own like-heart red, and Buy Me a Coffee
+    /// with its own cup burst, so the three feel related without adding
+    /// decorative particles around any of the marks.
     private struct AboutSocialButton: View {
         let kind: AboutSocialKind
         let title: String
@@ -3320,7 +3403,7 @@ struct InlineSettingsView: View {
         private var accent: Color {
             kind == .github
                 ? Color(red: 245 / 255, green: 166 / 255, blue: 35 / 255)
-                : Color(red: 0.46, green: 0.72, blue: 1.00)
+                : Color(red: 249 / 255, green: 24 / 255, blue: 128 / 255)
         }
 
         var body: some View {
@@ -3333,10 +3416,7 @@ struct InlineSettingsView: View {
                             .offset(y: hovering ? -13 : 0)
                             .scaleEffect(hovering ? 0.8 : 1)
 
-                        Image(systemName: kind == .github ? "star.fill" : "person.crop.circle.badge.plus")
-                            .font(.system(size: kind == .github ? 13 : 14,
-                                          weight: .semibold))
-                            .foregroundStyle(accent)
+                        actionMark
                             .opacity(hovering ? 1 : 0)
                             .offset(y: hovering ? 0 : 13)
                             .scaleEffect(hovering ? 1 : 0.8)
@@ -3348,6 +3428,10 @@ struct InlineSettingsView: View {
                         .font(.sf(12, weight: .medium))
                         .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
                         .lineLimit(1)
+                        // The row is narrower than three full titles. Coffee's
+                        // is the one that must stay whole, so the other two give
+                        // up a little size rather than a tail of letters.
+                        .minimumScaleFactor(kind == .coffee ? 1 : 0.78)
 
                     Spacer(minLength: 0)
                 }
@@ -3361,11 +3445,20 @@ struct InlineSettingsView: View {
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .strokeBorder(.white.opacity(hovering ? 0.16 : 0.08), lineWidth: 0.5)
                 )
+                // The coffee burst is drawn wider than its slot; keep it inside
+                // the button's own edge.
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
             .buttonStyle(AboutSocialPressStyle())
             .scaleEffect(hovering ? 1.02 : 1)
-            .onHover { hovering = $0 }
+            .onHover { inside in
+                hovering = inside
+                // One tap as the button catches under the cursor — the same one
+                // the island gets when it snaps open. Only on the way in;
+                // leaving is passive.
+                if inside { Haptics.alignment() }
+            }
             .animation(.easeInOut(duration: 0.2), value: hovering)
             .animation(.spring(response: 0.3, dampingFraction: 0.72), value: hovering)
         }
@@ -3385,6 +3478,122 @@ struct InlineSettingsView: View {
                     .resizable()
                     .scaledToFit()
                     .frame(width: 14, height: 14)
+            case .coffee:
+                // Buy Me a Coffee's own cup, drawn as a template like the other
+                // two marks — the artwork's colour arrives on hover.
+                Image("CoffeeMark")
+                    .renderingMode(.template)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 17, height: 16)
+            }
+        }
+
+        /// What rises from below on hover. GitHub and X answer with the glyph of
+        /// the action itself; Buy Me a Coffee answers with its own artwork, a
+        /// burst of cups, which is why this one isn't a symbol.
+        @ViewBuilder
+        private var actionMark: some View {
+            switch kind {
+            case .github:
+                Image(systemName: "star.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(accent)
+            case .x:
+                // heart.fill sits smaller in its box than star.fill at the same
+                // point size, so it takes a notch more to read equal.
+                Image(systemName: "heart.fill")
+                    .font(.system(size: 14.5, weight: .semibold))
+                    .foregroundStyle(accent)
+            case .coffee:
+                // Deliberately larger than the 17pt mark slot — at slot size the
+                // cups are too small to read as cups. It spills into the button's
+                // own padding, which the button clips.
+                AnimatedGIF(resource: "buy-me-a-coffee", animating: hovering)
+                    .frame(width: 40, height: 40)
+                    // The cups leave frame up and to the right, so the artwork's
+                    // weight sits right of its own centre.
+                    .offset(x: -4)
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+
+    /// An animated GIF from the bundle. SwiftUI's `Image` shows a single frame,
+    /// so this hands the file to AppKit, which plays it. The frames only run
+    /// while `animating` is true — a paused hover costs nothing — and each start
+    /// rewinds to frame one.
+    private struct AnimatedGIF: NSViewRepresentable {
+        let resource: String
+        let animating: Bool
+
+        private static var cache: [String: Data] = [:]
+
+        private static func data(for resource: String) -> Data? {
+            if let hit = cache[resource] { return hit }
+            guard let url = Bundle.main.url(forResource: resource, withExtension: "gif"),
+                  let data = try? Data(contentsOf: url) else { return nil }
+            cache[resource] = data
+            return data
+        }
+
+        private func loadImage() -> NSImage? {
+            Self.data(for: resource).flatMap(NSImage.init(data:))
+        }
+
+        /// The frames of a GIF are decoded the first time each one is drawn,
+        /// which is paid for mid-playback — the opening reads as a stall. Walking
+        /// them once up front, while the panel is merely open, gets that out of
+        /// the way before any hover.
+        private static func warm(_ image: NSImage?) {
+            guard let rep = image?.representations.first as? NSBitmapImageRep,
+                  let frames = rep.value(forProperty: .frameCount) as? Int else { return }
+            for frame in 0..<frames {
+                rep.setProperty(.currentFrame, withValue: frame)
+                _ = rep.bitmapData
+            }
+            rep.setProperty(.currentFrame, withValue: 0)
+        }
+
+        private static func rewind(_ image: NSImage?) {
+            (image?.representations.first as? NSBitmapImageRep)?
+                .setProperty(.currentFrame, withValue: 0)
+        }
+
+        func makeNSView(context: Context) -> NSImageView {
+            let view = NSImageView()
+            view.imageScaling = .scaleProportionallyUpOrDown
+            let image = loadImage()
+            view.image = image
+            view.animates = animating
+            DispatchQueue.main.async { Self.warm(image) }
+            // An image view's intrinsic size is the file's own pixel size, which
+            // would otherwise draw the frames far larger than the seat they were
+            // given — the SwiftUI frame only clips, it doesn't shrink AppKit.
+            view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            view.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+            view.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            view.setContentHuggingPriority(.defaultLow, for: .vertical)
+            return view
+        }
+
+        func sizeThatFits(_ proposal: ProposedViewSize,
+                          nsView: NSImageView,
+                          context: Context) -> CGSize? {
+            CGSize(width: proposal.width ?? 24, height: proposal.height ?? 24)
+        }
+
+        func updateNSView(_ view: NSImageView, context: Context) {
+            guard view.animates != animating else { return }
+            if animating {
+                // Without the rewind a second hover would resume wherever the
+                // last one stopped. Rewinding in place keeps the already-decoded
+                // frames, which reassigning the image would throw away.
+                view.animates = false
+                Self.rewind(view.image)
+                view.animates = true
+            } else {
+                view.animates = false
             }
         }
     }

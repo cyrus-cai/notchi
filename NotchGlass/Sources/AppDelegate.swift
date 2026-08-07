@@ -660,7 +660,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // completion. Only a run that truly died files as interrupted. Every
         // settled shape lands in Recent via the same call.
         for recovered in AgentTaskManager.shared.recoverInterruptedRuns() {
-            model.recordAgentHistory(recovered, countAsUnseen: false)
+            model.recordAgentHistory(recovered)
         }
 
         // A tap on an agent-Codex "task finished" banner: summon the panel and

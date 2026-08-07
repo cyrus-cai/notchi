@@ -239,6 +239,11 @@ answer from the results.
 - What the user copied ("this", "what I copied") → read_clipboard.
 - Exact arithmetic → calculate.
 - The current clock time → current_datetime (today's date is already stated above).
+- open_url is the one tool with a side effect on the user's screen, and it is \
+gated on their words, not on usefulness: call it ONLY when this message \
+explicitly asks you to open, visit, launch, or go to a page. Never open a page \
+to research, check, verify, or show a source — use read_page or search for that, \
+and otherwise just write the link in your answer and let the user click it.
 - This Notch app's own preferences — viewing settings, changing language, icons, \
 launch at login, appearance, notes, shortcuts, model/provider, search, keys, proxy, \
 or other Settings values → manage_app_settings. For an explicit change, call it \
@@ -1372,7 +1377,11 @@ enum RemoteModelManifest {
     private static let manifestURL = URL(string: "https://notch.website/models.json")!
     private static let dataKey = "remoteModelManifest.json"
     private static let fetchedAtKey = "remoteModelManifest.fetchedAt"
-    /// Re-fetch at most this often. Launch and Settings-open both call
+    /// Which UTC day / month this copy last requested the manifest on. Purely
+    /// local — never sent anywhere; see `firstRequestPeriods()`.
+    private static let lastRequestDayKey = "remoteModelManifest.lastRequestDay"
+    private static let lastRequestMonthKey = "remoteModelManifest.lastRequestMonth"
+    /// Re-fetch at most this often. Launch, panel-open and Settings-open all call
     /// `refreshIfDue`, so a shorter TTL just means more no-op wakeups.
     private static let ttl: TimeInterval = 6 * 60 * 60
 
@@ -1403,8 +1412,12 @@ enum RemoteModelManifest {
     /// Cheap no-op otherwise, so callers can invoke it opportunistically. Any
     /// failure leaves the previous cache in place.
     static func refreshIfDue() async {
+        // A day/month rollover counts as due even inside the TTL: it's what makes
+        // the server's `daily_requesters` an exact number rather than an estimate,
+        // and it costs at most one extra request per machine per day of use.
+        let periods = firstRequestPeriods()
         let due: Bool = withLock {
-            guard !fetching, cached == nil || isStale else { return false }
+            guard !fetching, cached == nil || isStale || !periods.isEmpty else { return false }
             fetching = true
             return true
         }
@@ -1413,6 +1426,14 @@ enum RemoteModelManifest {
 
         var req = URLRequest(url: manifestURL)
         req.timeoutInterval = 10
+        // Which periods this manifest request is the first of, for this copy of the
+        // app — "day", "day,month", or absent. This is what lets the website count
+        // machines instead of requests, while storing nothing that identifies one:
+        // the whole computation happens locally against the two UserDefaults keys
+        // above, and all that leaves the Mac is "first request of the day".
+        if !periods.isEmpty {
+            req.setValue(periods.joined(separator: ","), forHTTPHeaderField: "X-Notchi-First-Request")
+        }
         // Lets the server break these fetches down by release. CFNetwork's default
         // User-Agent carries CFBundleVersion — a flat build number that doesn't move
         // with `MARKETING_VERSION` — so without this header every install looks
@@ -1429,6 +1450,37 @@ enum RemoteModelManifest {
         withLock { cached = lists }
         UserDefaults.standard.set(data, forKey: dataKey)
         UserDefaults.standard.set(Date(), forKey: fetchedAtKey)
+        // Marked only after the request actually landed. Marking on send would
+        // silently drop the day whenever the Mac happens to be offline at launch;
+        // the opposite error (server counted it, we never saw the reply) is far
+        // rarer and self-limits to a couple of requests a day.
+        markRequested()
+    }
+
+    /// Which calendar periods this request is the first of — `["day"]`,
+    /// `["day", "month"]`, or empty when this copy already requested the manifest
+    /// today. UTC so every install rolls over at the same instant, regardless of
+    /// where it is.
+    private static func firstRequestPeriods() -> [String] {
+        let (day, month) = utcPeriods()
+        guard UserDefaults.standard.string(forKey: lastRequestDayKey) != day else { return [] }
+        return UserDefaults.standard.string(forKey: lastRequestMonthKey) == month
+            ? ["day"] : ["day", "month"]
+    }
+
+    private static func markRequested() {
+        let (day, month) = utcPeriods()
+        UserDefaults.standard.set(day, forKey: lastRequestDayKey)
+        UserDefaults.standard.set(month, forKey: lastRequestMonthKey)
+    }
+
+    /// `("2026-08-07", "2026-08")` for now, in UTC.
+    private static func utcPeriods() -> (day: String, month: String) {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(secondsFromGMT: 0)!
+        let c = cal.dateComponents([.year, .month, .day], from: Date())
+        let month = String(format: "%04d-%02d", c.year ?? 0, c.month ?? 0)
+        return ("\(month)-\(String(format: "%02d", c.day ?? 0))", month)
     }
 
     private static var isStale: Bool {

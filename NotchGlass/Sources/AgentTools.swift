@@ -81,6 +81,47 @@ struct ReadClipboardTool: NotchTool {
     }
 }
 
+/// Open a URL in the user's default browser. A visible, side-effecting action —
+/// a window jumps in front of whatever the user was doing — so it is gated on
+/// *intent*, not on usefulness: the description below (reinforced by the persona
+/// in `notchSystemPrompt`) forbids calling it for any research purpose. Looking
+/// something up is what `read_page` and the search tools are for; this tool
+/// exists only to carry out an explicit "open / visit / take me to that page".
+/// The scheme is validated to http/https so the model can't open arbitrary
+/// `file://`, `x-apple-…`, or app-scheme URLs.
+struct OpenURLTool: NotchTool {
+    let name = "open_url"
+    let description = """
+    Opens a web URL in the user's default browser, taking over their screen. Call \
+    this ONLY when the user explicitly asked you to open, visit, launch, or go to \
+    a page in this very message — the words have to be theirs. NEVER call it to \
+    look something up, check a page, verify a fact, gather information, or show \
+    the user a source you found: reading a page is read_page's job and searching \
+    is the search tool's job, and neither ever justifies opening a browser. If you \
+    merely think a link would be useful, write it in your answer as a Markdown \
+    link and let the user decide. When in doubt, do not call this tool. Use the \
+    full https URL the user meant.
+    """
+    let schema: [String: Any] = [
+        "type": "object",
+        "properties": [
+            "url": ["type": "string", "description": "The full http(s) URL to open. Only when the user explicitly asked for it to be opened."]
+        ],
+        "required": ["url"]
+    ]
+
+    func execute(_ input: [String: Any]) async throws -> String {
+        guard let s = input["url"] as? String,
+              let url = URL(string: s),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else {
+            return "Error: not a valid http(s) URL."
+        }
+        let ok = await MainActor.run { NSWorkspace.shared.open(url) }
+        return ok ? "Opened \(url.absoluteString)." : "Couldn't open \(url.absoluteString)."
+    }
+}
+
 /// Exact arithmetic. LLMs reliably mangle multi-step or large-number math
 /// (carry errors, dropped digits), so any numeric computation the user asks for
 /// should run through a deterministic evaluator rather than the model's "head".
@@ -1574,6 +1615,7 @@ extension ToolRegistry {
             ReadClipboardTool(),
             CalculateTool(),
             ReadPageTool(),
+            OpenURLTool(),
         ]
         switch APIKeyStore.resolvedSearchBackend() {
         case .exa:
@@ -1599,5 +1641,6 @@ extension ToolRegistry {
     /// provider through (it omits any provider-specific builtin like Kimi's echo).
     static var standard: ToolRegistry { ToolRegistry([
         DateTimeTool(), ReadClipboardTool(), CalculateTool(), ReadPageTool(),
+        OpenURLTool(),
     ]) }
 }

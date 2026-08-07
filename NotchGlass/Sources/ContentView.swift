@@ -472,13 +472,11 @@ private struct WorkEarWidthsKey: PreferenceKey {
 /// and a once-a-second elapsed clock on the right, the collapsed twin of the
 /// agent card's clock, replacing the old three-dot wave (the ticking time
 /// is the "it's alive" signal; dots on top were dead weight).
-/// Finished: the left ear holds a small count badge — how many results landed
-/// while the notch was collapsed — so the notch doesn't fold flat over unseen
-/// work. Opening the panel clears it (`NotchModel.unseenFinishedCount`).
+/// When the work settles the ears fold flat — the notification banner already
+/// said what finished; the resting notch keeps no tally.
 private struct BackgroundWorkEars: View {
     enum Stage: Equatable {
         case running(verb: String, since: Date)
-        case finished(count: Int)
     }
     let stage: Stage
     /// The drawn hardware-notch width the ears flank (content-free gap).
@@ -490,18 +488,17 @@ private struct BackgroundWorkEars: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    /// A stable identity per visual stage, so SwiftUI crossfades run → badge
-    /// (and re-pops the badge when its count steps up) instead of morphing text.
+    /// A stable identity per verb, so SwiftUI crossfades one doing-word into the
+    /// next instead of morphing the text in place.
     private var stageKey: String {
         switch stage {
         case .running(let verb, _): return "run-\(verb)"
-        case .finished(let count):  return "done-\(count)"
         }
     }
 
     var body: some View {
         HStack(spacing: 0) {
-            // Left ear — the verb while running, the count badge when settled.
+            // Left ear — the verb while running.
             ZStack {
                 leftStage
                     .id(stageKey)
@@ -561,20 +558,6 @@ private struct BackgroundWorkEars: View {
                     .foregroundStyle(Tokens.text3)
                     .lineLimit(1)
                     .fixedSize()
-            case .finished(let count):
-                // The count badge: one quiet capsule, just the number — the
-                // notification banner already said *what* finished; this only
-                // has to say "N things are waiting for you in here".
-                Text("\(count)")
-                    .font(.sf(10.5, weight: .semibold))
-                    .monospacedDigit()
-                    .foregroundStyle(Tokens.text2)
-                    .lineLimit(1)
-                    .fixedSize()
-                    .frame(minWidth: 10)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 2.5)
-                    .background(Capsule().fill(Color.white.opacity(0.14)))
             }
         }
         .background(GeometryReader { proxy in
@@ -699,16 +682,6 @@ struct NotchIsland: View {
         return start
     }
 
-    /// True when everything settled while the notch was collapsed and the
-    /// results haven't been looked at: the notch keeps a small count badge in
-    /// the left ear instead of folding flat, until the panel opens (which
-    /// zeroes `unseenFinishedCount`). Yields to `busy` (running work outranks
-    /// a tally) and to the copy-sense hint (transient and actionable beats a
-    /// durable count for the one strip).
-    private var showsFinishedBadge: Bool {
-        !model.open && !busy && !sensing && model.unseenFinishedCount > 0
-    }
-
     /// True when the resting notch is offering (or narrating) a clipboard
     /// capture. Gated on the GLOBAL `open` like `busy`, and yields to the busy
     /// dots — an in-flight answer outranks a copy hint for the one strip.
@@ -716,17 +689,13 @@ struct NotchIsland: View {
         !model.open && !busy && model.clipboardSense != .idle
     }
 
-    /// The resting notch's LEFT flex — the busy verb, the finished-count badge,
-    /// or the copy-sense left ear (phrase → dots → verdict), sized to its
-    /// measured content. The occupants never coexist (`sensing` yields to
-    /// `busy`; the badge yields to both).
+    /// The resting notch's LEFT flex — the busy verb, or the copy-sense left ear
+    /// (phrase → dots → verdict), sized to its measured content. The occupants
+    /// never coexist (`sensing` yields to `busy`).
     private var earLeft: CGFloat {
         if busy {
             return workEarContent.left > 0
                 ? workEarContent.left + senseEarPad * 2 : busyExtension
-        }
-        if showsFinishedBadge, workEarContent.left > 0 {
-            return workEarContent.left + senseEarPad * 2
         }
         if sensing, senseEarContent.left > 0 {
             return senseEarContent.left + senseEarPad * 2
@@ -736,7 +705,7 @@ struct NotchIsland: View {
 
     /// The resting notch's RIGHT flex — the busy elapsed clock while work runs,
     /// or the copy-sense ⌘C ear while the offer stands (it folds shut on
-    /// confirm). The finished badge never extends right: one quiet count, left.
+    /// confirm).
     private var earRight: CGFloat {
         if busy {
             return workEarContent.right > 0
@@ -789,16 +758,13 @@ struct NotchIsland: View {
                 // work runs, the verb on the left shoulder and a once-a-second
                 // elapsed clock on the right (the collapsed twin of the
                 // agent card's clock — no dots; ticking time IS the "it's
-                // alive" signal). When the last task settles, the left ear
-                // keeps a small count badge instead of folding flat, so
-                // finished background work doesn't silently vanish into the
-                // bezel. It all lives inside the island's own black zone — one
-                // material, one form — which is what makes the flex read as
-                // the notch working, not as a badge stuck beside it.
-                if busy || showsFinishedBadge {
+                // alive" signal). When the last task settles the ears fold
+                // flat again. It all lives inside the island's own black
+                // zone — one material, one form — which is what makes the flex
+                // read as the notch working, not as a badge stuck beside it.
+                if busy {
                     BackgroundWorkEars(
-                        stage: busy ? .running(verb: busyVerb, since: busySince)
-                                    : .finished(count: model.unseenFinishedCount),
+                        stage: .running(verb: busyVerb, since: busySince),
                         notchWidth: Tokens.notchWidth,
                         earLeft: earLeft,
                         earRight: earRight)

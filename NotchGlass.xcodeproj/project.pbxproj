@@ -52,6 +52,7 @@
 		A1000071 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1000070 /* Assets.xcassets */; };
 		A10004A1 /* Fonts in Resources */ = {isa = PBXBuildFile; fileRef = A10004A0 /* Fonts */; };
 		A10004B1 /* intro-sunrise.m4a in Resources */ = {isa = PBXBuildFile; fileRef = A10004B0 /* intro-sunrise.m4a */; };
+		A10004B3 /* buy-me-a-coffee.gif in Resources */ = {isa = PBXBuildFile; fileRef = A10004B2 /* buy-me-a-coffee.gif */; };
 		A1000710 /* AgentHarness.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000720 /* AgentHarness.swift */; };
 		A1000711 /* AgentTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000721 /* AgentTools.swift */; };
 		A1000912 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = A1000913 /* PrivacyInfo.xcprivacy */; };
@@ -107,6 +108,7 @@
 		A1000070 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A10004A0 /* Fonts */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Fonts; sourceTree = "<group>"; };
 		A10004B0 /* intro-sunrise.m4a */ = {isa = PBXFileReference; lastKnownFileType = file; path = "intro-sunrise.m4a"; sourceTree = "<group>"; };
+		A10004B2 /* buy-me-a-coffee.gif */ = {isa = PBXFileReference; lastKnownFileType = image.gif; path = "buy-me-a-coffee.gif"; sourceTree = "<group>"; };
 		A1000100 /* NotchGlass.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NotchGlass.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -196,6 +198,7 @@
 				A1000070 /* Assets.xcassets */,
 				A10004A0 /* Fonts */,
 				A10004B0 /* intro-sunrise.m4a */,
+				A10004B2 /* buy-me-a-coffee.gif */,
 				A1000913 /* PrivacyInfo.xcprivacy */,
 			);
 			path = Resources;
@@ -271,6 +274,7 @@
 				A1000071 /* Assets.xcassets in Resources */,
 				A10004A1 /* Fonts in Resources */,
 				A10004B1 /* intro-sunrise.m4a in Resources */,
+				A10004B3 /* buy-me-a-coffee.gif in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -397,7 +401,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.5.3;
+				MARKETING_VERSION = 0.5.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -420,7 +424,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.5.3;
+				MARKETING_VERSION = 0.5.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;

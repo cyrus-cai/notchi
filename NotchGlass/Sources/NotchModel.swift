@@ -400,12 +400,7 @@ final class NotchModel: ObservableObject {
     // Open / closed drives the grow-out-of-the-notch animation.
     @Published var open = false {
         didSet {
-            // Opening the panel is "seeing" the results: the finished-task badge
-            // on the resting notch (see `unseenFinishedCount`) counts work the
-            // user hasn't looked at yet, and the open panel shows all of it —
-            // Recent rows and the agent card — so the count zeroes here.
             if open {
-                unseenFinishedCount = 0
                 // A bucket that came back armed from the last launch still has to be
                 // re-seeded (folder, live engine) — see `rearmPersistedAgentBucket`.
                 // Done on open, not at init: the probes it needs shell out, and by
@@ -627,22 +622,6 @@ final class NotchModel: ObservableObject {
     /// on every exit path (clean finish, mid-stream error, supersede-cancel), so
     /// the indicator can never stick on after the last round settles.
     @Published private(set) var roundsInFlight = 0
-
-    /// Background work that FINISHED while the panel was fully closed and hasn't
-    /// been looked at yet — detached Ask rounds landing in Recent, and agent
-    /// Codex runs settling. While non-zero (and nothing is still running), the
-    /// resting notch keeps a small count badge instead of folding flat, so a
-    /// finished task doesn't just silently disappear into the bezel. Cleared the
-    /// moment the panel opens (`open.didSet`): the panel shows everything.
-    @Published private(set) var unseenFinishedCount = 0
-
-    /// Count one background task as finished-but-unseen. No-op while the panel
-    /// is open anywhere — on-screen results are being seen as they land (the
-    /// thread itself, the Recent row, the agent card).
-    func noteBackgroundTaskFinished() {
-        guard !open else { return }
-        unseenFinishedCount += 1
-    }
 
     /// When the oldest still-running Ask round started — the resting notch's
     /// busy ear shows this elapsed clock (mirroring the agent card's), so
@@ -4139,6 +4118,10 @@ final class NotchModel: ObservableObject {
                 }
                 savedIdleDraft = ""
             }
+            // Opening the panel is the app being *used*, which is the moment the
+            // curated shortlists want to be current — launch alone misses a Mac
+            // that stays up for a week. A cheap no-op inside the manifest's TTL.
+            Task.detached(priority: .background) { await RemoteModelManifest.refreshIfDue() }
         }
         // A hover re-entry supersedes any pending leave watch — and any pending
         // entry watch has just been answered (by itself or by another route in).
@@ -4841,11 +4824,7 @@ final class NotchModel: ObservableObject {
     /// tap can route straight to this row. Reopening also makes the result
     /// follow-up-able: questions about it go to the chat model with the report
     /// in context.
-    /// `countAsUnseen` is false for a run recovered at launch (see
-    /// `recoverInterruptedRun`): it settled in a previous life of the app, so it
-    /// isn't news the resting notch should badge.
-    func recordAgentHistory(_ task: AgentTaskManager.AgentTask,
-                            countAsUnseen: Bool = true) {
+    func recordAgentHistory(_ task: AgentTaskManager.AgentTask) {
         // Every settled round is an exchange — cancels and interrupted runs
         // included, so a run that ended badly still leaves a record; a follow-up
         // settles the same task id again with a longer thread, replacing the
@@ -4910,12 +4889,6 @@ final class NotchModel: ObservableObject {
         // not yet on disk) where a crash erased the run without a trace.
         let settledTaskID = task.id
         saveHistoryNow { AgentTaskManager.clearInFlight(taskID: settledTaskID) }
-        // A run settling with the panel closed joins the resting notch's
-        // finished-count badge — but not a cancel (the user just threw that away
-        // by hand, nothing "unseen" about it), and not a run recovered from a
-        // previous launch.
-        guard countAsUnseen, task.outcome != .cancelled else { return }
-        noteBackgroundTaskFinished()
     }
 
     /// Whether the on-screen thread is (or grew out of) an agent run's record.
@@ -5775,7 +5748,6 @@ final class NotchModel: ObservableObject {
                 self.markFinished(id: answerID)   // no-op when detached
                 self.persistThread(thread, threadID: threadID, answer: acc)
                 if walkedAway {
-                    self.noteBackgroundTaskFinished()
                     self.notifyAnswerReady(threadID: threadID, question: q, answer: acc)
                 }
             } catch is CancellationError {
@@ -5817,7 +5789,6 @@ final class NotchModel: ObservableObject {
                     } else if walkedAway {
                         // Interrupted but salvaged a partial answer, and the user had
                         // already walked away — still notify, same as a clean finish.
-                        self.noteBackgroundTaskFinished()
                         self.notifyAnswerReady(threadID: threadID, question: q, answer: saved)
                     }
                 } else {

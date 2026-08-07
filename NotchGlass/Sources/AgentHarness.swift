@@ -806,6 +806,7 @@ struct AgentHarness {
             case "ask_user": return L("agent.activity.askUser")
             case "read_clipboard": return L("agent.activity.clipboard")
             case "current_datetime": return L("agent.activity.time")
+            case "open_url": return L("agent.activity.open")
             case "calculate": return L("agent.activity.calc")
             case "search_history": return L("agent.activity.history")
             case "read_page":

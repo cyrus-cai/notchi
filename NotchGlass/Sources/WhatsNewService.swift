@@ -64,6 +64,16 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.5.4",
+            date: "2026-08-07",
+            features: [
+                "Ask and Agent open the page you ask for, in your default browser.",
+            ],
+            improvements: [
+                "About gains a Buy Me a Coffee button.",
+            ]
+        ),
+        Entry(
             version: "0.5.3",
             date: "2026-08-06",
             features: [
