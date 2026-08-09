@@ -984,6 +984,14 @@ struct NotchIsland: View {
         // the height, and it should ride the same coherent motion.
         .animation(.spring(response: 0.42, dampingFraction: 0.78), value: model.showHistory)
         .animation(.spring(response: 0.42, dampingFraction: 0.78), value: model.showHistoryFilter)
+        // NOT keyed here: the prompt box growing a line. That one is owned at its
+        // source instead — `PromptField`'s height report writes `inputHeight` inside
+        // an explicit `withAnimation` (see `NotchBody.promptGrowth`), so the row, the
+        // chrome laid out under it AND this island's frame / glass / clip all ride one
+        // transaction. Keying it here as well was tried and does nothing: a
+        // `.animation(…, value:)` at this level only governs changes SwiftUI already
+        // decided to animate, and an un-transacted state write out of an AppKit
+        // callback isn't one of them.
         // Publish the island's live frame (canvas-window space) so the model can
         // verify hover events against the pointer's real position — the raw
         // enter/exit stream includes artifacts synthesized by this very frame

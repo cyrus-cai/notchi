@@ -17,16 +17,18 @@ final class WhatsNewService: ObservableObject {
     static let shared = WhatsNewService()
 
     /// One published release. `version` is the only required field; `date` is an
-    /// optional adornment. The notes are split into three sections the panel renders
+    /// optional adornment. The notes are split into four sections the panel renders
     /// under their own headings — `features` (brand-new capabilities),
-    /// `improvements` (refinements to things that already existed), and `fixes`
-    /// (what got fixed). Any can be empty; an empty section is omitted entirely.
+    /// `improvements` (refinements to things that already existed), `fixes` (what
+    /// got fixed), and `others` (project/personal housekeeping such as support and
+    /// license links). Any can be empty; an empty section is omitted entirely.
     struct Entry: Identifiable, Equatable {
         var version: String
         var date: String?
         var features: [String]
         var improvements: [String]
         var fixes: [String]
+        var others: [String]
 
         var id: String { version }
 
@@ -35,11 +37,12 @@ final class WhatsNewService: ObservableObject {
             date: String? = nil,
             features: [String] = [],
             improvements: [String] = [],
-            fixes: [String] = []
+            fixes: [String] = [],
+            others: [String] = []
         ) {
             self.version = version; self.date = date
             self.features = features; self.improvements = improvements
-            self.fixes = fixes
+            self.fixes = fixes; self.others = others
         }
     }
 
@@ -64,12 +67,29 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.5.5",
+            date: "2026-08-09",
+            features: [
+                "Prompt shortcuts are AI-named and appear as modes in the `/` menu, ready to run on typed input.",
+            ],
+            improvements: [
+                "Slash, model, folder, and agent option menus share a compact floating glass design.",
+                "The input box expands smoothly across multiple lines.",
+            ],
+            fixes: [
+                "Wrapping text no longer jumps or clips the first line.",
+            ],
+            others: [
+                "About credits the thinking-orbs loading animation and its license.",
+            ]
+        ),
+        Entry(
             version: "0.5.4",
             date: "2026-08-07",
             features: [
                 "Ask and Agent open the page you ask for, in your default browser.",
             ],
-            improvements: [
+            others: [
                 "About gains a Buy Me a Coffee button.",
             ]
         ),
@@ -119,11 +139,13 @@ final class WhatsNewService: ObservableObject {
             ],
             improvements: [
                 "Ask shows images only after you paste them, with multi-image attachments and per-image removal.",
-                "About links to GitHub, X, and the licenses.",
                 "What's New links out to the full release archive.",
             ],
             fixes: [
                 "Accessibility permission survives updates — builds now carry a stable signing identity.",
+            ],
+            others: [
+                "About links to GitHub, X, and the licenses.",
             ]
         ),
         Entry(

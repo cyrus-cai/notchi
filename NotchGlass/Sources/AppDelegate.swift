@@ -789,6 +789,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.runPromptShortcut(id: id)
             }) else { continue }
             promptHotKeys[id] = hotKey
+            // Backward compatibility: a ready shortcut created before names
+            // existed has `name == nil`. Ask the AI for its name once — the
+            // `/` menu then shows the named row instead of a raw prompt slice.
+            // `ensurePromptShortcutName` is idempotent and re-registration only
+            // runs on launch or a shortcuts change, so this never re-names.
+            model.ensurePromptShortcutName(binding)
         }
     }
 

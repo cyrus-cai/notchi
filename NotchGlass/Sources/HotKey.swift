@@ -384,18 +384,37 @@ struct ShortcutChord: Codable, Equatable, Hashable {
     }
 }
 
-/// One user-authored instruction bound directly to a global shortcut. There is
-/// deliberately no user-facing name or workflow metadata: the prompt itself is
-/// the row's identity, and the shortcut always acts on the current text selection.
+/// One user-authored instruction bound directly to a global shortcut. The prompt
+/// is the row's identity and always acts on the current text selection; an
+/// optional AI-suggested `name` lets the shortcut surface as a named, switchable
+/// mode in the `/` menu. `name` is `nil` for shortcuts created before naming
+/// existed — `displayName` falls back to the prompt so those rows stay readable.
 struct PromptShortcut: Codable, Equatable, Identifiable {
     var id: UUID
     var shortcut: ShortcutChord?
     var prompt: String
+    /// AI-generated display name for the `/` menu. Decodes to `nil` for old
+    /// persisted rows (optional Codable = zero-migration), so already-added
+    /// shortcuts work without any data rewrite.
+    var name: String?
 
-    init(id: UUID = UUID(), shortcut: ShortcutChord? = nil, prompt: String = "") {
+    init(id: UUID = UUID(), shortcut: ShortcutChord? = nil, prompt: String = "",
+         name: String? = nil) {
         self.id = id
         self.shortcut = shortcut
         self.prompt = prompt
+        self.name = name
+    }
+
+    /// What the row/menu shows: the name when one has been generated, else a
+    /// truncated slice of the prompt — the same fallback old rows get before
+    /// their first AI naming pass runs.
+    var displayName: String {
+        if let name, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return name
+        }
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.count > 24 ? String(trimmed.prefix(24)) + "…" : trimmed
     }
 
     var isReady: Bool {

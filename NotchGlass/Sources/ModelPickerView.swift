@@ -686,9 +686,10 @@ struct AgentFolderPickerView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 1) {
             ForEach(folders, id: \.self) { f in
-                AskRecentModelRow(label: f.lastPathComponent, selected: f == current) {
+                MenuCardRow(title: f.lastPathComponent, emphasized: true,
+                            selected: f == current) {
                     // Menu semantics: one click picks and dismisses. Clicking the
                     // already-armed row just dismisses.
                     if f != current { arm(f) }
@@ -699,16 +700,23 @@ struct AgentFolderPickerView: View {
             // to arm, so the ↑/↓ cursor deliberately skips it.
             Rectangle().fill(.white.opacity(0.07))
                 .frame(height: 0.5)
+                .padding(.horizontal, MenuCard.rowPad)
                 .padding(.vertical, 3)
-            AskRecentModelRow(label: L("agent.folder.switch"), selected: false) {
+            MenuCardRow(title: L("agent.folder.switch"), selected: false) {
                 onDone()
                 onBrowse()
             }
         }
-        .padding(8)
-        .frame(width: 190)
+        .padding(MenuCard.cardPad)
+        .frame(width: cardWidth, alignment: .leading)
         .onAppear(perform: installKeyMonitor)
         .onDisappear(perform: removeKeyMonitor)
+    }
+
+    /// Wide enough for the longest folder name, and for the door under them.
+    private var cardWidth: CGFloat {
+        MenuCard.width(titles: folders.map { ($0.lastPathComponent, nil) }
+                        + [(L("agent.folder.switch"), nil)], max: 260)
     }
 
     private func arm(_ f: URL) {
@@ -819,14 +827,20 @@ struct AskRecentModelPickerView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 1) {
             ForEach(rows, id: \.self) { r in
-                AskRecentModelRow(
-                    label: ModelRatings.prettyName(for: r.id, provider: r.provider),
+                MenuCardRow(
+                    title: ModelRatings.prettyName(for: r.id, provider: r.provider),
                     // Backends driven by the user's own signed-in CLI wear the tag:
                     // in a list that otherwise means "a key we hold", it says where
                     // this one actually runs and why it needed no setup.
-                    tagged: r.provider.isCLI,
+                    accessory: r.provider.isCLI ? "CLI" : nil,
+                    // The highlight here means "the model in effect", not "where the
+                    // cursor is" — so it carries the emphasized weight, and hover
+                    // does NOT move it (arming commits the pick straight to the
+                    // store; the `/` menu's follow-the-pointer highlight would
+                    // switch models just by sweeping past a row).
+                    emphasized: true,
                     selected: r == current) {
                         // Menu semantics: one click picks and dismisses. Clicking
                         // the already-armed row just dismisses.
@@ -839,16 +853,29 @@ struct AskRecentModelPickerView: View {
             // arm, it's a door — and the ↑/↓ cursor deliberately skips it.
             Rectangle().fill(.white.opacity(0.07))
                 .frame(height: 0.5)
+                .padding(.horizontal, MenuCard.rowPad)
                 .padding(.vertical, 3)
-            AskRecentModelRow(label: L("model.picker.more"), tagged: false, selected: false) {
+            MenuCardRow(title: L("model.picker.more"), selected: false) {
                 onDone()
                 onMoreModels()
             }
         }
-        .padding(8)
-        .frame(width: 190)
+        .padding(MenuCard.cardPad)
+        // Sized by its own rows like the `/` card, capped so one long model id
+        // can't stretch the menu across the panel.
+        .frame(width: cardWidth, alignment: .leading)
         .onAppear(perform: installKeyMonitor)
         .onDisappear(perform: removeKeyMonitor)
+    }
+
+    /// Wide enough for every row whole — the models with their CLI tags, and the
+    /// "More models…" door under them.
+    private var cardWidth: CGFloat {
+        let models = rows.map {
+            (ModelRatings.prettyName(for: $0.id, provider: $0.provider),
+             $0.provider.isCLI ? "CLI" : nil)
+        }
+        return MenuCard.width(titles: models + [(L("model.picker.more"), nil)], max: 260)
     }
 
     private func arm(_ r: Row) {
@@ -877,48 +904,6 @@ struct AskRecentModelPickerView: View {
         guard !rows.isEmpty else { return }
         let cur = rows.firstIndex(of: current) ?? -1
         arm(rows[min(max(cur + delta, 0), rows.count - 1)])
-    }
-}
-
-/// One row of the Ask recents menu — `AgentModelRow`'s look (soft wash when armed,
-/// fainter on hover, no rims or checkmarks) with the vendor's real mark leading,
-/// since these rows mix providers.
-private struct AskRecentModelRow: View {
-    let label: String
-    /// Marks a backend that runs through a local CLI rather than a key.
-    var tagged: Bool = false
-    let selected: Bool
-    let onTap: () -> Void
-
-    @State private var hovering = false
-
-    var body: some View {
-        HStack(spacing: 7) {
-            Text(label)
-                .font(.sf(11.5, weight: selected ? .semibold : .regular))
-                .foregroundStyle(selected ? Tokens.text1 : Tokens.text2)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            Spacer(minLength: 6)
-            if tagged {
-                Text("CLI")
-                    .font(.sf(9, weight: .semibold))
-                    .tracking(0.4)
-                    .foregroundStyle(Tokens.text3)
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 1.5)
-                    .background(RoundedRectangle(cornerRadius: 4)
-                        .fill(.white.opacity(0.10)))
-            }
-        }
-        .padding(.horizontal, 8)
-        .frame(height: 25)
-        .background(RoundedRectangle(cornerRadius: 7)
-            .fill(selected ? .white.opacity(0.12) : hovering ? .white.opacity(0.05) : .clear))
-        .contentShape(RoundedRectangle(cornerRadius: 7))
-        .onHover { hovering = $0 }
-        .onTapGesture(perform: onTap)
-        .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
     }
 }
 
@@ -1107,7 +1092,9 @@ struct AgentModelPickerView: View {
     /// DEMANDED explicitly rather than `.frame(maxHeight:)`, because a flexible
     /// ScrollView inside an NSPopover just accepts whatever height the popover
     /// last proposed and clips.
-    private var listHeight: CGFloat { CGFloat(Self.listRows) * 27 - 2 }
+    private var listHeight: CGFloat {
+        CGFloat(Self.listRows) * MenuCard.rowStride - MenuCard.rowSpacing
+    }
 
     /// Whether the list actually outgrows the window and scrolls — the gate for
     /// the edge fades below.
@@ -1117,11 +1104,14 @@ struct AgentModelPickerView: View {
         VStack(alignment: .leading, spacing: 0) {
             ScrollViewReader { proxy in
                 ScrollView(showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 2) {
+                    VStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
                         // Only the armed engine's models — the other engine is one
                         // tap away in the bottom bar, so the rows stay bare names.
                         ForEach(engineChoices, id: \.self) { c in
-                            AgentModelRow(label: shortLabel(c), selected: isSelected(c)) {
+                            // The shared menu row, minus its own wash: the armed
+                            // highlight here is the single gliding shape below.
+                            MenuCardRow(title: shortLabel(c), emphasized: true,
+                                        selected: isSelected(c), wash: false) {
                                 // Menu semantics, same as the Ask recents menu: one
                                 // click picks the model AND closes — no lingering
                                 // card after the choice is made. Effort / engine
@@ -1140,23 +1130,29 @@ struct AgentModelPickerView: View {
                     // so the wash can never disagree with the rows' geometry.
                     .background(alignment: .topLeading) {
                         if let i = engineChoices.firstIndex(where: isSelected) {
-                            RoundedRectangle(cornerRadius: 7)
-                                .fill(.white.opacity(0.12))
-                                .frame(height: 25)
+                            Capsule(style: .continuous)
+                                .fill(.white.opacity(0.14))
+                                .frame(height: MenuCard.rowHeight)
                                 .frame(maxWidth: .infinity)
-                                .offset(y: CGFloat(i) * 27)
+                                .offset(y: CGFloat(i) * MenuCard.rowStride)
                                 .animation(Self.selectionSpring, value: i)
                         }
                     }
                     // Breathing room each fade falls across at either end of scroll.
-                    .padding(.top, overflowing ? 14 : 0)
-                    .padding(.bottom, overflowing ? 24 : 0)
+                    // The SAME at both ends, and only the card's own padding deep:
+                    // an asymmetric runway (it was 14 / 24) parked the first row a
+                    // third of a row lower than every other menu's first row while
+                    // leaving a hole above the divider — the card read as hung
+                    // wrong rather than as a list that scrolls.
+                    .padding(.vertical, overflowing ? MenuCard.cardPad : 0)
                 }
                 // The shared dissolve (`scrollEdgeFade`) at both overflow edges instead
                 // of a hard cut. Gated on actual overflow — a short engine list sizes
-                // to content, and fading it would dim real rows. A thin feather up top:
-                // the list is short, so the taper only swallows a row on its way out.
-                .scrollEdgeFade(top: overflowing, bottom: overflowing, topFade: 14, bottomFade: 24)
+                // to content, and fading it would dim real rows. The feather is the
+                // runway's depth, so a row is either standing in the window or on its
+                // way out through it — never half-dimmed at rest.
+                .scrollEdgeFade(top: overflowing, bottom: overflowing,
+                                topFade: MenuCard.cardPad, bottomFade: MenuCard.cardPad)
                 .frame(height: listHeight)
                 // Open centered on the current pick — with the fleet of models the
                 // armed one can sit below the fold, and a picker that opens blind to
@@ -1176,6 +1172,7 @@ struct AgentModelPickerView: View {
             }
 
             Rectangle().fill(.white.opacity(0.07)).frame(height: 0.5)
+                .padding(.horizontal, MenuCard.rowPad)
                 .padding(.vertical, 6)
 
             // One bottom bar, two things: the engine dropdown — the same GlassMenu
@@ -1200,8 +1197,8 @@ struct AgentModelPickerView: View {
                 EffortSlider(rungs: efforts, selected: selectedEffort, onSelect: onSelectEffort)
                     .frame(width: 92)
             }
-            .padding(.horizontal, 8)
-            .frame(height: 25)
+            .padding(.horizontal, 6)
+            .frame(height: MenuCard.rowHeight)
         }
         // Content width first, padding outside — sized bottom-up from what the
         // content actually needs (see `cardWidth`), never a top-down frame the
@@ -1209,7 +1206,7 @@ struct AgentModelPickerView: View {
         // placement, and the `presentationBackground` slab are all negotiated
         // from this size; a child spilling past it is what desynced the three.
         .frame(width: cardWidth)
-        .padding(8)
+        .padding(MenuCard.cardPad)
         .onAppear {
             syncMirrors()
             installKeyMonitor()
@@ -1293,45 +1290,6 @@ struct AgentModelPickerView: View {
         let cur = selectedEffort.flatMap { rungs.firstIndex(of: $0) } ?? -1
         let next = min(max(cur + delta, -1), rungs.count - 1)
         onSelectEffort(next < 0 ? nil : rungs[next])
-    }
-}
-
-/// One row of the ⌘⇧I card. Its own `View` so it owns its hover state. Deliberately
-/// spare: the armed row is just a soft wash + semibold — no rim, no checkmark — and a
-/// hovered row a fainter wash, so the card reads as text on glass, not a stack of
-/// controls. Bare names only — the engine identity lives in the bottom bar's switch.
-/// The armed wash is a single offset-driven shape behind the whole row stack (see
-/// `AgentModelPickerView`), so selection *glides* between rows instead of blinking.
-private struct AgentModelRow: View {
-    let label: String
-    let selected: Bool
-    let onTap: () -> Void
-
-    @State private var hovering = false
-
-    var body: some View {
-        HStack(spacing: 0) {
-            Text(label)
-                .font(.sf(11.5, weight: selected ? .semibold : .regular))
-                .foregroundStyle(selected ? Tokens.text1 : Tokens.text2)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            Spacer(minLength: 6)
-        }
-        .padding(.horizontal, 8)
-        .frame(height: 25)
-        // The hover wash is a CONSTANT shape whose fill changes — the row's
-        // view structure never varies with state. The armed wash isn't this
-        // row's business at all: it's the single gliding shape behind the
-        // whole stack (see the list's `.background` in `AgentModelPickerView`).
-        .background {
-            RoundedRectangle(cornerRadius: 7)
-                .fill(hovering && !selected ? .white.opacity(0.05) : .clear)
-        }
-        .contentShape(RoundedRectangle(cornerRadius: 7))
-        .onHover { hovering = $0 }
-        .onTapGesture(perform: onTap)
-        .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
     }
 }
 

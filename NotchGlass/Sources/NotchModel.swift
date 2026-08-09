@@ -680,9 +680,14 @@ final class NotchModel: ObservableObject {
             // A Tab override is scoped to the line it was pressed on. The field
             // emptying — submit cleared it, or the user deleted everything — ends
             // that line, so the next one starts back on auto-classification.
+            // A `/`-pinned prompt shortcut is scoped the same way.
             if manualPanelOverride != nil,
                text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 manualPanelOverride = nil
+            }
+            if promptShortcutMode != nil,
+               text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                promptShortcutMode = nil
             }
             // The `/` menu's highlight is scoped to the menu being open: every
             // edit that shuts it (a space, a submit, a delete-all) parks the
@@ -704,7 +709,15 @@ final class NotchModel: ObservableObject {
             // with a stale highlight would otherwise steal Enter from the visible
             // text (`historyConfirmHighlighted`) and pop the list back open,
             // highlight intact, the moment the box empties again.
-            if showHistory, hasText {
+            //
+            // The `/` command word is the one exception: it's a menu query, not a
+            // line being written, and the card floats in its OWN window over the
+            // panel — so folding the panel underneath it just makes the surface
+            // jump out from under the menu the user is reading. The menu owns
+            // ↑/↓/Enter while it's up (see `slashMenuStep` / `confirmSlashCommand`),
+            // so an open list behind it can't steal those keys; and the moment the
+            // query stops naming a mode ("/usr/local, …") this fires and folds.
+            if showHistory, hasText, !slashMenuOpen {
                 showHistory = false
                 highlightedHistoryIndex = nil
             }
@@ -1668,7 +1681,68 @@ final class NotchModel: ObservableObject {
         setAgentBucket(!agentComposeActive)
     }
 
+    // MARK: - Prompt shortcut naming
+
+    /// Give a ready prompt shortcut an AI-generated display name, if it doesn't
+    /// have one yet. Called when a prompt first settles into a ready row (the
+    /// Settings editor's save path and the chat-driven create path both funnel
+    /// here) — NOT while the user is still typing: a name is generated once per
+    /// prompt, silently, and never overwrites an existing one. `displayName`
+    /// falls back to the prompt meanwhile, so old shortcuts render fine even
+    /// before their naming pass completes.
+    ///
+    /// The name is written straight back into the persisted store (and broadcast
+    /// via `.promptShortcutsChanged`), so the `/` menu and the settings row both
+    /// pick it up without a relaunch. Runs detached — naming must never block a
+    /// keystroke or a submit — and tolerates every failure (no key, a dead
+    /// network, a stub service) by simply leaving the shortcut unnamed.
+    func ensurePromptShortcutName(_ shortcut: PromptShortcut) {
+        let instruction = shortcut.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !instruction.isEmpty,
+              shortcut.name?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
+        else { return }
+        let id = shortcut.id
+        Task { [weak self] in
+            guard let self else { return }
+            let name: String
+            do {
+                name = try await self.ai.complete(prompt: """
+                Give this prompt shortcut a short, single-phrase display name for a \
+                command menu. Reply with ONLY the name — no quotes, no prefix, no \
+                explanation, under 4 words. Prompt: \(instruction)
+                """)
+            } catch { return }
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\"“”'‘’"))
+            guard !trimmed.isEmpty else { return }
+            let capped = trimmed.count > 24 ? String(trimmed.prefix(24)) : trimmed
+            var shortcuts = PromptShortcutStore.current
+            guard let index = shortcuts.firstIndex(where: { $0.id == id }),
+                  shortcuts[index].name == nil else { return }
+            shortcuts[index].name = capped
+            PromptShortcutStore.save(shortcuts)
+            NotificationCenter.default.post(name: .promptShortcutsChanged, object: nil)
+        }
+    }
+
     // MARK: - The `/` command menu
+
+    /// One row of the `/` menu. The menu's original four rows are *modes* — a
+    /// `/` on the fresh prompt pins the next line's destination, exactly what the
+    /// pill and the Tab cycle already reach. A user-defined prompt shortcut is a
+    /// fifth kind of row with the same shape: pin it and Enter runs the input
+    /// through that shortcut's instruction — a named, switchable mode of its own.
+    enum SlashMatch: Identifiable {
+        case mode(SlashCommand)
+        case shortcut(PromptShortcut)
+
+        var id: String {
+            switch self {
+            case .mode(let command): return "mode." + command.rawValue
+            case .shortcut(let shortcut): return "shortcut." + shortcut.id.uuidString
+            }
+        }
+    }
 
     /// The four modes a `/` on the empty prompt can pin the next line to. The set
     /// the pill (Ask ⇄ Agent) and the Tab cycle (Ask → Note → Remind) already
@@ -1717,17 +1791,29 @@ final class NotchModel: ObservableObject {
         return !slashMatches.isEmpty
     }
 
-    /// The rows the current query leaves standing, always in the enum's declared
-    /// order so the list never reshuffles under the highlight as you type. A bare
-    /// `/` matches all of them. Agent is offered only when a local agent CLI is
-    /// actually installed — the same gate the bucket pill runs on.
-    var slashMatches: [SlashCommand] {
+    /// The rows the current query leaves standing: the four modes (in the enum's
+    /// declared order so the list never reshuffles under the highlight as you
+    /// type), then every *ready* prompt shortcut after them. A bare `/` matches
+    /// all of them. Agent is offered only when a local agent CLI is actually
+    /// installed — the same gate the bucket pill runs on. Prompt shortcuts are
+    /// their own named modes: they match on their name and their prompt, so a
+    /// Chinese name is `/`-addressable exactly like a localized mode title.
+    var slashMatches: [SlashMatch] {
         let query = text.hasPrefix("/") ? String(text.dropFirst()).lowercased() : ""
-        return SlashCommand.allCases.filter { command in
-            guard command != .agent || agentAvailable else { return false }
-            guard !query.isEmpty else { return true }
-            return command.keywords.contains { $0.hasPrefix(query) }
+        let modes: [SlashMatch] = SlashCommand.allCases.compactMap { command in
+            guard command != .agent || agentAvailable else { return nil }
+            guard !query.isEmpty || command.keywords.contains(where: { $0.hasPrefix(query) })
+            else { return nil }
+            return .mode(command)
         }
+        let shortcuts: [SlashMatch] = PromptShortcutStore.current.compactMap { shortcut in
+            guard shortcut.isReady else { return nil }
+            guard !query.isEmpty
+                  || shortcut.name?.lowercased().hasPrefix(query) == true
+                  || shortcut.prompt.lowercased().hasPrefix(query) else { return nil }
+            return .shortcut(shortcut)
+        }
+        return modes + shortcuts
     }
 
     /// ↓ / ↑ inside the menu, wrapping at both ends so the rows are a ring.
@@ -1759,38 +1845,60 @@ final class NotchModel: ObservableObject {
         return true
     }
 
-    /// Land on a mode. Clear the command word FIRST (the field is now empty and
+    /// A prompt shortcut pinned as the current line's mode. When set, Enter on
+    /// the idle prompt runs the input through that shortcut's instruction instead
+    /// of the ordinary Ask/Note/Remind routing — the shortcut behaves as a named,
+    /// switchable mode. Scope mirrors `manualPanelOverride`: it lifts the moment
+    /// the field empties (submit, delete-all, close), so every fresh line starts
+    /// on the classifier again.
+    @Published var promptShortcutMode: PromptShortcut? = nil
+
+    /// Land on a row. Clear the command word FIRST (the field is now empty and
     /// ready for the real line), then pin where Enter will send it — that order
     /// matters, since emptying the field is exactly what clears
-    /// `manualPanelOverride`. The pin then behaves like a Tab override that was
-    /// pressed a keystroke early: it holds through the whole line and lifts on
-    /// submit. Note/Remind announce themselves through the prompt's placeholder
-    /// until there's text for the inline ghost to trail; Agent flips the pill.
-    func applySlashCommand(_ command: SlashCommand) {
+    /// `manualPanelOverride` and `promptShortcutMode`. The pin then behaves like
+    /// a Tab override that was pressed a keystroke early: it holds through the
+    /// whole line and lifts on submit. Note/Remind announce themselves through
+    /// the prompt's placeholder until there's text for the inline ghost to trail;
+    /// Agent flips the pill; a prompt shortcut names itself in the hint.
+    func applySlashCommand(_ match: SlashMatch) {
         text = ""
         slashHighlight = 0
-        switch command {
-        case .ask:
+        switch match {
+        case .mode(let command):
+            switch command {
+            case .ask:
+                setAgentBucket(false)
+                promptShortcutMode = nil
+                manualPanelOverride = nil
+            case .note:
+                setAgentBucket(false)
+                promptShortcutMode = nil
+                manualPanelOverride = .note
+            case .remind:
+                setAgentBucket(false)
+                promptShortcutMode = nil
+                manualPanelOverride = .reminder
+            case .agent:
+                promptShortcutMode = nil
+                manualPanelOverride = nil
+                setAgentBucket(true)
+            }
+        case .shortcut(let shortcut):
             setAgentBucket(false)
             manualPanelOverride = nil
-        case .note:
-            setAgentBucket(false)
-            manualPanelOverride = .note
-        case .remind:
-            setAgentBucket(false)
-            manualPanelOverride = .reminder
-        case .agent:
-            manualPanelOverride = nil
-            setAgentBucket(true)
+            promptShortcutMode = shortcut
         }
     }
 
     /// The idle prompt's placeholder key. A mode pinned by `/` (or by Tab on a
     /// line since deleted) has nothing else to show on an empty field — the
     /// inline ghost only exists beside typed glyphs — so the placeholder carries
-    /// it: "Write a note…", "Remind me to…". Agent compose keeps its own.
+    /// it: "Write a note…", "Remind me to…". A pinned prompt shortcut shows its
+    /// name in place of the key. Agent compose keeps its own.
     var idlePlaceholderKey: String {
         if agentComposeActive { return "agent.placeholder" }
+        if let shortcut = promptShortcutMode { return shortcut.displayName }
         switch manualPanelOverride {
         case .note:     return "note.placeholder"
         case .reminder: return "remind.placeholder"
@@ -2241,6 +2349,10 @@ final class NotchModel: ObservableObject {
                 }
                 PromptShortcutStore.save(list)
                 NotificationCenter.default.post(name: .promptShortcutsChanged, object: nil)
+                // A freshly-settled prompt (created or edited here, or in Settings)
+                // earns its AI display name once — `ensurePromptShortcutName` only
+                // writes when a name is still missing.
+                if binding.isReady { ensurePromptShortcutName(binding) }
             case .promptShortcutRemoval(let id):
                 var list = PromptShortcutStore.current
                 list.removeAll { $0.id == id }
@@ -4256,7 +4368,14 @@ final class NotchModel: ObservableObject {
         // The user pinned this answer: leaving is no longer a fold signal. Drop any
         // watch that was already armed (a leave-during-typing may have scheduled
         // one before the pin) so it can't fire behind the pin's back.
-        if isAnswerPinned || isModelPickerOpen || isFolderPickerOpen || detachDrag != nil {
+        //
+        // The open `/` menu joins the pickers here for the same reason: its card
+        // hangs BELOW the island in its own window, so reaching down to the lower
+        // rows reads as "left the island" and would fold the panel out from under
+        // the menu being read. Ordinary leave-folding resumes the moment the menu
+        // is gone (a picked row, a keystroke past the command word, Esc).
+        if isAnswerPinned || isModelPickerOpen || isFolderPickerOpen
+            || slashMenuOpen || detachDrag != nil {
             cancelLeaveWatch()
             return
         }
@@ -4309,7 +4428,9 @@ final class NotchModel: ObservableObject {
     private func recheckLeaveWatch() {
         guard let watch = leaveWatch else { return }
         guard open else { leaveWatch = nil; return }
-        if isAnswerPinned || isModelPickerOpen || isFolderPickerOpen { cancelLeaveWatch(); return }
+        if isAnswerPinned || isModelPickerOpen || isFolderPickerOpen || slashMenuOpen {
+            cancelLeaveWatch(); return
+        }
         // Parked back over (or still over) the island: nothing to fold, but keep
         // watching — AppKit's tracking state may be desynced, so the exit that
         // would restart this conversation might never arrive.
@@ -4537,6 +4658,23 @@ final class NotchModel: ObservableObject {
         // An active agent compose sends the line to the agent CLI, not the
         // chat model — regardless of what the classifier reads.
         if agentComposeActive { submitAgent(); return }
+        // A `/`-pinned prompt shortcut acts as the line's mode: wrap the input
+        // in that shortcut's instruction and ask — the same intent the chord
+        // path fires with captured selection, just against what was typed.
+        if let shortcut = promptShortcutMode {
+            let instruction = shortcut.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !instruction.isEmpty else { return }
+            text = """
+            \(instruction)
+
+            <selected_text>
+            \(text)
+            </selected_text>
+            """
+            promptShortcutMode = nil
+            submit()
+            return
+        }
         switch effectiveSubmitPanel {
         case .chat:     submit()
         case .note:

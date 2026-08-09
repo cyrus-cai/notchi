@@ -416,7 +416,7 @@ struct NotchBody: View {
 
                 // The recent list expands below the prompt once the clock is tapped.
                 // (The immersive variant above handles the overflowing case.)
-                if !model.hasText && recentHasContent && model.showHistory {
+                if !promptHidesRecent && recentHasContent && model.showHistory {
                     historySection
                         .padding(.top, 12)
                         .transition(moduleTransition)
@@ -494,7 +494,7 @@ struct NotchBody: View {
     /// clear that taller header — so the frosted immersive surface stays consistent
     /// whether or not a preview is present.
     private var useImmersiveHistory: Bool {
-        !model.hasText
+        !promptHidesRecent
             && model.showHistory
             && noteFeedbackContent == nil
             && model.recentVisible.count > 6
@@ -512,7 +512,16 @@ struct NotchBody: View {
     /// immersive variant). The Ask|Agent bucket pill hides in this state — an
     /// expanded Recent view shouldn't also carry the compose-family switch.
     private var recentListShown: Bool {
-        !model.hasText && recentHasContent && model.showHistory
+        !promptHidesRecent && recentHasContent && model.showHistory
+    }
+
+    /// Does what's in the box displace the Recent list? Any ordinary line does —
+    /// but the `/` command word doesn't: it's a query for the menu card floating
+    /// over the panel, so the panel behind holds its shape instead of collapsing
+    /// out from under the card the moment `/` is typed. (Mirrored in
+    /// `text.didSet`, which likewise leaves `showHistory` alone for that one case.)
+    private var promptHidesRecent: Bool {
+        model.hasText && !model.slashMenuOpen
     }
 
     // MARK: - Immersive history
@@ -901,29 +910,32 @@ struct NotchBody: View {
             }
         }, icon: { EmptyView() })
         .fixedSize()
-        // Settle-gated like the body-hung pickers: a pick changes the chip's
-        // title, the chip resizes, and a bare NSPopover would stay pinned to
-        // where the chip *was* — the gate re-glues it to the moved chip.
-        .modifier(SettledPopover(isPresented: $model.showAskModelPicker) {
-            AskRecentModelPickerView(
-                rows: askRecentModelRows,
-                selectedProvider: selectedProvider,
-                selectedModelID: selectedModelID,
-                onSelect: { row in
-                    ModelCatalogStore.select(provider: row.provider, model: row.id)
-                },
-                // "More models…" hands off to Settings' Model pane — the full
-                // cross-provider catalog the recents menu deliberately doesn't carry.
-                onMoreModels: {
-                    model.settingsSection = "Model"
-                    withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
-                        model.openSettings()
-                    }
-                },
-                onDone: { model.showAskModelPicker = false })
-                .preferredColorScheme(.dark)
-                .modifier(GlassPopoverBackground(cornerRadius: 14, veilOpacity: 0, glassTint: 0.14))
-        })
+        // Hung in its own clear panel, exactly like the `/` card — the chip's
+        // screen rect is re-read on every layout pass, so a pick that re-titles
+        // (and resizes) the chip carries the card with it instead of stranding it.
+        .modifier(MenuCardWindow(
+            open: model.showAskModelPicker,
+            onDismiss: { _ in model.showAskModelPicker = false },
+            card: {
+                AnyView(AskRecentModelPickerView(
+                    rows: askRecentModelRows,
+                    selectedProvider: selectedProvider,
+                    selectedModelID: selectedModelID,
+                    onSelect: { row in
+                        ModelCatalogStore.select(provider: row.provider, model: row.id)
+                    },
+                    // "More models…" hands off to Settings' Model pane — the full
+                    // cross-provider catalog the recents menu deliberately doesn't carry.
+                    onMoreModels: {
+                        model.settingsSection = "Model"
+                        withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                            model.openSettings()
+                        }
+                    },
+                    onDone: { model.showAskModelPicker = false })
+                    .preferredColorScheme(.dark)
+                    .menuCardBackground())
+            }))
     }
 
     /// The rows the Ask chip's quick menu shows: the selection in effect first, then
@@ -999,18 +1011,20 @@ struct NotchBody: View {
                 }
             }, icon: { EmptyView() })
             .fixedSize()
-            // Same settle-gated, chip-hung popover as the model menus — a pick
-            // resizes the chip, and the gate re-glues the tail to where it lands.
-            .modifier(SettledPopover(isPresented: $model.showAgentFolderPicker) {
-                AgentFolderPickerView(
-                    folders: agentFolderRows,
-                    selected: model.agentComposeFolder,
-                    onSelect: { model.selectAgentFolder($0) },
-                    onBrowse: { model.pickAgentFolder() },
-                    onDone: { model.showAgentFolderPicker = false })
-                    .preferredColorScheme(.dark)
-                    .modifier(GlassPopoverBackground(cornerRadius: 14, veilOpacity: 0, glassTint: 0.14))
-            })
+            // Same chip-hung card as the model menus, in its own clear panel.
+            .modifier(MenuCardWindow(
+                open: model.showAgentFolderPicker,
+                onDismiss: { _ in model.showAgentFolderPicker = false },
+                card: {
+                    AnyView(AgentFolderPickerView(
+                        folders: agentFolderRows,
+                        selected: model.agentComposeFolder,
+                        onSelect: { model.selectAgentFolder($0) },
+                        onBrowse: { model.pickAgentFolder() },
+                        onDone: { model.showAgentFolderPicker = false })
+                        .preferredColorScheme(.dark)
+                        .menuCardBackground())
+                }))
 
             // Model + reasoning effort read as ONE chip — "Claude Opus xhigh".
             // Clicking it opens the same model+effort quick picker ⌘⇧I summons,
@@ -1028,47 +1042,47 @@ struct NotchBody: View {
             // The card hangs off a 1pt probe pinned under the chip's centre —
             // a point, not the chip's own frame. Same place the card has always
             // opened (bottom edge, centred), but re-titling the chip can't drag
-            // it sideways or trip `SettledPopover`'s re-glue, which would blink
-            // the card shut and open mid-pick. Placed with `.position` (a real
-            // layout placement the popover's anchor rect follows) — `.offset`
-            // is a render-time transform the anchor ignores, which lands the
-            // card at the chip's leading edge instead. In the background, so
-            // the chip's own button keeps every click. The settle gate still
-            // earns its keep for the island moving underneath (⌘⇧I mid-spring).
+            // it sideways mid-pick. Placed with `.position` (a real layout
+            // placement, which is what the probe reports as its screen rect) —
+            // `.offset` is a render-time transform the probe's own frame ignores,
+            // which would land the card at the chip's leading edge instead. In
+            // the background, so the chip's own button keeps every click.
             .background {
                 GeometryReader { g in
                     Color.clear
                         .frame(width: 1, height: 1)
-                        .modifier(SettledPopover(isPresented: $model.showAgentPicker) {
-                            AgentModelPickerView(
-                                choices: AgentEngine.available.flatMap(\.modelChoices),
-                                selectedEngine: model.agentArmedEngine,
-                                selectedModelID: model.agentModelID,
-                                selectedEffort: model.agentEffort,
-                                onSelectModel: { choice in
-                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                                        model.selectAgentModel(choice)
-                                    }
-                                },
-                                // Same spring as the model pick, so the chip's title
-                                // (and width) catches the new effort as a glide
-                                // rather than a jump.
-                                onSelectEffort: { effort in
-                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                                        model.agentEffort = effort
-                                    }
-                                },
-                                onDone: { model.showAgentPicker = false })
-                                // Resolve the Claude aliases to concrete model names ("opus" →
-                                // "Claude Opus 4.8") so the rows can say what they actually run;
-                                // cached + TTL'd, so this is usually a no-op, and the labels fill
-                                // in reactively when a real probe lands.
-                                .task { catalog.resolveClaudeAliases() }
-                                .preferredColorScheme(.dark)
-                                // A thinner veil than the standard popover — this card reads as
-                                // transparent Liquid Glass, the wallpaper refracting through it.
-                                .modifier(GlassPopoverBackground(cornerRadius: 14, veilOpacity: 0, glassTint: 0.14))
-                        })
+                        .modifier(MenuCardWindow(
+                            open: model.showAgentPicker,
+                            centered: true,
+                            onDismiss: { _ in model.showAgentPicker = false },
+                            card: {
+                                AnyView(AgentModelPickerView(
+                                    choices: AgentEngine.available.flatMap(\.modelChoices),
+                                    selectedEngine: model.agentArmedEngine,
+                                    selectedModelID: model.agentModelID,
+                                    selectedEffort: model.agentEffort,
+                                    onSelectModel: { choice in
+                                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                            model.selectAgentModel(choice)
+                                        }
+                                    },
+                                    // Same spring as the model pick, so the chip's title
+                                    // (and width) catches the new effort as a glide
+                                    // rather than a jump.
+                                    onSelectEffort: { effort in
+                                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                            model.agentEffort = effort
+                                        }
+                                    },
+                                    onDone: { model.showAgentPicker = false })
+                                    // Resolve the Claude aliases to concrete model names ("opus" →
+                                    // "Claude Opus 4.8") so the rows can say what they actually run;
+                                    // cached + TTL'd, so this is usually a no-op, and the labels fill
+                                    // in reactively when a real probe lands.
+                                    .task { catalog.resolveClaudeAliases() }
+                                    .preferredColorScheme(.dark)
+                                    .menuCardBackground())
+                            }))
                         // The chip's bottom-centre — where the card has always
                         // hung from — held at the width the chip had when it opened.
                         .position(x: agentChipAnchorX ?? g.size.width / 2,
@@ -3128,6 +3142,14 @@ struct NotchBody: View {
     /// The idle row at rest: a one-line prompt in a 48pt row. As the box grows the
     /// row keeps exactly that breathing room above and below.
     static let idleRowHeight: CGFloat = 48
+    /// The one curve a prompt wrap moves on — box, the chrome below it, and the
+    /// island's shell/glass/clip, all from the single `withAnimation` in
+    /// `onHeightChange`. Noticeably quicker than the panel's module spring (0.42):
+    /// a wrap fires mid-keystroke and more characters are already landing, so a
+    /// long, soft settle reads as the panel breathing a beat behind your typing.
+    /// High damping because this must never overshoot — an undershoot would clip a
+    /// line of text that is already on screen.
+    static let promptGrowth: Animation = .spring(response: 0.22, dampingFraction: 0.9)
     private var idleRowVerticalPadding: CGFloat {
         NotchBody.idleRowHeight - PromptField.lineHeight(for: NotchBody.idleFontSize)
     }
@@ -3249,7 +3271,26 @@ struct NotchBody: View {
                     onCaretWidth: followUp ? { _ in } : { caretWidth = $0 },
                     // The box's own height — one line, or as many as the text has
                     // wrapped to (capped). The row is built around it.
-                    onHeightChange: followUp ? { _ in } : { inputHeight = $0 }
+                    //
+                    // The write is wrapped in an explicit transaction, and that is
+                    // load-bearing: it arrives from an AppKit callback (the field's
+                    // layout report), which carries no transaction of its own, so
+                    // SwiftUI treats the resulting layout as un-animated and every
+                    // view that MOVES because the row got taller — the bucket row
+                    // under it, the island's frame, its glass background and its
+                    // clip shape — hard-cuts a full line's height in a single frame.
+                    // (Measured off a screen recording: 37pt in one frame, zero
+                    // intermediate frames, while the text inside the box eased —
+                    // the two halves of one growth on two different clocks, which is
+                    // exactly what read as the panel jumping mid-typing.) Scoped
+                    // `.animation(…, value:)` modifiers can't rescue that, on the row
+                    // or on the island: they pick the curve for a change SwiftUI has
+                    // already decided to animate, they don't turn a snap into one.
+                    // Owning the transaction here does, for the whole tree at once.
+                    onHeightChange: followUp ? { _ in } : { h in
+                        guard h != inputHeight else { return }
+                        withAnimation(NotchBody.promptGrowth) { inputHeight = h }
+                    }
                 )
                 .frame(height: followUp ? nil : inputHeight)
                 // No trailing ghost, and so no reserved strip beside the text: the
@@ -3320,12 +3361,25 @@ struct NotchBody: View {
         // downward instead of the text scrolling away sideways.
         .frame(height: followUp ? 30 : max(NotchBody.idleRowHeight, inputHeight + idleRowVerticalPadding))
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: model.hasText)
-        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: inputHeight)
+        // No `.animation(…, value: inputHeight)` here on purpose. It only ever
+        // sprang THIS row while its siblings and the glass shell around it snapped,
+        // which is the desync itself. `onHeightChange` now owns the whole growth in
+        // one `withAnimation` — see `promptGrowth`.
         // The `/` menu's anchor: a zero-cost probe that reports THIS row's screen
         // rect and hangs the menu's own window under it. Nothing about the row (or
         // anything else in the panel) changes when the menu is up — see
-        // `SlashMenuHost`.
-        .background(SlashMenuHost(model: model, open: !followUp && model.slashMenuOpen))
+        // `MenuCardWindow`.
+        .modifier(MenuCardWindow(
+            open: !followUp && model.slashMenuOpen,
+            // Clicking away is Esc's exit — the command word goes with the menu.
+            // A click in another app also re-arms the ordinary leave-fold
+            // (`collapseOnLeave` sits out while the menu is up), the same
+            // re-check un-pinning an answer runs.
+            onDismiss: { insideApp in
+                _ = model.dismissSlashMenu()
+                if !insideApp { model.collapseOnLeave(from: model.activeDisplay) }
+            },
+            card: { AnyView(SlashCommandMenu(model: model).menuCardBackground()) }))
     }
 
     /// The first-launch-after-update cue: a "what's new" chip on the bucket row's
@@ -3887,8 +3941,10 @@ struct IdleTrailingCluster: View {
     /// alone and shrinks to a single round segment.
     var showsRecent: Bool
     /// How many agent runs are live. Non-zero swaps the round chevron for a
-    /// "N running ⌄" capsule — the live count rides the disclosure itself instead
-    /// of a standalone status strip below the prompt.
+    /// "N running ⌄" capsule *while the list is closed* — the live count rides the
+    /// disclosure itself instead of a standalone status strip below the prompt.
+    /// With Recent open the count is redundant (the runs head the list), so the
+    /// chevron comes back plain.
     var runningCount: Int = 0
     var togglePin: () -> Void
     var toggleRecent: () -> Void
@@ -3922,10 +3978,13 @@ struct IdleTrailingCluster: View {
             // Live runs fold their count into the disclosure — "N running ⌄" — so
             // the resting panel stays at its input while a background agent works;
             // the standalone status strip stays hidden until nothing's running.
-            if runningCount > 0 {
+            // Once the list IS open the count has served its purpose — the runs are
+            // right there at the top of it, with their own status dots — so the
+            // capsule collapses back to the plain chevron that closes the list.
+            if runningCount > 0 && !recentOpen {
                 runningRecentChip
                     .transition(.scale(scale: 0.7).combined(with: .opacity))
-            } else if showsRecent {
+            } else if showsRecent || recentOpen {
                 segment(.recent, engaged: recentOpen, action: toggleRecent,
                         tooltip: L("recent.recent")) {
                     // A downward chevron reads as "pull the recent list down"; it flips
@@ -3935,11 +3994,13 @@ struct IdleTrailingCluster: View {
                         .rotationEffect(.degrees(recentOpen ? 180 : 0))
                         .animation(.spring(response: 0.32, dampingFraction: 0.8), value: recentOpen)
                 }
+                .transition(.scale(scale: 0.7).combined(with: .opacity))
             }
         }
         .animation(.spring(response: 0.34, dampingFraction: 0.82), value: showsRecent)
         .animation(.spring(response: 0.34, dampingFraction: 0.82), value: pinned)
         .animation(.spring(response: 0.34, dampingFraction: 0.82), value: runningCount)
+        .animation(.spring(response: 0.34, dampingFraction: 0.82), value: recentOpen)
     }
 
     /// The disclosure while runs are live: the same glass, stretched to a capsule
@@ -4337,70 +4398,103 @@ struct AgentComposeMenuChip<Icon: View, Items: View>: View {
     }
 }
 
-/// Hangs the `/` menu under the prompt in a window of its OWN — the reason the
-/// menu is a true overlay instead of another block in the panel's stack.
+/// Hangs a menu card under the view it is attached to, in a window of its OWN —
+/// the reason these menus are true overlays instead of another block in the
+/// panel's stack, and the reason their glass looks like the island's.
 ///
-/// This is a zero-size probe dropped in the input row's `.background`. It takes no
-/// space, so nothing in the panel moves when the menu opens; it reports the row's
-/// SCREEN rect (from its own `NSView`, so it stays right through island re-layouts
-/// and display switches); and it parents a borderless child panel to the island's
-/// window, hung just under that rect. Being a separate window is what lets the card
-/// overhang the island's edge and spill onto the desktop — inside the SwiftUI tree
-/// it would be clipped by the glass form and would push the panel taller.
+/// This is a zero-size probe dropped in an anchor's `.background`. It takes no
+/// space, so nothing moves when the menu opens; it reports the anchor's SCREEN
+/// rect (from its own `NSView`, so it stays right through island re-layouts and
+/// display switches); and it parents a borderless child panel to the island's
+/// window, hung just under that rect. Being a separate window is what lets the
+/// card overhang the island's edge and spill onto the desktop — inside the
+/// SwiftUI tree it would be clipped by the glass form and would push the panel
+/// taller.
 ///
-/// The child panel deliberately **cannot become key** (`SlashMenuPanel`), so
+/// It is also the only way these cards can wear the *same* glass. An `NSPopover`
+/// hosts its content in a window of the system's own making: `nativeGlass` has no
+/// transparent backdrop to refract there, so the card renders as the veil alone —
+/// a flat, opaque slab — while the identical recipe over a clear panel reads as
+/// glass. One presentation, one look.
+///
+/// The child panel deliberately **cannot become key** (`MenuCardPanel`), so
 /// clicking a row never pulls first-responder off the prompt field — you can keep
-/// typing to filter with the pointer sitting on the card. It closes itself when the
-/// menu shuts, when the probe leaves the tree (panel folded, thread opened), and
-/// when its host window goes away.
-private struct SlashMenuHost: NSViewRepresentable {
-    let model: NotchModel
+/// typing to filter with the pointer sitting on the card. It closes itself when
+/// the menu shuts, when the probe leaves the tree (panel folded, thread opened),
+/// and when its host window goes away.
+private struct MenuCardWindow: ViewModifier {
     let open: Bool
+    /// Hang the card from the anchor's leading edge (a prompt row, a chip) or
+    /// centred on it (the 1pt probe the agent card hangs from).
+    var centered: Bool = false
+    /// A click that isn't part of using the menu — in another app (`insideApp`
+    /// false) or anywhere in ours but the card and the anchor.
+    let onDismiss: (_ insideApp: Bool) -> Void
+    @ViewBuilder var card: () -> AnyView
 
-    func makeNSView(context: Context) -> NSView { SlashMenuAnchorView() }
-
-    func updateNSView(_ view: NSView, context: Context) {
-        (view as? SlashMenuAnchorView)?.apply(model: model, open: open)
-    }
-
-    static func dismantleNSView(_ view: NSView, coordinator: ()) {
-        (view as? SlashMenuAnchorView)?.closeMenu()
+    func body(content: Content) -> some View {
+        content.background(
+            MenuCardHost(open: open, centered: centered, onDismiss: onDismiss, card: card())
+        )
     }
 }
 
-/// A borderless panel that never takes key focus — the menu's window. Everything
-/// it hosts is pointer-driven; the keyboard stays with the prompt field that the
-/// user is typing the command into.
-private final class SlashMenuPanel: NSPanel {
+private struct MenuCardHost: NSViewRepresentable {
+    let open: Bool
+    let centered: Bool
+    let onDismiss: (Bool) -> Void
+    let card: AnyView
+
+    func makeNSView(context: Context) -> NSView { MenuCardAnchorView() }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        (view as? MenuCardAnchorView)?.apply(card: card, open: open,
+                                             centered: centered, onDismiss: onDismiss)
+    }
+
+    static func dismantleNSView(_ view: NSView, coordinator: ()) {
+        (view as? MenuCardAnchorView)?.closeMenu()
+    }
+}
+
+/// A borderless panel that never takes key focus — a menu card's window.
+/// Everything it hosts is pointer-driven; the keyboard stays with the panel the
+/// menu was summoned from.
+private final class MenuCardPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 }
 
 /// The probe view: measures, positions, and owns the menu's panel.
-private final class SlashMenuAnchorView: NSView {
-    /// Air between the input row's bottom edge and the card's top.
+private final class MenuCardAnchorView: NSView {
+    /// Air between the anchor's bottom edge and the card's top.
     private static let gap: CGFloat = 6
     /// Transparent margin inside the window, around the card — the card draws its
     /// own two shadows in SwiftUI, and a window sized flush to the card would clip
     /// them off. Also the slack the position math has to add back.
     private static let shadowMargin: CGFloat = 28
 
-    private var panel: SlashMenuPanel?
+    private var panel: MenuCardPanel?
     private var hosting: NSHostingView<AnyView>?
     private var isOpen = false
+    private var centered = false
+    /// What a click outside the card reports to — see `installDismissMonitors`.
+    private var onDismiss: ((Bool) -> Void)?
+    private var clickMonitors: [Any] = []
 
-    func apply(model: NotchModel, open: Bool) {
+    func apply(card: AnyView, open: Bool, centered: Bool,
+               onDismiss: @escaping (Bool) -> Void) {
+        self.onDismiss = onDismiss
+        self.centered = centered
         guard open else {
             closeMenu()
             return
         }
-        let card = AnyView(
-            SlashCommandMenu(model: model).padding(Self.shadowMargin)
-        )
+        let padded = AnyView(card.padding(Self.shadowMargin))
         if let hosting {
-            hosting.rootView = card
+            hosting.rootView = padded
         } else {
-            openMenu(with: card)
+            openMenu(with: padded)
         }
         reposition()
     }
@@ -4408,7 +4502,7 @@ private final class SlashMenuAnchorView: NSView {
     private func openMenu(with card: AnyView) {
         guard let host = window else { return }
         let hosting = NSHostingView(rootView: card)
-        let panel = SlashMenuPanel(
+        let panel = MenuCardPanel(
             contentRect: NSRect(origin: .zero, size: hosting.fittingSize),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
@@ -4434,6 +4528,7 @@ private final class SlashMenuAnchorView: NSView {
         self.panel = panel
         self.hosting = hosting
         self.isOpen = true
+        installDismissMonitors()
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.12
             panel.animator().alphaValue = 1
@@ -4441,6 +4536,7 @@ private final class SlashMenuAnchorView: NSView {
     }
 
     func closeMenu() {
+        removeDismissMonitors()
         guard let panel else { return }
         self.panel = nil
         self.hosting = nil
@@ -4449,22 +4545,71 @@ private final class SlashMenuAnchorView: NSView {
         panel.orderOut(nil)
     }
 
-    /// Park the card just under the input row, left edges flush. Runs on every
-    /// apply and on every layout pass, so a growing prompt box (or the island
-    /// re-laying out under it) carries the card with it instead of leaving it
-    /// stranded mid-panel.
+    // MARK: - Click-away
+
+    /// A click anywhere but the card takes the menu down — the one thing an
+    /// `NSMenu` gives for free and a hand-built floating card does not. The panel
+    /// can't become key (that's what keeps the caret in the prompt), so no
+    /// resign-key event ever arrives to close it; watching the mouse is the way.
+    /// Two monitors: `global` for clicks in other apps and on the desktop, `local`
+    /// for clicks inside our own windows.
+    private func installDismissMonitors() {
+        guard clickMonitors.isEmpty else { return }
+        let clicks: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        if let global = NSEvent.addGlobalMonitorForEvents(matching: clicks, handler: { [weak self] event in
+            self?.dismiss(on: event, insideApp: false)
+        }) {
+            clickMonitors.append(global)
+        }
+        if let local = NSEvent.addLocalMonitorForEvents(matching: clicks, handler: { [weak self] event in
+            self?.dismiss(on: event, insideApp: true)
+            return event
+        }) {
+            clickMonitors.append(local)
+        }
+    }
+
+    private func removeDismissMonitors() {
+        clickMonitors.forEach(NSEvent.removeMonitor)
+        clickMonitors.removeAll()
+    }
+
+    /// Take the menu down for a click that isn't part of using it. Two clicks are
+    /// NOT that: one on the card (a row is being picked — it must land first, and
+    /// closing here would pull the row out from under it), and one on the anchor
+    /// this probe measures (the chip that opened the menu, or the prompt row whose
+    /// command word the user is editing — dismissing there would wipe what they
+    /// are mid-way through fixing).
+    private func dismiss(on event: NSEvent, insideApp: Bool) {
+        guard isOpen, let onDismiss else { return }
+        if insideApp {
+            if event.window === panel { return }
+            if event.window === window,
+               bounds.contains(convert(event.locationInWindow, from: nil)) { return }
+        }
+        onDismiss(insideApp)
+    }
+
+    /// Park the card just under the anchor, left edges flush (or centred on it).
+    /// Runs on every apply and on every layout pass, so a growing prompt box (or
+    /// the island re-laying out under it) carries the card with it instead of
+    /// leaving it stranded mid-panel.
     private func reposition() {
         guard let panel, let hosting, let host = window else { return }
         let size = hosting.fittingSize
         let anchor = host.convertToScreen(convert(bounds, to: nil))
         let margin = Self.shadowMargin
         var origin = CGPoint(
-            x: anchor.minX - margin,
+            x: (centered ? anchor.midX - (size.width - margin * 2) / 2 : anchor.minX) - margin,
             y: anchor.minY - Self.gap - size.height + margin
         )
         // Never let it walk off the bottom of the display it's on.
         if let visible = (host.screen ?? NSScreen.main)?.visibleFrame {
             origin.y = max(origin.y, visible.minY + 8 - margin)
+            // Nor off either side — a chip near the island's edge would otherwise
+            // hang its card half off the screen.
+            origin.x = min(max(origin.x, visible.minX + 8 - margin),
+                           visible.maxX - size.width + margin - 8)
         }
         panel.setFrame(NSRect(origin: origin, size: size), display: true)
     }
@@ -4503,116 +4648,55 @@ private final class SlashMenuAnchorView: NSView {
 private struct SlashCommandMenu: View {
     @ObservedObject var model: NotchModel
 
-    /// The card's padding around the rows, and each row's around its word — shared
-    /// with the width arithmetic below so the two can't drift.
-    static let cardPad: CGFloat = 5
-    static let rowPad: CGFloat = 9
-    static let fontSize: CGFloat = 13
+    /// The chord that runs a row, when it has one. Only prompt shortcuts do — a
+    /// `/` destination is a mode, not a globally bound key. Its name and its chord
+    /// sit side by side (the card widens to fit both) rather than the chord
+    /// truncating the name under it.
+    static func chord(for match: NotchModel.SlashMatch) -> String? {
+        guard case .shortcut(let shortcut) = match else { return nil }
+        return shortcut.shortcut?.displayString
+    }
 
-    /// The card's width: the widest destination word (measured in the very font
-    /// SwiftUI will draw it in — `Font.sf` IS the system face, the same trick
-    /// `BucketWord.labelWidth` uses) plus both paddings. Plain arithmetic instead
-    /// of a geometry read, so the card is right on its first frame.
+    private static func title(for match: NotchModel.SlashMatch) -> String {
+        switch match {
+        case .mode(let command): return command.title
+        case .shortcut(let shortcut): return shortcut.displayName
+        }
+    }
+
+    /// Measured off ALL the rows the menu can ever hold — every mode plus every
+    /// ready prompt shortcut, not just the ones currently matching — so the card
+    /// holds still as the list filters down instead of breathing in and out per
+    /// keystroke.
     static var cardWidth: CGFloat {
-        let font = NSFont.systemFont(ofSize: fontSize, weight: .medium)
-        let widest = NotchModel.SlashCommand.allCases
-            .map { NSAttributedString(string: $0.title, attributes: [.font: font]).size().width }
-            .max() ?? 0
-        return ceil(widest) + (rowPad + cardPad) * 2
+        let modes = NotchModel.SlashCommand.allCases.map { ($0.title, String?.none) }
+        let shortcuts = PromptShortcutStore.current.filter(\.isReady)
+            .map { ($0.displayName, $0.shortcut?.displayString) }
+        return MenuCard.width(titles: modes + shortcuts)
     }
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
-        return VStack(alignment: .leading, spacing: 1) {
-            ForEach(Array(model.slashMatches.enumerated()), id: \.element.id) { index, command in
-                SlashCommandRow(
-                    command: command,
+        VStack(alignment: .leading, spacing: 1) {
+            ForEach(Array(model.slashMatches.enumerated()), id: \.element.id) { index, match in
+                MenuCardRow(
+                    title: Self.title(for: match),
+                    accessory: Self.chord(for: match),
                     selected: index == model.slashHighlight,
-                    hover: { model.slashHighlight = index },
+                    onHoverIn: { model.slashHighlight = index },
                     action: {
                         withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
-                            model.applySlashCommand(command)
+                            model.applySlashCommand(match)
                         }
                     }
                 )
             }
         }
-        .padding(SlashCommandMenu.cardPad)
+        .padding(MenuCard.cardPad)
         // Sized by its own words, pinned left under the caret — a menu, not a bar.
         // An explicit width rather than `fixedSize()`: under a fixed size every row
         // gets its IDEAL width, so the selected row's wash would stop at the end of
-        // its own word instead of spanning the card. Measured off the widest of ALL
-        // four words (not just the ones currently matching), so the card holds still
-        // as the list filters down instead of breathing in and out per keystroke.
+        // its own word instead of spanning the card.
         .frame(width: SlashCommandMenu.cardWidth, alignment: .leading)
-        // The manage menu's card recipe: `.clear` material refracting what's behind
-        // it under a dark veil, a top sheen, a specular rim, and the two shadows
-        // that lift it off the surface.
-        //
-        // The veil is heavier here than on the manage menu (0.38 → 0.66) because
-        // this card lives in its OWN window and routinely hangs off the island onto
-        // whatever the desktop happens to be — a bright Finder window, a white page.
-        // At 0.38 the words washed out the moment the card left the glass; the
-        // darker veil makes the menu read the same over anything.
-        .background {
-            shape.fill(.clear).nativeGlass(in: shape)
-                .overlay(shape.fill(Color.black.opacity(0.66)))
-        }
-        .overlay(
-            shape.fill(
-                LinearGradient(colors: [.white.opacity(0.09), .clear],
-                               startPoint: .top, endPoint: .center)
-            )
-            .blendMode(.plusLighter)
-            .allowsHitTesting(false)
-        )
-        .overlay(
-            shape.strokeBorder(
-                LinearGradient(colors: [.white.opacity(0.30), .white.opacity(0.07)],
-                               startPoint: .top, endPoint: .bottom),
-                lineWidth: 0.75
-            )
-            .allowsHitTesting(false)
-        )
-        .clipShape(shape)
-        .shadow(color: .black.opacity(0.30), radius: 3, y: 1)
-        .shadow(color: .black.opacity(0.35), radius: 16, y: 8)
-    }
-}
-
-/// One row: the destination's word, and nothing else. The selected row wears a
-/// soft wash — pointer and keyboard share it, so there's never a second,
-/// competing hover state.
-private struct SlashCommandRow: View {
-    let command: NotchModel.SlashCommand
-    let selected: Bool
-    let hover: () -> Void
-    let action: () -> Void
-
-    var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
-        return Button(action: action) {
-            Text(command.title)
-                .font(.sf(SlashCommandMenu.fontSize, weight: .medium))
-                .foregroundStyle(selected ? Tokens.text1 : Tokens.text3)
-                .lineLimit(1)
-                .padding(.horizontal, SlashCommandMenu.rowPad)
-                .padding(.vertical, 6)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background {
-                    if selected {
-                        shape.fill(Color.white.opacity(0.14))
-                    }
-                }
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        // Hover writes the SHARED highlight instead of painting a second one, so
-        // moving the mouse over the card also moves what Enter would pick.
-        .onHover { if $0 { hover() } }
-        .animation(.easeOut(duration: Tokens.rowFade), value: selected)
-        .accessibilityLabel(command.title)
-        .accessibilityAddTraits(selected ? [.isSelected] : [])
     }
 }
 

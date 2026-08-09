@@ -132,6 +132,9 @@ struct WhatsNewView: View {
             if !entry.fixes.isEmpty {
                 noteGroup(heading: L("whatsnew.section.fixes"), lines: entry.fixes)
             }
+            if !entry.others.isEmpty {
+                noteGroup(heading: L("whatsnew.section.others"), lines: entry.others)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

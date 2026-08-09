@@ -2840,6 +2840,12 @@ struct InlineSettingsView: View {
                 PromptShortcutStore.save(promptShortcuts)
                 if wasReady != promptShortcuts[index].isReady {
                     NotificationCenter.default.post(name: .promptShortcutsChanged, object: nil)
+                    // The prompt just settled into a ready row — ask the AI for a
+                    // display name once (it only writes when one is still missing,
+                    // so an already-named shortcut is never touched).
+                    if promptShortcuts[index].isReady {
+                        model.ensurePromptShortcutName(promptShortcuts[index])
+                    }
                 }
             }
         )
@@ -2866,12 +2872,7 @@ struct InlineSettingsView: View {
                 .font(.sf(12.5, weight: .semibold))
                 .foregroundStyle(Tokens.text1)
                 .padding(.bottom, 3)
-            ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
-                if index > 0 {
-                    Rectangle()
-                        .fill(.white.opacity(0.06))
-                        .frame(height: 0.5)
-                }
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 12) {
                         Text(row.label)
@@ -3379,6 +3380,20 @@ struct InlineSettingsView: View {
                 }
                 aboutLink("CC BY 4.0") {
                     NSWorkspace.shared.open(URL(string: "https://creativecommons.org/licenses/by/4.0/")!)
+                }
+            }
+
+            Text(L("about.thinkingOrbs"))
+                .font(.sf(13, weight: .medium))
+                .foregroundStyle(Tokens.text1)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 12) {
+                aboutLink("thinking-orbs") {
+                    NSWorkspace.shared.open(URL(string: "https://github.com/Jakubantalik/thinking-orbs")!)
+                }
+                aboutLink("MIT License") {
+                    NSWorkspace.shared.open(URL(string: "https://opensource.org/license/mit")!)
                 }
             }
         }

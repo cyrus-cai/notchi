@@ -101,6 +101,7 @@ function parseEntries(src) {
     features: listField(body, 'features'),
     improvements: listField(body, 'improvements'),
     fixes: listField(body, 'fixes'),
+    others: listField(body, 'others'),
   })).filter((e) => e.version);
 }
 
@@ -150,6 +151,7 @@ function renderEntries(entries) {
     html += renderGroup('New', 'rel.new', e.features);
     html += renderGroup('Improved', 'rel.improved', e.improvements);
     html += renderGroup('Fixed', 'rel.fixed', e.fixes);
+    html += renderGroup('Other', 'rel.other', e.others);
     html += `    </div>`;
     return html;
   }).join('\n');

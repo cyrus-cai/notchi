@@ -435,8 +435,10 @@ struct PromptField: NSViewRepresentable {
             // Belt-and-suspenders: macOS can re-arm prediction as you type, so keep
             // it disabled on every change (cheap idempotent set).
             PromptField.disableEditorMagic(tv)
-            // Keep the caret in view once the box has capped out and started scrolling.
-            tv.scrollRangeToVisible(tv.selectedRange())
+            // Keeping the caret in view is `report`'s job, not this one's — it is
+            // the only place that knows whether the box is actually scrolling yet.
+            // Chasing the caret from here scrolled a box that had merely WRAPPED,
+            // against a frame that hadn't grown yet: see `report`.
             report(for: tv)
         }
 
@@ -533,8 +535,37 @@ struct PromptField: NSViewRepresentable {
             // scrolls. Kept OFF otherwise so transient mid-animation layouts can't
             // flash the overlay knob over the panel (the ghost "cursor" bug).
             let scrollable = used > cap + 0.5
-            if let scroll = scrollView, scroll.hasVerticalScroller != scrollable {
-                scroll.hasVerticalScroller = scrollable
+            if let scroll = scrollView {
+                if scroll.hasVerticalScroller != scrollable {
+                    scroll.hasVerticalScroller = scrollable
+                }
+                // Below the cap the box does not scroll, it GROWS — so the one
+                // correct offset is the top, always. This used to be a blind
+                // `scrollRangeToVisible` on every edit, and on the keystroke that
+                // wrapped a line it did real damage: the caret had just moved to a
+                // line the box wasn't tall enough for yet (the frame only catches up
+                // a runloop tick later, once this report reaches SwiftUI), so AppKit
+                // did the only thing it could and scrolled a whole line down —
+                // shoving every already-drawn line up and slicing the first one off
+                // at the top edge. Measured off a screen recording: the text jumped
+                // up a full line, the top line was cut to a 5pt sliver, and it took
+                // ~90ms to slide back. Pinning to the top means a wrap simply
+                // reveals the new line at the bottom and never moves what's already
+                // there.
+                //
+                // Past the cap the box really is a scroller and the caret has to be
+                // chased — but now it happens AFTER the height is settled (the frame
+                // stops changing at the cap), so it can only ever scroll content
+                // that genuinely doesn't fit.
+                if scrollable {
+                    tv.scrollRangeToVisible(tv.selectedRange())
+                } else if scroll.contentView.bounds.origin.y != 0 {
+                    // Re-entrant by design: this posts a bounds change, which calls
+                    // back into `report`. It terminates on the next pass — the
+                    // origin is 0 by then, so this branch doesn't run again.
+                    scroll.contentView.scroll(to: .zero)
+                    scroll.reflectScrolledClipView(scroll.contentView)
+                }
             }
 
             // Where the last line ends — the anchor the inline hint hangs off.
@@ -5228,6 +5259,184 @@ private struct AgentTrailToolRow: View {
                                     .strokeBorder(.white.opacity(0.06), lineWidth: 0.5)
                             )
                     )
+            }
+        }
+    }
+}
+
+// MARK: - Floating menu card
+
+/// The floating-menu idiom, shared by every little card that pops off the panel
+/// in its own window: the `/` command menu and the Ask chip's model quick menu.
+///
+/// One recipe, one set of numbers — a glass slab with a generous radius, rows as
+/// capsule washes inside it, one short word per row with at most one bit of
+/// trailing furniture (a shortcut chord, a `CLI` tag). Anything that wants to be
+/// "a menu hanging off the island" wears this instead of inventing its own
+/// paddings and radii, so the two can never drift apart again.
+enum MenuCard {
+    /// The card's padding around its rows, and each row's around its word.
+    /// `rowPad` clears the capsule wash's own curve, so a word never sits in it.
+    static let cardPad: CGFloat = 6
+    static let rowPad: CGFloat = 12
+    static let fontSize: CGFloat = 11.5
+    /// The trailing accessory's type size, and the minimum gap it keeps from the
+    /// word (a row's HStack spacing sits on both sides of the `Spacer`) — both
+    /// feed `width(titles:)`.
+    static let accessoryFontSize: CGFloat = 10
+    static let accessoryGap: CGFloat = 12
+    /// Concentric with the rows: `cardPad` + a row capsule's own radius.
+    static let radius: CGFloat = 18
+    /// Rows are a fixed height at a fixed spacing, so a card that glides one wash
+    /// across its rows (the agent picker) can do the arithmetic instead of
+    /// measuring — and every menu keeps the same rhythm.
+    static let rowHeight: CGFloat = 26
+    static let rowSpacing: CGFloat = 1
+    /// Row top to the next row's top.
+    static var rowStride: CGFloat { rowHeight + rowSpacing }
+
+    /// The width a card needs to show every one of its rows whole: the widest
+    /// `word + gap + accessory`, plus both paddings. Measured in the very fonts
+    /// SwiftUI will draw them in (`Font.sf` IS the system face, the same trick
+    /// `BucketWord.labelWidth` uses) — plain arithmetic instead of a geometry
+    /// read, so the card is right on its first frame.
+    ///
+    /// A point of slack over the measurement: glyphs drawn from a fallback face
+    /// (a chord's ⌥, a vendor mark) can round a hair past what the attributed
+    /// measure reports, and any overshoot lands on the word as an ellipsis.
+    static func width(titles: [(String, String?)], max cap: CGFloat = .infinity) -> CGFloat {
+        let font = NSFont.systemFont(ofSize: fontSize, weight: .medium)
+        let accessoryFont = NSFont.systemFont(ofSize: accessoryFontSize, weight: .regular)
+        let widest = titles.map { title, accessory -> CGFloat in
+            let word = NSAttributedString(string: title, attributes: [.font: font]).size().width
+            guard let accessory else { return word }
+            let tail = NSAttributedString(string: accessory,
+                                          attributes: [.font: accessoryFont]).size().width
+            return word + accessoryGap + tail
+        }.max() ?? 0
+        return min(ceil(widest) + 2 + (rowPad + cardPad) * 2, cap)
+    }
+}
+
+/// One row of a `MenuCard`: a word, and at most one bit of trailing furniture.
+///
+/// The wash is a full capsule — one short word wide, it reads as a pill at this
+/// size and nests concentrically inside the card's own radius. Two states, never
+/// competing: `selected` is the card's real highlight (the `/` menu's shared
+/// keyboard+pointer cursor, the Ask menu's armed model), and a plain hover wears
+/// a fainter wash under it. Each row catching the cursor taps the trackpad — the
+/// alignment tap, so running down a menu feels like detents — but only when the
+/// cursor actually changes what's highlighted, and only on the way in.
+struct MenuCardRow: View {
+    let title: String
+    /// The row's one bit of trailing furniture: a shortcut chord, a `CLI` tag.
+    var accessory: String? = nil
+    /// Draw the word in the emphasized weight — for menus where the highlight
+    /// means "this is the one in effect" rather than "this is where the cursor is".
+    var emphasized: Bool = false
+    let selected: Bool
+    /// Draw the selected wash here. Off for a card that gilides ONE wash across
+    /// its rows (the agent picker's springy glide) — the row still takes the
+    /// selected ink, it just doesn't paint a second highlight under it.
+    var wash: Bool = true
+    /// For menus whose highlight follows the pointer: called as the row catches
+    /// the cursor, so hover and the keyboard drive the SAME highlight instead of
+    /// painting a second one.
+    var onHoverIn: (() -> Void)? = nil
+    let action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        let shape = Capsule(style: .continuous)
+        return Button(action: action) {
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.sf(MenuCard.fontSize, weight: emphasized && selected ? .medium : .regular))
+                    .foregroundStyle(selected ? Tokens.text1 : Tokens.text3)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if let accessory {
+                    Spacer(minLength: 0)
+                    Text(accessory)
+                        .font(.sf(MenuCard.accessoryFontSize, weight: .regular))
+                        .foregroundStyle(selected ? Tokens.text2 : Tokens.text4)
+                        .lineLimit(1)
+                        .fixedSize()
+                }
+            }
+            .padding(.horizontal, MenuCard.rowPad)
+            .frame(height: MenuCard.rowHeight)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background {
+                if wash, selected {
+                    shape.fill(Color.white.opacity(0.14))
+                } else if hovering, !selected {
+                    shape.fill(Color.white.opacity(0.06))
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { inside in
+            hovering = inside
+            guard inside else { return }
+            if !selected { Haptics.alignment() }
+            onHoverIn?()
+        }
+        .animation(.easeOut(duration: Tokens.rowFade), value: selected)
+        .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
+        .accessibilityLabel(title)
+        .accessibilityAddTraits(selected ? [.isSelected] : [])
+    }
+}
+
+/// The card's own material: `.clear` glass refracting what's behind it under a
+/// dark veil, a top sheen, and a specular rim — the manage menu's recipe.
+///
+/// The veil is heavy (0.66) because these cards live in their OWN windows and
+/// routinely hang off the island onto whatever the desktop happens to be — a
+/// bright Finder window, a white page. Lighter, the words washed out the moment
+/// the card left the glass; this makes a menu read the same over anything.
+struct MenuCardSlab: View {
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: MenuCard.radius, style: .continuous)
+        ZStack {
+            shape.fill(.clear).nativeGlass(in: shape)
+                .overlay(shape.fill(Color.black.opacity(0.66)))
+            shape
+                .fill(LinearGradient(colors: [.white.opacity(0.10), .clear],
+                                     startPoint: .top, endPoint: .center))
+                .blendMode(.plusLighter)
+            shape.strokeBorder(
+                LinearGradient(colors: [.white.opacity(0.30), .white.opacity(0.07)],
+                               startPoint: .top, endPoint: .bottom),
+                lineWidth: 0.75)
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+extension View {
+    /// The slab behind a menu that draws its own window (the `/` card), plus the
+    /// two shadows that lift it off whatever it hangs over.
+    func menuCardBackground() -> some View {
+        let shape = RoundedRectangle(cornerRadius: MenuCard.radius, style: .continuous)
+        return background { MenuCardSlab() }
+            .clipShape(shape)
+            .shadow(color: .black.opacity(0.30), radius: 3, y: 1)
+            .shadow(color: .black.opacity(0.35), radius: 16, y: 8)
+    }
+
+    /// The same slab for a menu presented in an `NSPopover` — the popover owns the
+    /// window (and its shadow), so this replaces its background instead of drawing
+    /// one behind the content. Same call `GlassPopoverBackground` makes.
+    func menuCardPresentationBackground() -> some View {
+        Group {
+            if #available(macOS 13.3, *) {
+                presentationBackground { MenuCardSlab() }
+            } else {
+                background { MenuCardSlab() }
             }
         }
     }
