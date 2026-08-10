@@ -381,9 +381,10 @@ struct InlineSettingsView: View {
     /// preferences, so they stay folded until the user needs them.
     @State private var permissionsSectionOpen = false
 
-    /// Whether the pointer is over a disclosure chip (the key section's and the
-    /// folded settings blocks' glass pill) — the chip brightens under the cursor.
-    @State private var hoveringDisclosure = false
+    /// Which disclosure chip owns the pointer. Permissions and Advanced can share
+    /// one pane, so a single Bool would brighten both at once.
+    private enum DisclosureHover { case keys, permissions, advanced }
+    @State private var hoveredDisclosure: DisclosureHover?
 
     /// What the proxy field resolves to right now — filled in asynchronously by
     /// `refreshProxyStatus` because detection may spawn a login shell.
@@ -707,7 +708,11 @@ struct InlineSettingsView: View {
     /// so the pill never skips a floor.
     private var header: some View {
         HStack(spacing: 10) {
-            PanelBackPill(title: section.isDetail ? section.title : L("settings.title")) {
+            PanelBackPill(
+                title: section.isDetail ? section.title : L("settings.title"),
+                help: section.parent.map { L("navigation.backTo", $0.title) }
+                    ?? L("settings.back")
+            ) {
                 if let parent = section.parent {
                     withAnimation(.easeOut(duration: 0.16)) { section = parent }
                 } else {
@@ -777,18 +782,21 @@ struct InlineSettingsView: View {
                 // control on the panel's glass rather than a bare line of text.
                 .background(
                     Capsule()
-                        .fill(.white.opacity(hoveringDisclosure ? 0.12 : 0.06))
+                        .fill(.white.opacity(hoveredDisclosure == .keys ? 0.12 : 0.06))
                 )
                 .overlay(
                     Capsule()
-                        .strokeBorder(.white.opacity(hoveringDisclosure ? 0.22 : 0.12),
+                        .strokeBorder(.white.opacity(hoveredDisclosure == .keys ? 0.22 : 0.12),
                                       lineWidth: 0.5)
                 )
                 .contentShape(Capsule())
             }
             .buttonStyle(.plain)
-            .onHover { hoveringDisclosure = $0 }
-            .animation(.easeOut(duration: Tokens.hoverFade), value: hoveringDisclosure)
+            .onHover { inside in
+                if inside { hoveredDisclosure = .keys }
+                else if hoveredDisclosure == .keys { hoveredDisclosure = nil }
+            }
+            .animation(.easeOut(duration: Tokens.hoverFade), value: hoveredDisclosure)
 
             if expanded {
                 // Why the section opened by itself, when it did.
@@ -1098,7 +1106,9 @@ struct InlineSettingsView: View {
         settingRow(label: L("search.backend")) {
             GlassMenu(title: searchBackendLabel(selectedBackend)) {
                 ForEach(APIKeyStore.SearchBackend.allCases) { b in
-                    Button(searchBackendLabel(b)) { selectSearchBackend(b) }
+                    Button { selectSearchBackend(b) } label: {
+                        menuOption(searchBackendLabel(b), selected: b == selectedBackend)
+                    }
                 }
             }
         }
@@ -1837,6 +1847,17 @@ struct InlineSettingsView: View {
         return modelID.isEmpty ? provider.defaultModel : modelID
     }
 
+    /// The closed trigger names the current value; once opened, every single-choice
+    /// menu keeps that context with the same native checkmark row.
+    @ViewBuilder
+    private func menuOption(_ title: String, selected: Bool) -> some View {
+        if selected {
+            Label(title, systemImage: "checkmark")
+        } else {
+            Text(title)
+        }
+    }
+
     /// Step one: **which backend answers.** A plain menu of every provider, split
     /// into the ones that can answer right now and the ones that still need a key —
     /// so the useful half is never buried among a dozen unconfigured vendors.
@@ -1852,14 +1873,18 @@ struct InlineSettingsView: View {
                 if !ready.isEmpty {
                     SwiftUI.Section(L("model.picker.configured")) {
                         ForEach(ready) { p in
-                            Button(p.displayName) { selectProvider(p) }
+                            Button { selectProvider(p) } label: {
+                                menuOption(p.displayName, selected: p == provider)
+                            }
                         }
                     }
                 }
                 if !unready.isEmpty {
                     SwiftUI.Section(L("model.picker.unconfigured")) {
                         ForEach(unready) { p in
-                            Button(p.displayName) { selectProvider(p) }
+                            Button { selectProvider(p) } label: {
+                                menuOption(p.displayName, selected: p == provider)
+                            }
                         }
                     }
                 }
@@ -2055,7 +2080,9 @@ struct InlineSettingsView: View {
         settingRow(label: L("general.menuBarIcon")) {
             GlassMenu(title: menuBarIconVisibility.label) {
                 ForEach(MenuBarIconVisibility.allCases) { v in
-                    Button(v.label) { selectMenuBarIconVisibility(v) }
+                    Button { selectMenuBarIconVisibility(v) } label: {
+                        menuOption(v.label, selected: v == menuBarIconVisibility)
+                    }
                 }
             }
         }
@@ -2086,7 +2113,9 @@ struct InlineSettingsView: View {
             VStack(alignment: .leading, spacing: 8) {
                 GlassMenu(title: noteDestination.label) {
                     ForEach(NoteDestination.allCases) { d in
-                        Button(d.label) { selectNoteDestination(d) }
+                        Button { selectNoteDestination(d) } label: {
+                            menuOption(d.label, selected: d == noteDestination)
+                        }
                     }
                 }
                 if noteDestination == .markdownFolder {
@@ -2210,18 +2239,21 @@ struct InlineSettingsView: View {
                 // control on the panel's glass rather than a bare line of text.
                 .background(
                     Capsule()
-                        .fill(.white.opacity(hoveringDisclosure ? 0.12 : 0.06))
+                        .fill(.white.opacity(hoveredDisclosure == .permissions ? 0.12 : 0.06))
                 )
                 .overlay(
                     Capsule()
-                        .strokeBorder(.white.opacity(hoveringDisclosure ? 0.22 : 0.12),
+                        .strokeBorder(.white.opacity(hoveredDisclosure == .permissions ? 0.22 : 0.12),
                                       lineWidth: 0.5)
                 )
                 .contentShape(Capsule())
             }
             .buttonStyle(.plain)
-            .onHover { hoveringDisclosure = $0 }
-            .animation(.easeOut(duration: Tokens.hoverFade), value: hoveringDisclosure)
+            .onHover { inside in
+                if inside { hoveredDisclosure = .permissions }
+                else if hoveredDisclosure == .permissions { hoveredDisclosure = nil }
+            }
+            .animation(.easeOut(duration: Tokens.hoverFade), value: hoveredDisclosure)
 
             if permissionsSectionOpen {
                 VStack(alignment: .leading, spacing: 9) {
@@ -2460,18 +2492,21 @@ struct InlineSettingsView: View {
                 // control on the panel's glass rather than a bare line of text.
                 .background(
                     Capsule()
-                        .fill(.white.opacity(hoveringDisclosure ? 0.12 : 0.06))
+                        .fill(.white.opacity(hoveredDisclosure == .advanced ? 0.12 : 0.06))
                 )
                 .overlay(
                     Capsule()
-                        .strokeBorder(.white.opacity(hoveringDisclosure ? 0.22 : 0.12),
+                        .strokeBorder(.white.opacity(hoveredDisclosure == .advanced ? 0.22 : 0.12),
                                       lineWidth: 0.5)
                 )
                 .contentShape(Capsule())
             }
             .buttonStyle(.plain)
-            .onHover { hoveringDisclosure = $0 }
-            .animation(.easeOut(duration: Tokens.hoverFade), value: hoveringDisclosure)
+            .onHover { inside in
+                if inside { hoveredDisclosure = .advanced }
+                else if hoveredDisclosure == .advanced { hoveredDisclosure = nil }
+            }
+            .animation(.easeOut(duration: Tokens.hoverFade), value: hoveredDisclosure)
 
             if advancedSectionOpen {
                 proxyRow
@@ -2554,7 +2589,9 @@ struct InlineSettingsView: View {
                    info: L("general.hoverSensitivity.hint")) {
             GlassMenu(title: hoverSensitivity.label) {
                 ForEach(HoverSensitivity.allCases) { s in
-                    Button(s.label) { selectHoverSensitivity(s) }
+                    Button { selectHoverSensitivity(s) } label: {
+                        menuOption(s.label, selected: s == hoverSensitivity)
+                    }
                 }
             }
         }
@@ -2667,6 +2704,7 @@ struct InlineSettingsView: View {
         // leaving the pane dismantles the monitor automatically.
         .background(HotKeyRecorder(active: recordingShortcut != nil,
                                    onCapture: captureShortcut,
+                                   onDoubleCommand: captureDoubleCommand,
                                    onCancel: { recordingShortcut = nil }))
         // Leaving the pane ends recording outright. The armed target used to
         // survive in `@State` while the monitor was dismantled, so coming back
@@ -2932,10 +2970,31 @@ struct InlineSettingsView: View {
         row: AppShortcutReference.Entry
     ) -> some View {
         HStack(spacing: 5) {
-            // Reset is inboard of the chord and only surfaces on hover: the chord
-            // chip keeps the same right edge as every read-only row's keycaps,
-            // and a resting row never carries a second control.
-            if shortcutIsModified(target) {
+            // Summon has two useful modifier-only presets, so its inboard control
+            // is a Reset To menu instead of a one-way default reset. Other editable
+            // chords keep the compact reset affordance when they differ from
+            // their shipped value.
+            if target == .summon {
+                Menu {
+                    Button("Double-tap Command") {
+                        restoreSummonDoubleTap(UInt32(cmdKey))
+                    }
+                    Button("Double-tap Option") {
+                        restoreSummonDoubleTap(UInt32(optionKey))
+                    }
+                } label: {
+                    Text(L("general.shortcut.resetTo"))
+                        .font(.sf(10.5, weight: .medium))
+                        .foregroundStyle(Tokens.text3)
+                        .padding(.horizontal, 9)
+                        .frame(minHeight: 24)
+                }
+                .menuStyle(.button)
+                .buttonStyle(ShortcutChipStyle(rest: 0.055, restStroke: 0.1))
+                .menuIndicator(.hidden)
+                .opacity(hoveredShortcutRow == target ? 1 : 0)
+                .allowsHitTesting(hoveredShortcutRow == target)
+            } else if shortcutIsModified(target) {
                 Button {
                     resetShortcut(target)
                 } label: {
@@ -3057,6 +3116,19 @@ struct InlineSettingsView: View {
         }
     }
 
+    /// A bare modifier never produces `keyDown`, so the summon recorder receives
+    /// double-Command separately from ordinary chords. Other editable shortcuts
+    /// remain chord-only.
+    private func captureDoubleCommand() {
+        guard recordingShortcut == .summon else { return }
+        shortcutHints[.summon] = nil
+        recordingShortcut = nil
+        commitSummonHotKey(SummonHotKey(keyCode: 0,
+                                        modifiers: 0,
+                                        doubleTapModifier: UInt32(cmdKey),
+                                        enabled: true))
+    }
+
     private func resetShortcut(_ target: EditableShortcut) {
         recordingShortcut = nil
         shortcutHints[target] = nil
@@ -3069,6 +3141,15 @@ struct InlineSettingsView: View {
         case .prompt:
             break
         }
+    }
+
+    private func restoreSummonDoubleTap(_ modifier: UInt32) {
+        recordingShortcut = nil
+        shortcutHints[.summon] = nil
+        commitSummonHotKey(SummonHotKey(keyCode: 0,
+                                        modifiers: 0,
+                                        doubleTapModifier: modifier,
+                                        enabled: true))
     }
 
     private func disableSummonHotKey() {
@@ -3211,6 +3292,10 @@ struct InlineSettingsView: View {
                 .id(updateSlot)
                 .transition(.opacity)
         }
+        // Text and the small spinner report slightly different intrinsic
+        // heights. Keep their shared row fixed so starting a check cannot nudge
+        // the identity stack by a fraction of a point.
+        .frame(height: 16, alignment: .leading)
         .animation(.easeInOut(duration: 0.18), value: updateSlot)
     }
 
@@ -3239,10 +3324,9 @@ struct InlineSettingsView: View {
     private var updateContent: some View {
         switch updateSlot {
         case .available(let v):
-            Button(L("about.update.to", v)) { updater.update() }
-                .buttonStyle(.plain)
-                .font(.sf(12, weight: .semibold))
-                .foregroundStyle(Tokens.text1)
+            aboutLink(L("about.update.to", v), weight: .semibold) {
+                updater.update()
+            }
         case .updating:
             HStack(spacing: 7) {
                 ProgressView().controlSize(.small)
@@ -3413,6 +3497,7 @@ struct InlineSettingsView: View {
         let title: String
         let action: () -> Void
 
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
         @State private var hovering = false
 
         private var accent: Color {
@@ -3428,13 +3513,13 @@ struct InlineSettingsView: View {
                         brandMark
                             .foregroundStyle(Tokens.text2)
                             .opacity(hovering ? 0 : 1)
-                            .offset(y: hovering ? -13 : 0)
-                            .scaleEffect(hovering ? 0.8 : 1)
+                            .offset(y: reduceMotion ? 0 : (hovering ? -13 : 0))
+                            .scaleEffect(reduceMotion ? 1 : (hovering ? 0.8 : 1))
 
                         actionMark
                             .opacity(hovering ? 1 : 0)
-                            .offset(y: hovering ? 0 : 13)
-                            .scaleEffect(hovering ? 1 : 0.8)
+                            .offset(y: reduceMotion ? 0 : (hovering ? 0 : 13))
+                            .scaleEffect(reduceMotion ? 1 : (hovering ? 1 : 0.8))
 
                     }
                     .frame(width: 17, height: 17)
@@ -3466,7 +3551,7 @@ struct InlineSettingsView: View {
                 .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
             .buttonStyle(AboutSocialPressStyle())
-            .scaleEffect(hovering ? 1.02 : 1)
+            .scaleEffect(reduceMotion ? 1 : (hovering ? 1.02 : 1))
             .onHover { inside in
                 hovering = inside
                 // One tap as the button catches under the cursor — the same one
@@ -3474,8 +3559,9 @@ struct InlineSettingsView: View {
                 // leaving is passive.
                 if inside { Haptics.alignment() }
             }
-            .animation(.easeInOut(duration: 0.2), value: hovering)
-            .animation(.spring(response: 0.3, dampingFraction: 0.72), value: hovering)
+            .animation(.easeInOut(duration: reduceMotion ? 0.12 : 0.2), value: hovering)
+            .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.72),
+                       value: hovering)
         }
 
         @ViewBuilder
@@ -3696,11 +3782,29 @@ struct InlineSettingsView: View {
         }
     }
 
-    private func aboutLink(_ title: String, action: @escaping () -> Void) -> some View {
-        Button(title, action: action)
-            .buttonStyle(.plain)
-            .font(.sf(12, weight: .medium))
-            .foregroundStyle(Tokens.text2)
+    private func aboutLink(_ title: String, weight: Font.Weight = .medium,
+                           action: @escaping () -> Void) -> some View {
+        AboutTextLink(title: title, weight: weight, action: action)
+    }
+
+    /// The quiet text-link species used throughout About. It stays visually light,
+    /// but unlike inert body copy it now answers the pointer consistently.
+    private struct AboutTextLink: View {
+        let title: String
+        let weight: Font.Weight
+        let action: () -> Void
+
+        @State private var hovering = false
+
+        var body: some View {
+            Button(title, action: action)
+                .buttonStyle(.plain)
+                .font(.sf(12, weight: weight))
+                .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
+                .contentShape(Rectangle())
+                .onHover { hovering = $0 }
+                .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+        }
     }
 
     private var footer: some View {
@@ -4255,16 +4359,19 @@ private struct MiniDisplay: View {
 private struct HotKeyRecorder: NSViewRepresentable {
     var active: Bool
     var onCapture: (UInt32, NSEvent.ModifierFlags) -> Void
+    var onDoubleCommand: () -> Void
     var onCancel: () -> Void
 
     func makeNSView(context: Context) -> NSView {
         context.coordinator.onCapture = onCapture
+        context.coordinator.onDoubleCommand = onDoubleCommand
         context.coordinator.onCancel = onCancel
         return NSView(frame: .zero)
     }
 
     func updateNSView(_: NSView, context: Context) {
         context.coordinator.onCapture = onCapture
+        context.coordinator.onDoubleCommand = onDoubleCommand
         context.coordinator.onCancel = onCancel
         context.coordinator.setActive(active)
     }
@@ -4277,30 +4384,72 @@ private struct HotKeyRecorder: NSViewRepresentable {
 
     final class Coordinator {
         var onCapture: ((UInt32, NSEvent.ModifierFlags) -> Void)?
+        var onDoubleCommand: (() -> Void)?
         var onCancel: (() -> Void)?
         private var monitor: Any?
+        private var pendingCommandTap = false
+        private var lastCommandTapTime: TimeInterval?
 
         func setActive(_ active: Bool) {
             if active, monitor == nil {
                 // Announce first: the global hot keys must be unregistered before
                 // the monitor goes up, or the chords Notch owns still never arrive.
                 ShortcutRecording.setActive(true)
-                monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                pendingCommandTap = false
+                lastCommandTapTime = nil
+                monitor = NSEvent.addLocalMonitorForEvents(
+                    matching: [.keyDown, .flagsChanged]
+                ) { [weak self] event in
+                    guard let self else { return event }
+                    if event.type == .flagsChanged {
+                        self.captureDoubleCommandIfNeeded(event)
+                        return event
+                    }
                     // Esc cancels recording without committing anything. Clearing
                     // the armed target is the whole point — leaving it armed makes
                     // the *next* keystroke anywhere land on that row.
                     guard event.keyCode != UInt16(kVK_Escape) else {
-                        self?.onCancel?()
+                        self.onCancel?()
                         return nil
                     }
                     let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-                    self?.onCapture?(UInt32(event.keyCode), flags)
+                    self.onCapture?(UInt32(event.keyCode), flags)
                     return nil // swallow — don't let the chord reach the panel
                 }
             } else if !active, let m = monitor {
                 NSEvent.removeMonitor(m)
                 monitor = nil
+                pendingCommandTap = false
+                lastCommandTapTime = nil
                 ShortcutRecording.setActive(false)
+            }
+        }
+
+        /// Recognize two clean Command down/up taps inside the same 300 ms window
+        /// used by the live summon monitor. Any other held modifier invalidates
+        /// the sequence, so normal chords never turn into a double-tap binding.
+        private func captureDoubleCommandIfNeeded(_ event: NSEvent) {
+            let watched: NSEvent.ModifierFlags = [.command, .option, .control, .shift]
+            let active = event.modifierFlags.intersection(watched)
+
+            if active == .command {
+                pendingCommandTap = true
+                return
+            }
+
+            guard pendingCommandTap else { return }
+            pendingCommandTap = false
+            guard active.isEmpty else {
+                lastCommandTapTime = nil
+                return
+            }
+
+            let now = event.timestamp
+            if let last = lastCommandTapTime, now - last <= 0.30 {
+                lastCommandTapTime = nil
+                onDoubleCommand?()
+            } else {
+                lastCommandTapTime = now
             }
         }
 

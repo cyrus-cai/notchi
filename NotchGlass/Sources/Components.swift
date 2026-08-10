@@ -1067,9 +1067,16 @@ struct GlassTextButton: View {
 /// rather than two unrelated marks that happen to share a row.
 struct PanelBackPill: View {
     var title: String
+    var help: String
     var action: () -> Void
 
     @State private var hovering = false
+
+    init(title: String, help: String? = nil, action: @escaping () -> Void) {
+        self.title = title
+        self.help = help ?? title
+        self.action = action
+    }
 
     var body: some View {
         Button(action: action) {
@@ -1091,6 +1098,7 @@ struct PanelBackPill: View {
         .buttonStyle(GlassPressStyle())
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+        .accessibilityLabel(help)
     }
 }
 
@@ -1469,6 +1477,7 @@ private struct ConfirmDialogPressStyle: ButtonStyle {
 struct ThinkingDots: View {
     var dot: CGFloat = 6
     var spacing: CGFloat = 7
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var phase = false
 
     var body: some View {
@@ -1477,11 +1486,11 @@ struct ThinkingDots: View {
                 Circle()
                     .fill(Tokens.text3)
                     .frame(width: dot, height: dot)
-                    .scaleEffect(phase ? 1.0 : 0.82)
-                    .opacity(phase ? 0.85 : 0.18)
-                    .offset(y: phase ? -2 : 0)
+                    .scaleEffect(reduceMotion ? 0.9 : (phase ? 1.0 : 0.82))
+                    .opacity(reduceMotion ? 0.55 : (phase ? 0.85 : 0.18))
+                    .offset(y: reduceMotion ? 0 : (phase ? -2 : 0))
                     .animation(
-                        .easeInOut(duration: 0.62)
+                        reduceMotion ? nil : .easeInOut(duration: 0.62)
                             .repeatForever(autoreverses: true)
                             .delay(Double(i) * 0.16),
                         value: phase
@@ -1489,7 +1498,7 @@ struct ThinkingDots: View {
             }
         }
         .frame(minHeight: 22)
-        .onAppear { phase = true }
+        .onAppear { if !reduceMotion { phase = true } }
     }
 }
 

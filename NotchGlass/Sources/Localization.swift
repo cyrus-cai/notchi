@@ -158,6 +158,7 @@ enum Strings {
 
         // Settings shell
         "settings.title": "Settings",
+        "navigation.backTo": "Back to %@",
         "settings.back": "Back to prompt",
         "sidebar.model": "Model",
         "sidebar.search": "Search",
@@ -453,6 +454,7 @@ enum Strings {
         "sense.failed": "Couldn't save",
         "general.appLanguage": "Language",
         "general.shortcut": "Shortcut",
+        "general.shortcut.resetTo": "Reset To",
         "general.shortcut.recording": "Type a shortcut…",
         "general.shortcut.off": "Off",
         "general.shortcut.reset": "Reset to double-tap ⌥",
@@ -687,6 +689,7 @@ enum Strings {
         "appLang.system": "跟随系统",
 
         "settings.title": "设置",
+        "navigation.backTo": "返回%@",
         "settings.back": "返回输入",
         "sidebar.model": "模型",
         "sidebar.search": "搜索",
@@ -977,6 +980,7 @@ enum Strings {
         "sense.failed": "保存失败",
         "general.appLanguage": "语言",
         "general.shortcut": "快捷键",
+        "general.shortcut.resetTo": "恢复为",
         "general.shortcut.recording": "按下快捷键…",
         "general.shortcut.off": "关闭",
         "general.shortcut.reset": "恢复为双击 ⌥",
@@ -1196,6 +1200,7 @@ enum Strings {
         "appLang.system": "跟隨系統",
 
         "settings.title": "設定",
+        "navigation.backTo": "返回%@",
         "settings.back": "返回輸入",
         "sidebar.model": "模型",
         "sidebar.search": "搜尋",
@@ -1486,6 +1491,7 @@ enum Strings {
         "sense.failed": "保存失敗",
         "general.appLanguage": "語言",
         "general.shortcut": "快捷鍵",
+        "general.shortcut.resetTo": "還原為",
         "general.shortcut.recording": "按下快捷鍵…",
         "general.shortcut.off": "關閉",
         "general.shortcut.reset": "還原為雙擊 ⌥",
@@ -1704,6 +1710,7 @@ enum Strings {
         "appLang.system": "システムに合わせる",
 
         "settings.title": "設定",
+        "navigation.backTo": "%@に戻る",
         "settings.back": "入力に戻る",
         "sidebar.model": "モデル",
         "sidebar.search": "検索",
@@ -1983,6 +1990,7 @@ enum Strings {
         "sense.failed": "保存できませんでした",
         "general.appLanguage": "言語",
         "general.shortcut": "ショートカット",
+        "general.shortcut.resetTo": "戻す",
         "general.shortcut.recording": "ショートカットを入力…",
         "general.shortcut.off": "オフ",
         "general.shortcut.reset": "⌥ 二度押しに戻す",
@@ -2199,6 +2207,7 @@ enum Strings {
         "appLang.system": "시스템 따르기",
 
         "settings.title": "설정",
+        "navigation.backTo": "%@(으)로 돌아가기",
         "settings.back": "입력으로 돌아가기",
         "sidebar.model": "모델",
         "sidebar.search": "검색",
@@ -2478,6 +2487,7 @@ enum Strings {
         "sense.failed": "저장하지 못했습니다",
         "general.appLanguage": "언어",
         "general.shortcut": "단축키",
+        "general.shortcut.resetTo": "다음으로 재설정",
         "general.shortcut.recording": "단축키를 누르세요…",
         "general.shortcut.off": "끔",
         "general.shortcut.reset": "⌥ 두 번 누르기로 되돌리기",
@@ -2699,7 +2709,7 @@ enum Strings {
     // MARK: Français
     static let fr: [String: String] = localized([
         "appLang.system": "Système",
-        "settings.title": "Réglages", "settings.back": "Retour à la saisie",
+        "settings.title": "Réglages", "settings.back": "Retour à la saisie", "navigation.backTo": "Retour à %@",
         "sidebar.model": "Modèle", "sidebar.search": "Recherche", "sidebar.notes": "Notes",
         "sidebar.general": "Général", "sidebar.appearance": "Apparence", "general.advanced": "Avancé",
         "sidebar.about": "À propos", "sidebar.shortcuts": "Raccourcis",
@@ -2831,7 +2841,7 @@ enum Strings {
 
     // MARK: Español
     static let es: [String: String] = localized([
-        "appLang.system": "Sistema", "settings.title": "Configuración", "settings.back": "Volver a la entrada",
+        "appLang.system": "Sistema", "settings.title": "Configuración", "settings.back": "Volver a la entrada", "navigation.backTo": "Volver a %@",
         "sidebar.model": "Modelo", "sidebar.search": "Búsqueda", "sidebar.notes": "Notas", "sidebar.general": "General",
         "sidebar.appearance": "Apariencia", "general.advanced": "Avanzado", "sidebar.about": "Acerca de", "sidebar.shortcuts": "Atajos",
         "shortcuts.group.summon": "Invocación", "shortcuts.group.prompt": "Entrada", "shortcuts.group.answer": "Respuesta", "shortcuts.group.panel": "Panel",
@@ -2900,7 +2910,8 @@ enum Strings {
         "general.customInstructions.placeholder": "p. ej., responde siempre en español", "general.copySense": "Detección de copia",
         "general.copySense.hint": "Copia una nota o recordatorio y vuelve a pulsar ⌘C para guardarlo.", "sense.note": "Para guardar", "sense.reminder": "Para guardar",
         "sense.saved": "Guardado", "sense.failed": "No se pudo guardar", "general.appLanguage": "Idioma", "general.shortcut": "Atajo",
-        "general.shortcut.recording": "Escribe un atajo…", "general.shortcut.off": "Desactivado", "general.shortcut.disable": "Desactivar",
+        "general.shortcut.recording": "Escribe un atajo…",
+        "general.shortcut.off": "Desactivado", "general.shortcut.disable": "Desactivar",
         "general.hoverSensitivity": "Sensibilidad", "hover.low": "Baja", "hover.balanced": "Equilibrada", "hover.instant": "Instantánea",
         "placement.all": "Todas las pantallas", "placement.builtIn": "Pantalla integrada", "dock.hidden": "Oculto", "dock.shown": "Mostrado",
         "about.update.to": "Actualizar a %@", "about.updating": "Actualizando…", "about.updateFailed": "La actualización falló; descárgala desde la página de versiones",

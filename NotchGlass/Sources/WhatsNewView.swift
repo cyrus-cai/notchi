@@ -57,7 +57,7 @@ struct WhatsNewView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            PanelBackPill(title: L("whatsnew.title")) {
+            PanelBackPill(title: L("whatsnew.title"), help: L("whatsnew.back")) {
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                     model.closeWhatsNew()
                 }

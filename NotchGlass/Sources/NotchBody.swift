@@ -1603,6 +1603,8 @@ struct NotchBody: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .notchTooltip(help, edge: .bottom)
+        .accessibilityLabel(help)
     }
 
 
@@ -3851,6 +3853,7 @@ private struct RecallSlide: ViewModifier {
 /// slot where the timestamp lands once the answer settles. Sits in the row at
 /// `.firstTextBaseline`, so the dots align with the title rather than floating.
 struct RecentPendingDots: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var phase = false
     var body: some View {
         HStack(spacing: 3.5) {
@@ -3858,16 +3861,16 @@ struct RecentPendingDots: View {
                 Circle()
                     .fill(Tokens.text4)
                     .frame(width: 3.5, height: 3.5)
-                    .opacity(phase ? 0.9 : 0.25)
+                    .opacity(reduceMotion ? 0.55 : (phase ? 0.9 : 0.25))
                     .animation(
-                        .easeInOut(duration: 0.62)
+                        reduceMotion ? nil : .easeInOut(duration: 0.62)
                             .repeatForever(autoreverses: true)
                             .delay(Double(i) * 0.16),
                         value: phase
                     )
             }
         }
-        .onAppear { phase = true }
+        .onAppear { if !reduceMotion { phase = true } }
         .accessibilityLabel(L("recent.answering"))
     }
 }
@@ -4061,6 +4064,8 @@ struct IdleTrailingCluster: View {
             else if hovered == segment { hovered = nil }
         }
         .animation(.easeOut(duration: 0.18), value: hovered)
+        .notchTooltip(tooltip)
+        .accessibilityLabel(tooltip)
     }
 }
 
@@ -4292,6 +4297,7 @@ struct AgentStatusDot: View {
     let running: Bool
     let outcome: AgentTaskManager.Outcome?
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var breathing = false
 
     private var tint: Color {
@@ -4311,10 +4317,11 @@ struct AgentStatusDot: View {
                 // without any glass sheen.
                 Circle()
                     .fill(.white.opacity(0.5))
-                    .opacity(breathing ? 0.7 : 0.26)
-                    .scaleEffect(breathing ? 1.0 : 0.72)
-                    .onAppear { breathing = true }
-                    .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true),
+                    .opacity(reduceMotion ? 0.5 : (breathing ? 0.7 : 0.26))
+                    .scaleEffect(reduceMotion ? 1 : (breathing ? 1.0 : 0.72))
+                    .onAppear { if !reduceMotion { breathing = true } }
+                    .animation(reduceMotion ? nil : .easeInOut(duration: 0.9)
+                        .repeatForever(autoreverses: true),
                                value: breathing)
                     .transition(.scale(scale: 0.4).combined(with: .opacity))
             } else {
@@ -4325,7 +4332,8 @@ struct AgentStatusDot: View {
             }
         }
         .frame(width: 7, height: 7)
-        .animation(.spring(response: 0.38, dampingFraction: 0.7), value: running)
+        .animation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.7),
+                   value: running)
     }
 }
 

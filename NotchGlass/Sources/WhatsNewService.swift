@@ -67,6 +67,23 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.5.6",
+            date: "2026-08-10",
+            features: [
+                "The summon shortcut can now be set to double-tap Command, with quick presets for Command and Option.",
+            ],
+            improvements: [
+                "Settings menus show a checkmark beside the current selection.",
+                "Reduce Motion now covers loading dots, agent status, and About controls.",
+                "Header and idle controls gain tooltips and clearer VoiceOver labels.",
+                "About links now respond visibly on hover.",
+            ],
+            fixes: [
+                "Hovering Permissions or Advanced no longer highlights both sections.",
+                "Checking for updates no longer shifts the About layout.",
+            ]
+        ),
+        Entry(
             version: "0.5.5",
             date: "2026-08-09",
             features: [
