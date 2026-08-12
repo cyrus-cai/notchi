@@ -449,6 +449,12 @@ final class NotchModel: ObservableObject {
     /// typed `submit`), so it never leaks onto the next conversation.
     @Published var fromPromptShortcut = false
 
+    /// Selection captured by an empty prompt shortcut whose destination is the
+    /// notch. It stays invisible model context while the ordinary idle field asks
+    /// for a one-off instruction; `submitCurrent` consumes and clears it.
+    @Published private(set) var promptShortcutContext: String?
+    var usingPromptShortcutContext: Bool { promptShortcutContext != nil }
+
     /// The model picker popover (anchored to the model chip in settings) is open.
     /// While set, `collapseOnLeave` bails exactly as it does for a pinned answer: the
     /// popover is a separate window outside the island's tracking area, so moving the
@@ -476,6 +482,12 @@ final class NotchModel: ObservableObject {
     /// (`AgentFolderMRU`), with the file panel as its tail row. Hung off the chip
     /// itself, exactly like the two model menus.
     @Published var showAgentFolderPicker = false
+
+    /// A settled result's metadata card: the Chat footer's ⓘ model menu or the
+    /// Agent follow-up row's command menu. Both live in a separate child window,
+    /// so leaving the island to reach one must not fold the result page out from
+    /// under the pointer.
+    @Published var isResultMetadataMenuOpen = false
 
     /// The agent task whose detail page is open — the full-page work trail a
     /// status row's tap opens while its run is live (a settled row opens its
@@ -505,7 +517,16 @@ final class NotchModel: ObservableObject {
     /// same project and engine.
     @Published var agentComposeActive =
         UserDefaults.standard.bool(forKey: "agentBucketArmed") {
-        didSet { UserDefaults.standard.set(agentComposeActive, forKey: "agentBucketArmed") }
+        didSet {
+            UserDefaults.standard.set(agentComposeActive, forKey: "agentBucketArmed")
+            guard agentComposeActive != oldValue else { return }
+            // Chat and Agent own separate Recent views: switching buckets changes
+            // which rows exist without touching Chat's source filter itself.
+            // Invalidate the derived slice and release any index into the old one.
+            agentFilteredHistoryCache = nil
+            highlightedHistoryIndex = nil
+            historyRecallIndex = nil
+        }
     }
 
     /// The folder the composed task will run in — seeded from the remembered
@@ -1133,6 +1154,10 @@ final class NotchModel: ObservableObject {
                 subtitle: L("input.placeholder"),
                 isAgent: agentComposeActive,
                 running: false)
+        case .shortcutComposer:
+            return DetachedCardFace(
+                title: L("shortcuts.promptAction.window.context"),
+                subtitle: "", isAgent: false, running: false)
         case .agentTask(let id):
             if let task = AgentTaskManager.shared.tasks.first(where: { $0.id == id }) {
                 return DetachedCardFace(
@@ -1223,6 +1248,10 @@ final class NotchModel: ObservableObject {
             text = ""
             showHistory = false
             highlightedHistoryIndex = nil
+        case .shortcutComposer:
+            // Compact shortcut composers are born outside the panel and never
+            // pass through this detach path.
+            break
         case .agentTask:
             agentDetailTaskID = nil
         case .thread:
@@ -1251,6 +1280,9 @@ final class NotchModel: ObservableObject {
             // draft back to the prompt (written after `openPanel`, which may
             // have restored a parked draft of its own).
             if !draft.isEmpty { text = draft }
+        case .shortcutComposer:
+            // This transient face has no panel representation to reattach to.
+            break
         case .agentTask(let id):
             if AgentTaskManager.shared.tasks.contains(where: { $0.id == id }) {
                 agentDetailTaskID = id
@@ -1356,7 +1388,9 @@ final class NotchModel: ObservableObject {
     /// a follow-up, a brand-new one when `submit()` treated the (empty) seed as
     /// a fresh thread. A compose window uses it to become that thread.
     @discardableResult
-    private func runDetachedRound(threadID: UUID, seed: [Turn], question: String) -> UUID? {
+    private func runDetachedRound(threadID: UUID, seed: [Turn], question: String,
+                                  hideUserBubble: Bool = false,
+                                  trackCompactTask: Bool = false) -> UUID? {
         // Never stack rounds on one thread from the window: the tear-off
         // dropped the round's task handle, so a second submit couldn't
         // supersede-cancel the first. The field is disabled while streaming;
@@ -1369,7 +1403,7 @@ final class NotchModel: ObservableObject {
         turns = seed
         threadHistoryID = threadID
         text = question
-        submit()
+        submit(hideUserBubble: hideUserBubble)
         // A regenerate that emptied the seed re-ids the thread (`submit`
         // treats it as fresh) — re-key the window's mirror so it keeps
         // hearing the round under the new id.
@@ -1390,6 +1424,9 @@ final class NotchModel: ObservableObject {
                 DetachedThreadStore(threadID: threadHistoryID, turns: turns)
         }
         let landedThreadID = threadHistoryID
+        if trackCompactTask, let task {
+            compactRoundTasks[landedThreadID] = task
+        }
         // Hand the round off detached and put the panel back exactly as it was.
         task = saved.task
         turns = saved.turns
@@ -1982,8 +2019,8 @@ final class NotchModel: ObservableObject {
     /// Deliberately NOT here: write / draft / plan / brainstorm and the rest of
     /// the generation asks. Those are the ordinary conversation, and pinning every
     /// one of them to a literal verb would retire the mood words entirely.
-    static let taskWords: [(word: String, cues: [String])] = [
-        ("Translating...", [
+    static let taskWords: [(word: String, orb: OrbState, cues: [String])] = [
+        ("Translating...", .connecting, [
             "translate", "translating",
             "翻译", "翻譯", "译成", "譯成", "译为", "譯為", "转译", "轉譯",
             "翻訳", "번역",
@@ -1992,25 +2029,25 @@ final class NotchModel: ObservableObject {
         // "summar" on purpose: covers summarize / summarise / summary / summaries
         // in one cue. Spanish keeps the verb forms only — bare "resume" is the
         // English noun ("review my resume"), which is not a summary request.
-        ("Summarizing...", [
+        ("Summarizing...", .composing, [
             "summar", "tl;dr", "tldr", "recap",
             "总结", "總結", "摘要", "概括", "归纳", "歸納",
             "要約", "요약",
             "resumir", "resumen",
         ]),
-        ("Proofreading...", [
+        ("Proofreading...", .composing, [
             "proofread", "typos",
             "校对", "校對", "校正", "纠错", "糾錯", "错别字", "錯別字",
             "誤字", "교정",
             "corrige los errores",
         ]),
-        ("Rewriting...", [
+        ("Rewriting...", .composing, [
             "rewrite", "reword", "rephrase", "paraphrase",
             "改写", "改寫", "重写", "重寫", "润色", "潤色", "改一下措辞",
             "書き直", "다시 써",
             "reescribe", "reescribir", "reformula",
         ]),
-        ("Explaining...", [
+        ("Explaining...", .composing, [
             "explain", "eli5",
             "解释", "解釋", "讲解", "講解", "说明一下", "說明一下",
             "解説", "설명",
@@ -2020,15 +2057,26 @@ final class NotchModel: ObservableObject {
 
     /// The pinned wait word for this question, or nil when it's an ordinary round
     /// that should roll a mood word.
-    static func taskWord(for question: String) -> String? {
+    static func taskStyle(for question: String) -> (word: String, orb: OrbState)? {
         let q = question.lowercased()
-        return taskWords.first { entry in entry.cues.contains { q.contains($0) } }?.word
+        guard let match = taskWords.first(where: { entry in entry.cues.contains { q.contains($0) } })
+        else { return nil }
+        return (match.word, match.orb)
+    }
+
+    /// Text-only convenience for compact shortcut presentation, which shares
+    /// the same task classifier but does not render an orb itself.
+    static func taskWord(for question: String) -> String? {
+        taskStyle(for: question)?.word
     }
 
     /// Non-nil while this round's wait word is pinned to a task word (see
     /// `taskWords`) — the reroll returns it unchanged and the rotation timer
     /// never starts. Cleared when the round ends.
     private var pinnedThinkingWord: String? = nil
+    /// Semantic orb paired with the pinned task word. Translation connects
+    /// languages; the other literal task labels retain the composing ribbon.
+    private var pinnedThinkingOrb: OrbState = .composing
 
     /// The current rotating thinking word. Re-rolled at the start of each answer and
     /// every `thinkingWordInterval` while the wait is on screen, avoiding an immediate
@@ -2049,10 +2097,10 @@ final class NotchModel: ObservableObject {
     @Published private var thinkingActivityOrb: OrbState = .composing
 
     /// What the wait line's orb should wear right now: the activity's semantic
-    /// mode while a tool runs, else the reference "Thinking…." ribbon (mood
-    /// word, bare wait, and the compose gap all read as thinking).
+    /// mode while a tool runs, else the pinned task's own mode. Ordinary mood
+    /// words and bare waits keep the reference "Thinking…." ribbon.
     var thinkingOrbState: OrbState {
-        thinkingActivity != nil ? thinkingActivityOrb : .composing
+        thinkingActivity != nil ? thinkingActivityOrb : pinnedThinkingOrb
     }
 
     /// When the current round's pre-stream wait began — the anchor for the quiet
@@ -2122,7 +2170,13 @@ final class NotchModel: ObservableObject {
         thinkingStartedAt = Date()
         // Each round starts in pure-dots mode; only a tool flips it into word mode.
         hasUsedToolThisRound = false
-        pinnedThinkingWord = Self.taskWord(for: question)
+        if let taskStyle = Self.taskStyle(for: question) {
+            pinnedThinkingWord = taskStyle.word
+            pinnedThinkingOrb = taskStyle.orb
+        } else {
+            pinnedThinkingWord = nil
+            pinnedThinkingOrb = .composing
+        }
         rerollThinkingWord()
         // A pinned word is the whole round's word — nothing to rotate.
         guard pinnedThinkingWord == nil else {
@@ -2144,6 +2198,7 @@ final class NotchModel: ObservableObject {
         thinkingStartedAt = nil
         hasUsedToolThisRound = false
         pinnedThinkingWord = nil
+        pinnedThinkingOrb = .composing
     }
 
     /// The first-token freeze: stop the mood-word rotation (the pre-stream wait
@@ -3499,6 +3554,7 @@ final class NotchModel: ObservableObject {
             if historySearchQuery != oldValue { highlightedHistoryIndex = nil }
             if !historySearchQuery.isEmpty { noteUserTyping() }
             filteredHistoryCache = nil
+            agentFilteredHistoryCache = nil
         }
     }
     /// Source filter for the recent list — `nil` shows everything. Set from the
@@ -3549,7 +3605,10 @@ final class NotchModel: ObservableObject {
     @Published private(set) var history: [HistoryItem] = [] {
         // The archive is one of the three inputs of `filteredHistory` — see the
         // cache note there.
-        didSet { filteredHistoryCache = nil }
+        didSet {
+            filteredHistoryCache = nil
+            agentFilteredHistoryCache = nil
+        }
     }
 
     /// Shell-style ↑/↓ history recall cursor for the idle prompt. `nil` means no
@@ -3560,15 +3619,17 @@ final class NotchModel: ObservableObject {
     /// recall never fights live editing.
     private var historyRecallIndex: Int? = nil
 
-    /// The question strings ↑/↓ recall walks, newest first — the raw `history` `q`
-    /// values with **adjacent duplicates collapsed** (bash `ignoredups`). Asking the
+    /// The question strings ↑/↓ recall walks, newest first — the active bucket's
+    /// `history` values with **adjacent duplicates collapsed** (bash `ignoredups`). Asking the
     /// same thing twice in a row leaves one entry here, so ↑ never fills the same
     /// line twice running and the "x / total" counter counts distinct consecutive
     /// questions. Non-adjacent repeats (asked A, then B, then A again) are kept —
     /// only *consecutive* duplicates fold, matching "连续两条相同" exactly.
     private var recallQuestions: [String] {
         var out: [String] = []
-        for item in history {           // history is newest-first
+        for item in history where
+            (agentComposeActive ? item.source == .agent : item.source != .agent) {
+            // `history` is newest-first; recall stays inside the active bucket.
             if out.last != item.q { out.append(item.q) }
         }
         return out
@@ -3606,7 +3667,7 @@ final class NotchModel: ObservableObject {
     /// The full archive is retained on disk without limit (see `saveHistory`); the
     /// notch stays light by rendering only the newest `notchRecentCap`. Everything
     /// older is one click away in the standalone History window (`archiveVisible`).
-    static let notchRecentCap = 50
+    static let notchRecentCap = 100
 
     /// The recent items rendered in the *notch* list — the newest `notchRecentCap`
     /// of the (filtered) history, not the whole archive. The list scrolls, and
@@ -3623,15 +3684,25 @@ final class NotchModel: ObservableObject {
     var recentVisible: [HistoryItem] {
         let trayIDs = Set(AgentTaskManager.shared.tasks.map(\.id))
         guard !trayIDs.isEmpty else {
-            return Array(filteredHistory.prefix(NotchModel.notchRecentCap))
+            return Array(recentFilteredHistory.prefix(NotchModel.notchRecentCap))
         }
-        return Array(filteredHistory.lazy.filter { !trayIDs.contains($0.id) }
+        return Array(recentFilteredHistory.lazy.filter { !trayIDs.contains($0.id) }
             .prefix(NotchModel.notchRecentCap))
     }
 
     /// The FULL filtered history, newest-first — every retained item, uncapped.
     /// Backs the standalone History window so nothing captured is ever out of reach.
     var archiveVisible: [HistoryItem] { filteredHistory }
+
+    /// The unsearched size of the bucket currently owning Recent. Agent compose
+    /// sees only agent conversations; Chat owns Ask / Notes / Reminders.
+    /// Footer affordances use this instead of the global archive count so an Agent
+    /// list never advertises rows that are outside its scope.
+    var recentScopeHistoryCount: Int {
+        history.lazy.filter { item in
+            self.agentComposeActive ? item.source == .agent : item.source != .agent
+        }.count
+    }
 
     /// Memoized `filteredHistory`, invalidated by the didSets of its only three
     /// inputs (`history`, `historySourceFilter`, `historySearchQuery`). The filter
@@ -3640,9 +3711,32 @@ final class NotchModel: ObservableObject {
     /// so without the memo every unrelated re-render re-filtered the full archive.
     private var filteredHistoryCache: [HistoryItem]? = nil
 
-    /// Shared filter pipeline for both the notch list and the archive window: the
-    /// source filter (from the manage menu) narrows first, then the live substring
-    /// search refines within that slice — the two compose.
+    /// Separate because Agent ignores the Ask-side source filter while sharing its
+    /// text query. Keeping two caches prevents the standalone archive / Ask ledger
+    /// from inheriting Agent's implicit source scope.
+    private var agentFilteredHistoryCache: [HistoryItem]? = nil
+
+    private var recentFilteredHistory: [HistoryItem] {
+        if agentComposeActive {
+            if let cached = agentFilteredHistoryCache { return cached }
+            var items = history.filter { $0.source == .agent }
+            if !historySearchQuery.isEmpty {
+                items = items.filter {
+                    $0.displayTitle.localizedCaseInsensitiveContains(historySearchQuery)
+                }
+            }
+            agentFilteredHistoryCache = items
+            return items
+        }
+
+        // Chat is a sibling bucket, not the old all-source ledger: Agent rows
+        // never bleed into it. The optional source filter can only narrow within
+        // Ask / Notes / Reminders.
+        return filteredHistory.filter { $0.source != .agent }
+    }
+
+    /// The global filter pipeline retained for the standalone all-history archive.
+    /// The notch's two bucket scopes live in `recentFilteredHistory`.
     private var filteredHistory: [HistoryItem] {
         if let cached = filteredHistoryCache { return cached }
         var items = history
@@ -3720,6 +3814,10 @@ final class NotchModel: ObservableObject {
 
     private var ai: AIService
     private var task: Task<Void, Never>?
+    /// Detached prompt-shortcut rounds leave the panel's `task` slot so they can
+    /// stream headlessly. Keep their handles by thread id so a repeated shortcut
+    /// can supersede its previous translation in the same compact window.
+    private var compactRoundTasks: [UUID: Task<Void, Never>] = [:]
     /// Holds the auto-dismiss timer for the "Saved to Notes" cue so a rapid second
     /// save cancels the first one's fade rather than letting them overlap.
     private var noteCueTask: Task<Void, Never>?
@@ -4375,7 +4473,7 @@ final class NotchModel: ObservableObject {
         // the menu being read. Ordinary leave-folding resumes the moment the menu
         // is gone (a picked row, a keystroke past the command word, Esc).
         if isAnswerPinned || isModelPickerOpen || isFolderPickerOpen
-            || slashMenuOpen || detachDrag != nil {
+            || isResultMetadataMenuOpen || slashMenuOpen || detachDrag != nil {
             cancelLeaveWatch()
             return
         }
@@ -4428,7 +4526,8 @@ final class NotchModel: ObservableObject {
     private func recheckLeaveWatch() {
         guard let watch = leaveWatch else { return }
         guard open else { leaveWatch = nil; return }
-        if isAnswerPinned || isModelPickerOpen || isFolderPickerOpen || slashMenuOpen {
+        if isAnswerPinned || isModelPickerOpen || isFolderPickerOpen
+            || isResultMetadataMenuOpen || slashMenuOpen {
             cancelLeaveWatch(); return
         }
         // Parked back over (or still over) the island: nothing to fold, but keep
@@ -4535,12 +4634,14 @@ final class NotchModel: ObservableObject {
         mode = .idle
         isAnswerPinned = false
         fromPromptShortcut = false
+        promptShortcutContext = nil
         isModelPickerOpen = false
         isFolderPickerOpen = false
         showModelPicker = false
         showAgentPicker = false
         showAskModelPicker = false
         showAgentFolderPicker = false
+        isResultMetadataMenuOpen = false
         text = ""; turns = []
         showHistory = false
         showSettings = false
@@ -4587,6 +4688,7 @@ final class NotchModel: ObservableObject {
         mode = .idle
         isAnswerPinned = false
         fromPromptShortcut = false
+        promptShortcutContext = nil
         agentDetailTaskID = nil
         text = ""; turns = []
         showHistory = false
@@ -4639,6 +4741,68 @@ final class NotchModel: ObservableObject {
         submit(hideUserBubble: true)
     }
 
+    /// The empty form of a prompt shortcut, targeted at the notch. Open a fresh
+    /// idle surface and retain the captured selection out of sight; the field is
+    /// only for the instruction the user wants to apply to it.
+    func openPromptShortcutComposer(selectedText: String,
+                                    on display: CGDirectDisplayID?) {
+        let context = selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        mode = .idle
+        openPanel(on: display)
+        newChat()
+        // Nothing was selected: this is the plain idle prompt, opened by the
+        // gesture. The context stays nil so no badge claims a selection that
+        // isn't there — the gesture still gets the user somewhere to type.
+        promptShortcutContext = context.isEmpty ? nil : selectedText
+    }
+
+    /// A prompt shortcut whose presentation is a compact pointer-side window.
+    /// The round starts headlessly, preserving whatever the notch is currently
+    /// showing, then its live mirror is handed directly to the window.
+    func runPromptShortcutInWindow(shortcutID: UUID, prompt: String, selectedText: String,
+                                   title: String, near pointer: NSPoint,
+                                   sourceApplication: NSRunningApplication?) {
+        guard let threadID = startPromptShortcutRound(
+            prompt: prompt, selectedText: selectedText)
+        else { return }
+        DetachedSessionWindowController.presentCompactShortcut(
+            shortcutID: shortcutID, threadID: threadID,
+            title: title, model: self, near: pointer,
+            sourceApplication: sourceApplication)
+    }
+
+    /// Start the headless round shared by saved prompt shortcuts and the compact
+    /// one-off composer. Keeping construction here guarantees both paths wrap the
+    /// captured selection identically and both remain invisible to panel state.
+    @discardableResult
+    func startPromptShortcutRound(prompt: String, selectedText: String) -> UUID? {
+        let instruction = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let context = selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !instruction.isEmpty else { return nil }
+
+        // The one-off composer can DROP its captured selection (the × on the
+        // "Using copied text" badge) — the line then stands on its own and asks
+        // exactly what was typed.
+        let question = context.isEmpty ? instruction : """
+        \(instruction)
+
+        <selected_text>
+        \(selectedText)
+        </selected_text>
+        """
+        return runDetachedRound(
+            threadID: UUID(), seed: [], question: question,
+            hideUserBubble: true, trackCompactTask: true)
+    }
+
+    /// Supersede a compact shortcut's previous headless round. This is a replace,
+    /// not a visible stop: discard its unfinished Recent placeholder while the
+    /// existing window immediately adopts the newer translation.
+    func cancelCompactRound(threadID: UUID) {
+        compactRoundTasks.removeValue(forKey: threadID)?.cancel()
+        settlePending(threadID)
+    }
+
     /// The single Enter entry point the input field calls. There's only one surface
     /// — the chat input — so this never changes what the panel looks like; it just
     /// routes the line by **intent**:
@@ -4655,6 +4819,24 @@ final class NotchModel: ObservableObject {
         // resumable, else the chat model), so a persisted Agent bucket can
         // never hijack an ask thread's follow-up into a fresh agent task.
         if !turns.isEmpty { submit(); return }
+        // An empty prompt shortcut has already supplied the object of the ask.
+        // Whatever is typed now is the one-off instruction, regardless of intent
+        // classification or which bucket was previously armed.
+        if let selectedText = promptShortcutContext {
+            let instruction = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !instruction.isEmpty else { return }
+            promptShortcutContext = nil
+            text = """
+            \(instruction)
+
+            <selected_text>
+            \(selectedText)
+            </selected_text>
+            """
+            fromPromptShortcut = true
+            submit(hideUserBubble: true)
+            return
+        }
         // An active agent compose sends the line to the agent CLI, not the
         // chat model — regardless of what the classifier reads.
         if agentComposeActive { submitAgent(); return }
@@ -5566,6 +5748,7 @@ final class NotchModel: ObservableObject {
             defer {
                 self.roundsInFlight -= 1
                 self.inFlightRounds.removeAll { $0.answerID == answerID }
+                self.compactRoundTasks[threadID] = nil
                 // Don't let the last round's tool label / write phase outlive
                 // it on the collapsed notch's busy ear.
                 if self.inFlightRounds.isEmpty {
@@ -5794,6 +5977,13 @@ final class NotchModel: ObservableObject {
                             // the isOnScreen gate: a detached round is exactly
                             // the one the resting notch is reporting on.
                             self.backgroundActivity = label
+                            // The detached thread mirror needs the same live state:
+                            // its header and answer wait row must say Search / Read /
+                            // Calculate rather than falling back to a hard-coded verb.
+                            if let i = thread.firstIndex(where: { $0.id == answerID }) {
+                                thread[i].toolActivity = label
+                                self.syncInFlight(answerID, thread)
+                            }
                             // The activity line only shows on a still-on-screen
                             // round; a detached harness silently ignores it.
                             if self.isOnScreen(answerID: answerID) {
@@ -7040,10 +7230,14 @@ final class NotchModel: ObservableObject {
     /// How much of the archive a Clear wipes. The confirmation only offers the
     /// choice when the narrow scope is actually narrower — see
     /// `historyCountWithinLastDay`.
-    enum HistoryClearScope {
-        /// Everything filed in the last 24 hours; older rows stay.
+    enum HistoryClearScope: Equatable {
+        /// Chat / Notes / Reminders filed in the last 24 hours; older rows and
+        /// every Agent conversation stay.
         case lastDay
-        case all
+        /// Every Chat / Notes / Reminders row, leaving Agent untouched.
+        case chat
+        /// Every Agent conversation, leaving Ask / Notes / Reminders untouched.
+        case agent
     }
 
     /// The window `.lastDay` wipes.
@@ -7053,28 +7247,43 @@ final class NotchModel: ObservableObject {
     /// and what tells the confirmation whether there's a choice worth offering.
     var historyCountWithinLastDay: Int {
         let cutoff = Date().addingTimeInterval(-Self.historyLastDayWindow)
-        return history.lazy.filter { $0.t >= cutoff }.count
+        return history.lazy.filter {
+            $0.t >= cutoff
+                && (self.agentComposeActive ? $0.source == .agent : $0.source != .agent)
+        }.count
     }
 
-    func clearHistory(scope: HistoryClearScope = .all) {
+    /// Total represented by the active Clear confirmation. Agent's confirmation
+    /// counts only the rows it can remove; Chat counts Ask / Notes / Reminders.
+    var historyClearTotalCount: Int { recentScopeHistoryCount }
+
+    func clearHistory(scope: HistoryClearScope = .chat) {
         // Everything filed at/after this instant goes. A full clear reaches all the
         // way back, which is just `.distantPast` — so both scopes are one cutoff and
         // one code path.
         let cutoff: Date = switch scope {
-        case .all: .distantPast
+        case .chat, .agent: .distantPast
         case .lastDay: Date().addingTimeInterval(-Self.historyLastDayWindow)
         }
         // Clearing before the launch load lands must also reach the rows the read
         // hasn't handed over yet, or the wiped window pops back once it finishes.
-        armClearBeforeLoad(cutoff)
+        if scope == .agent {
+            armAgentClearBeforeLoad()
+        } else {
+            armChatClearBeforeLoad(cutoff)
+        }
 
-        let doomed = history.filter { $0.t >= cutoff }
-        guard !doomed.isEmpty || scope == .all else { return }
+        let doomed = history.filter {
+            $0.t >= cutoff && (scope == .agent ? $0.source == .agent : $0.source != .agent)
+        }
+        guard !doomed.isEmpty || !historyLoaded || scope == .chat || scope == .agent else { return }
         // The rows go, so their attachments go with them. (A clear that lands before
         // the load only sees what's in memory; the rest of the store is swept by the
         // prune in `mergeLoadedHistory`, which then finds nothing referencing it.)
         Self.deleteHistoryImages(doomed.flatMap(\.imageFiles))
-        history.removeAll { $0.t >= cutoff }
+        history.removeAll {
+            $0.t >= cutoff && (scope == .agent ? $0.source == .agent : $0.source != .agent)
+        }
         saveHistory()
 
         // The keyboard highlight indexes into the *visible* slice, and a partial
@@ -7211,17 +7420,23 @@ final class NotchModel: ObservableObject {
     /// merge would replace the whole archive with them.
     private var historyLoaded = false
     private var historySaveDeferred = false
-    /// Set when the user clears history before the launch load lands, so the merge
-    /// can't resurrect the archive it was just asked to destroy. The value is the
-    /// clear's cutoff — drop everything filed at/after it (`.distantPast` for a full
-    /// clear, a 24h-ago instant for the narrow scope). `nil` = nothing cleared yet.
-    private var historyClearedBeforeLoad: Date?
+    /// A Chat clear can race the launch-time history read. Once armed, it owns only
+    /// Ask / Notes / Reminders rows at or after its cutoff; Agent remains intact.
+    private var chatHistoryClearedBeforeLoad: Date?
+    /// Agent counterpart to `chatHistoryClearedBeforeLoad`.
+    private var agentHistoryClearedBeforeLoad = false
 
-    /// Records a pre-load clear's reach. Two clears keep the *earlier* cutoff — it's
-    /// the one that removes more, and neither window should come back.
-    private func armClearBeforeLoad(_ cutoff: Date) {
+    /// Records a pre-load Chat clear's reach. Two clears keep the earlier cutoff —
+    /// it removes more, while still never crossing into Agent.
+    private func armChatClearBeforeLoad(_ cutoff: Date) {
         guard !historyLoaded else { return }
-        historyClearedBeforeLoad = min(historyClearedBeforeLoad ?? .distantFuture, cutoff)
+        chatHistoryClearedBeforeLoad = min(
+            chatHistoryClearedBeforeLoad ?? .distantFuture, cutoff)
+    }
+
+    private func armAgentClearBeforeLoad() {
+        guard !historyLoaded else { return }
+        agentHistoryClearedBeforeLoad = true
     }
     /// The debounced pending save, so a burst of saves collapses to one write and
     /// the terminate flush can run it early.
@@ -7252,12 +7467,15 @@ final class NotchModel: ObservableObject {
             }
         }
         guard !loaded.isEmpty else { return }
-        // A clear that landed before this read finished also owns the rows it never
-        // got to see — apply its cutoff to what came off disk, or the wiped window
-        // reappears. (`.distantPast` = a full clear: nothing survives.)
-        let surviving = historyClearedBeforeLoad.map { cutoff in
-            loaded.filter { $0.t < cutoff }
+        // A clear that landed before this read finished also owns the matching
+        // bucket's rows it never got to see. Apply both scopes independently so
+        // neither clear can erase the sibling bucket.
+        var surviving = chatHistoryClearedBeforeLoad.map { cutoff in
+            loaded.filter { $0.source == .agent || $0.t < cutoff }
         } ?? loaded
+        if agentHistoryClearedBeforeLoad {
+            surviving.removeAll { $0.source == .agent }
+        }
         guard !surviving.isEmpty else { return }
         // Anything already in `history` arrived after launch — newer than
         // everything on disk — so it stays in front (the list is newest-first).

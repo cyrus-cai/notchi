@@ -123,6 +123,19 @@ struct WhatsNewView: View {
                     .foregroundStyle(Tokens.text4)
             }
 
+            if let heroAssetName = entry.heroAssetName {
+                Image(heroAssetName)
+                    .resizable()
+                    .aspectRatio(2, contentMode: .fit)
+                    .frame(maxWidth: .infinity)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .strokeBorder(Tokens.hairline, lineWidth: 1)
+                    )
+                    .accessibilityHidden(true)
+            }
+
             if !entry.features.isEmpty {
                 noteGroup(heading: L("whatsnew.section.features"), lines: entry.features)
             }

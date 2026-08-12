@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import Carbon
+import Darwin
 
 /// A thin wrapper over Carbon's `RegisterEventHotKey` — a process-wide hot key
 /// that fires even when the app isn't frontmost, with no Accessibility
@@ -105,9 +106,9 @@ enum ShortcutRecording {
 /// Fires `action` when the user double-taps a *bare* modifier key (e.g. ⌥⌥),
 /// the way Raycast/CleanShot summon on a double-tapped ⌘. Carbon's
 /// `RegisterEventHotKey` can't represent a lone modifier, so this watches
-/// `flagsChanged` through a global+local `NSEvent` monitor — which, unlike a
-/// CGEvent tap, needs no Accessibility permission, only the ability to observe
-/// modifier state (granted to ordinary apps).
+/// `flagsChanged` through a global+local `NSEvent` monitor. It also observes
+/// `keyDown` so a chord such as ⌘C invalidates the candidate tap instead of
+/// masquerading as a bare ⌘ press.
 ///
 /// A "tap" is the target modifier going down and back up with no *other*
 /// modifier held at any point; two taps inside `window` seconds fire the action.
@@ -138,10 +139,14 @@ final class DoubleTapModifierMonitor {
         // Global monitor: catches taps while another app is frontmost. Local
         // monitor: catches them while our own (settings) window has focus —
         // global monitors don't see events delivered to our process.
-        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.flagsChanged, .keyDown]
+        ) { [weak self] event in
             self?.handle(event)
         }
-        localMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+        localMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.flagsChanged, .keyDown]
+        ) { [weak self] event in
             self?.handle(event)
             return event
         }
@@ -158,6 +163,15 @@ final class DoubleTapModifierMonitor {
     private static let watched: NSEvent.ModifierFlags = [.command, .option, .control, .shift]
 
     private func handle(_ event: NSEvent) {
+        // A double-tap must consist of two *bare* modifier taps. Any ordinary key
+        // between or during them dirties the whole sequence. In particular this
+        // prevents habitual repeated ⌘C presses from firing the action.
+        if event.type == .keyDown {
+            pendingTap = false
+            lastTapTime = nil
+            return
+        }
+
         // An unmappable modifier (empty `flag`) can never be the sole one held, so
         // bail — otherwise `active == flag` would match every plain key-up.
         guard !flag.isEmpty else { return }
@@ -171,15 +185,17 @@ final class DoubleTapModifierMonitor {
             return
         }
 
-        // Any other transition. We only care about the *release* that completes a
-        // clean tap: the target went down alone (pendingTap) and now nothing is
-        // held. If some other modifier joined in, the tap is dirty — reset.
-        guard pendingTap else { return }
-        pendingTap = false
+        // Any other held modifier dirties both the pending press and the previous
+        // completed tap, even if it joined before the target did.
         guard active.isEmpty else {
-            lastTapTime = nil // a different modifier intruded; not a clean tap
+            pendingTap = false
+            lastTapTime = nil
             return
         }
+
+        // Empty flags are the release edge that can complete a clean tap.
+        guard pendingTap else { return }
+        pendingTap = false
 
         let now = event.timestamp
         if let last = lastTapTime, now - last <= window {
@@ -202,6 +218,343 @@ final class DoubleTapModifierMonitor {
         default:                 return []
         }
     }
+}
+
+/// Keeps the unfinished Force Touch path dormant without discarding its
+/// implementation or the user's saved pressure preference.
+enum ForceClickFeature {
+    static let isEnabled = false
+}
+
+/// Observes a Force Touch trackpad globally and fires once when a click continues
+/// into the second pressure rung. AppKit's `.pressure` stream is window-local —
+/// its global event monitor silently receives nothing — so the raw pressure comes
+/// from macOS's private MultitouchSupport framework. Ordinary mouse-down/up events
+/// still delimit the gesture and remain owned by the app under the pointer.
+final class ForceClickMonitor {
+    private let action: () -> Void
+    /// How far the press has come, 0…1, where 1 is the pressure that fires. Fed
+    /// live so the UI can show the gesture building instead of only its result
+    /// (`ForceClickHerald`); `nil` progress means the press is over.
+    private let progress: (Double?) -> Void
+    private var pressureSource: RawTrackpadPressureSource?
+    private var globalMonitor: Any?
+    private var localMonitor: Any?
+    private var mouseIsDown = false
+    private var latestPressure: Float = 0
+    private var clickPressure: Float?
+    private var peakPressure: Float = 0
+    private var firedForCurrentPress = false
+
+    /// Whether this machine actually feeds pressure. False on a mouse, an old
+    /// non-Force-Touch trackpad, or if the private framework ever stops loading —
+    /// in which case the pressure setting has nothing to act on and its test pad
+    /// says so instead of waiting for a press that can never register.
+    var isSupported: Bool { pressureSource != nil }
+
+    init(progress: @escaping (Double?) -> Void = { _ in },
+         action: @escaping () -> Void) {
+        self.action = action
+        self.progress = progress
+
+        let mouseEvents: NSEvent.EventTypeMask = [.leftMouseDown, .leftMouseUp]
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: mouseEvents) {
+            [weak self] event in
+            self?.handleMouse(event)
+        }
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: mouseEvents) {
+            [weak self] event in
+            self?.handleMouse(event)
+            return event
+        }
+        pressureSource = RawTrackpadPressureSource { [weak self] pressure, hasTouches in
+            self?.handlePressure(pressure, hasTouches: hasTouches)
+        }
+#if DEBUG
+        if pressureSource == nil {
+            NSLog("[ForceClick] raw trackpad pressure source unavailable")
+        }
+#endif
+    }
+
+    deinit {
+        if let globalMonitor { NSEvent.removeMonitor(globalMonitor) }
+        if let localMonitor { NSEvent.removeMonitor(localMonitor) }
+    }
+
+    private func handleMouse(_ event: NSEvent) {
+        switch event.type {
+        case .leftMouseDown:
+            mouseIsDown = true
+            firedForCurrentPress = false
+            peakPressure = latestPressure
+            // The raw frame normally arrives just before mouse-down. If it races
+            // behind, the first pressure frame below becomes the baseline instead.
+            clickPressure = latestPressure > 1 ? latestPressure : nil
+        case .leftMouseUp:
+#if DEBUG
+            NSLog("[ForceClick] baseline=%.1f peak=%.1f fired=%@",
+                  clickPressure ?? 0, peakPressure,
+                  firedForCurrentPress ? "yes" : "no")
+#endif
+            resetPress()
+        default:
+            break
+        }
+    }
+
+    private func handlePressure(_ pressure: Float, hasTouches: Bool) {
+        latestPressure = pressure
+        peakPressure = max(peakPressure, pressure)
+        guard hasTouches else {
+            if !mouseIsDown { resetPress() }
+            return
+        }
+        guard mouseIsDown, !firedForCurrentPress else { return }
+        guard let baseline = clickPressure else {
+            if pressure > 1 { clickPressure = pressure }
+            return
+        }
+
+        let reached = ForceClickPressure.current.progress(of: pressure, from: baseline)
+        progress(reached)
+        guard reached >= 1 else { return }
+        firedForCurrentPress = true
+        action()
+    }
+
+    private func resetPress() {
+        let wasTracking = mouseIsDown || clickPressure != nil
+        mouseIsDown = false
+        clickPressure = nil
+        firedForCurrentPress = false
+        if wasTracking { progress(nil) }
+    }
+}
+
+/// The settings test pad's tap into the live gesture.
+///
+/// A pressure rung is a feeling, not a number — no label or diagram can tell you
+/// what "Firm" costs your finger, only pressing can. But the pad can't open its
+/// own reader: `RawTrackpadPressureSource` keeps a single active client and that
+/// one belongs to the app's monitor. So the pad *arms* this while the pointer
+/// rests on it, and the monitor routes the press here — to a bar the finger
+/// drives — instead of to the herald and the composer.
+@MainActor
+final class ForceClickProbe: ObservableObject {
+    static let shared = ForceClickProbe()
+
+    /// The pointer is resting on the on-screen test pad, so the next press is a
+    /// rehearsal: it draws here and opens nothing.
+    @Published var isArmed = false
+    /// How far the trial press has come, 0…1; nil between presses.
+    @Published private(set) var progress: Double?
+    /// Latched from the moment a trial press crosses the rung until the finger
+    /// lifts, so "that was enough" stays legible for longer than one frame.
+    @Published private(set) var reached = false
+    /// Whether pressure reaches the app at all on this machine.
+    @Published var isSupported = false
+
+    private init() {}
+
+    /// Raw frames arrive ~125 times a second and mostly repeat themselves.
+    /// Publishing each one would hand SwiftUI a re-layout per frame for movement
+    /// too small to see, so the bar advances in visible steps.
+    private static let step: Double = 64
+
+    func update(_ value: Double?) {
+        guard let value else {
+            guard progress != nil || reached else { return }
+            progress = nil
+            reached = false
+            return
+        }
+        let stepped = (value * Self.step).rounded() / Self.step
+        guard stepped != progress else { return }
+        progress = stepped
+    }
+
+    func fire() {
+        progress = 1
+        reached = true
+    }
+}
+
+/// How firmly a normal click must continue before Notchi treats it as a Force
+/// Click. Each rung combines an absolute pressure floor with the rise from the
+/// first click, so a late raw frame cannot make an ordinary click look forced.
+enum ForceClickPressure: String, CaseIterable, Identifiable {
+    case light
+    case medium
+    case firm
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .light:  return L("forceClick.light")
+        case .medium: return L("forceClick.medium")
+        case .firm:   return L("forceClick.firm")
+        }
+    }
+
+    fileprivate var ratio: Float {
+        switch self {
+        case .light:  return 1.45
+        case .medium: return 1.70
+        case .firm:   return 2.00
+        }
+    }
+
+    fileprivate var minimumRise: Float {
+        switch self {
+        case .light:  return 38
+        case .medium: return 65
+        case .firm:   return 95
+        }
+    }
+
+    fileprivate var minimumPressure: Float {
+        switch self {
+        case .light:  return 150
+        case .medium: return 200
+        case .firm:   return 260
+        }
+    }
+
+    /// How far a press at `pressure` has come toward this rung, 0…1, where 1 means
+    /// it fires. Raw pressure is reported in gram-force; Apple's own second-click
+    /// threshold is private and adapts by hardware/settings, so each rung combines
+    /// an absolute floor with the rise from the first click, tuned around the
+    /// medium values validated on a real Force Touch pad.
+    ///
+    /// The three terms are combined with `min` — the slowest one to be satisfied
+    /// is what the user still has to push through, so this hits exactly 1 at the
+    /// same moment all three conditions hold. That makes it the single definition
+    /// of the gesture: the cue can't promise a fire the monitor won't deliver.
+    func progress(of pressure: Float, from baseline: Float) -> Double {
+        let absolute = Double(pressure / minimumPressure)
+        let proportional = baseline > 0
+            ? Double(pressure / (baseline * ratio))
+            : 0
+        let risen = Double((pressure - baseline) / minimumRise)
+        return max(0, min(1, min(absolute, min(proportional, risen))))
+    }
+
+    private static let key = "forceClickPressure"
+
+    static var current: ForceClickPressure {
+        get {
+            UserDefaults.standard.string(forKey: key)
+                .flatMap(ForceClickPressure.init(rawValue:)) ?? .medium
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: key) }
+    }
+}
+
+/// Minimal, dynamically-linked reader for the system trackpad's contact frames.
+/// Loading at runtime keeps the app build independent of private SDK headers and
+/// makes unsupported machines a clean no-op.
+private final class RawTrackpadPressureSource {
+    private typealias DeviceRef = UnsafeMutableRawPointer
+    private typealias FrameCallback = @convention(c) (
+        DeviceRef?, UnsafeMutableRawPointer?, Int32, Double, Int32
+    ) -> Void
+    private typealias IsAvailable = @convention(c) () -> Bool
+    private typealias CreateDefault = @convention(c) () -> DeviceRef?
+    private typealias RegisterCallback = @convention(c) (DeviceRef?, FrameCallback?) -> Void
+    private typealias StartDevice = @convention(c) (DeviceRef?, Int32) -> Int32
+    private typealias StopDevice = @convention(c) (DeviceRef?) -> Int32
+    private typealias ReleaseDevice = @convention(c) (DeviceRef?) -> Void
+
+    private static weak var active: RawTrackpadPressureSource?
+    private static let touchStride = 96
+    private static let pressureOffset = 52
+
+    private let framework: UnsafeMutableRawPointer
+    private let device: DeviceRef
+    private let unregister: RegisterCallback
+    private let stop: StopDevice
+    private let release: ReleaseDevice
+    private let onFrame: (Float, Bool) -> Void
+
+    init?(onFrame: @escaping (Float, Bool) -> Void) {
+        let path = "/System/Library/PrivateFrameworks/MultitouchSupport.framework/MultitouchSupport"
+        guard let framework = dlopen(path, RTLD_LAZY | RTLD_LOCAL),
+              let isAvailable: IsAvailable = Self.symbol("MTDeviceIsAvailable", in: framework),
+              isAvailable(),
+              let create: CreateDefault = Self.symbol("MTDeviceCreateDefault", in: framework),
+              let device = create(),
+              let register: RegisterCallback = Self.symbol(
+                "MTRegisterContactFrameCallback", in: framework),
+              let unregister: RegisterCallback = Self.symbol(
+                "MTUnregisterContactFrameCallback", in: framework),
+              let start: StartDevice = Self.symbol("MTDeviceStart", in: framework),
+              let stop: StopDevice = Self.symbol("MTDeviceStop", in: framework),
+              let release: ReleaseDevice = Self.symbol("MTDeviceRelease", in: framework)
+        else {
+            return nil
+        }
+
+        self.framework = framework
+        self.device = device
+        self.unregister = unregister
+        self.stop = stop
+        self.release = release
+        self.onFrame = onFrame
+
+        Self.active = self
+        register(device, rawTrackpadFrameCallback)
+        guard start(device, 0) == 0 else {
+            unregister(device, rawTrackpadFrameCallback)
+            release(device)
+            Self.active = nil
+            dlclose(framework)
+            return nil
+        }
+    }
+
+    deinit {
+        unregister(device, rawTrackpadFrameCallback)
+        _ = stop(device)
+        release(device)
+        if Self.active === self { Self.active = nil }
+        dlclose(framework)
+    }
+
+    fileprivate static func receive(
+        touches: UnsafeMutableRawPointer?, count: Int32
+    ) {
+        guard let source = active else { return }
+        var maximum: Float = 0
+        if let touches, count > 0 {
+            for index in 0..<Int(count) {
+                let address = touches
+                    .advanced(by: index * touchStride + pressureOffset)
+                    .assumingMemoryBound(to: Float.self)
+                maximum = max(maximum, address.pointee)
+            }
+        }
+        DispatchQueue.main.async { [weak source] in
+            source?.onFrame(maximum, count > 0)
+        }
+    }
+
+    private static func symbol<T>(_ name: String,
+                                  in framework: UnsafeMutableRawPointer) -> T? {
+        guard let address = dlsym(framework, name) else { return nil }
+        return unsafeBitCast(address, to: T.self)
+    }
+}
+
+private func rawTrackpadFrameCallback(
+    _ device: UnsafeMutableRawPointer?,
+    _ touches: UnsafeMutableRawPointer?,
+    _ count: Int32,
+    _ timestamp: Double,
+    _ frame: Int32
+) {
+    RawTrackpadPressureSource.receive(touches: touches, count: count)
 }
 
 /// The user-configurable global shortcut that summons (toggles) the notch panel.
@@ -373,12 +726,32 @@ struct SummonHotKey: Equatable {
 struct ShortcutChord: Codable, Equatable, Hashable {
     let keyCode: UInt32
     let modifiers: UInt32
+    /// Non-nil for a global double-tap of a bare modifier. Optional keeps every
+    /// previously persisted prompt shortcut decodable without a migration.
+    let doubleTapModifier: UInt32?
+
+    init(keyCode: UInt32, modifiers: UInt32, doubleTapModifier: UInt32? = nil) {
+        self.keyCode = keyCode
+        self.modifiers = modifiers
+        self.doubleTapModifier = doubleTapModifier
+    }
+
+    static func doubleTap(_ modifier: UInt32) -> ShortcutChord {
+        ShortcutChord(keyCode: 0, modifiers: 0, doubleTapModifier: modifier)
+    }
+
+    var isDoubleTap: Bool { doubleTapModifier != nil }
 
     var displayString: String {
-        SummonHotKey.modifierSymbols(modifiers) + SummonHotKey.keyName(keyCode)
+        if let doubleTapModifier {
+            let glyph = SummonHotKey.modifierSymbols(doubleTapModifier)
+            return glyph + glyph
+        }
+        return SummonHotKey.modifierSymbols(modifiers) + SummonHotKey.keyName(keyCode)
     }
 
     func matches(_ event: NSEvent) -> Bool {
+        guard !isDoubleTap else { return false }
         guard UInt32(event.keyCode) == keyCode else { return false }
         return modifiers == SummonHotKey.carbonModifiers(from: event.modifierFlags)
     }
@@ -397,13 +770,17 @@ struct PromptShortcut: Codable, Equatable, Identifiable {
     /// persisted rows (optional Codable = zero-migration), so already-added
     /// shortcuts work without any data rewrite.
     var name: String?
+    /// When true, the result opens in a compact window beside the pointer instead
+    /// of unfolding the notch. Optional keeps rows saved by older builds decodable.
+    var opensBesidePointer: Bool?
 
     init(id: UUID = UUID(), shortcut: ShortcutChord? = nil, prompt: String = "",
-         name: String? = nil) {
+         name: String? = nil, opensBesidePointer: Bool? = nil) {
         self.id = id
         self.shortcut = shortcut
         self.prompt = prompt
         self.name = name
+        self.opensBesidePointer = opensBesidePointer
     }
 
     /// What the row/menu shows: the name when one has been generated, else a
@@ -420,6 +797,10 @@ struct PromptShortcut: Codable, Equatable, Identifiable {
     var isReady: Bool {
         shortcut != nil && !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
+
+    var opensInPointerWindow: Bool { opensBesidePointer == true }
+
+    var canRunFromHotKey: Bool { isReady }
 }
 
 /// Small versionless store for the equally small `[shortcut, prompt]` list.
@@ -442,6 +823,32 @@ enum PromptShortcutStore {
 
     static func shortcut(id: UUID) -> PromptShortcut? {
         current.first { $0.id == id }
+    }
+}
+
+/// The fixed global action that opens a one-off instruction field with the
+/// current selection already attached. Unlike `PromptShortcut`, this has no
+/// prompt field by design: its identity never depends on leaving an editor blank.
+struct SelectedTextShortcut: Codable, Equatable {
+    var opensBesidePointer = false
+
+    var opensInPointerWindow: Bool { opensBesidePointer }
+}
+
+enum SelectedTextShortcutStore {
+    static let actionID = UUID(uuidString: "7A6EA903-8EAE-4A72-BA61-184947183A9F")!
+    private static let key = "selectedTextShortcut"
+
+    static var current: SelectedTextShortcut {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let value = try? JSONDecoder().decode(SelectedTextShortcut.self, from: data)
+        else { return SelectedTextShortcut() }
+        return value
+    }
+
+    static func save(_ value: SelectedTextShortcut) {
+        guard let data = try? JSONEncoder().encode(value) else { return }
+        UserDefaults.standard.set(data, forKey: key)
     }
 }
 
@@ -917,9 +1324,15 @@ enum AppShortcutStore {
         }
 
         let summon = SummonHotKey.current
-        if !editingSummon, summon.enabled, !summon.isDoubleTap,
-           ShortcutChord(keyCode: summon.keyCode, modifiers: summon.modifiers) == proposed {
-            return L("shortcuts.summon")
+        if !editingSummon, summon.enabled {
+            if let modifier = proposed.doubleTapModifier,
+               summon.isDoubleTap, summon.doubleTapModifier == modifier {
+                return L("shortcuts.summon")
+            }
+            if !proposed.isDoubleTap, !summon.isDoubleTap,
+               ShortcutChord(keyCode: summon.keyCode, modifiers: summon.modifiers) == proposed {
+                return L("shortcuts.summon")
+            }
         }
         return nil
     }

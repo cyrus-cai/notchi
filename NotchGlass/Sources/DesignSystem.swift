@@ -948,8 +948,15 @@ extension View {
     /// Attach a `NotchTooltip` — the in-house replacement for `.help()`. Use it on
     /// the answer-footer action icons (copy / save / regenerate / info / pin) and
     /// any other island control that wants a hover hint in the panel's own voice.
-    func notchTooltip(_ text: String, edge: VerticalEdge = .top, delay: TimeInterval = 0.45) -> some View {
-        modifier(NotchTooltip(text: text, edge: edge, delay: delay))
+    /// Pass `shows: false` to keep the control a silent chip (hover shows nothing)
+    /// while the accessibility label still rides the caller's own `.accessibilityLabel`.
+    @ViewBuilder
+    func notchTooltip(_ text: String, edge: VerticalEdge = .top, delay: TimeInterval = 0.45, shows: Bool = true) -> some View {
+        if shows {
+            modifier(NotchTooltip(text: text, edge: edge, delay: delay))
+        } else {
+            self
+        }
     }
 }
 

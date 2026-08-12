@@ -646,12 +646,14 @@ final class AgentTaskManager: ObservableObject {
         case .codex:
             // Sandboxed workspace-write: can edit anything under the folder and
             // run commands inside codex's sandbox; network stays off (codex's own
-            // workspace-write default). A follow-up rides `exec resume <id>`
-            // instead of a fresh `exec` — same options, and the explicit `-`
-            // prompt positional keeps the prompt on stdin like round one.
-            args = resumeSession.map { ["exec", "resume", $0, "-"] } ?? ["exec"]
-            args += ["--json", "--skip-git-repo-check", "--color", "never",
-                     "-s", "workspace-write", "-C", folder.path]
+            // workspace-write default). `resume` is an `exec` subcommand, so the
+            // exec-only flags must precede it; placing --color/-s/-C after the
+            // resumed prompt makes the resume parser reject the follow-up before
+            // it starts. The explicit `-` positional below keeps that prompt on
+            // stdin like round one.
+            args = ["exec", "--json", "--skip-git-repo-check", "--color", "never",
+                    "-s", "workspace-write", "-C", folder.path]
+            if resumeSession != nil { args.append("resume") }
             if let model { args += ["-m", model] }
             if let effort {
                 args += ["-c", "model_reasoning_effort=\(effort.rawValue)"]
@@ -670,6 +672,7 @@ final class AgentTaskManager: ObservableObject {
                     run.tempImageURLs.append(url)
                 }
             }
+            if let resumeSession { args += [resumeSession, "-"] }
         case .claude:
             // acceptEdits auto-approves file edits under the project (the cwd),
             // and Bash/web are pre-authorized so builds/tests/doc-lookups run
@@ -1767,11 +1770,16 @@ private final class CodexAgentStreamState: AgentEventParser {
             var residue = AgentProgress()
             _ = drainLines(into: &residue)
         }
-        let tail = stderrTail
+        let lines = stderrTail
             .split(separator: "\n")
             .map(String.init)
-            .last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })
-            ?? ""
+            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        let last = lines.last ?? ""
+        // clap ends parse failures with this generic hint. Keep the actual
+        // `error: ...` line instead, so a future CLI incompatibility is visible.
+        let tail = last.hasPrefix("For more information, try")
+            ? (lines.last(where: { $0.hasPrefix("error:") }) ?? last)
+            : last
         return AgentSnapshot(finalMessage: finalMessage, failure: failure,
                              stderrTail: tail, sawTerminal: sawTerminal)
     }

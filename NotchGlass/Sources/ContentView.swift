@@ -123,7 +123,7 @@ struct ContentView: View {
             // the field has somewhere to land; if the filter's already up, ⌘F is a
             // no-op rather than a toggle (Esc clears/closes it — see below).
             if AppShortcutStore.matches(.filter, event: event),
-               !model.showSettings, model.history.count > 6 {
+               !model.showSettings, model.recentScopeHistoryCount > 6 {
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                     if !model.showHistory { model.showHistory = true }
                     model.showHistoryFilter = true
@@ -835,7 +835,8 @@ struct NotchIsland: View {
             if model.confirmingClear, isOpen {
                 ClearHistoryConfirm(
                     lastDayCount: model.historyCountWithinLastDay,
-                    totalCount: model.history.count,
+                    totalCount: model.historyClearTotalCount,
+                    agentOnly: model.agentComposeActive,
                     onCancel: {
                         withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
                             model.confirmingClear = false

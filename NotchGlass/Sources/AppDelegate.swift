@@ -137,6 +137,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// each registration captures only its stable id and reads the current prompt
     /// at fire time, so editing prompt text needs no hot-key churn.
     private var promptHotKeys: [UUID: HotKey] = [:]
+    /// Modifier-only prompt bindings use the same clean double-tap recognizer as
+    /// summon; Carbon hot keys cannot represent a bare modifier.
+    private var promptDoubleTaps: [UUID: DoubleTapModifierMonitor] = [:]
+    /// Experimental Force Touch entry into the same selected-text composer. It
+    /// reads the user's pressure level live on every press.
+    private var selectedTextForceClick: ForceClickMonitor?
 
     /// True while a prompt shortcut's selection capture is still in flight — the
     /// web-content path can wait a few hundred ms for a browser to build its
@@ -212,6 +218,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Seed the configured flag to match the service the model launched with.
         model.isConfigured = AppDelegate.isConfigured()
+
+        // …and re-seed it once a CLI's binary resolution lands. For the four CLI
+        // providers "configured" IS "the binary resolved and you're signed in",
+        // and that answer is resolved asynchronously (`warmUp()` below) — a read
+        // taken here, on a cold cache, is always `false`. Without this observer
+        // that `false` latched for the whole session: with `codex` / `claude` /
+        // `grok` / `cmd` as the selected provider, every launch came up claiming
+        // nothing was configured — the Ask chip red on "Choose model…", the model
+        // list falling back to the CLI offer — until some Settings action posted
+        // `.aiBackendChanged`. Registered *before* the warm-ups so the probe
+        // can't finish into a window where nobody is listening.
+        NotificationCenter.default.addObserver(
+            forName: .cliAvailabilityResolved, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                let now = AppDelegate.isConfigured()
+                guard now != self.model.isConfigured else { return }
+                // Only the flag moves: a CLI provider's service is built keyless
+                // (`makeService` never returns the stub for one), so the backend
+                // was already the right object — it was the *claim* about it that
+                // was stale.
+                self.model.isConfigured = now
+            }
+        }
 
         // Start sampling mouse movement so a hover-open can read the cursor's
         // approach vector — the entry physics in `NotchIsland` feed on it.
@@ -607,10 +638,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             forName: .openHistoryArchiveRequested,
             object: nil,
             queue: .main
-        ) { [weak self] _ in
+        ) { [weak self] notification in
             Task { @MainActor in
                 guard let self else { return }
-                HistoryArchiveWindowController.shared.present(model: self.model)
+                let scope = (notification.userInfo?["scope"] as? String)
+                    .flatMap(HistoryArchiveScope.init(rawValue:)) ?? .all
+                HistoryArchiveWindowController.shared.present(
+                    model: self.model,
+                    scope: scope
+                )
             }
         }
 
@@ -724,6 +760,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         registerPromptHotKeys()
+        if ForceClickFeature.isEnabled {
+            // The press draws itself while it is still being decided, so the gesture
+            // stops being a coin flip (`ForceClickHerald`). The cue grows into exactly
+            // the capsule the composer opens with, at the same spot.
+            selectedTextForceClick = ForceClickMonitor(
+                // Already on main (the raw pressure frames are hopped there before the
+                // monitor sees them) and it runs ~125 times a second, so this takes the
+                // isolation it has rather than allocating a Task per frame.
+                progress: { [weak self] reached in
+                    MainActor.assumeIsolated {
+                        // Settings' test pad borrows this stream while the pointer
+                        // rests on it — one reader exists, so a rehearsal has to be
+                        // the real press, just pointed somewhere else.
+                        guard !ForceClickProbe.shared.isArmed else {
+                            return ForceClickProbe.shared.update(reached)
+                        }
+                        guard let reached else { return ForceClickHerald.shared.cancel() }
+                        // The press draws the composer window itself now, so it needs
+                        // the model the window will be built against.
+                        guard let self else { return }
+                        ForceClickHerald.shared.update(progress: reached, model: self.model)
+                    }
+                },
+                action: { [weak self] in
+                    // A press on the test pad has arrived where it was going. It
+                    // reports "that was enough" and stops there: the pad exists to
+                    // let you feel the rung, not to open a composer over Settings.
+                    guard !ForceClickProbe.shared.isArmed else {
+                        return ForceClickProbe.shared.fire()
+                    }
+                    // The cue stops being a cue here: it stretches out into the capsule
+                    // itself, and the window is held back until that shape is standing
+                    // still, so the two are never on screen disagreeing.
+                    ForceClickHerald.shared.expand()
+                    self?.runSelectedTextShortcut(grownFromPressure: true)
+                })
+            ForceClickProbe.shared.isSupported = selectedTextForceClick?.isSupported ?? false
+        }
         NotificationCenter.default.addObserver(
             forName: .promptShortcutsChanged,
             object: nil,
@@ -779,22 +853,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// ready row claims its new chord exactly once.
     private func registerPromptHotKeys() {
         promptHotKeys.removeAll()
+        promptDoubleTaps.removeAll()
         guard !ShortcutRecording.isActive else { return }
-        for binding in PromptShortcutStore.current where binding.isReady {
+
+        for binding in PromptShortcutStore.current where binding.canRunFromHotKey {
             guard let chord = binding.shortcut else { continue }
             let id = binding.id
-            guard let hotKey = HotKey(keyCode: chord.keyCode,
-                                      modifiers: chord.modifiers,
-                                      action: { [weak self] in
+            let fire: () -> Void = { [weak self] in
                 self?.runPromptShortcut(id: id)
-            }) else { continue }
-            promptHotKeys[id] = hotKey
+            }
+            if let modifier = chord.doubleTapModifier {
+                promptDoubleTaps[id] = DoubleTapModifierMonitor(
+                    carbonModifier: modifier,
+                    action: fire
+                )
+            } else {
+                guard let hotKey = HotKey(keyCode: chord.keyCode,
+                                          modifiers: chord.modifiers,
+                                          action: fire) else { continue }
+                promptHotKeys[id] = hotKey
+            }
             // Backward compatibility: a ready shortcut created before names
             // existed has `name == nil`. Ask the AI for its name once — the
             // `/` menu then shows the named row instead of a raw prompt slice.
             // `ensurePromptShortcutName` is idempotent and re-registration only
             // runs on launch or a shortcuts change, so this never re-names.
-            model.ensurePromptShortcutName(binding)
+            if binding.isReady { model.ensurePromptShortcutName(binding) }
         }
     }
 
@@ -802,10 +886,106 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// system focused element), then start a fresh Chat and submit immediately.
     /// Missing/unsupported selections deliberately do not fall back to clipboard.
     private func runPromptShortcut(id: UUID) {
-        guard let binding = PromptShortcutStore.shortcut(id: id), binding.isReady else { return }
+        guard let binding = PromptShortcutStore.shortcut(id: id), binding.canRunFromHotKey else { return }
+        captureSelectedText { [weak self] selectedText, triggerPoint, sourceApplication in
+            guard let self else { return }
+            if binding.opensInPointerWindow {
+                self.model.runPromptShortcutInWindow(
+                    shortcutID: id,
+                    prompt: binding.prompt,
+                    selectedText: selectedText,
+                    title: binding.displayName,
+                    near: triggerPoint,
+                    sourceApplication: sourceApplication)
+            } else {
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                    self.model.runPromptShortcut(prompt: binding.prompt,
+                                                 selectedText: selectedText,
+                                                 on: self.displayForSummon())
+                }
+            }
+        }
+    }
+
+    /// The fixed no-prompt action: capture first, then open its one-off composer
+    /// in the configured destination. The destination is read at fire time, so a
+    /// settings change never needs to rebuild the chord registration to take effect.
+    ///
+    /// `grownFromPressure` means a force click is already drawing the capsule at the
+    /// pointer (`ForceClickHerald`). The window then waits for that stretch to
+    /// settle before it appears — a selection that answers instantly would otherwise
+    /// open the real composer over a cue still mid-flight.
+    private func runSelectedTextShortcut(grownFromPressure: Bool = false) {
+        let config = SelectedTextShortcutStore.current
+        let open: (String, NSPoint, NSRunningApplication?) -> Void = {
+            [weak self] selectedText, triggerPoint, sourceApplication in
+            guard let self else { return }
+            if config.opensInPointerWindow {
+                DetachedSessionWindowController.presentCompactShortcutComposer(
+                    shortcutID: SelectedTextShortcutStore.actionID,
+                    selectedText: selectedText,
+                    model: self.model,
+                    near: triggerPoint,
+                    sourceApplication: sourceApplication)
+            } else {
+                // The composer is opening in the notch, nowhere near the pointer:
+                // only the pointer-side window inherits the cue's geometry and
+                // takes it off screen (`takeOverFromPressureCue`). Here the cue
+                // has to let go itself, or it stays standing where the press was.
+                ForceClickHerald.shared.abort()
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                    self.model.openPromptShortcutComposer(
+                        selectedText: selectedText,
+                        on: self.displayForSummon())
+                }
+            }
+        }
+        // A fired press always gets its composer. The cue is drawn before anyone
+        // knows whether there is a selection, so it waits for the stretch to settle
+        // either way and the window takes its place.
+        let deliver: (String, NSPoint, NSRunningApplication?) -> Void = { text, point, app in
+            guard grownFromPressure else { return open(text, point, app) }
+            ForceClickHerald.shared.whenExpanded { open(text, point, app) }
+        }
+        captureSelectedText(
+            // Nothing selected is not a failure — it's an ordinary Ask. The same
+            // composer opens with no context: no badge, and a line that stands on
+            // its own (`startPromptShortcutRound` already sends it that way).
+            noSelection: { point, app in deliver("", point, app) },
+            // Denied, or a capture already in flight: no composer is coming, so the
+            // cue has to be taken off screen. Left standing it is a glass pill above
+            // every window that takes no click and no key, with the herald latched
+            // mid-stretch so no later press can even redraw it.
+            unavailable: {
+                guard grownFromPressure else { return }
+                ForceClickHerald.shared.abort()
+            },
+            action: deliver)
+    }
+
+    /// Shared selection edge for both kinds of global action. Nothing activates
+    /// Notchi before capture completes, so the source app keeps its selection and
+    /// accessibility focus throughout the browser wake-up retry.
+    ///
+    /// The two endings that aren't a captured selection are told apart, because
+    /// they mean opposite things. **`noSelection`** is a normal outcome — the
+    /// pointer simply wasn't on any text — and carries the same trigger context as
+    /// a hit, so a caller can go on and open something anyway. **`unavailable`** is
+    /// the capture not being possible at all (accessibility denied, or another
+    /// capture still running); nothing follows it. Both used to be a bare `return`,
+    /// which left whatever the caller had already put on screen standing there.
+    private func captureSelectedText(
+        noSelection: @escaping (NSPoint, NSRunningApplication?) -> Void = { _, _ in },
+        unavailable: @escaping () -> Void = {},
+        action: @escaping (String, NSPoint, NSRunningApplication?) -> Void
+    ) {
+        // Capture at the chord edge, not after selection lookup: waking a browser's
+        // accessibility tree can take a beat and the pointer may have moved by then.
+        let triggerPoint = NSEvent.mouseLocation
+        let sourceApplication = NSWorkspace.shared.frontmostApplication
         // The capture can now take a beat (waking a browser's accessibility tree),
         // so a second chord during that beat must not start a second round.
-        guard !isCapturingSelection else { return }
+        guard !isCapturingSelection else { return unavailable() }
         isCapturingSelection = true
         // The capture answers immediately for a native app; over web content it may
         // have to wake the app's accessibility tree first and call back a beat later
@@ -817,12 +997,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.isCapturingSelection = false
             switch result {
             case .text(let selectedText):
-                withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
-                    self.model.runPromptShortcut(prompt: binding.prompt,
-                                                 selectedText: selectedText,
-                                                 on: self.displayForSummon())
-                }
+                action(selectedText, triggerPoint, sourceApplication)
             case .permissionRequired:
+                unavailable()
                 // A previous denial suppresses macOS's one-time alert. Always take the
                 // user to the exact privacy pane as the deterministic recovery path.
                 guard let url = URL(string:
@@ -830,7 +1007,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 else { return }
                 NSWorkspace.shared.open(url)
             case .noSelection:
-                return
+                noSelection(triggerPoint, sourceApplication)
             }
         }
     }
@@ -1145,9 +1322,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Where a summoned-from-anywhere open (⌘,) should land: the screen the
     /// mouse is on when it has a panel, else the preferred screen.
     private func displayForSummon() -> CGDirectDisplayID? {
-        let mouse = NSEvent.mouseLocation
-        if let id = NSScreen.screens
-            .first(where: { NSMouseInRect(mouse, $0.frame, false) })?.displayID,
+        if let id = NSScreen.containing(NSEvent.mouseLocation)?.displayID,
            panels[id] != nil {
             return id
         }
@@ -1357,5 +1532,38 @@ extension NSScreen {
                       y: primaryHeight - frame.maxY,
                       width: frame.width,
                       height: frame.height)
+    }
+
+    /// The screen a global pointer location sits on — the one answer every
+    /// "which display is the user on right now?" question in the app goes
+    /// through (panel summons, the pointer-side shortcut window).
+    ///
+    /// Not `NSMouseInRect(_:_:false)`, which used to do this job in two places:
+    /// it deliberately owns only three of a rect's four edges (x ∈ [minX, maxX),
+    /// y ∈ (minY, maxY]) so neighbouring *views* never both claim a point — and
+    /// on stacked displays that hands a pointer resting exactly on the seam to
+    /// the screen *below*. `CGRect.contains` has the same flaw mirrored (it drops
+    /// the top edge, i.e. the menu-bar row). And when neither claimed the point,
+    /// the callers fell back to `NSScreen.main` — the screen with the key window,
+    /// which has nothing to do with where the mouse is.
+    ///
+    /// So: nearest screen by distance-to-frame. A point inside (or on any edge
+    /// of) exactly one screen scores zero there and nowhere else; a genuine seam
+    /// point is ambiguous by definition and resolves deterministically to the
+    /// first of the two. The answer is never "whatever app is frontmost".
+    static func containing(_ point: NSPoint) -> NSScreen? {
+        screens.min {
+            $0.frame.squaredDistance(to: point) < $1.frame.squaredDistance(to: point)
+        }
+    }
+}
+
+private extension CGRect {
+    /// Zero when the point lies inside the rect or on any of its edges;
+    /// otherwise the squared distance to the nearest edge.
+    func squaredDistance(to p: CGPoint) -> CGFloat {
+        let dx = max(minX - p.x, 0, p.x - maxX)
+        let dy = max(minY - p.y, 0, p.y - maxY)
+        return dx * dx + dy * dy
     }
 }

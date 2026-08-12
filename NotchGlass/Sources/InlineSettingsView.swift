@@ -343,6 +343,9 @@ struct InlineSettingsView: View {
     /// persisted value; writes go through `selectHoverSensitivity`. Read live by
     /// `NotchModel.hoverEntered`, so a change applies to the very next hover.
     @State private var hoverSensitivity: HoverSensitivity = .current
+    /// How much additional trackpad pressure turns a click into the global
+    /// selected-text action. The monitor reads the persisted value live.
+    @State private var forceClickPressure: ForceClickPressure = .current
 
     /// Whether the island auto-hides while a full-screen app covers its screen —
     /// mirrors the persisted value; writes go through `selectHideInFullscreen`,
@@ -558,6 +561,9 @@ struct InlineSettingsView: View {
                 noteDestinationRow
                 copySenseRow
             case .general:
+                if ForceClickFeature.isEnabled {
+                    forceClickPressureRow
+                }
                 hoverSensitivityRow
                 appLanguageRow
                 launchAtLoginRow
@@ -689,10 +695,10 @@ struct InlineSettingsView: View {
                 .padding(.horizontal, 10)
                 .frame(height: 28)
                 .background(
-                    RoundedRectangle(cornerRadius: 8)
+                    Capsule()
                         .fill(.white.opacity(selected ? 0.08 : (hovering ? 0.04 : 0)))
                 )
-                .contentShape(RoundedRectangle(cornerRadius: 8))
+                .contentShape(Capsule())
             }
             .buttonStyle(.plain)
             .onHover { hovering = $0 }
@@ -1698,9 +1704,9 @@ struct InlineSettingsView: View {
             .foregroundStyle(Tokens.text1)
             .padding(.horizontal, 12)
             .frame(height: 30)
-            .background(RoundedRectangle(cornerRadius: 9).fill(.white.opacity(0.10)))
-            .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(.white.opacity(0.20), lineWidth: 0.5))
-            .contentShape(RoundedRectangle(cornerRadius: 9))
+            .background(Capsule().fill(.white.opacity(0.10)))
+            .overlay(Capsule().strokeBorder(.white.opacity(0.20), lineWidth: 0.5))
+            .contentShape(Capsule())
     }
 
     /// The primary action of the whole onboarding: one click, sign in (or sign
@@ -1722,9 +1728,8 @@ struct InlineSettingsView: View {
             .foregroundStyle(Tokens.text1)
             .padding(.horizontal, 12)
             .frame(height: 30)
-            .prominentSurface(in: RoundedRectangle(cornerRadius: 9, style: .continuous),
-                              lit: connectHovering)
-            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .prominentSurface(in: Capsule(), lit: connectHovering)
+            .contentShape(Capsule())
         }
         .buttonStyle(GlassPressStyle())
         .onHover { connectHovering = $0 }
@@ -1927,9 +1932,9 @@ struct InlineSettingsView: View {
                     .padding(.leading, 10)
                     .padding(.trailing, 9)
                     .frame(height: 30)
-                    .background(RoundedRectangle(cornerRadius: 9).fill(.white.opacity(0.06)))
-                    .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(.white.opacity(0.12), lineWidth: 0.5))
-                    .contentShape(RoundedRectangle(cornerRadius: 9))
+                    .background(Capsule().fill(.white.opacity(0.06)))
+                    .overlay(Capsule().strokeBorder(.white.opacity(0.12), lineWidth: 0.5))
+                    .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
                 .fixedSize()
@@ -2580,21 +2585,73 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// How readily the resting notch unfurls when the pointer reaches it. Sits
-    /// under the shortcut because it answers the same question — how you get in.
-    /// A menu rather than cards: the three steps are one scale, and the row
-    /// belongs to the quiet end of General, not on a diagram's worth of weight.
-    private var hoverSensitivityRow: some View {
-        settingRow(label: L("general.hoverSensitivity"),
-                   info: L("general.hoverSensitivity.hint")) {
-            GlassMenu(title: hoverSensitivity.label) {
-                ForEach(HoverSensitivity.allCases) { s in
-                    Button { selectHoverSensitivity(s) } label: {
-                        menuOption(s.label, selected: s == hoverSensitivity)
+    /// The global selected-text gesture has no keyboard binding: this is its one
+    /// setting. A menu fits the three ordered pressure rungs — and under it, the
+    /// pad you can actually press, because the words "Light / Medium / Firm" name
+    /// a feeling and nothing on a screen can hand you a feeling except letting
+    /// you try it.
+    private var forceClickPressureRow: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            settingRow(label: L("general.forceClickPressure"),
+                       info: L("general.forceClickPressure.hint")) {
+                GlassMenu(title: forceClickPressure.label) {
+                    ForEach(ForceClickPressure.allCases) { pressure in
+                        Button { selectForceClickPressure(pressure) } label: {
+                            menuOption(pressure.label, selected: pressure == forceClickPressure)
+                        }
                     }
                 }
             }
+            ForceClickTestPad()
+                // Hangs under the menu it belongs to, on the controls' column
+                // rather than the labels'.
+                .padding(.leading, 76)
         }
+    }
+
+    private func selectForceClickPressure(_ newValue: ForceClickPressure) {
+        guard newValue != forceClickPressure else { return }
+        forceClickPressure = newValue
+        ForceClickPressure.current = newValue
+    }
+
+    /// How readily the resting notch unfurls when the pointer reaches it. The
+    /// three ordered policies map directly to a native, tick-mark-only NSSlider:
+    /// Low, Balanced, and Instant.
+    private var hoverSensitivityRow: some View {
+        let controlWidth: CGFloat = 190
+        return settingRow(label: L("general.hoverSensitivity"),
+                          info: L("general.hoverSensitivity.hint")) {
+            VStack(spacing: 1) {
+                NativeThreeStepSlider(value: hoverSensitivityPosition)
+                    .frame(width: controlWidth, height: 22)
+                    .accessibilityLabel(L("general.hoverSensitivity"))
+
+                HStack(spacing: 0) {
+                    ForEach(HoverSensitivity.allCases) { sensitivity in
+                        Text(sensitivity.label)
+                            .font(.sf(10.5, weight: sensitivity == hoverSensitivity ? .semibold : .regular))
+                            .foregroundStyle(sensitivity == hoverSensitivity ? Tokens.text1 : Tokens.text3)
+                            .frame(maxWidth: .infinity,
+                                   alignment: sensitivity == .low ? .leading
+                                       : (sensitivity == .instant ? .trailing : .center))
+                    }
+                }
+                .frame(width: controlWidth)
+            }
+        }
+    }
+
+    private var hoverSensitivityPosition: Binding<Double> {
+        Binding(
+            get: {
+                Double(HoverSensitivity.allCases.firstIndex(of: hoverSensitivity) ?? 1)
+            },
+            set: { position in
+                let index = min(max(Int(position.rounded()), 0), HoverSensitivity.allCases.count - 1)
+                selectHoverSensitivity(HoverSensitivity.allCases[index])
+            }
+        )
     }
 
     private func selectHoverSensitivity(_ newValue: HoverSensitivity) {
@@ -2704,7 +2761,7 @@ struct InlineSettingsView: View {
         // leaving the pane dismantles the monitor automatically.
         .background(HotKeyRecorder(active: recordingShortcut != nil,
                                    onCapture: captureShortcut,
-                                   onDoubleCommand: captureDoubleCommand,
+                                   onDoubleModifier: captureDoubleModifier,
                                    onCancel: { recordingShortcut = nil }))
         // Leaving the pane ends recording outright. The armed target used to
         // survive in `@State` while the monitor was dismantled, so coming back
@@ -2767,20 +2824,13 @@ struct InlineSettingsView: View {
             // (the chip's height minus the line's); these top pads add the rest of
             // the clearance, so the title reads as a section header rather than as
             // a label stuck to the first row.
-            if promptShortcuts.isEmpty {
-                Text(L("shortcuts.promptAction.empty"))
-                    .font(.sf(11.5))
-                    .foregroundStyle(Tokens.text4)
-                    .padding(.top, 10)
-            } else {
-                VStack(alignment: .leading, spacing: 5) {
-                    ForEach(promptShortcuts) { binding in
-                        promptShortcutRow(binding)
-                            .transition(.opacity.combined(with: .move(edge: .top)))
-                    }
+            VStack(alignment: .leading, spacing: 5) {
+                ForEach(promptShortcuts) { binding in
+                    promptShortcutRow(binding)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
                 }
-                .padding(.top, 10)
             }
+            .padding(.top, 10)
         }
     }
 
@@ -2818,19 +2868,47 @@ struct InlineSettingsView: View {
                 .overlay(RoundedRectangle(cornerRadius: 8)
                     .strokeBorder(.white.opacity(0.11), lineWidth: 0.5))
 
-                // Delete sits inboard of the chord and only surfaces on hover, the
-                // same call the reset control makes in the rows above: a resting row
-                // carries exactly one control, and the chord keeps the right edge.
-                Button { deletePromptShortcut(binding.id) } label: {
-                    Image(systemName: "trash")
-                        .font(.sf(10.5, weight: .medium))
+                // Where a shortcut opens is a low-frequency per-row property, so
+                // it lives in the overflow menu rather than as a permanent
+                // "Window" chip whose two states differed only by text colour and
+                // whose label never named its own opposite. The menu's checkmark
+                // is the state readout — the row itself carries no badge for it.
+                //
+                // One overflow chip now carries both the open-in choice and
+                // delete, so the row's tail is a single control instead of three
+                // abutting ones. Quiet until hover, like the reset affordance the
+                // app-shortcut rows use.
+                Menu {
+                    // An inline Picker renders as native checkmarked items, which
+                    // states the current choice outright rather than leaving it to
+                    // be inferred from a chip's shade.
+                    Picker("", selection: promptWindowBinding(for: binding.id)) {
+                        Text(L("shortcuts.promptAction.openIn.notch")).tag(false)
+                        Text(L("shortcuts.promptAction.openIn.window")).tag(true)
+                    }
+                    .pickerStyle(.inline)
+                    .labelsHidden()
+
+                    Divider()
+
+                    Button(role: .destructive) {
+                        deletePromptShortcut(binding.id)
+                    } label: {
+                        Text(L("shortcuts.promptAction.delete"))
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.sf(10.5, weight: .semibold))
                         .foregroundStyle(Tokens.text3)
                         // Square frame so the chip style's capsule resolves to a
                         // true circle rather than a vertical oval.
                         .frame(width: Self.promptRowHeight, height: Self.promptRowHeight)
                 }
+                .menuStyle(.button)
                 .buttonStyle(ShortcutChipStyle(rest: 0.055, restStroke: 0.1))
-                .help(L("shortcuts.promptAction.delete"))
+                .menuIndicator(.hidden)
+                .help(L("shortcuts.promptAction.more"))
+                .accessibilityLabel(L("shortcuts.promptAction.more"))
                 .opacity(hovered ? 1 : 0)
                 .allowsHitTesting(hovered)
 
@@ -2884,6 +2962,23 @@ struct InlineSettingsView: View {
                     if promptShortcuts[index].isReady {
                         model.ensurePromptShortcutName(promptShortcuts[index])
                     }
+                }
+            }
+        )
+    }
+
+    /// The row's open-in choice as a two-value selection, so the overflow menu can
+    /// drive it with a checkmarked Picker instead of a blind toggle.
+    private func promptWindowBinding(for id: UUID) -> Binding<Bool> {
+        Binding(
+            get: { promptShortcuts.first(where: { $0.id == id })?.opensInPointerWindow ?? false },
+            set: { value in
+                guard let index = promptShortcuts.firstIndex(where: { $0.id == id }) else { return }
+                let couldRun = promptShortcuts[index].canRunFromHotKey
+                promptShortcuts[index].opensBesidePointer = value
+                PromptShortcutStore.save(promptShortcuts)
+                if couldRun != promptShortcuts[index].canRunFromHotKey {
+                    NotificationCenter.default.post(name: .promptShortcutsChanged, object: nil)
                 }
             }
         )
@@ -3045,6 +3140,32 @@ struct InlineSettingsView: View {
         }
     }
 
+    /// One conflict pass for every editable chord. `AppShortcutStore` owns the
+    /// fixed/local actions and summon; the two global selected-text families live
+    /// beside it and therefore add their owners here.
+    private func shortcutConflictOwner(
+        for chord: ShortcutChord,
+        editing target: EditableShortcut
+    ) -> String? {
+        let appOwner: String? = switch target {
+        case .summon:
+            AppShortcutStore.conflictOwner(for: chord, editingSummon: true)
+        case .action(let action):
+            AppShortcutStore.conflictOwner(for: chord, editingAction: action)
+        case .prompt:
+            AppShortcutStore.conflictOwner(for: chord)
+        }
+        if let appOwner { return appOwner }
+
+        let editingPromptID: UUID? = if case .prompt(let id) = target { id } else { nil }
+        if promptShortcuts.contains(where: {
+            $0.id != editingPromptID && $0.shortcut == chord
+        }) {
+            return L("shortcuts.promptAction")
+        }
+        return nil
+    }
+
     /// Recorder validation is deliberately shared for summon and local actions:
     /// one real modifier is required, and a chord may have exactly one owner.
     private func captureShortcut(keyCode: UInt32, flags: NSEvent.ModifierFlags) {
@@ -3057,22 +3178,8 @@ struct InlineSettingsView: View {
             return
         }
 
-        let owner: String? = switch target {
-        case .summon:
-            AppShortcutStore.conflictOwner(for: chord, editingSummon: true)
-        case .action(let action):
-            AppShortcutStore.conflictOwner(for: chord, editingAction: action)
-        case .prompt:
-            AppShortcutStore.conflictOwner(for: chord)
-        }
-        if let owner {
+        if let owner = shortcutConflictOwner(for: chord, editing: target) {
             shortcutHints[target] = L("shortcuts.conflict.usedBy", owner)
-            return
-        }
-        if case .prompt(let id) = target,
-           promptShortcuts.contains(where: { $0.id != id && $0.shortcut == chord }) {
-            shortcutHints[target] = L("shortcuts.conflict.usedBy",
-                                      L("shortcuts.promptAction"))
             return
         }
 
@@ -3116,17 +3223,37 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// A bare modifier never produces `keyDown`, so the summon recorder receives
-    /// double-Command separately from ordinary chords. Other editable shortcuts
-    /// remain chord-only.
-    private func captureDoubleCommand() {
-        guard recordingShortcut == .summon else { return }
-        shortcutHints[.summon] = nil
-        recordingShortcut = nil
-        commitSummonHotKey(SummonHotKey(keyCode: 0,
-                                        modifiers: 0,
-                                        doubleTapModifier: UInt32(cmdKey),
-                                        enabled: true))
+    /// A bare modifier never produces `keyDown`, so summon and prompt shortcut
+    /// rows receive double-Command / double-Option separately from ordinary
+    /// chords. Panel-local action shortcuts remain chord-only.
+    private func captureDoubleModifier(_ modifier: UInt32) {
+        guard let target = recordingShortcut else { return }
+        if case .action = target { return }
+        let chord = ShortcutChord.doubleTap(modifier)
+
+        if let owner = shortcutConflictOwner(for: chord, editing: target) {
+            shortcutHints[target] = L("shortcuts.conflict.usedBy", owner)
+            return
+        }
+
+        switch target {
+        case .summon:
+            shortcutHints[target] = nil
+            recordingShortcut = nil
+            commitSummonHotKey(SummonHotKey(keyCode: 0,
+                                            modifiers: 0,
+                                            doubleTapModifier: modifier,
+                                            enabled: true))
+        case .prompt(let id):
+            guard let index = promptShortcuts.firstIndex(where: { $0.id == id }) else { return }
+            shortcutHints[target] = nil
+            recordingShortcut = nil
+            promptShortcuts[index].shortcut = chord
+            PromptShortcutStore.save(promptShortcuts)
+            NotificationCenter.default.post(name: .promptShortcutsChanged, object: nil)
+        case .action:
+            break
+        }
     }
 
     private func resetShortcut(_ target: EditableShortcut) {
@@ -3145,6 +3272,12 @@ struct InlineSettingsView: View {
 
     private func restoreSummonDoubleTap(_ modifier: UInt32) {
         recordingShortcut = nil
+        let chord = ShortcutChord.doubleTap(modifier)
+        if let owner = shortcutConflictOwner(for: chord, editing: .summon) {
+            shortcutHints[.summon] = L("shortcuts.conflict.usedBy",
+                                       owner)
+            return
+        }
         shortcutHints[.summon] = nil
         commitSummonHotKey(SummonHotKey(keyCode: 0,
                                         modifiers: 0,
@@ -3538,17 +3671,17 @@ struct InlineSettingsView: View {
                 .padding(.horizontal, 13)
                 .frame(maxWidth: .infinity, minHeight: 36, maxHeight: 36)
                 .background(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    Capsule()
                         .fill(.white.opacity(hovering ? 0.075 : 0.04))
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    Capsule()
                         .strokeBorder(.white.opacity(hovering ? 0.16 : 0.08), lineWidth: 0.5)
                 )
                 // The coffee burst is drawn wider than its slot; keep it inside
                 // the button's own edge.
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .clipShape(Capsule())
+                .contentShape(Capsule())
             }
             .buttonStyle(AboutSocialPressStyle())
             .scaleEffect(reduceMotion ? 1 : (hovering ? 1.02 : 1))
@@ -4165,10 +4298,6 @@ struct GlassMenu<Content: View>: View {
     private static var regularMetrics: Metrics { (13, 10, 7, 30, 11, 9) }
 
     private var metrics: Metrics { compact ? Self.compactMetrics : Self.regularMetrics }
-    /// Fully round for the compact pill; the settings pane's larger chip keeps its
-    /// squircle, where a capsule would fight the rounded-rect fields beside it.
-    private var radius: CGFloat { compact ? metrics.height / 2 : 9 }
-
     /// The width a compact chip needs for `title`, measured in the face SwiftUI
     /// will draw it in. Callers that must size a rigid row around the chip (the
     /// agent card's bottom bar) can then do arithmetic instead of a geometry read.
@@ -4202,9 +4331,8 @@ struct GlassMenu<Content: View>: View {
             .padding(.leading, title.isEmpty ? m.trail : m.lead)
             .padding(.trailing, m.trail)
             .frame(height: m.height)
-            .recessedSurface(in: RoundedRectangle(cornerRadius: radius, style: .continuous),
-                             lit: hovering)
-            .contentShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .recessedSurface(in: Capsule(), lit: hovering)
+            .contentShape(Capsule())
         }
         .menuStyle(.button)
         .buttonStyle(.plain)
@@ -4227,6 +4355,9 @@ struct GlassMenu<Content: View>: View {
 /// pointer instead of sitting dead until it's clicked.
 private struct PickerCard<Content: View>: View {
     let selected: Bool
+    /// The two-card rows keep the standard width; a three-card row asks for a
+    /// narrower one so it still clears the pane's edge.
+    var width: CGFloat = 108
     let action: () -> Void
     @ViewBuilder let content: () -> Content
 
@@ -4236,7 +4367,7 @@ private struct PickerCard<Content: View>: View {
         Button(action: action) {
             content()
                 .padding(.vertical, 8)
-                .frame(width: 108)
+                .frame(width: width)
                 .background(
                     RoundedRectangle(cornerRadius: 9)
                         .fill(.white.opacity((selected ? 0.10 : 0.04) + (hovering ? 0.05 : 0)))
@@ -4251,6 +4382,53 @@ private struct PickerCard<Content: View>: View {
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
+    }
+}
+
+/// AppKit's native linear slider configured as exactly three selectable stops.
+/// `allowsTickMarkValuesOnly` makes pointer, keyboard, and accessibility input
+/// land on a real policy rather than an in-between value.
+private struct NativeThreeStepSlider: NSViewRepresentable {
+    @Binding var value: Double
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(value: $value)
+    }
+
+    func makeNSView(context: Context) -> NSSlider {
+        let slider = NSSlider(value: value,
+                              minValue: 0,
+                              maxValue: 2,
+                              target: context.coordinator,
+                              action: #selector(Coordinator.valueChanged(_:)))
+        slider.sliderType = .linear
+        slider.numberOfTickMarks = 3
+        slider.tickMarkPosition = .below
+        slider.allowsTickMarkValuesOnly = true
+        slider.altIncrementValue = 1
+        slider.isContinuous = true
+        slider.controlSize = .small
+        slider.trackFillColor = NSColor.white.withAlphaComponent(0.55)
+        return slider
+    }
+
+    func updateNSView(_ slider: NSSlider, context: Context) {
+        context.coordinator.value = $value
+        if slider.doubleValue != value {
+            slider.doubleValue = value
+        }
+    }
+
+    final class Coordinator: NSObject {
+        var value: Binding<Double>
+
+        init(value: Binding<Double>) {
+            self.value = value
+        }
+
+        @objc func valueChanged(_ sender: NSSlider) {
+            value.wrappedValue = sender.doubleValue
+        }
     }
 }
 
@@ -4356,22 +4534,102 @@ private struct MiniDisplay: View {
     }
 }
 
+/// Somewhere to try the rung you just picked.
+///
+/// "Light / Medium / Firm" names a pressure your finger has to find, and no
+/// label, picture or recording can hand that over — you have to press. So this
+/// is a live pad: rest the pointer on it, press, and the cap grows under your
+/// finger exactly as the herald's does at the pointer, driven by the same
+/// `ForceClickPressure.progress` that decides whether the real gesture fires.
+/// It can't fire anything — the press is routed here and stops here.
+///
+/// One reader exists for the trackpad's raw frames (`RawTrackpadPressureSource`),
+/// and the app's monitor owns it, so this borrows that stream through
+/// `ForceClickProbe` rather than opening a second one.
+private struct ForceClickTestPad: View {
+    @ObservedObject private var probe = ForceClickProbe.shared
+
+    /// The cap at rest is a cursor's worth of ink and it fills the outline at
+    /// the moment the press would fire, so "how much further" is a distance.
+    private static let seedWidth: CGFloat = 20
+    private static let fullWidth: CGFloat = 128
+    private static let height: CGFloat = 20
+
+    private var reached: Double { probe.progress ?? 0 }
+
+    var body: some View {
+        if probe.isSupported {
+            pad
+                // Arming is just "the pointer is on the pad" — which spares the
+                // pad any screen-coordinate arithmetic, and means the gesture
+                // goes back to opening Notchi the moment you leave.
+                .onHover { probe.isArmed = $0 }
+                .onDisappear { probe.isArmed = false }
+        } else {
+            // A mouse or a pre-Force-Touch trackpad never sends pressure, so the
+            // setting above it can't do anything either — better said once here
+            // than left as a pad that ignores every press.
+            Text(L("forceClick.try.unsupported"))
+                .font(.sf(11))
+                .foregroundStyle(Tokens.text3)
+        }
+    }
+
+    private var pad: some View {
+        VStack(spacing: 7) {
+            ZStack {
+                // Where the press has to get to.
+                Capsule()
+                    .strokeBorder(.white.opacity(probe.reached ? 0.55 : 0.18),
+                                  style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                    .frame(width: Self.fullWidth, height: Self.height)
+                Capsule()
+                    .fill(.white.opacity(probe.reached ? 0.92 : 0.24 + 0.30 * reached))
+                    .frame(width: capWidth, height: Self.height)
+            }
+            Text(probe.reached ? L("forceClick.try.reached") : L("forceClick.try"))
+                .font(.sf(11, weight: probe.reached ? .medium : .regular))
+                .foregroundStyle(probe.reached ? Tokens.text1 : Tokens.text3)
+                .lineLimit(1)
+        }
+        .frame(width: Self.fullWidth + 24, height: 52)
+        .background(
+            RoundedRectangle(cornerRadius: 9)
+                .fill(.white.opacity(probe.isArmed ? 0.07 : 0.035))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 9)
+                .strokeBorder(.white.opacity(probe.isArmed ? 0.18 : 0.10), lineWidth: 0.5)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 9))
+        // The press phase is deliberately unanimated: the finger IS the
+        // animation, and an interpolator between the two would make a rung feel
+        // like a different rung. Only the arrival flashes on its own.
+        .animation(.easeOut(duration: 0.12), value: probe.reached)
+        .animation(.easeOut(duration: Tokens.rowFade), value: probe.isArmed)
+    }
+
+    private var capWidth: CGFloat {
+        Self.seedWidth + (Self.fullWidth - Self.seedWidth) * CGFloat(reached)
+    }
+}
+
 private struct HotKeyRecorder: NSViewRepresentable {
     var active: Bool
     var onCapture: (UInt32, NSEvent.ModifierFlags) -> Void
-    var onDoubleCommand: () -> Void
+    var onDoubleModifier: (UInt32) -> Void
     var onCancel: () -> Void
 
     func makeNSView(context: Context) -> NSView {
         context.coordinator.onCapture = onCapture
-        context.coordinator.onDoubleCommand = onDoubleCommand
+        context.coordinator.onDoubleModifier = onDoubleModifier
         context.coordinator.onCancel = onCancel
         return NSView(frame: .zero)
     }
 
     func updateNSView(_: NSView, context: Context) {
         context.coordinator.onCapture = onCapture
-        context.coordinator.onDoubleCommand = onDoubleCommand
+        context.coordinator.onDoubleModifier = onDoubleModifier
         context.coordinator.onCancel = onCancel
         context.coordinator.setActive(active)
     }
@@ -4384,25 +4642,25 @@ private struct HotKeyRecorder: NSViewRepresentable {
 
     final class Coordinator {
         var onCapture: ((UInt32, NSEvent.ModifierFlags) -> Void)?
-        var onDoubleCommand: (() -> Void)?
+        var onDoubleModifier: ((UInt32) -> Void)?
         var onCancel: (() -> Void)?
         private var monitor: Any?
-        private var pendingCommandTap = false
-        private var lastCommandTapTime: TimeInterval?
+        private var pendingModifierTap: UInt32?
+        private var lastModifierTap: (modifier: UInt32, time: TimeInterval)?
 
         func setActive(_ active: Bool) {
             if active, monitor == nil {
                 // Announce first: the global hot keys must be unregistered before
                 // the monitor goes up, or the chords Notch owns still never arrive.
                 ShortcutRecording.setActive(true)
-                pendingCommandTap = false
-                lastCommandTapTime = nil
+                pendingModifierTap = nil
+                lastModifierTap = nil
                 monitor = NSEvent.addLocalMonitorForEvents(
                     matching: [.keyDown, .flagsChanged]
                 ) { [weak self] event in
                     guard let self else { return event }
                     if event.type == .flagsChanged {
-                        self.captureDoubleCommandIfNeeded(event)
+                        self.captureDoubleModifierIfNeeded(event)
                         return event
                     }
                     // Esc cancels recording without committing anything. Clearing
@@ -4419,37 +4677,45 @@ private struct HotKeyRecorder: NSViewRepresentable {
             } else if !active, let m = monitor {
                 NSEvent.removeMonitor(m)
                 monitor = nil
-                pendingCommandTap = false
-                lastCommandTapTime = nil
+                pendingModifierTap = nil
+                lastModifierTap = nil
                 ShortcutRecording.setActive(false)
             }
         }
 
-        /// Recognize two clean Command down/up taps inside the same 300 ms window
-        /// used by the live summon monitor. Any other held modifier invalidates
-        /// the sequence, so normal chords never turn into a double-tap binding.
-        private func captureDoubleCommandIfNeeded(_ event: NSEvent) {
+        /// Recognize two clean Command or Option down/up taps inside the same
+        /// 300 ms window used by the live monitor. Any other held modifier
+        /// invalidates the sequence, so normal chords never become a double tap.
+        private func captureDoubleModifierIfNeeded(_ event: NSEvent) {
             let watched: NSEvent.ModifierFlags = [.command, .option, .control, .shift]
             let active = event.modifierFlags.intersection(watched)
 
-            if active == .command {
-                pendingCommandTap = true
+            let pressed: UInt32? = switch active {
+            case .command: UInt32(cmdKey)
+            case .option: UInt32(optionKey)
+            default: nil
+            }
+            if let pressed {
+                pendingModifierTap = pressed
                 return
             }
 
-            guard pendingCommandTap else { return }
-            pendingCommandTap = false
             guard active.isEmpty else {
-                lastCommandTapTime = nil
+                pendingModifierTap = nil
+                lastModifierTap = nil
                 return
             }
+
+            guard let completed = pendingModifierTap else { return }
+            pendingModifierTap = nil
 
             let now = event.timestamp
-            if let last = lastCommandTapTime, now - last <= 0.30 {
-                lastCommandTapTime = nil
-                onDoubleCommand?()
+            if let last = lastModifierTap,
+               last.modifier == completed, now - last.time <= 0.30 {
+                lastModifierTap = nil
+                onDoubleModifier?(completed)
             } else {
-                lastCommandTapTime = now
+                lastModifierTap = (completed, now)
             }
         }
 

@@ -898,6 +898,10 @@ struct GlassIconButton: View {
     /// compact header corners pass a smaller value so the glass reads as a quiet
     /// mark rather than a full button.
     var glyphSize: CGFloat = 14
+    /// Whether the hover tooltip shows. Some of these chips are so familiar they
+    /// shouldn't cover the panel with a hint; the accessibility label stays either
+    /// way.
+    var showsTooltip: Bool = true
     var action: () -> Void
 
     @State private var hovering = false
@@ -922,7 +926,7 @@ struct GlassIconButton: View {
         // icon button in the app with NO hover hint at all, while its neighbours
         // carried the glass tip and the segment cluster carried AppKit's yellow
         // bubble. One tooltip species everywhere now.
-        .notchTooltip(help, edge: tipEdge)
+        .notchTooltip(help, edge: tipEdge, shows: showsTooltip)
         .accessibilityLabel(help)
     }
 }
@@ -958,6 +962,9 @@ struct GlassSegmentCluster: View {
     /// header at the top of its panel/window, so the tip drops DOWN by default —
     /// floating it up would run it off the top edge.
     var tipEdge: VerticalEdge = .bottom
+    /// Some compact surfaces already make every action self-evident and do not
+    /// want hover cards covering their content. Accessibility labels remain.
+    var showsTooltips = true
     /// Drop the glass pill and render the glyphs bare. For the panel's result
     /// header, where these chips are hover-only chrome: a slab of glass appearing
     /// and vanishing with the pointer reads as the panel twitching, while bare
@@ -965,6 +972,11 @@ struct GlassSegmentCluster: View {
     /// dimming (the glass used to do it) and stand further apart, since nothing
     /// binds them into one control any more.
     var glass: Bool = true
+    /// The capsule floats over a foreign window, not over one of our dark slabs
+    /// (the prompt-shortcut band). Smokes the glass so the white glyphs keep
+    /// their contrast over a light backdrop, and drops the resting dimming —
+    /// 55% of a dark pill over a white page is a pale smudge, not quiet chrome.
+    var smoked: Bool = false
 
     // Identity is by index (stable across rebuilds), so the hover highlight
     // survives re-renders — a per-segment UUID would churn and drop it.
@@ -980,39 +992,14 @@ struct GlassSegmentCluster: View {
     var body: some View {
         HStack(spacing: glass ? 2 : 6) {
             ForEach(Array(segments.enumerated()), id: \.offset) { index, seg in
-                let hovering = hoveredIndex == index
-                Button(action: seg.action) {
-                    seg.glyph
-                        // Glassed: pure white, the pill behind carries the resting
-                        // dimming. Bare: the glyph does it itself, and rests QUIET —
-                        // the answer-footer icons' level (text3), not a second row of
-                        // bright chrome competing with the text. Direct hover (or a
-                        // live pin) brings it up to full ink.
-                        .foregroundStyle(glass ? Tokens.ink
-                                              : (hovering || seg.engaged ? Tokens.text1
-                                                                         : Tokens.text3))
-                        .frame(width: chip, height: chip)
-                        .background(
-                            Circle().fill(.white.opacity(
-                                segmentHighlight
-                                    ? (seg.engaged ? 0.20 : (hovering && glass ? 0.12 : 0))
-                                    : 0))
-                        )
-                        .contentShape(Circle())
+                if showsTooltips {
+                    segmentButton(index: index, segment: seg)
+                        .notchTooltip(seg.tooltip, edge: tipEdge)
+                        .accessibilityLabel(seg.tooltip)
+                } else {
+                    segmentButton(index: index, segment: seg)
+                        .accessibilityLabel(seg.tooltip)
                 }
-                .buttonStyle(GlassPressStyle())
-                .onHover { inside in
-                    if inside { hoveredIndex = index }
-                    else if hoveredIndex == index { hoveredIndex = nil }
-                }
-                // The island's own glass tip, not AppKit's stock yellow bubble —
-                // these glyphs sit inches from the answer footer's icons, which
-                // have always used `notchTooltip`; two tooltip materials on one
-                // screen read as two different apps.
-                .notchTooltip(seg.tooltip, edge: tipEdge)
-                // `.help()` doubled as the VoiceOver description; the glass tip
-                // is purely visual, so name the control explicitly.
-                .accessibilityLabel(seg.tooltip)
             }
         }
         .padding(glass ? 3 : 0)
@@ -1023,12 +1010,40 @@ struct GlassSegmentCluster: View {
             if glass {
                 let lit = hoveredIndex != nil || segments.contains { $0.engaged }
                 Color.clear
-                    .glassCapsule(in: Capsule(), brighter: lit)
-                    .opacity(lit ? 1 : 0.55)
+                    .glassCapsule(in: Capsule(), brighter: lit, smoked: smoked)
+                    .opacity(smoked ? 1 : (lit ? 1 : 0.55))
             }
         }
         .animation(.easeOut(duration: 0.18), value: hoveredIndex)
         .animation(.easeOut(duration: 0.18), value: segments.map(\.engaged))
+    }
+
+    private func segmentButton(index: Int, segment seg: Segment) -> some View {
+        let hovering = hoveredIndex == index
+        return Button(action: seg.action) {
+            seg.glyph
+                // Glassed: pure white, the pill behind carries the resting
+                // dimming. Bare: the glyph does it itself, and rests QUIET —
+                // the answer-footer icons' level (text3), not a second row of
+                // bright chrome competing with the text. Direct hover (or a
+                // live pin) brings it up to full ink.
+                .foregroundStyle(glass ? Tokens.ink
+                                      : (hovering || seg.engaged ? Tokens.text1
+                                                                 : Tokens.text3))
+                .frame(width: chip, height: chip)
+                .background(
+                    Circle().fill(.white.opacity(
+                        segmentHighlight
+                            ? (seg.engaged ? 0.20 : (hovering && glass ? 0.12 : 0))
+                            : 0))
+                )
+                .contentShape(Circle())
+        }
+        .buttonStyle(GlassPressStyle())
+        .onHover { inside in
+            if inside { hoveredIndex = index }
+            else if hoveredIndex == index { hoveredIndex = nil }
+        }
     }
 }
 
@@ -1226,15 +1241,31 @@ extension View {
     /// glass on macOS 26+, a dark blur fallback below — topped with the same
     /// whisper-thin specular rim the island uses, so it sits in the same material
     /// family. Works for both circular icon chips and capsule text pills.
+    ///
+    /// `smoked` is for a capsule that floats free over ANOTHER app's window
+    /// rather than over one of our own dark slabs: clear glass takes its
+    /// character from whatever is behind it, so over a white page it comes back
+    /// white and the white glyphs on it vanish. Smoked bakes the island's glass
+    /// tint into the material and lays the same black veil the free-floating
+    /// composer chrome wears (`CompactComposerGlass`, `DetachedWindowGlass`), so
+    /// the pill reads as the island's glass on any backdrop, light or dark.
     @ViewBuilder
-    func glassCapsule<S: InsettableShape>(in shape: S, brighter: Bool, tint: Color? = nil) -> some View {
+    func glassCapsule<S: InsettableShape>(in shape: S, brighter: Bool, tint: Color? = nil,
+                                          smoked: Bool = false) -> some View {
         self
             .background {
                 if #available(macOS 26.0, *) {
                     shape.fill(.clear)
-                        .glassEffect(.clear.interactive(), in: shape)
+                        .glassEffect(smoked
+                            ? .clear.tint(.black.opacity(GlassMaterial.bakedTint)).interactive()
+                            : .clear.interactive(), in: shape)
                 } else {
                     LegacyGlassBackdrop().clipShape(shape)
+                }
+            }
+            .overlay {
+                if smoked {
+                    shape.fill(Color.black.opacity(0.30)).allowsHitTesting(false)
                 }
             }
             // Both overlays are purely decorative (tint + specular rim). They sit ON
@@ -1327,10 +1358,15 @@ struct ClearHistoryConfirm: View {
     /// falls back to the plain Cancel / Clear History pair.
     var lastDayCount: Int
     var totalCount: Int
+    /// Agent's Recent surface is a hard source scope. Its destructive action is
+    /// therefore one explicit Agent-only clear, not the global time-range chooser.
+    var agentOnly = false
     var onCancel: () -> Void
     var onConfirm: (NotchModel.HistoryClearScope) -> Void
 
-    private var offersScopeChoice: Bool { lastDayCount > 0 && lastDayCount < totalCount }
+    private var offersScopeChoice: Bool {
+        !agentOnly && lastDayCount > 0 && lastDayCount < totalCount
+    }
 
     var body: some View {
         ZStack {
@@ -1342,17 +1378,27 @@ struct ClearHistoryConfirm: View {
 
             VStack(spacing: 14) {
                 VStack(spacing: 6) {
-                    Text(L("clear.title"))
+                    Text(L(agentOnly ? "clear.agent.title" : "clear.title"))
                         .font(.sf(15, weight: .semibold))
                         .foregroundStyle(Tokens.text1)
-                    Text(L(offersScopeChoice ? "clear.body.scope" : "clear.body"))
+                    Text(L(agentOnly
+                           ? "clear.agent.body"
+                           : (offersScopeChoice ? "clear.body.scope" : "clear.body")))
                         .font(.sf(12))
                         .foregroundStyle(Tokens.text3)
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                if offersScopeChoice {
+                if agentOnly {
+                    VStack(spacing: 8) {
+                        ConfirmDialogButton(title: L("clear.agent.confirm"),
+                                            kind: .destructive) { onConfirm(.agent) }
+                        ConfirmDialogButton(title: L("clear.cancel"),
+                                            kind: .quiet,
+                                            action: onCancel)
+                    }
+                } else if offersScopeChoice {
                     // Two reaches, stacked mild-first: the day window reads as plain
                     // glass, "Everything" as red-tinted glass. Cancel drops out of the
                     // material entirely so three capsules don't read as three peers.
@@ -1360,7 +1406,7 @@ struct ClearHistoryConfirm: View {
                         ConfirmDialogButton(title: L("clear.scope.lastDay"),
                                             kind: .neutral) { onConfirm(.lastDay) }
                         ConfirmDialogButton(title: L("clear.scope.all"),
-                                            kind: .destructive) { onConfirm(.all) }
+                                            kind: .destructive) { onConfirm(.chat) }
                         ConfirmDialogButton(title: L("clear.cancel"),
                                             kind: .quiet,
                                             action: onCancel)
@@ -1368,7 +1414,10 @@ struct ClearHistoryConfirm: View {
                 } else {
                     HStack(spacing: 10) {
                         ConfirmDialogButton(title: L("clear.cancel"), kind: .neutral, action: onCancel)
-                        ConfirmDialogButton(title: L("clear.confirm"), kind: .destructive) { onConfirm(.all) }
+                        ConfirmDialogButton(
+                            title: L(agentOnly ? "clear.agent.confirm" : "clear.confirm"),
+                            kind: .destructive
+                        ) { onConfirm(agentOnly ? .agent : .chat) }
                     }
                 }
             }
@@ -1516,12 +1565,14 @@ struct ThinkingDots: View {
 ///   dotted globe) and `drawRubik` (solving — the same dot field cut into
 ///   bands that twist in quarter turns, scramble, then click back),
 ///   `engine/orbits.ts` → `drawOrbits` (working — particles on tilted
-///   orbits). All verbatim.
+///   orbits), and `engine/web.ts` → `drawWeb` (connecting — a drifting
+///   constellation whose nodes wire together and pass bright packets). All
+///   verbatim.
 /// - `engine/profiles.ts` + `presets.ts` → each mode's base profile with its
 ///   inline `@ size 20` preset applied through the same `scaleCounts` /
-///   `scaleRadii` machinery. The reference's remaining two modes (wave /
-///   morph) have no Notch wait state to wear them, so they aren't ported —
-///   dead code isn't fidelity.
+///   `scaleRadii` machinery. The reference's remaining modes (wave / braid /
+///   ring / morph) have no Notch wait state to wear them, so they aren't
+///   ported — dead code isn't fidelity.
 ///
 /// Which mode shows is SEMANTIC, decided where the activity originates (the
 /// agent harness knows which tool it just launched — see
@@ -1531,6 +1582,7 @@ struct ThinkingDots: View {
 ///   • a first search round, or reading a page       → `.searching` (globe)
 ///   • a repeat search round ("digging deeper")      → `.solving`   (rubik)
 ///   • any other tool running                        → `.working`   (orbits)
+///   • a pinned translation task                     → `.connecting` (web)
 /// A state change cross-dissolves on the house beat rather than the
 /// reference's hard remount — the one deliberate deviation, matching how
 /// `CrossfadeText` melts the wait words this orb sits beside.
@@ -1615,6 +1667,9 @@ enum OrbState: Hashable {
     case solving
     /// Particles on tilted orbits — a non-search tool doing work.
     case working
+    /// A drifting constellation wires itself while packets run between nodes —
+    /// the translation flow, connecting one language to another.
+    case connecting
 }
 
 /// The dotted-orb engine, ported 1:1 from `thinking-orbs/src/engine`. Kept as
@@ -1630,6 +1685,40 @@ enum OrbEngine {
         var r: Double
         var white: Double
         var a: Double = 1
+    }
+
+    /// `core.ts` `Line`: one projected edge in the connecting constellation.
+    struct Line {
+        var x1: Double
+        var y1: Double
+        var x2: Double
+        var y2: Double
+        var white: Double
+        var a: Double = 1
+        var w: Double
+    }
+
+    static func lerp(_ a: Double, _ b: Double, _ f: Double) -> Double {
+        a + (b - a) * f
+    }
+
+    static func frac(_ x: Double) -> Double {
+        x - floor(x)
+    }
+
+    /// `core.ts` `vnoise`: smooth deterministic value noise on a 2-D lattice.
+    static func vnoise(_ x: Double, _ y: Double) -> Double {
+        let xi = floor(x)
+        let yi = floor(y)
+        var fx = x - xi
+        var fy = y - yi
+        fx = fx * fx * (3 - 2 * fx)
+        fy = fy * fy * (3 - 2 * fy)
+        let a = hashD(xi, yi)
+        let b = hashD(xi + 1, yi)
+        let c = hashD(xi, yi + 1)
+        let d = hashD(xi + 1, yi + 1)
+        return a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy
     }
 
     /// `core.ts` `hashD`: deterministic hash in [0, 1).
@@ -1681,6 +1770,22 @@ enum OrbEngine {
         }
     }
 
+    /// `core.ts` `paintLines`: stroke edges before the dot pass so nodes sit
+    /// above their constellation web.
+    static func paintLines(_ ctx: inout GraphicsContext, _ lines: [Line]) {
+        for line in lines {
+            guard line.a >= 0.02 else { continue }
+            let white = min(1, max(0, line.white))
+            let gray = 1 - white
+            var path = Path()
+            path.move(to: CGPoint(x: line.x1, y: line.y1))
+            path.addLine(to: CGPoint(x: line.x2, y: line.y2))
+            ctx.stroke(path,
+                       with: .color(Color(white: gray, opacity: line.a)),
+                       style: StrokeStyle(lineWidth: line.w))
+        }
+    }
+
     /// `core.ts` `radiusScale`: dot radii were tuned for a 300pt frame;
     /// sub-linear scaling keeps small spinners legible.
     static func radiusScale(_ size: Double, _ power: Double) -> Double {
@@ -1712,8 +1817,10 @@ enum OrbEngine {
                 done.insert(b)
             }
         }
-        for k in ["orbitN", "ghostN"] {
-            if let v = out[k], !done.contains(k) { out[k] = max(1, (v * scale).rounded()) }
+        for k in ["orbitN", "ghostN", "nodeN", "strandN", "signals"] {
+            if let v = out[k], v != 0, !done.contains(k) {
+                out[k] = max(1, (v * scale).rounded())
+            }
         }
         if let v = out["iconD"] { out["iconD"] = max(0.02, v * scale) }
         return out
@@ -1723,7 +1830,8 @@ enum OrbEngine {
     /// near/far falloff stays intact while the mark shrinks or grows.
     static func scaleRadii(_ opts: [String: Double], _ scale: Double) -> [String: Double] {
         var out = opts
-        for k in ["rBase", "rDepth", "rActive", "rDot", "ghostR", "partR", "partRDepth"] {
+        for k in ["rBase", "rDepth", "rActive", "rDot", "ghostR", "partR", "partRDepth",
+                  "nodeR", "nodeRDepth"] {
             if let v = out[k] { out[k] = v * scale }
         }
         out["rSizeMul"] = (out["rSizeMul"] ?? 1) * scale
@@ -1755,6 +1863,13 @@ enum OrbEngine {
         "rsPow": 0.6, "rMin": 0.3,
     ]
 
+    /// `BASE_PROFILES.web`, verbatim.
+    static let webBase: [String: Double] = [
+        "nodeN": 30, "thr": 0.72, "signals": 5,
+        "nodeR": 1.4, "nodeRDepth": 1.8, "lineW": 0.8,
+        "rsPow": 0.6, "rMin": 0.3,
+    ]
+
     /// One resolved (state, 20) preset: the mode's baked clock multiplier, its
     /// fully-scaled draw options, and its frame painter.
     struct OrbPreset {
@@ -1763,7 +1878,7 @@ enum OrbEngine {
         let draw: (inout GraphicsContext, Double, Double, [String: Double]) -> Void
     }
 
-    /// `resolvePreset(state, 20)` for the three states Notch wears, each built
+    /// `resolvePreset(state, 20)` for the states Notch wears, each built
     /// through the same machinery as the source and cached once:
     ///   composing → ribbon 20 {speed 3.12,  count ×0.051, size ×1.073,
     ///                          spin 0, bandMul 4.94, wobMul 1}
@@ -1771,6 +1886,7 @@ enum OrbEngine {
     ///                          scanMul 4.335, dimBase 0.45}
     ///   solving   → rubik  20 {speed 1.95,  count ×0.088, size ×1.9}
     ///   working   → orbits 20 {speed 3.9,   count ×0.238, size ×2.4}
+    ///   connecting → web   20 {speed 6.63,  count ×0.25,  size ×1.52}
     private static let presets: [OrbState: OrbPreset] = {
         var composing = scaleRadii(scaleCounts(ribbonBase, 0.051), 1.073)
         for (k, v) in ["spin": 0.0, "bandMul": 4.94, "wobMul": 1.0] { composing[k] = v }
@@ -1782,11 +1898,14 @@ enum OrbEngine {
 
         let working = scaleRadii(scaleCounts(orbitsBase, 0.238), 2.4)
 
+        let connecting = scaleRadii(scaleCounts(webBase, 0.25), 1.52)
+
         return [
             .composing: OrbPreset(speed: 3.12, opts: composing, draw: drawRibbon),
             .searching: OrbPreset(speed: 2.665, opts: searching, draw: drawGlobe),
             .solving: OrbPreset(speed: 1.95, opts: solving, draw: drawRubik),
             .working: OrbPreset(speed: 3.9, opts: working, draw: drawOrbits),
+            .connecting: OrbPreset(speed: 6.63, opts: connecting, draw: drawWeb),
         ]
     }()
 
@@ -2092,6 +2211,89 @@ enum OrbEngine {
         }
         paint(&ctx, &dots, rMin: o["rMin"] ?? 0.3)
     }
+
+    // MARK: web (`web.ts`)
+
+    /// `drawWeb`, verbatim: nodes wander over a rotating sphere, nearby pairs
+    /// wire together, and bright packets travel between deterministically
+    /// re-picked node pairs.
+    static func drawWeb(_ ctx: inout GraphicsContext, size: Double, t: Double, o: [String: Double]) {
+        let cx = size / 2
+        let cy = size / 2
+        let R = (size / 2) * 0.8 * (o["spread"] ?? 1)
+        let pt = makeProj(yaw: t * 0.12, tilt: 0.32, cx: cx, cy: cy, scale: R)
+        let rs = radiusScale(size, o["rsPow"] ?? 0.6)
+        let nodeN = Int(o["nodeN"] ?? 30)
+        let threshold = o["thr"] ?? 0.72
+        let nodeR = o["nodeR"] ?? 1.4
+        let nodeRDepth = o["nodeRDepth"] ?? 1.8
+
+        // Fibonacci nodes drift under slow value noise, then renormalise back
+        // onto the unit sphere.
+        var nodes: [(Double, Double, Double)] = []
+        for i in 0..<nodeN {
+            let d = fibDir(i, nodeN)
+            let x = d.0 + 0.3 * (vnoise(Double(i) * 0.31 + 9, t * 0.24) - 0.5) * 2
+            let y = d.1 + 0.3 * (vnoise(Double(i) * 0.53 + 27, t * 0.21) - 0.5) * 2
+            let z = d.2 + 0.3 * (vnoise(Double(i) * 0.77 + 55, t * 0.27) - 0.5) * 2
+            let length = sqrt(x * x + y * y + z * z)
+            nodes.append((x / length, y / length, z / length))
+        }
+
+        var lines: [Line] = []
+        var dots: [Dot] = []
+        // Edges between close neighbours, faded by proximity and depth.
+        for i in 0..<nodeN {
+            for j in (i + 1)..<nodeN {
+                let dx = nodes[i].0 - nodes[j].0
+                let dy = nodes[i].1 - nodes[j].1
+                let dz = nodes[i].2 - nodes[j].2
+                let distance = sqrt(dx * dx + dy * dy + dz * dz)
+                if distance >= threshold { continue }
+                let (x1, y1, z1) = pt(nodes[i].0, nodes[i].1, nodes[i].2)
+                let (x2, y2, z2) = pt(nodes[j].0, nodes[j].1, nodes[j].2)
+                let depth = ((z1 + z2) / 2 + 1) / 2
+                lines.append(Line(
+                    x1: x1, y1: y1, x2: x2, y2: y2, white: 0.42,
+                    a: (1 - distance / threshold) * (0.3 + 0.55 * depth),
+                    w: max(0.6, (o["lineW"] ?? 0.8) * rs)))
+            }
+        }
+
+        for i in 0..<nodeN {
+            let (px, py, z) = pt(nodes[i].0, nodes[i].1, nodes[i].2)
+            let depth = (z + 1) / 2
+            let pulse = 1 + 0.25 * sin(t * 1.4 + Double(i) * 2.7)
+            dots.append(Dot(
+                x: px, y: py, z: z,
+                r: (nodeR + nodeRDepth * depth) * pulse * rs,
+                white: 0.55 - 0.45 * depth))
+        }
+
+        // Bright packets running between paired nodes.
+        let signals = Int(o["signals"] ?? 5)
+        for signal in 0..<signals {
+            let offset = Double(signal) * 7.31
+            let segment = floor(t * 0.55 + offset)
+            let a = min(nodeN - 1, Int(floor(hashD(segment, Double(signal) * 3.1 + 1.7) * Double(nodeN))))
+            let b = min(nodeN - 1, Int(floor(hashD(segment, Double(signal) * 5.7 + 4.2) * Double(nodeN))))
+            if a == b { continue }
+            let f = frac(t * 0.55 + offset)
+            let x = lerp(nodes[a].0, nodes[b].0, f)
+            let y = lerp(nodes[a].1, nodes[b].1, f)
+            let z = lerp(nodes[a].2, nodes[b].2, f)
+            let length = max(1e-6, sqrt(x * x + y * y + z * z))
+            let (px, py, zr) = pt(x / length, y / length, z / length)
+            let depth = (zr + 1) / 2
+            dots.append(Dot(
+                x: px, y: py, z: zr,
+                r: (nodeR * 1.5 + nodeRDepth * depth) * rs,
+                white: 0.05, a: 0.5 + 0.5 * depth))
+        }
+
+        paintLines(&ctx, lines)
+        paint(&ctx, &dots, rMin: o["rMin"] ?? 0.3)
+    }
 }
 
 /// A single status-line slot that dissolves whenever its `text` changes, so a
@@ -2309,6 +2511,14 @@ struct AssistantTurnView: View {
     /// Non-nil only on a settled agent report turn; renders as a quiet completion
     /// stamp at the end of the footer. `nil` (no stamp) for ordinary chat answers.
     var completedAt: Date? = nil
+    /// Compact pointer-side prompt windows move Copy into their header and omit
+    /// the entire settled action row. Ordinary panel and detached-thread answers
+    /// keep the full footer.
+    var showsFooter: Bool = true
+    /// Keep the model info and agent completion stamp in the footer. The main
+    /// panel's agent report moves those two pieces into the command chip beside
+    /// its follow-up composer; detached threads keep the original footer metadata.
+    var showsFooterMetadata: Bool = true
     var onInAppCopy: (() -> Void)? = nil
     /// Re-run this answer's question for a fresh take. Non-nil only on the LAST
     /// assistant turn — regenerating a mid-thread answer would orphan everything
@@ -2576,7 +2786,7 @@ struct AssistantTurnView: View {
             // sources, and copying/regenerating half an answer isn't useful. The
             // action icons share `turnHovered` so they surface together (see
             // `AnswerFooterButton`).
-            if !streaming && (hasText || !sources.isEmpty) {
+            if showsFooter && !streaming && (hasText || !sources.isEmpty) {
                 // Optically align the row's left edge with the answer text above
                 // it. When a bare icon leads, its 11pt glyph sits centered in a
                 // 22pt hit-frame, so it rests ~5pt inset from x=0 — the row reads
@@ -2667,12 +2877,12 @@ struct AssistantTurnView: View {
                         }
                     }
                     // The model that produced this answer — an ⓘ glyph whose
-                    // tooltip *is* the model name, so hovering it just shows the
-                    // name (no click, no popover, no inline unfurl). Prefer the
-                    // concrete model the provider actually ran (the real reply
-                    // behind `openrouter/free`), shown as a bare name; fall back
-                    // to the regenerate-with pick (XII-135) when none was reported.
-                    if let caption = Self.footerModelCaption(answerModel: answerModel,
+                    // tooltip is the model name. Prefer the concrete model the
+                    // provider actually ran (the real reply behind
+                    // `openrouter/free`), shown as a bare name; fall back to the
+                    // regenerate-with pick when none was reported.
+                    if showsFooterMetadata,
+                       let caption = Self.footerModelCaption(answerModel: answerModel,
                                                              regenModel: regenModel) {
                         AnswerFooterButton(icon: "info.circle",
                                            help: caption,
@@ -2684,7 +2894,7 @@ struct AssistantTurnView: View {
                     // hover-reveal rhythm as the action icons. Its tooltip carries
                     // the full date. Only on agent reports (`completedAt` is nil for
                     // chat answers).
-                    if let completedAt {
+                    if showsFooterMetadata, let completedAt {
                         Text(completionStamp(completedAt))
                             .font(.sf(11, weight: .medium).monospacedDigit())
                             .foregroundStyle(Tokens.text4)
@@ -2908,9 +3118,48 @@ struct InlineMarkdownText: View {
                     parsed[run.range].underlineStyle = .single
                 }
             }
+            autolink(&parsed)
             return parsed
         }
-        return AttributedString(source)
+        var plain = AttributedString(source)
+        autolink(&plain)
+        return plain
+    }
+
+    private static let linkDetector = try? NSDataDetector(
+        types: NSTextCheckingResult.CheckingType.link.rawValue)
+
+    /// Link the bare URLs the model writes as plain prose — a translated line
+    /// ending in `meta.com/thefutureisfor` carries no markdown, so without this
+    /// it renders as dead text. Same scheme gate as `[label](url)`: only
+    /// http/https survive, so `mailto:` and friends stay inert.
+    private func autolink(_ attributed: inout AttributedString) {
+        guard let detector = Self.linkDetector else { return }
+        let plain = String(attributed.characters)
+        guard !plain.isEmpty else { return }
+        let full = NSRange(plain.startIndex..<plain.endIndex, in: plain)
+        for match in detector.matches(in: plain, options: [], range: full) {
+            guard let url = match.url,
+                  let scheme = url.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https",
+                  let found = Range(match.range, in: plain)
+            else { continue }
+            let offset = plain.distance(from: plain.startIndex, to: found.lowerBound)
+            let length = plain.distance(from: found.lowerBound, to: found.upperBound)
+            let start = attributed.index(attributed.startIndex, offsetByCharacters: offset)
+            let end = attributed.index(start, offsetByCharacters: length)
+            let range = start..<end
+            // Leave alone anything the markdown pass already claimed — an
+            // explicit `[label](url)` link, or a `code` span (a URL inside
+            // backticks is being shown, not offered).
+            let claimed = attributed[range].runs.contains {
+                $0.link != nil || $0.inlinePresentationIntent?.contains(.code) == true
+            }
+            guard !claimed else { continue }
+            attributed[range].link = url
+            attributed[range].foregroundColor = linkColor
+            attributed[range].underlineStyle = .single
+        }
     }
 }
 
@@ -4636,7 +4885,12 @@ private struct CodeBlockView: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .padding(5)
+                .padding(.top, 5)
+                // Keep the hit target clear of macOS's overlay scroller. The
+                // scroller floats above SwiftUI scroll content (it does not take
+                // layout space), so a top-trailing button at the old 5pt inset
+                // could sit directly underneath it when scroll bars were visible.
+                .padding(.trailing, 17)
                 // Ghost by default; brightens on hover; full while showing the check.
                 .opacity(copied ? 1.0 : hovering ? 0.7 : 0.3)
                 .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
@@ -4664,6 +4918,7 @@ private struct AnswerFooterButton: View {
     /// True while the cursor is anywhere over the owning turn — brightens the
     /// whole footer as one unit (owned by `AssistantTurnView`).
     let rowHovered: Bool
+    var showsTooltip: Bool = true
     var confirms: Bool = false
     let action: () -> Void
 
@@ -4696,7 +4951,7 @@ private struct AnswerFooterButton: View {
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
         .animation(.easeOut(duration: 0.18), value: rowHovered)
         .animation(.easeOut(duration: 0.15), value: confirmed)
-        .notchTooltip(help)
+        .notchTooltip(help, shows: showsTooltip)
     }
 }
 
@@ -5327,6 +5582,24 @@ enum MenuCard {
     }
 }
 
+/// Geometry and typography of the Recent ⋯ menu. Result metadata cards use
+/// these same values so the two floating-card species cannot drift by a point or
+/// a font weight again.
+enum ManageMenuMetrics {
+    static let radius: CGFloat = 20
+    static let cardPadding: CGFloat = 6
+    static let rowSpacing: CGFloat = 2
+    static let rowHorizontalPadding: CGFloat = 8
+    static let rowVerticalPadding: CGFloat = 7
+    static let rowContentSpacing: CGFloat = 8
+    static let fontSize: CGFloat = 12
+    static let accessoryFontSize: CGFloat = 10
+    static var rowTextHeight: CGFloat {
+        ceil(NSFont.systemFont(ofSize: fontSize, weight: .medium)
+            .boundingRectForFont.height)
+    }
+}
+
 /// One row of a `MenuCard`: a word, and at most one bit of trailing furniture.
 ///
 /// The wash is a full capsule — one short word wide, it reads as a pill at this
@@ -5427,6 +5700,37 @@ struct MenuCardSlab: View {
 }
 
 extension View {
+    /// The exact glass slab worn by Recent's ⋯ menu: same radius, veil, sheen,
+    /// rim, clipping and shadows. Metadata cards use this instead of the denser
+    /// generic `MenuCard` slab.
+    func manageMenuCardBackground() -> some View {
+        let shape = RoundedRectangle(cornerRadius: ManageMenuMetrics.radius,
+                                     style: .continuous)
+        return background {
+            shape.fill(.clear).nativeGlass(in: shape)
+                .overlay(shape.fill(Color.black.opacity(0.38)))
+        }
+        .overlay(
+            shape.fill(
+                LinearGradient(colors: [.white.opacity(0.09), .clear],
+                               startPoint: .top, endPoint: .center)
+            )
+            .blendMode(.plusLighter)
+            .allowsHitTesting(false)
+        )
+        .overlay(
+            shape.strokeBorder(
+                LinearGradient(colors: [.white.opacity(0.30), .white.opacity(0.07)],
+                               startPoint: .top, endPoint: .bottom),
+                lineWidth: 0.75
+            )
+            .allowsHitTesting(false)
+        )
+        .clipShape(shape)
+        .shadow(color: .black.opacity(0.30), radius: 3, y: 1)
+        .shadow(color: .black.opacity(0.35), radius: 16, y: 8)
+    }
+
     /// The slab behind a menu that draws its own window (the `/` card), plus the
     /// two shadows that lift it off whatever it hangs over.
     func menuCardBackground() -> some View {

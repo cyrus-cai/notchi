@@ -25,6 +25,7 @@ final class WhatsNewService: ObservableObject {
     struct Entry: Identifiable, Equatable {
         var version: String
         var date: String?
+        var heroAssetName: String?
         var features: [String]
         var improvements: [String]
         var fixes: [String]
@@ -35,12 +36,14 @@ final class WhatsNewService: ObservableObject {
         init(
             version: String,
             date: String? = nil,
+            heroAssetName: String? = nil,
             features: [String] = [],
             improvements: [String] = [],
             fixes: [String] = [],
             others: [String] = []
         ) {
             self.version = version; self.date = date
+            self.heroAssetName = heroAssetName
             self.features = features; self.improvements = improvements
             self.fixes = fixes; self.others = others
         }
@@ -66,6 +69,24 @@ final class WhatsNewService: ObservableObject {
     /// English-only by design. Order doesn't matter — `sorted` puts the newest
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
+        Entry(
+            version: "0.5.7",
+            date: "2026-08-12",
+            heroAssetName: "WhatsNew057Promo",
+            features: [
+                "Run prompt shortcuts in a compact window beside the pointer, or keep them in the notch.",
+                "Global prompt shortcuts can use double-tap Command or Option.",
+            ],
+            improvements: [
+                "Chat and Agent now keep separate Recent lists.",
+                "Agent history can be cleared without removing other history.",
+                "Plain URLs in answers are now clickable.",
+            ],
+            fixes: [
+                "Codex tasks resume correctly with the current CLI argument format.",
+                "Floating menus no longer linger after scrolling Recent or switching between Chat and Agent.",
+            ]
+        ),
         Entry(
             version: "0.5.6",
             date: "2026-08-10",

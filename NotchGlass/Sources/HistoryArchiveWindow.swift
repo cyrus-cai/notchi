@@ -1,6 +1,12 @@
 import AppKit
 import SwiftUI
 
+/// Which compose bucket opened the archive. The menu-bar History command uses
+/// `.all`; See All from the notch keeps Chat and Agent strictly separated.
+enum HistoryArchiveScope: String {
+    case all, chat, agent
+}
+
 /// The standalone **History** window: a genuinely self-contained top-level window
 /// showing the COMPLETE conversation/capture archive — not the newest-slice the
 /// notch list keeps (see `NotchModel.notchRecentCap`).
@@ -35,8 +41,14 @@ final class HistoryArchiveWindowController: NSObject, NSWindowDelegate {
 
     /// Open (or bring to front) the History window. Reuses the single instance so
     /// repeated invocations don't stack duplicates.
-    func present(model: NotchModel) {
+    func present(model: NotchModel, scope: HistoryArchiveScope = .all) {
         if let window {
+            // Re-scope even when the window is already open: moving from Agent to
+            // Chat (or back) must not retain the previous bucket's rows.
+            window.contentView = NSHostingView(
+                rootView: HistoryArchiveView(model: model, scope: scope)
+                    .coordinateSpace(.named(TooltipCoordinateSpace.clipBox))
+            )
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
@@ -67,7 +79,7 @@ final class HistoryArchiveWindowController: NSObject, NSWindowDelegate {
         window.appearance = NSAppearance(named: .darkAqua)
 
         window.contentView = NSHostingView(
-            rootView: HistoryArchiveView(model: model)
+            rootView: HistoryArchiveView(model: model, scope: scope)
                 // Same as the detached window: this window's edges are the wall
                 // its hover tooltips clamp to.
                 .coordinateSpace(.named(TooltipCoordinateSpace.clipBox)))
@@ -144,16 +156,30 @@ private struct GlassHairline: View {
 /// shows through the whole window.
 private struct HistoryArchiveView: View {
     @ObservedObject var model: NotchModel
+    let scope: HistoryArchiveScope
 
     @State private var query = ""
-    @State private var sourceFilter: NotchModel.HistoryItem.Source? = nil
+    @State private var sourceFilter: NotchModel.HistoryItem.Source?
     /// Whether the Ask bucket's children (Notes / Reminders) are unfurled. Ask is
     /// the parent; its two sub-filters only appear once Ask is tapped.
     @State private var askExpanded = false
     @State private var selection: UUID? = nil
 
+    init(model: NotchModel, scope: HistoryArchiveScope = .all) {
+        self.model = model
+        self.scope = scope
+        _sourceFilter = State(initialValue: scope == .agent ? .agent : nil)
+        _askExpanded = State(initialValue: scope == .chat)
+    }
+
     private var filteredItems: [NotchModel.HistoryItem] {
-        var items = model.history
+        var items = model.history.filter { item in
+            switch scope {
+            case .all:   true
+            case .chat:  item.source != .agent
+            case .agent: item.source == .agent
+            }
+        }
         if let sourceFilter {
             items = items.filter { $0.source == sourceFilter }
         }
@@ -239,46 +265,61 @@ private struct HistoryArchiveView: View {
             // The search field wears the panel's glass-capsule chrome — a real
             // translucent glass pill with the specular rim, matching the notch's
             // own input affordances.
-            .glassCapsule(in: RoundedRectangle(cornerRadius: 10, style: .continuous),
-                          brighter: false)
-            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .glassCapsule(in: Capsule(), brighter: false)
+            .contentShape(Capsule())
 
             filterRow(count: count)
         }
         .padding(12)
     }
 
-    /// Two buckets: Ask (a parent that unfurls Notes / Reminders on tap) and Agent.
-    /// The children only appear while Ask is expanded or one of them is the active
-    /// filter — mirroring the notch's `ManageFilterChip` menu.
+    /// The global archive can switch buckets. A See All launched from the notch is
+    /// locked to its originating bucket, with Chat still able to narrow to Ask,
+    /// Notes, or Reminders inside that boundary.
     private func filterRow(count: Int) -> some View {
-        let askGroupActive = sourceFilter == .ask || sourceFilter == .note || sourceFilter == .reminder
-        let subsShown = askExpanded || askGroupActive
+        let chatScoped = scope == .chat
+        let askGroupActive = chatScoped
+            ? sourceFilter == nil || sourceFilter == .ask
+                || sourceFilter == .note || sourceFilter == .reminder
+            : sourceFilter == .ask || sourceFilter == .note || sourceFilter == .reminder
+        let subsShown = chatScoped || askExpanded || askGroupActive
         let spring = Animation.spring(response: 0.38, dampingFraction: 0.82)
         return HStack(spacing: 6) {
-            // Ask — the parent bucket. Lights for any of its children; tapping it
-            // selects Ask and reveals Notes/Reminders, or clears when already Ask.
-            filterPill(.ask, L("history.window.filter.ask"), active: askGroupActive) {
-                withAnimation(spring) {
-                    if sourceFilter == .ask {
-                        sourceFilter = nil
-                        askExpanded = false
-                    } else {
-                        sourceFilter = .ask
-                        askExpanded = true
+            if scope != .agent {
+                // In Chat scope this parent means the complete Chat bucket. In the
+                // global archive it retains the existing Ask-only filter behavior.
+                filterPill(.ask, L("history.window.filter.ask"), active: askGroupActive) {
+                    withAnimation(spring) {
+                        if chatScoped {
+                            sourceFilter = nil
+                            askExpanded = true
+                        } else if sourceFilter == .ask {
+                            sourceFilter = nil
+                            askExpanded = false
+                        } else {
+                            sourceFilter = .ask
+                            askExpanded = true
+                        }
                     }
                 }
-            }
-            if subsShown {
-                filterPill(.note, L("history.window.filter.notes"))
-                filterPill(.reminder, L("history.window.filter.reminders"))
-            }
-            // Agent — the other bucket. Folds the Ask children when picked.
-            filterPill(.agent, L("history.window.filter.agent")) {
-                withAnimation(spring) {
-                    sourceFilter = sourceFilter == .agent ? nil : .agent
-                    askExpanded = false
+                if subsShown {
+                    filterPill(.note, L("history.window.filter.notes"))
+                    filterPill(.reminder, L("history.window.filter.reminders"))
                 }
+            }
+
+            if scope == .all {
+                // Agent — the other bucket. Folds the Ask children when picked.
+                filterPill(.agent, L("history.window.filter.agent")) {
+                    withAnimation(spring) {
+                        sourceFilter = sourceFilter == .agent ? nil : .agent
+                        askExpanded = false
+                    }
+                }
+            } else if scope == .agent {
+                // Fixed scope marker: its action is deliberately inert because
+                // this window was opened from Agent's own See All.
+                filterPill(.agent, L("history.window.filter.agent"), active: true) {}
             }
             Spacer()
             Text(L("history.window.count", count))
@@ -334,9 +375,11 @@ private struct HistoryArchiveView: View {
             Image(systemName: "clock.arrow.circlepath")
                 .font(.sf(26, weight: .light))
                 .foregroundStyle(Tokens.text4)
-            Text(query.isEmpty && sourceFilter == nil
-                 ? L("history.window.empty")
-                 : L("history.window.empty.filtered"))
+            Text(query.isEmpty && sourceFilter == .agent
+                 ? L("history.window.empty.agent")
+                 : (query.isEmpty && sourceFilter == nil
+                    ? L("history.window.empty")
+                    : L("history.window.empty.filtered")))
                 .font(.sf(13))
                 .foregroundStyle(Tokens.text3)
         }
@@ -612,4 +655,3 @@ private struct TranscriptBubble: View {
         return s
     }
 }
-
