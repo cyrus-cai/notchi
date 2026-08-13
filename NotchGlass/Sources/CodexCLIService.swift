@@ -103,6 +103,18 @@ struct CodexCLIService: AIService {
         return nil
     }
 
+    /// Whether the resolution has actually LANDED — the difference between "no"
+    /// and "not yet". `isAvailable` collapses the two on purpose (it's read from
+    /// `body`, so it can never block), which is fine for drawing but wrong for
+    /// anything that acts destructively on a negative: a caller that DISCARDS
+    /// state when an engine looks dead has to ask this first, or the first hover
+    /// after a relaunch throws away a perfectly live pick.
+    static var isAvailabilityResolved: Bool {
+        guard resolveLock.try() else { return false }
+        defer { resolveLock.unlock() }
+        return cachedBinary != nil
+    }
+
     /// Resolve the binary and read the configured model off the main thread, so the
     /// first `isAvailable` / `defaultModel` call during a SwiftUI render reads a warm
     /// cache instead of spawning `--version` (or hitting disk) on the main thread.

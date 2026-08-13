@@ -455,6 +455,49 @@ final class NotchModel: ObservableObject {
     @Published private(set) var promptShortcutContext: String?
     var usingPromptShortcutContext: Bool { promptShortcutContext != nil }
 
+    /// What the user had highlighted in the app they came from, read at the open
+    /// edge (`SelectedTextCapture.ambient`) and carried into the idle prompt as
+    /// context for the next ask. The whole point is that "translate this" works
+    /// without copying anything first — the thing on screen *is* "this".
+    ///
+    /// It is never silent: the badge above the input says it is being used and
+    /// hands back an × to drop it (`dropSelectionContext`), because a selection
+    /// left over in some window the user isn't thinking about must never quietly
+    /// steer an answer.
+    @Published private(set) var selectionContext: String?
+    /// The app that selection came from ("Safari"), for the badge. `nil` when the
+    /// name is unavailable — the badge then just says a selection is in use.
+    @Published private(set) var selectionContextSource: String?
+    /// The last selection dropped with the badge's ×. Kept across closes so the
+    /// same still-highlighted paragraph doesn't march back in on the next summon:
+    /// the × means "not this text", and it holds until the user highlights
+    /// something else.
+    private var dismissedSelection: String?
+
+    /// Settings → General, "Use selected text": whether opening the panel reads
+    /// what the user had highlighted outside. On by default — it is the whole
+    /// point of a notch you talk to ("translate this" with nothing copied) — but
+    /// people who live with a permanent selection in an editor want the prompt to
+    /// stay blank, so it is one switch away. Off also stops the accessibility read
+    /// happening at all, not just the badge from drawing.
+    @Published var selectionContextEnabled: Bool =
+        UserDefaults.standard.object(forKey: NotchModel.selectionContextKey) as? Bool ?? true
+    {
+        didSet {
+            UserDefaults.standard.set(selectionContextEnabled,
+                                      forKey: NotchModel.selectionContextKey)
+            if !selectionContextEnabled { clearSelectionContext() }
+        }
+    }
+    private static let selectionContextKey = "selectionContextEnabled"
+
+    /// The one-time "you can switch this off in Settings" note, shown after the
+    /// user drops a carried selection for the FIRST time — see
+    /// `dropSelectionContext`. Retires itself after a few seconds.
+    @Published private(set) var selectionContextHintShown = false
+    private var selectionContextHintTask: Task<Void, Never>?
+    private static let selectionContextHintSeenKey = "selectionContextHintSeen"
+
     /// The model picker popover (anchored to the model chip in settings) is open.
     /// While set, `collapseOnLeave` bails exactly as it does for a pinned answer: the
     /// popover is a separate window outside the island's tracking area, so moving the
@@ -3843,6 +3886,15 @@ final class NotchModel: ObservableObject {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.flushHistorySave() }
         }
+        // The other half of `rearmPersistedAgentBucket`'s "not yet" rule: it declines
+        // to judge a restored bucket while the CLI probes are still in flight, so the
+        // moment they land it has to be asked again — otherwise an engine that really
+        // did go away would stay armed for the whole session.
+        NotificationCenter.default.addObserver(
+            forName: .cliAvailabilityResolved, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.rearmPersistedAgentBucket() }
+        }
     }
 
     deinit {
@@ -4635,6 +4687,7 @@ final class NotchModel: ObservableObject {
         isAnswerPinned = false
         fromPromptShortcut = false
         promptShortcutContext = nil
+        clearSelectionContext()
         isModelPickerOpen = false
         isFolderPickerOpen = false
         showModelPicker = false
@@ -4689,6 +4742,7 @@ final class NotchModel: ObservableObject {
         isAnswerPinned = false
         fromPromptShortcut = false
         promptShortcutContext = nil
+        clearSelectionContext()
         agentDetailTaskID = nil
         text = ""; turns = []
         showHistory = false
@@ -4754,6 +4808,73 @@ final class NotchModel: ObservableObject {
         // gesture. The context stays nil so no badge claims a selection that
         // isn't there — the gesture still gets the user somewhere to type.
         promptShortcutContext = context.isEmpty ? nil : selectedText
+    }
+
+    // MARK: - The selection the user came in with
+
+    /// Whether an ambient selection belongs on what the panel is currently
+    /// showing: the plain idle prompt, and nothing else. A thread on screen, an
+    /// agent task being written, settings, What's New, or a shortcut that already
+    /// captured its own selection each own the surface — dropping a second
+    /// context badge onto any of them would be noise at best.
+    var acceptsSelectionContext: Bool {
+        selectionContextEnabled
+            && mode == .idle && turns.isEmpty
+            && !showSettings && !showWhatsNew
+            && !agentComposeActive
+            && promptShortcutContext == nil
+    }
+
+    /// Carry the selection read at the open edge into the idle prompt. Silent
+    /// no-op for everything that isn't worth carrying — an empty read, a surface
+    /// that doesn't accept one, or the exact text the user already said no to.
+    func attachSelectionContext(_ selected: String, from app: String?) {
+        let body = selected.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty, acceptsSelectionContext, body != dismissedSelection else { return }
+        selectionContext = selected
+        selectionContextSource = app
+    }
+
+    /// The × on the badge: this answer is not about that. Remembered, so the next
+    /// summon over the same untouched selection doesn't re-attach it.
+    func dropSelectionContext() {
+        dismissedSelection = selectionContext?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        selectionContext = nil
+        selectionContextSource = nil
+        // The × is the first moment we can be sure the user has both noticed the
+        // feature and wanted it gone — so it is the one moment worth spending on
+        // telling them where the switch lives. Once ever, then never again: a
+        // reminder that repeats is nagging about a thing they already handled.
+        guard !UserDefaults.standard.bool(forKey: Self.selectionContextHintSeenKey)
+        else { return }
+        UserDefaults.standard.set(true, forKey: Self.selectionContextHintSeenKey)
+        selectionContextHintTask?.cancel()
+        selectionContextHintShown = true
+        selectionContextHintTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            guard !Task.isCancelled else { return }
+            withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
+                self?.selectionContextHintShown = false
+            }
+        }
+    }
+
+    /// Take the one-time hint off screen early — the user followed it into
+    /// Settings, or the page moved on underneath it.
+    func retireSelectionContextHint() {
+        selectionContextHintTask?.cancel()
+        selectionContextHintShown = false
+    }
+
+    /// Drop the carried selection because the page changed under it (a new chat,
+    /// a close, a line that went somewhere else). Unlike `dropSelectionContext`
+    /// this is not a refusal, so it arms no memory — the next open reads the
+    /// selection fresh.
+    private func clearSelectionContext() {
+        selectionContext = nil
+        selectionContextSource = nil
+        retireSelectionContextHint()
     }
 
     /// A prompt shortcut whose presentation is a compact pointer-side window.
@@ -4857,6 +4978,31 @@ final class NotchModel: ObservableObject {
             submit()
             return
         }
+        // The selection carried in from the app the user came from rides along
+        // with an ASK — "translate this" is about the thing they had highlighted,
+        // which is the entire reason it was picked up. Note and Remind route on
+        // their own words alone ("call mom tomorrow", typed over some paragraph
+        // still selected in another window, is a reminder and nothing else), so
+        // there the context is dropped rather than folded in. Either way it is
+        // consumed here: it belonged to this line.
+        if let selection = selectionContext {
+            clearSelectionContext()
+            let instruction = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if effectiveSubmitPanel == .chat, !instruction.isEmpty {
+                text = """
+                \(instruction)
+
+                <selected_text>
+                \(selection)
+                </selected_text>
+                """
+                // Same shape as the prompt-shortcut path above: the wrapped
+                // payload is wire context, not something to render back at the
+                // user as their own bubble.
+                submit(hideUserBubble: true)
+                return
+            }
+        }
         switch effectiveSubmitPanel {
         case .chat:     submit()
         case .note:
@@ -4878,6 +5024,11 @@ final class NotchModel: ObservableObject {
     /// outside any withAnimation context.
     func enterAgentCompose(folder: URL? = nil) {
         guard !AgentEngine.available.isEmpty else { return }
+        // A task for the agent is written against a project on disk, not against
+        // whatever was highlighted in another window — and `submitAgent` never
+        // reads the carried selection, so leaving the chip up would be the panel
+        // claiming a context it isn't going to send.
+        clearSelectionContext()
         withAnimation(.smooth(duration: 0.3)) {
             if let folder {
                 lastAgentFolder = folder
@@ -4891,8 +5042,9 @@ final class NotchModel: ObservableObject {
         }
         // The remembered engine may have been uninstalled / signed out since it
         // was last used — fall back to whichever is live, and drop the model
-        // pick with it (it named the dead engine's model).
-        if !agentArmedEngine.isAvailable,
+        // pick with it (it named the dead engine's model). Gated on KNOWN dead,
+        // never on a probe that simply hasn't landed (see `isKnownUnavailable`).
+        if agentArmedEngine.isKnownUnavailable,
            let fallback = AgentEngine.available.first {
             agentArmedEngine = fallback
             agentModelID = nil
@@ -4905,14 +5057,26 @@ final class NotchModel: ObservableObject {
     /// engine (uninstalled / signed out since it was last used), dropping its model
     /// pick with it. No agent CLI survives at all → fall back to Ask rather than
     /// unfurl a compose row that can't run.
+    ///
+    /// **Only a KNOWN-dead engine is repointed.** This runs on the first open, which
+    /// after a relaunch can land inside the launch probe's window — and there every
+    /// engine reads unavailable. Repointing on that made a relaunch quietly reset the
+    /// armed model: Command Code + Deepseek came back as Codex on the CLI default,
+    /// and because both writes persist through `didSet`, the pick wasn't just drawn
+    /// wrong, it was gone. A pick that can't be judged yet is left exactly as it is;
+    /// `.cliAvailabilityResolved` runs this again once the probe has an answer.
     private func rearmPersistedAgentBucket() {
         guard agentComposeActive else { return }
+        // Same "not yet" caution one level up: `agentAvailable` is false during the
+        // probe window too, and closing the bucket there would drop the user out of
+        // a mode they're still in.
+        guard AgentEngine.allCases.allSatisfy(\.isAvailabilityResolved) else { return }
         guard agentAvailable else {
             agentComposeActive = false
             return
         }
         if agentComposeFolder == nil { agentComposeFolder = lastAgentFolder }
-        if !agentArmedEngine.isAvailable, let fallback = AgentEngine.available.first {
+        if agentArmedEngine.isKnownUnavailable, let fallback = AgentEngine.available.first {
             agentArmedEngine = fallback
             agentModelID = nil
         }

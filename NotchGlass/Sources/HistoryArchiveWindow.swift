@@ -547,7 +547,12 @@ private struct HistoryDetailView: View {
 
     private var transcript: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
+            // Lazy, like the master list beside it: a long agent thread is dozens
+            // of bubbles and only a few fit the pane, so selecting a row shouldn't
+            // pay to build and lay out the ones below the fold. Nothing here pins
+            // to the tail (the pane opens at the top), so the lazy stack never has
+            // to realize the whole transcript to find an anchor.
+            LazyVStack(alignment: .leading, spacing: 14) {
                 ForEach(item.conversation) { turn in
                     TranscriptBubble(turn: turn)
                 }

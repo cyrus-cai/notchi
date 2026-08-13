@@ -790,7 +790,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     /// - `.builtin` (Kimi): inject a `builtin_function` tool. The model emits a
     ///   tool call the client must echo back *unchanged* (its arguments JSON) for
     ///   the provider to actually run the search — handled by the matching
-    ///   passthrough tool, not by any local execution.
+    ///   canonical search tool's passthrough provider, not by local execution.
     /// - `.chatModelSwap` (OpenAI): chat-completions has no search tool; the only
     ///   path is to swap the request `model` to a search-capable id and add a
     ///   parameter, which forces a search every turn.
@@ -800,7 +800,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         case tool([String: Any])
         /// A `builtin_function` tool plus the body fields it requires (e.g.
         /// `thinking: disabled`). The client echoes the call back; see
-        /// `KimiWebSearchPassthrough`.
+        /// `KimiSearchProvider`.
         case builtin(tool: [String: Any], bodyExtras: [String: Any])
         /// Swap the request model to `model` and merge `bodyExtras` (e.g.
         /// `web_search_options`). Used where chat-completions can't carry a tool.
@@ -822,7 +822,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // current account/models — it returned training-cutoff hallucinations with
         // no results, the exact dishonest behavior XII-116 fought. GLM's real
         // search runs through a *client-side* tool against Zhipu's standalone Web
-        // Search API instead — see `GLMWebSearchTool` and `ToolRegistry.standard`.
+        // Search API instead — see `GLMSearchProvider` and `ToolRegistry.standard`.
         case .openrouter:
             // One tool for every proxied model; bills OpenRouter credits, no extra
             // key. The old `:online` model suffix is deprecated — don't use it.
@@ -848,18 +848,9 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    /// The function name a provider uses for a *builtin* search the client must
-    /// echo back (Kimi's `$web_search`). The harness matches an incoming tool call
-    /// against this to route it to the passthrough instead of failing on an unknown
-    /// tool. `nil` for providers whose search needs no echo.
-    var builtinSearchName: String? {
-        if case .builtin = serverSearch, case .kimi = self { return "$web_search" }
-        return nil
-    }
-
     /// Whether this provider can run a *real* web search during a turn — either a
     /// native server-side search (`serverSearch != nil`: Anthropic / OpenAI / Kimi
-    /// / OpenRouter) or the client-side `GLMWebSearchTool` (GLM). The five vendors
+    /// / OpenRouter) or the client-side `GLMSearchProvider` (GLM). The five vendors
     /// that have neither (DeepSeek / Gemini / Qwen / MiniMax / MiMo) return false:
     /// their requests go out unchanged and the model answers only from its training
     /// data, with no way to reach current information. The Settings provider menu
@@ -2875,6 +2866,27 @@ private enum ToolReasoningOptOut {
 }
 
 extension OpenAICompatAIService: AgentCapableService {
+    /// Keep provider wire quirks at the service boundary. The registry and
+    /// harness only ever deal in the canonical `web_search` capability.
+    func canonicalToolName(_ name: String) -> String {
+        if provider == .glm, name == "lookup_web" { return WebSearchTool.toolName }
+        if provider == .kimi, name == "$web_search" { return WebSearchTool.toolName }
+        return name
+    }
+
+    private func wireToolName(_ name: String) -> String {
+        guard name == WebSearchTool.toolName else { return name }
+        // GLM confuses a client function named `web_search` with its broken
+        // server-side builtin. Keep that workaround as a wire alias, not as a
+        // second capability identity.
+        if provider == .glm { return "lookup_web" }
+        // Moonshot requires its native builtin's literal `$web_search` name.
+        // A user-selected standalone backend is an ordinary client function and
+        // therefore keeps the canonical name.
+        if provider == .kimi, !APIKeyStore.unifiedSearchActive { return "$web_search" }
+        return name
+    }
+
     func streamTurn(system: String,
                     messages: [AgentMessage],
                     tools: [ToolSpec]) -> AsyncThrowingStream<TurnEvent, Error> {
@@ -2903,9 +2915,9 @@ extension OpenAICompatAIService: AgentCapableService {
 
                         // Server-side web search (XII-118): for OpenAI-compatible
                         // vendors the native search rides in three different shapes.
-                        // `.tool` (GLM) adds a tools-array entry; `.builtin` (Kimi)
-                        // adds a builtin tool plus required body fields and is echoed
-                        // back by the harness; `.chatModelSwap` (OpenAI) swaps the model
+                        // `.tool` adds a tools-array entry; `.builtin` (Kimi) maps
+                        // the canonical tool to its wire alias and adds required body
+                        // fields; `.chatModelSwap` (OpenAI) swaps the model
                         // and adds a parameter. Resolve the effective model + any extra
                         // search tool/body up front, then build the request once.
                         // A unified client-side searcher (Keenable by default, Exa
@@ -2915,12 +2927,19 @@ extension OpenAICompatAIService: AgentCapableService {
                         var effectiveModel = model
                         var searchTool: [String: Any]? = nil
                         var bodyExtras: [String: Any] = [:]
+                        let canonicalSearchAdvertised = tools.contains {
+                            $0.name == WebSearchTool.toolName
+                        }
                         switch (APIKeyStore.unifiedSearchActive ? nil : provider.serverSearch) {
                         case .tool(let t):
                             searchTool = t
-                        case .builtin(let t, let extras):
-                            searchTool = t
-                            bodyExtras = extras
+                        case .builtin(_, let extras):
+                            // `ToolRegistry.standard` supplies the canonical Kimi
+                            // passthrough. Mapping that spec below produces `t`'s
+                            // builtin shape without advertising two search tools.
+                            if canonicalSearchAdvertised {
+                                bodyExtras = extras
+                            }
                         case .chatModelSwap(let m, let extras):
                             effectiveModel = m
                             bodyExtras = extras
@@ -2931,13 +2950,20 @@ extension OpenAICompatAIService: AgentCapableService {
                         // The model's own client-side tools plus, when present, the
                         // provider's server-search entry. Kept in one array so a turn
                         // can both call a local tool and search.
-                        var wireTools = Self.wireTools(tools)
+                        let clientToolSpecs = tools.map { spec in
+                            ToolSpec(name: wireToolName(spec.name),
+                                     description: spec.description,
+                                     schema: spec.schema)
+                        }
+                        var wireTools = Self.wireTools(clientToolSpecs)
                         if let searchTool { wireTools.append(searchTool) }
 
                         // No `temperature` — see `SamplingKnobs`.
                         var body: [String: Any] = [
                             "model": effectiveModel,
-                            "messages": Self.wireMessages(system: system, messages: messages),
+                            "messages": Self.wireMessages(system: system,
+                                                          messages: messages,
+                                                          toolName: wireToolName),
                             "stream": true,
                         ]
                         if !wireTools.isEmpty {
@@ -3114,7 +3140,8 @@ extension OpenAICompatAIService: AgentCapableService {
     /// `{role:"assistant", content, tool_calls:[…]}`; a tool-results turn becomes
     /// one `{role:"tool", tool_call_id, content}` message per result.
     private static func wireMessages(system: String,
-                                     messages: [AgentMessage]) -> [[String: Any]] {
+                                     messages: [AgentMessage],
+                                     toolName: (String) -> String) -> [[String: Any]] {
         var out: [[String: Any]] = [["role": "system", "content": system]]
         for m in messages {
             switch m.kind {
@@ -3126,7 +3153,8 @@ extension OpenAICompatAIService: AgentCapableService {
                                                 encoding: .utf8)) ?? "{}"
                     return ["id": c.id,
                             "type": "function",
-                            "function": ["name": c.name, "arguments": argsJSON ?? "{}"]]
+                            "function": ["name": toolName(c.name),
+                                         "arguments": argsJSON ?? "{}"]]
                 }
                 out.append(["role": "assistant",
                             "content": text,
@@ -3139,7 +3167,7 @@ extension OpenAICompatAIService: AgentCapableService {
                     var msg: [String: Any] = ["role": "tool",
                                               "tool_call_id": r.id,
                                               "content": r.result]
-                    if !r.name.isEmpty { msg["name"] = r.name }
+                    if !r.name.isEmpty { msg["name"] = toolName(r.name) }
                     out.append(msg)
                 }
             }

@@ -564,6 +564,9 @@ struct InlineSettingsView: View {
                 if ForceClickFeature.isEnabled {
                     forceClickPressureRow
                 }
+                // What the panel picks up when it opens, next to how a press
+                // opens it — both are the notch reaching outside itself.
+                selectionContextRow
                 hoverSensitivityRow
                 appLanguageRow
                 launchAtLoginRow
@@ -2455,6 +2458,23 @@ struct InlineSettingsView: View {
         }
     }
 
+    /// Whether opening the panel carries in whatever the user had highlighted in
+    /// the app they came from (`NotchModel.selectionContext`). On by default; off
+    /// stops the accessibility read itself, not just the badge.
+    private var selectionContextRow: some View {
+        settingRow(label: L("general.selectionContext"),
+                   info: L("general.selectionContext.hint")) {
+            Toggle("", isOn: Binding(
+                get: { model.selectionContextEnabled },
+                set: { Haptics.levelChange(); model.selectionContextEnabled = $0 }
+            ))
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .tint(Tokens.text2)
+        }
+    }
+
     /// Whether background work flexes the resting notch's busy ears (the verb on
     /// the left shoulder, the elapsed clock on the right). One global switch:
     /// off keeps the closed notch flat for agent runs and detached Ask rounds
@@ -2623,7 +2643,7 @@ struct InlineSettingsView: View {
         return settingRow(label: L("general.hoverSensitivity"),
                           info: L("general.hoverSensitivity.hint")) {
             VStack(spacing: 1) {
-                NativeThreeStepSlider(value: hoverSensitivityPosition)
+                NativeDetentSlider(value: hoverSensitivityPosition, ticks: HoverSensitivity.allCases.count)
                     .frame(width: controlWidth, height: 22)
                     .accessibilityLabel(L("general.hoverSensitivity"))
 
@@ -4385,11 +4405,17 @@ private struct PickerCard<Content: View>: View {
     }
 }
 
-/// AppKit's native linear slider configured as exactly three selectable stops.
-/// `allowsTickMarkValuesOnly` makes pointer, keyboard, and accessibility input
-/// land on a real policy rather than an in-between value.
-private struct NativeThreeStepSlider: NSViewRepresentable {
+/// A native `NSSlider` quantized to a fixed ladder of tick positions — the
+/// "multi-segment" control behind the hover-sensitivity row (3 ticks) and the
+/// agent card's thinking-strength dial (N ticks). Ticks sit below the track;
+/// dragging snaps to the nearest one, so `value` only ever lands on an integer
+/// position in `0…ticks-1`.
+struct NativeDetentSlider: NSViewRepresentable {
     @Binding var value: Double
+    /// Number of detents on the ladder (tick marks + the positions they mark).
+    /// Two ticks are the minimum the system allows; 3 = the old
+    /// `NativeThreeStepSlider` exactly.
+    let ticks: Int
 
     func makeCoordinator() -> Coordinator {
         Coordinator(value: $value)
@@ -4398,11 +4424,11 @@ private struct NativeThreeStepSlider: NSViewRepresentable {
     func makeNSView(context: Context) -> NSSlider {
         let slider = NSSlider(value: value,
                               minValue: 0,
-                              maxValue: 2,
+                              maxValue: Double(ticks - 1),
                               target: context.coordinator,
                               action: #selector(Coordinator.valueChanged(_:)))
         slider.sliderType = .linear
-        slider.numberOfTickMarks = 3
+        slider.numberOfTickMarks = ticks
         slider.tickMarkPosition = .below
         slider.allowsTickMarkValuesOnly = true
         slider.altIncrementValue = 1
@@ -4414,6 +4440,11 @@ private struct NativeThreeStepSlider: NSViewRepresentable {
 
     func updateNSView(_ slider: NSSlider, context: Context) {
         context.coordinator.value = $value
+        // Re-clamp on tick-count changes (e.g. the agent card's rungs can
+        // shrink when the armed model changes) so the thumb can't sit past the
+        // last detent it's now allowed to hit.
+        let max = Double(ticks - 1)
+        if value > max { value = max }
         if slider.doubleValue != value {
             slider.doubleValue = value
         }

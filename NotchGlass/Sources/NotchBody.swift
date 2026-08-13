@@ -35,6 +35,10 @@ struct NotchBody: View {
     /// removal badge only appears while its own thumbnail is hovered, so the
     /// strip rests as clean previews instead of a row of close buttons.
     @State private var hoveredComposeImageIndex: Int? = nil
+
+    /// Pointer over the one-time "turn this off in Settings" line
+    /// (`selectionContextHintLine`) — it brightens like every other quiet link.
+    @State private var hoveringSelectionHint = false
     /// Where the agent model+effort card hangs from: half the chip's width, i.e.
     /// the point under its centre — **frozen for as long as the card is up**.
     /// The chip re-titles live while you pick ("Opus 5 medium" → "Sonnet 5
@@ -389,6 +393,19 @@ struct NotchBody: View {
                 // suppressed (its context chips live *below* the input), but an image
                 // the user explicitly ⌘V-pasted into the task shows here — that's
                 // part of the task being written, not noise over it.
+                // The selection carried in from the app the user came from gets a
+                // row of its own rather than a turn in the slot below: an image
+                // pasted onto the same prompt must not hide the fact that a
+                // selection is riding along too.
+                if let selection = model.selectionContext {
+                    selectionContextLine(selection)
+                        .padding(.bottom, 8)
+                        .transition(moduleTransition)
+                } else if model.selectionContextHintShown {
+                    selectionContextHintLine
+                        .padding(.bottom, 8)
+                        .transition(moduleTransition)
+                }
                 if model.usingPromptShortcutContext {
                     Text(L("shortcuts.promptAction.window.context"))
                         .font(.sf(12, weight: .medium))
@@ -598,6 +615,13 @@ struct NotchBody: View {
                     // measured from this header's real height) grows to keep the
                     // first row clear. Same slot swap as the flat layout: an
                     // active agent compose shows its pasted attachment instead.
+                    if let selection = model.selectionContext {
+                        selectionContextLine(selection)
+                            .padding(.bottom, 8)
+                    } else if model.selectionContextHintShown {
+                        selectionContextHintLine
+                            .padding(.bottom, 8)
+                    }
                     if model.agentComposeActive {
                         if !model.agentComposeImages.isEmpty {
                             composeImagesAttachedLine(model.agentComposeImages) {
@@ -781,6 +805,47 @@ struct NotchBody: View {
         }
         // The × badges overhang their thumbnails — give the row the 4pt back.
         .padding(.top, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The carried-selection chip in its slot above the input (see
+    /// `SelectionContextChip`). Leading-aligned like every other line in this
+    /// stack, and it fades out the moment the × is hit — the drop has to look
+    /// like the panel letting go of something, not a row blinking off.
+    private func selectionContextLine(_ selection: String) -> some View {
+        SelectionContextChip(source: model.selectionContextSource,
+                             selection: selection) {
+            withAnimation(.easeOut(duration: 0.18)) { model.dropSelectionContext() }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Said once, in the slot the chip just vacated, the first time the user drops
+    /// a carried selection: there's a switch for this. It takes the same footnote
+    /// voice as the note-save cue and retires itself after a few seconds — and it
+    /// is a button, because a hint that names Settings and then makes you go find
+    /// them yourself is half a hint. Tapping it lands on General, where the row is.
+    private var selectionContextHintLine: some View {
+        Button {
+            model.retireSelectionContextHint()
+            model.settingsSection = "General"
+            withAnimation(.spring(response: 0.42, dampingFraction: 0.8)) {
+                model.openSettings()
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(L("selection.context.hint.off"))
+                Image(systemName: "arrow.up.right")
+                    .font(.sf(9, weight: .semibold))
+            }
+            .font(.sf(12))
+            .tracking(0.2)
+            .foregroundStyle(hoveringSelectionHint ? Tokens.text2 : Tokens.text4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hoveringSelectionHint = $0 }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hoveringSelectionHint)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -1530,7 +1595,10 @@ struct NotchBody: View {
     /// mis-route the line to the chat model. Placeholder says "queue" while a round
     /// is in flight, "ask a follow-up" once it settles.
     private func agentDetailFollowUpRow(_ task: AgentTaskManager.AgentTask) -> some View {
-        HStack(alignment: .bottom, spacing: 6) {
+        // Same growing box as the chat follow-up, so it rounds the same way.
+        let shape = NotchBody.composerShape(
+            height: max(27, agentDetailFollowUpHeight) + 12)
+        return HStack(alignment: .bottom, spacing: 6) {
             ZStack(alignment: .leading) {
                 PromptField(
                     text: $agentDetailFollowUp,
@@ -1566,13 +1634,11 @@ struct NotchBody: View {
         .padding(.trailing, 6)
         .padding(.vertical, 6)
         .background(
-            Capsule()
-                .fill(focused ? Tokens.recessFillLit : Tokens.recessFill)
+            shape.fill(focused ? Tokens.recessFillLit : Tokens.recessFill)
         )
-        .clipShape(Capsule())
+        .clipShape(shape)
         .overlay(
-            Capsule()
-                .strokeBorder(focused ? Tokens.recessRimLit : Tokens.recessRim, lineWidth: 0.5)
+            shape.strokeBorder(focused ? Tokens.recessRimLit : Tokens.recessRim, lineWidth: 0.5)
         )
         .animation(.easeOut(duration: 0.2), value: focused)
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: agentDetailFollowUp.isEmpty)
@@ -2090,17 +2156,6 @@ struct NotchBody: View {
     private let compactRowHeight: CGFloat = 35
     private let historyFooterHeight: CGFloat = 50
 
-    #if DEBUG
-    private func debugGeom(_ tag: String, _ y: CGFloat) {
-        let line = "[GEOM \(tag)] tasks=\(agentManager.tasks.count) recent=\(model.recentVisible.count) contentTopY=\(String(format: "%.1f", y)) topReach=\(String(format: "%.1f", immersiveTopReach)) header=\(String(format: "%.1f", measuredImmersiveHeaderHeight))\n"
-        if let h = FileHandle(forWritingAtPath: "/tmp/notch-geom.log") {
-            h.seekToEndOfFile(); h.write(line.data(using: .utf8)!); try? h.close()
-        } else {
-            try? line.data(using: .utf8)!.write(to: URL(fileURLWithPath: "/tmp/notch-geom.log"))
-        }
-    }
-    #endif
-
     /// The recent list. `immersive` swaps the compact, below-the-header list for
     /// the tall variant whose content scrolls UP behind the floating input —
     /// frosting and fading as it goes (see `immersiveTopReach`). Only used once
@@ -2151,17 +2206,6 @@ struct NotchBody: View {
             // Lazy: the data holds up to `notchRecentCap` (100) rows but only ~6–9
             // fit the frame — no need to build and lay out the off-screen ones.
             LazyVStack(alignment: .leading, spacing: 0) {
-                #if DEBUG
-                // TEMP: report the content-top position inside the scroll viewport so
-                // we can see the resting scroll offset (topReach = pinned to top).
-                Color.clear.frame(height: 0).background(GeometryReader { g in
-                    Color.clear
-                        .onAppear { debugGeom("appear", g.frame(in: .named("immScroll")).minY) }
-                        .onChange(of: g.frame(in: .named("immScroll")).minY) { _, y in
-                            debugGeom("change", y)
-                        }
-                })
-                #endif
                 // Agent runs ride the TOP of the scroll — the newest rows, scrolling
                 // with the recent list like everything else — instead of pinned above
                 // it (immersive: in the floating header; compact: a fixed sibling). So
@@ -2358,14 +2402,24 @@ struct NotchBody: View {
         // "Type anything…" frost. Decoupled from `immersiveTopReach` (which is layout:
         // where rows rest) so tuning the blur never shifts the list. Glass translucency
         // is untouched — this only softens focus, never darkens.
-        .modifier(ConditionalTopBlur(active: immersive, height: immersiveBlurReach, maxRadius: 36))
-        // Immersive only: the mirror at the BOTTOM — frost rows scrolling DOWN into
-        // the runway behind the manage bar, so they dissolve under the buttons the
-        // same way the top dissolves them under the input. Band kept shorter than the
-        // bottom runway (`immersiveBottomBlurReach` < `immersiveBottomReach`) so it
-        // clears the last resting row (no halo at rest). A lighter peak radius than
-        // the top (the bar is shorter than the input header, so less depth to hide).
-        .modifier(ConditionalBottomBlur(active: immersive, height: immersiveBottomBlurReach, maxRadius: 22))
+        //
+        // …and the mirror at the BOTTOM — frost rows scrolling DOWN into the runway
+        // behind the manage bar, so they dissolve under the buttons the same way the
+        // top dissolves them under the input. Band kept shorter than the bottom
+        // runway (`immersiveBottomBlurReach` < `immersiveBottomReach`) so it clears
+        // the last resting row (no halo at rest). A lighter peak radius than the top
+        // (the bar is shorter than the input header, so less depth to hide).
+        //
+        // The two radii differ, so this can't collapse to one blurred copy — but it
+        // still goes through the merged modifier, which lays the two layers as
+        // SIBLINGS over the same list instead of nesting them. Stacked, the bottom
+        // modifier's content was already `list + top-blur copy`, so the pair built
+        // the scroll surface four times over on every open; sibling, it's three.
+        .modifier(ConditionalEdgeBlur(active: immersive,
+                                      topHeight: immersiveBlurReach,
+                                      bottomHeight: immersiveBottomBlurReach,
+                                      topRadius: 36,
+                                      bottomRadius: 22))
         // Keep the keyboard-highlighted row visible: stepping ↓/↑ past the visible
         // window would otherwise leave the selection offscreen. Mirrors the
         // streaming tail-follow in `conversationScroll` — a reactive scroll in its
@@ -2476,7 +2530,78 @@ struct NotchBody: View {
     /// clipped+scrolling layout is active. Derived from the same @State that
     /// `conversationScroll` already reads — promoted here so `resultView`, `body`,
     /// and `conversationScroll` all share the identical boolean without duplication.
-    private var isAnswerClipped: Bool { measuredAnswerHeight > answerMaxHeight }
+    ///
+    /// Unmeasured (0) means a whole thread just arrived while the panel was
+    /// already mounted — reopening a record from Recent, where neither `init`'s
+    /// parked seed nor a previous measurement applies. Falling through to a
+    /// measurement that can only land a layout pass LATER meant a long record
+    /// mounted in the growing layout at its full natural height (a 40-turn agent
+    /// run unfurling top-to-bottom, panel and all) and then sprang back to the
+    /// 407pt scroller — the crossover `.animation(value: clipped)` animating a
+    /// two-thousand-point collapse right through the open. The estimate below
+    /// costs no layout, so the first frame is already the final one.
+    private var isAnswerClipped: Bool {
+        guard measuredAnswerHeight > 0 else {
+            return Self.estimatedThreadExceeds(model.turns, answerMaxHeight)
+        }
+        return measuredAnswerHeight > answerMaxHeight
+    }
+
+    /// Whether a thread's natural height clears `ceiling`, estimated from its text
+    /// alone — no view build, no text layout. Deliberately a *boolean* with an
+    /// early-out rather than a height: it only ever feeds `isAnswerClipped`, and
+    /// bailing the moment the running total crosses the ceiling means a long
+    /// thread is settled after a dozen lines instead of walking a 50k-character
+    /// transcript. Accuracy only matters near the boundary, where being wrong
+    /// costs exactly what the old behaviour cost everywhere: one crossover.
+    private static func estimatedThreadExceeds(_ turns: [NotchModel.Turn],
+                                               _ ceiling: CGFloat) -> Bool {
+        // The thread's text column: the result panel less its padding and the
+        // turn stack's own trailing inset.
+        let column = Tokens.openWidthResult - panelPadding * 2 - 8
+        // Wrapped height of one run of text. A CJK glyph takes about a full em,
+        // latin about half — precise enough to tell a two-line question from a
+        // forty-line report.
+        func height(_ text: String, _ em: CGFloat) -> CGFloat {
+            var lines = 0
+            for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+                var advance: CGFloat = 0
+                for ch in line { advance += ch.isASCII ? em * 0.5 : em }
+                lines += max(1, Int(ceil(advance / column)))
+            }
+            return CGFloat(lines) * em * 1.45
+        }
+
+        var total: CGFloat = 0
+        for turn in turns where !turn.hidesUserBubble {
+            if turn.role == "user" {
+                total += height(turn.text, 14.5) + 26        // bubble padding
+                if !turn.imageFiles.isEmpty { total += 30 }  // the image strip
+            } else {
+                // An agent turn stacks its work trail above the report. Folded
+                // (the default), each RUN of consecutive tool calls is a single
+                // summary row; the narration between runs reads as prose.
+                if turn.isAgent,
+                   let trail = turn.agentLog?.droppingTrailingAnswer(turn.text) {
+                    var inToolRun = false
+                    for entry in trail {
+                        if entry.mono {
+                            if !inToolRun { total += 20 }
+                            inToolRun = true
+                        } else {
+                            total += height(entry.title, 15) + 7
+                            inToolRun = false
+                        }
+                        if total > ceiling { return true }
+                    }
+                }
+                total += height(turn.text, 15) + 16
+            }
+            total += 16                                      // the stack's turn spacing
+            if total > ceiling { return true }
+        }
+        return total > ceiling
+    }
 
     /// True while the follow-up input is folded into a glyph on the header's glass
     /// pill — a thread the user landed on by hitting a prompt shortcut on a
@@ -2812,39 +2937,16 @@ struct NotchBody: View {
             }
         }
         // Measure the thread's INTRINSIC height — what it wants to be with no ceiling
-        // — to drive ONLY the `clipped` switch above. While unclipped the visible
-        // layout reports it directly (above). Once CLIPPED the visible layout is
-        // pinned to `answerMaxHeight` (300), so measuring it would report 300, which
-        // isn't > 300, and `clipped` would flip-flop on the boundary — that state
-        // needs the hidden, unconstrained copy of the turn stack below. It's laid
-        // out but never drawn (`.hidden()`), and overlaid at zero size so it never
-        // affects this view's layout. The measurement lagging the content by a pass
-        // is harmless — it feeds a boolean threshold, not a frame height.
-        .background(alignment: .top) {
-            // Mounted only while clipped AND settled. While a clipped thread still
-            // STREAMS the probe stays down: within one round the content only
-            // grows, so once past the ceiling it can't change the layout decision —
-            // it would only double every flush's text-layout work feeding a boolean
-            // that's already true. It mounts when the stream settles, so the next
-            // content change that CAN shrink the thread (a regenerate replacing a
-            // long answer, opening a shorter history thread) re-measures as before.
-            if clipped && !model.isStreaming {
-                growingConversation
-                    // Take the thread's full intrinsic height regardless of the height
-                    // this background slot proposes (300 when the visible layout is the
-                    // clipped scroller) — otherwise the probe would cap at 300 and the
-                    // `clipped` switch couldn't tell 300 from 1000, so it'd flip-flop on
-                    // the boundary. `fixedSize(vertical:)` makes it report its true height.
-                    .fixedSize(horizontal: false, vertical: true)
-                    .hidden()
-                    .allowsHitTesting(false)
-                    .background(
-                        GeometryReader { geo in
-                            Color.clear.preference(key: AnswerHeightKey.self, value: geo.size.height)
-                        }
-                    )
-            }
-        }
+        // — to drive ONLY the `clipped` switch above. Each layout reports it from
+        // the tree that's already on screen: unclipped, that's the visible stack
+        // (above); clipped, it's the turn stack *inside* the ScrollView, which a
+        // ScrollView already lays out at its full unconstrained height (see
+        // `clippedConversation`). Measuring the clipped view from the OUTSIDE would
+        // report the pinned 300 and flip-flop the switch on the boundary — which is
+        // why this used to mount a whole hidden, `fixedSize`d second copy of the
+        // turn stack here. That copy re-ran the entire thread's view build and text
+        // layout on every mount, doubling the cost of opening a long agent record
+        // for a number the live scroll content already knew.
         .onPreferenceChange(AnswerHeightKey.self) {
             // 0 means "the probe is unmounted" (suspended above, or a transient
             // empty pass) — never "the content shrank to nothing". Keep the last
@@ -2912,6 +3014,26 @@ struct NotchBody: View {
                                 .id(turn.id)
                         }
                     }
+                    // The thread's intrinsic height, read off the live scroll
+                    // content — a ScrollView proposes an unbounded height to its
+                    // content, so this stack is already laid out at its full size
+                    // and the `clipped` switch can be fed straight from it (no
+                    // hidden second copy; see `conversationScroll`).
+                    //
+                    // Mounted only once the stream settles, same discipline the
+                    // hidden probe kept: within one round the content only grows,
+                    // so past the ceiling it can't change the decision, and the
+                    // per-flush preference churn would be pure waste. It returns
+                    // for the next change that CAN shrink the thread (a regenerate
+                    // replacing a long answer, opening a shorter history thread).
+                    .background(alignment: .top) {
+                        if !model.isStreaming {
+                            GeometryReader { geo in
+                                Color.clear.preference(key: AnswerHeightKey.self,
+                                                       value: geo.size.height)
+                            }
+                        }
+                    }
                     // The bottom runway: empty scroll space the last turn slides DOWN
                     // into behind the floating follow-up input. Positioned HERE — above
                     // the anchor — so `scrollTo(anchor:.bottom)` leaves the last turn
@@ -2938,6 +3060,10 @@ struct NotchBody: View {
             // of the VStack flow — keeping the panel the same total height. The
             // `isAnswerClipped` threshold stays at 300.
             .frame(height: clippedAnswerMaxHeight + resultHeaderReach)
+            // Sticky affordances inside the thread (a code block's copy button)
+            // park below the floating header block instead of at the bare viewport
+            // top, where the header and its dissolve would swallow them.
+            .environment(\.stickyScrollTopInset, resultHeaderReach)
             .scrollIndicators(.never)
             // Submitting a follow-up appends two turns and flips mode
             // result→load→result, which rebuilds the ScrollView and resets its
@@ -2970,23 +3096,30 @@ struct NotchBody: View {
         // matches the bottom band (comparably thin chrome, unlike the deep 36 the
         // immersive input header needs).
         //
-        // Both bands rest while the answer is still STREAMING: each is a full
-        // `drawingGroup`-flattened copy of the scroll viewport, re-rasterized
-        // whenever its content changes — and a streaming thread changes on every
-        // ~33ms flush AND every frame of the tail-follow scroll, so the two frost
-        // copies were the bulk of the per-update render cost of a long answer.
-        // The `scrollEdgeFade` opacity taper above stays on throughout, so text
-        // still dissolves at both runways; the frost simply joins when the stream
-        // settles and the content goes static.
-        .modifier(ConditionalTopBlur(active: !model.isStreaming, height: clippedTopBlurReach, maxRadius: 22))
-        // Progressive blur on the bottom runway, mirroring the immersive manage bar's
-        // ConditionalBottomBlur: rows scrolling down into the runway frost out as they
-        // go behind the input. Kept 4pt shorter than the runway (`clippedBottomBlurReach`
-        // = 58pt) so the band clears the last resting row (~64pt up) — no halo at rest.
-        // maxRadius 22 matches the manage bar (comparable chrome). Active whenever the
-        // answer is settled — clippedConversation is only ever mounted when
-        // `isAnswerClipped` — and resting during the stream, same as the top band.
-        .modifier(ConditionalBottomBlur(active: !model.isStreaming, height: clippedBottomBlurReach, maxRadius: 22))
+        // …and the mirrored band on the bottom runway, so rows scrolling down
+        // behind the input frost out the same way. Kept 4pt shorter than each
+        // runway (`clippedTopBlurReach` = 40, `clippedBottomBlurReach` = 58) so a
+        // band clears the nearest resting row — no halo at rest. maxRadius 22
+        // matches the manage bar's chrome.
+        //
+        // ONE merged modifier, not `ConditionalTopBlur` + `ConditionalBottomBlur`
+        // stacked: a progressive blur overlays a rebuilt copy of its content, so
+        // the stacked pair instantiated the entire thread FOUR times (the bottom
+        // one's content already being original + top-blur copy). On a long agent
+        // record that quadrupled view build + text layout on the tap that opens
+        // it — the stall. Merged, it's one copy, drawn identically. See
+        // `ProgressiveEdgeBlur`.
+        //
+        // Both bands rest while the answer is still STREAMING: the copy is
+        // `drawingGroup`-flattened and re-rasterizes whenever its content changes
+        // — and a streaming thread changes on every ~33ms flush AND every frame of
+        // the tail-follow scroll. The `scrollEdgeFade` opacity taper above stays on
+        // throughout, so text still dissolves at both runways; the frost simply
+        // joins when the stream settles and the content goes static.
+        .modifier(ConditionalEdgeBlur(active: !model.isStreaming,
+                                      topHeight: clippedTopBlurReach,
+                                      bottomHeight: clippedBottomBlurReach,
+                                      topRadius: 22))
     }
 
     /// Height of the taper at each scroll edge, in points. Generous on purpose so
@@ -3235,6 +3368,21 @@ struct NotchBody: View {
     /// High damping because this must never overshoot — an undershoot would clip a
     /// line of text that is already on screen.
     static let promptGrowth: Animation = .spring(response: 0.22, dampingFraction: 0.9)
+    /// A follow-up box at rest: one 27pt line in 6pt of padding.
+    static let followUpRowHeight: CGFloat = 39
+    /// A composer box's silhouette at a given height — a true pill on its resting
+    /// line, and *the same corner* once the draft wraps.
+    ///
+    /// It cannot stay a `Capsule`. A capsule's radius is half its height, so a
+    /// five-line box rounds at ~53pt while its text sits 15pt off the leading
+    /// edge — the corner curve then bites through the first and last lines and
+    /// `clipShape` cuts their opening glyphs away. Freezing the radius at the
+    /// resting half-height leaves the one-line box pixel-identical and keeps
+    /// every wrapped line clear of the curve.
+    static func composerShape(height: CGFloat) -> RoundedRectangle {
+        RoundedRectangle(cornerRadius: min(height, followUpRowHeight) / 2,
+                         style: .continuous)
+    }
     private var idleRowVerticalPadding: CGFloat {
         NotchBody.idleRowHeight - PromptField.lineHeight(for: NotchBody.idleFontSize)
     }
@@ -3594,6 +3742,14 @@ struct NotchBody: View {
             regenModel: report.regenModel)
     }
 
+    /// The follow-up box's own outline. Its height is the field's slot (27pt at
+    /// rest, taller once the text wraps) plus 6pt of padding top and bottom, so a
+    /// resting box is still a pill and a wrapped one keeps that same corner
+    /// instead of curving in over its own first line (`NotchBody.composerShape`).
+    private var followUpShape: RoundedRectangle {
+        NotchBody.composerShape(height: max(27, followUpHeight) + 12)
+    }
+
     private var followUpComposer: some View {
         // Bottom-aligned so the send button stays on the box's last line as a long
         // follow-up unfolds upward off the answer, instead of floating at its middle.
@@ -3684,21 +3840,21 @@ struct NotchBody: View {
         .padding(.trailing, 6)
         .padding(.vertical, 6)
         .background(
-            Capsule()
+            followUpShape
                 .fill(focused ? Tokens.recessFillLit : Tokens.recessFill)
                 // A whisper of the destination's colour washed over the box while
                 // there's text — the quiet twin of the tinted destination pill,
                 // so the field itself leans toward where Enter will send the line.
                 // Fades out on an empty field (destination is just the default).
                 .overlay(
-                    Capsule()
+                    followUpShape
                         .fill(model.submitTint
                             .opacity(model.hasText ? 0.045 : 0))
                 )
         )
-        .clipShape(Capsule())
+        .clipShape(followUpShape)
         .overlay(
-            Capsule()
+            followUpShape
                 .strokeBorder(focused ? Tokens.recessRimLit : Tokens.recessRim, lineWidth: 0.5)
         )
         // Flash the field's rim when the destination flips (Ask⇄Note⇄Remind) — the
@@ -3706,7 +3862,7 @@ struct NotchBody: View {
         // destination's colour. Keyed on the intent *category* so a
         // recurrence-suffix edit doesn't pulse.
         .intentChangePulse(on: model.effectiveSubmitPanel,
-                           shape: Capsule(),
+                           shape: followUpShape,
                            tint: model.submitInk)
         .animation(.smooth(duration: 0.25), value: model.effectiveSubmitPanel)
         .animation(.easeOut(duration: 0.2), value: focused)
@@ -4136,6 +4292,74 @@ private struct ActiveFilterChip: View {
         .buttonStyle(GlassPressStyle())
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+    }
+}
+
+/// "Using selected text from Safari": the selection the panel came in with,
+/// stated above the input, with an × to drop it.
+///
+/// Why it is a statement rather than silent plumbing: the text was picked up
+/// without anyone asking for it, out of a window the user may not even be
+/// looking at any more — so the panel has to say what it is about to send, and
+/// hand back a way to say no. Modelled on `ActiveFilterChip`, the other "this
+/// context is in effect, here is how to end it" chip, sized down to the footnote
+/// scale of the compact composer's badge since this one sits over the input
+/// instead of in a row of buttons. Only the × is a control: dropping the
+/// selection can't be undone without going back and highlighting it again, so a
+/// stray click anywhere on the chip must not do it.
+private struct SelectionContextChip: View {
+    var source: String?
+    var selection: String
+    var drop: () -> Void
+
+    @State private var hovering = false
+    @State private var hoveringDrop = false
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "text.quote")
+                .font(.sf(9.5, weight: .semibold))
+                .foregroundStyle(Tokens.text4)
+            Text(source.map { L("selection.context.from", $0) } ?? L("selection.context"))
+                .font(.sf(11.5, weight: .medium))
+                .foregroundStyle(hovering ? Tokens.text2 : Tokens.text3)
+                .lineLimit(1)
+            Button(action: drop) {
+                Image(systemName: "xmark")
+                    .font(.sf(8.5, weight: .bold))
+                    .foregroundStyle(hoveringDrop ? Tokens.text1 : Tokens.text4)
+                    .frame(width: 14, height: 14)
+                    .background(Circle().fill(.white.opacity(hoveringDrop ? 0.14 : 0)))
+                    .contentShape(Circle())
+            }
+            .buttonStyle(GlassPressStyle())
+            .onHover { hoveringDrop = $0 }
+            .accessibilityLabel(L("selection.context.drop"))
+        }
+        .padding(.leading, 10)
+        .padding(.trailing, 5)
+        .frame(height: 24)
+        .glassCapsule(in: Capsule(), brighter: hovering)
+        .contentShape(Capsule())
+        // The chip names the source; the tooltip shows what is actually riding
+        // along, so "which selection?" is answerable without sending anything.
+        .help(preview)
+        .onHover { inside in
+            hovering = inside
+            if !inside { hoveringDrop = false }
+        }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hoveringDrop)
+    }
+
+    /// One line of the selection for the tooltip — enough to recognise it by,
+    /// never a wall of text hanging off the pointer.
+    private var preview: String {
+        let flat = selection
+            .split(whereSeparator: \.isNewline)
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespaces)
+        return flat.count > 140 ? String(flat.prefix(140)) + "…" : flat
     }
 }
 

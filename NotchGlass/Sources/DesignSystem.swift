@@ -244,6 +244,24 @@ extension EnvironmentValues {
     }
 }
 
+/// How far below a thread ScrollView's viewport top a *sticky* affordance must
+/// park to stay legible. A code block's copy button rides the visible top edge of
+/// its island (see `CodeBlockView`), and every thread scroller tops out in a
+/// dissolve band — a floating header in the panel's clipped layout, a fade/blur
+/// runway in a detached window. Parking at the bare viewport top would slide the
+/// button under that band. Each host sets its own reach; 0 is right for content
+/// that doesn't scroll.
+private struct StickyScrollTopInsetKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 0
+}
+
+extension EnvironmentValues {
+    var stickyScrollTopInset: CGFloat {
+        get { self[StickyScrollTopInsetKey.self] }
+        set { self[StickyScrollTopInsetKey.self] = newValue }
+    }
+}
+
 // MARK: - Scroll edge fade
 
 /// The one soft-fade treatment every scrolling region in the panel shares, so
@@ -400,12 +418,116 @@ struct ProgressiveTopBlur: ViewModifier {
     }
 }
 
+/// **Both** runways frosted in ONE copy of the content — use this instead of
+/// stacking `progressiveTopBlur` + `progressiveBottomBlur` whenever the two
+/// bands share a radius.
+///
+/// Why it exists: each progressive blur overlays a *rebuilt* copy of the content
+/// (that's how the blurred layer is produced), so stacking the two modifiers
+/// doesn't cost 2 copies — it costs **4**. The bottom modifier's `content` is
+/// already `original + top-blur-overlay`, i.e. two instantiations, and it
+/// overlays a second copy of that pair. On a long thread every one of those
+/// copies re-runs the full view build + text layout of every turn on the main
+/// thread the instant the view mounts, which is what made opening a long agent
+/// record stall. One modifier = 2 instantiations (the live one plus its single
+/// blurred copy), rendering identically: the gradient mask below simply carries
+/// both tapers — opaque at each edge, clear across the middle — instead of one.
+struct ProgressiveEdgeBlur: ViewModifier {
+    /// Band heights in points, measured inward from each edge.
+    var topHeight: CGFloat
+    var bottomHeight: CGFloat
+    /// Peak blur radius at each edge. **Equal radii collapse to a single copy**
+    /// — one blurred layer carrying both tapers in its mask. Unequal radii need
+    /// two blurred layers, but they're laid as *siblings over the same base*,
+    /// never nested, so it's 3 instantiations rather than the stacked pair's 4.
+    var topRadius: CGFloat = 7
+    var bottomRadius: CGFloat = 7
+
+    func body(content: Content) -> some View {
+        if topRadius == bottomRadius {
+            content.overlay(band(content, top: true, bottom: true, radius: topRadius))
+        } else {
+            // Both overlays copy the ORIGINAL `content`, not each other's result.
+            // (Blurring the top layer along with the content in the bottom band is
+            // a no-op anyway: the top layer's own mask is already clear down there.)
+            content
+                .overlay(band(content, top: true, bottom: false, radius: topRadius))
+                .overlay(band(content, top: false, bottom: true, radius: bottomRadius))
+        }
+    }
+
+    /// One flattened, blurred copy of the content, masked to the requested edge
+    /// band(s) — opaque at the edge, tapering to clear at the band's inner lip.
+    private func band(_ content: Content, top: Bool, bottom: Bool,
+                      radius: CGFloat) -> some View {
+        GeometryReader { geo in
+            let h = max(geo.size.height, 1)
+            // Clamp each band to under half the view so the two tapers can never
+            // cross and blur the whole region on a short viewport.
+            let t = top ? min(topHeight / h, 0.45) : 0
+            let b = bottom ? min(bottomHeight / h, 0.45) : 0
+            content
+                .drawingGroup()
+                .blur(radius: radius)
+                .mask(
+                    LinearGradient(
+                        stops: [
+                            .init(color: top ? .black : .clear, location: 0),
+                            .init(color: top ? .black : .clear, location: max(t - t * 0.5, 0)),
+                            .init(color: .clear, location: t),
+                            .init(color: .clear, location: max(1 - b, t)),
+                            .init(color: bottom ? .black : .clear, location: min(1 - b + b * 0.5, 1)),
+                            .init(color: bottom ? .black : .clear, location: 1),
+                        ],
+                        startPoint: .top, endPoint: .bottom
+                    )
+                )
+                .allowsHitTesting(false)
+        }
+    }
+}
+
+/// Mount/unmount `ProgressiveEdgeBlur` (the merged partner to
+/// `ConditionalTopBlur` / `ConditionalBottomBlur`), so a resting or streaming
+/// surface pays for no blurred copy at all.
+struct ConditionalEdgeBlur: ViewModifier {
+    var active: Bool
+    var topHeight: CGFloat
+    var bottomHeight: CGFloat
+    var topRadius: CGFloat = 7
+    /// Defaults to `topRadius` — leave it off whenever both edges share a radius,
+    /// which is what lets the two bands ride one blurred copy.
+    var bottomRadius: CGFloat? = nil
+
+    func body(content: Content) -> some View {
+        if active {
+            content.progressiveEdgeBlur(top: topHeight, bottom: bottomHeight,
+                                        topRadius: topRadius,
+                                        bottomRadius: bottomRadius ?? topRadius)
+        } else {
+            content
+        }
+    }
+}
+
 extension View {
     /// Frost the top band of a scrolling region so rows passing behind a floating
     /// header blur out progressively (see `ProgressiveTopBlur`). Pair with
     /// `scrollEdgeFade(top:)` for the matching opacity taper.
     func progressiveTopBlur(height: CGFloat, maxRadius: CGFloat = 7) -> some View {
         modifier(ProgressiveTopBlur(height: height, maxRadius: maxRadius))
+    }
+
+    /// Frost BOTH runways (see `ProgressiveEdgeBlur`). Prefer this over stacking
+    /// the top and bottom modifiers — stacking quadruples the content copies.
+    /// Omit `bottomRadius` when both edges share a radius; that's the case that
+    /// collapses to a single blurred copy.
+    func progressiveEdgeBlur(top: CGFloat, bottom: CGFloat,
+                             topRadius: CGFloat = 7,
+                             bottomRadius: CGFloat? = nil) -> some View {
+        modifier(ProgressiveEdgeBlur(topHeight: top, bottomHeight: bottom,
+                                     topRadius: topRadius,
+                                     bottomRadius: bottomRadius ?? topRadius))
     }
 
     /// Frost the BOTTOM band — the mirror of `progressiveTopBlur`, for rows passing

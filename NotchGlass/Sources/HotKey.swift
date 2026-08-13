@@ -880,27 +880,14 @@ enum SelectedTextCapture {
             return .permissionRequired
         }
 
-        guard var element = focusedElement(front: front) else {
+        guard let element = focusedElement(front: front) else {
             return selectionInFocusedWindow(of: front).map(CaptureResult.text) ?? .noSelection
         }
 
-        // The selected-text representation is often owned by the focused node's
-        // WebArea/scroll-area parent rather than the leaf itself. Walk upward only
-        // (bounded) — scanning a whole browser accessibility tree can contain tens
-        // of thousands of nodes and would make a shortcut visibly stall.
-        for _ in 0..<12 {
-            AXUIElementSetMessagingTimeout(element, 0.25)
-
-            // Secure text fields must never become model input. Stop entirely,
-            // rather than walking to a parent that might expose the same value in
-            // a less explicitly protected representation.
-            if isSecureTextField(element) { return .noSelection }
-            if let selected = selectedText(in: element) { return .text(selected) }
-
-            guard let parent = axElement(attribute(kAXParentAttribute, of: element)),
-                  !CFEqual(parent, element)
-            else { break }
-            element = parent
+        switch selectionWalkingUp(from: element) {
+        case .found(let selected): return .text(selected)
+        case .secure: return .noSelection
+        case .none: break
         }
         // Focus can sit on a node that owns no selection of its own and whose
         // ancestors are plain containers — a Chromium window whose tree has only
@@ -943,6 +930,82 @@ enum SelectedTextCapture {
             }
             DispatchQueue.main.async { completion(.noSelection) }
         }
+    }
+
+    /// The **ambient** read, for the panel opening on its own rather than on a
+    /// chord aimed at a selection. Same bounded lookup, three deliberate
+    /// differences — because this one runs on *every* open, unasked:
+    ///
+    ///   · **Never prompts.** Accessibility not granted → nothing happens, quietly.
+    ///     Summoning the notch is not the moment to demand a privacy permission.
+    ///   · **Never wakes a browser's tree.** No `AXManualAccessibility`, no retry
+    ///     ladder: `current(completion:)` turns Chromium's web-content tree on to
+    ///     make a shortcut reliable, which is a cost worth paying for a gesture the
+    ///     user aimed. Paying it on every summon would tax their browser forever
+    ///     for a convenience they may never use. One pass, whatever is already there.
+    ///   · **Reads the app, not the system.** By the time this answers, the panel
+    ///     has activated and the system-wide focused element is Notchi's own prompt
+    ///     field — so the lookup starts from `front`'s application element instead.
+    ///     Off the main thread, so a wedged app's AX timeouts can't stall the open.
+    ///
+    /// `completion` always lands on the main queue; `nil` means "nothing to carry".
+    static func ambient(front: NSRunningApplication?,
+                        completion: @escaping (String?) -> Void) {
+        guard let front,
+              front.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+              AXIsProcessTrusted()
+        else { return completion(nil) }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let selected = selection(ownedBy: front)
+            DispatchQueue.main.async { completion(selected) }
+        }
+    }
+
+    /// One app's selection, read without consulting the system-wide focused
+    /// element (see `ambient`). Its focused node first, then the same bounded
+    /// sweep of its focused window that covers a browser whose focus sits on the
+    /// window itself.
+    private static func selection(ownedBy app: NSRunningApplication) -> String? {
+        let application = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(application, 0.25)
+        if let focused = axElement(attribute(kAXFocusedUIElementAttribute, of: application)) {
+            switch selectionWalkingUp(from: focused) {
+            case .found(let selected): return selected
+            case .secure: return nil
+            case .none: break
+            }
+        }
+        return selectionInFocusedWindow(of: app)
+    }
+
+    private enum Walk {
+        case found(String)
+        /// A password field owned the focus — the walk stops dead (see below).
+        case secure
+        case none
+    }
+
+    /// The selected-text representation is often owned by the focused node's
+    /// WebArea/scroll-area parent rather than the leaf itself. Walk upward only
+    /// (bounded) — scanning a whole browser accessibility tree can contain tens
+    /// of thousands of nodes and would make a shortcut visibly stall.
+    private static func selectionWalkingUp(from start: AXUIElement) -> Walk {
+        var element = start
+        for _ in 0..<12 {
+            AXUIElementSetMessagingTimeout(element, 0.25)
+
+            // Secure text fields must never become model input. Stop entirely,
+            // rather than walking to a parent that might expose the same value in
+            // a less explicitly protected representation.
+            if isSecureTextField(element) { return .secure }
+            if let selected = selectedText(in: element) { return .found(selected) }
+
+            guard let parent = axElement(attribute(kAXParentAttribute, of: element)),
+                  !CFEqual(parent, element)
+            else { break }
+            element = parent
+        }
+        return .none
     }
 
     /// Gaps between re-reads while a web tree is being built — tight at first (an

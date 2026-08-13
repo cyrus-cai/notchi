@@ -142,7 +142,7 @@ enum APIKeyStore {
         }
     }
 
-    // Keenable is an optional standalone search backend (`KeenableWebSearchTool`).
+    // Keenable is an optional standalone search backend (`KeenableSearchProvider`).
     // Its HTTP API REQUIRES a key (a keyless `/v1/search` call 401s — the "no key"
     // claim applies only to Keenable's CLI/MCP, not the raw API), so like Exa it's
     // only the active searcher when a key is configured.

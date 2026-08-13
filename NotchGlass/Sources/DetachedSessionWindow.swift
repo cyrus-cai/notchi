@@ -810,15 +810,17 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
     /// AppKit inflate the window the moment it's created.
     private static let composeMinSize = NSSize(width: 380, height: 96)
     static let compactWidth: CGFloat = 410
-    /// The waiting card — what an answer window is before a word has landed. It
-    /// has to hold the thinking orb clear of both scroll runways, or the edge
-    /// fades eat the one thing on screen: the window chrome an answered card
-    /// carries (margins, header, follow-up row), its own top/bottom padding, both
-    /// runways, and one row for the orb.
+    /// The waiting card — what an answer window is before a word has landed: the
+    /// window chrome an answered card carries (margins, header, follow-up row),
+    /// its own top/bottom padding, the resting gaps the one orb row rests
+    /// between, and that row. A single line never scrolls, so it wears the
+    /// resting rhythm rather than the runways (`DetachedThreadView`) — budgeting
+    /// two 28pt runways for it opened the wait 38pt taller than the card it
+    /// becomes and left the orb floating in the middle of an empty box.
     private static let compactInitialHeight: CGFloat =
         CompactShortcutMetrics.answerChrome
             + DetachedThreadView.cardTopPadding + DetachedThreadView.cardBottomPadding
-            + ThreadScroll.runway * 2 + 26
+            + DetachedThreadView.restingTopGap + DetachedThreadView.restingBottomGap + 26
     fileprivate static let compactMaxHeight: CGFloat = 520
     private static let compactMinSize = NSSize(width: 340, height: 96)
     /// The bare prompt-shortcut composer is shorter than any answer window, so
@@ -2122,7 +2124,9 @@ struct DetachedComposeView: View {
 
     /// The window's height with a one-line prompt: the body's insets, the header,
     /// its gap, and the input row. A wrapped draft grows the window from here.
-    static let restingHeight: CGFloat = 15 + 26 + 10 + NotchBody.idleRowHeight + 14
+    static let restingHeight: CGFloat =
+        DetachedThreadView.cardTopPadding + 26 + 10 + NotchBody.idleRowHeight
+            + DetachedThreadView.cardBottomPadding
 
     /// One feedback line's own height plus its gap — added to the window when a
     /// save cue is up, so the cue never squeezes the input.
@@ -2185,9 +2189,9 @@ struct DetachedComposeView: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 20)
-        .padding(.top, 15)
-        .padding(.bottom, 14)
+        .padding(.horizontal, DetachedThreadView.cardHorizontalPadding)
+        .padding(.top, DetachedThreadView.cardTopPadding)
+        .padding(.bottom, DetachedThreadView.cardBottomPadding)
         .onAppear {
             // Same false→true edge the panel uses to hand an AppKit field
             // first-responder; the small delay lets the window become key first.
@@ -2388,20 +2392,71 @@ struct DetachedThreadView: View {
     ///
     /// The top runway must clear the complete frost band; otherwise the first
     /// answer line rests inside the blur and looks clipped.
-    private var scrollTopInset: CGFloat { ThreadScroll.runway }
-    private var scrollBottomInset: CGFloat { ThreadScroll.runway }
-    /// The panel's own rhythm (`NotchBody`: 15 over the header, 14 under the
-    /// follow-up row).
-    static let cardTopPadding: CGFloat = 15
-    static let cardBottomPadding: CGFloat = 14
+    ///
+    /// **A runway is only worth its height on a window that has height to
+    /// spare.** A torn-out session is a fixed 460pt frame the user resizes at
+    /// will, so its threads scroll and the 28pt bands are free — they live in
+    /// space the window already has. A pointer-side card is the opposite: it
+    /// sizes ITSELF to its answer, so every point of runway is a point the
+    /// window grows by. At 28+28 a two-line reply opened a card carrying 36pt of
+    /// nothing between its action row and the follow-up capsule against 23 under
+    /// the capsule — the bottom margin reading as a sag.
+    ///
+    /// So the compact card rests on the panel's own short-answer rhythm instead
+    /// (`NotchBody.resultView`: header, an 18pt quiet gap, the thread, 24pt, the
+    /// input). It is ONE rhythm, not a switch on whether the answer happens to
+    /// fit: swapping the insets mid-answer relaid the card out underneath a
+    /// window that was still gliding open, and AppKit tears the window down for
+    /// exceeding its constraint passes when those two argue. A long answer
+    /// scrolls under an 18pt taper instead of a 28pt one — the bands are sized
+    /// to these gaps below, so nothing is ever frosted while at rest.
+    private var scrollTopInset: CGFloat {
+        compactShortcut ? Self.restingTopGap : ThreadScroll.runway
+    }
+    private var scrollBottomInset: CGFloat {
+        compactShortcut ? Self.restingBottomGap : ThreadScroll.runway
+    }
+    /// The compact card's resting rhythm, taken from the panel's short layout:
+    /// the header's 18pt quiet gap over the thread, and 24pt under it —
+    /// `restingBottomGap` + `followUpGap` — before the follow-up line.
+    static let restingTopGap: CGFloat = 18
+    static let restingBottomGap: CGFloat = 24 - followUpGap
+    /// The panel's own rhythm — `NotchBody.panelPadding`, the SAME on all four
+    /// sides, so the follow-up capsule sits as far from the bottom edge as it
+    /// does from the sides and 15 reads concentric against the window's 30pt
+    /// corner (`DetachedSessionRootView.cornerRadius`, the island's own radius).
+    ///
+    /// It used to run horizontal 20 / top 15 / bottom 14 here — three different
+    /// numbers, none of them the panel's — which is exactly what made a detached
+    /// window's margins read as a different species from the notch's: the
+    /// follow-up line hung 20 from the sides but only 14 off the rounded bottom,
+    /// so the corner curve ate the side gap and the row looked to sag.
+    static let cardHorizontalPadding: CGFloat = NotchBody.panelPadding
+    static let cardTopPadding: CGFloat = NotchBody.panelPadding
+    static let cardBottomPadding: CGFloat = NotchBody.panelPadding
     /// The header pill's height (`GlassSegmentCluster` — a 26pt chip in 3pt of
     /// glass) and the follow-up row's, so the compact window can budget for the
     /// chrome it now carries (`CompactShortcutMetrics.answerChrome`).
     static let headerHeight: CGFloat = 32
     static let followUpGap: CGFloat = 8
     static let followUpHeight: CGFloat = 39
-    private var scrollFade: CGFloat { ThreadScroll.runway }
-    private var scrollBand: CGFloat { ThreadScroll.band }
+    /// The fade and frost bands are exactly the gaps the thread rests between —
+    /// never deeper — so a card at rest is crisp edge to edge and only content
+    /// that has actually travelled into a gap gets dissolved.
+    private var topFade: CGFloat { scrollTopInset }
+    private var bottomFade: CGFloat { scrollBottomInset }
+    private var topBand: CGFloat { min(ThreadScroll.band, scrollTopInset) }
+    private var bottomBand: CGFloat { min(ThreadScroll.band, scrollBottomInset) }
+
+
+    /// The window height a compact card wants for a turn stack this tall — the
+    /// one place that arithmetic lives, so the height the window is set to and
+    /// the layout inside it can never disagree.
+    private func compactWindowHeight(forContentHeight bare: CGFloat) -> CGFloat {
+        bare + scrollTopInset + scrollBottomInset
+            + Self.cardTopPadding + Self.cardBottomPadding
+            + CompactShortcutMetrics.answerChrome
+    }
     private var latestAnswerText: String {
         renderedTurns.last(where: { $0.role == "assistant" })?.text
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -2418,10 +2473,10 @@ struct DetachedThreadView: View {
     }
     private var activeTaskWord: String? { activeTaskStyle?.word }
     private var activeTaskOrb: OrbState { activeTaskStyle?.orb ?? .composing }
-    // The panel body's exact rhythm (NotchBody: horizontal 20 / top 15, header
-    // then an 18pt quiet gap, turns at 14pt spacing) — so the first frame after
-    // the tear lays out where the panel's last frame did, and the question
-    // bubble is the title; the header carries no text of its own.
+    // The panel body's exact rhythm (NotchBody: a uniform 15pt inset, header then
+    // an 18pt quiet gap, turns at 14pt spacing) — so the first frame after the
+    // tear lays out where the panel's last frame did, and the question bubble is
+    // the title; the header carries no text of its own.
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
@@ -2433,28 +2488,41 @@ struct DetachedThreadView: View {
                         }
                         Color.clear.frame(height: 1).id(Self.bottomID)
                     }
-                    // Runways: rows rest between the header and the follow-up
-                    // line, then scroll into these empty bands — up behind the
-                    // header, down behind the input — to fade + frost out on
-                    // both edges (see ThreadScroll).
-                    .padding(.top, scrollTopInset)
-                    .padding(.bottom, scrollBottomInset)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     // A ScrollView otherwise accepts the viewport's finite height
                     // proposal and the probe below only reports that clipped box.
                     // Ask for the stack's ideal vertical size so the probe sees the
                     // complete laid-out answer, including lines below the fold.
                     .fixedSize(horizontal: false, vertical: true)
+                    // Measured BARE — inside the gaps, not around them — so the
+                    // window's height is built from the turn stack plus whichever
+                    // gaps this face rests it between (`compactWindowHeight`),
+                    // rather than from a number that already has one pair baked in.
                     .background(GeometryReader { geo in
                         Color.clear.preference(
                             key: DetachedThreadContentHeightKey.self,
                             value: geo.size.height)
                     })
+                    // The gaps rows rest between and then scroll away into — up
+                    // behind the header, down behind the input — fading and
+                    // frosting out on both edges. A session window can afford
+                    // the full 28pt runways; the compact card pays for them in
+                    // its own height, so it rests on the panel's short rhythm
+                    // (see `scrollTopInset`).
+                    .padding(.top, scrollTopInset)
+                    .padding(.bottom, scrollBottomInset)
                 }
                 .scrollIndicators(.automatic)
-                .scrollEdgeFade(top: true, bottom: true, fade: scrollFade)
-                .progressiveTopBlur(height: scrollBand, maxRadius: ThreadScroll.blurRadius)
-                .progressiveBottomBlur(height: scrollBand, maxRadius: ThreadScroll.blurRadius)
+                // Sticky affordances inside the thread (a code block's copy
+                // button) park below the top fade band, not in it.
+                .environment(\.stickyScrollTopInset, topFade)
+                .scrollEdgeFade(top: true, bottom: true,
+                                topFade: topFade, bottomFade: bottomFade)
+                // ONE merged pass, not the two stacked modifiers — see
+                // `ProgressiveEdgeBlur`: stacking them rebuilds the whole thread
+                // four times over on mount.
+                .progressiveEdgeBlur(top: topBand, bottom: bottomBand,
+                                     topRadius: ThreadScroll.blurRadius)
                 // The fade/blur modifiers render copies of the scroll surface.
                 // Clip the composed result at the viewport itself so those
                 // layers cannot follow a live scroll into the transparent bands
@@ -2476,21 +2544,19 @@ struct DetachedThreadView: View {
             followUpRow
                 .padding(.top, Self.followUpGap)
         }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, Self.cardHorizontalPadding)
         .padding(.top, Self.cardTopPadding)
         .padding(.bottom, Self.cardBottomPadding)
-        .onPreferenceChange(DetachedThreadContentHeightKey.self) { contentHeight in
-            guard compactShortcut, contentHeight > 0 else { return }
+        .onPreferenceChange(DetachedThreadContentHeightKey.self) { measured in
+            guard compactShortcut, measured > 0 else { return }
             // A wait is not a reason to move a window: the waiting card opens
             // once, to its own floor (`compactInitialHeight`), and only the
             // answer grows it past that (`compactFloorHeight`).
             guard !latestAnswerText.isEmpty else { return }
-            // The card's own padding inside the window chrome an answered
-            // shortcut window carries — the margins, the header and the
-            // follow-up row. The measured content already includes its own
-            // top/bottom runways.
-            onDesiredHeight(max(contentHeight + Self.cardTopPadding + Self.cardBottomPadding
-                                    + CompactShortcutMetrics.answerChrome,
+            // The turn stack, the gaps it rests between, the card's own padding,
+            // and the window chrome an answered shortcut carries — the margins,
+            // the header and the follow-up row.
+            onDesiredHeight(max(compactWindowHeight(forContentHeight: measured),
                                 estimatedCompactWindowHeight(for: latestAnswerText)))
         }
         .onChange(of: latestAnswerText) { _, answer in
@@ -2547,17 +2613,19 @@ struct DetachedThreadView: View {
                 .font: NSFont.systemFont(ofSize: 15),
                 .paragraphStyle: paragraph,
             ])
-        // The window chrome around the card (margins, header, follow-up row) +
-        // the card's own padding + the scroll runways the content rests between.
-        return ceil(bounds.height) + Self.cardTopPadding + Self.cardBottomPadding
-            + CompactShortcutMetrics.answerChrome + scrollTopInset + scrollBottomInset
+        // Same arithmetic the real measurement goes through (chrome, card
+        // padding, and whichever pair of gaps the stack rests between) — the two
+        // must agree on the rhythm, or the backstop would ask for a scrolling
+        // card's height while the layout is resting and the window would wear
+        // the difference as dead space.
+        return compactWindowHeight(forContentHeight: ceil(bounds.height))
     }
 
     /// The width the answer's prose actually wraps at: the compact window, less
     /// the face's margins and the card's own horizontal padding.
     private static let compactAnswerTextWidth: CGFloat =
         DetachedSessionWindowController.compactWidth
-            - CompactShortcutMetrics.inset * 2 - 20 * 2
+            - CompactShortcutMetrics.inset * 2 - cardHorizontalPadding * 2
 
     /// The same follow-up line the panel's result view carries — a submit here
     /// runs the round through the panel pipeline, headless (see
@@ -2707,8 +2775,8 @@ struct DetachedAgentTaskView: View {
         }
     }
 
-    // Same rhythm as the panel's agent detail page (NotchBody: horizontal 20 /
-    // top 15, header then the quiet gap), so the tear doesn't reflow the trail.
+    // Same rhythm as the panel's agent detail page (NotchBody's uniform 15pt
+    // inset, header then the quiet gap), so the tear doesn't reflow the trail.
     private func content(_ task: AgentTaskManager.AgentTask) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             header(task)
@@ -2744,9 +2812,12 @@ struct DetachedAgentTaskView: View {
                     .padding(.bottom, ThreadScroll.runway)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                // Sticky affordances inside the record (a code block's copy
+                // button) park below the top fade band, not in it.
+                .environment(\.stickyScrollTopInset, ThreadScroll.runway)
                 .scrollEdgeFade(top: true, bottom: true, fade: ThreadScroll.runway)
-                .progressiveTopBlur(height: ThreadScroll.band, maxRadius: ThreadScroll.blurRadius)
-                .progressiveBottomBlur(height: ThreadScroll.band, maxRadius: ThreadScroll.blurRadius)
+                .progressiveEdgeBlur(top: ThreadScroll.band, bottom: ThreadScroll.band,
+                                     topRadius: ThreadScroll.blurRadius)
                 .onChange(of: task.log.count) { _, _ in
                     withAnimation(.easeOut(duration: 0.2)) {
                         proxy.scrollTo(Self.bottomID, anchor: .bottom)
@@ -2757,9 +2828,9 @@ struct DetachedAgentTaskView: View {
             followUpRow(task)
                 .padding(.top, 8)
         }
-        .padding(.horizontal, 20)
-        .padding(.top, 15)
-        .padding(.bottom, 14)
+        .padding(.horizontal, DetachedThreadView.cardHorizontalPadding)
+        .padding(.top, DetachedThreadView.cardTopPadding)
+        .padding(.bottom, DetachedThreadView.cardBottomPadding)
     }
 
     private func header(_ task: AgentTaskManager.AgentTask) -> some View {

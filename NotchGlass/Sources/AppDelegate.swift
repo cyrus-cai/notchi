@@ -341,6 +341,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak self] isOpen, active in
                 guard let self else { return }
                 if isOpen {
+                    // Read the outside selection HERE, on the synchronous open
+                    // edge — before the activation below makes Notchi's own
+                    // prompt the focused element and the app that owned the
+                    // selection stops being frontmost.
+                    self.carryInOutsideSelection()
                     // This fires synchronously inside the hover handler ($open
                     // publishes on willSet) — BEFORE SwiftUI commits the open
                     // animation's first frame. The key-window dance does
@@ -1008,6 +1013,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NSWorkspace.shared.open(url)
             case .noSelection:
                 noSelection(triggerPoint, sourceApplication)
+            }
+        }
+    }
+
+    /// Bring whatever the user had highlighted in the app they came from into the
+    /// idle prompt as context, so "translate this" needs no ⌘C first. Unlike the
+    /// chord paths above this is unasked-for — it runs on every open — so it takes
+    /// the ambient read: no permission prompt, no browser accessibility wake-up,
+    /// and nothing at all unless the panel is sitting on a plain idle prompt (the
+    /// model re-checks that when the answer lands, since the user may have started
+    /// typing, opened settings or walked off during the read).
+    ///
+    /// Must be called on the synchronous open edge: a beat later Notchi is the
+    /// frontmost app and there is no "app they came from" left to ask.
+    private func carryInOutsideSelection() {
+        guard model.acceptsSelectionContext else { return }
+        let front = NSWorkspace.shared.frontmostApplication
+        let name = front?.localizedName
+        SelectedTextCapture.ambient(front: front) { [weak self] selected in
+            guard let self, let selected else { return }
+            withAnimation(.easeOut(duration: 0.18)) {
+                self.model.attachSelectionContext(selected, from: name)
             }
         }
     }

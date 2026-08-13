@@ -44,6 +44,15 @@ scripts/check-roadmap.sh
 # don't belong in the app repo.
 videos/
 
+# Generated / scratch output — promo renders, exported docs, PDF page dumps,
+# preview HTML. All regenerable, none of it belongs in the app repo.
+output/
+tmp/
+.readme-preview.html
+
+# Local dev seeding tool — writes fake history into Application Support.
+scripts/seed-history.py
+
 # Misc
 *.moved-aside
 *.pbxuser

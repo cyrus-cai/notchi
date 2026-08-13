@@ -70,6 +70,23 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.5.8",
+            date: "2026-08-13",
+            features: [
+                "Opening Notchi brings in selected text, with controls to drop it or turn the feature off.",
+            ],
+            improvements: [
+                "The Agent model picker lays out models, thinking effort, and engines more clearly.",
+                "Long conversations and Agent records open more smoothly.",
+                "The copy button stays visible while scrolling through long code blocks.",
+                "Prompt shortcut and detached session windows use tighter, more consistent spacing.",
+            ],
+            fixes: [
+                "Agent engine and model choices no longer reset while CLI detection finishes after a relaunch.",
+                "Multi-line follow-ups no longer clip against the input field's rounded corners.",
+            ]
+        ),
+        Entry(
             version: "0.5.7",
             date: "2026-08-12",
             heroAssetName: "WhatsNew057Promo",

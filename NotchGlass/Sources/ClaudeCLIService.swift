@@ -121,6 +121,18 @@ struct ClaudeCLIService: AIService {
         return nil
     }
 
+    /// Whether the resolution has actually LANDED — the difference between "no"
+    /// and "not yet". `isAvailable` collapses the two on purpose (it's read from
+    /// `body`, so it can never block), which is fine for drawing but wrong for
+    /// anything that acts destructively on a negative: a caller that DISCARDS
+    /// state when an engine looks dead has to ask this first, or the first hover
+    /// after a relaunch throws away a perfectly live pick.
+    static var isAvailabilityResolved: Bool {
+        guard resolveLock.try() else { return false }
+        defer { resolveLock.unlock() }
+        return cachedBinary != nil
+    }
+
     /// Resolve the binary off the main thread so the first `isAvailable` read
     /// during a SwiftUI render hits a warm cache. Idempotent: a second call while
     /// the first is still probing is a no-op.

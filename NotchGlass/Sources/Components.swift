@@ -3089,12 +3089,43 @@ struct InlineMarkdownText: View {
         Text(attributed)
     }
 
-    private var attributed: AttributedString {
+    /// One line's parsed text, minus the caller's colour — the cacheable half.
+    /// `spans` are the surviving links as (character offset, length) pairs rather
+    /// than `AttributedString.Index` ranges, so they stay valid when re-applied to
+    /// a copy that's being mutated.
+    private final class Parsed {
+        let text: AttributedString
+        let spans: [(offset: Int, length: Int)]
+        init(text: AttributedString, spans: [(offset: Int, length: Int)]) {
+            self.text = text
+            self.spans = spans
+        }
+    }
+
+    /// Memoized inline parse, keyed on the raw line. Every line of an answer runs
+    /// `AttributedString(markdown:)` (a full cmark parse) plus an `NSDataDetector`
+    /// sweep for bare URLs — and the same line is parsed by every mounted copy of
+    /// the turn: the visible thread, the progressive-blur overlay copy, and again
+    /// on every reopen of the same record from Recent. On a long agent transcript
+    /// that was hundreds of parses on the main thread per open. One entry per
+    /// distinct line collapses all of them to the first. Colour is applied after
+    /// the lookup, so the same cached line serves every call site's `linkColor`.
+    private static let parseCache: NSCache<NSString, Parsed> = {
+        let cache = NSCache<NSString, Parsed>()
+        cache.countLimit = 512
+        return cache
+    }()
+
+    private static func parsed(_ raw: String) -> Parsed {
+        let key = raw as NSString
+        if let hit = parseCache.object(forKey: key) { return hit }
+
         // Inline `$…$` / `\(…\)` math converts to Unicode glyphs BEFORE the
         // markdown parse — by the time SwiftUI reads the line, `x^2` is already
         // `x²` and any character surviving conversion that markdown would
         // reinterpret (`*`, `_`, …) is escaped.
         let source = MathTypeset.inline(raw)
+        var text: AttributedString
         // SwiftUI's built-in inline-markdown parsing covers **bold**, *italic*,
         // and `code` — exactly the subset we need.
         if var parsed = try? AttributedString(
@@ -3107,23 +3138,51 @@ struct InlineMarkdownText: View {
             // scheme that fires on click. Allow only http/https — real web links the
             // user can open — and strip every other `.link` run (keep its styling,
             // drop the clickable URL), so file:// and custom schemes stay inert.
-            // Surviving links get our ink colour + an underline instead of the
-            // stock blue, which is illegible on the dark glass.
-            for run in parsed.runs where run.link != nil {
-                let scheme = run.link?.scheme?.lowercased()
+            let links = parsed.runs.compactMap { $0.link == nil ? nil : $0.range }
+            for range in links {
+                let scheme = parsed[range].link?.scheme?.lowercased()
                 if scheme != "http" && scheme != "https" {
-                    parsed[run.range].link = nil
-                } else {
-                    parsed[run.range].foregroundColor = linkColor
-                    parsed[run.range].underlineStyle = .single
+                    parsed[range].link = nil
                 }
             }
             autolink(&parsed)
-            return parsed
+            text = parsed
+        } else {
+            var plain = AttributedString(source)
+            autolink(&plain)
+            text = plain
         }
-        var plain = AttributedString(source)
-        autolink(&plain)
-        return plain
+
+        // Surviving links, as offsets — the caller paints them (see `attributed`).
+        let spans = text.runs.compactMap { run -> (offset: Int, length: Int)? in
+            guard run.link != nil else { return nil }
+            let chars = text.characters
+            return (offset: chars.distance(from: text.startIndex, to: run.range.lowerBound),
+                    length: chars.distance(from: run.range.lowerBound, to: run.range.upperBound))
+        }
+
+        let result = Parsed(text: text, spans: spans)
+        parseCache.setObject(result, forKey: key)
+        return result
+    }
+
+    private var attributed: AttributedString {
+        let hit = Self.parsed(raw)
+        // The overwhelmingly common case: no links, so the cached line is the
+        // finished text and nothing is copied or mutated.
+        guard !hit.spans.isEmpty else { return hit.text }
+        // Links get our ink colour + an underline instead of the stock blue, which
+        // is illegible on the dark glass. Offsets are recomputed against the copy
+        // each time: setting attributes never changes the character count, so they
+        // stay exact across the loop's own mutations.
+        var out = hit.text
+        for span in hit.spans {
+            let start = out.index(out.startIndex, offsetByCharacters: span.offset)
+            let end = out.index(start, offsetByCharacters: span.length)
+            out[start..<end].foregroundColor = linkColor
+            out[start..<end].underlineStyle = .single
+        }
+        return out
     }
 
     private static let linkDetector = try? NSDataDetector(
@@ -3133,7 +3192,10 @@ struct InlineMarkdownText: View {
     /// ending in `meta.com/thefutureisfor` carries no markdown, so without this
     /// it renders as dead text. Same scheme gate as `[label](url)`: only
     /// http/https survive, so `mailto:` and friends stay inert.
-    private func autolink(_ attributed: inout AttributedString) {
+    ///
+    /// Marks the `.link` only — colour and underline are painted by `attributed`
+    /// after the cache lookup, so one cached parse serves every `linkColor`.
+    private static func autolink(_ attributed: inout AttributedString) {
         guard let detector = Self.linkDetector else { return }
         let plain = String(attributed.characters)
         guard !plain.isEmpty else { return }
@@ -3157,8 +3219,6 @@ struct InlineMarkdownText: View {
             }
             guard !claimed else { continue }
             attributed[range].link = url
-            attributed[range].foregroundColor = linkColor
-            attributed[range].underlineStyle = .single
         }
     }
 }
@@ -3226,9 +3286,15 @@ enum MarkdownParser {
     /// of that to a single parse. NSCache is thread-safe and purges under
     /// memory pressure; the count limit bounds the streaming case, where each
     /// ~33ms flush is a new (one chunk longer) key that's never seen again.
+    ///
+    /// The limit has to clear a whole *record*, not just one answer: a reopened
+    /// agent run stacks a separate source per narration entry per round, and at
+    /// 32 a long transcript evicted its own earlier blocks before the sibling
+    /// copies (blur overlay, a second body pass) could hit them — so every copy
+    /// re-parsed from scratch. 256 covers the longest trail we cap at.
     private static let parseCache: NSCache<NSString, ParsedBlocks> = {
         let cache = NSCache<NSString, ParsedBlocks>()
-        cache.countLimit = 32
+        cache.countLimit = 256
         return cache
     }()
 
@@ -4829,6 +4895,12 @@ private struct AnswerPDFView: View {
 /// scroll position and text-selection hit-testing — so it works identically while
 /// the answer streams (once the closing fence parses this block into the tree) and
 /// after it settles, where multi-line drag-select on the narrow panel is unreliable.
+///
+/// The button is *sticky*: it rides the top-right corner of the island's VISIBLE
+/// part, not of its layout frame. A long block is usually taller than the thread's
+/// viewport, so a corner-pinned button scrolls away with the block's first line and
+/// the copy affordance disappears exactly when the block is big enough to need it.
+/// See `stickyOffset(in:)`.
 private struct CodeBlockView: View {
     let text: String
     let baseFont: CGFloat
@@ -4837,8 +4909,18 @@ private struct CodeBlockView: View {
     /// clipboard and keep this copy from being re-injected into the next Ask.
     let onInAppCopy: (() -> Void)?
 
+    @Environment(\.stickyScrollTopInset) private var stickyTopInset
+
     @State private var hovering = false
     @State private var copied = false
+
+    /// The button's own box, and its inset off the island's corner — the SAME on
+    /// both edges, so the glass circle reads as concentric inside the island's 8pt
+    /// radius instead of hanging off-centre. It clears macOS's overlay scroller
+    /// (which floats above the scroll content without taking layout space) because
+    /// the thread stack is already inset 8pt from the viewport's right edge.
+    private static let side: CGFloat = 26
+    private static let inset: CGFloat = 8
 
     var body: some View {
         // NOTE: the parent `MarkdownBlocks` container in NotchBody wraps the whole
@@ -4864,39 +4946,67 @@ private struct CodeBlockView: View {
                     .strokeBorder(Tokens.hairline, lineWidth: 0.5)
             )
             .overlay(alignment: .topTrailing) {
-                Button {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(text, forType: .string)
-                    onInAppCopy?()
-                    Haptics.confirm()
-                    withAnimation(.easeOut(duration: 0.15)) { copied = true }
-                    Task {
-                        try? await Task.sleep(for: .seconds(1.5))
-                        withAnimation(.easeOut(duration: 0.25)) { copied = false }
-                    }
-                } label: {
-                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                        .font(.sf(11, weight: .regular))
-                        .foregroundStyle(copied ? Tokens.text2 : Tokens.text3)
-                        // Native SF Symbols swap — the doc morphs to the check
-                        // instead of hard-cutting.
-                        .contentTransition(.symbolEffect(.replace))
-                        .frame(width: 22, height: 22)
-                        .contentShape(Rectangle())
+                GeometryReader { geo in
+                    copyButton
+                        .padding(Self.inset)
+                        .offset(y: stickyOffset(in: geo))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity,
+                               alignment: .topTrailing)
                 }
-                .buttonStyle(.plain)
-                .padding(.top, 5)
-                // Keep the hit target clear of macOS's overlay scroller. The
-                // scroller floats above SwiftUI scroll content (it does not take
-                // layout space), so a top-trailing button at the old 5pt inset
-                // could sit directly underneath it when scroll bars were visible.
-                .padding(.trailing, 17)
-                // Ghost by default; brightens on hover; full while showing the check.
-                .opacity(copied ? 1.0 : hovering ? 0.7 : 0.3)
-                .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
-                .animation(.easeOut(duration: 0.15), value: copied)
             }
             .onHover { hovering = $0 }
+    }
+
+    private var copyButton: some View {
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            onInAppCopy?()
+            Haptics.confirm()
+            withAnimation(.easeOut(duration: 0.15)) { copied = true }
+            Task {
+                try? await Task.sleep(for: .seconds(1.5))
+                withAnimation(.easeOut(duration: 0.25)) { copied = false }
+            }
+        } label: {
+            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                .font(.sf(12, weight: .regular))
+                .foregroundStyle(hovering || copied ? Tokens.text1 : Tokens.text3)
+                // Native SF Symbols swap — the doc morphs to the check
+                // instead of hard-cutting.
+                .contentTransition(.symbolEffect(.replace))
+                .frame(width: Self.side, height: Self.side)
+                // Sticky, this chip spends most of its life parked over dense code
+                // rather than over the island's quiet first line — so it wears the
+                // same Liquid Glass circle as every other icon chip that floats ON
+                // the glass (`GlassIconButton`), not a flat wash that lets the code
+                // read straight through it.
+                .glassCapsule(in: Circle(), brighter: hovering)
+                .contentShape(Circle())
+        }
+        .buttonStyle(GlassPressStyle())
+        // Quiet at rest, full on hover and while showing the check.
+        .opacity(copied ? 1.0 : hovering ? 1.0 : 0.6)
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+        .animation(.easeOut(duration: 0.15), value: copied)
+    }
+
+    /// How far down the island the button has to travel to stay in the reader's
+    /// view. `bounds(of: .scrollView)` hands back the thread scroller's visible
+    /// rect **in this island's own coordinates**, so a positive `minY` is exactly
+    /// the slice of the block that has scrolled up past the viewport's top edge —
+    /// push the button down by that much (plus the host's dissolve band, see
+    /// `stickyScrollTopInset`) and it holds the visible top-right corner.
+    ///
+    /// Clamped at both ends: never above the island's own top (a block sitting
+    /// fully in view keeps the plain corner placement), and never past its bottom,
+    /// so the button leaves with the block instead of hanging off it. Returns 0
+    /// wherever there is no scroller at all — the unclipped short-answer layout,
+    /// the hidden height probes, the blur overlay copies.
+    private func stickyOffset(in geo: GeometryProxy) -> CGFloat {
+        guard let visible = geo.bounds(of: .scrollView) else { return 0 }
+        let travel = max(geo.size.height - Self.side - Self.inset * 2, 0)
+        return min(max(visible.minY + stickyTopInset, 0), travel)
     }
 }
 

@@ -132,6 +132,14 @@ protocol AgentCapableService: AIService {
     func streamTurn(system: String,
                     messages: [AgentMessage],
                     tools: [ToolSpec]) -> AsyncThrowingStream<TurnEvent, Error>
+
+    /// Translate a provider's wire-level tool alias into Notch's stable
+    /// capability name. Most providers already use the canonical name.
+    func canonicalToolName(_ name: String) -> String
+}
+
+extension AgentCapableService {
+    func canonicalToolName(_ name: String) -> String { name }
 }
 
 /// A tool as advertised to the model: a name, a description the model reads to
@@ -427,14 +435,17 @@ struct AgentHarness {
                     // tool actually running. The label is re-derived (and, for
                     // read_page, refined with the page's host) when the assembled
                     // calls execute below — same helpers, so the words agree.
-                    let preview = [ToolInvocation(id: "", name: name, input: [:])]
+                    let canonicalName = service.canonicalToolName(name)
+                    let preview = [ToolInvocation(id: "", name: canonicalName, input: [:])]
                     onActivity(activityLabel(for: preview, isRepeatRound: didTool),
                                Self.orbState(for: preview, isRepeatRound: didTool))
                     // Text after this point is call-adjacent prose, not the answer
                     // displacing the label — don't let it clear the line.
                     clearedGapLabel = true
                 case .toolCall(let id, let name, let input):
-                    pendingCalls.append(ToolInvocation(id: id, name: name, input: input))
+                    pendingCalls.append(ToolInvocation(id: id,
+                                                       name: service.canonicalToolName(name),
+                                                       input: input))
                 case .finished(let reason):
                     stopReason = reason
                 }
@@ -464,10 +475,13 @@ struct AgentHarness {
             // quietly reopen the very loop the withdrawal just closed.
             if pendingCalls.isEmpty, !toolsThisTurn.isEmpty {
                 let advertised = Set(toolsThisTurn.map(\.name))
-                let recovered = markupFilter.recoveredCalls { advertised.contains($0) }
+                let recovered = markupFilter.recoveredCalls {
+                    advertised.contains(service.canonicalToolName($0))
+                }
                 for (i, call) in recovered.enumerated() {
                     pendingCalls.append(ToolInvocation(id: "leaked_\(iteration)_\(i)",
-                                                       name: call.name, input: call.input))
+                                                       name: service.canonicalToolName(call.name),
+                                                       input: call.input))
                 }
             }
 
@@ -500,8 +514,10 @@ struct AgentHarness {
                     // reads the leak purely to DESCRIBE it — the call is never run
                     // here, which is the whole point of having withdrawn the tool.
                     let leaked = markupFilter
-                        .recoveredCalls { registry.tool(named: $0) != nil }
-                        .first?.name
+                        .recoveredCalls {
+                            registry.tool(named: service.canonicalToolName($0)) != nil
+                        }
+                        .first.map { service.canonicalToolName($0.name) }
                     // An empty assistant turn is rejected by the providers, so stand in
                     // a marker the model reads as its own silence — same device as the
                     // truncation replay below.
@@ -638,13 +654,10 @@ struct AgentHarness {
 
     /// Tool names that hit the network for fresh information — the ones whose
     /// follow-up "reading the results" gap is worth narrating with a "composing…"
-    /// cue. `lookup_web` is GLM's client search tool (deliberately not named
-    /// `web_search` to avoid colliding with GLM's builtin); `$web_search` is Kimi's
-    /// builtin echo; the vendor-named tools are the unified client searchers.
+    /// cue. Provider-specific wire aliases are normalized by the service boundary,
+    /// so the harness only consumes the stable capability name.
     private static func isSearchTool(_ name: String) -> Bool {
-        name == "lookup_web" || name == "$web_search"
-            || name == "exa_search" || name == "keenable_search"
-            || name == "anysearch_search"
+        name == WebSearchTool.toolName
     }
 
     /// The note handed to a model whose turn produced no answer at all: what we saw,
@@ -654,7 +667,7 @@ struct AgentHarness {
     ///
     /// Naming the leaked tool is what makes this worth sending. A model told only
     /// "you produced nothing" will often produce nothing again — it has no idea what
-    /// it did wrong. Told "the `exa_search` call you wrote as text cannot run", it
+    /// it did wrong. Told "the `web_search` call you wrote as text cannot run", it
     /// has something specific to correct, and the obvious correction is to speak.
     ///
     /// The last sentence matters as much as the first: a model that searched and
@@ -743,7 +756,7 @@ struct AgentHarness {
     static func orbState(for calls: [ToolInvocation], isRepeatRound: Bool) -> OrbState {
         if let first = calls.first, calls.count == 1 {
             switch first.name {
-            case "lookup_web", "$web_search", "exa_search", "keenable_search", "anysearch_search":
+            case WebSearchTool.toolName:
                 return isRepeatRound ? .solving : .searching
             case "read_page":
                 // Reading a page keeps its own wait line ("Reading example.com")
@@ -768,7 +781,7 @@ struct AgentHarness {
     /// slot — or nil when the call's arguments haven't arrived yet (the
     /// streaming `toolCallStarted` preview passes an empty input), so the caller
     /// falls back to the generic line. Our three search tools name the argument
-    /// `query`; Kimi's builtin names it `search_query`.
+    /// `query`; Kimi's wire-level builtin names it `search_query`.
     private static func searchQuery(of call: ToolInvocation) -> String? {
         let raw = (call.input["query"] as? String) ?? (call.input["search_query"] as? String)
         guard var q = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !q.isEmpty else {
@@ -793,7 +806,7 @@ struct AgentHarness {
     private func activityLabel(for calls: [ToolInvocation], isRepeatRound: Bool) -> String {
         if let first = calls.first, calls.count == 1 {
             switch first.name {
-            case "lookup_web", "$web_search", "exa_search", "keenable_search", "anysearch_search":
+            case WebSearchTool.toolName:
                 // Name what it's actually looking up once the arguments have
                 // landed — the same move `read_page` makes with its host. At
                 // `toolCallStarted` they're still streaming, so the generic line
@@ -929,7 +942,7 @@ private struct ToolMarkupFilter {
 /// things sitting in the text: the tool's **name** and its **arguments JSON**,
 /// separated by the model's own control tokens. DeepSeek's is
 ///
-///     <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>keenable_search
+///     <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>web_search
 ///     ```json
 ///     {"query": "…"}
 ///     ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
@@ -1019,7 +1032,7 @@ private enum LeakedToolCall {
 
     /// The last word before the arguments that names a tool the registry has.
     /// Scanning backwards is what makes the scaffolding harmless: in
-    /// `function … keenable_search … json {`, `json` is tried first, rejected,
+    /// `function … web_search … json {`, `json` is tried first, rejected,
     /// and the real name is the next one back.
     private static func lastKnownName(in text: Substring,
                                       isKnownTool: (String) -> Bool) -> String? {

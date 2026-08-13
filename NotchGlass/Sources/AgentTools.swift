@@ -912,30 +912,59 @@ reworded query. If the results don't contain the answer, say so rather than \
 guessing.
 """
 
+/// Backend seam for web search. Providers own authentication, transport, and
+/// response parsing; they never choose the tool name or schema exposed to a
+/// model. Adding another search service only requires another implementation of
+/// this protocol plus one case in `SearchBackend.searchProvider`.
+protocol SearchProvider: Sendable {
+    func search(_ input: [String: Any]) async throws -> (text: String, sources: [WebSource])
+}
+
+/// The one web-search capability exposed to models and consumed by the harness.
+/// Its provider can change without changing the prompt-facing contract.
+struct WebSearchTool: SourcedTool {
+    static let toolName = "web_search"
+
+    let name = toolName
+    let description = webSearchToolDescription
+    let schema: [String: Any] = [
+        "type": "object",
+        "properties": [
+            "query": ["type": "string", "description": "The search query."]
+        ],
+        "required": ["query"],
+    ]
+    let provider: any SearchProvider
+
+    func execute(_ input: [String: Any]) async throws -> String {
+        try await runSourced(input).text
+    }
+
+    func runSourced(_ input: [String: Any]) async throws -> (text: String, sources: [WebSource]) {
+        try await provider.search(input)
+    }
+}
+
 /// Kimi's `$web_search` is a *builtin* server tool with an unusual contract
 /// (XII-118): the model emits a tool call, and the client must echo the call's
 /// arguments back **unchanged** for Moonshot to actually run the search
 /// server-side. There is no local search to perform — this "tool" exists only so
 /// the harness's ordinary tool loop has something to dispatch to instead of
-/// failing on an unknown name, and its `execute` returns its own input re-encoded
+/// failing on an unknown name, and its provider returns its input re-encoded
 /// as JSON, which is exactly the echo Kimi expects. Registered only for the Kimi
-/// provider (see `ToolRegistry.standard(for:)`); never advertised — Kimi declares
-/// the tool itself via the request's `builtin_function` entry, so this carries no
-/// description/schema the model would ever read.
-struct KimiWebSearchPassthrough: NotchTool {
-    let name = "$web_search"
-    let description = ""
-    let schema: [String: Any] = ["type": "object", "properties": [:]]
-
-    func execute(_ input: [String: Any]) async throws -> String {
+/// provider (see `ToolRegistry.standard(for:)`). The service boundary advertises
+/// it with Moonshot's wire-level builtin name while the registry keeps the stable
+/// capability identity.
+struct KimiSearchProvider: SearchProvider {
+    func search(_ input: [String: Any]) async throws -> (text: String, sources: [WebSource]) {
         // Echo the model's arguments back verbatim as a JSON string — Moonshot
         // runs the real search on receiving this. Anything else (an error, a
         // summary, empty) means the search silently never happens.
         guard let data = try? JSONSerialization.data(withJSONObject: input),
               let json = String(data: data, encoding: .utf8) else {
-            return "{}"
+            return ("{}", [])
         }
-        return json
+        return (json, [])
     }
 }
 
@@ -949,34 +978,18 @@ struct KimiWebSearchPassthrough: NotchTool {
 /// model calls it, the harness hits the standalone endpoint with the user's GLM
 /// key, and feeds the results back. This DOES drive the "🔍 searching" activity
 /// line (it goes through the harness tool loop), unlike a true server-side search.
-struct GLMWebSearchTool: SourcedTool {
-    // NOT "web_search": that name collides with GLM's own built-in server-side
-    // web_search tool, so glm-4.x mistakes this client tool for the builtin —
-    // it ignores the results we feed back and re-calls the tool in a loop until
+struct GLMSearchProvider: SearchProvider {
+    // The service sends this capability under the `lookup_web` wire alias because
+    // `web_search` collides with GLM's own built-in server-side tool: glm-4.x
+    // ignores the results we feed back and re-calls the tool in a loop until
     // the iteration cap, then answers from training data (the stale/hallucinated
     // answers Cyrus saw). A distinct name makes the model treat it as an ordinary
     // function: it reads the fed-back results and answers from them. Verified live.
-    let name = "lookup_web"
-    let description = webSearchToolDescription
-    let schema: [String: Any] = [
-        "type": "object",
-        "properties": [
-            "query": ["type": "string", "description": "The search query."]
-        ],
-        "required": ["query"],
-    ]
-
     private static let endpoint = URL(string: "https://open.bigmodel.cn/api/paas/v4/web_search")!
     private static let timeout: TimeInterval = 15
     private static let maxResults = 6
 
-    // Conforms to the plain protocol via the sourced path: the model gets the
-    // text, the UI gets the sources, both from one search.
-    func execute(_ input: [String: Any]) async throws -> String {
-        try await runSourced(input).text
-    }
-
-    func runSourced(_ input: [String: Any]) async throws -> (text: String, sources: [WebSource]) {
+    func search(_ input: [String: Any]) async throws -> (text: String, sources: [WebSource]) {
         guard let query = (input["query"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines), !query.isEmpty else {
             return ("Error: empty search query.", [])
@@ -1049,7 +1062,7 @@ struct GLMWebSearchTool: SourcedTool {
 }
 
 /// Provider-agnostic web search via **Exa** (`https://api.exa.ai/search`). Unlike
-/// `GLMWebSearchTool` (which reuses the GLM provider's key and only exists because
+/// `GLMSearchProvider` (which reuses the GLM provider's key and only exists because
 /// GLM's in-chat search silently no-ops), Exa is a standalone search backend with
 /// its own key (`APIKeyStore.currentExaKey()` / `EXA_API_KEY`). When that key is
 /// present this tool is registered for *every* provider and the providers' own
@@ -1063,26 +1076,13 @@ struct GLMWebSearchTool: SourcedTool {
 /// token-efficient, query-relevant excerpts. Response: `results[]` each carrying
 /// `title`, `url`, `publishedDate`, and a `highlights` string array (with `text`
 /// as a fallback when a result has no highlights).
-struct ExaWebSearchTool: SourcedTool {
-    let name = "exa_search"
-    let description = webSearchToolDescription
-    let schema: [String: Any] = [
-        "type": "object",
-        "properties": [
-            "query": ["type": "string", "description": "The search query."]
-        ],
-        "required": ["query"],
-    ]
+struct ExaSearchProvider: SearchProvider {
 
     private static let endpoint = URL(string: "https://api.exa.ai/search")!
     private static let timeout: TimeInterval = 15
     private static let maxResults = 6
 
-    func execute(_ input: [String: Any]) async throws -> String {
-        try await runSourced(input).text
-    }
-
-    func runSourced(_ input: [String: Any]) async throws -> (text: String, sources: [WebSource]) {
+    func search(_ input: [String: Any]) async throws -> (text: String, sources: [WebSource]) {
         guard let query = (input["query"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines), !query.isEmpty else {
             return ("Error: empty search query.", [])
@@ -1182,16 +1182,7 @@ struct ExaWebSearchTool: SourcedTool {
 /// Request: `POST /v1/search` with `{ "query": ... }`. Response: `results[]` each
 /// carrying `title`, `url`, `snippet` (query-relevant highlights, falling back to
 /// `description`), and `published_at` (ISO 8601).
-struct KeenableWebSearchTool: SourcedTool {
-    let name = "keenable_search"
-    let description = webSearchToolDescription
-    let schema: [String: Any] = [
-        "type": "object",
-        "properties": [
-            "query": ["type": "string", "description": "The search query."]
-        ],
-        "required": ["query"],
-    ]
+struct KeenableSearchProvider: SearchProvider {
 
     private static let endpoint = URL(string: "https://api.keenable.ai/v1/search")!
     private static let timeout: TimeInterval = 15
@@ -1201,11 +1192,7 @@ struct KeenableWebSearchTool: SourcedTool {
     // (post-filtering) handful rather than feeding the model the noisy tail.
     private static let maxResults = 4
 
-    func execute(_ input: [String: Any]) async throws -> String {
-        try await runSourced(input).text
-    }
-
-    func runSourced(_ input: [String: Any]) async throws -> (text: String, sources: [WebSource]) {
+    func search(_ input: [String: Any]) async throws -> (text: String, sources: [WebSource]) {
         guard let query = (input["query"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines), !query.isEmpty else {
             return ("Error: empty search query.", [])
@@ -1313,26 +1300,13 @@ struct KeenableWebSearchTool: SourcedTool {
 /// `ANYSEARCH_API_KEY` / stored key is sent as a Bearer token for higher limits.
 /// The unified endpoint routes an untagged query to the appropriate sources and
 /// returns both compact snippets and cleaned page content.
-struct AnySearchWebSearchTool: SourcedTool {
-    let name = "anysearch_search"
-    let description = webSearchToolDescription
-    let schema: [String: Any] = [
-        "type": "object",
-        "properties": [
-            "query": ["type": "string", "description": "The search query."]
-        ],
-        "required": ["query"],
-    ]
+struct AnySearchProvider: SearchProvider {
 
     private static let endpoint = URL(string: "https://api.anysearch.com/v1/search")!
     private static let timeout: TimeInterval = 15
     private static let maxResults = 6
 
-    func execute(_ input: [String: Any]) async throws -> String {
-        try await runSourced(input).text
-    }
-
-    func runSourced(_ input: [String: Any]) async throws -> (text: String, sources: [WebSource]) {
+    func search(_ input: [String: Any]) async throws -> (text: String, sources: [WebSource]) {
         guard let query = (input["query"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines), !query.isEmpty else {
             return ("Error: empty search query.", [])
@@ -1410,6 +1384,19 @@ struct AnySearchWebSearchTool: SourcedTool {
             }
         }
         return ""
+    }
+}
+
+extension APIKeyStore.SearchBackend {
+    /// The only backend-to-implementation wiring point. Capability definition,
+    /// prompts, registries, harness logic, and MCP exposure stay unchanged when
+    /// another provider is added.
+    var searchProvider: any SearchProvider {
+        switch self {
+        case .exa:       return ExaSearchProvider()
+        case .keenable:  return KeenableSearchProvider()
+        case .anysearch: return AnySearchProvider()
+        }
     }
 }
 
@@ -1596,7 +1583,7 @@ extension ToolRegistry {
     /// exceptions, both added here per provider:
     ///  • **GLM** — its in-chat `tools:[{web_search}]` path silently doesn't search
     ///    on the current account/models (verified live), so GLM uses a real
-    ///    client-side `GLMWebSearchTool` that hits Zhipu's standalone search API.
+    ///    client-side `GLMSearchProvider` that hits Zhipu's standalone search API.
     ///  • **Kimi** — its builtin search needs a client-side echo, so the
     ///    `$web_search` passthrough is added so the harness can echo the call back.
     /// (The defunct DuckDuckGo `WebSearchTool` was removed — see XII-116/XII-118.)
@@ -1617,21 +1604,16 @@ extension ToolRegistry {
             ReadPageTool(),
             OpenURLTool(),
         ]
-        switch APIKeyStore.resolvedSearchBackend() {
-        case .exa:
-            tools.append(ExaWebSearchTool())
-        case .keenable:
-            tools.append(KeenableWebSearchTool())
-        case .anysearch:
-            tools.append(AnySearchWebSearchTool())
-        // No client searcher picked (or the pick has no key) — the provider's own
-        // native search stays in play.
-        case nil:
+        if let backend = APIKeyStore.resolvedSearchBackend() {
+            tools.append(WebSearchTool(provider: backend.searchProvider))
+        } else {
+            // No client searcher picked (or the pick has no key) — the provider's
+            // own native search stays in play.
             if provider == .glm {
-                tools.append(GLMWebSearchTool())
+                tools.append(WebSearchTool(provider: GLMSearchProvider()))
             }
-            if provider.builtinSearchName == "$web_search" {
-                tools.append(KimiWebSearchPassthrough())
+            if provider == .kimi {
+                tools.append(WebSearchTool(provider: KimiSearchProvider()))
             }
         }
         return ToolRegistry(tools)

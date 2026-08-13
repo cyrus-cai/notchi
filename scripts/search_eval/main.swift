@@ -267,7 +267,7 @@ func run() async {
     // clean-looking sweep in which not one query ever searched. A battery that
     // can't measure the thing it exists to measure must stop, not report zeros.
     guard registry.tools.contains(where: {
-        ["exa_search", "keenable_search", "anysearch_search", "lookup_web", "$web_search"].contains($0.name)
+        $0.name == WebSearchTool.toolName
     }) else {
         print("\nNo search tool in the registry — nothing to evaluate. "
               + "Configure a search backend in Settings first (and a key when required).")
@@ -314,8 +314,7 @@ func run() async {
         if rec.recoveredCount > 0 { recoveredQueries += 1 }
         if let thrown { failures.append("\(item.id): \(thrown.localizedDescription)") }
 
-        let searchNames = ["exa_search", "keenable_search", "anysearch_search", "lookup_web", "$web_search"]
-        let searchCount = rec.executedCalls.filter { searchNames.contains($0.name) }.count
+        let searchCount = rec.executedCalls.filter { $0.name == WebSearchTool.toolName }.count
         let ceiling = harness.maxSearchRounds
         let reachedCeiling = searchCount >= ceiling
         countByKind[item.kind, default: 0] += 1

@@ -29,6 +29,27 @@ enum AgentEngine: String, CaseIterable {
         }
     }
 
+    /// Whether this engine's availability answer is FINAL, rather than the
+    /// placeholder "no" a probe still in flight reports. `isAvailable` has to
+    /// answer instantly from `body`, so on a cold cache it says `false` for every
+    /// engine whose binary hasn't resolved yet — Command Code's probe is a Node
+    /// cold start, ~2s after launch.
+    var isAvailabilityResolved: Bool {
+        switch self {
+        case .codex:  return CodexCLIService.isAvailabilityResolved
+        case .claude: return ClaudeCLIService.isAvailabilityResolved
+        case .grok:   return GrokCLIService.isAvailabilityResolved
+        case .commandCode: return CommandCodeCLIService.isAvailabilityResolved
+        }
+    }
+
+    /// Known dead — resolved, and the answer was no. The ONLY safe trigger for
+    /// dropping a remembered engine and the model pick under it: `!isAvailable`
+    /// alone is true during every launch's probe window, and acting on it there
+    /// is how a relaunch used to silently reset the armed model to the first
+    /// engine's default.
+    var isKnownUnavailable: Bool { isAvailabilityResolved && !isAvailable }
+
     /// The terminal command that picks this engine's session back up. Neither
     /// CLI is spawned with `--ephemeral` / `--no-session-persistence`, so a run
     /// Notch lost track of (quit, crash) is still resumable by hand — the

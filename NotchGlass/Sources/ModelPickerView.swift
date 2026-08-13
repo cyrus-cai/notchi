@@ -973,6 +973,8 @@ struct AgentModelPickerView: View {
     let onSelectEffort: (AgentEffort?) -> Void
     let onDone: () -> Void
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     /// A local keyDown monitor is the only reliable way to own the arrow keys inside a
     /// popover — a focused field editor swallows them before SwiftUI sees them.
     @State private var keyMonitor: Any?
@@ -985,6 +987,12 @@ struct AgentModelPickerView: View {
     /// scrolling the list under the pointer is exactly the misbehavior a hover-driven
     /// list has to avoid.
     @State private var scrollToSelection = false
+    /// Hover on the engine row — its wash, matching a model row's.
+    @State private var engineHovering = false
+    /// Which edge of the list is mid-scroll, and so has something to dissolve.
+    /// Bools rather than the live offset — see the observer in `body`.
+    @State private var scrolledOffTop = false
+    @State private var scrolledOffBottom = false
     /// The armed row's wash is one shared shape that *slides* between rows
     /// instead of blinking off one row and on another — the springy glide is the
     /// card's one piece of motion. It lives as a single offset-driven shape
@@ -1005,20 +1013,38 @@ struct AgentModelPickerView: View {
         return out
     }
 
-    /// The card's content width. The floor (174) is the original design; past that,
-    /// the width is DERIVED from the bottom bar's real minimum — the engine
-    /// dropdown at its widest engine name, the 8pt spacer, the 92pt effort slider
-    /// and its own 16pt padding — because the bar is the card's one rigid row.
-    /// (Historically the marks row pushed that minimum past a hard-coded 174 once
-    /// Grok joined: the bar overflowed, SwiftUI centered the spill, and the whole
-    /// content column slid 8pt out of the popover's margins — the 边距乱 bug.) The
-    /// dropdown is measured at the widest name rather than the current one, so
-    /// flipping GPT → Command Code doesn't resize the card under the pointer.
+    /// The card's content width. The floor (174) is the original design; past
+    /// that, the width is DERIVED from the widest model row — the card's one
+    /// rigid block — because a card that outgrows a row spills under the
+    /// pointer. (Historically the marks row pushed that minimum past a
+    /// hard-coded 174 once Grok joined: the bar overflowed, SwiftUI centered
+    /// the spill, and the whole content column slid 8pt out of the popover's
+    /// margins — the 边距乱 bug.)
     private var cardWidth: CGFloat {
-        let chip = engines.map { GlassMenu<EmptyView>.compactWidth(for: chipTitle(for: $0)) }
-            .max() ?? 0
-        return max(174, chip + 8 + 92 + 16)
+        // The widest model row, whole — the list is the card's widest block.
+        // `MenuCard.width` already counts the row and card padding, so its
+        // result can be a frame width directly (same as the recents card).
+        let rows = engineChoices.map { (shortLabel($0), nil as String?) }
+        let list = MenuCard.width(titles: rows, max: Self.maxWidth)
+        // The engine row spans the card too — counted so "Command Code" can't
+        // truncate on an engine whose model names happen to be short.
+        let engine = MenuCard.width(titles: [(groupTitle(for: selectedEngine), nil)])
+        // Clamped at BOTH ends. The floor keeps the card from collapsing around
+        // a one-word fleet; the ceiling is what stops the card being sized by
+        // whatever the longest id in an aggregator's catalog happens to be —
+        // model names are vendor strings, not a layout budget. Past it the row
+        // truncates (`MenuCardRow` is `lineLimit(1)` + tail), which is the right
+        // trade: a readable card with one clipped name beats a 400pt slab.
+        return min(max(174, list, engine), Self.maxWidth)
     }
+
+    /// The card's hard ceiling. Deliberately far tighter than the recents /
+    /// folder cards' 260: those carry file paths and questions, whole sentences
+    /// that earn the width. This one carries model names — two or three tokens —
+    /// and a slider, and it hangs off the notch, so width it doesn't need is
+    /// just a bigger slab over the desktop. 186 fits the names that exist
+    /// ("Deepseek-v4-flash", "Kimi-k2.7-code") and clips the outliers.
+    private static let maxWidth: CGFloat = 186
 
     /// The list's content: only the armed engine's models. The other engine's fleet
     /// sits behind its mark in the bottom bar — half the content of the old mixed
@@ -1043,13 +1069,6 @@ struct AgentModelPickerView: View {
         // the caption is the account they all run through.
         case .commandCode: return "Command Code"
         }
-    }
-
-    /// The dropdown chip's label. Same family name, abbreviated where the full one
-    /// would stretch the card's one rigid row ("Command Code" → "Cmd"); the menu
-    /// that drops out of the chip still spells it out.
-    private func chipTitle(for e: AgentEngine) -> String {
-        e == .commandCode ? "Cmd" : groupTitle(for: e)
     }
 
     /// The row title inside a group: the caption already names the family, so
@@ -1088,12 +1107,23 @@ struct AgentModelPickerView: View {
     /// and the rows the pointer was aimed at moved out from under it. Four rows is
     /// the window; anything shorter leaves air, anything longer scrolls.
     private static let listRows = 4
+    /// How deep the list dissolves at whichever edge is actually mid-scroll. At
+    /// the old 6pt (the card's own padding) the taper was a sliver — rows ended
+    /// on what read as a hard cut. Two thirds of a row is enough to see a row go.
     /// Rows are a fixed 25pt at 2pt spacing, so the height is pure arithmetic —
     /// DEMANDED explicitly rather than `.frame(maxHeight:)`, because a flexible
     /// ScrollView inside an NSPopover just accepts whatever height the popover
     /// last proposed and clips.
+    private static let edgeFade: CGFloat = 18
+
     private var listHeight: CGFloat {
         CGFloat(Self.listRows) * MenuCard.rowStride - MenuCard.rowSpacing
+    }
+
+    /// What the rows actually add up to — the other half of the bottom-edge test
+    /// (the observer reports the offset, not the remaining travel).
+    private var contentHeight: CGFloat {
+        CGFloat(engineChoices.count) * MenuCard.rowStride - MenuCard.rowSpacing
     }
 
     /// Whether the list actually outgrows the window and scrolls — the gate for
@@ -1101,12 +1131,17 @@ struct AgentModelPickerView: View {
     private var overflowing: Bool { engineChoices.count > Self.listRows }
 
     var body: some View {
+        // Model, then effort, then engine: the card reads top-down from the
+        // choice you came to make to the dials that qualify it. The model list
+        // leads because it's what the card is for; the engine sits last because
+        // it's the rarest change and it re-fills everything above it.
         VStack(alignment: .leading, spacing: 0) {
             ScrollViewReader { proxy in
                 ScrollView(showsIndicators: false) {
                     VStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
                         // Only the armed engine's models — the other engine is one
-                        // tap away in the bottom bar, so the rows stay bare names.
+                        // tap away in the engine switch above, so the rows stay
+                        // bare names.
                         ForEach(engineChoices, id: \.self) { c in
                             // The shared menu row, minus its own wash: the armed
                             // highlight here is the single gliding shape below.
@@ -1114,8 +1149,8 @@ struct AgentModelPickerView: View {
                                         selected: isSelected(c), wash: false) {
                                 // Menu semantics, same as the Ask recents menu: one
                                 // click picks the model AND closes — no lingering
-                                // card after the choice is made. Effort / engine
-                                // tweaks below are what keep the card open.
+                                // card after the choice is made. The effort dial
+                                // above is what keeps the card open.
                                 if !isSelected(c) { arm(c) }
                                 onDone()
                             }
@@ -1138,21 +1173,32 @@ struct AgentModelPickerView: View {
                                 .animation(Self.selectionSpring, value: i)
                         }
                     }
-                    // Breathing room each fade falls across at either end of scroll.
-                    // The SAME at both ends, and only the card's own padding deep:
-                    // an asymmetric runway (it was 14 / 24) parked the first row a
-                    // third of a row lower than every other menu's first row while
-                    // leaving a hole above the divider — the card read as hung
-                    // wrong rather than as a list that scrolls.
-                    .padding(.vertical, overflowing ? MenuCard.cardPad : 0)
+                    // No runway. A card this small can't spend two thirds of a row
+                    // on empty space at each end just to give a taper something to
+                    // dissolve into — reserved at rest, it reads as the list hung
+                    // too low under the card's top edge. The fades are gated on
+                    // real scroll position instead (see `scrolledOffTop`), so at
+                    // rest the first row sits where every other menu's first row
+                    // does, and the taper only exists while rows are leaving.
+                    // Zero-size probe on the scroll CONTENT reads the clip view's
+                    // offset. Only the two CROSSINGS are stored, never the live
+                    // offset: driving a gradient's length from the offset rebuilds
+                    // the mask on every tick, which is what made the settings pane
+                    // crawl (see `paneScrolledOffTop`). These flip once each.
+                    .onScrollOffsetChange { offset in
+                        let top = offset > 0.5
+                        if top != scrolledOffTop { scrolledOffTop = top }
+                        let bottom = offset < contentHeight - listHeight - 0.5
+                        if bottom != scrolledOffBottom { scrolledOffBottom = bottom }
+                    }
                 }
                 // The shared dissolve (`scrollEdgeFade`) at both overflow edges instead
                 // of a hard cut. Gated on actual overflow — a short engine list sizes
                 // to content, and fading it would dim real rows. The feather is the
                 // runway's depth, so a row is either standing in the window or on its
                 // way out through it — never half-dimmed at rest.
-                .scrollEdgeFade(top: overflowing, bottom: overflowing,
-                                topFade: MenuCard.cardPad, bottomFade: MenuCard.cardPad)
+                .scrollEdgeFade(top: scrolledOffTop, bottom: scrolledOffBottom,
+                                fade: Self.edgeFade)
                 .frame(height: listHeight)
                 // Open centered on the current pick — with the fleet of models the
                 // armed one can sit below the fold, and a picker that opens blind to
@@ -1171,34 +1217,24 @@ struct AgentModelPickerView: View {
                 .onChange(of: selectedEngine) { followSelection(proxy) }
             }
 
-            Rectangle().fill(.white.opacity(0.07)).frame(height: 0.5)
-                .padding(.horizontal, MenuCard.rowPad)
-                .padding(.vertical, 6)
+            hairline
 
-            // One bottom bar, two things: the engine dropdown — the same GlassMenu
-            // chip the settings pane uses, spelling out the engine in words rather
-            // than asking the user to decode brand marks — on the left, and the
-            // plainest possible effort slider (detent dots and a thumb, leftmost =
-            // the CLI default, the top rung's dot lit in the agent tint) on the
-            // right. No captions, no readouts. ←/→ still steps the effort.
-            HStack(spacing: 0) {
-                GlassMenu(title: chipTitle(for: selectedEngine), compact: true) {
-                    ForEach(engines, id: \.self) { e in
-                        Button { switchEngine(e) } label: {
-                            if e == selectedEngine {
-                                Label(groupTitle(for: e), systemImage: "checkmark")
-                            } else {
-                                Text(groupTitle(for: e))
-                            }
-                        }
-                    }
-                }
-                Spacer(minLength: 8)
-                EffortSlider(rungs: efforts, selected: selectedEffort, onSelect: onSelectEffort)
-                    .frame(width: 92)
-            }
-            .padding(.horizontal, 6)
-            .frame(height: MenuCard.rowHeight)
+            // Thinking strength — the same native detent slider the settings
+            // pane's hover-sensitivity row uses: one tick per rung, the
+            // leftmost detent = the CLI's own default, a label under every
+            // detent. ←/→ still step the effort.
+            effortBar
+                // Caption, slider and marks share the model rows' left edge —
+                // the card has ONE text column, not one per section.
+                .padding(.horizontal, MenuCard.rowPad)
+
+            hairline
+
+            // The engine — the single switch that chooses whose fleet the list
+            // above shows. A full-width row in the list's own language (bare
+            // word, hover wash, no border), because it IS a row of this card,
+            // not a control parked in a bar.
+            engineRow
         }
         // Content width first, padding outside — sized bottom-up from what the
         // content actually needs (see `cardWidth`), never a top-down frame the
@@ -1215,6 +1251,128 @@ struct AgentModelPickerView: View {
         .onChange(of: choices) { syncMirrors() }
         .onChange(of: efforts) { syncMirrors() }
         .onChange(of: selectedEngine) { syncMirrors() }
+    }
+
+    /// The rule between the card's three sections — inset to the rows' own
+    /// text column so it reads as a fold in the list, not a bar across the card.
+    private var hairline: some View {
+        Rectangle().fill(.white.opacity(0.07)).frame(height: 0.5)
+            .padding(.horizontal, MenuCard.rowPad)
+            .padding(.vertical, 7)
+    }
+
+    /// The engine switch: a plain full-width row carrying the family name, and a
+    /// chevron that surfaces with the hover wash. Borderless on purpose — a chip
+    /// here would be the only outlined thing on the card.
+    private var engineRow: some View {
+        let shape = Capsule(style: .continuous)
+        return Menu {
+            ForEach(engines, id: \.self) { e in
+                Button { switchEngine(e) } label: {
+                    if e == selectedEngine {
+                        Label(groupTitle(for: e), systemImage: "checkmark")
+                    } else {
+                        Text(groupTitle(for: e))
+                    }
+                }
+            }
+        } label: {
+            // At rest it's just the word, in the quietest ink on the card — the
+            // engine is the thing you change least here, so it reads as a
+            // footnote naming whose models these are. The chevron is the part
+            // that says "this is a control", and it only has to say that once
+            // the pointer is here, so it fades in with the wash. Spelled out
+            // whole, which a full row has the width for ("Command Code", not
+            // the old chip's "Cmd").
+            HStack(spacing: 6) {
+                Text(groupTitle(for: selectedEngine))
+                    .font(.sf(MenuCard.fontSize, weight: .regular))
+                    .foregroundStyle(engineHovering ? Tokens.text2 : Tokens.text4)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.sf(8, weight: .semibold))
+                    .foregroundStyle(Tokens.text3)
+                    .opacity(engineHovering ? 1 : 0)
+            }
+            .padding(.horizontal, MenuCard.rowPad)
+            .frame(height: MenuCard.rowHeight)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background { if engineHovering { shape.fill(.white.opacity(0.06)) } }
+            .contentShape(shape)
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .onHover { engineHovering = $0 }
+        .animation(.easeOut(duration: Tokens.rowFade), value: engineHovering)
+    }
+
+    /// The thinking-strength dial: one line naming the dial AND where it stands
+    /// ("Effort High"), then the native detent slider. Not a label per rung, and
+    /// not even the two ends — the thumb's position already carries the range,
+    /// so words at both margins were furniture. This says the one thing the
+    /// thumb can't: which rung it's sitting on.
+    private var effortBar: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 4) {
+                Text(L("agent.effort"))
+                // Only the rung word changes, so only it animates — and it
+                // SUBSTITUTES rather than edits, so a cross-fade in place read as
+                // one word smearing through another. `blurReplace` is the native
+                // transition for exactly that: the outgoing word defocuses and
+                // shrinks away while the incoming one resolves out of blur.
+                //
+                // It's a transition, not a `contentTransition`, so it needs a
+                // real insertion/removal — hence the `.id`, which makes each rung
+                // its own view. The ZStack holds them in one place while they
+                // overlap (a plain swap would let the HStack reflow mid-flight),
+                // and `fixedSize` keeps each word typeset at its ideal width so
+                // neither re-wraps on the way through.
+                ZStack(alignment: .leading) {
+                    Text(effortLabel(for: currentEffortIndex))
+                        .fixedSize()
+                        .id(currentEffortIndex)
+                        .transition(.blurReplace)
+                }
+                .animation(reduceMotion ? nil : .snappy(duration: 0.3),
+                           value: currentEffortIndex)
+            }
+            .font(.sf(10.5, weight: .regular))
+            .foregroundStyle(Tokens.text3)
+            .lineLimit(1)
+            NativeDetentSlider(value: effortPosition, ticks: positionCount)
+                .frame(height: 20)
+        }
+    }
+
+    /// The detent ladder's position count — rungs plus the CLI default's empty
+    /// leftmost detent.
+    private var positionCount: Int { efforts.count + 1 }
+
+    /// Position 0 = default (nil); position i (1…count) = rungs[i-1].
+    private var currentEffortIndex: Int {
+        guard let selectedEffort, let i = efforts.firstIndex(of: selectedEffort) else { return 0 }
+        return i + 1
+    }
+
+    /// The slider's position binding. Writes snap to the nearest detent and
+    /// fire only on a real change, so a drag doesn't spam `onSelectEffort`
+    /// with the same rung every frame.
+    private var effortPosition: Binding<Double> {
+        Binding(
+            get: { Double(currentEffortIndex) },
+            set: { position in
+                let idx = min(max(Int(position.rounded()), 0), positionCount - 1)
+                guard idx != currentEffortIndex else { return }
+                onSelectEffort(idx == 0 ? nil : efforts[idx - 1])
+            }
+        )
+    }
+
+    private func effortLabel(for index: Int) -> String {
+        index == 0 ? L("agent.effort.default") : L("agent.effort.\(efforts[index - 1].rawValue)")
     }
 
     private func syncMirrors() {
@@ -1290,73 +1448,5 @@ struct AgentModelPickerView: View {
         let cur = selectedEffort.flatMap { rungs.firstIndex(of: $0) } ?? -1
         let next = min(max(cur + delta, -1), rungs.count - 1)
         onSelectEffort(next < 0 ? nil : rungs[next])
-    }
-}
-
-/// The reasoning-effort dial at its plainest: one detent dot per position and a round
-/// thumb riding them — nothing else. The leftmost detent is the CLI default, then one
-/// dot per rung; the far (rightmost) dot is lit in the agent tint to mark the
-/// "hardest thinking" end. Click or drag snaps the thumb to the nearest detent; ←/→
-/// drive the same state from the keyboard (the thumb is derived from `selected`,
-/// never stored).
-private struct EffortSlider: View {
-    let rungs: [AgentEffort]
-    let selected: AgentEffort?
-    /// nil = the CLI's own default (position 0).
-    let onSelect: (AgentEffort?) -> Void
-
-    // Position 0 = default (nil); position i (1…count) = rungs[i-1].
-    private var positionCount: Int { rungs.count + 1 }
-    private var currentIndex: Int {
-        guard let selected, let i = rungs.firstIndex(of: selected) else { return 0 }
-        return i + 1
-    }
-
-    private let thumbD: CGFloat = 11
-    private let dot: CGFloat = 2.5
-
-    var body: some View {
-        GeometryReader { geo in
-            let usable = max(geo.size.width - thumbD, 1)
-            let step = positionCount > 1 ? usable / CGFloat(positionCount - 1) : 0
-            let thumbX = thumbD / 2 + step * CGFloat(currentIndex)
-
-            ZStack(alignment: .leading) {
-                ForEach(0..<positionCount, id: \.self) { i in
-                    let isLast = i == positionCount - 1
-                    Circle()
-                        .fill(isLast ? Tokens.agentTint : .white.opacity(0.35))
-                        .frame(width: dot, height: dot)
-                        .offset(x: thumbD / 2 + step * CGFloat(i) - dot / 2)
-                }
-
-                Circle()
-                    .fill(.white)
-                    .frame(width: thumbD, height: thumbD)
-                    .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
-                    .offset(x: thumbX - thumbD / 2)
-                    .animation(.spring(response: 0.24, dampingFraction: 0.82), value: currentIndex)
-            }
-            // Fill the GeometryReader: the dots and thumb are small offset shapes,
-            // so without this the ZStack (and the contentShape hit area with it)
-            // collapses to the thumb's own ~11pt — the slider stops being clickable
-            // anywhere but its left edge.
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { v in snap(toX: v.location.x, usable: usable, step: step) }
-            )
-        }
-    }
-
-    /// Map a touch x to the nearest detent and fire only on a real change, so a
-    /// drag doesn't spam `onSelect` with the same rung every frame.
-    private func snap(toX x: CGFloat, usable: CGFloat, step: CGFloat) {
-        guard step > 0 else { return }
-        let clamped = min(max(x - thumbD / 2, 0), usable)
-        let idx = min(max(Int((clamped / step).rounded()), 0), positionCount - 1)
-        guard idx != currentIndex else { return }
-        onSelect(idx == 0 ? nil : rungs[idx - 1])
     }
 }

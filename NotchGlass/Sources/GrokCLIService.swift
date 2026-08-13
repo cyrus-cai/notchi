@@ -109,6 +109,18 @@ struct GrokCLIService: AIService {
         return nil
     }
 
+    /// Whether the resolution has actually LANDED — the difference between "no"
+    /// and "not yet". `isAvailable` collapses the two on purpose (it's read from
+    /// `body`, so it can never block), which is fine for drawing but wrong for
+    /// anything that acts destructively on a negative: a caller that DISCARDS
+    /// state when an engine looks dead has to ask this first, or the first hover
+    /// after a relaunch throws away a perfectly live pick.
+    static var isAvailabilityResolved: Bool {
+        guard resolveLock.try() else { return false }
+        defer { resolveLock.unlock() }
+        return cachedBinary != nil
+    }
+
     /// Resolve the binary and read the model cache off the main thread, so the
     /// first `isAvailable` / `defaultModel` call during a SwiftUI render reads a
     /// warm cache instead of shelling out (or hitting disk) on the main thread.
@@ -376,13 +388,13 @@ struct GrokCLIService: AIService {
                         "--no-memory", "--no-subagents", "--no-plan",
                         "--no-auto-update",
                         "--cwd", workDir.path]
-            if let backend = unifiedBackend, !workDirIsEphemeral,
+            if unifiedBackend != nil, !workDirIsEphemeral,
                Self.writeMCPConfig(in: workDir) {
                 args += ["--tools", "web_fetch",
                          "--disallowed-tools", "run_terminal_cmd,web_search",
                          "--trust",
                          "--system-prompt-override",
-                         system + Self.searchDirective(for: backend)]
+                         system + Self.searchDirective()]
             } else {
                 args += ["--tools", "web_search,web_fetch",
                          "--disallowed-tools", "run_terminal_cmd",
@@ -514,8 +526,8 @@ extension GrokCLIService {
     /// live: it pointed web_fetch at DuckDuckGo's results page instead. So the
     /// prompt names the one sanctioned searcher (reachable via grok's
     /// search_tool/use_tool MCP meta-tools) and explicitly bans the workaround.
-    static func searchDirective(for backend: APIKeyStore.SearchBackend) -> String {
-        let tool = "\(mcpServerName)__\(unifiedToolName(for: backend))"
+    static func searchDirective() -> String {
+        let tool = "\(mcpServerName)__\(WebSearchTool.toolName)"
         return """
         \n\nWeb search: the built-in web_search tool is disabled in this session. \
         The ONLY way to search the web is the MCP tool `\(tool)` — discover it \
@@ -526,13 +538,6 @@ extension GrokCLIService {
         """
     }
 
-    static func unifiedToolName(for backend: APIKeyStore.SearchBackend) -> String {
-        switch backend {
-        case .exa:       return "exa_search"
-        case .keenable:  return "keenable_search"
-        case .anysearch: return "anysearch_search"
-        }
-    }
 }
 
 // MARK: - MCP stdio server mode
@@ -579,8 +584,8 @@ enum GrokSearchMCPServer {
                 ])
             case "tools/list":
                 guard let id else { break }
-                let toolName = APIKeyStore.resolvedSearchBackend()
-                    .map { GrokCLIService.unifiedToolName(for: $0) } ?? "search_unavailable"
+                let toolName = APIKeyStore.resolvedSearchBackend() == nil
+                    ? "search_unavailable" : WebSearchTool.toolName
                 reply(id: id, result: ["tools": [[
                     "name": toolName,
                     "description": webSearchToolDescription,
@@ -618,14 +623,9 @@ enum GrokSearchMCPServer {
         Task.detached {
             defer { sem.signal() }
             do {
-                switch backend {
-                case .exa:
-                    box.text = try await ExaWebSearchTool().execute(["query": query])
-                case .keenable:
-                    box.text = try await KeenableWebSearchTool().execute(["query": query])
-                case .anysearch:
-                    box.text = try await AnySearchWebSearchTool().execute(["query": query])
-                case nil:
+                if let backend {
+                    box.text = try await backend.searchProvider.search(["query": query]).text
+                } else {
                     box.text = "Error: no search backend is configured; tell the user "
                              + "to pick one in Notch's settings."
                 }

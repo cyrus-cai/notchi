@@ -77,6 +77,9 @@ src="$built_dir/$APP_NAME"
 # --- stop the running instance ---------------------------------------------
 # Kill any running copy so the replace can't hit a busy bundle and the relaunch
 # starts the new build clean. (No error if nothing is running.)
+# macOS may show a truncated `comm` (for example, `/Applications/No`) in `ps`;
+# `pkill -f` deliberately matches the full command line, so that display does
+# not mean this pattern missed the process. Verify with `pgrep -fl` if needed.
 info "Stopping any running ${APP_NAME}…"
 pkill -f "$APP_NAME/Contents/MacOS" 2>/dev/null || true
 # Also stop any legacy Notch.app / NotchGlass.app process from before the renames.
