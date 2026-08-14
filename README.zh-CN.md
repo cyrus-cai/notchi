@@ -1,5 +1,9 @@
 [English](README.md) · [简体中文](README.zh-CN.md)
 
+<div align="center">
+
+<img src=".github/icon.png" width="96" alt="Notchi" />
+
 # Notchi
 
 **刘海，随时待命。**
@@ -10,6 +14,8 @@
 [更新日志](https://www.notch.website/releases)
 
 MIT · Apple Liquid Glass
+
+</div>
 
 Notchi 是一款免费、开源的 macOS 应用，它从 notch 变为思考和行动的地方。你的输入内容将被自动识别为 Chat，note，reminder，或编程代理任务。
 

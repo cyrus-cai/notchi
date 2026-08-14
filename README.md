@@ -1,5 +1,9 @@
 [English](README.md) · [简体中文](README.zh-CN.md)
 
+<div align="center">
+
+<img src=".github/icon.png" width="96" alt="Notchi" />
+
 # Notchi
 
 **Your notch, always ready.**
@@ -10,6 +14,8 @@
 [Release Notes](https://www.notch.website/releases)
 
 MIT · Apple Liquid Glass
+
+</div>
 
 Notchi is a free, open-source macOS app that turns the notch into a place to think and act. Whatever you type is automatically recognized as a chat, a note, a reminder, or a coding-agent task.
 
