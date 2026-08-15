@@ -76,6 +76,10 @@ final class UpdaterService: ObservableObject {
 
     private let lastCheckKey = "updater_last_check"
     private var checking = false
+    /// A release lookup is tiny and should finish quickly. Without an explicit
+    /// bound, `URLSession` can leave the manual spinner up for its much longer
+    /// default timeout when GitHub or a configured proxy is unreachable.
+    private static let checkTimeout: TimeInterval = 10
 
     /// Silent daily check — called at launch and whenever the panel opens, so a
     /// long-running agent still notices releases. Throttled to once per 24h.
@@ -244,8 +248,9 @@ final class UpdaterService: ObservableObject {
 
     private static func fetchLatest() async throws -> Release {
         let url = URL(string: "https://api.github.com/repos/\(repo)/releases/latest")!
-        let (data, resp) = try await ProxyConfig.urlSession.data(
-            for: request(url, accept: "application/vnd.github+json"))
+        var req = request(url, accept: "application/vnd.github+json")
+        req.timeoutInterval = checkTimeout
+        let (data, resp) = try await ProxyConfig.urlSession.data(for: req)
         guard (resp as? HTTPURLResponse)?.statusCode == 200 else {
             throw UpdateError.badResponse
         }

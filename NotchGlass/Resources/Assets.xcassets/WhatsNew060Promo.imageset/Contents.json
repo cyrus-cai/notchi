@@ -1,0 +1,12 @@
+{
+  "images" : [
+    {
+      "filename" : "notchi-v0.6.0-promo.png",
+      "idiom" : "universal"
+    }
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}

@@ -2508,9 +2508,11 @@ final class NotchModel: ObservableObject {
              "custom_instructions":
             return "model"
         case "search", "search_backend", "search_api_key":
-            return "search"
-        case "notes", "note_destination", "notes_folder", "copy_sense":
-            return "notes"
+            // Search lives inside Model now — its rows are a group on that pane.
+            return "model"
+        case "capture", "notes", "note_destination", "notes_folder", "copy_sense",
+             "selection_context", "force_click":
+            return "capture"
         case "general", "app_language", "launch_at_login", "hover_sensitivity", "proxy":
             return "general"
         case "shortcuts", "summon_shortcut", "action_shortcut", "prompt_shortcut":
@@ -2518,6 +2520,8 @@ final class NotchModel: ObservableObject {
         case "appearance", "dock_icon", "menu_bar_icon", "display_placement",
              "hide_in_fullscreen", "live_activity":
             return "appearance"
+        case "stats", "usage", "statistics":
+            return "stats"
         case "about":
             return "about"
         default:
@@ -2533,11 +2537,11 @@ final class NotchModel: ObservableObject {
         let section: InlineSettingsView.Section
         switch Self.settingToken(requested) {
         case "model":      section = .model
-        case "search":     section = .search
-        case "notes":      section = .notes
+        case "capture":    section = .capture
         case "general":    section = .general
         case "appearance": section = .appearance
         case "shortcuts":  section = .shortcuts
+        case "stats":      section = .stats
         case "about":      section = .about
         default: return false
         }
@@ -5236,6 +5240,10 @@ final class NotchModel: ObservableObject {
     func selectAgentModel(_ choice: AgentModelChoice) {
         agentArmedEngine = choice.engine
         agentModelID = choice.id
+        // An explicit pick counts as "recently used" right away, so the picker's
+        // top section reflects it on the next open even before a run goes out —
+        // the same rule the Ask chip's recents follow.
+        AgentModelMRU.record(engine: choice.engine, model: choice.id)
     }
 
     /// Enter on a composed line: start the agent run. With no folder yet
@@ -5276,6 +5284,9 @@ final class NotchModel: ObservableObject {
         let effort = agentEffort.flatMap {
             engine.effortChoices(forModelID: model).contains($0) ? $0 : nil
         }
+        // What actually ran is the truest "recent" signal there is — including the
+        // CLI-default pick (`model == nil`), which is a choice like any other.
+        AgentModelMRU.record(engine: engine, model: model)
         // Captured before the send clears them. Encoding a Retina
         // screenshot (downscale + JPEG) is real CPU — and there may now be
         // several — so it runs off-main, same as the chat path: the spawn waits

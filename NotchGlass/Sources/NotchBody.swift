@@ -1890,6 +1890,17 @@ struct NotchBody: View {
                     model.toggleSettings()
                 }
             }
+            // What the archive adds up to. Like the shortcuts row it hands off to
+            // its settings pane rather than popping a card here — the digest is a
+            // grid of tiles, far more than this menu's width, and it sits next to
+            // Shortcuts in the sidebar too.
+            manageMenuRow(icon: LucideIcons.chartNoAxesColumn, title: L("recent.menu.stats")) {
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                    manageExpanded = false
+                    model.settingsSection = "Stats"
+                    model.toggleSettings()
+                }
+            }
             manageMenuRow(icon: LucideIcons.settings, title: L("recent.menu.settings"), shortcut: "⌘,") {
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                     manageExpanded = false

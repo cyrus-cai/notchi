@@ -1006,12 +1006,14 @@ struct OpenAICompatAIService: AIService {
                             req.setValue(value, forHTTPHeaderField: field)
                         }
 
+                        let askingForUsage = StreamUsage.supported(endpoint)
                         let body = RequestBody(
                             model: model,
                             messages: chat,
                             stream: true,
                             fallbackModels: provider == .openrouter
-                                ? OpenRouterFreeModels.serverFallbacks(primary: model) : nil
+                                ? OpenRouterFreeModels.serverFallbacks(primary: model) : nil,
+                            includeUsage: askingForUsage
                         )
                         req.httpBody = try JSONEncoder().encode(body)
 
@@ -1022,6 +1024,12 @@ struct OpenAICompatAIService: AIService {
                         guard (200..<300).contains(http.statusCode) else {
                             // Drain the error body (capped) for a useful message.
                             let bodyText = await Self.drainErrorBody(bytes.lines)
+                            // A 400 on the one request that carried
+                            // `stream_options` is the endpoint refusing the field:
+                            // drop it and go again, so a token count can never be
+                            // what stops an answer.
+                            if http.statusCode == 400, askingForUsage,
+                               StreamUsage.markRejected(endpoint) { continue }
                             throw ServiceError.http(provider: provider.displayName,
                                                     status: http.statusCode, body: bodyText)
                         }
@@ -1039,8 +1047,15 @@ struct OpenAICompatAIService: AIService {
                             if payload.isEmpty { continue }
                             if payload == "[DONE]" { break }
                             guard let data = payload.data(using: .utf8),
-                                  let chunk = try? decoder.decode(StreamChunk.self, from: data),
-                                  let piece = chunk.choices.first?.delta.content,
+                                  let chunk = try? decoder.decode(StreamChunk.self, from: data)
+                            else { continue }
+                            // The usage trailer rides its own chunk (empty
+                            // `choices`), so it is read before the text guard
+                            // below drops everything that isn't a delta.
+                            if let usage = chunk.usage {
+                                TokenMeter.shared.record(input: usage.input, output: usage.output)
+                            }
+                            guard let piece = chunk.choices.first?.delta.content,
                                   !piece.isEmpty
                             else { continue }
                             yieldedAny = true
@@ -1100,6 +1115,13 @@ struct OpenAICompatAIService: AIService {
         /// provider (and for OpenRouter paid models), keeping the wire body
         /// byte-identical to before.
         var fallbackModels: [String]? = nil
+        /// `stream_options: {include_usage: true}` — what makes a streaming
+        /// response end with a `usage` block instead of just `[DONE]`. It is the
+        /// only way to get *real* token counts out of this wire format, and
+        /// Stats' token figure refuses to show anything else (see `TokenMeter`).
+        /// Dropped for the run of the process on any endpoint that rejects it —
+        /// see `StreamUsage.supported`.
+        var includeUsage: Bool = false
 
         private struct DynamicKey: CodingKey {
             let stringValue: String
@@ -1116,6 +1138,10 @@ struct OpenAICompatAIService: AIService {
             try c.encode(stream, forKey: DynamicKey("stream"))
             if let fallbackModels {
                 try c.encode(fallbackModels, forKey: DynamicKey("models"))
+            }
+            if includeUsage {
+                try c.encode(["include_usage": true],
+                             forKey: DynamicKey("stream_options"))
             }
         }
     }
@@ -1157,9 +1183,57 @@ struct OpenAICompatAIService: AIService {
     /// answer text; it's `null` on role-only and reasoning-only chunks, hence
     /// optional.
     private struct StreamChunk: Decodable {
-        let choices: [Choice]
+        /// Absent on the usage-only trailer some vendors send after the last
+        /// content chunk, hence defaulted rather than required.
+        var choices: [Choice] = []
+        /// Present on exactly one chunk of a `include_usage` stream — the last
+        /// one, whose `choices` is empty.
+        var usage: StreamUsage.Block? = nil
         struct Choice: Decodable { let delta: Delta }
         struct Delta: Decodable { let content: String? }
+    }
+}
+
+/// Token usage as the OpenAI wire format reports it, and the one flag that says
+/// whether an endpoint will report it at all.
+///
+/// `stream_options` is standard, and every vendor Notch bundles honours it — but
+/// `custom` points at whatever the user's own gateway is, and a strict server
+/// that 400s on an unknown field would break *answering*, not just counting. So
+/// a rejection is caught once, remembered for the run of the process, and the
+/// request is retried clean. Counting must never be able to cost an answer.
+enum StreamUsage {
+    struct Block: Decodable {
+        var prompt_tokens: Int?
+        var completion_tokens: Int?
+        /// OpenRouter/Anthropic-via-gateway spell cached prompt tokens here; they
+        /// are a *subset* of `prompt_tokens`, so they are never added on top.
+        var total_tokens: Int?
+
+        /// What to hand `TokenMeter`: the two sides of the exchange. Falls back
+        /// to `total_tokens` when a vendor reports only that.
+        var input: Int { prompt_tokens ?? max(0, (total_tokens ?? 0) - (completion_tokens ?? 0)) }
+        var output: Int { completion_tokens ?? 0 }
+    }
+
+    private static let lock = NSLock()
+    /// Endpoints that answered `stream_options` with a 400. Keyed by endpoint URL
+    /// rather than by provider so two `custom` configurations don't share a
+    /// verdict. In-memory only: a gateway that grows support shouldn't need a
+    /// preference cleared, just a relaunch.
+    nonisolated(unsafe) private static var rejected: Set<String> = []
+
+    static func supported(_ endpoint: URL) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return !rejected.contains(endpoint.absoluteString)
+    }
+
+    /// Called when a request that carried `stream_options` came back 400. Returns
+    /// true if this is news — i.e. the caller should retry the same request with
+    /// the field dropped rather than surfacing the error.
+    static func markRejected(_ endpoint: URL) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return rejected.insert(endpoint.absoluteString).inserted
     }
 }
 
@@ -1244,8 +1318,18 @@ struct AnthropicAIService: AIService {
                             let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
                             if payload.isEmpty { continue }
                             guard let data = payload.data(using: .utf8),
-                                  let event = try? decoder.decode(StreamEvent.self, from: data),
-                                  event.type == "content_block_delta",
+                                  let event = try? decoder.decode(StreamEvent.self, from: data)
+                            else { continue }
+                            // Real token counts for Stats: the input side lands on
+                            // `message_start`, the output side on the closing
+                            // `message_delta`. Nothing extra is asked for on the
+                            // wire — Anthropic reports usage on every stream.
+                            if let usage = event.message?.usage {
+                                TokenMeter.shared.record(input: usage.input, output: 0)
+                            } else if let usage = event.usage {
+                                TokenMeter.shared.record(input: 0, output: usage.output)
+                            }
+                            guard event.type == "content_block_delta",
                                   let piece = event.delta?.text,
                                   !piece.isEmpty
                             else { continue }
@@ -1338,7 +1422,55 @@ struct AnthropicAIService: AIService {
     private struct StreamEvent: Decodable {
         let type: String
         let delta: Delta?
+        /// `message_start` carries the whole request's input accounting;
+        /// `message_delta` carries the output count as the turn ends. Both are
+        /// spelled `usage`, on different events — hence one optional here and a
+        /// fold at each site (see `AnthropicUsage`).
+        let usage: AnthropicUsage?
+        let message: Message?
         struct Delta: Decodable { let text: String? }
+        struct Message: Decodable { let usage: AnthropicUsage? }
+    }
+}
+
+/// Anthropic's `usage` block. Cache reads and cache writes are billed *in
+/// addition* to `input_tokens` (unlike the OpenAI format's `cached_tokens`,
+/// which is a subset), so they are added rather than ignored.
+struct AnthropicUsage: Decodable {
+    var input_tokens: Int?
+    var output_tokens: Int?
+    var cache_read_input_tokens: Int?
+    var cache_creation_input_tokens: Int?
+
+    var input: Int {
+        (input_tokens ?? 0) + (cache_read_input_tokens ?? 0) + (cache_creation_input_tokens ?? 0)
+    }
+    var output: Int { output_tokens ?? 0 }
+
+    /// Fold a *complete* raw `usage` dictionary into the meter — one whose input
+    /// and output sides are both final. That's what the CLI dialects hand back
+    /// (they report per finished API call, as `[String: Any]` rather than
+    /// something decoded), and what a non-streaming response carries.
+    static func record(_ usage: [String: Any]) {
+        recordInput(usage)
+        recordOutput(usage)
+    }
+
+    /// A streaming turn splits its accounting across two events: `message_start`
+    /// knows the whole input, `message_delta` closes with the final output. Each
+    /// side is taken from exactly one of them — `message_start` also carries a
+    /// partial `output_tokens` (usually 1), and counting that as well would
+    /// inflate every answer by a token or two.
+    static func recordInput(_ usage: [String: Any]) {
+        TokenMeter.shared.record(
+            input: (usage["input_tokens"] as? Int ?? 0)
+                + (usage["cache_read_input_tokens"] as? Int ?? 0)
+                + (usage["cache_creation_input_tokens"] as? Int ?? 0),
+            output: 0)
+    }
+
+    static func recordOutput(_ usage: [String: Any]) {
+        TokenMeter.shared.record(input: 0, output: usage["output_tokens"] as? Int ?? 0)
     }
 }
 
@@ -2984,6 +3116,10 @@ extension OpenAICompatAIService: AgentCapableService {
                            let chain = OpenRouterFreeModels.serverFallbacks(primary: effectiveModel) {
                             body["models"] = chain
                         }
+                        // Real token counts for Stats — see `StreamUsage`, and
+                        // the 400 fallback below that makes asking for them free.
+                        let askingForUsage = StreamUsage.supported(provider.endpoint)
+                        if askingForUsage { body["stream_options"] = ["include_usage": true] }
                         req.httpBody = try AgentWire.body(body)
 
                         let (bytes, response) = try await ProxyConfig.urlSession.bytes(for: req)
@@ -3001,6 +3137,11 @@ extension OpenAICompatAIService: AgentCapableService {
                                 noReasoning = true
                                 continue
                             }
+                            // Likewise for an endpoint that won't take
+                            // `stream_options`: drop it and replay, never let a
+                            // token count cost the turn.
+                            if http.statusCode == 400, askingForUsage,
+                               StreamUsage.markRejected(provider.endpoint) { continue }
                             throw ServiceError.http(provider: provider.displayName,
                                                     status: http.statusCode, body: bodyText)
                         }
@@ -3022,8 +3163,16 @@ extension OpenAICompatAIService: AgentCapableService {
                             if payload.isEmpty { continue }
                             if payload == "[DONE]" { break }
                             guard let data = payload.data(using: .utf8),
-                                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                                  let choices = obj["choices"] as? [[String: Any]],
+                                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                            else { continue }
+                            // The usage trailer is a chunk with no `choices` at
+                            // all, so it is read before the guard that requires one.
+                            if let usage = obj["usage"] as? [String: Any] {
+                                TokenMeter.shared.record(
+                                    input: usage["prompt_tokens"] as? Int ?? 0,
+                                    output: usage["completion_tokens"] as? Int ?? 0)
+                            }
+                            guard let choices = obj["choices"] as? [[String: Any]],
                                   let choice = choices.first
                             else { continue }
 
@@ -3258,6 +3407,14 @@ extension AnthropicAIService: AgentCapableService {
                             else { continue }
 
                             switch type {
+                            case "message_start":
+                                // The turn's input accounting (prompt + cache),
+                                // reported without being asked for. Its output
+                                // half lands on `message_delta` below.
+                                if let message = obj["message"] as? [String: Any],
+                                   let usage = message["usage"] as? [String: Any] {
+                                    AnthropicUsage.recordInput(usage)
+                                }
                             case "content_block_start":
                                 let idx = obj["index"] as? Int ?? 0
                                 if let block = obj["content_block"] as? [String: Any],
@@ -3302,6 +3459,9 @@ extension AnthropicAIService: AgentCapableService {
                                 if let delta = obj["delta"] as? [String: Any],
                                    let sr = delta["stop_reason"] as? String {
                                     stopReason = sr
+                                }
+                                if let usage = obj["usage"] as? [String: Any] {
+                                    AnthropicUsage.recordOutput(usage)
                                 }
                             case "message_stop":
                                 break

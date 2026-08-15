@@ -114,9 +114,29 @@ ditto "$src" "$dest" || die "Could not copy into ${INSTALL_DIR}."
 # refuses the path until that settles. Retry briefly, then fall back to spawning
 # the binary directly — same app, just sidesteps the stale LS record.
 info "Launching…"
+# Launch with a SCRUBBED environment, whichever path gets used below.
+#
+# The app resolves and spawns the coding CLIs (`claude`, `codex`, `cmd`) to read
+# their sign-in state — and a child process inherits whatever the app was
+# launched with. A reinstall run from an agent/automation session hands its own
+# environment over (`open` forwards the caller's env; the nohup fallback
+# inherits it outright), so the app would probe with CLAUDECODE=1,
+# ANTHROPIC_BASE_URL and a session's OAuth/token vars in scope — and the CLIs
+# answer as a nested session instead of the user's own login. On screen that
+# reads as "signed out" with nothing actually wrong on disk.
+#
+# A Finder/Dock launch carries none of that; `env -i` reproduces exactly that
+# starting point (the app finds the CLIs through a login shell anyway, so the
+# bare PATH costs it nothing).
+launch_env=(/usr/bin/env -i
+  HOME="$HOME"
+  USER="${USER:-$(id -un)}"
+  PATH=/usr/bin:/bin:/usr/sbin:/sbin
+  TMPDIR="$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo /tmp)")
+
 launched=false
 for _ in 1 2 3 4 5 6; do
-  if open "$dest" 2>/dev/null; then launched=true; break; fi
+  if "${launch_env[@]}" open "$dest" 2>/dev/null; then launched=true; break; fi
   sleep 0.5
 done
 if ! $launched; then
@@ -133,7 +153,7 @@ if ! $launched; then
     # that reads the terminal takes SIGTTIN and lands in state `T` (stopped) —
     # a process that exists, satisfies the pgrep check below, and never draws a
     # frame. From the outside that is exactly "the app won't open".
-    nohup "$dest/Contents/MacOS/Notchi" </dev/null >/dev/null 2>&1 &
+    nohup "${launch_env[@]}" "$dest/Contents/MacOS/Notchi" </dev/null >/dev/null 2>&1 &
     disown 2>/dev/null || true
   fi
 fi
@@ -154,7 +174,7 @@ case "$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ')" in
       T*)
         kill -9 "$pid" 2>/dev/null || true
         sleep 1
-        open "$dest" 2>/dev/null || true
+        "${launch_env[@]}" open "$dest" 2>/dev/null || true
         sleep 2
         pgrep -x Notchi >/dev/null || die "Could not launch ${dest} (stayed suspended)."
         ;;

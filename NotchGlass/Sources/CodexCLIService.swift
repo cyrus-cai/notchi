@@ -149,10 +149,7 @@ struct CodexCLIService: AIService {
     /// non-working shim (e.g. the `superset` wrapper, which prints "not found" and
     /// exits non-zero) that `command -v` might otherwise hand back.
     private static func smokeTest(_ path: String) -> Bool {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: path)
-        p.arguments = ["--version"]
-        p.environment = ShellEnvironment.childEnvironment(for: path)
+        let p = ShellEnvironment.makeProcess(path, ["--version"])
         p.standardOutput = Pipe()
         p.standardError = Pipe()
         do { try p.run() } catch { return false }
@@ -264,10 +261,7 @@ struct CodexCLIService: AIService {
     /// app-server is always torn down before returning.
     private static func queryModelList() -> [Model]? {
         guard let binary = resolveBinary() else { return nil }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: binary)
-        p.arguments = ["app-server"]
-        p.environment = ShellEnvironment.childEnvironment(for: binary)
+        let p = ShellEnvironment.makeProcess(binary, ["app-server"])
         let inPipe = Pipe(), outPipe = Pipe()
         p.standardInput = inPipe
         p.standardOutput = outPipe
@@ -311,10 +305,7 @@ struct CodexCLIService: AIService {
     @discardableResult
     static func reauthorize() -> Bool {
         guard let binary = resolveBinary() else { return false }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: binary)
-        p.arguments = ["login"]
-        p.environment = ShellEnvironment.childEnvironment(for: binary)
+        let p = ShellEnvironment.makeProcess(binary, ["login"])
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
         do { try p.run() } catch { return false }
@@ -347,16 +338,10 @@ struct CodexCLIService: AIService {
                         "-C", workDir.path]
             if let model { args += ["-m", model] }
 
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: binary)
-            process.arguments = args
-            process.currentDirectoryURL = workDir
-            // Inherit the environment but guarantee HOME so codex finds ~/.codex/auth.json
-            // even when launched from a GUI context with a sparse environment. Same
-            // reason the proxy has to be injected: `--ignore-user-config` means the
-            // proxy keys in ~/.codex/config.toml don't apply either, so the
-            // environment is the only channel left.
-            process.environment = ShellEnvironment.childEnvironment(for: binary)
+            // `--ignore-user-config` means the proxy keys in ~/.codex/config.toml
+            // don't apply, so the environment `makeProcess` builds is the only
+            // channel the proxy has left.
+            let process = ShellEnvironment.makeProcess(binary, args, cwd: workDir)
 
             let outPipe = Pipe(), inPipe = Pipe(), errPipe = Pipe()
             process.standardOutput = outPipe
@@ -486,6 +471,12 @@ private final class StreamState {
                    let text = item["text"] as? String, !text.isEmpty {
                     yieldedAny = true
                     out.append(text)
+                }
+            case "turn.completed":
+                // The turn's real token cost, as codex reports it.
+                if let usage = obj["usage"] as? [String: Any] {
+                    TokenMeter.shared.record(input: usage["input_tokens"] as? Int ?? 0,
+                                             output: usage["output_tokens"] as? Int ?? 0)
                 }
             case "error":
                 if let msg = obj["message"] as? String { failure = msg }

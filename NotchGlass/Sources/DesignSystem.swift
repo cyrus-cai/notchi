@@ -194,6 +194,7 @@ extension View {
     func captionLabel() -> some View {
         font(.sf(10, weight: .semibold))
             .tracking(0.8)
+            .textCase(.uppercase)
             .foregroundStyle(Tokens.text4)
     }
 }

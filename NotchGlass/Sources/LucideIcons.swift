@@ -105,6 +105,27 @@ enum LucideIcons {
         "M12 6v6l4 2",
     ], viewBox: 24)
 
+    /// lucide `hash` — the neutral "a quantity of something" mark. Stats' token
+    /// tile wears it because that figure isn't a bucket the way the three beside
+    /// it are: it's a measure taken across all of them, and lending it any
+    /// bucket's glyph would say it belonged to that bucket.
+    static let hash = Mark(paths: [
+        "M4 9h16",
+        "M4 15h16",
+        "M10 3 8 21",
+        "M16 3 14 21",
+    ], viewBox: 24)
+
+    /// lucide `chart-no-axes-column` — three bare bars, no frame. The manage
+    /// menu's Stats row wears it: the pane it opens is a set of counts, and the
+    /// axis-less version says "a reading" without dragging a chart's furniture
+    /// into a 13pt glyph.
+    static let chartNoAxesColumn = Mark(paths: [
+        "M12 20V10",
+        "M18 20V4",
+        "M6 20v-4",
+    ], viewBox: 24)
+
     /// lucide `command` — the ⌘ loop. The keyboard-shortcuts row wears it because
     /// it *is* the subject: the glyph names the card it opens without a word.
     static let command = Mark(paths: [

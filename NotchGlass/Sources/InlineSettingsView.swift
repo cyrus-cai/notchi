@@ -134,6 +134,10 @@ struct InlineSettingsView: View {
     /// setup (keyless active provider, or a pending model) forces it open
     /// regardless — see `keySection`.
     @State private var keySectionOpen = false
+    /// Whether the custom-instructions field is unfolded. Collapsed at rest like
+    /// the key section above it — it opens by itself only when there is already an
+    /// instruction stored, so an existing preference is never hidden.
+    @State private var instructionsSectionOpen = false
 
     /// The model catalog behind the picker — live lists, the fold, and which providers
     /// are callable. Session-wide (the panel's ⌘⇧I picker reads the same store), so a
@@ -269,12 +273,12 @@ struct InlineSettingsView: View {
     /// The left-hand category list — the point of the column is that the next
     /// setting gets a home without redesigning the panel.
     enum Section: String, CaseIterable, Identifiable {
-        case model = "Model"     // provider, API key, model override
-        case search = "Search"   // search backend + its key
-        case notes = "Notes"     // the capture pipeline: note destination + copy sensing
+        case model = "Model"     // who answers: provider, API key, model override — and the search backend behind it
+        case capture = "Capture" // how a line gets in and where it lands: copy sensing, selected text, Force Click, note destination
         case appearance = "Appearance" // where it shows up: screens, full screen, Dock icon
-        case general = "General" // language, launch at login, hover, + Advanced (proxy)
         case shortcuts = "Shortcuts" // editable keyboard controls, its own top-level settings category
+        case general = "General" // language, launch at login, permissions, + Advanced (proxy)
+        case stats = "Stats"     // what the archive adds up to — read-only
         case about = "About"     // version + self-update
         case licenses = "Licenses" // third-party attribution and licences
         var id: String { rawValue }
@@ -287,7 +291,13 @@ struct InlineSettingsView: View {
         /// `nil` for the top-level categories, whose back leaves settings.
         var parent: Section? { isDetail ? .about : nil }
 
-        /// The sidebar's rows: every category, minus the sub-pages.
+        /// The sidebar's rows: every category, minus the sub-pages — in
+        /// declaration order, which is the grouping. The column is 104pt wide and
+        /// carries no device to draw a group with: a rule through it is heavy, and
+        /// an inserted gap reads as a layout slip rather than a boundary. So the
+        /// bands live in the ORDER and nowhere else — what answers and what it
+        /// takes in, then how the app presents and behaves, then the two pages
+        /// that only report.
         static var sidebarCases: [Section] { allCases.filter { !$0.isDetail } }
 
         /// The sidebar label, localized. The raw value stays English (a stable
@@ -295,11 +305,11 @@ struct InlineSettingsView: View {
         var title: String {
             switch self {
             case .model:      return L("sidebar.model")
-            case .search:     return L("sidebar.search")
-            case .notes:      return L("sidebar.notes")
+            case .capture:    return L("sidebar.capture")
             case .general:    return L("sidebar.general")
             case .shortcuts:  return L("sidebar.shortcuts")
             case .appearance: return L("sidebar.appearance")
+            case .stats:      return L("sidebar.stats")
             case .about:      return L("sidebar.about")
             case .licenses:   return L("about.licenses")
             }
@@ -386,7 +396,7 @@ struct InlineSettingsView: View {
 
     /// Which disclosure chip owns the pointer. Permissions and Advanced can share
     /// one pane, so a single Bool would brighten both at once.
-    private enum DisclosureHover { case keys, permissions, advanced }
+    private enum DisclosureHover { case keys, instructions, permissions, advanced }
     @State private var hoveredDisclosure: DisclosureHover?
 
     /// What the proxy field resolves to right now — filled in asynchronously by
@@ -400,6 +410,17 @@ struct InlineSettingsView: View {
     @State private var remindersPermission: SettingsPermissionStatus = .checking
     @State private var notesPermission: SettingsPermissionStatus = .checking
     @State private var notificationsPermission: SettingsPermissionStatus = .checking
+
+    /// The day the Stats grid's pointer is on. Lives here, not in the pane,
+    /// because the readout naming it is drawn in the panel header — the pane's
+    /// own corners are all spoken for.
+    @State private var statsHover: StatsHoverDay?
+
+    /// What Settings → Stats draws. `nil` until the first fold over the archive
+    /// lands (see `refreshStats`); recomputed whenever the archive grows.
+    @State private var stats: StatsDigest?
+    /// The token odometer's reading, refreshed alongside the digest.
+    @State private var statsTokens = TokenMeter.Reading(total: 0)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -424,22 +445,13 @@ struct InlineSettingsView: View {
                     sidebar
                         .padding(.top, Self.paneTopRunway)
 
-                    // Hairline column boundary, full height of whichever side is
-                    // taller. `maxHeight: .infinity` makes it greedy on its own —
-                    // the `fixedSize` below is what resolves it to the columns'
-                    // height instead of every point the panel can offer.
-                    Rectangle()
-                        .fill(.white.opacity(0.08))
-                        .frame(width: 0.5)
-                        .frame(maxHeight: .infinity)
-
                     paneContent
                         .padding(.leading, 14)
                 }
                 // Take the columns' own height, nothing more: the pane already
                 // carries an exact height (content, capped at Recent's), so this
-                // no longer unfolds the scroll — it only stops the greedy divider
-                // (and the scroll behind it) from stretching the island.
+                // no longer unfolds the scroll — it only stops the scroll behind
+                // it from stretching the island.
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, 8)
                 .padding(.top, 12)
@@ -500,21 +512,38 @@ struct InlineSettingsView: View {
         NotchBody.immersiveListHeight - Self.headerChrome
     }
 
+    /// Carries the open pane's measured content height out of the scroll view.
+    private struct PaneContentHeightKey: PreferenceKey {
+        static let defaultValue: CGFloat = 0
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+            value = max(value, nextValue())
+        }
+    }
+
     /// Scroll anchor for the key section — the one pane area whose unfold can
     /// push its own fields past the pane's height cap.
     private static let keySectionAnchor = "settings.keySection"
 
     /// The empty inset above the pane's first row, and the length of the top
-    /// taper that dissolves into it. The runway is the longer of the two on
-    /// purpose: a fade that outreaches its runway lands on live content.
+    /// taper that dissolves into it. The taper is the longer of the two: a 12pt
+    /// fade that stopped at the runway's edge read as a hard cut, so it now
+    /// starts well above the first row and reaches down past it — matched to the
+    /// bottom's 32pt so both edges of the pane dissolve at the same rate. It only
+    /// ever draws while the pane is scrolled (`paneScrolledOffTop`), so at rest
+    /// the first row is still fully solid.
     private static let paneTopRunway: CGFloat = 14
-    private static let paneTopFade: CGFloat = 12
+    private static let paneTopFade: CGFloat = 34
 
     /// Whether the open pane is scrolled off its top — all the top taper needs to
     /// know. A Bool, not the live offset: driving the gradient's LENGTH from the
     /// offset rebuilt the pane's mask on every scroll tick, which is what made
     /// scrolling crawl. This flips once.
     @State private var paneScrolledOffTop = false
+
+    /// Whether the open pane's rows are taller than the room under the runway.
+    /// Starts `true` so a pane that does overflow never shows an un-tapered first
+    /// frame; the measurement corrects it on the same layout pass.
+    @State private var paneOverflows = true
 
     /// The open section's pane. Lives apart from `body` because it is drawn in
     /// two different frames — in the right-hand column beside the sidebar for a
@@ -537,11 +566,21 @@ struct InlineSettingsView: View {
                 // then pick one of *its* models. The API key stays supporting
                 // cast — folded into `keySection`, which only unfolds when the
                 // choice actually needs a key (or the user opens it by hand).
+                // Both groups carry a caption: leaving the first one bare (the
+                // sidebar does name it) read as a caption that had gone missing.
+                Text(L("sidebar.model"))
+                    .captionLabel()
                 providerRow
                 modelRow
                 keySection
                 customInstructionsRow
-            case .search:
+                // Web search used to be a category of its own — a whole sidebar
+                // entry for two rows. It is the same question this pane already
+                // answers (which backend, and its key), so it rides here as a
+                // labelled group instead.
+                Text(L("sidebar.search"))
+                    .captionLabel()
+                    .padding(.top, 2)
                 searchBackendRow
                     // No stored pick yet → commit the shown default so the
                     // UI and what actually runs never disagree.
@@ -549,25 +588,30 @@ struct InlineSettingsView: View {
                         if searchBackend == nil { selectSearchBackend(selectedBackend) }
                     }
                 // Only the picked backend's key row shows — like the model
-                // section, one choice, one field to fill.
+                // choice above, one pick, one field to fill.
                 switch selectedBackend {
                 case .keenable: keenableKeyRow
                 case .exa:      exaKeyRow
                 case .anysearch: anySearchKeyRow
                 }
-            case .notes:
-                // The capture pipeline in one place: where a jot files,
-                // then the closed-notch copy sensing that feeds it.
-                noteDestinationRow
+            case .capture:
+                // The whole path a line takes into the notch, in the order it
+                // travels: what the panel picks up when it opens, how a press
+                // opens it, then where a jot finally files. These four rows used
+                // to be split across Notes and General, which put "what gets
+                // captured" and "where it goes" on different pages.
                 copySenseRow
-            case .general:
+                selectionContextRow
                 if ForceClickFeature.isEnabled {
                     forceClickPressureRow
                 }
-                // What the panel picks up when it opens, next to how a press
-                // opens it — both are the notch reaching outside itself.
-                selectionContextRow
-                hoverSensitivityRow
+                noteDestinationRow
+            case .general:
+                // What's left once the capture rows moved out is genuinely
+                // app-level: how it talks to you, whether it starts with the Mac,
+                // what the system lets it touch, and the escape hatch. Two live
+                // controls first, then the two folded blocks — nobody opens
+                // Settings to look at a proxy field.
                 appLanguageRow
                 launchAtLoginRow
                 permissionsSection
@@ -578,13 +622,18 @@ struct InlineSettingsView: View {
                 // Two groups, heaviest control first. Where it shows up —
                 // which screens carry an island, whether it also sits in
                 // the Dock and the menu bar — then how it behaves once
-                // there: yielding to full screen, animating on background
-                // work.
+                // there: how readily it opens under the pointer, yielding to
+                // full screen, animating on background work. Hover sensitivity
+                // sat in General for as long as General was a drawer; it is a
+                // property of the island, and this is the island's page.
                 placementRow
                 dockIconRow
                 menuBarIconRow
+                hoverSensitivityRow
                 fullscreenAutoHideRow
                 liveActivityRow
+            case .stats:
+                statsSection
             case .about:
                 aboutSection
             case .licenses:
@@ -592,15 +641,22 @@ struct InlineSettingsView: View {
             }
             }
             .frame(maxWidth: .infinity, alignment: .topLeading)
+            // How tall this pane's rows actually are, measured before the runway
+            // and the bottom inset are added — the number the bottom taper is
+            // gated on (see `paneOverflows`).
+            .background(
+                GeometryReader { g in
+                    Color.clear.preference(key: PaneContentHeightKey.self,
+                                           value: g.size.height)
+                }
+            )
             // A top RUNWAY — the whole right-hand pane rests a little lower than the
             // sidebar's first item, and this inset is what the top taper dissolves
-            // into. It has to outlast the taper (see `paneTopFade`), or the fade
-            // lands on live content the instant the pane moves: About's masthead
-            // (a 44pt icon beside the app name, the tallest first row in the app)
-            // went half-transparent on a stray trackpad nudge, which read as
-            // something covering the top of the pane. With the runway, a small
-            // scroll eats empty space first and the rows stay solid. The bottom
-            // keeps its own runway — that edge tapers at all times.
+            // into: a small scroll eats empty space before a row reaches the
+            // steep part of the taper (see `paneTopFade`), so rows stay readable
+            // on a stray trackpad nudge instead of the pane's top looking
+            // covered. The bottom keeps its own runway — that edge tapers at all
+            // times.
             .padding(.top, Self.paneTopRunway)
             .padding(.bottom, 20)
             // Zero-size probe on the scroll CONTENT: it reads the real clip view's
@@ -610,6 +666,12 @@ struct InlineSettingsView: View {
                 let off = offset > 0.5
                 if off != paneScrolledOffTop { paneScrolledOffTop = off }
             }
+            }
+            .onPreferenceChange(PaneContentHeightKey.self) { height in
+                // The runway is empty by definition, so the rows only overflow
+                // once they outgrow what is left under it.
+                let over = height > settingsPaneHeight - Self.paneTopRunway + 0.5
+                if over != paneOverflows { paneOverflows = over }
             }
             .scrollIndicators(.never)
             // One fixed height for every pane (see `settingsPaneHeight`) — the
@@ -634,13 +696,22 @@ struct InlineSettingsView: View {
             // permanent one dimmed the first row of every pane before the user had
             // scrolled anything, and the fade is there to dissolve rows leaving
             // past the back pill — nothing is leaving while the pane sits at top.
-            // Kept shorter than the runway above it so it always has empty space
-            // to dissolve into rather than the first row.
-            .scrollEdgeFade(top: paneScrolledOffTop, bottom: true,
+            // It starts above the first row and runs long (see `paneTopFade`) so
+            // rows thin out gradually on the way past the back pill instead of
+            // snapping off at the runway's edge.
+            // The bottom taper is gated on the pane actually overflowing — which
+            // is what `scrollEdgeFade` documents and what every other scrolling
+            // region in the app does. Unconditional, it dimmed the last 32pt of
+            // panes that fit perfectly well: About's colophon, and Stats' bottom
+            // card, both washed out with nothing below them to dissolve into.
+            .scrollEdgeFade(top: paneScrolledOffTop, bottom: paneOverflows,
                             topFade: Self.paneTopFade, bottomFade: 32)
             // A pane swap starts at the top again; the observer only reports on
             // the next bounds change, so clear the flag here.
-            .onChange(of: section) { paneScrolledOffTop = false }
+            .onChange(of: section) {
+                paneScrolledOffTop = false
+                statsHover = nil
+            }
         }
     }
 
@@ -732,10 +803,42 @@ struct InlineSettingsView: View {
             }
 
             Spacer()
+
+            // Stats' hover readout. The header is the one line in this panel with
+            // standing empty space, so naming the square under the pointer costs
+            // no layout anywhere — and at this height it is clear of the pane's
+            // own tapers.
+            statsReadout
         }
         .padding(.horizontal, 8)
         .padding(.top, 12)
         .padding(.bottom, 4)
+        .animation(.easeOut(duration: Tokens.rowFade), value: statsHover)
+    }
+
+    /// "Aug 5 · 21 chats · 2 agent runs" — the date, and what actually went
+    /// through the notch that day, bucket by bucket. It used to read "23 items",
+    /// which left the reader working out what an item was; each figure now
+    /// carries the noun its column in the totals row carries, singular forms
+    /// included, because "1 chats" is the kind of thing that makes a panel look
+    /// unfinished. A day nothing happened on shows only its date — the empty
+    /// square under the pointer has already said the rest.
+    @ViewBuilder
+    private var statsReadout: some View {
+        if section == .stats, let day = statsHover?.day, let stats {
+            let buckets = StatsFormat.dayBreakdown(stats.breakdown[day] ?? .init())
+            Text(buckets.map { L("stats.dayTip", StatsFormat.day(day), $0) }
+                 ?? StatsFormat.day(day))
+                // Meta weight, not label weight: this line is an annotation on
+                // the square under the pointer, and at `.text3`/11 it competed
+                // with the back pill across the header from it.
+                .font(.sf(10).monospacedDigit())
+                .foregroundStyle(Tokens.text4)
+                .lineLimit(1)
+                .fixedSize()
+                .padding(.trailing, 6)
+                .transition(.opacity)
+        }
     }
 
     // MARK: - Rows
@@ -2172,40 +2275,79 @@ struct InlineSettingsView: View {
     /// `NotchModel.customInstructionsLimit` chars (the binding truncates), empty by
     /// default. Deliberately understated: the hint says it refines, never that it
     /// overrides the core rules.
+    /// Folded away at rest behind the same glass disclosure chip the API key uses:
+    /// it is a once-in-a-while preference, not something the Model pane should
+    /// spend a whole field on every time it opens.
     private var customInstructionsRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 3) {
-                Text(L("general.customInstructions"))
-                    .font(.sf(13))
-                    .foregroundStyle(Tokens.text1)
+        VStack(alignment: .leading, spacing: 12) {
+            Button {
+                withAnimation(.easeOut(duration: 0.16)) { instructionsSectionOpen.toggle() }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "chevron.right")
+                        .font(.sf(9, weight: .semibold))
+                        .rotationEffect(.degrees(instructionsSectionOpen ? 90 : 0))
+                    Text(L("general.customInstructions"))
+                        .font(.sf(12, weight: .medium))
+                }
+                .foregroundStyle(Tokens.text1)
+                .padding(.horizontal, 10)
+                .frame(height: 26)
+                // The disclosure's own glass chip — a translucent pill that
+                // brightens under the pointer, so the fold itself reads as a
+                // control on the panel's glass rather than a bare line of text.
+                .background(
+                    Capsule()
+                        .fill(.white.opacity(hoveredDisclosure == .instructions ? 0.12 : 0.06))
+                )
+                .overlay(
+                    Capsule()
+                        .strokeBorder(.white.opacity(hoveredDisclosure == .instructions ? 0.22 : 0.12),
+                                      lineWidth: 0.5)
+                )
+                .contentShape(Capsule())
             }
-            ZStack(alignment: .topLeading) {
-                if model.customInstructions.isEmpty {
-                    Text(L("general.customInstructions.placeholder"))
+            .buttonStyle(.plain)
+            .onHover { inside in
+                if inside { hoveredDisclosure = .instructions }
+                else if hoveredDisclosure == .instructions { hoveredDisclosure = nil }
+            }
+            .animation(.easeOut(duration: Tokens.hoverFade), value: hoveredDisclosure)
+
+            if instructionsSectionOpen {
+                ZStack(alignment: .topLeading) {
+                    if model.customInstructions.isEmpty {
+                        Text(L("general.customInstructions.placeholder"))
+                            .font(.sf(13))
+                            .foregroundStyle(Tokens.text3)
+                            .allowsHitTesting(false)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                    }
+                    TextField("", text: Binding(
+                        get: { model.customInstructions },
+                        set: { model.customInstructions = $0 }
+                    ), axis: .vertical)
+                        .textFieldStyle(.plain)
+                        .lineLimit(1...3)
                         .font(.sf(13))
-                        .foregroundStyle(Tokens.text3)
-                        .allowsHitTesting(false)
+                        .foregroundStyle(Tokens.text1)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
+                        // Typing here counts as activity so a drifting pointer can't fold
+                        // the panel mid-edit (same guard the API-key field uses).
+                        .onChange(of: model.customInstructions) { model.noteUserTyping() }
                 }
-                TextField("", text: Binding(
-                    get: { model.customInstructions },
-                    set: { model.customInstructions = $0 }
-                ), axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .lineLimit(1...3)
-                    .font(.sf(13))
-                    .foregroundStyle(Tokens.text1)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    // Typing here counts as activity so a drifting pointer can't fold
-                    // the panel mid-edit (same guard the API-key field uses).
-                    .onChange(of: model.customInstructions) { model.noteUserTyping() }
+                .background(
+                    RoundedRectangle(cornerRadius: 9)
+                        .fill(.white.opacity(0.06))
+                )
             }
-            .background(
-                RoundedRectangle(cornerRadius: 9)
-                    .fill(.white.opacity(0.06))
-            )
+        }
+        // An instruction already on file shouldn't hide behind a fold the user
+        // never opened — start unfolded in that case, still foldable by hand.
+        .onAppear {
+            if !model.customInstructions.isEmpty { instructionsSectionOpen = true }
         }
     }
 
@@ -2301,18 +2443,40 @@ struct InlineSettingsView: View {
         }
     }
 
+    /// None of this may run on the render path. It is called from
+    /// `permissionsSection`'s `onAppear`, which fires *inside* the 0.16s section
+    /// swap — and every probe in here is a blocking round-trip to a system
+    /// daemon, not a property read:
+    ///
+    /// - `EKEventStore.authorizationStatus` is a TCC lookup that measured
+    ///   **50–70 ms** whenever its in-process cache is cold (it warms after two
+    ///   calls and drops again on any TCC change) — three to four dropped frames
+    ///   of an animation that only lasts ten, which is the visible hitch on
+    ///   landing on General;
+    /// - `UNUserNotificationCenter.current()` opens its XPC connection on first
+    ///   touch;
+    /// - the Notes probe walks LaunchServices and may launch Notes.app.
+    ///
+    /// Same rule `refreshProxyStatus` already follows: resolve off the main
+    /// thread, let the pills fill in a beat later. They start on `.checking`, so
+    /// there is nothing to flash.
     private func refreshPermissions() {
-        remindersPermission = Self.remindersStatus()
+        Task.detached(priority: .userInitiated) {
+            let reminders = Self.remindersStatus()
+            await MainActor.run { remindersPermission = reminders }
 
-        UNUserNotificationCenter.current().getNotificationSettings { settings in
-            let status = Self.notificationsStatus(settings.authorizationStatus)
-            Task { @MainActor in notificationsPermission = status }
+            UNUserNotificationCenter.current().getNotificationSettings { settings in
+                let status = Self.notificationsStatus(settings.authorizationStatus)
+                Task { @MainActor in notificationsPermission = status }
+            }
+
+            await MainActor.run { refreshNotesPermission() }
         }
-
-        refreshNotesPermission()
     }
 
-    private static func remindersStatus() -> SettingsPermissionStatus {
+    /// `nonisolated` on purpose: it touches no view state, and `refreshPermissions`
+    /// deliberately runs it off the main thread (the TCC lookup blocks).
+    nonisolated private static func remindersStatus() -> SettingsPermissionStatus {
         switch EKEventStore.authorizationStatus(for: .reminder) {
         case .authorized, .fullAccess: return .granted
         case .notDetermined:           return .notDetermined
@@ -2364,12 +2528,12 @@ struct InlineSettingsView: View {
     /// the live state without prompting.
     private func refreshNotesPermission() {
         notesPermission = .checking
-        withRunningNotes { app in
-            guard let app else {
+        withRunningNotes { pid in
+            guard let pid else {
                 notesPermission = .unavailable
                 return
             }
-            determineNotesPermission(for: app, ask: false)
+            determineNotesPermission(pid: pid, ask: false)
         }
     }
 
@@ -2379,41 +2543,52 @@ struct InlineSettingsView: View {
             return
         }
         notesPermission = .checking
-        withRunningNotes { app in
-            guard let app else {
+        withRunningNotes { pid in
+            guard let pid else {
                 notesPermission = .unavailable
                 return
             }
-            determineNotesPermission(for: app, ask: true)
+            determineNotesPermission(pid: pid, ask: true)
         }
     }
 
     /// Supply a running Notes process without bringing it to the foreground.
     /// Existing instances are reused; otherwise the app is launched without
     /// activation because the AE permission API only accepts a live target.
-    private func withRunningNotes(_ completion: @escaping (NSRunningApplication?) -> Void) {
-        if let running = NSRunningApplication.runningApplications(
-            withBundleIdentifier: "com.apple.Notes").first {
-            completion(running)
-            return
-        }
-        guard let url = NSWorkspace.shared.urlForApplication(
-            withBundleIdentifier: "com.apple.Notes") else {
-            completion(nil)
-            return
-        }
-        let configuration = NSWorkspace.OpenConfiguration()
-        configuration.activates = false
-        configuration.addsToRecentItems = false
-        NSWorkspace.shared.openApplication(at: url, configuration: configuration) { app, _ in
-            Task { @MainActor in completion(app) }
+    ///
+    /// Both lookups are LaunchServices round-trips (`urlForApplication` measured
+    /// ~7 ms cold), and this is reached from `permissionsSection`'s `onAppear` —
+    /// mid-section-swap. They run off the main thread; only the launch and the
+    /// completion come back to it. A `pid` crosses the boundary rather than the
+    /// `NSRunningApplication`, since the pid is all the AE probe wants.
+    private func withRunningNotes(_ completion: @escaping @MainActor (pid_t?) -> Void) {
+        Task.detached(priority: .userInitiated) {
+            if let running = NSRunningApplication.runningApplications(
+                withBundleIdentifier: "com.apple.Notes").first {
+                let pid = running.processIdentifier
+                await MainActor.run { completion(pid) }
+                return
+            }
+            guard let url = NSWorkspace.shared.urlForApplication(
+                withBundleIdentifier: "com.apple.Notes") else {
+                await MainActor.run { completion(nil) }
+                return
+            }
+            await MainActor.run {
+                let configuration = NSWorkspace.OpenConfiguration()
+                configuration.activates = false
+                configuration.addsToRecentItems = false
+                NSWorkspace.shared.openApplication(at: url, configuration: configuration) { app, _ in
+                    let pid = app?.processIdentifier
+                    Task { @MainActor in completion(pid) }
+                }
+            }
         }
     }
 
     /// This call can block behind the secure consent sheet, so it always runs off
     /// the main thread. The result is then translated back onto the view state.
-    private func determineNotesPermission(for app: NSRunningApplication, ask: Bool) {
-        let pid = app.processIdentifier
+    private func determineNotesPermission(pid: pid_t, ask: Bool) {
         DispatchQueue.global(qos: .userInitiated).async {
             let target = NSAppleEventDescriptor(processIdentifier: pid)
             let result = AEDeterminePermissionToAutomateTarget(
@@ -3364,6 +3539,50 @@ struct InlineSettingsView: View {
     /// block (name, tagline, one-line description) sits above the Version row so
     /// the panel reads as more than a build number, then a quiet links row hands
     /// off to the source and release pages.
+    // MARK: - Stats
+
+    /// Settings → **Stats**. The pane is a pure function of the archive, so this
+    /// holds nothing but the folded digest and refreshes it when the archive
+    /// grows under it (an answer can land while the pane is open).
+    private var statsSection: some View {
+        Group {
+            if let stats {
+                StatsPane(digest: stats, tokens: statsTokens, hovered: $statsHover)
+            } else {
+                // Deliberately blank until the first fold lands: the archive
+                // decodes asynchronously at launch, and flashing "no activity
+                // yet" for a frame before the numbers arrive reads as a bug.
+                Color.clear.frame(height: 1)
+            }
+        }
+        .task(id: statsFingerprint) { await refreshStats() }
+    }
+
+    /// What has to change for the digest to be stale. Not `history.count` alone:
+    /// a follow-up on an open thread rewrites that thread in place and re-files it
+    /// at the head, so the row count doesn't move while the word count does — the
+    /// pane would sit there showing the figure from before the answer.
+    private var statsFingerprint: some Hashable {
+        struct Fingerprint: Hashable { let count: Int; let newest: Date? }
+        return Fingerprint(count: model.history.count, newest: model.history.first?.t)
+    }
+
+    /// Fold the archive off the main thread. It's a few milliseconds over today's
+    /// archives, but the walk is unbounded — it grows with every answer the app
+    /// ever gives — and the panel it would block is an animating one.
+    private func refreshStats() async {
+        let items = model.history
+        let digest = await Task.detached(priority: .userInitiated) {
+            StatsDigest.make(from: items)
+        }.value
+        stats = digest
+        // The token figure is the one number on the pane that isn't folded from
+        // the archive — it's the meter's own running total (see `TokenMeter`),
+        // re-read on the same beat, since the answer that grew the archive is
+        // also the request that moved the meter.
+        statsTokens = TokenMeter.shared.reading
+    }
+
     private var aboutSection: some View {
         VStack(alignment: .leading, spacing: 14) {
             // 1 — Identity: who the app is, with the version and its update
@@ -4259,19 +4478,30 @@ struct SettingActionButton: View {
 struct SettingInfo: View {
     private let plain: String?
     private let rich: AttributedString?
+    /// Glyph size and the square it's hit-tested in. The defaults are the
+    /// settings-row register, where the mark hangs off a 13pt label with a whole
+    /// row's height to sit in. Stats' token tile passes a smaller pair: there it
+    /// trails an 11pt label inside a quarter-width column, and the 20pt square
+    /// would set that column's own line height.
+    var glyph: CGFloat = 12
+    var hit: CGFloat = 20
 
     @State private var showing = false
     @State private var hovering = false
 
-    init(_ text: String) { plain = text; rich = nil }
-    init(_ text: AttributedString) { plain = nil; rich = text }
+    init(_ text: String, glyph: CGFloat = 12, hit: CGFloat = 20) {
+        plain = text; rich = nil; self.glyph = glyph; self.hit = hit
+    }
+    init(_ text: AttributedString, glyph: CGFloat = 12, hit: CGFloat = 20) {
+        plain = nil; rich = text; self.glyph = glyph; self.hit = hit
+    }
 
     var body: some View {
         Button { showing.toggle() } label: {
             Image(systemName: "info.circle")
-                .font(.sf(12, weight: .regular))
+                .font(.sf(glyph, weight: .regular))
                 .foregroundStyle(hovering ? Tokens.text2 : Tokens.text4)
-                .frame(width: 20, height: 20)
+                .frame(width: hit, height: hit)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

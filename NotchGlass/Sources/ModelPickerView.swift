@@ -907,6 +907,62 @@ struct AskRecentModelPickerView: View {
     }
 }
 
+// MARK: - Agent model recents
+
+/// The agent side's "recently run models" memory — `AskModelMRU`'s twin, and what
+/// the quick picker's top section lists. Fed by every explicit pick and by every
+/// launched run, newest first, persisted in UserDefaults.
+///
+/// Stored as ONE cross-engine list but read per engine: the picker only ever
+/// shows the armed engine's fleet, and a per-engine cap that lived in the store
+/// would let a busy engine's picks evict a quiet one's history entirely.
+///
+/// A nil model — the engine's own CLI-config default — is a real choice here
+/// (it's what Codex runs before its model list lands), so it rides as an empty
+/// id rather than being dropped on the way in.
+enum AgentModelMRU {
+    struct Entry: Hashable {
+        let engine: AgentEngine
+        /// nil = the engine's CLI-config default.
+        let model: String?
+    }
+
+    /// How much history the store keeps, across every engine. Comfortably more
+    /// than the picker shows per engine (`AgentModelPickerView.recentRows`), so
+    /// switching engines back and forth doesn't erode either one's list.
+    static let capacity = 24
+    private static let defaultsKey = "agent_model_mru"
+
+    /// Newest first. Entries whose engine no longer decodes (a removed case
+    /// after an update) are dropped rather than crashing the picker.
+    static var entries: [Entry] {
+        let raw = UserDefaults.standard.stringArray(forKey: defaultsKey) ?? []
+        return raw.compactMap { line in
+            guard let bar = line.firstIndex(of: "|"),
+                  let engine = AgentEngine(rawValue: String(line[..<bar]))
+            else { return nil }
+            let model = String(line[line.index(after: bar)...])
+            return Entry(engine: engine, model: model.isEmpty ? nil : model)
+        }
+    }
+
+    /// One engine's history, newest first.
+    static func entries(for engine: AgentEngine) -> [Entry] {
+        entries.filter { $0.engine == engine }
+    }
+
+    static func record(engine: AgentEngine, model: String?) {
+        let trimmed = model?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let entry = Entry(engine: engine, model: (trimmed?.isEmpty ?? true) ? nil : trimmed)
+        var list = entries
+        list.removeAll { $0 == entry }
+        list.insert(entry, at: 0)
+        UserDefaults.standard.set(
+            list.prefix(capacity).map { "\($0.engine.rawValue)|\($0.model ?? "")" },
+            forKey: defaultsKey)
+    }
+}
+
 // MARK: - Agent quick picker (⌘⇧I)
 
 /// An agent engine's brand mark, tinted like the surrounding text — Codex's bundled
@@ -1046,12 +1102,54 @@ struct AgentModelPickerView: View {
     /// ("Deepseek-v4-flash", "Kimi-k2.7-code") and clips the outliers.
     private static let maxWidth: CGFloat = 186
 
-    /// The list's content: only the armed engine's models. The other engine's fleet
-    /// sits behind its mark in the bottom bar — half the content of the old mixed
-    /// list, and the rows can stay bare names.
-    private var engineChoices: [AgentModelChoice] {
+    /// The armed engine's whole fleet. The other engine's sits behind its mark in
+    /// the bottom bar — half the content of the old mixed list, and the rows can
+    /// stay bare names.
+    private var allEngineChoices: [AgentModelChoice] {
         choices.filter { $0.engine == selectedEngine }
     }
+
+    /// The models this engine was most recently run with, newest first, capped at
+    /// `recentRows` — the list's top half. An aggregator's catalog is twenty-odd
+    /// ids of which any one user touches three or four, so the vendor's own order
+    /// buries the models you actually use behind ones you never will. Entries the
+    /// engine no longer offers are dropped rather than shown as dead rows.
+    private var recentChoices: [AgentModelChoice] {
+        let fleet = allEngineChoices
+        var out: [AgentModelChoice] = []
+        for entry in AgentModelMRU.entries(for: selectedEngine) {
+            guard out.count < Self.recentRows,
+                  let hit = fleet.first(where: { $0.id == entry.model }),
+                  !out.contains(hit)
+            else { continue }
+            out.append(hit)
+        }
+        return out
+    }
+
+    /// Everything the recents don't already carry, in the engine's own order —
+    /// the list's bottom half. Nothing is hidden here, and nothing is listed
+    /// twice: this is the SAME fleet, just with the used few lifted out of it.
+    private var otherChoices: [AgentModelChoice] {
+        let recent = Set(recentChoices)
+        return allEngineChoices.filter { !recent.contains($0) }
+    }
+
+    /// The list's content, in the order it's drawn: recents, then the rest.
+    /// Everything downstream — ↑/↓, the gliding wash's row arithmetic, the
+    /// overflow fades — reads this one flat array, so the split is a rule about
+    /// ORDER, not a second list to keep in sync.
+    private var engineChoices: [AgentModelChoice] { recentChoices + otherChoices }
+
+    /// How many rows the recents section holds. Two rows past the list's own
+    /// four-row window, so the section is worth scrolling into but can never
+    /// become the whole list on a big catalog.
+    private static let recentRows = 8
+
+    /// Whether the two halves both exist and so want a rule between them. A
+    /// first-ever open (no history) and an engine whose whole fleet is already
+    /// recent both draw one plain list.
+    private var showsDivider: Bool { !recentChoices.isEmpty && !otherChoices.isEmpty }
 
     /// What was last armed per engine while this card is up, so flipping
     /// GPT → Claude → GPT lands back on the GPT model you had, not on the
@@ -1124,6 +1222,7 @@ struct AgentModelPickerView: View {
     /// (the observer reports the offset, not the remaining travel).
     private var contentHeight: CGFloat {
         CGFloat(engineChoices.count) * MenuCard.rowStride - MenuCard.rowSpacing
+            + (showsDivider ? Self.dividerStride : 0)
     }
 
     /// Whether the list actually outgrows the window and scrolls — the gate for
@@ -1141,21 +1240,11 @@ struct AgentModelPickerView: View {
                     VStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
                         // Only the armed engine's models — the other engine is one
                         // tap away in the engine switch above, so the rows stay
-                        // bare names.
-                        ForEach(engineChoices, id: \.self) { c in
-                            // The shared menu row, minus its own wash: the armed
-                            // highlight here is the single gliding shape below.
-                            MenuCardRow(title: shortLabel(c), emphasized: true,
-                                        selected: isSelected(c), wash: false) {
-                                // Menu semantics, same as the Ask recents menu: one
-                                // click picks the model AND closes — no lingering
-                                // card after the choice is made. The effort dial
-                                // above is what keeps the card open.
-                                if !isSelected(c) { arm(c) }
-                                onDone()
-                            }
-                            .id(c)
-                        }
+                        // bare names. The ones this engine actually gets run with
+                        // lead; the rest of its catalog follows under a rule.
+                        ForEach(recentChoices, id: \.self, content: modelRow)
+                        if showsDivider { listDivider }
+                        ForEach(otherChoices, id: \.self, content: modelRow)
                     }
                     // The armed wash: ONE persistent shape behind the row stack,
                     // riding a row-index offset (rows are fixed 25pt + 2pt spacing,
@@ -1169,7 +1258,7 @@ struct AgentModelPickerView: View {
                                 .fill(.white.opacity(0.14))
                                 .frame(height: MenuCard.rowHeight)
                                 .frame(maxWidth: .infinity)
-                                .offset(y: CGFloat(i) * MenuCard.rowStride)
+                                .offset(y: washOffset(row: i))
                                 .animation(Self.selectionSpring, value: i)
                         }
                     }
@@ -1251,6 +1340,46 @@ struct AgentModelPickerView: View {
         .onChange(of: choices) { syncMirrors() }
         .onChange(of: efforts) { syncMirrors() }
         .onChange(of: selectedEngine) { syncMirrors() }
+    }
+
+    /// One model row. The shared menu row, minus its own wash: the armed
+    /// highlight here is the single gliding shape behind the stack.
+    @ViewBuilder
+    private func modelRow(_ c: AgentModelChoice) -> some View {
+        MenuCardRow(title: shortLabel(c), emphasized: true,
+                    selected: isSelected(c), wash: false) {
+            // Menu semantics, same as the Ask recents menu: one click picks the
+            // model AND closes — no lingering card after the choice is made. The
+            // effort dial below is what keeps the card open.
+            if !isSelected(c) { arm(c) }
+            onDone()
+        }
+        .id(c)
+    }
+
+    /// The rule between the used few and the rest of the catalog. Tighter than
+    /// the card's section `hairline` (7pt of air each side would spend a quarter
+    /// of the window on a gap): this is the recents card's own tail rule — 3pt
+    /// each side — because it separates rows inside one list rather than two
+    /// sections of the card.
+    private var listDivider: some View {
+        Rectangle().fill(.white.opacity(0.07))
+            .frame(height: 0.5)
+            .padding(.horizontal, MenuCard.rowPad)
+            .padding(.vertical, 3)
+    }
+
+    /// What the divider costs every row under it: its own height plus the extra
+    /// stack spacing its insertion adds. The wash rides pure row arithmetic (it
+    /// never measures the rows), so the one thing that isn't a row has to be
+    /// counted by hand here and in `contentHeight`.
+    private static let dividerStride: CGFloat = 0.5 + 3 * 2 + MenuCard.rowSpacing
+
+    /// Where the armed wash sits: its row's offset, plus the divider once the
+    /// armed row is below it.
+    private func washOffset(row i: Int) -> CGFloat {
+        CGFloat(i) * MenuCard.rowStride
+            + (showsDivider && i >= recentChoices.count ? Self.dividerStride : 0)
     }
 
     /// The rule between the card's three sections — inset to the rows' own

@@ -759,15 +759,7 @@ final class AgentTaskManager: ObservableObject {
             if let effort { args += ["--effort", effort.rawValue] }
         }
 
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: binary)
-        p.arguments = args
-        p.currentDirectoryURL = folder
-        var env = ProcessInfo.processInfo.environment
-        if env["HOME"] == nil { env["HOME"] = NSHomeDirectory() }
-        ProxyConfig.apply(to: &env)
-        env["DISABLE_AUTOUPDATER"] = "1"
-        p.environment = env
+        let p = ShellEnvironment.makeProcess(binary, args, cwd: folder)
 
         // stdout/stderr go to FILES, not pipes — deliberately. A pipe ties the
         // CLI to this process: quit the app mid-run and the orphaned CLI dies
@@ -1674,10 +1666,13 @@ private final class CodexAgentStreamState: AgentEventParser {
                 sawTerminal = true
                 // Per-turn token accounting. `input_tokens` is the request's
                 // full prompt (cached_input_tokens is a subset of it, not
-                // additive) = what the turn occupied of the context window.
+                // additive) = what the turn occupied of the context window, and
+                // with the output side the turn's real cost for Stats.
                 if let usage = obj["usage"] as? [String: Any],
                    let input = usage["input_tokens"] as? Int {
                     progress.contextUsed = input
+                    TokenMeter.shared.record(input: input,
+                                             output: usage["output_tokens"] as? Int ?? 0)
                     any = true
                 }
                 // Opportunistic: some codex builds name the window too.
@@ -1845,11 +1840,16 @@ private final class ClaudeAgentStreamState: AgentEventParser {
                 guard let message = obj["message"] as? [String: Any],
                       let content = message["content"] as? [[String: Any]] else { continue }
                 // Each API call reports its own usage — a live context-window
-                // read while the run streams (the result event refines it).
-                if let usage = message["usage"] as? [String: Any],
-                   let used = Self.contextTokens(usage) {
-                    progress.contextUsed = used
-                    any = true
+                // read while the run streams (the result event refines it), and
+                // the run's real token cost for Stats. Only the per-call events
+                // are metered; the closing `result` total covers the same calls
+                // and would double them.
+                if let usage = message["usage"] as? [String: Any] {
+                    AnthropicUsage.record(usage)
+                    if let used = Self.contextTokens(usage) {
+                        progress.contextUsed = used
+                        any = true
+                    }
                 }
                 for block in content {
                     switch block["type"] as? String {
@@ -2093,6 +2093,8 @@ private final class GrokAgentStreamState: AgentEventParser {
                 if let usage = obj["usage"] as? [String: Any],
                    let input = usage["input_tokens"] as? Int, input > 0 {
                     progress.contextUsed = input
+                    TokenMeter.shared.record(input: input,
+                                             output: usage["output_tokens"] as? Int ?? 0)
                     any = true
                 }
                 let report = finalMessage.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2248,6 +2250,10 @@ private final class CommandCodeAgentStreamState: AgentEventParser {
             guard let usage = event["usage"] as? [String: Any],
                   let input = usage["inputTokens"] as? Int, input > 0 else { return false }
             progress.contextUsed = input
+            // One event per model call — summing them gives the run's real token
+            // cost for Stats. (camelCase keys here; this dialect is its own.)
+            TokenMeter.shared.record(input: input,
+                                     output: usage["outputTokens"] as? Int ?? 0)
             return true
         case "text_delta":
             guard let delta = event["delta"] as? String, !delta.isEmpty else { return false }

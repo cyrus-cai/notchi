@@ -93,6 +93,7 @@ struct CommandCodeCLIService: AIService {
     /// launch warm-up holds while its own spawn runs. Never call it from a SwiftUI
     /// render or anywhere else on the main thread: use `resolvedBinaryIfReady()`.
     static func resolveBinary() -> String? {
+        primeFromDisk()
         resolveLock.lock(); defer { resolveLock.unlock() }
         if let cached = cachedBinary { return cached }
         let resolved = locateBinary()
@@ -110,6 +111,10 @@ struct CommandCodeCLIService: AIService {
     /// sat on the mutex for the whole spawn. That is exactly the first hover after a
     /// relaunch, and it read as the notch refusing to open.
     static func resolvedBinaryIfReady() -> String? {
+        // Last launch's answer, if it's still on disk — a `UserDefaults` read and one
+        // `stat`, so it is safe from a render and it makes the FIRST read of the
+        // process the real one instead of "not yet" (see `primeFromDisk`).
+        primeFromDisk()
         var known: String?? = nil
         if resolveLock.try() {
             known = cachedBinary
@@ -127,6 +132,7 @@ struct CommandCodeCLIService: AIService {
     /// state when an engine looks dead has to ask this first, or the first hover
     /// after a relaunch throws away a perfectly live pick.
     static var isAvailabilityResolved: Bool {
+        primeFromDisk()
         guard resolveLock.try() else { return false }
         defer { resolveLock.unlock() }
         return cachedBinary != nil
@@ -137,12 +143,16 @@ struct CommandCodeCLIService: AIService {
     /// warm cache instead of spawning a process on the main thread. Idempotent: a
     /// second call while the first is still probing is a no-op.
     static func warmUp() {
+        // Free and synchronous: after this the app already knows what it knew when it
+        // last quit, so nothing below is on the critical path of the first render.
+        primeFromDisk()
         warmLock.lock()
         guard !warmingUp else { warmLock.unlock(); return }
         warmingUp = true
         warmLock.unlock()
         DispatchQueue.global(qos: .utility).async {
             _ = resolveBinary()
+            revalidateSeed()
             warmLock.lock(); warmingUp = false; warmLock.unlock()
             // Anything that read `isAvailable` as "not yet known" while this ran now
             // has a real answer to redraw with.
@@ -150,6 +160,151 @@ struct CommandCodeCLIService: AIService {
                 NotificationCenter.default.post(name: .cliAvailabilityResolved, object: nil)
             }
         }
+    }
+
+    // MARK: - Remembering the last launch's answer
+
+    /// Where the previous launch's resolution lives. Command Code is the one CLI
+    /// backend whose vetting spawn is expensive: its siblings answer `--version` in
+    /// under half a second, while `cmd --list-models` takes **8-11 seconds** on a
+    /// normal machine (it is network-bound, not CPU-bound — node itself boots in
+    /// 70ms). Everything is derived from that one spawn — is the engine available,
+    /// what models does it serve — so with an in-memory-only cache EVERY launch had a
+    /// ten-second window where Command Code read as unconfigured: the engine missing
+    /// from the agent picker's list, its chip falling back to the bare engine name.
+    /// That window is what these keys close: the answer is written to disk and read
+    /// back at the next launch before anything renders.
+    private static let storedPathKey = "commandCode.binaryPath"
+    private static let storedCatalogKey = "commandCode.catalog"
+    private static let storedFingerprintKey = "commandCode.catalog.fingerprint"
+    private static let storedFetchedAtKey = "commandCode.catalog.fetchedAt"
+    /// Backstop for the one change the fingerprint can't see — the account's own
+    /// lineup moving (a plan change adds models the same CLI build already knew how
+    /// to serve). A week, exactly as `ClaudeCLIService.resolvedModelsTTL`: CLI
+    /// updates land via the fingerprint instead, so this isn't the freshness
+    /// mechanism, just its floor.
+    private static let catalogTTL: TimeInterval = 7 * 24 * 3600
+
+    private static let primeLock = NSLock()
+    private static var primed = false
+    /// True while this process is running on the remembered answer and no spawn has
+    /// re-vetted it yet — what `revalidateSeed()` acts on.
+    private static var seededFromDisk = false
+
+    /// Adopt the previous launch's resolution, if the binary it names is still there.
+    /// A `UserDefaults` read plus one `stat` — no spawn, no lock held across work — so
+    /// it is safe to call from a render, and it runs exactly once per process.
+    ///
+    /// A remembered path is only trusted as far as "this file still exists and is
+    /// executable"; whether it is still a working Command Code build is settled in the
+    /// background by `revalidateSeed()`. Showing last launch's catalog for the second
+    /// it takes to confirm that is the whole point — stale beats blank.
+    static func primeFromDisk() {
+        primeLock.lock()
+        guard !primed else { primeLock.unlock(); return }
+        primed = true
+        primeLock.unlock()
+
+        let defaults = UserDefaults.standard
+        guard let path = defaults.string(forKey: storedPathKey),
+              FileManager.default.isExecutableFile(atPath: path)
+        else { return }
+        let models = (defaults.stringArray(forKey: storedCatalogKey) ?? []).compactMap(decode)
+        guard !models.isEmpty else { return }
+        resolveLock.lock()
+        if cachedBinary == nil {
+            cachedBinary = .some(path)
+            seededFromDisk = true
+        }
+        resolveLock.unlock()
+        adopt(models)
+    }
+
+    /// Re-vet the remembered binary off-main, and re-read its catalog only when
+    /// there is something new to learn. The catalog is baked into the installed CLI
+    /// build, so the binary's own identity answers "has it moved?" for free — the
+    /// eight-second spawn is paid on a CLI update (which the fingerprint sees the
+    /// moment it happens; Command Code self-updates, so this is not rare) or once a
+    /// week, never on a plain relaunch.
+    ///
+    /// If the remembered binary has stopped answering — uninstalled, replaced by
+    /// something else wearing the `cmd` name, broken by a bad update — the seed is
+    /// thrown away and the full resolution runs, exactly as a cold launch would.
+    private static func revalidateSeed() {
+        resolveLock.lock()
+        let seeded = seededFromDisk
+        let path = cachedBinary ?? nil
+        resolveLock.unlock()
+        guard seeded, let path else { return }
+
+        let defaults = UserDefaults.standard
+        let fetchedAt = defaults.object(forKey: storedFetchedAtKey) as? Date
+        let fresh = fetchedAt.map { Date().timeIntervalSince($0) < catalogTTL } ?? false
+        if fresh, fingerprint(of: path) == defaults.string(forKey: storedFingerprintKey) {
+            resolveLock.lock(); seededFromDisk = false; resolveLock.unlock()
+            return
+        }
+        if let models = probeModels(path) {
+            adopt(models)
+            remember(path: path, models: models)
+            resolveLock.lock(); seededFromDisk = false; resolveLock.unlock()
+            return
+        }
+        // The remembered install is gone or no longer Command Code — forget it whole
+        // (path AND catalog) and resolve from scratch.
+        resolveLock.lock()
+        cachedBinary = nil
+        seededFromDisk = false
+        resolveLock.unlock()
+        modelLock.lock(); cachedModels = nil; modelLock.unlock()
+        forgetStored()
+        _ = resolveBinary()
+    }
+
+    /// Write a successful resolution down for the next launch.
+    private static func remember(path: String, models: [CatalogEntry]) {
+        let defaults = UserDefaults.standard
+        defaults.set(path, forKey: storedPathKey)
+        defaults.set(models.map(encode), forKey: storedCatalogKey)
+        defaults.set(Date(), forKey: storedFetchedAtKey)
+        if let fp = fingerprint(of: path) {
+            defaults.set(fp, forKey: storedFingerprintKey)
+        } else {
+            defaults.removeObject(forKey: storedFingerprintKey)
+        }
+    }
+
+    private static func forgetStored() {
+        let defaults = UserDefaults.standard
+        for key in [storedPathKey, storedCatalogKey,
+                    storedFingerprintKey, storedFetchedAtKey] {
+            defaults.removeObject(forKey: key)
+        }
+    }
+
+    /// Identity of the build that will actually run: the executable's size and
+    /// modification date, taken through any symlink. Node CLIs install as a shim in
+    /// `bin/` pointing at the package's entry file, and it is the *target* that an
+    /// update rewrites — a fingerprint of the link itself would never move.
+    private static func fingerprint(of path: String) -> String? {
+        let real = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: real),
+              let size = attrs[.size] as? Int
+        else { return nil }
+        let stamp = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        return "\(real)|\(size)|\(Int(stamp))"
+    }
+
+    /// One catalog row as a line. Tab-separated because a model id and a vendor
+    /// caption can both carry spaces and slashes, but neither carries a tab.
+    private static func encode(_ e: CatalogEntry) -> String {
+        "\(e.id)\t\(e.group)\t\(e.isDefault ? "1" : "0")"
+    }
+
+    private static func decode(_ line: String) -> CatalogEntry? {
+        let parts = line.components(separatedBy: "\t")
+        guard parts.count == 3, !parts[0].isEmpty else { return nil }
+        return CatalogEntry(id: parts[0], group: parts[1], isDefault: parts[2] == "1")
     }
 
     /// Find the binary by *identity*, not by name. Every candidate is asked for its
@@ -160,7 +315,11 @@ struct CommandCodeCLIService: AIService {
     private static func locateBinary() -> String? {
         let fm = FileManager.default
         for p in candidatePaths where fm.isExecutableFile(atPath: p) {
-            if let models = probeModels(p) { adopt(models); return p }
+            if let models = probeModels(p) {
+                adopt(models)
+                remember(path: p, models: models)
+                return p
+            }
         }
         // Fall back to the user's shell PATH — a node version manager (nvm / fnm /
         // volta / hermes) keeps its global bin dir out of a GUI app's inherited PATH
@@ -168,6 +327,7 @@ struct CommandCodeCLIService: AIService {
         if let p = ShellEnvironment.which(["command-code", "commandcode", "cmd"]),
            let models = probeModels(p) {
             adopt(models)
+            remember(path: p, models: models)
             return p
         }
         return nil
@@ -260,6 +420,7 @@ struct CommandCodeCLIService: AIService {
         if alreadyHave { return }
         guard let binary = resolveBinary(), let models = probeModels(binary) else { return }
         adopt(models)
+        remember(path: binary, models: models)
     }
 
     /// Spawn `<binary> --list-models` and parse its catalog. `nil` means "this is not
@@ -277,14 +438,7 @@ struct CommandCodeCLIService: AIService {
     ///     …
     ///     Pass the full id, or just the short name after the last "/":
     private static func probeModels(_ path: String) -> [CatalogEntry]? {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: path)
-        p.arguments = ["--list-models", "--no-auto-update"]
-        var env = ShellEnvironment.childEnvironment(for: path)
-        // No colour: the CLI only emits SGR codes on a TTY, but a forced-colour
-        // environment would otherwise wrap every id in escape sequences.
-        env["NO_COLOR"] = "1"
-        p.environment = env
+        let p = ShellEnvironment.makeProcess(path, ["--list-models", "--no-auto-update"])
         let out = Pipe()
         p.standardOutput = out
         p.standardError = Pipe()
@@ -362,15 +516,7 @@ struct CommandCodeCLIService: AIService {
                         "--no-auto-update"]
             if let model { args += ["-m", model] }
 
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: binary)
-            process.arguments = args
-            process.currentDirectoryURL = workDir
-            // Guarantees HOME (so the CLI finds ~/.commandcode/auth.json from a GUI
-            // context), a node-reachable PATH (the shebang needs it), and the proxy
-            // (a GUI app inherits launchd's environment, which carries none — without
-            // it the CLI connects directly and fails behind a proxy).
-            process.environment = ShellEnvironment.childEnvironment(for: binary)
+            let process = ShellEnvironment.makeProcess(binary, args, cwd: workDir)
 
             let outPipe = Pipe(), inPipe = Pipe(), errPipe = Pipe()
             process.standardOutput = outPipe
@@ -478,8 +624,16 @@ private final class CommandCodeStreamState {
             else { continue }
             switch type {
             case "event":
-                guard let event = obj["event"] as? [String: Any],
-                      event["type"] as? String == "text_delta",
+                guard let event = obj["event"] as? [String: Any] else { continue }
+                // One `model_request_end` per model call, carrying that call's
+                // real usage — Stats' token figure is the sum of these and
+                // nothing else (see `TokenMeter`).
+                if event["type"] as? String == "model_request_end",
+                   let usage = event["usage"] as? [String: Any] {
+                    TokenMeter.shared.record(input: usage["inputTokens"] as? Int ?? 0,
+                                             output: usage["outputTokens"] as? Int ?? 0)
+                }
+                guard event["type"] as? String == "text_delta",
                       let delta = event["delta"] as? String, !delta.isEmpty
                 else { continue }
                 yieldedAny = true

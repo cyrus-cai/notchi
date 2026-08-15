@@ -513,11 +513,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if env["NOTCH_OPEN"] == "1" { model.showHistory = true }
         }
         #endif
+        #if DEBUG
+        // Debug aid: render Settings → Stats to a PNG and quit, so the pane can be
+        // looked at without waking the machine or driving the pointer. No-op
+        // unless NOTCH_STATS_SNAPSHOT names a file.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            guard let self else { return }
+            StatsSnapshot.renderIfRequested(history: self.model.history)
+        }
+        #endif
+
         // Debug aid: NOTCH_SETTINGS=1 opens the panel straight into the inline
         // settings view at launch (via the same path as ⌘,) so it can be
-        // inspected/screenshotted without a hover. No effect in normal use.
-        if env["NOTCH_SETTINGS"] == "1" {
+        // inspected/screenshotted without a hover. Passing a category's raw name
+        // instead (NOTCH_SETTINGS=Stats) opens that pane, so a screenshot doesn't
+        // have to be clicked for. No effect in normal use.
+        if let settings = env["NOTCH_SETTINGS"], !settings.isEmpty {
+            let target = InlineSettingsView.Section(rawValue: settings)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                if let target { self.model.settingsSection = target.rawValue }
                 NotificationCenter.default.post(name: .openSettingsRequested, object: nil)
             }
         }

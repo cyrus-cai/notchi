@@ -70,6 +70,24 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.6.0",
+            date: "2026-08-15",
+            heroAssetName: "WhatsNew060Promo",
+            features: [
+                "Stats summarizes chat and Agent messages, captures, token usage, active days, and streaks on this Mac.",
+                "The activity calendar shows daily usage intensity and pages back through earlier history.",
+            ],
+            improvements: [
+                "The Agent model picker puts recently used models first for the selected engine.",
+                "Settings are reorganized into clearer Model, Capture, Appearance, and Stats sections.",
+                "Command Code sign-in and its model catalog are ready immediately after relaunching.",
+            ],
+            fixes: [
+                "Agent tasks reliably run CLIs installed through nvm, fnm, Volta, and other version managers.",
+                "Update checks no longer stay busy for long when GitHub or a proxy is unreachable.",
+            ]
+        ),
+        Entry(
             version: "0.5.8",
             date: "2026-08-13",
             features: [

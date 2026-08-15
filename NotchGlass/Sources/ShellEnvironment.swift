@@ -105,14 +105,51 @@ enum ShellEnvironment {
 
     // MARK: - Spawning a CLI
 
+    /// **The only way to spawn an agent CLI.** Hands back a `Process` with its
+    /// executable, arguments, working directory and — the part that keeps getting
+    /// forgotten — its `environment` already set. Callers attach their own stdio and
+    /// call `run()`.
+    ///
+    /// This exists as a constructor rather than an environment *getter* on purpose.
+    /// The environment is what makes a CLI spawn work at all, and a `Process` whose
+    /// `environment` is left alone inherits launchd's — a PATH with no `node` in it,
+    /// no proxy, and (for a sandboxed context) no `HOME`. That version compiles, runs
+    /// fine on a machine with a system-wide node, and dies with
+    /// `env: node: No such file or directory` on a machine using a version manager.
+    /// It shipped once (the agent-task spawn built its environment by hand and
+    /// skipped the PATH work), so the environment is no longer something a caller can
+    /// forget: `childEnvironment` is private, and this is the only door.
+    ///
+    /// Anything a spawn needs *every* time belongs here, not at the call sites.
+    static func makeProcess(_ binary: String,
+                            _ arguments: [String],
+                            cwd: URL? = nil) -> Process {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: binary)
+        p.arguments = arguments
+        if let cwd { p.currentDirectoryURL = cwd }
+        p.environment = childEnvironment(for: binary)
+        return p
+    }
+
     /// The environment a spawned CLI gets: the inherited one, plus a guaranteed
     /// `HOME` (so it finds its `~/.<cli>` auth file from a GUI context), a `PATH`
-    /// that can resolve `node` for a shebang script, and the proxy `ProxyConfig`
-    /// resolves.
+    /// that can resolve `node` for a shebang script, the proxy `ProxyConfig`
+    /// resolves, and the two flags every one of these spawns wants:
+    ///
+    ///  - `DISABLE_AUTOUPDATER` — nothing Notch spawns is a session the user is
+    ///    watching, so a background self-update is only ever a way for a CLI to
+    ///    change versions underneath a run.
+    ///  - `NO_COLOR` — every spawn is headless and has its output parsed. These CLIs
+    ///    only emit SGR codes on a TTY, but a `FORCE_COLOR` in the user's own
+    ///    environment (which is inherited here) would wrap the output in escapes and
+    ///    break the parse.
     ///
     /// `binary`'s own directory leads the PATH: under a version manager that dir is
     /// where the matching `node` lives, and it's the one the shebang needs.
-    static func childEnvironment(for binary: String) -> [String: String] {
+    ///
+    /// Private — go through `makeProcess`.
+    private static func childEnvironment(for binary: String) -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         if env["HOME"] == nil { env["HOME"] = NSHomeDirectory() }
 
@@ -125,6 +162,9 @@ enum ShellEnvironment {
         var seen = Set<String>()
         env["PATH"] = dirs.filter { !$0.isEmpty && seen.insert($0).inserted }
             .joined(separator: ":")
+
+        env["DISABLE_AUTOUPDATER"] = "1"
+        env["NO_COLOR"] = "1"
 
         ProxyConfig.apply(to: &env)
         return env

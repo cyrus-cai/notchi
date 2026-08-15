@@ -166,10 +166,7 @@ struct ClaudeCLIService: AIService {
     /// it); `"unknown"` when the binary is fine but prints nothing, so a quiet
     /// build is still accepted. `nil` means "not a working `claude`".
     private static func smokeTest(_ path: String) -> String? {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: path)
-        p.arguments = ["--version"]
-        p.environment = ShellEnvironment.childEnvironment(for: path)
+        let p = ShellEnvironment.makeProcess(path, ["--version"])
         let out = Pipe()
         p.standardOutput = out
         p.standardError = Pipe()
@@ -332,12 +329,7 @@ struct ClaudeCLIService: AIService {
                     "--permission-mode", "default"]
         if let alias { args += ["--model", alias] }
 
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: binary)
-        p.arguments = args
-        var env = ShellEnvironment.childEnvironment(for: binary)
-        env["DISABLE_AUTOUPDATER"] = "1"
-        p.environment = env
+        let p = ShellEnvironment.makeProcess(binary, args)
 
         let inPipe = Pipe(), outPipe = Pipe()
         p.standardInput = inPipe
@@ -431,18 +423,7 @@ struct ClaudeCLIService: AIService {
                         "--system-prompt", system]
             if let model { args += ["--model", model] }
 
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: binary)
-            process.arguments = args
-            process.currentDirectoryURL = workDir
-            // A GUI app inherits launchd's environment: no proxy, and a PATH that
-            // can't find the CLI's own `node`. `ShellEnvironment` fixes both, and
-            // guarantees HOME so the CLI finds its auth file.
-            var env = ShellEnvironment.childEnvironment(for: binary)
-            // Don't let an embedded one-shot turn kick off the CLI's background
-            // auto-update check.
-            env["DISABLE_AUTOUPDATER"] = "1"
-            process.environment = env
+            let process = ShellEnvironment.makeProcess(binary, args, cwd: workDir)
 
             let outPipe = Pipe(), inPipe = Pipe(), errPipe = Pipe()
             process.standardOutput = outPipe
@@ -540,6 +521,13 @@ private final class ClaudeStreamState {
                 // mid-sentence.
                 guard let message = obj["message"] as? [String: Any],
                       let content = message["content"] as? [[String: Any]] else { continue }
+                // Each completed assistant message reports the API call behind
+                // it. Summing them is the run's real token cost — the closing
+                // `result` event's own total is deliberately left alone, since
+                // taking both would count the same call twice.
+                if let usage = message["usage"] as? [String: Any] {
+                    AnthropicUsage.record(usage)
+                }
                 for block in content where block["type"] as? String == "text" {
                     if let text = block["text"] as? String, !text.isEmpty {
                         out.append(yieldedAny ? "\n\n" + text : text)

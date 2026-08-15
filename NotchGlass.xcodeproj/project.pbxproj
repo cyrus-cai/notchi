@@ -44,6 +44,8 @@
 		A10007D0 /* DetachedSessionWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10007D1 /* DetachedSessionWindow.swift */; };
 		A1000078 /* Localization.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000079 /* Localization.swift */; };
 		A1000080 /* WhatsNewService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000081 /* WhatsNewService.swift */; };
+		A1000340 /* StatsPane.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000341 /* StatsPane.swift */; };
+		A1000342 /* TokenMeter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000343 /* TokenMeter.swift */; };
 		A10000C0 /* OnboardingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000C1 /* OnboardingService.swift */; };
 		A10000C2 /* IntroAnimation.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000C3 /* IntroAnimation.swift */; };
 		A10000C4 /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000C5 /* NotificationService.swift */; };
@@ -87,6 +89,8 @@
 		A10007D1 /* DetachedSessionWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DetachedSessionWindow.swift; sourceTree = "<group>"; };
 		A1000079 /* Localization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Localization.swift; sourceTree = "<group>"; };
 		A1000081 /* WhatsNewService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhatsNewService.swift; sourceTree = "<group>"; };
+		A1000341 /* StatsPane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatsPane.swift; sourceTree = "<group>"; };
+		A1000343 /* TokenMeter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenMeter.swift; sourceTree = "<group>"; };
 		A10000C1 /* OnboardingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingService.swift; sourceTree = "<group>"; };
 		A10000C3 /* IntroAnimation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntroAnimation.swift; sourceTree = "<group>"; };
 		A10000C5 /* NotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationService.swift; sourceTree = "<group>"; };
@@ -171,6 +175,8 @@
 				A10007D1 /* DetachedSessionWindow.swift */,
 				A1000079 /* Localization.swift */,
 				A1000081 /* WhatsNewService.swift */,
+				A1000341 /* StatsPane.swift */,
+				A1000343 /* TokenMeter.swift */,
 				A10000C1 /* OnboardingService.swift */,
 				A10000C3 /* IntroAnimation.swift */,
 				A10000C5 /* NotificationService.swift */,
@@ -314,6 +320,8 @@
 				A10007D0 /* DetachedSessionWindow.swift in Sources */,
 				A1000078 /* Localization.swift in Sources */,
 				A1000080 /* WhatsNewService.swift in Sources */,
+				A1000340 /* StatsPane.swift in Sources */,
+				A1000342 /* TokenMeter.swift in Sources */,
 				A10000C0 /* OnboardingService.swift in Sources */,
 				A10000C2 /* IntroAnimation.swift in Sources */,
 				A10000C4 /* NotificationService.swift in Sources */,
@@ -405,7 +413,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.5.8;
+				MARKETING_VERSION = 0.6.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -428,7 +436,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.5.8;
+				MARKETING_VERSION = 0.6.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;

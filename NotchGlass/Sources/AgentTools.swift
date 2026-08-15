@@ -493,7 +493,7 @@ struct ManageAppSettingsTool: NotchTool {
     commands the app supports, and ALWAYS read it before changing action_shortcut or \
     prompt_shortcut so the scope you send points at a binding that really exists. \
     action=open opens the relevant in-app Settings page without changing anything; \
-    section must be model, search, notes, general, appearance, shortcuts, or about. Use open \
+    section must be model, capture, general, appearance, shortcuts, stats, or about. Use open \
     when the user asks for an unsupported value (for example an interface language \
     the app does not offer), so they land on the real available choices instead of \
     receiving only a textual refusal. Opening a page needs no confirmation. \
@@ -510,7 +510,7 @@ struct ManageAppSettingsTool: NotchTool {
             ],
             "section": [
                 "type": "string",
-                "enum": ["model", "search", "notes", "general", "appearance", "shortcuts", "about"],
+                "enum": ["model", "capture", "general", "appearance", "shortcuts", "stats", "about"],
                 "description": "The page to open when action=open.",
             ],
             "changes": [

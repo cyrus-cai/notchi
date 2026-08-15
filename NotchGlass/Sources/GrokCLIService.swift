@@ -153,10 +153,7 @@ struct GrokCLIService: AIService {
 
     /// A candidate is real only if `--version` exits cleanly — skips broken shims.
     private static func smokeTest(_ path: String) -> Bool {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: path)
-        p.arguments = ["--version"]
-        p.environment = ShellEnvironment.childEnvironment(for: path)
+        let p = ShellEnvironment.makeProcess(path, ["--version"])
         p.standardOutput = Pipe()
         p.standardError = Pipe()
         do { try p.run() } catch { return false }
@@ -289,10 +286,7 @@ struct GrokCLIService: AIService {
     @discardableResult
     static func reauthorize() -> Bool {
         guard let binary = resolveBinary() else { return false }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: binary)
-        p.arguments = ["login"]
-        p.environment = ShellEnvironment.childEnvironment(for: binary)
+        let p = ShellEnvironment.makeProcess(binary, ["login"])
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
         do { try p.run() } catch { return false }
@@ -402,16 +396,7 @@ struct GrokCLIService: AIService {
             }
             if let model { args += ["-m", model] }
 
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: binary)
-            process.arguments = args
-            process.currentDirectoryURL = workDir
-            // Inherit the environment but guarantee HOME so grok finds
-            // ~/.grok/auth.json even when launched from a GUI context with a sparse
-            // environment, and inject the proxy (a GUI app inherits launchd's
-            // environment, which carries none — without it the CLI connects
-            // directly and fails behind a proxy).
-            process.environment = ShellEnvironment.childEnvironment(for: binary)
+            let process = ShellEnvironment.makeProcess(binary, args, cwd: workDir)
 
             let outPipe = Pipe(), errPipe = Pipe()
             process.standardOutput = outPipe
@@ -679,6 +664,11 @@ private final class GrokStreamState {
                     ?? (obj["error"] as? String)
                     ?? "unknown error"
             case "end":
+                // The turn's real token cost, when the CLI reports it.
+                if let usage = obj["usage"] as? [String: Any] {
+                    TokenMeter.shared.record(input: usage["input_tokens"] as? Int ?? 0,
+                                             output: usage["output_tokens"] as? Int ?? 0)
+                }
                 // A terminal event whose stopReason names an error, with no text
                 // produced, is a failure worth surfacing (auth, quota, refusal).
                 if !yieldedAny, let reason = obj["stopReason"] as? String {
