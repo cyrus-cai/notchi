@@ -757,6 +757,14 @@ struct ShortcutChord: Codable, Equatable, Hashable {
     }
 }
 
+/// One backend to run a round on: a model id and the provider that serves it.
+/// A bare model id is not enough — the same name can exist at two providers, and
+/// only the pair says which key/endpoint the request goes to.
+struct ModelPin: Hashable {
+    var provider: Provider
+    var model: String
+}
+
 /// One user-authored instruction bound directly to a global shortcut. The prompt
 /// is the row's identity and always acts on the current text selection; an
 /// optional AI-suggested `name` lets the shortcut surface as a named, switchable
@@ -773,14 +781,39 @@ struct PromptShortcut: Codable, Equatable, Identifiable {
     /// When true, the result opens in a compact window beside the pointer instead
     /// of unfolding the notch. Optional keeps rows saved by older builds decodable.
     var opensBesidePointer: Bool?
+    /// Pins this shortcut to one backend — a translation chord can stay on a cheap
+    /// fast model at one provider while the notch's default answers everything
+    /// else. Stored as two optionals (`Provider.rawValue` + model id) so an older
+    /// row simply decodes to no pin. Read/written through `pin`; a half-set pair
+    /// means no pin, since a model id only means anything under its provider.
+    var providerID: String?
+    var model: String?
 
     init(id: UUID = UUID(), shortcut: ShortcutChord? = nil, prompt: String = "",
-         name: String? = nil, opensBesidePointer: Bool? = nil) {
+         name: String? = nil, opensBesidePointer: Bool? = nil,
+         pin: ModelPin? = nil) {
         self.id = id
         self.shortcut = shortcut
         self.prompt = prompt
         self.name = name
         self.opensBesidePointer = opensBesidePointer
+        self.providerID = pin?.provider.rawValue
+        self.model = pin?.model
+    }
+
+    /// The pinned backend as one value — the form every caller wants, since the
+    /// provider and the model are only meaningful together.
+    var pin: ModelPin? {
+        get {
+            guard let providerID, let provider = Provider(rawValue: providerID),
+                  let model, !model.isEmpty
+            else { return nil }
+            return ModelPin(provider: provider, model: model)
+        }
+        set {
+            providerID = newValue?.provider.rawValue
+            model = newValue?.model
+        }
     }
 
     /// What the row/menu shows: the name when one has been generated, else a

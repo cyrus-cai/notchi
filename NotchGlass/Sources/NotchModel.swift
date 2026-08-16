@@ -1433,12 +1433,17 @@ final class NotchModel: ObservableObject {
     @discardableResult
     private func runDetachedRound(threadID: UUID, seed: [Turn], question: String,
                                   hideUserBubble: Bool = false,
-                                  trackCompactTask: Bool = false) -> UUID? {
+                                  trackCompactTask: Bool = false,
+                                  pin: ModelPin? = nil) -> UUID? {
         // Never stack rounds on one thread from the window: the tear-off
         // dropped the round's task handle, so a second submit couldn't
         // supersede-cancel the first. The field is disabled while streaming;
         // this is the backstop.
         guard !seed.contains(where: { $0.streaming }) else { return nil }
+        // Armed after the guard so a refused round leaves no override behind for
+        // whatever submits next. Nil keeps whatever the caller already armed
+        // (`regenerateDetachedAnswer` sets its own pick before calling in).
+        if pin != nil { armModelPin(pin) }
         let saved = (turns: turns, threadID: threadHistoryID, mode: mode,
                      text: text, task: task, pinned: isAnswerPinned,
                      error: askError, history: showHistory)
@@ -4777,6 +4782,7 @@ final class NotchModel: ObservableObject {
     /// `openPanel` comes first so its reattach-on-open behavior can settle; the
     /// following `newChat` then guarantees this action starts its own conversation.
     func runPromptShortcut(prompt: String, selectedText: String,
+                           pin: ModelPin? = nil,
                            on display: CGDirectDisplayID?) {
         let instruction = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !instruction.isEmpty,
@@ -4796,7 +4802,22 @@ final class NotchModel: ObservableObject {
         // Mark the thread as shortcut-driven BEFORE submitting: the result view
         // reads this to collapse its follow-up input into a floating button.
         fromPromptShortcut = true
+        armModelPin(pin)
         submit(hideUserBubble: true)
+    }
+
+    /// Arm the next `submit()` with a shortcut's pinned backend. A pin whose
+    /// provider can no longer serve (key deleted, CLI signed out) is dropped
+    /// rather than fired at a backend that will only fail — the shortcut still
+    /// runs, on the current default.
+    private func armModelPin(_ pin: ModelPin?) {
+        guard let pin, ModelCatalogStore.ready(pin.provider) else {
+            regenOverrideModel = nil
+            regenOverrideProvider = nil
+            return
+        }
+        regenOverrideModel = pin.model
+        regenOverrideProvider = pin.provider
     }
 
     /// The empty form of a prompt shortcut, targeted at the notch. Open a fresh
@@ -4885,10 +4906,11 @@ final class NotchModel: ObservableObject {
     /// The round starts headlessly, preserving whatever the notch is currently
     /// showing, then its live mirror is handed directly to the window.
     func runPromptShortcutInWindow(shortcutID: UUID, prompt: String, selectedText: String,
+                                   pin: ModelPin? = nil,
                                    title: String, near pointer: NSPoint,
                                    sourceApplication: NSRunningApplication?) {
         guard let threadID = startPromptShortcutRound(
-            prompt: prompt, selectedText: selectedText)
+            prompt: prompt, selectedText: selectedText, pin: pin)
         else { return }
         DetachedSessionWindowController.presentCompactShortcut(
             shortcutID: shortcutID, threadID: threadID,
@@ -4900,7 +4922,8 @@ final class NotchModel: ObservableObject {
     /// one-off composer. Keeping construction here guarantees both paths wrap the
     /// captured selection identically and both remain invisible to panel state.
     @discardableResult
-    func startPromptShortcutRound(prompt: String, selectedText: String) -> UUID? {
+    func startPromptShortcutRound(prompt: String, selectedText: String,
+                                  pin: ModelPin? = nil) -> UUID? {
         let instruction = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         let context = selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !instruction.isEmpty else { return nil }
@@ -4917,7 +4940,7 @@ final class NotchModel: ObservableObject {
         """
         return runDetachedRound(
             threadID: UUID(), seed: [], question: question,
-            hideUserBubble: true, trackCompactTask: true)
+            hideUserBubble: true, trackCompactTask: true, pin: pin)
     }
 
     /// Supersede a compact shortcut's previous headless round. This is a replace,
@@ -4979,6 +5002,9 @@ final class NotchModel: ObservableObject {
             </selected_text>
             """
             promptShortcutMode = nil
+            // Same shortcut, same pin: a `/`-driven run is the chord's twin, so it
+            // runs on the backend that shortcut names.
+            armModelPin(shortcut.pin)
             submit()
             return
         }
@@ -5240,6 +5266,15 @@ final class NotchModel: ObservableObject {
     func selectAgentModel(_ choice: AgentModelChoice) {
         agentArmedEngine = choice.engine
         agentModelID = choice.id
+        // Drop an effort the new model doesn't take. The run already clamps this
+        // at spawn (see `startAgentRun`), but leaving it armed made the chip read
+        // "Kimi K3 max" for a model with no adjustable effort at all — a level the
+        // run would silently discard. The chip should never name a dial that isn't
+        // connected to anything.
+        if let effort = agentEffort,
+           !choice.engine.effortChoices(forModelID: choice.id).contains(effort) {
+            agentEffort = nil
+        }
         // An explicit pick counts as "recently used" right away, so the picker's
         // top section reflects it on the next open even before a run goes out —
         // the same rule the Ask chip's recents follow.
@@ -5801,15 +5836,28 @@ final class NotchModel: ObservableObject {
         // default. Consumed + cleared here. `regenModel` is stamped onto the answer
         // turn below so the result shows which model produced it.
         let overrideModel = regenOverrideModel
+        let overrideProvider = regenOverrideProvider
         regenOverrideModel = nil
+        regenOverrideProvider = nil
+        // A prompt shortcut can pin a backend other than the selected one, so the
+        // override builds against ITS provider.
+        let pinnedProvider = overrideProvider ?? APIKeyStore.selectedProvider
         let overrideService: AIService? = overrideModel.flatMap { m in
-            let provider = APIKeyStore.selectedProvider
-            guard let key = APIKeyStore.current(for: provider) else { return nil }
-            return AppDelegate.makeService(provider: provider, apiKey: key, model: m)
+            // Keyless backends (the CLI providers) and the custom endpoint
+            // authenticate their own way, so readiness — not a stored key — is the
+            // test, and the key rides along as "" where there is none.
+            guard ModelCatalogStore.ready(pinnedProvider) else { return nil }
+            return AppDelegate.makeService(provider: pinnedProvider,
+                                           apiKey: APIKeyStore.keyOrEmpty(for: pinnedProvider),
+                                           model: m)
         }
+        // The provider this round actually streams from — the pin only counts once
+        // its service exists. Everything provider-scoped below (tool registry, tool
+        // support, recents) follows the service, never the setting behind it.
+        let runProvider = overrideService == nil ? APIKeyStore.selectedProvider : pinnedProvider
         // This ask "uses" the model it will stream from — feed the chip menu's
         // recents (the one-shot regenerate override counts as the model used).
-        let askProvider = APIKeyStore.selectedProvider
+        let askProvider = runProvider
         AskModelMRU.record(provider: askProvider,
                            model: overrideModel
                                ?? APIKeyStore.effectiveModel(for: askProvider)
@@ -6108,7 +6156,7 @@ final class NotchModel: ObservableObject {
                 //    confirmation gate;
                 //  · `search_history` — reads the archive off `history`, which is
                 //    main-actor state on this object.
-                var agentTools = ToolRegistry.standard(for: APIKeyStore.selectedProvider).tools
+                var agentTools = ToolRegistry.standard(for: runProvider).tools
                 agentTools.append(ManageAppSettingsTool { [weak self] request in
                     guard let self else { throw CancellationError() }
                     return try await self.handleAppSettingsRequest(answerID: answerID,
@@ -6133,7 +6181,7 @@ final class NotchModel: ObservableObject {
                 let askService: AIService = overrideService ?? self.ai
                 if !imageAttached,
                    let agent = askService as? AgentCapableService,
-                   APIKeyStore.selectedProvider.supportsTools,
+                   runProvider.supportsTools,
                    !registry.isEmpty {
                     let harness = AgentHarness(service: agent, registry: registry)
                     let agentMessages = context.map {
@@ -6203,8 +6251,8 @@ final class NotchModel: ObservableObject {
                     // harness path does this via `onModel`; this plain-stream path
                     // (Codex and other non-tool turns) otherwise left the footer blank.
                     let ranModel = overrideModel
-                        ?? APIKeyStore.effectiveModel(for: APIKeyStore.selectedProvider)
-                        ?? APIKeyStore.selectedProvider.defaultModel
+                        ?? APIKeyStore.effectiveModel(for: runProvider)
+                        ?? runProvider.defaultModel
                     if let i = thread.firstIndex(where: { $0.id == answerID }) {
                         thread[i].answerModel = ranModel
                         self.syncInFlight(answerID, thread)
@@ -6445,6 +6493,11 @@ final class NotchModel: ObservableObject {
     /// pinned to X for just that turn, and stamps the answer with X — without ever
     /// touching the user's saved default. Nil for every normal submit.
     private var regenOverrideModel: String?
+
+    /// The provider half of that override, set only when the pick names a backend
+    /// other than the selected one (a prompt shortcut's cross-provider pin). Nil
+    /// means "the selected provider", which is every regenerate-with pick.
+    private var regenOverrideProvider: Provider?
 
     /// Shared tail of retry/regenerate: drop the newest Q/A pair, lift the question
     /// back into the input, and re-run `submit()` so a fresh answer streams into a

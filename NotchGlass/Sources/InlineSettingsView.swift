@@ -3086,6 +3086,17 @@ struct InlineSettingsView: View {
 
                     Divider()
 
+                    // Which backend answers this one shortcut. A submenu, not more
+                    // inline rows: the model lists are long enough to bury the two
+                    // choices above it and delete below. Every provider that can
+                    // actually serve right now gets its own section — the pin
+                    // carries the provider with it, so a shortcut can sit on a
+                    // different backend than the notch's default without either
+                    // one moving the other.
+                    promptModelMenu(for: binding.id)
+
+                    Divider()
+
                     Button(role: .destructive) {
                         deletePromptShortcut(binding.id)
                     } label: {
@@ -3175,6 +3186,69 @@ struct InlineSettingsView: View {
                 if couldRun != promptShortcuts[index].canRunFromHotKey {
                     NotificationCenter.default.post(name: .promptShortcutsChanged, object: nil)
                 }
+            }
+        )
+    }
+
+    /// One provider's pinnable models, precomputed so the menu below stays a
+    /// shallow expression — the nested ForEach/Section written inline in the row
+    /// blew past the type checker's budget.
+    private struct PromptModelGroup: Identifiable {
+        let provider: Provider
+        let models: [String]
+        var id: String { provider.rawValue }
+    }
+
+    /// Providers a shortcut can actually be pinned to: the ones that can serve a
+    /// request as things stand (key stored, or a signed-in CLI). Offering a
+    /// provider with no key would be offering a pin that silently falls back.
+    private var promptModelGroups: [PromptModelGroup] {
+        Provider.allCases
+            .filter(ModelCatalogStore.ready)
+            .map { PromptModelGroup(provider: $0, models: $0.availableModels) }
+    }
+
+    /// The row's model submenu: "Default model", then one checkmarked group per
+    /// provider that can serve. The group heading is a plain `Text` — the same
+    /// disabled-header idiom the answer footer's regenerate-with menu uses — and
+    /// each group is its own inline Picker over the shared pin, so the checkmark
+    /// lands next to the exact provider+model the shortcut runs on.
+    private func promptModelMenu(for id: UUID) -> some View {
+        let selection = promptModelBinding(for: id)
+        return Menu(L("shortcuts.promptAction.model")) {
+            Picker("", selection: selection) {
+                Text(L("shortcuts.promptAction.model.default"))
+                    .tag(ModelPin?.none)
+            }
+            .pickerStyle(.inline)
+            .labelsHidden()
+
+            ForEach(promptModelGroups) { group in
+                Divider()
+                Text(group.provider.displayName)
+                Picker("", selection: selection) {
+                    ForEach(group.models, id: \.self) { name in
+                        Text(name).tag(ModelPin?.some(
+                            ModelPin(provider: group.provider, model: name)))
+                    }
+                }
+                .pickerStyle(.inline)
+                .labelsHidden()
+            }
+        }
+    }
+
+    /// The row's pinned backend, `nil` meaning "the default model". Persisted like
+    /// every other row property; it never touches the app-wide provider/model
+    /// setting.
+    private func promptModelBinding(for id: UUID) -> Binding<ModelPin?> {
+        Binding(
+            get: { promptShortcuts.first(where: { $0.id == id })?.pin },
+            set: { value in
+                guard let index = promptShortcuts.firstIndex(where: { $0.id == id }) else { return }
+                promptShortcuts[index].pin = value
+                PromptShortcutStore.save(promptShortcuts)
+                NotificationCenter.default.post(name: .promptShortcutsChanged, object: nil)
             }
         )
     }

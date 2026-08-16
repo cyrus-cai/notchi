@@ -70,6 +70,20 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.6.1",
+            date: "2026-08-16",
+            features: [
+                "A prompt shortcut can pin its own provider and model, separate from the notch's default.",
+            ],
+            improvements: [
+                "The thinking-strength slider is hidden for models with no adjustable reasoning effort.",
+                "The app bundle is about 2.5 MB smaller.",
+            ],
+            fixes: [
+                "Command Code agent runs no longer fail with an unsupported reasoning-effort error.",
+            ]
+        ),
+        Entry(
             version: "0.6.0",
             date: "2026-08-15",
             heroAssetName: "WhatsNew060Promo",

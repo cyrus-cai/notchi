@@ -913,6 +913,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     shortcutID: id,
                     prompt: binding.prompt,
                     selectedText: selectedText,
+                    pin: binding.pin,
                     title: binding.displayName,
                     near: triggerPoint,
                     sourceApplication: sourceApplication)
@@ -920,6 +921,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                     self.model.runPromptShortcut(prompt: binding.prompt,
                                                  selectedText: selectedText,
+                                                 pin: binding.pin,
                                                  on: self.displayForSummon())
                 }
             }

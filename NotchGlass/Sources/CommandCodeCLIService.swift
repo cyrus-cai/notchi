@@ -218,6 +218,10 @@ struct CommandCodeCLIService: AIService {
         }
         resolveLock.unlock()
         adopt(models)
+        // The measured `--effort` sets ride the same remembered install, so the
+        // first picker open of a process shows real rungs instead of re-probing
+        // every model the user looks at.
+        primeEffortsFromDisk(path: path)
     }
 
     /// Re-vet the remembered binary off-main, and re-read its catalog only when
@@ -240,13 +244,19 @@ struct CommandCodeCLIService: AIService {
         let defaults = UserDefaults.standard
         let fetchedAt = defaults.object(forKey: storedFetchedAtKey) as? Date
         let fresh = fetchedAt.map { Date().timeIntervalSince($0) < catalogTTL } ?? false
-        if fresh, fingerprint(of: path) == defaults.string(forKey: storedFingerprintKey) {
+        let rebuilt = fingerprint(of: path) != defaults.string(forKey: storedFingerprintKey)
+        if fresh, !rebuilt {
             resolveLock.lock(); seededFromDisk = false; resolveLock.unlock()
             return
         }
         if let models = probeModels(path) {
             adopt(models)
             remember(path: path, models: models)
+            // A NEW build can remap every model's effort set, so its measurements go
+            // with the old catalog. The weekly TTL alone doesn't invalidate them —
+            // same binary, same mapping — so this hangs off the fingerprint, not
+            // freshness.
+            if rebuilt { forgetEfforts() }
             resolveLock.lock(); seededFromDisk = false; resolveLock.unlock()
             return
         }
@@ -258,6 +268,7 @@ struct CommandCodeCLIService: AIService {
         resolveLock.unlock()
         modelLock.lock(); cachedModels = nil; modelLock.unlock()
         forgetStored()
+        forgetEfforts()
         _ = resolveBinary()
     }
 
@@ -477,6 +488,175 @@ struct CommandCodeCLIService: AIService {
                                     isDefault: rest.contains("(default)")))
         }
         return out
+    }
+
+    // MARK: - Reasoning-effort probe
+
+    /// An `--effort` value no build will ever accept. Passing it makes the CLI
+    /// print the model's real set and exit **before it opens a connection** —
+    /// which is what turns "what does this model take?" into a question we can
+    /// just ask, for free.
+    private static let effortProbeSentinel = "__notch_probe__"
+
+    /// How long the probe may take before we give up on it. Measured at ~1.3s
+    /// (node cold start; no API call happens), so this is pure runaway insurance.
+    private static let effortProbeTimeout: TimeInterval = 15
+
+    private static let effortLock = NSLock()
+    /// Model id → the levels that model accepts. `[]` is an answer ("no adjustable
+    /// reasoning effort"), not an absence — a model simply not in the dictionary is
+    /// the unknown case. `defaultSentinel` keys the flag-less run (`-m` omitted).
+    private static var cachedEfforts: [String: [String]] = [:]
+    /// Probes in flight, so a picker redrawing ten times a second can't queue ten
+    /// spawns for the same model.
+    private static var effortsInFlight: Set<String> = []
+
+    private static let storedEffortsKey = "commandCode.efforts"
+    private static let storedEffortsFingerprintKey = "commandCode.efforts.fingerprint"
+
+    /// The `--effort` levels this model accepts, or `nil` if nobody has asked the
+    /// binary yet. A lock-free-ish cache read: safe from a SwiftUI render, never
+    /// spawns anything itself (see `probeEfforts`).
+    static func effortLevels(for modelID: String?) -> [String]? {
+        let key = effortKey(modelID)
+        effortLock.lock(); defer { effortLock.unlock() }
+        return cachedEfforts[key]
+    }
+
+    /// Ask the installed binary what `modelID` accepts, off the main thread, once.
+    /// No-op when the answer is already known or a probe is already running for it.
+    /// Posts `.cliAvailabilityResolved` when an answer lands, so a picker drawn
+    /// while the set was unknown redraws with the real rungs.
+    static func probeEfforts(for modelID: String?) {
+        let key = effortKey(modelID)
+        effortLock.lock()
+        let skip = cachedEfforts[key] != nil || effortsInFlight.contains(key)
+        if !skip { effortsInFlight.insert(key) }
+        effortLock.unlock()
+        guard !skip else { return }
+
+        // Render-safe read: if the binary hasn't resolved yet this returns nil (and
+        // kicks the warm-up), and the next picker open asks again.
+        guard let binary = resolvedBinaryIfReady() else {
+            effortLock.lock(); effortsInFlight.remove(key); effortLock.unlock()
+            return
+        }
+
+        DispatchQueue.global(qos: .utility).async {
+            let levels = runEffortProbe(binary, modelID: modelID)
+            effortLock.lock()
+            if let levels { cachedEfforts[key] = levels }
+            effortsInFlight.remove(key)
+            let snapshot = cachedEfforts
+            effortLock.unlock()
+            guard levels != nil else { return }
+            rememberEfforts(snapshot, path: binary)
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .cliAvailabilityResolved, object: nil)
+            }
+        }
+    }
+
+    /// The cache key for a model pick: the id itself, or the sentinel standing for
+    /// "no `-m` at all", which is a distinct question from any named model.
+    private static func effortKey(_ modelID: String?) -> String {
+        let m = (modelID ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return m.isEmpty ? defaultSentinel : m
+    }
+
+    /// Spawn the probe and read the answer out of the refusal. `nil` means the
+    /// output wasn't either shape we understand — don't cache a guess.
+    private static func runEffortProbe(_ path: String, modelID: String?) -> [String]? {
+        var args = ["-p", "hi", "--effort", effortProbeSentinel,
+                    "--no-auto-update", "--skip-onboarding", "--trust", "--no-session"]
+        if let modelID, !modelID.isEmpty, modelID != defaultSentinel {
+            args += ["-m", modelID]
+        }
+        let p = ShellEnvironment.makeProcess(path, args,
+                                             cwd: FileManager.default.temporaryDirectory)
+        let pipe = Pipe()
+        // The refusal goes to **stderr** (verified on v1.26.0; exit status 1), but
+        // both streams land in one pipe so a build that moves it to stdout doesn't
+        // silently turn every model into "unknown".
+        p.standardOutput = pipe
+        p.standardError = pipe
+        p.standardInput = FileHandle.nullDevice
+        do { try p.run() } catch { return nil }
+        let deadline = DispatchWorkItem { if p.isRunning { p.terminate() } }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + effortProbeTimeout,
+                                                       execute: deadline)
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        deadline.cancel()
+        guard let text = String(data: data, encoding: .utf8) else { return nil }
+        return parseEffortRefusal(text)
+    }
+
+    /// Pull the accepted levels out of what the CLI printed. Two shapes, both
+    /// verified against v1.26.0:
+    ///
+    ///     Unknown effort "__notch_probe__". Supported: low, medium, high.
+    ///     Kimi K3 has no adjustable reasoning effort.
+    ///
+    /// Anything else (a network error, a renamed model, a future rewording) is
+    /// `nil` — unknown, so the menu stays at Default and we ask again later rather
+    /// than caching a wrong answer. Pure function of a string, like `parseCatalog`,
+    /// because this is the other brittle seam in this file.
+    static func parseEffortRefusal(_ text: String) -> [String]? {
+        for raw in text.split(separator: "\n") {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.contains("no adjustable reasoning effort") { return [] }
+            guard let marker = line.range(of: "Supported:"),
+                  line.hasPrefix("Unknown effort")
+            else { continue }
+            let list = line[marker.upperBound...]
+                .trimmingCharacters(in: CharacterSet(charactersIn: " ."))
+            let levels = list.components(separatedBy: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            return levels.isEmpty ? nil : levels
+        }
+        return nil
+    }
+
+    /// Persist the measured sets against the fingerprint of the build they were
+    /// measured on, so they survive a relaunch but never outlive a CLI update —
+    /// the effort mapping is baked into the build, exactly like the model catalog.
+    private static func rememberEfforts(_ efforts: [String: [String]], path: String) {
+        let defaults = UserDefaults.standard
+        defaults.set(efforts.mapValues { $0.joined(separator: ",") }, forKey: storedEffortsKey)
+        if let fp = fingerprint(of: path) {
+            defaults.set(fp, forKey: storedEffortsFingerprintKey)
+        } else {
+            defaults.removeObject(forKey: storedEffortsFingerprintKey)
+        }
+    }
+
+    /// Adopt the previous launch's measurements, but only if the binary hasn't
+    /// changed underneath them. Called from `primeFromDisk`, so the first picker
+    /// open of a process already shows real rungs instead of re-probing.
+    private static func primeEffortsFromDisk(path: String) {
+        let defaults = UserDefaults.standard
+        guard let stored = defaults.dictionary(forKey: storedEffortsKey) as? [String: String],
+              !stored.isEmpty,
+              let fp = fingerprint(of: path),
+              fp == defaults.string(forKey: storedEffortsFingerprintKey)
+        else { return }
+        // "" round-trips an empty set — the "no adjustable effort" answer.
+        let restored = stored.mapValues { value in
+            value.split(separator: ",").map(String.init)
+        }
+        effortLock.lock()
+        for (k, v) in restored where cachedEfforts[k] == nil { cachedEfforts[k] = v }
+        effortLock.unlock()
+    }
+
+    /// Drop every measured set — the binary is gone or has been replaced, so what
+    /// it accepted is no longer a fact about anything.
+    private static func forgetEfforts() {
+        effortLock.lock(); cachedEfforts = [:]; effortLock.unlock()
+        UserDefaults.standard.removeObject(forKey: storedEffortsKey)
+        UserDefaults.standard.removeObject(forKey: storedEffortsFingerprintKey)
     }
 
     // MARK: - Streaming

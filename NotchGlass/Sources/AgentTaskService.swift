@@ -170,35 +170,161 @@ enum AgentEffort: String, CaseIterable {
 }
 
 extension AgentEngine {
-    /// The effort levels pickable for a run on this engine + model pick.
-    /// Claude's is the CLI's documented `--effort` set. Codex's is the pinned
-    /// model's own `supportedReasoningEfforts` from `model/list` (they differ
-    /// per model — e.g. only some models take `ultra`); for the default pick
-    /// (`modelID == nil`) that's the account-default model's set. Until the
-    /// list is fetched, the lowest common denominator every model accepts.
+    /// The effort levels pickable for a run on this engine + model pick — see
+    /// `AgentEffortCatalog` for where each engine's answer comes from and why a
+    /// hardcoded ladder isn't one.
     func effortChoices(forModelID modelID: String?) -> [AgentEffort] {
-        switch self {
-        case .claude:
-            return [.low, .medium, .high, .xhigh, .max]
-        case .grok:
-            // Grok's `--reasoning-effort` ladder (the standard rungs; grok also
-            // accepts none/minimal, which have no AgentEffort case).
-            return [.low, .medium, .high, .xhigh, .max]
-        case .commandCode:
-            // `--effort` is per-model on an aggregator — its Claude and GPT rows take
-            // the full ladder, but a DeepSeek row takes only high/max and plenty take
-            // none at all — and the CLI's model list doesn't publish which. So the
-            // menu offers the documented common rungs; a model that doesn't reason
-            // simply ignores the flag.
-            return [.low, .medium, .high]
+        AgentEffortCatalog.choices(engine: self, modelID: modelID)
+    }
+}
+
+/// Which `--effort` levels an engine+model actually accepts.
+///
+/// This used to be three hardcoded ladders, and the Command Code one was wrong in
+/// a way that **killed runs**: the CLI doesn't ignore a level it doesn't take, it
+/// refuses the whole task before doing any work —
+/// `Unknown effort "low". Supported: high, max.` Measured against the installed
+/// CLI (v1.26.0, 55 models), the old `[.low, .medium, .high]` guess was right for
+/// 7 of them; 29 accept no effort flag at all, and the CLI's own default model
+/// (`deepseek/deepseek-v4-flash`) takes only `high`/`max` — which is exactly the
+/// combination a fresh install hit.
+///
+/// The sets aren't even a ladder, so "clamp to the nearest rung" is no fix either:
+/// `qwen/qwen3.8-max` takes `xhigh` but not `high`, `zai-org/glm-5.3` skips
+/// `medium`. The only correct answer is the real set, so it comes from three
+/// layers, most authoritative first:
+///
+///  1. **The installed binary** (`CommandCodeCLIService.effortLevels`) — a 1.3s
+///     probe that spends no tokens, cached against the CLI's fingerprint. Only
+///     the build on this Mac can answer for the build on this Mac, and Command
+///     Code updates itself in the background, so no table we ship or serve can
+///     know which build a given user is on.
+///  2. **The remote manifest** (`RemoteModelManifest.efforts`) — the maintained
+///     table on the website, so a CLI release that moves a model's set is fixed
+///     without shipping an app update. It can also be told to *outrank* the probe
+///     per engine (`effortsOverride`), which is the lever for a probe that has
+///     started misreading the binary — off by default, since a probe that simply
+///     fails already falls through to here.
+///  3. **The bundled table below** — the same measurement baked in, so a fresh
+///     offline install is already right.
+///
+/// That order is the one this app already uses for models: the vendor's own live
+/// catalog supersedes the manifest, which supersedes the bundled spec
+/// (`RemoteModelManifest`). The probe is the live catalog of this seam.
+///
+/// A model no layer knows offers **no rungs at all** (Default only, no `--effort`
+/// sent). That is deliberate: sending an unverified level risks the run, and the
+/// upside is one menu entry. The probe fills the menu in a second or so.
+enum AgentEffortCatalog {
+    static func choices(engine: AgentEngine, modelID: String?) -> [AgentEffort] {
+        switch engine {
         case .codex:
+            // Codex publishes the answer itself — each model's own
+            // `supportedReasoningEfforts` from the app-server's `model/list` — so
+            // it needs no table. For the default pick (`modelID == nil`) that's
+            // the account-default model's set.
             let models = CodexCLIService.listedModels
             let picked = modelID.flatMap { id in models.first { $0.id == id } }
                 ?? models.first(where: \.isDefault) ?? models.first
+            // Until that list lands, the lowest common denominator every Codex
+            // model accepts — unchanged from before, and safe because Codex is one
+            // vendor's own lineup rather than an aggregator's.
             guard let picked else { return [.low, .medium, .high] }
             return picked.efforts.compactMap(AgentEffort.init)
+        case .commandCode:
+            // The one aggregator, and the one that hard-errors: ask the binary,
+            // and kick a probe when it hasn't been asked about this model yet.
+            let id = modelID ?? CommandCodeCLIService.defaultModel
+            // The remote kill switch, normally off — see
+            // `RemoteModelManifest.effortsOverridesProbe` for why the probe leads
+            // by default (it's the only layer that can't be wrong about which CLI
+            // build the user is actually running).
+            if RemoteModelManifest.effortsOverridesProbe(engine: engine.rawValue),
+               let curated = manifest(engine: engine, model: id) {
+                return curated
+            }
+            if let probed = CommandCodeCLIService.effortLevels(for: modelID) {
+                return probed.compactMap(AgentEffort.init)
+            }
+            CommandCodeCLIService.probeEfforts(for: modelID)
+            return manifest(engine: engine, model: id)
+                ?? bundledCommandCode[id]
+                ?? []
+        case .claude, .grok:
+            // Single-vendor CLIs with a documented, stable ladder (claude's
+            // `--effort`, grok's `--reasoning-effort`). Left as the documented set,
+            // but routed through the manifest first so a wrong rung is a website
+            // edit rather than a release.
+            let id = modelID ?? ""
+            return manifest(engine: engine, model: id)
+                ?? [.low, .medium, .high, .xhigh, .max]
         }
     }
+
+    /// The maintained table's answer for this engine+model, mapped into the cases
+    /// this app knows. An entry that exists but is empty means "no effort flag" and
+    /// is returned as such — only a *missing* entry falls through to the next layer.
+    private static func manifest(engine: AgentEngine, model: String) -> [AgentEffort]? {
+        guard let levels = RemoteModelManifest.efforts(engine: engine.rawValue, model: model)
+        else { return nil }
+        return levels.compactMap(AgentEffort.init)
+    }
+
+    /// Command Code's table as measured against CLI v1.26.0 — the offline seed for
+    /// layers 2 and 3 above. Grouped by set rather than listed per model, because
+    /// that is how it reads: a whole vendor's rows usually move together.
+    ///
+    /// Regenerate by probing the installed CLI, which costs no tokens and answers
+    /// in ~1.3s per model:
+    ///
+    ///     cmd -p hi -m <id> --effort __probe__ --no-auto-update --skip-onboarding
+    private static let bundledCommandCode: [String: [AgentEffort]] = {
+        let groups: [([AgentEffort], [String])] = [
+            ([.low, .medium, .high, .xhigh, .max], [
+                "claude-sonnet-5", "claude-sonnet-4-6",
+                "claude-fable-5", "claude-opus-5",
+                "claude-opus-4-8", "claude-opus-4-7",
+                "gpt-5.6-sol", "gpt-5.6-terra",
+                "gpt-5.6-luna"]),
+            ([.low, .medium, .high, .xhigh], [
+                "gpt-5.5", "gpt-5.4",
+                "gpt-5.3-codex", "xai/grok-4.6"]),
+            ([.low, .medium, .high], [
+                "gpt-5.4-mini", "google/gemini-3.7-flash",
+                "google/gemini-3.6-flash", "google/gemini-3.5-flash",
+                "google/gemini-3.5-flash-lite", "google/gemini-3.1-flash-lite",
+                "xai/grok-4.5"]),
+            ([.high, .max], [
+                "deepseek/deepseek-v4-pro", "deepseek/deepseek-v4-flash",
+                "zai-org/glm-5.2"]),
+            ([.low, .high, .max], ["zai-org/glm-5.3"]),
+            ([.low, .medium, .xhigh], ["qwen/qwen3.8-max"]),
+            ([.high, .xhigh], ["sakana/fugu-ultra"]),
+            // No adjustable reasoning effort — over half the fleet. The CLI says so
+            // in as many words ("<Model> has no adjustable reasoning effort.").
+            ([], [
+                "moonshotai/kimi-k3", "moonshotai/kimi-k2.7-code",
+                "moonshotai/kimi-k2.7-code-highspeed", "moonshotai/kimi-k2.6",
+                "moonshotai/kimi-k2.5", "zai-org/glm-5.2-fast",
+                "zai-org/glm-5.1", "zai-org/glm-5",
+                "minimaxai/minimax-m3", "minimaxai/minimax-m2.7",
+                "minimaxai/minimax-m2.5", "xiaomi/mimo-v2.5-pro",
+                "xiaomi/mimo-v2.5", "qwen/qwen3.7-max",
+                "qwen/qwen3.7-plus", "qwen/qwen3.7-flash",
+                "qwen/qwen3.6-max-preview", "qwen/qwen3.6-plus",
+                "stepfun/step-3.7-flash", "stepfun/step-3.5-flash",
+                "tencent/hy3-paid", "nvidia/nemotron-3-ultra-550b-a55b",
+                "thinkingmachines/inkling", "thinkingmachines/inkling-small",
+                "poolside/laguna-s-2.1-free", "claude-haiku-4-5",
+                "meta/muse-spark-1.1", "meta/muse-spark-1.2",
+                "meta/muse-spark-1.2-contributor"]),
+        ]
+        var out: [String: [AgentEffort]] = [:]
+        for (levels, ids) in groups {
+            for id in ids { out[id] = levels }
+        }
+        return out
+    }()
 }
 
 /// One step in an agent run's work trail: a tool call the agent made — the

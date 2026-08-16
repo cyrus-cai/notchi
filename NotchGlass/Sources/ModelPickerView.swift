@@ -1038,6 +1038,12 @@ struct AgentModelPickerView: View {
     /// captured at install time, and Codex's model list can land after the card opens).
     @State private var choicesMirror: [AgentModelChoice] = []
     @State private var effortsMirror: [AgentEffort] = []
+    /// Bumped when a CLI answers a question the card asked while drawing — today
+    /// that's Command Code's effort probe (`AgentEffortCatalog`), which spawns on
+    /// the first look at a model and lands about a second later. Mutating it
+    /// re-evaluates `efforts`, so the rungs fill in under the pointer instead of
+    /// waiting for the next open. Never read: the invalidation IS the effect.
+    @State private var probeGeneration = 0
     /// True only when the selection just moved via ↑/↓, so the list scrolls to keep it
     /// visible. A click never sets it — the clicked row is visible by definition, and
     /// scrolling the list under the pointer is exactly the misbehavior a hover-driven
@@ -1306,16 +1312,24 @@ struct AgentModelPickerView: View {
                 .onChange(of: selectedEngine) { followSelection(proxy) }
             }
 
-            hairline
-
             // Thinking strength — the same native detent slider the settings
             // pane's hover-sensitivity row uses: one tick per rung, the
             // leftmost detent = the CLI's own default, a label under every
             // detent. ←/→ still step the effort.
-            effortBar
-                // Caption, slider and marks share the model rows' left edge —
-                // the card has ONE text column, not one per section.
-                .padding(.horizontal, MenuCard.rowPad)
+            //
+            // Dropped whole for a model with no rungs, rather than shown as a
+            // one-detent dial that does nothing. Over half of Command Code's
+            // fleet has no adjustable reasoning effort at all (the CLI says so
+            // in as many words), and a dead slider claims a choice that isn't
+            // there. Its hairlines go with it — a section that isn't drawn
+            // shouldn't leave its rules behind.
+            if !efforts.isEmpty {
+                hairline
+                effortBar
+                    // Caption, slider and marks share the model rows' left edge —
+                    // the card has ONE text column, not one per section.
+                    .padding(.horizontal, MenuCard.rowPad)
+            }
 
             hairline
 
@@ -1340,6 +1354,9 @@ struct AgentModelPickerView: View {
         .onChange(of: choices) { syncMirrors() }
         .onChange(of: efforts) { syncMirrors() }
         .onChange(of: selectedEngine) { syncMirrors() }
+        .onReceive(NotificationCenter.default.publisher(for: .cliAvailabilityResolved)) { _ in
+            probeGeneration &+= 1
+        }
     }
 
     /// One model row. The shared menu row, minus its own wash: the armed

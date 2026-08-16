@@ -1493,7 +1493,14 @@ struct AnthropicUsage: Decodable {
 /// Manifest shape (provider keys are `Provider.rawValue`; the first id in each
 /// array doubles as the default model, same convention as `ProviderSpec`):
 ///
-///     { "version": 1, "providers": { "openai": ["gpt-5.5", …], … } }
+///     { "version": 1,
+///       "providers": { "openai": ["gpt-5.5", …], … },
+///       "efforts": { "commandCode": { "claude-sonnet-5": ["low", …], … }, … } }
+///
+/// `efforts` is the agent CLIs' reasoning-effort table — which `--effort` levels
+/// each engine's models actually accept (see `AgentEffortCatalog`). It rides this
+/// manifest for the same reason the shortlists do: the answer moves when a CLI
+/// ships a build, not when Notch ships one.
 enum RemoteModelManifest {
     /// Baked into every shipped version — must never move. Schema evolution goes
     /// through the JSON's `version` field, not a new URL.
@@ -1508,12 +1515,25 @@ enum RemoteModelManifest {
     /// `refreshIfDue`, so a shorter TTL just means more no-op wakeups.
     private static let ttl: TimeInterval = 6 * 60 * 60
 
-    /// Parsed manifest (provider rawValue → model ids), seeded from the persisted
-    /// copy so the very first read after launch already reflects the last fetch.
-    /// Guarded by `lock`: read from any thread via `Provider.availableModels`,
-    /// replaced on a background task after a successful fetch.
+    /// One decoded manifest.
+    struct Payload {
+        /// Provider rawValue → curated model ids; first entry is the default.
+        let providers: [String: [String]]
+        /// Engine rawValue → model id → accepted `--effort` levels. An **empty
+        /// array is meaningful** here ("this model has no adjustable effort"), so
+        /// unlike `providers` it is deliberately not filtered out.
+        let efforts: [String: [String: [String]]]
+        /// Engines whose `efforts` table beats a live probe of the user's own CLI.
+        /// Normally empty — see `effortsOverridesProbe`.
+        let effortsOverride: Set<String>
+    }
+
+    /// Parsed manifest, seeded from the persisted copy so the very first read
+    /// after launch already reflects the last fetch. Guarded by `lock`: read from
+    /// any thread via `Provider.availableModels`, replaced on a background task
+    /// after a successful fetch.
     private static let lock = NSLock()
-    private static var cached: [String: [String]]? = loadPersisted()
+    private static var cached: Payload? = loadPersisted()
     private static var fetching = false
 
     /// Synchronous critical section — NSLock's lock/unlock can't be called
@@ -1528,7 +1548,35 @@ enum RemoteModelManifest {
     /// fetched (or doesn't cover this provider) — callers fall back to the
     /// bundled `ProviderSpec` list. First entry doubles as the default model.
     static func models(for provider: Provider) -> [String]? {
-        withLock { cached?[provider.rawValue] }
+        withLock { cached?.providers[provider.rawValue] }
+    }
+
+    /// The curated `--effort` levels for one agent engine + model, or `nil` when
+    /// the manifest says nothing about it — callers fall back to the engine's own
+    /// source (a live probe, or the bundled table). An empty array is an *answer*,
+    /// not an absence: "this model takes no effort flag at all".
+    static func efforts(engine: String, model: String) -> [String]? {
+        withLock { cached?.efforts[engine]?[model] }
+    }
+
+    /// Whether this manifest claims authority over a live probe of the user's own
+    /// CLI for `engine` — the remote kill switch for a probe that has started
+    /// reading the binary wrong.
+    ///
+    /// Off by default, and that default is the considered one. A probe asks the
+    /// exact build on this Mac; this table can only hold *one* build's answer, and
+    /// Command Code self-updates in the background, so a manifest that
+    /// unconditionally outranked the probe would be confidently wrong for every
+    /// user on a different CLI version — reintroducing the failure it exists to
+    /// fix. A probe that merely *fails* already falls through to this table on its
+    /// own (`effortLevels` stays nil), so the switch is only for the one case that
+    /// can't self-correct: a probe returning a wrong answer it parsed cleanly.
+    ///
+    /// Flip it by naming the engine in the manifest and deploying:
+    ///
+    ///     "effortsOverride": ["commandCode"]
+    static func effortsOverridesProbe(engine: String) -> Bool {
+        withLock { cached?.effortsOverride.contains(engine) ?? false }
     }
 
     /// Fetch the manifest when the cached copy is older than `ttl` (or absent).
@@ -1569,8 +1617,8 @@ enum RemoteModelManifest {
         guard let (data, response) = try? await ProxyConfig.urlSession.data(for: req),
               let http = response as? HTTPURLResponse,
               (200..<300).contains(http.statusCode),
-              let lists = decode(data) else { return }
-        withLock { cached = lists }
+              let payload = decode(data) else { return }
+        withLock { cached = payload }
         UserDefaults.standard.set(data, forKey: dataKey)
         UserDefaults.standard.set(Date(), forKey: fetchedAtKey)
         // Marked only after the request actually landed. Marking on send would
@@ -1612,7 +1660,7 @@ enum RemoteModelManifest {
         return Date().timeIntervalSince(last) >= ttl
     }
 
-    private static func loadPersisted() -> [String: [String]]? {
+    private static func loadPersisted() -> Payload? {
         guard let data = UserDefaults.standard.data(forKey: dataKey) else { return nil }
         return decode(data)
     }
@@ -1620,14 +1668,35 @@ enum RemoteModelManifest {
     /// Decode + sanitize: drop empty ids and empty lists, and reject a manifest
     /// with no usable providers at all, so a bad deploy can't blank the pickers —
     /// `models(for:)` returning `nil` keeps the bundled fallback in charge.
-    private static func decode(_ data: Data) -> [String: [String]]? {
-        struct Manifest: Decodable { let providers: [String: [String]] }
+    ///
+    /// `efforts` is sanitized on the opposite rule: an empty level list is kept,
+    /// because "this model accepts no `--effort`" is precisely the fact that table
+    /// exists to record. Absent entirely (an older manifest, before this key) is
+    /// simply an empty table — every engine falls through to its own source.
+    private static func decode(_ data: Data) -> Payload? {
+        struct Manifest: Decodable {
+            let providers: [String: [String]]
+            var efforts: [String: [String: [String]]]? = nil
+            var effortsOverride: [String]? = nil
+        }
         guard let manifest = try? JSONDecoder().decode(Manifest.self, from: data)
         else { return nil }
-        let cleaned = manifest.providers
+        let providers = manifest.providers
             .mapValues { $0.filter { !$0.isEmpty } }
             .filter { !$0.value.isEmpty }
-        return cleaned.isEmpty ? nil : cleaned
+        guard !providers.isEmpty else { return nil }
+        let efforts = (manifest.efforts ?? [:])
+            .mapValues { models in
+                models
+                    .filter { !$0.key.isEmpty }
+                    .mapValues { $0.filter { !$0.isEmpty } }
+            }
+            .filter { !$0.value.isEmpty }
+        // Only an engine that actually brought a table can claim authority over a
+        // probe — naming one with nothing behind it would silence the probe and
+        // put nothing in its place.
+        let override = Set(manifest.effortsOverride ?? []).intersection(efforts.keys)
+        return Payload(providers: providers, efforts: efforts, effortsOverride: override)
     }
 }
 
