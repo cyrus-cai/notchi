@@ -48,6 +48,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if provider == .commandCode {
             return CommandCodeCLIService(model: APIKeyStore.effectiveModel(for: .commandCode))
         }
+        // pi is the same keyless pattern — whichever providers the user signed pi
+        // into with its own `/login`, no key of ours. See `PiCLIService`.
+        if provider == .piCode {
+            return PiCLIService(model: APIKeyStore.effectiveModel(for: .piCode))
+        }
         // A custom endpoint is gated on being *configured* (URL + model), not on a
         // key: a local server authenticates nobody, so an empty key is a normal
         // setup there and the request simply goes out without an auth header.
@@ -86,6 +91,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if provider == .commandCode {
             return CommandCodeCLIService(model: model)
         }
+        if provider == .piCode {
+            return PiCLIService(model: model)
+        }
         if provider.isOpenAICompatible {
             return OpenAICompatAIService(provider: provider, apiKey: apiKey, model: model)
         } else {
@@ -104,6 +112,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if provider == .claudeCode { return ClaudeCLIService.isAvailable }
         if provider == .grokCode { return GrokCLIService.isAvailable }
         if provider == .commandCode { return CommandCodeCLIService.isAvailable }
+        if provider == .piCode { return PiCLIService.isAvailable }
         // The custom endpoint is "configured" when it has a URL and a model id —
         // its key is optional (see `CustomProvider`).
         if provider == .custom { return CustomProvider.isConfigured }
@@ -219,12 +228,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Seed the configured flag to match the service the model launched with.
         model.isConfigured = AppDelegate.isConfigured()
 
-        // …and re-seed it once a CLI's binary resolution lands. For the four CLI
+        // …and re-seed it once a CLI's binary resolution lands. For the five CLI
         // providers "configured" IS "the binary resolved and you're signed in",
         // and that answer is resolved asynchronously (`warmUp()` below) — a read
         // taken here, on a cold cache, is always `false`. Without this observer
         // that `false` latched for the whole session: with `codex` / `claude` /
-        // `grok` / `cmd` as the selected provider, every launch came up claiming
+        // `grok` / `cmd` / `pi` as the selected provider, every launch came up claiming
         // nothing was configured — the Ask chip red on "Choose model…", the model
         // list falling back to the CLI offer — until some Settings action posted
         // `.aiBackendChanged`. Registered *before* the warm-ups so the probe
@@ -252,13 +261,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // it costs an interactive login shell, so it must not land on the main
         // thread mid-render.
         ShellEnvironment.warmUp()
-        // Resolve the `codex` / `claude` / `grok` binaries off-main now, so the first time
-        // Settings asks `isAvailable` (a SwiftUI render) it reads a warm cache
-        // instead of paying the `--version` smoke-test spawn on the main thread.
+        // Resolve the `codex` / `claude` / `grok` / `cmd` / `pi` binaries off-main
+        // now, so the first time Settings asks `isAvailable` (a SwiftUI render) it
+        // reads a warm cache instead of paying the smoke-test spawn on the main
+        // thread.
         CodexCLIService.warmUp()
         ClaudeCLIService.warmUp()
         GrokCLIService.warmUp()
         CommandCodeCLIService.warmUp()
+        PiCLIService.warmUp()
         // Same reason: resolving the proxy may spawn a login shell, and the first
         // agent run must not wait on it.
         ProxyConfig.warmUp()
@@ -784,17 +795,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // stops being a coin flip (`ForceClickHerald`). The cue grows into exactly
             // the capsule the composer opens with, at the same spot.
             selectedTextForceClick = ForceClickMonitor(
-                // Already on main (the raw pressure frames are hopped there before the
-                // monitor sees them) and it runs ~125 times a second, so this takes the
-                // isolation it has rather than allocating a Task per frame.
                 progress: { [weak self] reached in
                     MainActor.assumeIsolated {
-                        // Settings' test pad borrows this stream while the pointer
-                        // rests on it — one reader exists, so a rehearsal has to be
-                        // the real press, just pointed somewhere else.
-                        guard !ForceClickProbe.shared.isArmed else {
-                            return ForceClickProbe.shared.update(reached)
-                        }
                         guard let reached else { return ForceClickHerald.shared.cancel() }
                         // The press draws the composer window itself now, so it needs
                         // the model the window will be built against.
@@ -803,19 +805,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 },
                 action: { [weak self] in
-                    // A press on the test pad has arrived where it was going. It
-                    // reports "that was enough" and stops there: the pad exists to
-                    // let you feel the rung, not to open a composer over Settings.
-                    guard !ForceClickProbe.shared.isArmed else {
-                        return ForceClickProbe.shared.fire()
-                    }
                     // The cue stops being a cue here: it stretches out into the capsule
                     // itself, and the window is held back until that shape is standing
                     // still, so the two are never on screen disagreeing.
                     ForceClickHerald.shared.expand()
                     self?.runSelectedTextShortcut(grownFromPressure: true)
                 })
-            ForceClickProbe.shared.isSupported = selectedTextForceClick?.isSupported ?? false
         }
         NotificationCenter.default.addObserver(
             forName: .promptShortcutsChanged,

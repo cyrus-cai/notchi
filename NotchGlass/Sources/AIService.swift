@@ -415,6 +415,12 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     // Kimi / …, billed to their Command Code plan. Not an HTTP endpoint — it
     // shells out to the local `cmd` binary (see `CommandCodeCLIService`).
     case commandCode
+    // pi (github.com/earendil-works/pi), the same keyless pattern again — and the
+    // widest of the five: it fronts every provider the user has separately signed
+    // into (a ChatGPT plan, a Claude plan, a Command Code account, an xAI key …) in
+    // one catalog, each model billed to its own upstream account. Not an HTTP
+    // endpoint — it shells out to the local `pi` binary (see `PiCLIService`).
+    case piCode
     case anthropic
     case gemini
     case deepseek
@@ -543,6 +549,21 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
                 signupHost: "commandcode.ai",
                 signupURL: "https://commandcode.ai/docs/quickstart",
                 envVarName: "COMMAND_CODE_CLI_UNUSED")
+        case .piCode:
+            // Not an HTTP backend — `PiCLIService` shells out to the local `pi`
+            // binary; `endpoint` is a never-used placeholder. The single "pi" model
+            // id is a sentinel meaning "the CLI's own configured default" (no
+            // `--provider`/`--model` flags); the real list is the catalog
+            // `pi --list-models` prints, which is exactly the providers the user has
+            // signed into. The `signupURL` points at the project — there's no key to
+            // create; sign-in is `/login` inside pi's own TUI.
+            return ProviderSpec(
+                displayName: "pi",
+                endpoint: "https://pi.dev/unused",
+                models: [PiCLIService.defaultSentinel],
+                signupHost: "github.com",
+                signupURL: "https://github.com/earendil-works/pi",
+                envVarName: "PI_CLI_UNUSED")
         case .gemini:
             return ProviderSpec(
                 displayName: "Google Gemini",
@@ -621,7 +642,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     /// and logged in (see each service's `isAvailable`).
     var isCLI: Bool {
         switch self {
-        case .codex, .claudeCode, .grokCode, .commandCode: return true
+        case .codex, .claudeCode, .grokCode, .commandCode, .piCode: return true
         default: return false
         }
     }
@@ -637,6 +658,9 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // Command Code's list is the catalog its own CLI prints, so its default is
         // whichever row that catalog marks — never a curated shortlist of ours.
         if self == .commandCode { return CommandCodeCLIService.defaultModel }
+        // pi's default is the provider+model pair its own settings.json names, out of
+        // the catalog its CLI prints — never a curated shortlist of ours.
+        if self == .piCode { return PiCLIService.defaultModel }
         // The custom endpoint's model is the user's own typed id — a remote
         // manifest has no business overriding someone's private server.
         if self == .custom { return spec.defaultModel }
@@ -657,6 +681,9 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // Command Code's list is the account's real catalog from `cmd --list-models`
         // (see `CommandCodeCLIService`), falling back to the single sentinel.
         if self == .commandCode { return CommandCodeCLIService.availableModelIDs }
+        // pi's list is every model the user's signed-in providers expose, from
+        // `pi --list-models` (see `PiCLIService`), falling back to the sentinel.
+        if self == .piCode { return PiCLIService.availableModelIDs }
         if self == .custom { return spec.availableModels }
         // Claude Code no longer offers the "claude" account-default sentinel (see
         // the spec above); a remote manifest written before that still lists it,
@@ -690,8 +717,10 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // The gateways front other people's models, and a custom endpoint could be
         // serving anything at all — in both cases the id has to speak for itself.
         // Command Code is the third of that kind — a CLI account that fronts ~50
-        // models from a dozen labs, so its ids name their own vendor.
-        case .openrouter, .vercel, .custom, .commandCode: return nil
+        // models from a dozen labs, so its ids name their own vendor. pi is the
+        // fourth, and the widest: its ids are `<pi-provider>/<model>`, and the model
+        // half names the real lab (see `PiCLIService.vendor(forID:)`).
+        case .openrouter, .vercel, .custom, .commandCode, .piCode: return nil
         case .openai, .codex:         return "OpenAI"
         case .anthropic, .claudeCode: return "Anthropic"
         case .grokCode:               return "xAI"
@@ -715,8 +744,10 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // Anthropic speaks its native protocol; Codex and Claude Code aren't HTTP
         // at all (subprocesses). All are routed to their own client, never the
         // shared one.
-        case .anthropic, .codex, .claudeCode, .grokCode, .commandCode: return false
-        default:                                                      return true
+        case .anthropic, .codex, .claudeCode, .grokCode, .commandCode, .piCode:
+            return false
+        default:
+            return true
         }
     }
 
@@ -746,8 +777,8 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // way — the turn dispatcher takes the plain `stream` path for them. Every
         // other provider exposes a function-calling API the harness can drive.
         switch self {
-        case .codex, .claudeCode, .grokCode, .commandCode: return false
-        default:                                           return true
+        case .codex, .claudeCode, .grokCode, .commandCode, .piCode: return false
+        default:                                                   return true
         }
     }
 
@@ -859,6 +890,12 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // The CLI backends (Codex, Claude Code, Grok, Command Code) search the web
         // themselves as part of their agent loops, so they earn the "Web search" chip
         // even though Notch injects nothing (`serverSearch == nil`).
+        //
+        // pi is deliberately NOT in that list: its built-in tools are
+        // read/write/edit/bash/ls/grep/find — a filesystem and shell set with no web
+        // search anywhere in it (verified against the installed build's own tool
+        // directory). Claiming the chip would be the dishonest no-search behavior
+        // XII-116 fought, so a pi chat answers from training data and says so.
         serverSearch != nil || self == .glm || self == .codex || self == .claudeCode
             || self == .grokCode || self == .commandCode
     }
@@ -1892,10 +1929,11 @@ enum ModelCatalog {
     /// in the Settings UI does today). A failed fetch is never cached, so the
     /// next call — cache or no — always gets a real retry.
     static func fetch(for provider: Provider, apiKey: String, force: Bool = false) async -> Result? {
-        // Codex / Grok / Command Code have no `/v1/models` endpoint (they're local
-        // subprocesses, not HTTP), so there's nothing to fetch — their model lists
-        // come from the CLIs themselves.
-        if provider == .codex || provider == .grokCode || provider == .commandCode { return nil }
+        // Codex / Grok / Command Code / pi have no `/v1/models` endpoint (they're
+        // local subprocesses, not HTTP), so there's nothing to fetch — their model
+        // lists come from the CLIs themselves.
+        if provider == .codex || provider == .grokCode || provider == .commandCode
+            || provider == .piCode { return nil }
         if !force, let hit = withCacheLock({ cache[provider] }),
            hit.apiKey == apiKey, Date().timeIntervalSince(hit.fetchedAt) < ttl {
             return hit.result
@@ -2153,11 +2191,14 @@ struct ModelInfo: Identifiable, Equatable, Sendable {
     /// Build from a bare id (providers whose `/v1/models` gives no metadata, or the
     /// bundled shortlist). Capabilities are inferred from the id; the meters come
     /// wholly from `ModelRatings`.
-    init(id: String, vendor: String) {
+    /// `name` overrides the id-derived title, for the one catalog that needs it: pi
+    /// serves the same model through several accounts, so a colliding name has to
+    /// carry its provider (see `PiCLIService.displayName(forID:)`).
+    init(id: String, vendor: String, name: String? = nil) {
         let rating = ModelRatings.rating(id: id, reasoning: ModelRatings.looksReasoning(id),
                                          promptPrice: nil)
         self.id = id
-        self.name = ModelRatings.prettyName(for: id)
+        self.name = name ?? ModelRatings.prettyName(for: id)
         self.vendor = vendor
         self.contextTokens = nil
         self.vision = ModelRatings.looksVision(id)
@@ -2585,6 +2626,11 @@ enum ModelRatings {
     /// because every one of these labels already sits beside the Anthropic mark.
     /// Until a probe has ever landed, the bare alias stands in.
     static func prettyName(for id: String, provider: Provider) -> String {
+        // pi's ids are `<pi-provider>/<model>`, and a name that appears under two of
+        // its providers has to say which — see `PiCLIService.displayName(forID:)`.
+        if provider == .piCode, id != PiCLIService.defaultSentinel {
+            return PiCLIService.displayName(forID: id)
+        }
         guard provider == .claudeCode,
               let resolved = ClaudeCLIService.resolvedModels[id]
         else { return prettyName(for: id) }

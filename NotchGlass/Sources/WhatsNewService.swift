@@ -70,6 +70,22 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.6.2",
+            date: "2026-08-18",
+            features: [
+                "Agent now supports pi, with every provider and model you've signed into through pi.",
+                "Type a colon or quotation mark at the start of a prompt to enter Note mode.",
+            ],
+            improvements: [
+                "Agent tasks show thinking, plans, file diffs, and tool output in a clearer work trail.",
+                "Queue follow-ups while an Agent is running, or press Command-Return to interrupt the current round and send immediately.",
+                "What's New adds version navigation for browsing earlier updates.",
+            ],
+            fixes: [
+                "Instructions sent by interrupt no longer appear twice in Agent task history.",
+            ]
+        ),
+        Entry(
             version: "0.6.1",
             date: "2026-08-16",
             features: [

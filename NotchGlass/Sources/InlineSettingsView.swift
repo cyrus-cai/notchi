@@ -353,9 +353,14 @@ struct InlineSettingsView: View {
     /// persisted value; writes go through `selectHoverSensitivity`. Read live by
     /// `NotchModel.hoverEntered`, so a change applies to the very next hover.
     @State private var hoverSensitivity: HoverSensitivity = .current
+    /// Where the hover slider's ticks actually sit (normalized 0…1), so its
+    /// labels line up under the marks rather than under an equal-width guess.
+    @State private var hoverTickCenters: [CGFloat]?
     /// How much additional trackpad pressure turns a click into the global
     /// selected-text action. The monitor reads the persisted value live.
     @State private var forceClickPressure: ForceClickPressure = .current
+    /// Where the pressure slider's ticks actually sit; see `hoverTickCenters`.
+    @State private var pressureTickCenters: [CGFloat]?
 
     /// Whether the island auto-hides while a full-screen app covers its screen —
     /// mirrors the persisted value; writes go through `selectHideInFullscreen`,
@@ -596,15 +601,12 @@ struct InlineSettingsView: View {
                 }
             case .capture:
                 // The whole path a line takes into the notch, in the order it
-                // travels: what the panel picks up when it opens, how a press
-                // opens it, then where a jot finally files. These four rows used
+                // travels: what the panel picks up when it opens, how it gets
+                // its subject, then where a jot finally files. These rows used
                 // to be split across Notes and General, which put "what gets
                 // captured" and "where it goes" on different pages.
                 copySenseRow
                 selectionContextRow
-                if ForceClickFeature.isEnabled {
-                    forceClickPressureRow
-                }
                 noteDestinationRow
             case .general:
                 // What's left once the capture rows moved out is genuinely
@@ -630,8 +632,14 @@ struct InlineSettingsView: View {
                 dockIconRow
                 menuBarIconRow
                 hoverSensitivityRow
+                if ForceClickFeature.isEnabled {
+                    forceClickPressureRow
+                }
                 fullscreenAutoHideRow
                 liveActivityRow
+                if HandwritingFeature.isEnabled {
+                    handwrittenAnswersRow
+                }
             case .stats:
                 statsSection
             case .about:
@@ -957,6 +965,8 @@ struct InlineSettingsView: View {
                     grokAccountRow
                 } else if keyScope == .commandCode {
                     commandCodeAccountRow
+                } else if keyScope == .piCode {
+                    piAccountRow
                 } else if keyScope == .openrouter && !manualKeyEntry && !envOverride {
                     openRouterAccountRow
                 } else {
@@ -1801,6 +1811,50 @@ struct InlineSettingsView: View {
         }
     }
 
+    // MARK: - pi sign-in status
+
+    /// pi is keyless like the rest, and — like Claude and Command Code, unlike Grok
+    /// — has NO in-app sign-in: pi's `/login` is a slash command inside its own
+    /// interactive TUI, which needs a real TTY, so there is nothing Notch can
+    /// usefully spawn. The row reports state and points at the terminal.
+    ///
+    /// "Signed in" means something wider here than for the others: pi fronts every
+    /// provider separately, so the check is "at least one provider is configured" —
+    /// which is exactly what a non-empty `pi --list-models` catalog says (see
+    /// `PiCLIService.authExists`).
+    @ViewBuilder
+    private var piAccountRow: some View {
+        let installed = PiCLIService.isInstalled
+        let signedIn = PiCLIService.authExists()
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Text(L("model.account"))
+                    .font(.sf(13, weight: .medium))
+                    .foregroundStyle(Tokens.text2)
+                    .frame(width: 64, alignment: .leading)
+
+                if !installed {
+                    // No CLI yet → link to the project's install docs.
+                    codexPillButton(L("pi.status.get")) {
+                        NSWorkspace.shared.open(Provider.piCode.signupURL)
+                    }
+                } else {
+                    statusPill(ok: signedIn,
+                               message: L(signedIn ? "pi.status.connected"
+                                                   : "pi.status.signedOut"))
+                }
+            }
+
+            Text(installed
+                 ? (signedIn ? L("pi.status.hint.ready") : L("pi.status.hint.login"))
+                 : L("pi.status.hint.install"))
+                .font(.sf(12))
+                .foregroundStyle(Tokens.text3)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.leading, 76)
+        }
+    }
+
     /// A quiet pill button in the account row's register (Get Codex / Sign in /
     /// Re-authorize) — same chrome as the OpenRouter Connect button.
     private func codexPillButton(_ title: String, action: @escaping () -> Void) -> some View {
@@ -2139,46 +2193,23 @@ struct InlineSettingsView: View {
     }
 
     /// Whether the app shows a Dock icon. Off by default — the notch overlay is a
-    /// menu-bar-less accessory — but some users want one place to relaunch or quit
-    /// it from. The choice applies immediately (AppDelegate flips the activation
-    /// policy).
+    /// Whether the app shows a Dock icon — mirrors the persisted value; writes go
+    /// through `selectDockIconVisibility` so `AppDelegate` flips the activation
+    /// policy immediately.
     ///
-    /// Drawn as a two-card picker like the placement row above: "is my icon down
-    /// there" is a spatial question, so each card shows a miniature screen with a
-    /// Dock strip — one with this app's tile in it, one without.
+    /// Hidden is the app's natural state: a menu-bar-less accessory whose only
+    /// presence is the island. Some users want one place to relaunch or quit
+    /// from, though. Drawn as a plain row — same shape as the menu-bar-icon
+    /// pick right below it.
     private var dockIconRow: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Text(L("general.dockIcon"))
-                .font(.sf(13, weight: .medium))
-                .foregroundStyle(Tokens.text2)
-                .lineLimit(1)
-                .fixedSize()
-                .frame(minWidth: 64, alignment: .leading)
-                // Sit on the cards' first inner line, matching the placement row.
-                .padding(.top, 8)
-            // Ordered "has icon" → "no icon", the same more-to-less direction the
-            // placement cards read in.
-            ForEach([DockIconVisibility.shown, .hidden]) { v in
-                dockIconCard(v)
-            }
-            Spacer(minLength: 0)
-        }
-    }
-
-    private func dockIconCard(_ v: DockIconVisibility) -> some View {
-        let selected = dockIconVisibility == v
-        return PickerCard(selected: selected) {
-            selectDockIconVisibility(v)
-        } content: {
-            VStack(spacing: 7) {
-                MiniDock(hasIcon: v == .shown)
-                    // The unselected diagram dims as a whole so the lit tile
-                    // reads as "what you'd get", not as a second active choice.
-                    .opacity(selected ? 1 : 0.55)
-                Text(v.label)
-                    .font(.sf(11, weight: selected ? .semibold : .regular))
-                    .foregroundStyle(selected ? Tokens.text1 : Tokens.text3)
-                    .lineLimit(1)
+        settingRow(label: L("general.dockIcon"),
+                   info: L("general.dockIcon.footer")) {
+            GlassMenu(title: dockIconVisibility.label) {
+                ForEach(DockIconVisibility.allCases) { v in
+                    Button { selectDockIconVisibility(v) } label: {
+                        menuOption(v.label, selected: v == dockIconVisibility)
+                    }
+                }
             }
         }
     }
@@ -2668,6 +2699,24 @@ struct InlineSettingsView: View {
         }
     }
 
+    /// Whether the assistant's answers come out in a hand instead of typeset.
+    /// Prose only — your question, the interface and every code block stay as
+    /// they are, and nothing about the copied text changes. That scope is the
+    /// one thing the label can't say, so it's the whole of the hint.
+    private var handwrittenAnswersRow: some View {
+        settingRow(label: L("appearance.handwritten"),
+                   info: L("appearance.handwritten.hint")) {
+            Toggle("", isOn: Binding(
+                get: { model.handwrittenAnswers },
+                set: { Haptics.levelChange(); model.handwrittenAnswers = $0 }
+            ))
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .tint(Tokens.text2)
+        }
+    }
+
     /// The collapsed-by-default tail of the General pane: plumbing nobody should
     /// have to walk past to reach the everyday rows. Same quiet disclosure line as
     /// `keySection` — it stays folded until the user opens it, whatever the proxy
@@ -2781,27 +2830,91 @@ struct InlineSettingsView: View {
     }
 
     /// The global selected-text gesture has no keyboard binding: this is its one
-    /// setting. A menu fits the three ordered pressure rungs — and under it, the
-    /// pad you can actually press, because the words "Light / Medium / Firm" name
-    /// a feeling and nothing on a screen can hand you a feeling except letting
-    /// you try it.
+    /// setting. Four ordered positions, quantized like the hover-sensitivity
+    /// slider right above it — Off, Light, Medium, Firm. Off disarms the
+    /// gesture entirely, so a plain click stays a plain click.
     private var forceClickPressureRow: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            settingRow(label: L("general.forceClickPressure"),
-                       info: L("general.forceClickPressure.hint")) {
-                GlassMenu(title: forceClickPressure.label) {
-                    ForEach(ForceClickPressure.allCases) { pressure in
-                        Button { selectForceClickPressure(pressure) } label: {
-                            menuOption(pressure.label, selected: pressure == forceClickPressure)
-                        }
+        let controlWidth: CGFloat = 190
+        return settingRow(label: L("general.forceClickPressure"),
+                          info: L("general.forceClickPressure.hint")) {
+            VStack(spacing: 1) {
+                NativeDetentSlider(value: forceClickPressurePosition,
+                                   ticks: ForceClickPressure.allCases.count,
+                                   tickCenters: $pressureTickCenters)
+                    .frame(width: controlWidth, height: 22)
+                    .accessibilityLabel(L("general.forceClickPressure"))
+
+                tickLabelRow(ForceClickPressure.allCases,
+                             selected: forceClickPressure,
+                             centers: pressureTickCenters,
+                             width: controlWidth)
+            }
+        }
+    }
+
+    /// Labels under a detent slider, each centered on its tick's real x-position
+    /// (from the slider's `rectOfTickMark`), so text sits squarely under the
+    /// marks instead of under an equal-width division of the control.
+    private func tickLabelRow<Option: Identifiable & Equatable & Hashable>(
+        _ options: [Option],
+        selected: Option,
+        centers: [CGFloat]?,
+        width: CGFloat
+    ) -> some View where Option: RawRepresentable, Option.RawValue == String {
+        ZStack {
+            if let centers, centers.count == options.count {
+                ForEach(Array(options.enumerated()), id: \.element) { index, option in
+                    tickLabel(option, selected: selected)
+                        .position(x: centers[index] * width, y: 7)
+                }
+            } else {
+                // Until AppKit reports where its tick marks actually landed, fall
+                // back to an even split — the row must never render blank.
+                HStack(spacing: 0) {
+                    ForEach(Array(options.enumerated()), id: \.element) { index, option in
+                        tickLabel(option, selected: selected)
+                            .frame(maxWidth: .infinity,
+                                   alignment: index == 0 ? .leading
+                                       : (index == options.count - 1 ? .trailing : .center))
                     }
                 }
             }
-            ForceClickTestPad()
-                // Hangs under the menu it belongs to, on the controls' column
-                // rather than the labels'.
-                .padding(.leading, 76)
         }
+        .frame(width: width, height: 14)
+    }
+
+    private func tickLabel<Option: RawRepresentable & Equatable>(
+        _ option: Option,
+        selected: Option
+    ) -> some View where Option.RawValue == String {
+        let isSelected = option == selected
+        return Text(optionLabel(option))
+            .font(.sf(10.5, weight: isSelected ? .semibold : .regular))
+            .foregroundStyle(isSelected ? Tokens.text1 : Tokens.text3)
+            .lineLimit(1)
+    }
+
+    private func optionLabel<Option: RawRepresentable>(_ option: Option) -> String
+    where Option.RawValue == String {
+        if let pressure = option as? ForceClickPressure {
+            return pressure.label
+        }
+        if let sensitivity = option as? HoverSensitivity {
+            return sensitivity.label
+        }
+        return ""
+    }
+
+    private var forceClickPressurePosition: Binding<Double> {
+        Binding(
+            get: {
+                Double(ForceClickPressure.allCases.firstIndex(of: forceClickPressure) ?? 2)
+            },
+            set: { position in
+                let index = min(max(Int(position.rounded()), 0), ForceClickPressure.allCases.count - 1)
+                selectForceClickPressure(ForceClickPressure.allCases[index])
+            }
+        )
     }
 
     private func selectForceClickPressure(_ newValue: ForceClickPressure) {
@@ -2818,21 +2931,16 @@ struct InlineSettingsView: View {
         return settingRow(label: L("general.hoverSensitivity"),
                           info: L("general.hoverSensitivity.hint")) {
             VStack(spacing: 1) {
-                NativeDetentSlider(value: hoverSensitivityPosition, ticks: HoverSensitivity.allCases.count)
+                NativeDetentSlider(value: hoverSensitivityPosition,
+                                   ticks: HoverSensitivity.allCases.count,
+                                   tickCenters: $hoverTickCenters)
                     .frame(width: controlWidth, height: 22)
                     .accessibilityLabel(L("general.hoverSensitivity"))
 
-                HStack(spacing: 0) {
-                    ForEach(HoverSensitivity.allCases) { sensitivity in
-                        Text(sensitivity.label)
-                            .font(.sf(10.5, weight: sensitivity == hoverSensitivity ? .semibold : .regular))
-                            .foregroundStyle(sensitivity == hoverSensitivity ? Tokens.text1 : Tokens.text3)
-                            .frame(maxWidth: .infinity,
-                                   alignment: sensitivity == .low ? .leading
-                                       : (sensitivity == .instant ? .trailing : .center))
-                    }
-                }
-                .frame(width: controlWidth)
+                tickLabelRow(HoverSensitivity.allCases,
+                             selected: hoverSensitivity,
+                             centers: hoverTickCenters,
+                             width: controlWidth)
             }
         }
     }
@@ -3926,6 +4034,26 @@ struct InlineSettingsView: View {
                     NSWorkspace.shared.open(URL(string: "https://opensource.org/license/mit")!)
                 }
             }
+
+            // The bundled Latin handwriting face (Settings → Appearance,
+            // "Handwritten answers"). The OFL asks that the licence travel with
+            // the software that ships the font.
+            Text(L("about.handwritingFont"))
+                .font(.sf(13, weight: .medium))
+                .foregroundStyle(Tokens.text1)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 12) {
+                aboutLink("Caveat") {
+                    NSWorkspace.shared.open(URL(string: "https://github.com/googlefonts/caveat")!)
+                }
+                aboutLink("SIL OFL 1.1") {
+                    NSWorkspace.shared.open(URL(string: "https://openfontlicense.org")!)
+                }
+                aboutLink("hanzi-writer-data") {
+                    NSWorkspace.shared.open(URL(string: "https://github.com/chanind/hanzi-writer-data")!)
+                }
+            }
         }
     }
 
@@ -4720,17 +4848,32 @@ struct NativeDetentSlider: NSViewRepresentable {
     /// Two ticks are the minimum the system allows; 3 = the old
     /// `NativeThreeStepSlider` exactly.
     let ticks: Int
+    /// Normalized x-position of each tick's center inside the slider, 0…1
+    /// (nil while the NSView isn't laid out yet). Labels align to these instead
+    /// of a naive equal-width split, because the AppKit track is inset from the
+    /// view's edges by half a thumb on each side. Defaults to nil for sliders
+    /// that draw no label row.
+    @Binding var tickCenters: [CGFloat]?
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(value: $value)
+    init(value: Binding<Double>, ticks: Int, tickCenters: Binding<[CGFloat]?> = .constant(nil)) {
+        _value = value
+        self.ticks = ticks
+        _tickCenters = tickCenters
     }
 
-    func makeNSView(context: Context) -> NSSlider {
-        let slider = NSSlider(value: value,
-                              minValue: 0,
-                              maxValue: Double(ticks - 1),
-                              target: context.coordinator,
-                              action: #selector(Coordinator.valueChanged(_:)))
+    func makeCoordinator() -> Coordinator {
+        Coordinator(value: $value, tickCenters: $tickCenters)
+    }
+
+    func makeNSView(context: Context) -> SliderView {
+        let slider = SliderView(value: value,
+                                minValue: 0,
+                                maxValue: Double(ticks - 1),
+                                target: context.coordinator,
+                                action: #selector(Coordinator.valueChanged(_:)))
+        slider.onTickGeometryChange = { [weak coordinator = context.coordinator] centers in
+            coordinator?.publish(tickCenters: centers)
+        }
         slider.sliderType = .linear
         slider.numberOfTickMarks = ticks
         slider.tickMarkPosition = .below
@@ -4742,8 +4885,22 @@ struct NativeDetentSlider: NSViewRepresentable {
         return slider
     }
 
-    func updateNSView(_ slider: NSSlider, context: Context) {
+    func updateNSView(_ slider: SliderView, context: Context) {
         context.coordinator.value = $value
+        context.coordinator.tickCenters = $tickCenters
+        // The ladder itself has to be re-applied, not just the value: SwiftUI
+        // REUSES this NSSlider when `ticks` changes, and `makeNSView` only ever
+        // ran once. A slider left holding the old count is not cosmetic — it
+        // CRASHED the app: `rectOfTickMark(at:)` below raises an NSException for
+        // an index past `numberOfTickMarks`, and an ObjC exception out of a
+        // SwiftUI update is a hard termination, not a caught error. The way in
+        // was arming a model whose rung count is higher than the armed one's
+        // (pi's models offer five rungs; plenty of others offer two or three),
+        // with the effort bar already on screen.
+        if slider.numberOfTickMarks != ticks {
+            slider.numberOfTickMarks = ticks
+            slider.maxValue = Double(ticks - 1)
+        }
         // Re-clamp on tick-count changes (e.g. the agent card's rungs can
         // shrink when the armed model changes) so the thumb can't sit past the
         // last detent it's now allowed to hit.
@@ -4752,64 +4909,64 @@ struct NativeDetentSlider: NSViewRepresentable {
         if slider.doubleValue != value {
             slider.doubleValue = value
         }
+        slider.reportTickGeometry()
+    }
+
+    /// Reports its own tick geometry from `layout()`. Reading it during
+    /// `updateNSView` alone is too early — SwiftUI runs that before AppKit has
+    /// sized the view, so `bounds.width` is still 0 and nothing ever measures
+    /// again; that left the label row permanently empty.
+    final class SliderView: NSSlider {
+        var onTickGeometryChange: (([CGFloat]) -> Void)?
+
+        override func layout() {
+            super.layout()
+            reportTickGeometry()
+        }
+
+        /// Normalized center of each tick mark, 0…1. Two detents are AppKit's
+        /// minimum, so anything less has no geometry to read — asking anyway
+        /// raises the same `rectOfTickMark(at:)` exception as an out-of-range
+        /// index.
+        func reportTickGeometry() {
+            let width = bounds.width
+            guard width > 0, numberOfTickMarks >= 2 else { return }
+            let centers = (0..<numberOfTickMarks).map { index -> CGFloat in
+                (rectOfTickMark(at: index).midX / width).clamped(to: 0...1)
+            }
+            onTickGeometryChange?(centers)
+        }
     }
 
     final class Coordinator: NSObject {
         var value: Binding<Double>
+        var tickCenters: Binding<[CGFloat]?>
 
-        init(value: Binding<Double>) {
+        init(value: Binding<Double>, tickCenters: Binding<[CGFloat]?>) {
             self.value = value
+            self.tickCenters = tickCenters
         }
 
         @objc func valueChanged(_ sender: NSSlider) {
             value.wrappedValue = sender.doubleValue
         }
+
+        /// Hops to the next runloop pass: the measurement can land inside a
+        /// SwiftUI update (or inside AppKit's layout), and writing state there
+        /// is what SwiftUI warns about.
+        func publish(tickCenters centers: [CGFloat]) {
+            guard tickCenters.wrappedValue != centers else { return }
+            DispatchQueue.main.async { [self] in
+                guard tickCenters.wrappedValue != centers else { return }
+                tickCenters.wrappedValue = centers
+            }
+        }
     }
 }
 
-/// A miniature screen with a Dock strip along its bottom edge, for the Dock-icon
-/// picker: the "Shown" card lights this app's tile inside the strip, the "Hidden"
-/// card leaves the strip without it. Same drawing language as `MiniDisplay` so
-/// the two diagrams read as a family.
-private struct MiniDock: View {
-    let hasIcon: Bool
-
-    var body: some View {
-        VStack(spacing: 1) {
-            ZStack(alignment: .bottom) {
-                RoundedRectangle(cornerRadius: 3)
-                    .fill(.white.opacity(0.08))
-                RoundedRectangle(cornerRadius: 3)
-                    .strokeBorder(.white.opacity(0.35), lineWidth: 1)
-                dock
-                    .padding(.bottom, 2)
-            }
-            .frame(width: 40, height: 23)
-            RoundedRectangle(cornerRadius: 1)
-                .fill(.white.opacity(0.35))
-                .frame(width: 46, height: 2)
-        }
-    }
-
-    private var dock: some View {
-        HStack(spacing: 2) {
-            tile(bright: false)
-            tile(bright: false)
-            if hasIcon { tile(bright: true) }
-            tile(bright: false)
-        }
-        .padding(.horizontal, 2.5)
-        .padding(.vertical, 1.5)
-        .background(
-            RoundedRectangle(cornerRadius: 2.5)
-                .fill(.white.opacity(0.16))
-        )
-    }
-
-    private func tile(bright: Bool) -> some View {
-        RoundedRectangle(cornerRadius: 1)
-            .fill(.white.opacity(bright ? 0.95 : 0.38))
-            .frame(width: 4, height: 4)
+private extension CGFloat {
+    func clamped(to range: ClosedRange<CGFloat>) -> CGFloat {
+        Swift.min(Swift.max(self, range.lowerBound), range.upperBound)
     }
 }
 
@@ -4866,86 +5023,6 @@ private struct MiniDisplay: View {
                     .frame(width: 12, height: 2)
             }
         }
-    }
-}
-
-/// Somewhere to try the rung you just picked.
-///
-/// "Light / Medium / Firm" names a pressure your finger has to find, and no
-/// label, picture or recording can hand that over — you have to press. So this
-/// is a live pad: rest the pointer on it, press, and the cap grows under your
-/// finger exactly as the herald's does at the pointer, driven by the same
-/// `ForceClickPressure.progress` that decides whether the real gesture fires.
-/// It can't fire anything — the press is routed here and stops here.
-///
-/// One reader exists for the trackpad's raw frames (`RawTrackpadPressureSource`),
-/// and the app's monitor owns it, so this borrows that stream through
-/// `ForceClickProbe` rather than opening a second one.
-private struct ForceClickTestPad: View {
-    @ObservedObject private var probe = ForceClickProbe.shared
-
-    /// The cap at rest is a cursor's worth of ink and it fills the outline at
-    /// the moment the press would fire, so "how much further" is a distance.
-    private static let seedWidth: CGFloat = 20
-    private static let fullWidth: CGFloat = 128
-    private static let height: CGFloat = 20
-
-    private var reached: Double { probe.progress ?? 0 }
-
-    var body: some View {
-        if probe.isSupported {
-            pad
-                // Arming is just "the pointer is on the pad" — which spares the
-                // pad any screen-coordinate arithmetic, and means the gesture
-                // goes back to opening Notchi the moment you leave.
-                .onHover { probe.isArmed = $0 }
-                .onDisappear { probe.isArmed = false }
-        } else {
-            // A mouse or a pre-Force-Touch trackpad never sends pressure, so the
-            // setting above it can't do anything either — better said once here
-            // than left as a pad that ignores every press.
-            Text(L("forceClick.try.unsupported"))
-                .font(.sf(11))
-                .foregroundStyle(Tokens.text3)
-        }
-    }
-
-    private var pad: some View {
-        VStack(spacing: 7) {
-            ZStack {
-                // Where the press has to get to.
-                Capsule()
-                    .strokeBorder(.white.opacity(probe.reached ? 0.55 : 0.18),
-                                  style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
-                    .frame(width: Self.fullWidth, height: Self.height)
-                Capsule()
-                    .fill(.white.opacity(probe.reached ? 0.92 : 0.24 + 0.30 * reached))
-                    .frame(width: capWidth, height: Self.height)
-            }
-            Text(probe.reached ? L("forceClick.try.reached") : L("forceClick.try"))
-                .font(.sf(11, weight: probe.reached ? .medium : .regular))
-                .foregroundStyle(probe.reached ? Tokens.text1 : Tokens.text3)
-                .lineLimit(1)
-        }
-        .frame(width: Self.fullWidth + 24, height: 52)
-        .background(
-            RoundedRectangle(cornerRadius: 9)
-                .fill(.white.opacity(probe.isArmed ? 0.07 : 0.035))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 9)
-                .strokeBorder(.white.opacity(probe.isArmed ? 0.18 : 0.10), lineWidth: 0.5)
-        )
-        .contentShape(RoundedRectangle(cornerRadius: 9))
-        // The press phase is deliberately unanimated: the finger IS the
-        // animation, and an interpolator between the two would make a rung feel
-        // like a different rung. Only the arrival flashes on its own.
-        .animation(.easeOut(duration: 0.12), value: probe.reached)
-        .animation(.easeOut(duration: Tokens.rowFade), value: probe.isArmed)
-    }
-
-    private var capWidth: CGFloat {
-        Self.seedWidth + (Self.fullWidth - Self.seedWidth) * CGFloat(reached)
     }
 }
 

@@ -27,6 +27,14 @@ struct ContentView: View {
             // gone. Removing the scrim also stops it swallowing the first click
             // on whatever sits under the canvas.
             NotchIsland(model: model)
+                // The answer's voice, injected once at the root so every mounted
+                // copy of a turn agrees — the visible thread, the hidden height
+                // probe, the progressive-blur overlays. Injecting it lower would
+                // let the probe measure a typeset answer while the thread renders
+                // a handwritten one, and the panel would settle to the wrong
+                // height. Only `MarkdownBlocks` reads it, and that view renders
+                // nothing but assistant output, so the reach is exactly the prose.
+                .environment(\.handwritten, HandwritingFeature.isEnabled && model.handwrittenAnswers)
                 // Rebuild the island's subtree on an App Language switch so every
                 // localized string re-evaluates at once. The island is collapsed
                 // (or being opened) when the user returns from a switch, so the

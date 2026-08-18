@@ -14,6 +14,8 @@
 		A1000014 /* AIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000005 /* AIService.swift */; };
 		A1000015 /* NotchModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000006 /* NotchModel.swift */; };
 		A1000016 /* GlassBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000007 /* GlassBackground.swift */; };
+		A1000C10 /* Handwriting.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000C11 /* Handwriting.swift */; };
+		A1000C12 /* StrokeInk.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000C13 /* StrokeInk.swift */; };
 		A1000017 /* NotchBody.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000008 /* NotchBody.swift */; };
 		A1000018 /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000009 /* Components.swift */; };
 		A100001A /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000A /* ContentView.swift */; };
@@ -37,6 +39,7 @@
 		A1000790 /* CodexCLIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000791 /* CodexCLIService.swift */; };
 		A1000900 /* GrokCLIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000901 /* GrokCLIService.swift */; };
 		A1000920 /* CommandCodeCLIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000921 /* CommandCodeCLIService.swift */; };
+		A1000B10 /* PiCLIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000B11 /* PiCLIService.swift */; };
 		A1000922 /* ShellEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000923 /* ShellEnvironment.swift */; };
 		A10007A0 /* AgentTaskService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10007A1 /* AgentTaskService.swift */; };
 		A10007B0 /* ClaudeCLIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10007B1 /* ClaudeCLIService.swift */; };
@@ -55,6 +58,7 @@
 		A1000071 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1000070 /* Assets.xcassets */; };
 		A10004A1 /* Fonts in Resources */ = {isa = PBXBuildFile; fileRef = A10004A0 /* Fonts */; };
 		A10004B1 /* intro-sunrise.m4a in Resources */ = {isa = PBXBuildFile; fileRef = A10004B0 /* intro-sunrise.m4a */; };
+		A1000C15 /* strokes.bin in Resources */ = {isa = PBXBuildFile; fileRef = A1000C14 /* strokes.bin */; };
 		A10004B3 /* buy-me-a-coffee.gif in Resources */ = {isa = PBXBuildFile; fileRef = A10004B2 /* buy-me-a-coffee.gif */; };
 		A1000710 /* AgentHarness.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000720 /* AgentHarness.swift */; };
 		A1000711 /* AgentTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000721 /* AgentTools.swift */; };
@@ -82,6 +86,7 @@
 		A1000791 /* CodexCLIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexCLIService.swift; sourceTree = "<group>"; };
 		A1000901 /* GrokCLIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GrokCLIService.swift; sourceTree = "<group>"; };
 		A1000921 /* CommandCodeCLIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandCodeCLIService.swift; sourceTree = "<group>"; };
+		A1000B11 /* PiCLIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PiCLIService.swift; sourceTree = "<group>"; };
 		A1000923 /* ShellEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellEnvironment.swift; sourceTree = "<group>"; };
 		A10007A1 /* AgentTaskService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentTaskService.swift; sourceTree = "<group>"; };
 		A10007B1 /* ClaudeCLIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeCLIService.swift; sourceTree = "<group>"; };
@@ -98,6 +103,8 @@
 		A10003BB /* HistoryArchiveWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryArchiveWindow.swift; sourceTree = "<group>"; };
 		A1000067 /* IntentExamples.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntentExamples.swift; sourceTree = "<group>"; };
 		A1000007 /* GlassBackground.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassBackground.swift; sourceTree = "<group>"; };
+		A1000C11 /* Handwriting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Handwriting.swift; sourceTree = "<group>"; };
+		A1000C13 /* StrokeInk.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StrokeInk.swift; sourceTree = "<group>"; };
 		A1000008 /* NotchBody.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotchBody.swift; sourceTree = "<group>"; };
 		A1000009 /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
 		A100000A /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -114,6 +121,7 @@
 		A1000070 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A10004A0 /* Fonts */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Fonts; sourceTree = "<group>"; };
 		A10004B0 /* intro-sunrise.m4a */ = {isa = PBXFileReference; lastKnownFileType = file; path = "intro-sunrise.m4a"; sourceTree = "<group>"; };
+		A1000C14 /* strokes.bin */ = {isa = PBXFileReference; lastKnownFileType = file; path = strokes.bin; sourceTree = "<group>"; };
 		A10004B2 /* buy-me-a-coffee.gif */ = {isa = PBXFileReference; lastKnownFileType = image.gif; path = "buy-me-a-coffee.gif"; sourceTree = "<group>"; };
 		A1000100 /* NotchGlass.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NotchGlass.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -168,6 +176,7 @@
 				A1000791 /* CodexCLIService.swift */,
 				A1000901 /* GrokCLIService.swift */,
 				A1000921 /* CommandCodeCLIService.swift */,
+				A1000B11 /* PiCLIService.swift */,
 				A1000923 /* ShellEnvironment.swift */,
 				A10007A1 /* AgentTaskService.swift */,
 				A10007B1 /* ClaudeCLIService.swift */,
@@ -185,6 +194,8 @@
 				A1000065 /* IntentEngine.swift */,
 				A1000067 /* IntentExamples.swift */,
 				A1000007 /* GlassBackground.swift */,
+				A1000C11 /* Handwriting.swift */,
+				A1000C13 /* StrokeInk.swift */,
 				A1000008 /* NotchBody.swift */,
 				A1000009 /* Components.swift */,
 				A100000A /* ContentView.swift */,
@@ -207,6 +218,7 @@
 				A1000070 /* Assets.xcassets */,
 				A10004A0 /* Fonts */,
 				A10004B0 /* intro-sunrise.m4a */,
+				A1000C14 /* strokes.bin */,
 				A10004B2 /* buy-me-a-coffee.gif */,
 				A1000913 /* PrivacyInfo.xcprivacy */,
 			);
@@ -283,6 +295,7 @@
 				A1000071 /* Assets.xcassets in Resources */,
 				A10004A1 /* Fonts in Resources */,
 				A10004B1 /* intro-sunrise.m4a in Resources */,
+				A1000C15 /* strokes.bin in Resources */,
 				A10004B3 /* buy-me-a-coffee.gif in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -313,6 +326,7 @@
 				A1000790 /* CodexCLIService.swift in Sources */,
 				A1000900 /* GrokCLIService.swift in Sources */,
 				A1000920 /* CommandCodeCLIService.swift in Sources */,
+				A1000B10 /* PiCLIService.swift in Sources */,
 				A1000922 /* ShellEnvironment.swift in Sources */,
 				A10007A0 /* AgentTaskService.swift in Sources */,
 				A10007B0 /* ClaudeCLIService.swift in Sources */,
@@ -330,6 +344,8 @@
 				A1000064 /* IntentEngine.swift in Sources */,
 				A1000066 /* IntentExamples.swift in Sources */,
 				A1000016 /* GlassBackground.swift in Sources */,
+				A1000C10 /* Handwriting.swift in Sources */,
+				A1000C12 /* StrokeInk.swift in Sources */,
 				A1000017 /* NotchBody.swift in Sources */,
 				A1000018 /* Components.swift in Sources */,
 				A100001A /* ContentView.swift in Sources */,
@@ -413,7 +429,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.6.1;
+				MARKETING_VERSION = 0.6.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -436,7 +452,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.6.1;
+				MARKETING_VERSION = 0.6.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;

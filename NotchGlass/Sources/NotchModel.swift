@@ -741,16 +741,24 @@ final class NotchModel: ObservableObject {
 
     @Published var text = "" {      // current input (idle prompt or follow-up)
         didSet {
+            let empty = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            // The punctuation-triggered Note pin lives exactly as long as the
+            // hand-typed first glyph that created it.
+            if let trigger = typedNoteTriggerPrefix,
+               !text.hasPrefix(trigger) {
+                typedNoteTriggerPrefix = nil
+                typedNoteModeActive = false
+                manualPanelOverride = empty ? nil : .chat
+            }
             // A Tab override is scoped to the line it was pressed on. The field
             // emptying — submit cleared it, or the user deleted everything — ends
             // that line, so the next one starts back on auto-classification.
             // A `/`-pinned prompt shortcut is scoped the same way.
-            if manualPanelOverride != nil,
-               text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if manualPanelOverride != nil, empty {
                 manualPanelOverride = nil
             }
             if promptShortcutMode != nil,
-               text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+               empty {
                 promptShortcutMode = nil
             }
             // The `/` menu's highlight is scoped to the menu being open: every
@@ -1611,6 +1619,20 @@ final class NotchModel: ObservableObject {
     /// close), so the next line is auto-classified again. See `toggleSubmitPanel`.
     @Published var manualPanelOverride: Panel? = nil
 
+    /// True only for Note mode entered by typing its punctuation prefix. It
+    /// drives the temporary explanation beside the caret and clears when that
+    /// exact first glyph is removed.
+    @Published private(set) var typedNoteModeActive = false
+    private var typedNoteTriggerPrefix: String?
+
+    func activateTypedNoteMode(trigger: Character) {
+        setAgentBucket(false)
+        promptShortcutMode = nil
+        typedNoteTriggerPrefix = String(trigger)
+        typedNoteModeActive = true
+        manualPanelOverride = .note
+    }
+
     /// Confidence the classifier must clear before we'll act on it — both to route
     /// Enter to the other surface AND to label the send button with that destination.
     /// One shared floor on purpose: we never switch surfaces *more* eagerly than the
@@ -1724,6 +1746,8 @@ final class NotchModel: ObservableObject {
         // chips, typed task) as a side effect of a key people mash. Leaving the
         // bucket is Shift-Tab's job (`toggleAgentBucket`) or the pill's Ask half.
         guard !agentComposeActive else { return }
+        typedNoteTriggerPrefix = nil
+        typedNoteModeActive = false
         switch effectiveSubmitPanel {
         case .chat:     manualPanelOverride = .note
         case .note:     manualPanelOverride = .reminder
@@ -3153,6 +3177,7 @@ final class NotchModel: ObservableObject {
         case "codex": return .codex
         case "claudecode", "claude_code": return .claudeCode
         case "grokcode", "grok_code": return .grokCode
+        case "pi", "picode", "pi_code": return .piCode
         case "commandcode", "command_code": return .commandCode
         case "anthropic", "claude": return .anthropic
         case "gemini", "google": return .gemini
@@ -3171,6 +3196,7 @@ final class NotchModel: ObservableObject {
         switch provider {
         case .claudeCode: return "claude_code"
         case .grokCode:   return "grok_code"
+        case .piCode:     return "pi_code"
         case .commandCode: return "command_code"
         default:          return provider.rawValue
         }
@@ -4005,6 +4031,22 @@ final class NotchModel: ObservableObject {
     }
     /// Legacy key name, kept so the setting survives the agent-only → global move.
     private static let liveActivityKey = "agentNotchActivityEnabled"
+
+    /// Whether the assistant's answers are written by hand instead of typeset
+    /// (Settings → Appearance, "Handwritten answers"). Off by default — the
+    /// printed voice stays the thing you get without asking.
+    ///
+    /// Scope is deliberately narrow: the assistant's own prose, and nothing else.
+    /// The question you typed, the interface around it, notes, code blocks and
+    /// every copied string are untouched, so the mode changes how the answer
+    /// *reads* and never what it *is*. See `Handwriting`.
+    @Published var handwrittenAnswers: Bool =
+        UserDefaults.standard.bool(forKey: Handwriting.defaultsKey)
+    {
+        didSet {
+            UserDefaults.standard.set(handwrittenAnswers, forKey: Handwriting.defaultsKey)
+        }
+    }
 
     /// The proxy Notch connects through (Settings → General) — the app's own
     /// requests and the spawned agent CLIs alike. Empty means auto — the app
@@ -5376,14 +5418,16 @@ final class NotchModel: ObservableObject {
             // and the follow-up field says who a question actually goes to.
             answerTurn.isAgent = true
             // The round's work trail rides the record, so the reopened thread
-            // shows the same tool rows the live detail page does. Trimmed on the
-            // way in — the archive is one JSON file rewritten after every answer,
-            // so a marathon round keeps its newest 200 steps and each captured
-            // output its first 800 chars.
+            // shows the same tool rows the live detail page does — patches and
+            // plans included, hence `kind`. Trimmed on the way in: the archive is
+            // one JSON file rewritten after every answer, so a marathon round
+            // keeps its newest 200 steps and each captured output its first
+            // 1200 chars (a patch needs more room than a command's tail did).
             if !exchange.log.isEmpty {
                 answerTurn.agentLog = exchange.log.suffix(200).map {
                     AgentLogEntry(id: $0.id, title: $0.title, mono: $0.mono,
-                                  detail: $0.detail.map { String($0.prefix(800)) })
+                                  detail: $0.detail.map { String($0.prefix(1200)) },
+                                  kind: $0.kind)
                 }
             }
             thread.append(answerTurn)
@@ -5670,7 +5714,8 @@ final class NotchModel: ObservableObject {
     private var activeModelSupportsVision: Bool {
         let provider = APIKeyStore.selectedProvider
         let model = APIKeyStore.effectiveModel(for: provider) ?? provider.defaultModel
-        guard provider != .codex, provider != .claudeCode, provider != .grokCode else { return false }
+        guard provider != .codex, provider != .claudeCode, provider != .grokCode,
+              provider != .piCode else { return false }
         return Provider.modelSupportsVision(model)
     }
 

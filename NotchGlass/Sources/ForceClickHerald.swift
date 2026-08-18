@@ -37,6 +37,13 @@ final class ForceClickHerald {
     /// passes through the bottom of the pressure range, and a cue that blinked on
     /// each of those would be far worse than no cue at all.
     private static let floor: Double = 0.32
+    /// Off. The growing cap read as a stray pill often enough that it explained
+    /// less than it interrupted; a press now stays invisible until it fires, and
+    /// the fire path (`expand` with no live window, `whenExpanded` un-latched)
+    /// degrades on its own to the composer's normal pointer entrance. The drawing
+    /// path below stays dormant rather than deleted, same deal as
+    /// `ForceClickFeature`.
+    private static let drawsCue = false
     /// The cap's diameter at `floor`, as a fraction of its full size — a cursor's
     /// worth of ink, so it reads as the pointer thickening rather than as a window
     /// opening.
@@ -78,7 +85,7 @@ final class ForceClickHerald {
     /// that fires. Called for every trackpad frame while the button is held.
     func update(progress: Double, model: NotchModel) {
         dropStaleStretch()
-        guard !stretching, !reduceMotion else { return }
+        guard Self.drawsCue, !stretching, !reduceMotion else { return }
         let t = (progress - Self.floor) / (1 - Self.floor)
         guard t > 0 else {
             if shown > 0 { retract() }

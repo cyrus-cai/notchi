@@ -1,7 +1,7 @@
 import Foundation
 import AppKit
 
-/// Which local agent CLI an agent task runs on. Both are the same compliant
+/// Which local agent CLI an agent task runs on. All of them are the same compliant
 /// pattern — spawn the user's own official binary under their own sign-in — so
 /// the runner only differs in argv and JSONL dialect.
 enum AgentEngine: String, CaseIterable {
@@ -9,6 +9,7 @@ enum AgentEngine: String, CaseIterable {
     case claude
     case grok
     case commandCode
+    case pi
 
     var displayName: String {
         switch self {
@@ -16,6 +17,7 @@ enum AgentEngine: String, CaseIterable {
         case .claude: return "Claude"
         case .grok:   return "Grok"
         case .commandCode: return "Command Code"
+        case .pi:     return "pi"
         }
     }
 
@@ -26,6 +28,7 @@ enum AgentEngine: String, CaseIterable {
         case .claude: return ClaudeCLIService.isAvailable
         case .grok:   return GrokCLIService.isAvailable
         case .commandCode: return CommandCodeCLIService.isAvailable
+        case .pi:     return PiCLIService.isAvailable
         }
     }
 
@@ -40,6 +43,7 @@ enum AgentEngine: String, CaseIterable {
         case .claude: return ClaudeCLIService.isAvailabilityResolved
         case .grok:   return GrokCLIService.isAvailabilityResolved
         case .commandCode: return CommandCodeCLIService.isAvailabilityResolved
+        case .pi:     return PiCLIService.isAvailabilityResolved
         }
     }
 
@@ -62,6 +66,9 @@ enum AgentEngine: String, CaseIterable {
         // A headless Command Code session is hidden from the interactive picker but
         // opens fine when its id is named outright.
         case .commandCode: return "cmd --resume \(session)"
+        // pi looks a session up by id within the folder it ran in, so this line is
+        // only exact when the user runs it from that folder — same as the others.
+        case .pi:     return "pi --session \(session)"
         }
     }
 
@@ -137,6 +144,18 @@ enum AgentEngine: String, CaseIterable {
             // `CommandCodeCLIService`. Same empty-cache fallback as Grok's: an
             // available engine must never have an empty section.
             let listed = CommandCodeCLIService.listedModels
+            if listed.isEmpty {
+                return [AgentModelChoice(engine: self, id: nil, label: displayName)]
+            }
+            return listed.map {
+                AgentModelChoice(engine: self, id: $0.id, label: $0.displayName)
+            }
+        case .pi:
+            // pi's catalog is the widest of the five, because it is not one account's
+            // lineup but every provider the user has signed pi into — read from the
+            // CLI itself (see `PiCLIService`). Same empty-catalog fallback as the
+            // other two: an available engine must never have an empty section.
+            let listed = PiCLIService.listedModels
             if listed.isEmpty {
                 return [AgentModelChoice(engine: self, id: nil, label: displayName)]
             }
@@ -250,6 +269,17 @@ enum AgentEffortCatalog {
             return manifest(engine: engine, model: id)
                 ?? bundledCommandCode[id]
                 ?? []
+        case .pi:
+            // The other aggregator, and the only one that answers this for free: its
+            // catalog carries a `thinking` column per model, so whether a pick takes
+            // a `--thinking` level is already known — no probe, no bundled table. The
+            // levels themselves are pi's own documented ladder, minus `off`/`minimal`
+            // (which are "don't think", not efforts). Still routed through the
+            // manifest first, so a wrong rung stays a website edit.
+            let id = modelID ?? PiCLIService.defaultModel
+            if let curated = manifest(engine: engine, model: id) { return curated }
+            guard PiCLIService.supportsThinking(modelID) else { return [] }
+            return [.low, .medium, .high, .xhigh, .max]
         case .claude, .grok:
             // Single-vendor CLIs with a documented, stable ladder (claude's
             // `--effort`, grok's `--reasoning-effort`). Left as the documented set,
@@ -333,14 +363,51 @@ enum AgentEffortCatalog {
 /// is an entry too (`mono == false`). Feeds the task card's expandable detail
 /// view; the one-line `activity` ticker stays the collapsed summary.
 struct AgentLogEntry: Identifiable, Equatable, Codable {
+    /// How the row is drawn. `plain` is the historical shape — a command, a file,
+    /// a paragraph of narration; the rest earn a rendering of their own, and each
+    /// owns its `detail` (a tool result never overwrites it — see `applyProgress`).
+    enum Kind: String, Codable {
+        case plain
+        /// The model's own reasoning, folded away behind a "Thinking" line.
+        case thinking
+        /// `detail` holds a patch — drawn line-coloured (`AgentDiff`).
+        case diff
+        /// `detail` holds an encoded checklist — drawn as one (`AgentTodo`).
+        case todo
+    }
+
     let id: UUID
-    /// The input side: command / file / query / narration text. Capped at parse.
-    let title: String
+    /// The input side: command / file / query / narration text. A streaming
+    /// block GROWS this in place as its deltas land, hence `var`.
+    var title: String
     /// Terminal-ish entries (commands, files, queries) render monospaced;
     /// narration reads as prose.
     let mono: Bool
     /// The output side, attached when the tool's result arrives. Capped at parse.
     var detail: String? = nil
+    var kind: Kind = .plain
+
+    init(id: UUID, title: String, mono: Bool,
+         detail: String? = nil, kind: Kind = .plain) {
+        self.id = id
+        self.title = title
+        self.mono = mono
+        self.detail = detail
+        self.kind = kind
+    }
+
+    /// Hand-written purely for `kind`: synthesized decoding ignores a property's
+    /// default value and throws on a missing key, so every record archived before
+    /// this field existed would fail to decode. Absent → `.plain`, which is what
+    /// those rows were.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id     = try c.decode(UUID.self, forKey: .id)
+        title  = try c.decode(String.self, forKey: .title)
+        mono   = try c.decode(Bool.self, forKey: .mono)
+        detail = try c.decodeIfPresent(String.self, forKey: .detail)
+        kind   = try c.decodeIfPresent(Kind.self, forKey: .kind) ?? .plain
+    }
 }
 
 extension Array where Element == AgentLogEntry {
@@ -357,11 +424,99 @@ extension Array where Element == AgentLogEntry {
     /// (prefix-capped, whitespace-trimmed) title. Pass an empty `answer` (e.g. while
     /// the round still streams and no report shows yet) to keep the trail whole.
     func droppingTrailingAnswer(_ answer: String) -> [AgentLogEntry] {
-        guard let last, !last.mono else { return self }
+        // Only a NARRATION tail can be the answer: a tool row (`mono`) never is,
+        // and neither is a folded reasoning block or a plan, whose text could
+        // otherwise coincidentally prefix-match and vanish.
+        guard let last, !last.mono, last.kind == .plain else { return self }
         let title = last.title.trimmingCharacters(in: .whitespacesAndNewlines)
         let body = answer.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty, !body.isEmpty, body.hasPrefix(title) else { return self }
         return Array(dropLast())
+    }
+}
+
+/// The patch a file-editing tool call is about to apply, built from the call's
+/// OWN arguments (every CLI hands over the before/after text; none of them ship
+/// a rendered diff). One `-`/`+` line per changed line, context dropped — the
+/// work trail wants "what changed", not a reviewable hunk.
+///
+/// Deliberately not a real LCS diff: an Edit's `old_string`/`new_string` are
+/// already the minimal region the model chose to rewrite, so line-for-line is
+/// both honest and cheap. The row's own title carries the ± counts.
+enum AgentDiff {
+    /// Cap per patch — a whole-file `Write` can be thousands of lines, and the
+    /// row is a peek, not the file.
+    private static let lineCap = 400
+
+    /// A replacement: every old line as `-`, every new line as `+`.
+    static func replacement(old: String, new: String) -> String {
+        lines(old, "-") + (old.isEmpty || new.isEmpty ? "" : "\n") + lines(new, "+")
+    }
+
+    /// A whole-file write: every line as `+`.
+    static func addition(_ content: String) -> String { lines(content, "+") }
+
+    /// Several replacements in one call (claude's `MultiEdit`), blank-separated.
+    static func combined(_ patches: [String]) -> String {
+        patches.filter { !$0.isEmpty }.joined(separator: "\n\n")
+    }
+
+    private static func lines(_ text: String, _ sign: String) -> String {
+        guard !text.isEmpty else { return "" }
+        let all = text.components(separatedBy: "\n")
+        let kept = all.prefix(lineCap).map { sign + $0 }
+        guard all.count > lineCap else { return kept.joined(separator: "\n") }
+        return (kept + ["… \(all.count - lineCap) more lines"]).joined(separator: "\n")
+    }
+
+    /// `(+added, −removed)` for a patch this type built — what the row's title
+    /// reports beside the file name.
+    static func counts(_ patch: String) -> (added: Int, removed: Int) {
+        var added = 0, removed = 0
+        for line in patch.split(separator: "\n", omittingEmptySubsequences: false) {
+            if line.hasPrefix("+") { added += 1 }
+            else if line.hasPrefix("-") { removed += 1 }
+        }
+        return (added, removed)
+    }
+
+    /// "Editing Foo.swift  +12 −3" — the row title for a patch. An empty patch
+    /// (a tool whose arguments didn't carry the text) keeps the bare title.
+    static func title(_ base: String, patch: String) -> String {
+        let (added, removed) = counts(patch)
+        guard added + removed > 0 else { return base }
+        var suffix = ""
+        if added > 0 { suffix += "  +\(added)" }
+        if removed > 0 { suffix += (added > 0 ? " " : "  ") + "−\(removed)" }
+        return base + suffix
+    }
+}
+
+/// The agent's own plan (claude's `TodoWrite`, codex's `todo_list`, Command
+/// Code's `todo_write`), encoded into one string so it can ride an entry's
+/// `detail` without widening `AgentLogEntry`'s archive shape: one item per line,
+/// `[x]` done · `[>]` in progress · `[ ]` pending.
+enum AgentTodo {
+    enum Status: String { case done = "x", active = ">", pending = " " }
+
+    static func encode(_ items: [(text: String, status: Status)]) -> String {
+        items
+            .map { "[\($0.status.rawValue)] " + $0.text.replacingOccurrences(of: "\n", with: " ") }
+            .joined(separator: "\n")
+    }
+
+    static func decode(_ encoded: String) -> [(text: String, status: Status)] {
+        encoded.split(separator: "\n", omittingEmptySubsequences: true).compactMap { line in
+            guard line.count > 4, line.hasPrefix("[") else { return nil }
+            let mark = line[line.index(line.startIndex, offsetBy: 1)]
+            let status = Status(rawValue: String(mark)) ?? .pending
+            return (String(line.dropFirst(4)), status)
+        }
+    }
+
+    /// "Plan · 2/7" — the row's headline, so a folded plan still reports progress.
+    static func title(_ items: [(text: String, status: Status)]) -> String {
+        L("agent.trail.plan", items.filter { $0.status == .done }.count, items.count)
     }
 }
 
@@ -526,12 +681,24 @@ final class AgentTaskManager: ObservableObject {
         /// Set by `cancel()` so the termination handler files the run as
         /// cancelled rather than failed.
         var cancelRequested = false
+        /// Set by `interrupt()` — a cancel that is really a hand-over: the round
+        /// still files as cancelled (it WAS stopped mid-work, and whatever it
+        /// already reported is worth keeping), but instead of ending the task,
+        /// `settle` immediately opens a new round in the same session carrying
+        /// this instruction.
+        var interruptPrompt: String?
+        var interruptImages: [Data] = []
         /// The temp files the round's pasted images were written to for codex's
         /// `exec -i` — deleted when the run settles.
         var tempImageURLs: [URL] = []
         /// The prompt driving this round — the task description on round one,
         /// the follow-up text after.
         var currentPrompt = ""
+        /// The temporary `› prompt` row shown while a follow-up is in flight.
+        /// Once this round settles, its exchange renders the same prompt as a
+        /// real user bubble, so `settle` removes this marker from both the flat
+        /// trail and whichever earlier exchange temporarily owned it.
+        var promptMarkerID: UUID?
         /// The round's images, as filenames in the history image store.
         var currentImageFiles: [String] = []
         /// Where in the task's work trail this round began — `settle` slices the
@@ -547,7 +714,11 @@ final class AgentTaskManager: ObservableObject {
     /// trail immediately) and `settle` dispatches them in order, one per
     /// settle, each as its own round in the same session. A cancel clears the
     /// task's queue: the user said stop, so nothing auto-restarts.
-    private struct QueuedFollowUp { let prompt: String; let imagesJPEG: [Data] }
+    private struct QueuedFollowUp {
+        let prompt: String
+        let imagesJPEG: [Data]
+        let markerID: UUID
+    }
     private var pendingFollowUps: [UUID: [QueuedFollowUp]] = [:]
 
     private init() {}
@@ -656,14 +827,16 @@ final class AgentTaskManager: ObservableObject {
             // Mid-round: the CLI can't take a new instruction while a round is
             // in flight, so the line queues for the next one. Its marker joins
             // the trail right away, so the user sees the instruction landed.
+            let markerID = UUID()
             pendingFollowUps[taskID, default: []].append(
-                QueuedFollowUp(prompt: prompt, imagesJPEG: imagesJPEG))
-            tasks[i].log.append(AgentLogEntry(id: UUID(), title: "› " + prompt,
+                QueuedFollowUp(prompt: prompt, imagesJPEG: imagesJPEG,
+                               markerID: markerID))
+            tasks[i].log.append(AgentLogEntry(id: markerID, title: "› " + prompt,
                                               mono: false))
             return
         }
         beginFollowUpRound(index: i, prompt: prompt, imagesJPEG: imagesJPEG,
-                           appendMarker: true)
+                           appendMarker: true, existingMarkerID: nil)
     }
 
     /// The spawn half of `followUp`: revive the settled task as running and
@@ -673,7 +846,8 @@ final class AgentTaskManager: ObservableObject {
     /// to report a session id — nothing to resume, ever — in which case any
     /// queued lines are cleared too, since no future settle will dispatch them.
     private func beginFollowUpRound(index i: Int, prompt: String,
-                                    imagesJPEG: [Data], appendMarker: Bool) {
+                                    imagesJPEG: [Data], appendMarker: Bool,
+                                    existingMarkerID: UUID?) {
         var t = tasks[i]
         guard let session = t.sessionID, let binary = Self.binary(for: t.engine) else {
             // Round one never reported a session id, or the engine's
@@ -693,13 +867,19 @@ final class AgentTaskManager: ObservableObject {
         t.activity = nil
         // The follow-up joins the work trail where it happened, so the
         // transcript reads as one conversation.
+        let markerID: UUID?
         if appendMarker {
-            t.log.append(AgentLogEntry(id: UUID(), title: "› " + prompt, mono: false))
+            let id = UUID()
+            t.log.append(AgentLogEntry(id: id, title: "› " + prompt, mono: false))
+            markerID = id
+        } else {
+            markerID = existingMarkerID
         }
         tasks[i] = t
         launch(taskID: t.id, binary: binary, engine: t.engine, folder: t.folder,
                prompt: prompt, model: t.armedModel, effort: t.armedEffort,
-               imagesJPEG: imagesJPEG, resumeSession: session)
+               imagesJPEG: imagesJPEG, resumeSession: session,
+               promptMarkerID: markerID)
     }
 
     /// Pick an interrupted run back up in-app — the GUI half of `resumeCommand`.
@@ -727,11 +907,13 @@ final class AgentTaskManager: ObservableObject {
         t.sessionID = session
         t.exchanges = priorRounds
         // The re-issued round opens the trail where the interruption cut it off.
-        t.log.append(AgentLogEntry(id: UUID(), title: "› " + prompt, mono: false))
+        let markerID = UUID()
+        t.log.append(AgentLogEntry(id: markerID, title: "› " + prompt, mono: false))
         tasks.append(t)
         launch(taskID: taskID, binary: binary, engine: engine, folder: folder,
                prompt: prompt, model: nil, effort: nil,
-               imagesJPEG: imagesJPEG, resumeSession: session)
+               imagesJPEG: imagesJPEG, resumeSession: session,
+               promptMarkerID: markerID)
     }
 
     /// The engine's resolved binary, gated on its sign-in — nil means "can't run".
@@ -742,6 +924,14 @@ final class AgentTaskManager: ObservableObject {
         case .grok:   return GrokCLIService.authExists() ? GrokCLIService.resolveBinary() : nil
         case .commandCode:
             return CommandCodeCLIService.authExists() ? CommandCodeCLIService.resolveBinary() : nil
+        case .pi:
+            // Resolve FIRST, then check the sign-in — the opposite order of its
+            // siblings, and load-bearing: pi's `authExists` reads the catalog, and
+            // the catalog is filled BY the resolution (`pi --list-models` is both
+            // probes in one spawn). Asking first on a cold cache would answer "not
+            // signed in" for a perfectly signed-in install.
+            guard let binary = PiCLIService.resolveBinary() else { return nil }
+            return PiCLIService.authExists() ? binary : nil
         }
     }
 
@@ -752,6 +942,7 @@ final class AgentTaskManager: ObservableObject {
         case .claude: return ClaudeAgentStreamState()
         case .grok:   return GrokAgentStreamState()
         case .commandCode: return CommandCodeAgentStreamState()
+        case .pi:     return PiAgentStreamState()
         }
     }
 
@@ -762,6 +953,7 @@ final class AgentTaskManager: ObservableObject {
         case .claude: return ClaudeCodeError.spawnFailed(detail).errorDescription
         case .grok:   return GrokError.spawnFailed(detail).errorDescription
         case .commandCode: return CommandCodeError.spawnFailed(detail).errorDescription
+        case .pi:     return PiError.spawnFailed(detail).errorDescription
         }
     }
 
@@ -770,10 +962,12 @@ final class AgentTaskManager: ObservableObject {
     /// `RunState`, so parallel rounds never trample each other's bookkeeping.
     private func launch(taskID: UUID, binary: String, engine: AgentEngine, folder: URL,
                         prompt: String, model: String?, effort: AgentEffort?,
-                        imagesJPEG: [Data], resumeSession: String?) {
+                        imagesJPEG: [Data], resumeSession: String?,
+                        promptMarkerID: UUID? = nil) {
         let run = RunState()
         runs[taskID] = run
         run.currentPrompt = prompt
+        run.promptMarkerID = promptMarkerID
         // The round's trail starts where the task's log stands now (any follow-up
         // marker already appended stays with the PREVIOUS round's tail, not this
         // round's slice — the prompt becomes the record's own user turn instead).
@@ -830,7 +1024,14 @@ final class AgentTaskManager: ObservableObject {
             // (the user's CLAUDE.md/skills are assets for implementation work)
             // and NOT --no-session-persistence (the session should be resumable
             // from a terminal with `claude --resume`, same as codex's).
+            // `--include-partial-messages` is what makes the trail STREAM: without
+            // it the CLI emits each assistant message whole, so a paragraph the
+            // model spent 40s writing lands in one lump. With it the same message
+            // also arrives as token deltas (`stream_event`), which the parser
+            // grows the trail entry from — and the whole-message event that still
+            // follows corrects it, so the two can't disagree.
             args = ["-p", "--verbose", "--output-format", "stream-json",
+                    "--include-partial-messages",
                     "--permission-mode", "acceptEdits",
                     "--allowedTools", "Bash,WebSearch,WebFetch"]
             // A follow-up resumes the persisted session (that's why the agent
@@ -883,6 +1084,22 @@ final class AgentTaskManager: ObservableObject {
             if let resumeSession { args += ["--resume", resumeSession] }
             if let model { args += ["-m", model] }
             if let effort { args += ["--effort", effort.rawValue] }
+        case .pi:
+            // pi needs no unattended-approval flag at all: headless `-p` runs its
+            // tools (read/write/edit/bash/ls/grep/find) without ever prompting —
+            // verified against the installed build, where a run wrote a file and
+            // ran a shell command with no TTY and no approval events. `--approve`
+            // is the OTHER kind of trust: it opts the run into the project's own
+            // AGENTS.md / extensions / skills, which is deliberate here (parity
+            // with the Claude engine, which likewise treats the repo's own
+            // instructions as assets for implementation work). `--offline` keeps a
+            // startup version check off the run (the twin of the others'
+            // `--no-auto-update`). The session persists by default, so a follow-up
+            // rides `--session <id>`, the id parsed from the `session` header line.
+            args = ["-p", "--mode", "json", "--approve", "--offline"]
+            if let resumeSession { args += ["--session", resumeSession] }
+            args += PiCLIService.modelArgs(for: model)
+            if let effort { args += ["--thinking", effort.rawValue] }
         }
 
         let p = ShellEnvironment.makeProcess(binary, args, cwd: folder)
@@ -1040,6 +1257,30 @@ final class AgentTaskManager: ObservableObject {
             // directly; its exit watch files the cancel.
             kill(pid, SIGTERM)
         }
+    }
+
+    /// Stop the round in flight and hand the agent a new instruction straight
+    /// away — the "no, do this instead" of a terminal's Esc. The CLI has no way
+    /// to take a mid-round instruction (headless, no TTY, stdin already closed),
+    /// so this is the honest equivalent: kill the process, keep everything it
+    /// reported, and re-open the SAME session with the new prompt the moment it
+    /// settles. `whileRunning` is why this exists at all — queueing (`followUp`)
+    /// makes the user wait out work they've already decided is wrong.
+    ///
+    /// Falls back to queueing when there's no session to resume yet (the round
+    /// died before its id landed): stopping there would end the task outright.
+    /// Returns whether the round was actually interrupted.
+    @discardableResult
+    func interrupt(taskID: UUID, prompt: String, imagesJPEG: [Data] = []) -> Bool {
+        guard let i = taskIndex(taskID), tasks[i].isRunning,
+              let run = runs[taskID], tasks[i].sessionID != nil else {
+            followUp(taskID: taskID, prompt: prompt, imagesJPEG: imagesJPEG)
+            return false
+        }
+        run.interruptPrompt = prompt
+        run.interruptImages = imagesJPEG
+        cancel(taskID: taskID)
+        return true
     }
 
     /// Dismiss one finished task's card. Never clears a running task. Any
@@ -1239,14 +1480,20 @@ final class AgentTaskManager: ObservableObject {
         t.sessionID = marker.sessionID
         t.exchanges = marker.rounds.map { .init(prompt: $0.prompt, answer: $0.answer) }
         // A follow-up round reopens the trail where its prompt did originally.
+        let promptMarkerID: UUID?
         if !t.exchanges.isEmpty {
-            t.log.append(AgentLogEntry(id: UUID(), title: "› " + marker.currentPrompt,
+            let id = UUID()
+            t.log.append(AgentLogEntry(id: id, title: "› " + marker.currentPrompt,
                                        mono: false))
+            promptMarkerID = id
+        } else {
+            promptMarkerID = nil
         }
         tasks.append(t)
 
         let run = RunState()
         run.currentPrompt = marker.currentPrompt
+        run.promptMarkerID = promptMarkerID
         run.currentImageFiles = marker.currentImageFiles ?? []
         run.pid = pid
         run.spawnedAt = marker.processStartedAt
@@ -1390,6 +1637,9 @@ final class AgentTaskManager: ObservableObject {
         if engine == .commandCode, CommandCodeError.isAuthFailure(reason) {
             return L("commandcode.error.authExpired")
         }
+        if engine == .pi, PiError.isAuthFailure(reason) {
+            return L("pi.error.authExpired")
+        }
         return reason
     }
 
@@ -1499,10 +1749,31 @@ final class AgentTaskManager: ObservableObject {
                 }
             }
         }
+        // A block still being written grows in place; an id that fell off the
+        // cap is simply gone (no-op), same as the two loops below.
+        for (id, text) in update.appends {
+            if let j = t.log.firstIndex(where: { $0.id == id }) { t.log[j].title += text }
+        }
+        // The CLI's authoritative copy of a block, or a plan being revised.
+        for (id, title, detail) in update.rewrites {
+            guard let j = t.log.firstIndex(where: { $0.id == id }) else { continue }
+            t.log[j].title = title
+            if let detail { t.log[j].detail = detail }
+        }
         // Outputs arrive after their tool call (a later result event) — attach
-        // in place. An id that fell off the cap is simply gone; no-op.
-        for (id, detail) in update.details {
-            if let j = t.log.firstIndex(where: { $0.id == id }) { t.log[j].detail = detail }
+        // in place. A row that drew its OWN detail (a patch, a checklist) keeps
+        // it: the tool result for those is boilerplate ("the file was updated").
+        // A failed call is the exception — it replaces the row's content, and
+        // demotes it to a plain one, so a rejected edit can't keep reading as an
+        // applied patch.
+        for (id, detail, isError) in update.details {
+            guard let j = t.log.firstIndex(where: { $0.id == id }) else { continue }
+            if isError {
+                t.log[j] = AgentLogEntry(id: t.log[j].id, title: t.log[j].title,
+                                         mono: t.log[j].mono, detail: detail)
+            } else if t.log[j].kind == .plain {
+                t.log[j].detail = detail
+            }
         }
         tasks[i] = t
         // The session id lands a beat after the spawn, so the in-flight marker
@@ -1591,8 +1862,21 @@ final class AgentTaskManager: ObservableObject {
                     : L("agent.failed", t.engine.displayName) + "\n" + reason
             }
         }
-        let roundLog = run.logStartIndex < t.log.count
-            ? Array(t.log[run.logStartIndex...]) : []
+        // A follow-up marker is only a live placeholder. Once the round becomes
+        // an exchange, the prompt is rendered by `UserQuestionBubble`; leaving
+        // the marker in either trail printed the same instruction again below.
+        var roundStartIndex = run.logStartIndex
+        if let markerID = run.promptMarkerID {
+            if let markerIndex = t.log.firstIndex(where: { $0.id == markerID }) {
+                t.log.remove(at: markerIndex)
+                if markerIndex < roundStartIndex { roundStartIndex -= 1 }
+            }
+            for exchangeIndex in t.exchanges.indices {
+                t.exchanges[exchangeIndex].log.removeAll { $0.id == markerID }
+            }
+        }
+        let roundLog = roundStartIndex < t.log.count
+            ? Array(t.log[roundStartIndex...]) : []
         t.exchanges.append(AgentExchange(prompt: run.currentPrompt, answer: answer,
                                          imageFiles: run.currentImageFiles,
                                          log: roundLog))
@@ -1615,6 +1899,17 @@ final class AgentTaskManager: ObservableObject {
                 threadID: t.id)
         }
 
+        // An interrupt is a cancel that hands over: the stopped round is filed
+        // above like any other, and the instruction that stopped it opens the
+        // next one right now, in the same session. Anything queued behind it
+        // stays queued — it dispatches on the interrupting round's own settle.
+        if let prompt = run.interruptPrompt, let i = taskIndex(taskID) {
+            beginFollowUpRound(index: i, prompt: prompt,
+                               imagesJPEG: run.interruptImages, appendMarker: true,
+                               existingMarkerID: nil)
+            return
+        }
+
         // Follow-ups typed while this round ran dispatch now, oldest first, one
         // per settle — each becomes its own round in the same session. A cancel
         // clears the queue instead: the user said stop, so nothing auto-restarts.
@@ -1625,7 +1920,8 @@ final class AgentTaskManager: ObservableObject {
             pendingFollowUps[taskID] = queue.isEmpty ? nil : queue
             if let i = taskIndex(taskID) {
                 beginFollowUpRound(index: i, prompt: next.prompt,
-                                   imagesJPEG: next.imagesJPEG, appendMarker: false)
+                                   imagesJPEG: next.imagesJPEG, appendMarker: false,
+                                   existingMarkerID: next.markerID)
             }
         }
     }
@@ -1712,8 +2008,91 @@ private struct AgentProgress {
     var changedFiles: [String] = []
     /// New work-trail entries, in stream order.
     var entries: [AgentLogEntry] = []
-    /// Late-arriving outputs for earlier entries, keyed by entry id.
-    var details: [(id: UUID, detail: String)] = []
+    /// Text appended to an entry ALREADY in the trail — the token deltas of a
+    /// block that is still being written (`StreamingBlocks`).
+    var appends: [(id: UUID, text: String)] = []
+    /// Whole-text replacement for an entry already in the trail: the CLI's own
+    /// authoritative copy of a block its deltas built, a dialect that sends
+    /// cumulative snapshots instead of deltas, or a plan being rewritten.
+    var rewrites: [(id: UUID, title: String, detail: String?)] = []
+    /// Late-arriving outputs for earlier entries, keyed by entry id. `isError`
+    /// marks a tool that FAILED — the one case allowed to overwrite a row that
+    /// owns its own detail (a diff we drew from arguments the tool then
+    /// rejected must not keep reading as an applied edit).
+    var details: [(id: UUID, detail: String, isError: Bool)] = []
+}
+
+/// The delta-to-entry bookkeeping every engine needs once it streams: the first
+/// chunk of a block opens a work-trail entry, later chunks grow it in place, and
+/// the CLI's own whole copy (when one arrives) replaces what the chunks built.
+///
+/// `slot` is the engine's own block index — Anthropic's `content_block` index
+/// for claude, the two constants below for the single-channel dialects, which
+/// only ever have one narration and one reasoning block open at a time.
+private struct StreamingBlocks {
+    static let narration = 0
+    static let thinking = 1
+
+    private var open: [Int: UUID] = [:]
+    /// Everything each open slot has accumulated — the ticker's source, and what
+    /// tells `replace` whether there's anything to correct.
+    private var text: [Int: String] = [:]
+
+    func isOpen(_ slot: Int) -> Bool { open[slot] != nil }
+    func accumulated(_ slot: Int) -> String { text[slot] ?? "" }
+
+    /// One delta. Opens the slot's entry on first sight, appends after.
+    mutating func append(_ delta: String, slot: Int, kind: AgentLogEntry.Kind,
+                         into progress: inout AgentProgress) {
+        guard !delta.isEmpty else { return }
+        text[slot, default: ""] += delta
+        if let id = open[slot] {
+            progress.appends.append((id, delta))
+        } else {
+            let entry = AgentLogEntry(id: UUID(), title: delta, mono: false, kind: kind)
+            open[slot] = entry.id
+            progress.entries.append(entry)
+        }
+    }
+
+    /// The slot's whole text at once — the shape codex sends (cumulative
+    /// snapshots rather than deltas) and the correction claude's `assistant`
+    /// event carries for a block its `stream_event`s already built. Opens the
+    /// entry if nothing streamed, so a CLI that emits no deltas at all still
+    /// lands one entry per block.
+    mutating func replace(_ whole: String, slot: Int, kind: AgentLogEntry.Kind,
+                          into progress: inout AgentProgress) {
+        guard !whole.isEmpty else { return }
+        text[slot] = whole
+        if let id = open[slot] {
+            progress.rewrites.append((id, whole, nil))
+        } else {
+            let entry = AgentLogEntry(id: UUID(), title: whole, mono: false, kind: kind)
+            open[slot] = entry.id
+            progress.entries.append(entry)
+        }
+    }
+
+    /// Seal a slot — the next delta starts a fresh entry.
+    mutating func close(_ slot: Int) {
+        open[slot] = nil
+        text[slot] = nil
+    }
+
+    mutating func closeAll() {
+        open.removeAll()
+        text.removeAll()
+    }
+
+    /// The rolling one-line ticker for a slot: the tail of what it has written,
+    /// so the collapsed card shows the words arriving rather than a static
+    /// "Thinking…". Falls back to that phrase before the first token lands.
+    func ticker(_ slot: Int) -> String {
+        let flat = accumulated(slot)
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespaces)
+        return flat.isEmpty ? L("agent.thinking") : String(flat.suffix(80))
+    }
 }
 
 /// A finished run's distilled output.
@@ -1751,6 +2130,13 @@ private final class CodexAgentStreamState: AgentEventParser {
     /// codex item id → the log entry it opened, so `item.completed` can attach
     /// the command's output to the entry `item.started` created.
     private var openEntries: [String: UUID] = [:]
+    /// The report and the reasoning as they're written. codex sends each
+    /// `item.updated` with the block's text SO FAR (a snapshot, not a delta), so
+    /// these ride `replace` rather than `append`.
+    private var stream = StreamingBlocks()
+    /// The single plan row, rewritten in place every time codex re-emits its
+    /// todo list — a trail that grew one row per revision buried the work.
+    private var planEntry: UUID?
 
     /// Append `data`, parse complete JSONL lines, and return the progress they
     /// carry (nil when nothing user-visible changed).
@@ -1815,14 +2201,19 @@ private final class CodexAgentStreamState: AgentEventParser {
                 switch itemType {
                 case "agent_message":
                     // Codex may emit interim messages; the last one is the report.
-                    // Each is also a narration entry in the work trail.
-                    if type == "item.completed",
-                       let text = item["text"] as? String, !text.isEmpty {
+                    // Each is also a narration entry in the work trail — grown in
+                    // place from the `item.updated` snapshots so the paragraph is
+                    // seen being written, then sealed by `item.completed`.
+                    let text = item["text"] as? String ?? ""
+                    if !text.isEmpty {
+                        stream.close(StreamingBlocks.thinking)
                         finalMessage = text
-                        progress.entries.append(AgentLogEntry(
-                            id: UUID(), title: String(text.prefix(500)), mono: false))
+                        stream.replace(text, slot: StreamingBlocks.narration,
+                                       kind: .plain, into: &progress)
+                        progress.activity = stream.ticker(StreamingBlocks.narration)
                         any = true
                     }
+                    if type == "item.completed" { stream.close(StreamingBlocks.narration) }
                 case "command_execution":
                     if let cmd = item["command"] as? String, !cmd.isEmpty {
                         progress.activity = "$ " + String(cmd.prefix(80))
@@ -1840,27 +2231,51 @@ private final class CodexAgentStreamState: AgentEventParser {
                             let out = (item["aggregated_output"] as? String ?? "")
                                 .trimmingCharacters(in: .whitespacesAndNewlines)
                             if !out.isEmpty {
-                                progress.details.append((entryID, String(out.suffix(2000))))
+                                progress.details.append((entryID, String(out.suffix(2000)), false))
                             }
                         }
                     }
                 case "file_change":
                     // `changes: [{path, kind}]` — collect names for the summary
                     // and surface the latest as the activity line. The completed
-                    // event's final list is what goes in the work trail.
+                    // event's final list is what goes in the work trail. codex
+                    // sends no before/after text (so no patch to draw), but it
+                    // does say WHICH of the three things it did — the verb is
+                    // the honest half of a diff we can show.
                     if let changes = item["changes"] as? [[String: Any]] {
                         for change in changes {
                             guard let path = change["path"] as? String else { continue }
                             let name = (path as NSString).lastPathComponent
+                            let title = Self.verb(change["kind"] as? String) + name
                             progress.changedFiles.append(name)
-                            progress.activity = "Editing " + name
+                            progress.activity = title
                             any = true
                             if type == "item.completed" {
                                 progress.entries.append(AgentLogEntry(
-                                    id: UUID(), title: "Editing " + name, mono: true))
+                                    id: UUID(), title: title, mono: true))
                             }
                         }
                     }
+                case "todo_list":
+                    // The plan, re-emitted in full on every revision — one row,
+                    // rewritten in place (see `planEntry`).
+                    let items = (item["items"] as? [[String: Any]] ?? []).compactMap {
+                        i -> (text: String, status: AgentTodo.Status)? in
+                        guard let text = (i["text"] as? String) ?? (i["title"] as? String),
+                              !text.isEmpty else { return nil }
+                        return (text, (i["completed"] as? Bool) == true ? .done : .pending)
+                    }
+                    guard !items.isEmpty else { continue }
+                    let encoded = AgentTodo.encode(items)
+                    if let planEntry {
+                        progress.rewrites.append((planEntry, AgentTodo.title(items), encoded))
+                    } else {
+                        let entry = AgentLogEntry(id: UUID(), title: AgentTodo.title(items),
+                                                  mono: false, detail: encoded, kind: .todo)
+                        planEntry = entry.id
+                        progress.entries.append(entry)
+                    }
+                    any = true
                 case "web_search":
                     if let query = item["query"] as? String, !query.isEmpty {
                         progress.activity = "Searching " + String(query.prefix(60))
@@ -1873,10 +2288,21 @@ private final class CodexAgentStreamState: AgentEventParser {
                         }
                     }
                 case "reasoning":
-                    if type == "item.started" {
-                        progress.activity = L("agent.thinking")
-                        any = true
+                    // The reasoning summary codex writes between tool calls.
+                    // It goes in the trail (folded behind a "Thinking" line) AND
+                    // rolls through the ticker, so a long think shows the words
+                    // moving instead of a frozen "Thinking…".
+                    let text = (item["text"] as? String)
+                        ?? (item["summary"] as? [String])?.joined(separator: "\n")
+                        ?? ""
+                    if !text.isEmpty {
+                        stream.close(StreamingBlocks.narration)
+                        stream.replace(text, slot: StreamingBlocks.thinking,
+                                       kind: .thinking, into: &progress)
                     }
+                    progress.activity = stream.ticker(StreamingBlocks.thinking)
+                    any = true
+                    if type == "item.completed" { stream.close(StreamingBlocks.thinking) }
                 default:
                     break
                 }
@@ -1892,6 +2318,16 @@ private final class CodexAgentStreamState: AgentEventParser {
             }
         }
         return any
+    }
+
+    /// The row's verb for a `file_change` kind — the one thing codex tells us
+    /// about the shape of the edit. Unknown kinds read as an edit.
+    private static func verb(_ kind: String?) -> String {
+        switch kind?.lowercased() {
+        case "add", "added", "create", "created": return "Creating "
+        case "delete", "deleted", "remove", "removed": return "Deleting "
+        default: return "Editing "
+        }
     }
 
     func appendStderr(_ data: Data) {
@@ -1942,6 +2378,15 @@ private final class ClaudeAgentStreamState: AgentEventParser {
     /// tool_use id → the log entry it opened, so the matching `tool_result`
     /// (a later `user` event) can attach the tool's output to it.
     private var openEntries: [String: UUID] = [:]
+    /// The message currently streaming, one slot per Anthropic `content_block`
+    /// index — so `--include-partial-messages` grows the paragraph in place and
+    /// the closing `assistant` event corrects it rather than printing it twice.
+    private var stream = StreamingBlocks()
+    /// What each streaming block index is (text vs thinking), learned from
+    /// `content_block_start` and needed by its deltas.
+    private var blockKinds: [Int: AgentLogEntry.Kind] = [:]
+    /// The single plan row, rewritten in place on every `TodoWrite`.
+    private var planEntry: UUID?
 
     func ingest(_ data: Data) -> AgentProgress? {
         lock.lock(); defer { lock.unlock() }
@@ -1962,6 +2407,44 @@ private final class ClaudeAgentStreamState: AgentEventParser {
                   let type = obj["type"] as? String
             else { continue }
             switch type {
+            case "stream_event":
+                // The token-level half of the stream (`--include-partial-messages`).
+                // Raw Anthropic SSE: `content_block_start` says what block index
+                // N is, its deltas grow it, and the `assistant` event below hands
+                // over the authoritative whole text once the message closes.
+                guard let event = obj["event"] as? [String: Any],
+                      let kind = event["type"] as? String else { continue }
+                switch kind {
+                case "message_start":
+                    // A fresh index space. Anything still open belonged to a
+                    // message that never reported — keep what it streamed, just
+                    // stop writing into it.
+                    stream.closeAll()
+                    blockKinds.removeAll()
+                case "content_block_start":
+                    let index = event["index"] as? Int ?? 0
+                    switch (event["content_block"] as? [String: Any])?["type"] as? String {
+                    case "text":     blockKinds[index] = .plain
+                    case "thinking": blockKinds[index] = .thinking
+                    default:         blockKinds[index] = nil   // tool_use: not streamed
+                    }
+                case "content_block_delta":
+                    let index = event["index"] as? Int ?? 0
+                    guard let delta = event["delta"] as? [String: Any] else { continue }
+                    let text: String?
+                    switch delta["type"] as? String {
+                    case "text_delta":     text = delta["text"] as? String
+                    case "thinking_delta": text = delta["thinking"] as? String
+                    default:               text = nil     // signature / input_json
+                    }
+                    guard let text, !text.isEmpty else { continue }
+                    stream.append(text, slot: index,
+                                  kind: blockKinds[index] ?? .plain, into: &progress)
+                    progress.activity = stream.ticker(index)
+                    any = true
+                default:
+                    break   // content_block_stop / message_delta / message_stop
+                }
             case "assistant":
                 guard let message = obj["message"] as? [String: Any],
                       let content = message["content"] as? [[String: Any]] else { continue }
@@ -1977,25 +2460,54 @@ private final class ClaudeAgentStreamState: AgentEventParser {
                         any = true
                     }
                 }
-                for block in content {
+                for (index, block) in content.enumerated() {
                     switch block["type"] as? String {
                     case "text":
                         // Interim narration; the last text before the result is
                         // the fallback report if the result event lacks one.
-                        // Each is also a narration entry in the work trail.
+                        // Each is also a narration entry in the work trail —
+                        // `replace` CORRECTS the one the deltas above already
+                        // built (or creates it, on a CLI that streams no
+                        // partials), so the paragraph is never printed twice.
                         if let text = block["text"] as? String, !text.isEmpty {
                             finalMessage = text
-                            progress.entries.append(AgentLogEntry(
-                                id: UUID(), title: String(text.prefix(500)), mono: false))
+                            stream.replace(text, slot: index, kind: .plain, into: &progress)
+                            any = true
+                        }
+                    case "thinking":
+                        if let text = block["thinking"] as? String, !text.isEmpty {
+                            stream.replace(text, slot: index, kind: .thinking, into: &progress)
                             any = true
                         }
                     case "tool_use":
                         guard let name = block["name"] as? String else { continue }
                         let input = block["input"] as? [String: Any] ?? [:]
+                        // The plan is not a row in the trail — it's ONE row that
+                        // keeps being rewritten, wherever it first appeared.
+                        if name == "TodoWrite" {
+                            let items = Self.todos(input["todos"])
+                            guard !items.isEmpty else { continue }
+                            let encoded = AgentTodo.encode(items)
+                            if let planEntry {
+                                progress.rewrites.append((planEntry, AgentTodo.title(items), encoded))
+                            } else {
+                                let entry = AgentLogEntry(id: UUID(), title: AgentTodo.title(items),
+                                                          mono: false, detail: encoded, kind: .todo)
+                                planEntry = entry.id
+                                progress.entries.append(entry)
+                            }
+                            // Deliberately NOT registered in `openEntries`: the
+                            // tool's "Todos have been modified" result would
+                            // overwrite the checklist we just encoded.
+                            any = true
+                            continue
+                        }
                         // Every tool call gets a work-trail entry; the handful
                         // below also drive the collapsed activity ticker and the
                         // changed-files summary, same as before.
                         var entryTitle = name
+                        var entryKind = AgentLogEntry.Kind.plain
+                        var entryDetail: String? = nil
                         switch name {
                         case "Bash":
                             if let cmd = input["command"] as? String, !cmd.isEmpty {
@@ -2007,8 +2519,18 @@ private final class ClaudeAgentStreamState: AgentEventParser {
                             if let path = input["file_path"] as? String {
                                 let file = (path as NSString).lastPathComponent
                                 progress.changedFiles.append(file)
-                                progress.activity = "Editing " + file
-                                entryTitle = "Editing " + file
+                                // The call's own arguments ARE the patch — the
+                                // before/after text the model chose to write.
+                                // Drawn here rather than waiting for the tool
+                                // result, which only says "the file was updated".
+                                let patch = Self.patch(tool: name, input: input)
+                                let base = (name == "Write" ? "Creating " : "Editing ") + file
+                                progress.activity = base
+                                entryTitle = AgentDiff.title(base, patch: patch)
+                                if !patch.isEmpty {
+                                    entryKind = .diff
+                                    entryDetail = patch
+                                }
                                 any = true
                             }
                         case "WebSearch":
@@ -2034,7 +2556,8 @@ private final class ClaudeAgentStreamState: AgentEventParser {
                         default:
                             break
                         }
-                        let entry = AgentLogEntry(id: UUID(), title: entryTitle, mono: true)
+                        let entry = AgentLogEntry(id: UUID(), title: entryTitle, mono: true,
+                                                  detail: entryDetail, kind: entryKind)
                         if let useID = block["id"] as? String { openEntries[useID] = entry.id }
                         progress.entries.append(entry)
                         any = true
@@ -2042,6 +2565,11 @@ private final class ClaudeAgentStreamState: AgentEventParser {
                         break
                     }
                 }
+                // The message is closed: every block it streamed has now been
+                // corrected by its authoritative copy above, so the next
+                // message's blocks start fresh slots.
+                stream.closeAll()
+                blockKinds.removeAll()
             case "user":
                 // Tool results ride back as `user` events — attach each output
                 // to the entry its tool_use opened.
@@ -2053,7 +2581,8 @@ private final class ClaudeAgentStreamState: AgentEventParser {
                     let text = Self.resultText(block["content"])
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                     if !text.isEmpty {
-                        progress.details.append((entryID, String(text.prefix(2000))))
+                        progress.details.append((entryID, String(text.prefix(2000)),
+                                                 (block["is_error"] as? Bool) == true))
                         any = true
                     }
                 }
@@ -2115,6 +2644,44 @@ private final class ClaudeAgentStreamState: AgentEventParser {
         return input + cacheRead + cacheCreation
     }
 
+    /// The patch a file-editing call is about to apply, from its own arguments.
+    /// Empty when the tool carries no before/after text (an argument shape we
+    /// don't know), in which case the row stays a plain "Editing …" line.
+    private static func patch(tool: String, input: [String: Any]) -> String {
+        switch tool {
+        case "Edit":
+            let old = input["old_string"] as? String ?? ""
+            let new = input["new_string"] as? String ?? ""
+            guard !old.isEmpty || !new.isEmpty else { return "" }
+            return AgentDiff.replacement(old: old, new: new)
+        case "MultiEdit":
+            let edits = input["edits"] as? [[String: Any]] ?? []
+            return AgentDiff.combined(edits.map {
+                AgentDiff.replacement(old: $0["old_string"] as? String ?? "",
+                                      new: $0["new_string"] as? String ?? "")
+            })
+        case "Write":
+            return AgentDiff.addition(input["content"] as? String ?? "")
+        case "NotebookEdit":
+            return AgentDiff.addition(input["new_source"] as? String ?? "")
+        default:
+            return ""
+        }
+    }
+
+    /// `TodoWrite`'s `todos` array → the plan row's items.
+    private static func todos(_ raw: Any?) -> [(text: String, status: AgentTodo.Status)] {
+        (raw as? [[String: Any]] ?? []).compactMap { item in
+            guard let text = (item["content"] as? String) ?? (item["activeForm"] as? String),
+                  !text.isEmpty else { return nil }
+            switch item["status"] as? String {
+            case "completed":   return (text, .done)
+            case "in_progress": return (text, .active)
+            default:            return (text, .pending)
+            }
+        }
+    }
+
     /// A tool_result's `content` is either a plain string or an array of blocks
     /// (text blocks for tool output, image blocks for screenshots). Distill the
     /// text.
@@ -2171,8 +2738,11 @@ private final class GrokAgentStreamState: AgentEventParser {
     private var finalMessage = ""
     private var failure: String?
     private var sawTerminal = false
-    /// The report is emitted as a work-trail entry once, at `end`.
-    private var emittedReport = false
+    /// The report and the reasoning, grown from their deltas. grok has no tool
+    /// events at all, so the narration slot stays open for the whole run — its
+    /// entry is therefore always the complete report, which is what lets the
+    /// detail page drop it in favour of the answer printed beneath.
+    private var stream = StreamingBlocks()
 
     func ingest(_ data: Data) -> AgentProgress? {
         lock.lock(); defer { lock.unlock() }
@@ -2196,16 +2766,21 @@ private final class GrokAgentStreamState: AgentEventParser {
             case "text":
                 if let t = obj["data"] as? String, !t.isEmpty {
                     finalMessage += t
-                    // Rolling ticker: the tail of the report as it's written, so
-                    // the collapsed card shows motion even without a tool trail.
-                    let flat = finalMessage
-                        .replacingOccurrences(of: "\n", with: " ")
-                        .trimmingCharacters(in: .whitespaces)
-                    progress.activity = String(flat.suffix(80))
+                    // The report grows in the trail as it's written, and its tail
+                    // rolls through the ticker so the collapsed card shows motion
+                    // even without a tool trail.
+                    stream.append(t, slot: StreamingBlocks.narration,
+                                  kind: .plain, into: &progress)
+                    progress.activity = stream.ticker(StreamingBlocks.narration)
                     any = true
                 }
             case "thought":
-                progress.activity = L("agent.thinking")
+                // Reasoning deltas ride the same `data` field the answer does.
+                if let t = obj["data"] as? String, !t.isEmpty {
+                    stream.append(t, slot: StreamingBlocks.thinking,
+                                  kind: .thinking, into: &progress)
+                }
+                progress.activity = stream.ticker(StreamingBlocks.thinking)
                 any = true
             case "end":
                 sawTerminal = true
@@ -2232,12 +2807,8 @@ private final class GrokAgentStreamState: AgentEventParser {
                         failure = reason
                     }
                 }
-                if !emittedReport, !report.isEmpty {
-                    emittedReport = true
-                    progress.entries.append(AgentLogEntry(
-                        id: UUID(), title: String(report.prefix(500)), mono: false))
-                    any = true
-                }
+                // The report is already in the trail — the deltas above built it.
+                stream.closeAll()
             case "error":
                 sawTerminal = true
                 failure = (obj["message"] as? String)
@@ -2299,8 +2870,12 @@ private final class CommandCodeAgentStreamState: AgentEventParser {
     /// toolCallId → tool name, so a completion knows what it completed (an error or
     /// denial event may not carry the name).
     private var openTools: [String: String] = [:]
-    /// The report is emitted as a work-trail entry once, with the result line.
-    private var emittedReport = false
+    /// The narration and the reasoning, grown from their `*_delta` events. A tool
+    /// call ends the current paragraph (see `tool_running`), so the trail reads as
+    /// prose · work · prose rather than one running block.
+    private var stream = StreamingBlocks()
+    /// The single plan row, rewritten in place on every `todo_write`.
+    private var planEntry: UUID?
 
     func ingest(_ data: Data) -> AgentProgress? {
         lock.lock(); defer { lock.unlock() }
@@ -2342,13 +2917,16 @@ private final class CommandCodeAgentStreamState: AgentEventParser {
                     failure = (obj["error"] as? String).flatMap { $0.isEmpty ? nil : $0 }
                         ?? "unknown error"
                 }
+                // `finalText` is authoritative — it replaces the paragraph the
+                // deltas built (creating it, if the run streamed none), so the
+                // trail's last narration is exactly the answer shown beneath it.
                 let report = finalMessage.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !emittedReport, !report.isEmpty {
-                    emittedReport = true
-                    progress.entries.append(AgentLogEntry(
-                        id: UUID(), title: String(report.prefix(500)), mono: false))
+                if !report.isEmpty {
+                    stream.replace(report, slot: StreamingBlocks.narration,
+                                   kind: .plain, into: &progress)
                     any = true
                 }
+                stream.closeAll()
             default:
                 break
             }
@@ -2384,25 +2962,54 @@ private final class CommandCodeAgentStreamState: AgentEventParser {
         case "text_delta":
             guard let delta = event["delta"] as? String, !delta.isEmpty else { return false }
             streamedText += delta
-            // Rolling ticker: the tail of the report as it's written, so the
-            // collapsed card shows motion between tool calls.
-            let flat = streamedText
-                .replacingOccurrences(of: "\n", with: " ")
-                .trimmingCharacters(in: .whitespaces)
-            progress.activity = String(flat.suffix(80))
+            // The paragraph grows in the trail as it's written, and its tail
+            // rolls through the ticker so the collapsed card shows motion
+            // between tool calls.
+            stream.close(StreamingBlocks.thinking)
+            stream.append(delta, slot: StreamingBlocks.narration,
+                          kind: .plain, into: &progress)
+            progress.activity = stream.ticker(StreamingBlocks.narration)
             return true
         case "thinking_start", "thinking_delta":
-            progress.activity = L("agent.thinking")
+            if let delta = event["delta"] as? String, !delta.isEmpty {
+                stream.close(StreamingBlocks.narration)
+                stream.append(delta, slot: StreamingBlocks.thinking,
+                              kind: .thinking, into: &progress)
+            }
+            progress.activity = stream.ticker(StreamingBlocks.thinking)
             return true
         case "tool_running":
             guard let id = event["toolCallId"] as? String,
                   let name = event["toolName"] as? String else { return false }
             openTools[id] = name
+            // A tool call closes whatever prose was being written: the next
+            // paragraph is a new thought, not a continuation of this one.
+            stream.closeAll()
+            // The plan is ONE row, rewritten wherever it first appeared.
+            let items = name == "todo_write" ? Self.todos(in: event) : []
+            if !items.isEmpty {
+                let encoded = AgentTodo.encode(items)
+                if let planEntry {
+                    progress.rewrites.append((planEntry, AgentTodo.title(items), encoded))
+                } else {
+                    let entry = AgentLogEntry(id: UUID(), title: AgentTodo.title(items),
+                                              mono: false, detail: encoded, kind: .todo)
+                    planEntry = entry.id
+                    progress.entries.append(entry)
+                }
+                return true
+            }
             let title = Self.title(tool: name, description: event["description"] as? String)
             progress.activity = String(title.prefix(80))
             if openEntries[id] == nil {
-                let entry = AgentLogEntry(id: UUID(), title: String(title.prefix(200)),
-                                          mono: Self.isMono(tool: name))
+                // A write / edit carries the text it's about to apply — draw it.
+                let patch = Self.patch(tool: name, input: event["input"])
+                let entry = AgentLogEntry(
+                    id: UUID(),
+                    title: AgentDiff.title(String(title.prefix(200)), patch: patch),
+                    mono: Self.isMono(tool: name),
+                    detail: patch.isEmpty ? nil : patch,
+                    kind: patch.isEmpty ? .plain : .diff)
                 openEntries[id] = entry.id
                 progress.entries.append(entry)
             }
@@ -2419,7 +3026,7 @@ private final class CommandCodeAgentStreamState: AgentEventParser {
             let output = Self.text(inResultOf: event["result"])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if !output.isEmpty {
-                progress.details.append((entryID, String(output.suffix(2000))))
+                progress.details.append((entryID, String(output.suffix(2000)), false))
             }
             return true
         case "tool_errored", "tool_denied":
@@ -2427,7 +3034,9 @@ private final class CommandCodeAgentStreamState: AgentEventParser {
             openTools[id] = nil
             guard let entryID = openEntries.removeValue(forKey: id) else { return true }
             guard let detail = event["error"] as? String, !detail.isEmpty else { return true }
-            progress.details.append((entryID, String(detail.suffix(2000))))
+            // A failed call replaces whatever the row was showing — including a
+            // patch drawn from arguments the tool then refused.
+            progress.details.append((entryID, String(detail.suffix(2000)), true))
             return true
         case "run_error":
             sawTerminal = true
@@ -2456,6 +3065,48 @@ private final class CommandCodeAgentStreamState: AgentEventParser {
     private static func isMono(tool: String) -> Bool {
         !["ask_user_question", "todo_write", "enter_plan_mode", "exit_plan_mode"]
             .contains(tool)
+    }
+
+    /// The patch a write/edit is about to apply, when the call's input carries the
+    /// before/after text. Command Code's tool arguments follow the same shape
+    /// Claude's do; an input we can't read leaves the row a plain line.
+    private static func patch(tool: String, input: Any?) -> String {
+        guard ["edit_file", "write_file"].contains(tool),
+              let input = input as? [String: Any] else { return "" }
+        func str(_ dict: [String: Any], _ keys: [String]) -> String {
+            for k in keys { if let v = dict[k] as? String, !v.isEmpty { return v } }
+            return ""
+        }
+        let oldKeys = ["old_string", "oldText", "old_text", "old"]
+        let newKeys = ["new_string", "newText", "new_text", "new"]
+        // A batched edit (an `edits` array) is the shape both pi and Claude's
+        // MultiEdit use; a single replacement sits at the top level.
+        if let edits = input["edits"] as? [[String: Any]], !edits.isEmpty {
+            return AgentDiff.combined(edits.map {
+                AgentDiff.replacement(old: str($0, oldKeys), new: str($0, newKeys))
+            })
+        }
+        let old = str(input, oldKeys)
+        let new = str(input, newKeys)
+        if !old.isEmpty || !new.isEmpty { return AgentDiff.replacement(old: old, new: new) }
+        return AgentDiff.addition(str(input, ["content", "text"]))
+    }
+
+    /// The plan items a `todo_write` call carries, whichever of the two key
+    /// shapes it uses.
+    private static func todos(in event: [String: Any]) -> [(text: String, status: AgentTodo.Status)] {
+        guard let input = event["input"] as? [String: Any] else { return [] }
+        let raw = (input["todos"] as? [[String: Any]]) ?? (input["items"] as? [[String: Any]]) ?? []
+        return raw.compactMap { item in
+            guard let text = (item["content"] as? String) ?? (item["text"] as? String),
+                  !text.isEmpty else { return nil }
+            switch item["status"] as? String {
+            case "completed":   return (text, .done)
+            case "in_progress": return (text, .active)
+            default:
+                return (text, (item["completed"] as? Bool) == true ? .done : .pending)
+            }
+        }
     }
 
     /// The file a write/edit touched, from the call's own input when the event
@@ -2493,6 +3144,296 @@ private final class CommandCodeAgentStreamState: AgentEventParser {
             _ = drainLines(into: &residue)
         }
         // A run cut short before its result line still has whatever it streamed.
+        if finalMessage.isEmpty { finalMessage = streamedText }
+        let tail = stderrTail
+            .split(separator: "\n")
+            .map(String.init)
+            .last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })
+            ?? ""
+        return AgentSnapshot(finalMessage: finalMessage, failure: failure,
+                             stderrTail: tail, sawTerminal: sawTerminal)
+    }
+}
+
+/// The **pi** dialect (`pi -p --mode json`). Structurally the closest to Command
+/// Code's — one JSON object per line, tool calls as their own frames — but the
+/// events are the framework's own (`docs/json.md`): a `session` header hands over
+/// the id `pi --session` continues, `tool_execution_start` / `tool_execution_end`
+/// bracket each call, `message_update.assistantMessageEvent` carries the token-level
+/// `text_delta` / `thinking_delta`, and each assistant `message_end` closes a model
+/// call with its real usage.
+///
+/// The one shape it lacks is a terminal *result* line: pi ends with `agent_end` +
+/// `agent_settled` and no distilled report, so the report is assembled from the
+/// assistant messages' own text — and a provider refusal arrives as a `message_end`
+/// whose `stopReason` is `"error"`, carrying `errorMessage`, rather than as an error
+/// event of its own.
+private final class PiAgentStreamState: AgentEventParser {
+    private let lock = NSLock()
+    private var buffer = Data()
+    private var stderrTail = ""
+    private var finalMessage = ""
+    private var streamedText = ""
+    private var failure: String?
+    private var sawTerminal = false
+    /// toolCallId → the log entry it opened, so `tool_execution_end` can attach the
+    /// tool's output to the entry `tool_execution_start` created.
+    private var openEntries: [String: UUID] = [:]
+    /// toolCallId → tool name, so a completion knows what it completed.
+    private var openTools: [String: String] = [:]
+    /// The narration and the reasoning, grown from `message_update`'s
+    /// token-level deltas; `message_end` hands over the authoritative text for
+    /// the paragraph they built.
+    private var stream = StreamingBlocks()
+
+    func ingest(_ data: Data) -> AgentProgress? {
+        lock.lock(); defer { lock.unlock() }
+        buffer.append(data)
+        var progress = AgentProgress()
+        return drainLines(into: &progress) ? progress : nil
+    }
+
+    /// Parse every complete (newline-terminated) line into `progress`. Caller holds
+    /// the lock.
+    private func drainLines(into progress: inout AgentProgress) -> Bool {
+        var any = false
+        while let nl = buffer.firstIndex(of: 0x0A) {
+            let line = buffer.subdata(in: buffer.startIndex..<nl)
+            buffer.removeSubrange(buffer.startIndex...nl)
+            guard !line.isEmpty,
+                  let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+                  let type = obj["type"] as? String
+            else { continue }
+            switch type {
+            case "session":
+                // The header line, first out of every run — the handle
+                // `pi --session` continues from, available before any work starts
+                // so a follow-up stays possible even if the round is interrupted.
+                guard let sid = obj["id"] as? String, !sid.isEmpty else { continue }
+                progress.sessionID = sid
+                any = true
+            case "message_start":
+                guard let message = obj["message"] as? [String: Any],
+                      message["role"] as? String == "assistant",
+                      let model = message["model"] as? String, !model.isEmpty
+                else { continue }
+                // Reported as the app's own id space (`<pi-provider>/<model>`), so
+                // the chip matches the row that armed it.
+                if let provider = message["provider"] as? String, !provider.isEmpty {
+                    progress.model = "\(provider)/\(model)"
+                } else {
+                    progress.model = model
+                }
+                any = true
+            case "message_update":
+                guard let event = obj["assistantMessageEvent"] as? [String: Any],
+                      let kind = event["type"] as? String
+                else { continue }
+                switch kind {
+                case "text_delta":
+                    guard let delta = event["delta"] as? String, !delta.isEmpty else { continue }
+                    streamedText += delta
+                    // The paragraph grows in the trail as it's written, and its
+                    // tail rolls through the ticker so the collapsed card shows
+                    // motion between tool calls.
+                    stream.close(StreamingBlocks.thinking)
+                    stream.append(delta, slot: StreamingBlocks.narration,
+                                  kind: .plain, into: &progress)
+                    progress.activity = stream.ticker(StreamingBlocks.narration)
+                    any = true
+                case "thinking_start", "thinking_delta":
+                    if let delta = event["delta"] as? String, !delta.isEmpty {
+                        stream.close(StreamingBlocks.narration)
+                        stream.append(delta, slot: StreamingBlocks.thinking,
+                                      kind: .thinking, into: &progress)
+                    }
+                    progress.activity = stream.ticker(StreamingBlocks.thinking)
+                    any = true
+                default:
+                    continue   // toolcall_start / text_end / thinking_end / …
+                }
+            case "message_end":
+                guard let message = obj["message"] as? [String: Any],
+                      message["role"] as? String == "assistant"
+                else { continue }
+                // One `message_end` per model call, carrying that call's real usage.
+                // `input` is the request's full prompt = what the turn occupied of
+                // the context window (the semantic codex's `input_tokens` carries).
+                if let usage = message["usage"] as? [String: Any] {
+                    let input = usage["input"] as? Int ?? 0
+                    let cacheRead = usage["cacheRead"] as? Int ?? 0
+                    // pi reports cache hits separately from fresh input, but both
+                    // occupy the window — the sum is what the meter should show.
+                    if input + cacheRead > 0 {
+                        progress.contextUsed = input + cacheRead
+                        any = true
+                    }
+                    TokenMeter.shared.record(input: input,
+                                             output: usage["output"] as? Int ?? 0)
+                }
+                // The report is the assistant's own text, whichever call produced
+                // it — and it's authoritative for the paragraph the deltas built,
+                // so it replaces that entry rather than adding a second copy.
+                if let text = Self.text(in: message["content"]), !text.isEmpty {
+                    finalMessage = text
+                    stream.replace(text, slot: StreamingBlocks.narration,
+                                   kind: .plain, into: &progress)
+                    any = true
+                }
+                stream.closeAll()
+                if message["stopReason"] as? String == "error" {
+                    sawTerminal = true
+                    failure = (message["errorMessage"] as? String)
+                        .flatMap { $0.isEmpty ? nil : $0 } ?? "unknown error"
+                }
+            case "tool_execution_start":
+                guard let id = obj["toolCallId"] as? String,
+                      let name = obj["toolName"] as? String else { continue }
+                openTools[id] = name
+                // A tool call closes whatever prose was being written: the next
+                // paragraph is a new thought, not a continuation of this one.
+                stream.closeAll()
+                let title = Self.title(tool: name, args: obj["args"] as? [String: Any])
+                progress.activity = String(title.prefix(80))
+                if openEntries[id] == nil {
+                    // A write / edit carries the text it's about to apply — draw it.
+                    let patch = Self.patch(tool: name, args: obj["args"])
+                    let entry = AgentLogEntry(
+                        id: UUID(),
+                        title: AgentDiff.title(String(title.prefix(200)), patch: patch),
+                        mono: true,
+                        detail: patch.isEmpty ? nil : patch,
+                        kind: patch.isEmpty ? .plain : .diff)
+                    openEntries[id] = entry.id
+                    progress.entries.append(entry)
+                }
+                any = true
+            case "tool_execution_end":
+                guard let id = obj["toolCallId"] as? String else { continue }
+                let name = (obj["toolName"] as? String) ?? openTools[id] ?? ""
+                openTools[id] = nil
+                // A write / edit is a changed file — what the run's summary counts.
+                if ["write", "edit"].contains(name), let path = Self.path(in: obj["args"]) {
+                    progress.changedFiles.append((path as NSString).lastPathComponent)
+                }
+                any = true
+                guard let entryID = openEntries.removeValue(forKey: id) else { continue }
+                let output = Self.text(inResultOf: obj["result"])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !output.isEmpty {
+                    progress.details.append((entryID, String(output.suffix(2000)), false))
+                }
+            case "agent_end", "agent_settled":
+                // pi's terminal pair. There is no distilled result line, so the
+                // report is whatever the assistant last said — already in the
+                // trail, put there by the deltas and corrected at `message_end`.
+                sawTerminal = true
+                if finalMessage.isEmpty { finalMessage = streamedText }
+                stream.closeAll()
+            default:
+                break   // agent_start / turn_start / turn_end / queue_update / …
+            }
+        }
+        return any
+    }
+
+    /// The work-trail title for a tool call. pi sends no prose `description` (its own
+    /// UI renders each tool's arguments), so the title is composed from the one
+    /// argument that names what the call is doing — the command, the path, the
+    /// pattern — falling back to the bare tool name.
+    private static func title(tool: String, args: [String: Any]?) -> String {
+        func arg(_ keys: [String]) -> String? {
+            for k in keys {
+                if let v = args?[k] as? String,
+                   !v.trimmingCharacters(in: .whitespaces).isEmpty { return v }
+            }
+            return nil
+        }
+        switch tool {
+        case "bash":
+            return "$ " + (arg(["command"]) ?? "")
+        case "read", "write", "edit", "ls":
+            return [tool, arg(["path", "file_path"])].compactMap { $0 }.joined(separator: " ")
+        case "grep", "find":
+            return [tool, arg(["pattern", "query", "regex"])]
+                .compactMap { $0 }.joined(separator: " ")
+        default:
+            return tool
+        }
+    }
+
+    /// The patch a write/edit is about to apply, from the call's own arguments.
+    /// pi's `edit` carries an ARRAY of replacements (`edits: [{oldText, newText}]`,
+    /// verified against the installed build) and `write` the whole file; key
+    /// names are probed rather than assumed, and an unreadable shape leaves the
+    /// row a plain line rather than a wrong patch.
+    private static func patch(tool: String, args: Any?) -> String {
+        guard ["write", "edit"].contains(tool),
+              let args = args as? [String: Any] else { return "" }
+        func str(_ dict: [String: Any], _ keys: [String]) -> String {
+            for k in keys { if let v = dict[k] as? String, !v.isEmpty { return v } }
+            return ""
+        }
+        let oldKeys = ["oldText", "old_string", "old_text", "old"]
+        let newKeys = ["newText", "new_string", "new_text", "new"]
+        if let edits = args["edits"] as? [[String: Any]], !edits.isEmpty {
+            return AgentDiff.combined(edits.map {
+                AgentDiff.replacement(old: str($0, oldKeys), new: str($0, newKeys))
+            })
+        }
+        let old = str(args, oldKeys)
+        let new = str(args, newKeys)
+        if !old.isEmpty || !new.isEmpty { return AgentDiff.replacement(old: old, new: new) }
+        return AgentDiff.addition(str(args, ["content", "text"]))
+    }
+
+    /// The file a write/edit touched, from the call's own arguments.
+    private static func path(in args: Any?) -> String? {
+        guard let args = args as? [String: Any],
+              let p = (args["path"] as? String) ?? (args["file_path"] as? String),
+              !p.isEmpty
+        else { return nil }
+        return p
+    }
+
+    /// Flatten an assistant message's content blocks into its answer text, dropping
+    /// the `thinking` and `toolCall` blocks that share the array.
+    private static func text(in content: Any?) -> String? {
+        guard let blocks = content as? [[String: Any]] else { return nil }
+        let parts = blocks.compactMap { block -> String? in
+            guard block["type"] as? String == "text" else { return nil }
+            return block["text"] as? String
+        }
+        return parts.isEmpty ? nil : parts.joined()
+    }
+
+    /// Flatten a tool result's content blocks (`{"content":[{"type":"text",…}]}`) into
+    /// one string; a bare string result passes through.
+    private static func text(inResultOf result: Any?) -> String {
+        if let s = result as? String { return s }
+        let blocks = (result as? [String: Any])?["content"] as? [[String: Any]]
+            ?? result as? [[String: Any]]
+        guard let blocks else { return "" }
+        return blocks.compactMap { $0["text"] as? String }.joined(separator: "\n")
+    }
+
+    func appendStderr(_ data: Data) {
+        guard let s = String(data: data, encoding: .utf8) else { return }
+        lock.lock(); defer { lock.unlock() }
+        stderrTail += s
+        if stderrTail.count > 2000 { stderrTail = String(stderrTail.suffix(2000)) }
+    }
+
+    func finish() -> AgentSnapshot {
+        lock.lock(); defer { lock.unlock() }
+        // A stream killed mid-flush leaves its last line unterminated in the buffer —
+        // terminate it and give it one final parse.
+        if !buffer.isEmpty {
+            buffer.append(0x0A)
+            var residue = AgentProgress()
+            _ = drainLines(into: &residue)
+        }
+        // A run cut short before its terminal pair still has whatever it streamed.
         if finalMessage.isEmpty { finalMessage = streamedText }
         let tail = stderrTail
             .split(separator: "\n")

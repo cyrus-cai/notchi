@@ -333,6 +333,7 @@ final class ModelCatalogStore: ObservableObject {
         case .claudeCode: return ClaudeCLIService.isAvailable
         case .grokCode:   return GrokCLIService.isAvailable
         case .commandCode: return CommandCodeCLIService.isAvailable
+        case .piCode:     return PiCLIService.isAvailable
         // The user's own endpoint needs a URL and a model, not necessarily a key.
         case .custom:     return CustomProvider.isConfigured
         default:          return APIKeyStore.current(for: p) != nil
@@ -447,6 +448,23 @@ final class ModelCatalogStore: ObservableObject {
             if ids != [CommandCodeCLIService.defaultSentinel] {
                 liveByProvider[.commandCode] = ids.map {
                     ModelInfo(id: $0, vendor: ModelRatings.vendor(for: $0))
+                }
+            }
+        }
+        // pi is keyless too, and the widest aggregator of the five: its catalog is
+        // every provider the user has signed pi into (`pi --list-models`), and each
+        // id is `<pi-provider>/<model>` — the model half names the real lab, so the
+        // rows carry the right mark rather than one house brand (see
+        // `PiCLIService.vendor(forID:)`). Never publish the bare sentinel.
+        if liveByProvider[.piCode] == nil {
+            let ids = await Task.detached(priority: .userInitiated) { () -> [String] in
+                PiCLIService.refreshModels()
+                return PiCLIService.availableModelIDs
+            }.value
+            if ids != [PiCLIService.defaultSentinel] {
+                liveByProvider[.piCode] = ids.map {
+                    ModelInfo(id: $0, vendor: PiCLIService.vendor(forID: $0),
+                              name: PiCLIService.displayName(forID: $0))
                 }
             }
         }
@@ -1000,6 +1018,12 @@ struct AgentEngineMark: View {
                     .fill(tint, style: FillStyle(eoFill: true))
                     .frame(width: size, height: size)
             }
+        case .pi:
+            if let mark = VendorLogos.mark(for: "pi") {
+                SVGPathShape(pathData: mark.path, viewBox: mark.viewBox)
+                    .fill(tint, style: FillStyle(eoFill: true))
+                    .frame(width: size, height: size)
+            }
         }
     }
 }
@@ -1172,6 +1196,9 @@ struct AgentModelPickerView: View {
         // No family to name — the rows under it are Claude, GPT, Qwen, Kimi …, so
         // the caption is the account they all run through.
         case .commandCode: return "Command Code"
+        // Same, one level out: pi's rows span several accounts as well as several
+        // labs, so the caption is the CLI itself.
+        case .pi:     return "pi"
         }
     }
 
@@ -1184,7 +1211,9 @@ struct AgentModelPickerView: View {
         // Grok's models are bare version numbers ("4.5" alone says nothing), and
         // Command Code's span a dozen families the caption can't stand in for —
         // both keep their labels whole.
-        if c.engine == .grok || c.engine == .commandCode { return c.label }
+        if c.engine == .grok || c.engine == .commandCode || c.engine == .pi {
+            return c.label
+        }
         let family = groupTitle(for: c.engine).lowercased()
         for sep in ["-", " "] {
             let p = family + sep

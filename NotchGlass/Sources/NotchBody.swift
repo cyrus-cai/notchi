@@ -68,6 +68,9 @@ struct NotchBody: View {
     /// way the moment the editor shows anything, including pinyin that hasn't
     /// committed to `model.text` yet (which lags a whole composition behind).
     @State private var caretWidth: CGFloat = 0
+    /// Vertical position of the prompt's last visible line, used by the
+    /// punctuation-mode explanation that trails the caret.
+    @State private var caretY: CGFloat = 0
     /// Same live display width, but for the follow-up field. Its placeholder is a
     /// SwiftUI overlay (so the copy can cross-fade — see `followUpPlaceholderLabel`),
     /// and this is how the overlay knows to vanish the moment the editor shows
@@ -101,6 +104,17 @@ struct NotchBody: View {
     @State private var agentDetailFollowUp: String = ""
     @State private var agentDetailFollowUpCaretWidth: CGFloat = 0
     @State private var agentDetailFollowUpHeight: CGFloat = PromptField.lineHeight(for: NotchBody.followUpFontSize)
+    /// The detail page's own ⌘ metadata menu (engine / folder / completion) —
+    /// the same chip a reopened record's follow-up row carries. Local state, not
+    /// `model.isResultMetadataMenuOpen`: the two surfaces never coexist, but the
+    /// page owns its own chip and shouldn't leave the record's flag flipped.
+    @State private var agentDetailMetadataOpen = false
+    /// Whether the agent detail page is still pinned to the tail. The page
+    /// follows the newest line like a terminal — but only while the reader is
+    /// AT the tail: scroll up to read an earlier tool output and the follow
+    /// releases, instead of yanking the page back down on every 250ms tick.
+    /// Re-arms when the reader returns to the bottom (or sends a follow-up).
+    @State private var agentDetailFollowsTail = true
     /// Small directional slide-in for the idle prompt as ↑/↓ recall swaps a past
     /// question in: set to a nonzero offset (with the step's direction) the instant
     /// a recall fires, then animated back to rest. See `model.recallPulse`.
@@ -338,6 +352,9 @@ struct NotchBody: View {
         if p == .grokCode, id.isEmpty || id == "grok" { return p.defaultModel }
         if p == .claudeCode, id.isEmpty || id == "claude" { return p.defaultModel }
         if p == .commandCode, id.isEmpty || id == CommandCodeCLIService.defaultSentinel {
+            return p.defaultModel
+        }
+        if p == .piCode, id.isEmpty || id == PiCLIService.defaultSentinel {
             return p.defaultModel
         }
         return id.isEmpty ? p.defaultModel : id
@@ -897,7 +914,10 @@ struct NotchBody: View {
                 if model.agentComposeActive {
                     agentComposeChips
                         .transition(.opacity)
-                } else {
+                } else if model.effectiveSubmitPanel == .chat {
+                    // Notes and reminders never invoke an AI model, so their
+                    // compose row should not advertise or offer one. The chip
+                    // belongs only to Ask; switching back brings it back.
                     askModelChip
                         .transition(.opacity)
                 }
@@ -1000,7 +1020,8 @@ struct NotchBody: View {
     /// already was.
     ///
     /// Where the tap goes then depends on what's already on the machine. A signed-in
-    /// `codex` / `claude` / `grok` CLI is a *working backend that needs no key* — so
+    /// `codex` / `claude` / `grok` / `cmd` / `pi` CLI is a *working backend that
+    /// needs no key* — so
     /// if any are there, the menu lists them (tagged CLI) and one click is the whole
     /// setup. Only with none of them does it fall through to Settings.
     private var askModelChip: some View {
@@ -1085,6 +1106,7 @@ struct NotchBody: View {
         if CodexCLIService.isAvailable { out.append(.codex) }
         if GrokCLIService.isAvailable { out.append(.grokCode) }
         if CommandCodeCLIService.isAvailable { out.append(.commandCode) }
+        if PiCLIService.isAvailable { out.append(.piCode) }
         return out
     }
 
@@ -1249,8 +1271,9 @@ struct NotchBody: View {
         case .claude: family = "claude"
         case .grok:   family = "grok"
         // Command Code fronts a dozen labs — there is no one family word to drop,
-        // and the vendor is exactly what tells its models apart.
-        case .commandCode: return label
+        // and the vendor is exactly what tells its models apart. pi fronts more
+        // still (a dozen labs across several accounts), for the same reason.
+        case .commandCode, .pi: return label
         }
         for sep in ["-", " "] {
             let p = family + sep
@@ -1476,6 +1499,30 @@ struct NotchBody: View {
 
     /// Stable id for the tail spacer the detail scroll follows while streaming.
     private static let agentDetailBottomID = "agent-detail-bottom"
+    /// The detail scroll's own coordinate space, and how far the content's end
+    /// may sit below the viewport before the page stops chasing the tail.
+    private static let agentDetailSpace = "agent-detail-scroll"
+    private static let agentDetailTailSlack: CGFloat = 28
+
+    /// Whether the trail's last entry is a paragraph the agent is writing right
+    /// now. When it is, the trail already shows the words arriving and the
+    /// one-line ticker under it would just repeat their tail; a folded reasoning
+    /// block or a tool row shows no motion, so there the ticker still earns its
+    /// place. Shared by the panel page and its torn-off twin.
+    static func trailTailIsStreamingProse(_ log: [AgentLogEntry]) -> Bool {
+        guard let last = log.last else { return false }
+        return !last.mono && last.kind == .plain && !last.title.hasPrefix("› ")
+    }
+
+    /// Scroll to the newest line — but only while the reader is still at the
+    /// tail. Shared by the two things that move it (a new row, and the trailing
+    /// block growing token by token).
+    private func followAgentDetailTail(_ proxy: ScrollViewProxy) {
+        guard agentDetailFollowsTail else { return }
+        withAnimation(.easeOut(duration: 0.2)) {
+            proxy.scrollTo(Self.agentDetailBottomID, anchor: .bottom)
+        }
+    }
 
     /// The detail scroll's height. Tuned so the whole page (26pt header + 10 gap
     /// + this + 10 gap + 39pt follow-up row = 320pt) matches the immersive
@@ -1534,16 +1581,22 @@ struct NotchBody: View {
                                 UserQuestionBubble(text: task.prompt)
                             }
                             if !liveTail.isEmpty {
-                                AgentWorkTrailView(entries: liveTail, isLazy: true)
+                                // `live`: the trailing block is still being
+                                // written, so it must not fold under the reader.
+                                AgentWorkTrailView(entries: liveTail, isLazy: true, live: true)
                             }
                             // The collapsed row's ticker, following the trail —
                             // what the run is doing right now. Same 14pt/text3
-                            // face the status row wears.
-                            CrossfadeText(text: task.activity ?? L("agent.thinking"),
-                                          font: 14, color: Tokens.text3)
-                                .tracking(-0.1)
-                                .lineLimit(1)
-                                .padding(.vertical, 2)
+                            // face the status row wears. Dropped while a
+                            // paragraph is visibly streaming just above it: the
+                            // ticker would only echo that paragraph's own tail.
+                            if !NotchBody.trailTailIsStreamingProse(task.log) {
+                                CrossfadeText(text: task.activity ?? L("agent.thinking"),
+                                              font: 14, color: Tokens.text3)
+                                    .tracking(-0.1)
+                                    .lineLimit(1)
+                                    .padding(.vertical, 2)
+                            }
                         }
                         Color.clear.frame(height: 1).id(Self.agentDetailBottomID)
                     }
@@ -1553,6 +1606,24 @@ struct NotchBody: View {
                     // reads identically on both sides of a tear.
                     .padding(.top, ThreadScroll.runway)
                     .padding(.bottom, 10)
+                    // Where the content's bottom edge currently sits inside the
+                    // viewport — the one measurement that says whether the reader
+                    // is at the tail. (macOS 14 is the floor here, so this is the
+                    // GeometryReader form rather than `onScrollGeometryChange`.)
+                    .background(GeometryReader { geo in
+                        Color.clear.preference(
+                            key: AgentDetailContentBottomKey.self,
+                            value: geo.frame(in: .named(Self.agentDetailSpace)).maxY)
+                    })
+                }
+                .coordinateSpace(name: Self.agentDetailSpace)
+                .onPreferenceChange(AgentDetailContentBottomKey.self) { bottom in
+                    // Slack = how far the content's end sits BELOW the viewport's
+                    // bottom edge. A screenful of tolerance, so the animated
+                    // tail-follow's own intermediate frames never read as "the
+                    // user scrolled away".
+                    let atTail = bottom - agentDetailScrollHeight <= Self.agentDetailTailSlack
+                    if atTail != agentDetailFollowsTail { agentDetailFollowsTail = atTail }
                 }
                 // The shared dissolve at the top edge only — the page pins to the
                 // tail, so the newest line rests at the bottom and must stay at
@@ -1564,15 +1635,40 @@ struct NotchBody: View {
                 .modifier(ConditionalTopBlur(active: !task.isRunning,
                                              height: ThreadScroll.band,
                                              maxRadius: ThreadScroll.blurRadius))
-                // Follow the tail while entries stream in, like a terminal.
+                // Follow the tail while entries stream in, like a terminal —
+                // unless the reader has scrolled up, in which case the page
+                // stays where they put it (`agentDetailFollowsTail`).
                 .onChange(of: task.log.count) { _, _ in
-                    withAnimation(.easeOut(duration: 0.2)) {
-                        proxy.scrollTo(Self.agentDetailBottomID, anchor: .bottom)
-                    }
+                    followAgentDetailTail(proxy)
+                }
+                // The trailing block GROWS token by token now, which moves the
+                // tail without changing the row count.
+                .onChange(of: task.log.last?.title) { _, _ in
+                    followAgentDetailTail(proxy)
                 }
                 .onAppear {
+                    agentDetailFollowsTail = true
                     proxy.scrollTo(Self.agentDetailBottomID, anchor: .bottom)
                 }
+                // The way back down, offered only once the follow has released —
+                // otherwise the page is already there and the chip is noise.
+                .overlay(alignment: .bottomTrailing) {
+                    if !agentDetailFollowsTail {
+                        GlassIconButton(systemName: "arrow.down",
+                                        help: L("agent.trail.toBottom"),
+                                        size: 26, glyphSize: 11,
+                                        showsTooltip: false) {
+                            agentDetailFollowsTail = true
+                            withAnimation(.easeOut(duration: 0.2)) {
+                                proxy.scrollTo(Self.agentDetailBottomID, anchor: .bottom)
+                            }
+                        }
+                        .padding(.trailing, 4)
+                        .transition(.scale(scale: 0.8).combined(with: .opacity))
+                    }
+                }
+                .animation(.spring(response: 0.3, dampingFraction: 0.85),
+                           value: agentDetailFollowsTail)
             }
             .frame(height: agentDetailScrollHeight)
 
@@ -1594,7 +1690,42 @@ struct NotchBody: View {
     /// page renders in `.idle` mode with empty `turns`, so `submitCurrent` would
     /// mis-route the line to the chat model. Placeholder says "queue" while a round
     /// is in flight, "ask a follow-up" once it settles.
+    /// The page's follow-up box plus the ⌘ metadata chip beside it — the same
+    /// pairing a reopened record wears (`followUpRow`). The chip is permanent
+    /// here rather than earned: a live run always has an engine and a folder to
+    /// name, and a chip that appeared only at settle would move the send button
+    /// mid-run.
     private func agentDetailFollowUpRow(_ task: AgentTaskManager.AgentTask) -> some View {
+        HStack(alignment: .bottom, spacing: 6) {
+            agentDetailComposer(task)
+                .frame(maxWidth: .infinity)
+
+            GlassIconButton(systemName: "command",
+                            help: L("agent.detail"),
+                            size: 39,
+                            glyphSize: 13,
+                            showsTooltip: false) {
+                agentDetailMetadataOpen.toggle()
+            }
+            .modifier(MenuCardWindow(
+                open: agentDetailMetadataOpen,
+                upperLeading: true,
+                onDismiss: { _ in agentDetailMetadataOpen = false },
+                card: {
+                    AnyView(AgentRunMetadataMenu(
+                        engine: task.engine.displayName,
+                        folderPath: task.folder.path,
+                        completedAt: task.finishedAt,
+                        onOpenFolder: {
+                            agentDetailMetadataOpen = false
+                            NSWorkspace.shared.open(task.folder)
+                        })
+                        .manageMenuCardBackground())
+                }))
+        }
+    }
+
+    private func agentDetailComposer(_ task: AgentTaskManager.AgentTask) -> some View {
         // Same growing box as the chat follow-up, so it rounds the same way.
         let shape = NotchBody.composerShape(
             height: max(27, agentDetailFollowUpHeight) + 12)
@@ -1607,6 +1738,16 @@ struct NotchBody: View {
                     focusTrigger: focused,
                     maxVisibleLines: NotchBody.promptMaxLines,
                     onSubmit: { submitAgentDetailFollowUp(task) },
+                    // ⌘⏎ is the accelerator for the chip below: stop the round
+                    // in flight and hand the agent this line right now.
+                    onCommandSubmit: {
+                        guard task.isRunning, task.sessionID != nil,
+                              !agentDetailFollowUp.trimmingCharacters(
+                                in: .whitespacesAndNewlines).isEmpty
+                        else { return false }
+                        submitAgentDetailFollowUp(task, interrupting: true)
+                        return true
+                    },
                     onCaretWidth: { agentDetailFollowUpCaretWidth = $0 },
                     onHeightChange: { agentDetailFollowUpHeight = $0 }
                 )
@@ -1626,8 +1767,14 @@ struct NotchBody: View {
             .animation(.easeOut(duration: 0.16), value: agentDetailFollowUpCaretWidth == 0)
 
             if !agentDetailFollowUp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                SendButton(compact: true) { submitAgentDetailFollowUp(task) }
-                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+                // The field already owns both verbs: ⏎ sends/queues and ⌘⏎
+                // interrupts the live round. State them plainly instead of
+                // repeating them as an interrupt pill plus glass arrow.
+                AgentFollowUpKeyHints(
+                    showsInterrupt: task.isRunning && task.sessionID != nil)
+                    .frame(height: max(27, agentDetailFollowUpHeight),
+                           alignment: .center)
+                    .transition(.opacity)
             }
         }
         .padding(.leading, 13)
@@ -1649,11 +1796,23 @@ struct NotchBody: View {
     /// itself stays so more can follow. While the round is in flight the manager
     /// holds it and dispatches on settle; a settled-but-resumable task spawns it
     /// straight away. Never dismisses the page.
-    private func submitAgentDetailFollowUp(_ task: AgentTaskManager.AgentTask) {
+    ///
+    /// `interrupting` is the ⌘⏎ / chip path: stop the round in flight and open
+    /// the next one with this line immediately, instead of waiting the current
+    /// one out (`AgentTaskManager.interrupt`).
+    private func submitAgentDetailFollowUp(_ task: AgentTaskManager.AgentTask,
+                                           interrupting: Bool = false) {
         let line = agentDetailFollowUp.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !line.isEmpty else { return }
         agentDetailFollowUp = ""
-        AgentTaskManager.shared.followUp(taskID: task.id, prompt: line)
+        // Sending is a statement that you want to watch what happens next, so it
+        // re-arms the tail follow however far up the page had been scrolled.
+        agentDetailFollowsTail = true
+        if interrupting {
+            AgentTaskManager.shared.interrupt(taskID: task.id, prompt: line)
+        } else {
+            AgentTaskManager.shared.followUp(taskID: task.id, prompt: line)
+        }
     }
 
     /// The detail page's top bar: back chevron (the page is a peek, not a mode —
@@ -1676,15 +1835,9 @@ struct NotchBody: View {
             } else {
                 agentElapsedLabel(task.elapsed)
             }
-            // Open-folder + detach ride the same trailing-cluster glass the result
-            // header and detached window wear (`GlassSegmentCluster`), so every
-            // two-icon corner control in the app reads as one species.
+            // Folder access already lives in the metadata menu beside the
+            // follow-up field. Keep only the detach action in the header.
             GlassSegmentCluster(segments: [
-                .init(tooltip: L("agent.openFolder"),
-                      action: { NSWorkspace.shared.open(task.folder) }) {
-                    Image(systemName: "folder")
-                        .font(.sf(12, weight: .semibold))
-                },
                 .init(tooltip: shortcutHelp("detached.open", action: .detach),
                       action: { model.openDetachedWindow() }) {
                     Image(systemName: "macwindow.on.rectangle")
@@ -1983,7 +2136,15 @@ struct NotchBody: View {
     /// menu: you meet them only after scrolling past the oldest row, which is
     /// precisely the moment "show me everything" or "wipe this" becomes the next
     /// move. A fading hairline above them marks where the list ends.
+    ///
+    /// Agent mode drops Clear entirely — an agent row is a run's only record
+    /// (its folder, its log, its resume handle), so a one-tap wipe at the end of
+    /// the task list isn't an action that belongs there.
+    @ViewBuilder
     private var historyFooterActions: some View {
+        let showsSeeAll = model.recentScopeHistoryCount > NotchModel.notchRecentCap
+        let showsClear = !model.agentComposeActive
+        if showsSeeAll || showsClear {
         VStack(alignment: .leading, spacing: 10) {
             Rectangle()
                 .fill(
@@ -2000,7 +2161,7 @@ struct NotchBody: View {
                 // past `notchRecentCap`. When everything still fits, the archive window
                 // would open onto the exact same rows already on screen, so the button
                 // is pure redundancy and we drop it (Clear stays — it's always apt).
-                if model.recentScopeHistoryCount > NotchModel.notchRecentCap {
+                if showsSeeAll {
                     HistoryFooterButton(
                         icon: "clock.arrow.circlepath",
                         title: L("recent.menu.seeAll")
@@ -2027,12 +2188,14 @@ struct NotchBody: View {
                 // Destructive, so it arms the confirmation instead of wiping on the
                 // first tap. The confirm card renders centered over the whole island
                 // (see NotchIsland), not anchored to this pill.
-                HistoryFooterButton(
-                    icon: "trash",
-                    title: L(model.agentComposeActive ? "recent.clear.agent" : "recent.clear")
-                ) {
-                    withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
-                        model.confirmingClear = true
+                if showsClear {
+                    HistoryFooterButton(
+                        icon: "trash",
+                        title: L("recent.clear")
+                    ) {
+                        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                            model.confirmingClear = true
+                        }
                     }
                 }
             }
@@ -2040,6 +2203,7 @@ struct NotchBody: View {
         }
         .padding(.top, 10)
         .padding(.horizontal, 8)
+        }
     }
 
     /// The compact recent list (≤6 visible rows) with the manage bar (the ⋯ chip)
@@ -3508,11 +3672,19 @@ struct NotchBody: View {
                     onPasteImage: followUp ? { false } : {
                         model.handleComposePasteImage()
                     },
+                    // A directly typed colon / double-quote in the first
+                    // position pins Note while leaving the glyph in the line.
+                    // Paste / restored text never reaches this callback.
+                    onInitialNoteTrigger: followUp ? { _ in } : { trigger in
+                        guard model.turns.isEmpty else { return }
+                        model.activateTypedNoteMode(trigger: trigger)
+                    },
                     // Live width of the last line's committed text + any composing
                     // pinyin — what the overlay placeholder watches so it clears the
                     // instant the editor shows anything. Only the idle prompt feeds
                     // this; `followUpRow` owns its own tracking.
                     onCaretWidth: followUp ? { _ in } : { caretWidth = $0 },
+                    onCaretY: followUp ? { _ in } : { caretY = $0 },
                     // The box's own height — one line, or as many as the text has
                     // wrapped to (capped). The row is built around it.
                     //
@@ -3537,10 +3709,29 @@ struct NotchBody: View {
                     }
                 )
                 .frame(height: followUp ? nil : inputHeight)
-                // No trailing ghost, and so no reserved strip beside the text: the
-                // destination is spelled out in the pill below the field (see
-                // `BucketTogglePill`), which leaves the line the full width of the
-                // row to wrap into.
+                // Only the explicit punctuation shortcut explains itself inline,
+                // in the same trailing position the old routing hint occupied.
+                .padding(.trailing,
+                         (!followUp && model.typedNoteModeActive)
+                            ? InlineModeHint.reservedTrailingWidth(
+                                text: "You are using Note mode", fontSize: fontSize)
+                            : 0)
+                .background {
+                    if !followUp && model.typedNoteModeActive {
+                        GeometryReader { geo in
+                            InlineModeHint(
+                                text: "You are using Note mode",
+                                fontSize: fontSize,
+                                caretWidth: caretWidth,
+                                caretY: caretY,
+                                availableWidth: geo.size.width,
+                                tint: Tokens.noteInk)
+                            .frame(height: geo.size.height, alignment: .center)
+                        }
+                        .allowsHitTesting(false)
+                    }
+                }
+                .animation(.smooth(duration: 0.25), value: model.typedNoteModeActive)
 
                 // The placeholder, drawn as a SwiftUI label over the (natively
                 // placeholder-less) field so its appearance can FADE — on emptying
@@ -4059,11 +4250,13 @@ private struct HoverMarqueeText: View {
             return
         }
         // About 28pt/sec: calm enough to read dates and paths, but a full pass of
-        // an ordinary overflow still completes within a couple of seconds. It
-        // reverses while the pointer remains, so neither end becomes unreachable.
+        // an ordinary overflow still completes within a couple of seconds. One
+        // pass only — it parks on the tail end and stays there while the pointer
+        // remains, instead of sliding back over text already being read. Leaving
+        // the row eases it home.
         let duration = max(0.9, Double(overflow / 28))
         offset = 0
-        withAnimation(.linear(duration: duration).repeatForever(autoreverses: true)) {
+        withAnimation(.linear(duration: duration)) {
             offset = -overflow
         }
     }
@@ -4434,6 +4627,20 @@ private struct AnswerHeightKey: PreferenceKey {
         // lets the frame track the real content up and down.
         let next = nextValue()
         if next > 0 { value = next }
+    }
+}
+
+/// Where the agent detail scroll's content ENDS, measured in the scroll's own
+/// coordinate space: equal to the viewport height when the page sits at the tail,
+/// larger once the reader has scrolled up. That difference is the whole basis of
+/// the tail-follow release (`agentDetailFollowsTail`).
+private struct AgentDetailContentBottomKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        // Single reader, like `AnswerHeightKey`: carry the current value through
+        // so it can fall as well as rise.
+        let next = nextValue()
+        if next != 0 { value = next }
     }
 }
 

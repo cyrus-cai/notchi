@@ -37,6 +37,52 @@ final class PromptTextView: NSTextView {
     /// paste was consumed as something other than text (the agent compose
     /// attaches a pasted IMAGE); `false` falls through to the normal text paste.
     var onPasteImage: () -> Bool = { false }
+    /// A hand-typed colon / double-quote at the very start of a fresh prompt
+    /// switches its mode while remaining ordinary note content. Kept on the
+    /// AppKit input path so paste, recall, restored drafts and other programmatic
+    /// fills can never switch modes by accident.
+    var onInitialNoteTrigger: (Character) -> Void = { _ in }
+    /// Consulted on ⌘⏎. Command-modified keys never reach `doCommandBy:` (AppKit
+    /// routes them as key equivalents first), so the chord is caught here rather
+    /// than beside ⏎ and ⇧⏎ in the delegate.
+    var onCommandSubmit: () -> Bool = { false }
+
+    /// True only while `paste(_:)` is asking AppKit to insert clipboard text.
+    /// A paste arrives under the same key-down event as a hand-typed character,
+    /// so the event type alone cannot distinguish it from direct input.
+    private var insertingPaste = false
+
+    /// Colon and double-quotation forms used by common Latin, CJK and European
+    /// input sources. The small / vertical punctuation forms matter for IMEs
+    /// that emit compatibility characters instead of ASCII/full-width glyphs.
+    private static let initialNoteTriggers: Set<Character> = [
+        ":", "：", "﹕", "︓",
+        "\"", "＂", "“", "”", "„", "‟", "«", "»",
+        "〝", "〞", "〟", "「", "」", "『", "』",
+    ]
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if mods == .command, event.keyCode == 36 /* Return */, onCommandSubmit() {
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    override func insertText(_ insertString: Any, replacementRange: NSRange) {
+        let inserted = (insertString as? NSAttributedString)?.string
+            ?? (insertString as? String)
+        let selection = selectedRange()
+        if !insertingPaste,
+           NSApp.currentEvent?.type == .keyDown,
+           selection.location == 0, selection.length == 0,
+           let inserted, inserted.count == 1,
+           let character = inserted.first,
+           Self.initialNoteTriggers.contains(character) {
+            onInitialNoteTrigger(character)
+        }
+        super.insertText(insertString, replacementRange: replacementRange)
+    }
 
     override func becomeFirstResponder() -> Bool {
         let accepted = super.becomeFirstResponder()
@@ -61,6 +107,8 @@ final class PromptTextView: NSTextView {
         // clipboard holds nothing the plain-text machinery can read, stop —
         // don't let AppKit improvise an attachment glyph out of raw pixels.
         guard NSPasteboard.general.availableType(from: super.readablePasteboardTypes) != nil else { return }
+        insertingPaste = true
+        defer { insertingPaste = false }
         super.paste(sender)
     }
 
@@ -144,6 +192,14 @@ struct PromptField: NSViewRepresentable {
     /// the paste (the clipboard held pixels and the compose took them); `false`
     /// lets the paste insert text as usual.
     var onPasteImage: () -> Bool = { false }
+    /// Invoked when the user directly types a colon or double-quote at insertion
+    /// position zero. The sigil is still inserted normally; paste and model-side
+    /// text changes never call this hook.
+    var onInitialNoteTrigger: (Character) -> Void = { _ in }
+    /// Invoked on ⌘⏎ — the agent detail's "interrupt the round and send this
+    /// now", the second meaning Enter can't carry (plain ⏎ queues). Returns
+    /// `true` when consumed; `false` lets the key do whatever it normally would.
+    var onCommandSubmit: () -> Bool = { false }
     /// Reports the width (pt) of the LAST line the box is currently *showing* —
     /// committed text PLUS any in-progress IME composition (the pinyin/marked text
     /// that isn't yet in `text`). The overlay placeholder watches it so it clears
@@ -213,6 +269,8 @@ struct PromptField: NSViewRepresentable {
         // never the copy captured at makeNSView time.
         let coord = context.coordinator
         tv.onPasteImage = { coord.parent.onPasteImage() }
+        tv.onInitialNoteTrigger = { coord.parent.onInitialNoteTrigger($0) }
+        tv.onCommandSubmit = { coord.parent.onCommandSubmit() }
 
         let scroll = NSScrollView(frame: tv.frame)
         scroll.documentView = tv
@@ -681,6 +739,51 @@ struct PromptField: NSViewRepresentable {
     }
 }
 
+/// A short explanation that trails the caret and docks at the prompt's trailing
+/// edge. Used only while a punctuation prefix has explicitly armed Note mode.
+struct InlineModeHint: View {
+    var text: String
+    var fontSize: CGFloat
+    var caretWidth: CGFloat
+    var caretY: CGFloat = 0
+    var availableWidth: CGFloat
+    var tint: Color
+
+    private static let gap: CGFloat = 8
+
+    static func reservedTrailingWidth(text: String, fontSize: CGFloat) -> CGFloat {
+        width(of: "— \(text)", fontSize: fontSize) + gap
+    }
+
+    private static func width(of string: String, fontSize: CGFloat) -> CGFloat {
+        let font = NSFont.systemFont(ofSize: fontSize)
+        return ceil((string as NSString).size(withAttributes: [.font: font]).width)
+    }
+
+    private static func baselineDrop(fontSize: CGFloat) -> CGFloat {
+        let font = NSFont.systemFont(ofSize: fontSize)
+        let swiftUILine = (font.ascender - font.descender).rounded(.up)
+        let nativeLine = NSLayoutManager().defaultLineHeight(for: font)
+        return max(0, (swiftUILine - nativeLine) / 2)
+    }
+
+    var body: some View {
+        let reserved = Self.reservedTrailingWidth(text: text, fontSize: fontSize)
+        let dock = availableWidth - reserved + Self.gap
+        let start = min(PromptField.textInset + caretWidth + Self.gap, dock)
+
+        Text("— \(text)")
+            .font(.sf(fontSize))
+            .foregroundStyle(tint.opacity(0.42))
+            .lineLimit(1)
+            .fixedSize()
+            .offset(x: start, y: caretY + Self.baselineDrop(fontSize: fontSize))
+            .animation(.smooth(duration: 0.25), value: start)
+            .animation(.smooth(duration: 0.25), value: caretY)
+            .transition(.opacity)
+    }
+}
+
 /// The compact substring filter that sits above the recent list once it grows past a
 /// handful of rows. An `NSViewRepresentable` over `NSTextField` — NOT a SwiftUI
 /// `TextField` — for the same reason `PromptField` is: a plain SwiftUI field pops the
@@ -879,6 +982,26 @@ struct SendButton: View {
             .frame(width: size, height: size)
             .glassCapsule(in: Circle(), brighter: hovering)
             .contentShape(Circle())
+    }
+}
+
+/// Keyboard guidance at the trailing edge of an Agent follow-up field. These
+/// are intentionally plain labels, not controls: Enter already owns send and
+/// Command-Enter owns interrupt, so glass buttons only repeated the same verbs
+/// while crowding the line.
+struct AgentFollowUpKeyHints: View {
+    var showsInterrupt: Bool
+
+    var body: some View {
+        Text(showsInterrupt
+             ? L("agent.followUp.send") + "  ·  " + L("agent.followUp.interrupt")
+             : L("agent.followUp.send"))
+        .font(.sf(NotchBody.followUpFontSize))
+        .foregroundStyle(Tokens.text4.opacity(0.72))
+        .lineLimit(1)
+        .fixedSize()
+        .padding(.trailing, 6)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -3080,25 +3203,171 @@ struct InlineMarkdownText: View {
     /// blue is both illegible and off-palette, so links are styled as ink +
     /// underline (the underline, not a colour shift, is what marks them tappable).
     var linkColor: Color = Tokens.text1
-    init(_ raw: String, linkColor: Color = Tokens.text1) {
+    /// Set only in handwriting mode, to the enclosing block's type size.
+    ///
+    /// Emphasis normally needs no help: SwiftUI reads `**bold**`/`*italic*`/
+    /// `code` off the parsed intents and promotes the environment font by trait.
+    /// That promotion silently fails on the handwriting face — it is pinned to
+    /// explicit variation coordinates, so asking it for a bold trait hands back
+    /// the same regular instance and every emphasis in the answer flattens into
+    /// body text. So in that mode each emphasised run gets an explicit font
+    /// instead (see `Handwriting`), which is what this carries the size for.
+    var hand: HandEmphasis? = nil
+
+    /// What a handwritten line needs to resolve its own emphasis faces, and to
+    /// write its Chinese by stroke.
+    struct HandEmphasis: Equatable {
+        /// Nominal prose size, for picking emphasis faces.
+        let size: CGFloat
+        /// The size CJK is actually set at — the em the stroke ink is scaled to.
+        let cjkEm: CGFloat
+        /// The ink colour, which the stroke renderer has to be told: it fills its
+        /// own paths rather than drawing glyphs, so it cannot inherit the text's
+        /// styling the way `GraphicsContext.draw(_:)` does.
+        let color: Color
+        /// True only on the growing tail of a streaming answer.
+        let streaming: Bool
+    }
+
+    init(_ raw: String, linkColor: Color = Tokens.text1, hand: HandEmphasis? = nil) {
         self.raw = raw
         self.linkColor = linkColor
+        self.hand = hand
     }
 
     var body: some View {
         Text(attributed)
+            .modifier(InkWritingIfAvailable(
+                plan: hand,
+                // The laid-out characters, not the raw markdown: `**bold**` lays
+                // out as four glyphs, and the renderer maps glyph order onto this
+                // string to know which character it is about to write.
+                characters: hand == nil ? [] : Self.parsed(raw).plain,
+                weights: hand == nil ? [] : Self.parsed(raw).inkWeights))
+    }
+
+    /// The emphasis kinds worth re-facing by hand. Ordinary body text is `.plain`
+    /// — in the printed voice it inherits the block's `.font` modifier as it
+    /// always has, and in the hand it still needs a face of its own because the
+    /// two scripts are set at different sizes (see `Face.cjk`).
+    private enum Emphasis: Equatable {
+        case plain, bold, italic, boldItalic, code
+    }
+
+    /// One stretch of a line that wants a single font: an emphasis kind, and
+    /// which script it's in.
+    ///
+    /// Script matters because the two halves of the handwriting stack don't share
+    /// a size. 翩翩体 draws its glyphs small inside the em, so Chinese set at the
+    /// same nominal size as Shantell reads a full point smaller than the English
+    /// beside it — noticeably so in a mixed sentence, which is most of them here.
+    /// Core Text has no way to say "this cascade entry, one size up" (a `.size` on
+    /// a cascade descriptor is ignored), so the correction has to happen where the
+    /// text is, as an explicit per-run font.
+    private struct Face: Equatable {
+        let emphasis: Emphasis
+        let cjk: Bool
     }
 
     /// One line's parsed text, minus the caller's colour — the cacheable half.
     /// `spans` are the surviving links as (character offset, length) pairs rather
     /// than `AttributedString.Index` ranges, so they stay valid when re-applied to
-    /// a copy that's being mutated.
+    /// a copy that's being mutated. `faces` records the font runs the same way,
+    /// for the same reason.
     private final class Parsed {
         let text: AttributedString
         let spans: [(offset: Int, length: Int)]
-        init(text: AttributedString, spans: [(offset: Int, length: Int)]) {
+        let faces: [(offset: Int, length: Int, face: Face)]
+        /// The characters as laid out, cached alongside the parse because the
+        /// stroke renderer needs them on every frame of a streaming answer.
+        let plain: [Character]
+        /// Ink weight per character, parallel to `plain`.
+        ///
+        /// The stroke renderer draws its own paths, so it never sees the per-run
+        /// fonts that carry emphasis for type — a bold Chinese character would
+        /// come out exactly as heavy as body text, which is the same silent
+        /// flattening the explicit faces exist to prevent. Emphasis has to reach
+        /// the ink as a number, and this is it.
+        let inkWeights: [CGFloat]
+        init(text: AttributedString,
+             spans: [(offset: Int, length: Int)],
+             faces: [(offset: Int, length: Int, face: Face)]) {
             self.text = text
             self.spans = spans
+            self.faces = faces
+            let characters = Array(text.characters)
+            self.plain = characters
+            var weights = [CGFloat](repeating: 1, count: characters.count)
+            for run in faces where run.face.emphasis == .bold || run.face.emphasis == .boldItalic {
+                for i in run.offset..<min(run.offset + run.length, weights.count) {
+                    weights[i] = StrokeInk.boldWeight
+                }
+            }
+            self.inkWeights = weights
+        }
+    }
+
+    /// Split a parsed line into runs that each want one font: walk it character by
+    /// character, tag every character with (emphasis, script), then coalesce.
+    ///
+    /// Done once per distinct line and cached with the parse — the per-render path
+    /// only ever reads the result. A line with no CJK and no emphasis coalesces to
+    /// a single `.plain` run, which the renderer then skips entirely.
+    private static func faceRuns(of text: AttributedString)
+        -> [(offset: Int, length: Int, face: Face)] {
+        var out: [(offset: Int, length: Int, face: Face)] = []
+        var offset = 0
+        for run in text.runs {
+            let emphasis: Emphasis
+            if let intent = run.inlinePresentationIntent {
+                if intent.contains(.code) {
+                    emphasis = .code
+                } else {
+                    switch (intent.contains(.stronglyEmphasized), intent.contains(.emphasized)) {
+                    case (true, true):  emphasis = .boldItalic
+                    case (true, false): emphasis = .bold
+                    case (false, true): emphasis = .italic
+                    default:            emphasis = .plain
+                    }
+                }
+            } else {
+                emphasis = .plain
+            }
+            for character in text[run.range].characters {
+                let face = Face(emphasis: emphasis, cjk: isCJK(character))
+                if var last = out.last, last.face == face {
+                    last.length += 1
+                    out[out.count - 1] = last
+                } else {
+                    out.append((offset: offset, length: 1, face: face))
+                }
+                offset += 1
+            }
+        }
+        return out
+    }
+
+    /// Whether a character belongs to the CJK half of the type stack — Han, kana,
+    /// Hangul, and the full-width / ideographic punctuation that sets with them
+    /// (`，。、（）`). Latin punctuation and spaces deliberately stay on the Latin
+    /// side so a mixed sentence doesn't switch face at every comma.
+    private static func isCJK(_ character: Character) -> Bool {
+        guard let scalar = character.unicodeScalars.first else { return false }
+        switch scalar.value {
+        case 0x2E80...0x303F,   // radicals, Kangxi, CJK symbols & punctuation
+             0x3040...0x30FF,   // kana
+             0x3130...0x318F,   // Hangul compatibility jamo
+             0x3400...0x4DBF,   // unified ideographs extension A
+             0x4E00...0x9FFF,   // unified ideographs
+             0xA960...0xA97F,   // Hangul jamo extended-A
+             0xAC00...0xD7AF,   // Hangul syllables
+             0xF900...0xFAFF,   // compatibility ideographs
+             0xFE30...0xFE4F,   // CJK compatibility forms
+             0xFF01...0xFF60,   // full-width forms
+             0x20000...0x3FFFF: // extensions B and beyond
+            return true
+        default:
+            return false
         }
     }
 
@@ -3154,35 +3423,95 @@ struct InlineMarkdownText: View {
         }
 
         // Surviving links, as offsets — the caller paints them (see `attributed`).
+        let chars = text.characters
         let spans = text.runs.compactMap { run -> (offset: Int, length: Int)? in
             guard run.link != nil else { return nil }
-            let chars = text.characters
             return (offset: chars.distance(from: text.startIndex, to: run.range.lowerBound),
                     length: chars.distance(from: run.range.lowerBound, to: run.range.upperBound))
         }
 
-        let result = Parsed(text: text, spans: spans)
+        let result = Parsed(text: text, spans: spans, faces: Self.faceRuns(of: text))
         parseCache.setObject(result, forKey: key)
         return result
     }
 
     private var attributed: AttributedString {
+        // In the hand, the line arrives already faced — one cached pass, not one
+        // per frame (see `handFaced`). In the printed voice it's the raw parse.
         let hit = Self.parsed(raw)
-        // The overwhelmingly common case: no links, so the cached line is the
-        // finished text and nothing is copied or mutated.
-        guard !hit.spans.isEmpty else { return hit.text }
+        let base = hand.map { Self.handFaced(raw, size: $0.size) } ?? hit.text
+        let links = hit.spans
+        // The overwhelmingly common case: no links, so the cached line is already
+        // finished and nothing is copied or mutated.
+        guard !links.isEmpty else { return base }
         // Links get our ink colour + an underline instead of the stock blue, which
         // is illegible on the dark glass. Offsets are recomputed against the copy
         // each time: setting attributes never changes the character count, so they
         // stay exact across the loop's own mutations.
-        var out = hit.text
-        for span in hit.spans {
+        var out = base
+        for span in links {
             let start = out.index(out.startIndex, offsetByCharacters: span.offset)
             let end = out.index(start, offsetByCharacters: span.length)
             out[start..<end].foregroundColor = linkColor
             out[start..<end].underlineStyle = .single
         }
         return out
+    }
+
+    /// A line with every run's handwriting face already applied, memoized per
+    /// (line, size).
+    ///
+    /// This has to be cached, not computed per render. Walking the runs costs an
+    /// `offsetByCharacters` seek per run, so facing a line is O(runs × length) —
+    /// and a streaming answer re-renders every ~33ms across several mounted copies
+    /// of the same turn. Doing it live would put that whole product on the main
+    /// thread at flush rate, for text that never changes once written. The set of
+    /// sizes in play is a handful (body plus the heading ladder), so keys stay
+    /// bounded the same way `parseCache`'s do.
+    private static let handCache: NSCache<NSString, HandFaced> = {
+        let cache = NSCache<NSString, HandFaced>()
+        cache.countLimit = 512
+        return cache
+    }()
+
+    private final class HandFaced {
+        let text: AttributedString
+        init(_ text: AttributedString) { self.text = text }
+    }
+
+    private static func handFaced(_ raw: String, size: CGFloat) -> AttributedString {
+        // Tenths of a point is finer than any size the answer renderer asks for,
+        // and keeps the key a short string rather than a float's full precision.
+        let key = "\(Int((size * 10).rounded()))|\(raw)" as NSString
+        if let hit = handCache.object(forKey: key) { return hit.text }
+
+        let parsed = Self.parsed(raw)
+        var out = parsed.text
+        for run in parsed.faces {
+            let start = out.index(out.startIndex, offsetByCharacters: run.offset)
+            let end = out.index(start, offsetByCharacters: run.length)
+            out[start..<end].font = handFont(run.face, size: size)
+        }
+        handCache.setObject(HandFaced(out), forKey: key)
+        return out
+    }
+
+    /// The concrete face for one run of a handwritten line.
+    ///
+    /// Inline code stays monospaced — a backticked identifier is machine text even
+    /// when the sentence around it is a hand — and so keeps the base size, since
+    /// SF Mono needs no correction.
+    private static func handFont(_ face: Face, size: CGFloat) -> Font {
+        guard face.emphasis != .code else { return Handwriting.codeFont(size) }
+        // The two scripts sit at different sizes to read level — that is the
+        // whole reason a line is split into runs at all.
+        let hand = face.cjk ? Handwriting.cjkFont : Handwriting.font
+        switch face.emphasis {
+        case .bold:       return hand(size, .bold, false)
+        case .italic:     return hand(size, .regular, true)
+        case .boldItalic: return hand(size, .bold, true)
+        default:          return hand(size, .regular, false)
+        }
     }
 
     private static let linkDetector = try? NSDataDetector(
@@ -4131,6 +4460,10 @@ struct MarkdownBlocks: View {
     var streamingTail: Bool = false
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// Injected by the surfaces that carry the assistant's own voice (the panel
+    /// thread, a detached thread). Everywhere else this stays false, so notes,
+    /// previews and settings copy are never re-faced.
+    @Environment(\.handwritten) private var handwritten
 
     // `parseCached`, not `parse`: this computed property re-runs on every body
     // evaluation, which during streaming happens for every ~33ms flush times
@@ -4150,7 +4483,8 @@ struct MarkdownBlocks: View {
                 // `.equatable()` — see the row's `Equatable` conformance for why.
                 MarkdownBlockRow(block: block, baseFont: baseFont, color: color,
                                  onInAppCopy: onInAppCopy,
-                                 fadeTail: streamingTail && !reduceMotion && i == parsed.count - 1)
+                                 fadeTail: streamingTail && !reduceMotion && i == parsed.count - 1,
+                                 hand: handwritten)
                     .equatable()
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -4180,6 +4514,8 @@ struct StreamingMarkdown: View {
     var color: Color = Tokens.text1
     var onInAppCopy: (() -> Void)? = nil
 
+    @Environment(\.handwritten) private var handwritten
+
     private var blocks: [MarkdownBlock] { MarkdownParser.parseCached(source) }
 
     var body: some View {
@@ -4194,13 +4530,15 @@ struct StreamingMarkdown: View {
                 // never re-fade as later chunks arrive. Rebuilt from the same
                 // `source` prefix; cheap, and keeps inline/code handling identical.
                 ForEach(Array(parsed.prefix(headCount).enumerated()), id: \.offset) { _, block in
-                    MarkdownBlockRow(block: block, baseFont: baseFont, color: color, onInAppCopy: onInAppCopy)
+                    MarkdownBlockRow(block: block, baseFont: baseFont, color: color,
+                                     onInAppCopy: onInAppCopy, hand: handwritten)
                         .equatable()
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
             if let tail = parsed.last {
-                MarkdownBlockRow(block: tail, baseFont: baseFont, color: color, onInAppCopy: onInAppCopy)
+                MarkdownBlockRow(block: tail, baseFont: baseFont, color: color,
+                                 onInAppCopy: onInAppCopy, hand: handwritten)
                     .equatable()
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .modifier(TailFadeIn(token: tailToken(for: tail)))
@@ -4352,14 +4690,219 @@ private struct StreamTailFade: ViewModifier {
     }
 }
 
-/// Availability shim: the glyph fade needs macOS 15's `TextRenderer`; on the
-/// 14.0 deployment floor the streaming text falls back to the paced reveal
-/// alone (still smooth — just no per-glyph ramp).
+// MARK: - Stroke writing (handwriting mode, macOS 15+)
+
+/// Writes a handwritten line the way a hand does: Chinese stroke by stroke in
+/// stroke order, everything else swept under a travelling nib.
+///
+/// # What this replaces
+///
+/// The first attempt at "writing" swept a nib left to right across the whole
+/// line. That is right for joined Latin — a cursive word genuinely is one
+/// left-to-right movement — and wrong for Chinese, where 你 is written 亻 then
+/// 尔 and no part of that is a horizontal sweep. This renderer keeps the sweep
+/// for the scripts it suits and hands every character with stroke data over to
+/// `StrokeInk`.
+///
+/// # Why Chinese is drawn even when it isn't moving
+///
+/// A character mid-write is `StrokeInk`'s marker ink; if a finished character
+/// reverted to the font's glyph it would visibly pop the instant it completed.
+/// So in handwriting mode the ink *is* the typeface for Chinese — settled text
+/// included — and the renderer runs on every handwritten line, not only the
+/// streaming one. `front` is simply past the end when nothing is animating.
+@available(macOS 15.0, *)
+struct InkRenderer: TextRenderer {
+    /// How far writing has got, in glyphs. Fractional: the part after the point
+    /// is how far into the current character the hand has reached, which becomes
+    /// that character's stroke progress.
+    var front: CGFloat
+    /// The laid-out characters, indexed by glyph order.
+    var characters: [Character]
+    /// Ink weight multiplier per character, same indexing.
+    var weights: [CGFloat]
+    /// The size CJK is set at — the em the ink is scaled to.
+    var em: CGFloat
+    /// Ink colour. Filled paths carry no text styling of their own.
+    var color: Color
+
+    var animatableData: CGFloat {
+        get { front }
+        set { front = newValue }
+    }
+
+    /// Length of the wet edge behind the nib, for the scripts that sweep.
+    static let softness: CGFloat = 5
+
+    func draw(layout: Text.Layout, in ctx: inout GraphicsContext) {
+        let shading = GraphicsContext.Shading.color(color)
+        var index = 0
+        for line in layout {
+            var slices: [Text.Layout.RunSlice] = []
+            for run in line {
+                for slice in run { slices.append(slice) }
+            }
+            let first = index
+            index += slices.count
+
+            let lineDone = front >= CGFloat(index)
+            if !lineDone && front <= CGFloat(first) { break }   // nothing here yet, nor below
+
+            // Where the nib sits on this line, for the swept (non-stroke) glyphs.
+            var headX = CGFloat.greatestFiniteMagnitude
+            if !lineDone {
+                let local = min(max(Int(front) - first, 0), slices.count - 1)
+                let rect = slices[local].typographicBounds.rect
+                headX = rect.minX + rect.width * (front - CGFloat(first + local))
+            }
+
+            for (offset, slice) in slices.enumerated() {
+                let position = first + offset
+                let bounds = slice.typographicBounds
+
+                // Chinese with stroke data: draw the ink, written as far as the
+                // hand has got into this character.
+                if let strokes = strokeCount(at: position, advance: bounds.rect.width) {
+                    let written: CGFloat
+                    if front >= CGFloat(position + 1) { written = CGFloat(strokes) }
+                    else if front <= CGFloat(position) { continue }
+                    else { written = (front - CGFloat(position)) * CGFloat(strokes) }
+
+                    if let path = StrokeInk.path(for: characters[position],
+                                                 origin: bounds.origin,
+                                                 em: em,
+                                                 progress: written,
+                                                 weight: position < weights.count ? weights[position] : 1) {
+                        ctx.fill(Path(path), with: shading)
+                    }
+                    continue
+                }
+
+                // Everything else — Latin, punctuation, anything the dataset
+                // doesn't cover — keeps its glyph and passes under the nib.
+                if lineDone || bounds.rect.maxX <= headX - Self.softness {
+                    ctx.draw(slice)
+                } else if bounds.rect.minX >= headX {
+                    break
+                } else {
+                    var nib = ctx
+                    nib.clipToLayer { layer in
+                        layer.fill(Self.wetPath(to: headX), with: Self.wetShading(to: headX))
+                    }
+                    nib.draw(slice)
+                }
+            }
+        }
+    }
+
+    /// The stroke count for the character at `position`, or nil when it should be
+    /// drawn as type.
+    ///
+    /// The advance check is a desync guard. Mapping glyph order onto character
+    /// order is an assumption (true for the linear text these rows hold), and if
+    /// it ever slipped, a Chinese character would be drawn as *a different*
+    /// Chinese character — the one failure mode here that would look like
+    /// corruption rather than like a missing effect. A full-width glyph whose
+    /// advance doesn't match the em it should have is the cheap tell, and falling
+    /// back to the glyph costs nothing.
+    private func strokeCount(at position: Int, advance: CGFloat) -> Int? {
+        guard position < characters.count else { return nil }
+        guard abs(advance - em) < em * 0.2 else { return nil }
+        return StrokeInk.strokeCount(for: characters[position])
+    }
+
+    private static func wetPath(to headX: CGFloat) -> Path {
+        Path(CGRect(x: headX - reach, y: -reach, width: reach, height: reach * 2))
+    }
+
+    private static func wetShading(to headX: CGFloat) -> GraphicsContext.Shading {
+        let solid = (reach - softness) / reach
+        return .linearGradient(
+            Gradient(stops: [.init(color: .black, location: 0),
+                             .init(color: .black, location: solid),
+                             .init(color: .clear, location: 1)]),
+            startPoint: CGPoint(x: headX - reach, y: 0),
+            endPoint: CGPoint(x: headX, y: 0))
+    }
+
+    private static let reach: CGFloat = 4_000
+}
+
+/// Drives the hand across one handwritten line.
+///
+/// While the line is the streaming tail, `front` chases the text's length with a
+/// linear animation retargeted on every pacer tick — it never quite arrives, and
+/// that standing gap is the character currently being written. A settled line
+/// mounts with `front` already past the end, so its Chinese is fully inked
+/// without animating anything.
+@available(macOS 15.0, *)
+private struct InkWriting: ViewModifier {
+    let plan: InlineMarkdownText.HandEmphasis
+    let characters: [Character]
+    let weights: [CGFloat]
+
+    @State private var front: CGFloat = 0
+
+    private static let lag: TimeInterval = 0.16
+
+    func body(content: Content) -> some View {
+        content
+            .textRenderer(InkRenderer(front: front, characters: characters, weights: weights,
+                                      em: plan.cjkEm, color: plan.color))
+            .onAppear {
+                guard plan.streaming else { front = .greatestFiniteMagnitude; return }
+                advance(to: characters.count)
+            }
+            .onChange(of: characters.count) { _, newValue in
+                guard plan.streaming else { front = .greatestFiniteMagnitude; return }
+                advance(to: newValue)
+            }
+            .onChange(of: plan.streaming) { _, streaming in
+                // The block just graduated out of the tail: finish the line
+                // rather than leaving the last characters half-written.
+                if !streaming { front = .greatestFiniteMagnitude }
+            }
+    }
+
+    private func advance(to length: Int) {
+        // A shrink means the tail re-parsed into a different block shape. Snap —
+        // rewriting text the reader has already finished is worse than no
+        // animation at all.
+        guard CGFloat(length) >= front else { front = CGFloat(length); return }
+        withAnimation(.linear(duration: Self.lag)) { front = CGFloat(length) }
+    }
+}
+
+/// Availability shim: stroke writing needs macOS 15's `TextRenderer`. On the 14.0
+/// deployment floor a handwritten answer still gets its faces — it just arrives
+/// as text rather than being written.
+struct InkWritingIfAvailable: ViewModifier {
+    var plan: InlineMarkdownText.HandEmphasis?
+    var characters: [Character]
+    var weights: [CGFloat]
+
+    func body(content: Content) -> some View {
+        if let plan, StrokeInk.isAvailable, #available(macOS 15.0, *) {
+            content.modifier(InkWriting(plan: plan, characters: characters, weights: weights))
+        } else {
+            content
+        }
+    }
+}
+
+/// Availability shim for the printed voice's per-glyph fade (macOS 15+); on the
+/// 14.0 deployment floor the streaming text falls back to the paced reveal alone.
+///
+/// Only the printed voice is handled here. A handwritten line is written by
+/// `InkWriting`, which lives inside `InlineMarkdownText` — it needs the laid-out
+/// characters to know which one it is drawing, and that string only exists there.
 struct TailFadeIfAvailable: ViewModifier {
     var active: Bool
     var length: Int
+    var hand: Bool = false
+
     func body(content: Content) -> some View {
-        if active, #available(macOS 15.0, *) {
+        if active, !hand, #available(macOS 15.0, *) {
             content.modifier(StreamTailFade(textLength: length))
         } else {
             content
@@ -4381,6 +4924,13 @@ struct MarkdownBlockRow: View, Equatable {
     /// appends, the previous tail's content is unchanged but this flag flips,
     /// and the row must re-evaluate to drop the fade renderer.
     var fadeTail: Bool = false
+    /// Render this block's prose in the handwriting voice (Settings → Appearance).
+    /// A stored property rather than an `@Environment` read because the row is
+    /// wrapped in `.equatable()` — an environment change alone would not get past
+    /// that gate, so the setting could flip with the answer still typeset. The
+    /// containers above (`MarkdownBlocks` / `StreamingMarkdown`) do the environment
+    /// read and hand the value down.
+    var hand: Bool = false
 
     /// The row-level diff gate (used via `.equatable()` at every call site).
     /// `onInAppCopy` is a closure, and a closure field defeats SwiftUI's
@@ -4392,7 +4942,34 @@ struct MarkdownBlockRow: View, Equatable {
     /// thread, so a row whose block/font/colour are unchanged renders identically.
     static func == (lhs: MarkdownBlockRow, rhs: MarkdownBlockRow) -> Bool {
         lhs.block == rhs.block && lhs.baseFont == rhs.baseFont && lhs.color == rhs.color
-            && lhs.fadeTail == rhs.fadeTail
+            && lhs.fadeTail == rhs.fadeTail && lhs.hand == rhs.hand
+    }
+
+    /// This row's prose face at `size` — the printed one, or the hand.
+    private func face(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
+        proseFont(size, weight: weight, hand: hand)
+    }
+
+    /// What `InlineMarkdownText` needs to re-face emphasis inside this row and to
+    /// write its Chinese by stroke, or nil when the row is typeset and SwiftUI's
+    /// own trait promotion is correct.
+    ///
+    /// `opacity` folds the row's own dimming (a done task, a quote) into the ink
+    /// colour: the stroke renderer fills its own paths, so a `.foregroundStyle`
+    /// on the view above never reaches them.
+    private func emphasis(_ size: CGFloat, opacity: Double = 1) -> InlineMarkdownText.HandEmphasis? {
+        guard hand else { return nil }
+        return .init(size: size,
+                     cjkEm: Handwriting.cjkEm(size),
+                     color: color.opacity(opacity),
+                     streaming: fadeTail)
+    }
+
+    /// Leading for a line of this row's prose. A hand needs a touch more air:
+    /// 翩翩体's ascenders and Shantell's bounced baseline both reach past where SF
+    /// sits, so the typeset leading crowds them into the line above.
+    private func leading(_ factor: CGFloat) -> CGFloat {
+        baseFont * (factor + (hand ? Handwriting.extraLineSpacing : 0))
     }
 
     /// Only linear text rows fade; code and tables render whole (fading a code
@@ -4423,7 +5000,8 @@ struct MarkdownBlockRow: View, Equatable {
         rowContent
             .modifier(TailFadeIfAvailable(
                 active: fadeTail && Self.fadeable(block),
-                length: Self.fadeLength(block)))
+                length: Self.fadeLength(block),
+                hand: hand))
     }
 
     @ViewBuilder
@@ -4431,51 +5009,79 @@ struct MarkdownBlockRow: View, Equatable {
         switch block {
         case .heading(let level, let text):
             let size = max(baseFont, baseFont + CGFloat(7 - min(level, 5)) * 1.5)
-            InlineMarkdownText(text, linkColor: color)
-                .font(.sf(size, weight: .semibold))
-                .tracking(-0.1)
+            InlineMarkdownText(text, linkColor: color, hand: emphasis(size))
+                .font(face(size, weight: .semibold))
+                // Negative tracking tightens SF; the hand is already loosely
+                // spaced by design and pulling it in reads as cramped.
+                .tracking(hand ? 0 : -0.1)
                 .foregroundStyle(color)
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
 
         case .bullet(let text, let indent):
-            listRow(marker: Text(bulletGlyph(for: indent)), text: text, indent: indent)
+            listRow(text: text, indent: indent) {
+                if hand {
+                    // A pen leaves a blob, not a disc. Sized off the type so it
+                    // tracks the answer's scale like the glyph it replaces.
+                    Ink.Dot(seed: seed &+ indent)
+                        .fill(color.opacity(0.7))
+                        .frame(width: baseFont * 0.3, height: baseFont * 0.3)
+                        // Nudged to sit on the text's x-height rather than its
+                        // baseline, where a round mark reads as having dropped.
+                        .offset(y: -baseFont * 0.18)
+                } else {
+                    markerText(bulletGlyph(for: indent))
+                }
+            }
 
         case .ordered(let number, let text, let indent):
-            listRow(marker: Text("\(number)."), text: text, indent: indent)
+            // The numeral follows the answer's voice — a hand-written list numbers
+            // itself in the same hand. Shantell's bounce puts each numeral at its
+            // own height in the gutter, which is the point.
+            listRow(text: text, indent: indent) { markerText("\(number).") }
 
         case .task(let done, let text, let indent):
             // A checked-off item dims: the checkbox already says "done", the
             // fade just keeps open items visually in front.
-            listRow(
-                marker: Text(Image(systemName: done ? "checkmark.square" : "square")),
-                text: text,
-                indent: indent,
-                textOpacity: done ? 0.55 : 1
-            )
+            listRow(text: text, indent: indent, textOpacity: done ? 0.55 : 1) {
+                if hand {
+                    drawnCheckbox(done: done)
+                } else {
+                    markerText(Image(systemName: done ? "checkmark.square" : "square"))
+                }
+            }
 
         case .quote(let text):
-            InlineMarkdownText(text, linkColor: color.opacity(0.8))
-                .font(.sf(baseFont))
-                .tracking(-0.05)
-                .lineSpacing(baseFont * 0.45)
+            InlineMarkdownText(text, linkColor: color.opacity(0.8), hand: emphasis(baseFont, opacity: 0.8))
+                .font(face(baseFont))
+                .tracking(hand ? 0 : -0.05)
+                .lineSpacing(leading(0.45))
                 .foregroundStyle(color.opacity(0.8))
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
                 .padding(.leading, 13)
                 .overlay(alignment: .leading) {
-                    // The accent bar that marks the island as quoted speech.
-                    RoundedRectangle(cornerRadius: 1.5)
-                        .fill(color.opacity(0.25))
-                        .frame(width: 3)
+                    // The accent bar that marks the island as quoted speech —
+                    // ruled, or drawn down the margin in the same 3pt footprint.
+                    Group {
+                        if hand {
+                            Ink.Stroke(seed: seed)
+                                .stroke(color.opacity(0.28),
+                                        style: StrokeStyle(lineWidth: 2.4, lineCap: .round))
+                        } else {
+                            RoundedRectangle(cornerRadius: 1.5)
+                                .fill(color.opacity(0.25))
+                        }
+                    }
+                    .frame(width: 3)
                 }
                 .padding(.vertical, 2)
 
         case .paragraph(let text):
-            InlineMarkdownText(text, linkColor: color)
-                .font(.sf(baseFont))
-                .tracking(-0.05)
-                .lineSpacing(baseFont * 0.6)
+            InlineMarkdownText(text, linkColor: color, hand: emphasis(baseFont))
+                .font(face(baseFont))
+                .tracking(hand ? 0 : -0.05)
+                .lineSpacing(leading(0.6))
                 .foregroundStyle(color)
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
@@ -4484,11 +5090,17 @@ struct MarkdownBlockRow: View, Equatable {
             CodeBlockView(text: text, baseFont: baseFont, color: color, onInAppCopy: onInAppCopy)
 
         case .table(let header, let rows):
-            MarkdownTableView(header: header, rows: rows, baseFont: baseFont, color: color)
+            MarkdownTableView(header: header, rows: rows, baseFont: baseFont, color: color, hand: hand)
 
         case .math(let text):
             // Display math: the Unicode rendering, centred like a typeset
             // formula, a shade larger than body so it reads as an island.
+            //
+            // Stays typeset in handwriting mode, deliberately. `MathTypeset`
+            // builds its formulas out of superscripts, radicals and Greek —
+            // glyphs the handwriting faces mostly don't carry, so a "handwritten"
+            // formula would in fact be a formula in three different faces at
+            // three different weights. Notation is machine text, like code.
             Text(MathTypeset.unicode(text))
                 .font(.sf(baseFont + 1))
                 .tracking(0.1)
@@ -4507,32 +5119,98 @@ struct MarkdownBlockRow: View, Equatable {
             AnswerPDFView(title: title, urlString: url, baseFont: baseFont, color: color)
 
         case .divider:
-            Rectangle()
-                .fill(Tokens.hairline)
-                .frame(height: 0.5)
-                .padding(.vertical, 4)
+            Group {
+                if hand {
+                    // Drawn at 1pt rather than the ruled 0.5: a wobbling
+                    // half-point line lands between pixels and stipples instead
+                    // of reading as a stroke. The extra weight is spread by the
+                    // wobble, so it still reads as the same quiet hairline.
+                    Ink.Rule(seed: seed)
+                        .stroke(Tokens.hairline,
+                                style: StrokeStyle(lineWidth: 1, lineCap: .round))
+                        .frame(height: 3)
+                } else {
+                    Rectangle()
+                        .fill(Tokens.hairline)
+                        .frame(height: 0.5)
+                }
+            }
+            .padding(.vertical, 4)
         }
     }
 
     /// A list item: a fixed-width gutter holds the marker so wrapped lines hang
     /// neatly under the text, not under the bullet. `indent` steps the whole row
     /// right for nested items; `textOpacity` lets done tasks read as settled.
-    private func listRow(marker: Text, text: String, indent: Int = 0, textOpacity: Double = 1) -> some View {
+    ///
+    /// The marker is a view rather than a `Text` because in the hand two of the
+    /// three kinds aren't type at all — the bullet and the checkbox are drawn.
+    private func listRow<Marker: View>(text: String,
+                                       indent: Int = 0,
+                                       textOpacity: Double = 1,
+                                       @ViewBuilder marker: () -> Marker) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            marker
-                .font(.sf(baseFont, weight: .medium).monospacedDigit())
-                .foregroundStyle(color.opacity(0.7))
+            marker()
                 .frame(minWidth: 16, alignment: .trailing)
-            InlineMarkdownText(text, linkColor: color.opacity(textOpacity))
-                .font(.sf(baseFont))
-                .tracking(-0.05)
-                .lineSpacing(baseFont * 0.5)
+            InlineMarkdownText(text, linkColor: color.opacity(textOpacity), hand: emphasis(baseFont, opacity: textOpacity))
+                .font(face(baseFont))
+                .tracking(hand ? 0 : -0.05)
+                .lineSpacing(leading(0.5))
                 .foregroundStyle(color.opacity(textOpacity))
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.leading, CGFloat(indent) * 16)
+    }
+
+    /// A typeset marker in the gutter — the printed bullet, every ordered
+    /// numeral, the printed checkbox.
+    private func markerText(_ content: some StringProtocol) -> some View {
+        Text(String(content))
+            .font(face(baseFont, weight: .medium).monospacedDigit())
+            .foregroundStyle(color.opacity(0.7))
+    }
+
+    private func markerText(_ image: Image) -> some View {
+        Text(image)
+            .font(.sf(baseFont, weight: .medium))
+            .foregroundStyle(color.opacity(0.7))
+    }
+
+    /// A task's box, drawn: four not-quite-meeting strokes, plus a tick that
+    /// breaks out past the corner when it's done.
+    private func drawnCheckbox(done: Bool) -> some View {
+        let side = baseFont * 0.82
+        return ZStack {
+            Ink.Box(seed: seed)
+                .stroke(color.opacity(done ? 0.45 : 0.7),
+                        style: StrokeStyle(lineWidth: 1.3, lineCap: .round))
+            if done {
+                Ink.Tick(seed: seed &+ 1)
+                    .stroke(color.opacity(0.75),
+                            style: StrokeStyle(lineWidth: 1.7, lineCap: .round, lineJoin: .round))
+                    .padding(-1.5)
+            }
+        }
+        .frame(width: side, height: side)
+        .offset(y: -baseFont * 0.06)
+    }
+
+    /// A stable jitter seed for this row's drawn marks. Derived from the block's
+    /// own text so two rules in one answer wobble differently and the same rule
+    /// wobbles identically on every redraw — `hashValue` would do neither, being
+    /// re-salted per process.
+    private var seed: Int {
+        switch block {
+        case .heading(_, let text), .bullet(let text, _), .ordered(_, let text, _),
+             .task(_, let text, _), .quote(let text), .paragraph(let text), .math(let text):
+            return text.utf8.reduce(17) { $0 &* 31 &+ Int($1) }
+        case .code(_, let text):
+            return text.utf8.prefix(64).reduce(17) { $0 &* 31 &+ Int($1) }
+        case .table, .divider, .image, .pdf:
+            return 11
+        }
     }
 
     /// Bullet glyph by nesting depth — the standard •/◦/▪ ladder, so levels read
@@ -4557,6 +5235,8 @@ private struct MarkdownTableView: View {
     let rows: [[String]]
     let baseFont: CGFloat
     let color: Color
+    /// Cells follow the answer's voice — a table is still prose, just ruled.
+    var hand: Bool = false
 
     private var columnCount: Int { header.count }
 
@@ -4598,9 +5278,13 @@ private struct MarkdownTableView: View {
     }
 
     private func cellText(_ raw: String, weight: Font.Weight, opacity: Double) -> some View {
-        InlineMarkdownText(raw, linkColor: color.opacity(opacity))
-            .font(.sf(baseFont - 1, weight: weight))
-            .tracking(-0.05)
+        InlineMarkdownText(raw, linkColor: color.opacity(opacity),
+                           hand: hand ? .init(size: baseFont - 1,
+                                              cjkEm: Handwriting.cjkEm(baseFont - 1),
+                                              color: color.opacity(opacity),
+                                              streaming: false) : nil)
+            .font(proseFont(baseFont - 1, weight: weight, hand: hand))
+            .tracking(hand ? 0 : -0.05)
             .foregroundStyle(color.opacity(opacity))
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -5422,26 +6106,33 @@ struct AgentWorkTrailView: View {
     /// the eager stack (default): their logs are one settled round's slice
     /// inside a thread whose scroll already manages its own geometry.
     var isLazy: Bool = false
+    /// Whether this trail belongs to a round still in flight. Only its LAST
+    /// block is exempt from the long-paragraph fold: a block that is still
+    /// being written must not collapse under the reader mid-sentence.
+    var live: Bool = false
 
-    /// One display unit of the trail: a prose paragraph, a follow-up prompt
-    /// marker, or a run of consecutive tool calls (folded together). Identified
-    /// by its first entry's id, which stays stable while a live run grows the
-    /// trailing group — so the group's expand state survives streaming.
+    /// One display unit of the trail: a prose paragraph, a fold of reasoning, a
+    /// plan, a follow-up prompt marker, or a run of consecutive tool calls
+    /// (folded together). Identified by its first entry's id, which stays stable
+    /// while a live run grows the trailing group — so the group's expand state
+    /// survives streaming.
     private enum Block: Identifiable {
         case prose(AgentLogEntry)
+        case thinking(AgentLogEntry)
+        case todo(AgentLogEntry)
         case marker(AgentLogEntry)
         case tools([AgentLogEntry])
 
         var id: UUID {
             switch self {
-            case .prose(let e), .marker(let e): return e.id
-            case .tools(let run):               return run[0].id
+            case .prose(let e), .marker(let e), .thinking(let e), .todo(let e): return e.id
+            case .tools(let run):                                              return run[0].id
             }
         }
     }
 
-    /// Fold consecutive mono entries into `.tools` runs, keeping prose/markers
-    /// as their own blocks in order.
+    /// Fold consecutive mono entries into `.tools` runs, keeping everything else
+    /// as its own block, in order.
     private var blocks: [Block] {
         var out: [Block] = []
         var run: [AgentLogEntry] = []
@@ -5452,9 +6143,13 @@ struct AgentWorkTrailView: View {
         for entry in entries {
             if entry.mono {
                 run.append(entry)
-            } else {
-                flush()
-                out.append(entry.title.hasPrefix("› ") ? .marker(entry) : .prose(entry))
+                continue
+            }
+            flush()
+            switch entry.kind {
+            case .thinking: out.append(.thinking(entry))
+            case .todo:     out.append(.todo(entry))
+            default:        out.append(entry.title.hasPrefix("› ") ? .marker(entry) : .prose(entry))
             }
         }
         flush()
@@ -5476,7 +6171,8 @@ struct AgentWorkTrailView: View {
     /// expanded, an output unfolded — for rows that scroll offscreen, so the
     /// two containers behave identically beyond when layout happens.)
     private var rows: some View {
-        ForEach(blocks) { block in
+        let all = blocks
+        return ForEach(Array(all.enumerated()), id: \.element.id) { i, block in
             switch block {
             case .tools(let run):
                 if run.count == 1 {
@@ -5489,26 +6185,175 @@ struct AgentWorkTrailView: View {
             case .marker(let entry):
                 // A follow-up round's prompt marker — present only in the
                 // live trail (the record files the prompt as its own user
-                // turn instead). Reads as a quiet inline bubble, in the
-                // user bubble's own type (14.5 medium).
-                Text(String(entry.title.dropFirst(2)))
-                    .font(.sf(14.5, weight: .medium))
-                    .foregroundStyle(Tokens.text2)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(.white.opacity(0.05))
-                    )
+                // turn instead). It IS a question the user asked, so it wears
+                // the same bubble every other prompt on the page wears: the
+                // marker used to carry its own tighter shell, which made the
+                // in-flight round look unlike the settled ones above it and
+                // made the bubble visibly jump the moment the round settled
+                // and re-rendered as a real turn.
+                UserQuestionBubble(text: String(entry.title.dropFirst(2)))
                     .padding(.vertical, 3)
+            case .thinking(let entry):
+                AgentTrailThinkingRow(text: entry.title)
+            case .todo(let entry):
+                AgentTrailPlanRow(entry: entry)
             case .prose(let entry):
                 // Narration is the agent's own words — set exactly like an
                 // answer (same MarkdownBlocks, same 15pt base), one shade
-                // quieter so the final report still leads.
-                MarkdownBlocks(source: entry.title, baseFont: 15,
-                               color: Tokens.text2)
+                // quieter so the final report still leads. The block still being
+                // written (the live trail's last) never folds.
+                AgentTrailProse(text: entry.title,
+                                foldable: !(live && i == all.count - 1))
             }
+        }
+    }
+}
+
+/// A paragraph of the agent's narration. Long ones fold to a readable height
+/// with a "show all" line rather than being cut at parse time — the trail used
+/// to keep only the first 500 characters of a block, and everything past that
+/// was simply gone from the record.
+private struct AgentTrailProse: View {
+    let text: String
+    /// False for the block still streaming: folding it would collapse the
+    /// paragraph under the reader as it grows.
+    var foldable: Bool = true
+
+    @State private var expanded = false
+
+    /// Past this many characters a paragraph is long enough that folding it
+    /// helps more than it hides. ~12 lines at the trail's measure.
+    private static let foldOver = 1_100
+    private static let foldedHeight: CGFloat = 168
+
+    private var folded: Bool { foldable && !expanded && text.count > Self.foldOver }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            MarkdownBlocks(source: text, baseFont: 15, color: Tokens.text2)
+                .frame(maxHeight: folded ? Self.foldedHeight : nil, alignment: .top)
+                .clipped()
+                // The cut edge tapers instead of guillotining a line in half, so
+                // the fold reads as "there's more" rather than as damage.
+                .mask(alignment: .top) {
+                    if folded {
+                        LinearGradient(stops: [.init(color: .black, location: 0.72),
+                                               .init(color: .clear, location: 1)],
+                                       startPoint: .top, endPoint: .bottom)
+                    } else {
+                        Color.black
+                    }
+                }
+            if foldable, text.count > Self.foldOver {
+                Button {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                        expanded.toggle()
+                    }
+                } label: {
+                    Text(L(expanded ? "agent.trail.less" : "agent.trail.more"))
+                        .font(.sf(12, weight: .medium))
+                        .foregroundStyle(Tokens.text4)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+}
+
+/// The model's own reasoning, folded away behind one quiet line. Collapsed by
+/// default on purpose: while the run is live the same words are already rolling
+/// through the activity ticker, so the trail stays a record of what was DONE and
+/// the thinking is there when you go looking for it.
+private struct AgentTrailThinkingRow: View {
+    let text: String
+
+    @State private var expanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                    expanded.toggle()
+                }
+            } label: {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(L("agent.trail.thinking"))
+                        .font(.sf(13))
+                        .italic()
+                        .foregroundStyle(Tokens.text4)
+                    Image(systemName: "chevron.right")
+                        .font(.sf(7.5, weight: .semibold))
+                        .foregroundStyle(Tokens.text4)
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if expanded {
+                Text(text)
+                    .font(.sf(13))
+                    .foregroundStyle(Tokens.text4)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    // The same indented rail a folded tool group unfolds into,
+                    // so "contents of the line above" reads the same everywhere.
+                    .padding(.leading, 9)
+                    .overlay(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 0.75)
+                            .fill(.white.opacity(0.08))
+                            .frame(width: 1.5)
+                    }
+            }
+        }
+    }
+}
+
+/// The agent's own plan — one row that the parsers rewrite in place as items
+/// tick over, rather than a new row per revision. Always open: a plan is the one
+/// thing in the trail you want to see without asking.
+private struct AgentTrailPlanRow: View {
+    let entry: AgentLogEntry
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(entry.title)
+                .font(.sf(12, weight: .medium))
+                .foregroundStyle(Tokens.text4)
+            ForEach(Array(AgentTodo.decode(entry.detail ?? "").enumerated()), id: \.offset) { _, item in
+                HStack(alignment: .firstTextBaseline, spacing: 7) {
+                    Image(systemName: Self.glyph(item.status))
+                        .font(.sf(10, weight: .semibold))
+                        .foregroundStyle(item.status == .done ? Tokens.text3 : Tokens.text4)
+                        .frame(width: 11)
+                    Text(item.text)
+                        .font(.sf(13))
+                        .foregroundStyle(item.status == .pending ? Tokens.text4 : Tokens.text2)
+                        .strikethrough(item.status == .done, color: Tokens.text4)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 7)
+        .padding(.horizontal, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(.white.opacity(0.03))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(.white.opacity(0.06), lineWidth: 0.5)
+                )
+        )
+    }
+
+    private static func glyph(_ status: AgentTodo.Status) -> String {
+        switch status {
+        case .done:    return "checkmark.circle.fill"
+        case .active:  return "circle.dotted"
+        case .pending: return "circle"
         }
     }
 }
@@ -5560,13 +6405,14 @@ private struct AgentTrailGroupRow: View {
     }
 
     /// "4 commands · 2 file edits · 1 search" — counts by the title prefixes the
-    /// parsers write ("$ ", "Editing ", "Searching ", "Read/Reading/Grep/Glob"),
-    /// anything else counted as a plain tool call.
+    /// parsers write ("$ ", "Editing/Creating/Deleting ", "Searching ",
+    /// "Read/Reading/Grep/Glob"), anything else counted as a plain tool call.
     private static func summary(_ entries: [AgentLogEntry]) -> String {
         var commands = 0, edits = 0, searches = 0, reads = 0, others = 0
         for e in entries {
             if e.title.hasPrefix("$ ") { commands += 1 }
-            else if e.title.hasPrefix("Editing ") { edits += 1 }
+            else if e.title.hasPrefix("Editing ") || e.title.hasPrefix("Creating ")
+                     || e.title.hasPrefix("Deleting ") { edits += 1 }
             else if e.title.hasPrefix("Searching ") { searches += 1 }
             else if e.title.hasPrefix("Read") || e.title.hasPrefix("Grep")
                      || e.title.hasPrefix("Glob") { reads += 1 }
@@ -5618,23 +6464,62 @@ private struct AgentTrailToolRow: View {
             .buttonStyle(.plain)
 
             if expanded, let detail = entry.detail {
-                Text(detail)
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(Tokens.text3)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(10)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(.white.opacity(0.03))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .strokeBorder(.white.opacity(0.06), lineWidth: 0.5)
-                            )
-                    )
+                Group {
+                    if entry.kind == .diff {
+                        AgentDiffBody(patch: detail)
+                    } else {
+                        Text(detail)
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(Tokens.text3)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(.white.opacity(0.03))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .strokeBorder(.white.opacity(0.06), lineWidth: 0.5)
+                        )
+                )
             }
         }
+    }
+}
+
+/// The patch behind a file-editing row: added lines green, removed lines red,
+/// everything else quiet. Built from the tool call's own before/after text
+/// (`AgentDiff`), which is why a row can show what changed the moment the call
+/// is made rather than after the tool answers "the file was updated".
+private struct AgentDiffBody: View {
+    let patch: String
+
+    /// Muted enough to sit on the panel's glass without shouting, saturated
+    /// enough to read as +/− at a glance.
+    private static let added = Color(red: 0.45, green: 0.80, blue: 0.55)
+    private static let removed = Color(red: 0.95, green: 0.48, blue: 0.45)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(patch.split(separator: "\n", omittingEmptySubsequences: false)
+                .enumerated()), id: \.offset) { _, line in
+                Text(line.isEmpty ? " " : String(line))
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(Self.tint(line))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    private static func tint(_ line: Substring) -> Color {
+        if line.hasPrefix("+") { return added }
+        if line.hasPrefix("-") { return removed }
+        return Tokens.text4
     }
 }
 

@@ -479,7 +479,7 @@ struct ManageAppSettingsTool: NotchTool {
     creating one. `scope` picks an existing binding by its current chord (option+s) or by a \
     distinctive part of its prompt; omit scope to create a new binding.
     - custom_instructions: text (empty clears it); proxy: URL/host, or auto to clear the manual proxy
-    - ai_provider: openrouter, vercel, openai, codex, claude_code, grok_code, command_code, anthropic, gemini, deepseek, qwen, glm, kimi, minimax, mimo, custom
+    - ai_provider: openrouter, vercel, openai, codex, claude_code, grok_code, command_code, pi_code, anthropic, gemini, deepseek, qwen, glm, kimi, minimax, mimo, custom
     - ai_model: model id or default; optional scope is a provider (defaults to the active provider)
     - api_key: key text or empty to remove; scope is the provider (defaults to active). Never read keys back.
     - search_backend: native, keenable, exa, or anysearch

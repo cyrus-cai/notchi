@@ -312,6 +312,12 @@ enum APIKeyStore {
            stored.isEmpty || stored == CommandCodeCLIService.defaultSentinel {
             return provider.defaultModel
         }
+        // pi: same shape again — an empty override or the "pi" sentinel both mean
+        // "whatever pi itself is configured to run" (its own settings.json pair,
+        // resolved against the catalog).
+        if provider == .piCode, stored.isEmpty || stored == PiCLIService.defaultSentinel {
+            return provider.defaultModel
+        }
         // Claude Code: same shape again. "claude" is the retired account-default
         // sentinel a pre-0.3.1 selection may still hold; it no longer appears in
         // the picker, so resolve it (and an empty override) to the provider's own

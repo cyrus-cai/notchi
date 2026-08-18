@@ -1438,6 +1438,9 @@ struct DetachedSessionRootView: View {
     /// model at this level would re-render a streaming thread window on every
     /// unrelated model publish.
     let model: NotchModel
+    /// The answer's voice, tracked on its own key so this view can follow the
+    /// setting live without observing the whole model — see `sessionBody`.
+    @AppStorage(Handwriting.defaultsKey) private var handwrittenAnswers = false
     var onReattach: () -> Void
     var onTogglePin: () -> Void
     var onClose: () -> Void
@@ -1635,6 +1638,24 @@ struct DetachedSessionRootView: View {
 
     @ViewBuilder
     private var sessionBody: some View {
+        sessionContent
+            // Same injection as the panel root (see `ContentView`): a detached
+            // thread is the same answer in another window and must speak in the
+            // same voice.
+            //
+            // Read from defaults rather than from `model.handwrittenAnswers`,
+            // even though the model is right there: this view holds the model
+            // *unobserved* on purpose (see the property above), so reading the
+            // published value here would render the current setting once and then
+            // never update — the toggle would appear to do nothing in an already
+            // open window. `@AppStorage` invalidates on this one key only, which
+            // keeps the "don't re-render a streaming thread on unrelated model
+            // publishes" property that the plain reference exists to protect.
+            .environment(\.handwritten, HandwritingFeature.isEnabled && handwrittenAnswers)
+    }
+
+    @ViewBuilder
+    private var sessionContent: some View {
         if case .shortcutComposer = state.session {
             CompactShortcutPromptView(
                 state: state,
@@ -2114,6 +2135,7 @@ struct DetachedComposeView: View {
 
     @State private var focused = false
     @State private var caretWidth: CGFloat = 0
+    @State private var caretY: CGFloat = 0
     @State private var inputHeight: CGFloat = PromptField.lineHeight(for: NotchBody.idleFontSize)
     /// This window's own read of its own line — see the type comment.
     @State private var reading: IntentEngine.Reading = .empty
@@ -2121,6 +2143,7 @@ struct DetachedComposeView: View {
     /// Tab's manual destination override, scoped to the line being written
     /// exactly like the panel's (`NotchModel.manualPanelOverride`).
     @State private var override: NotchModel.Panel?
+    @State private var typedNoteTrigger: String?
 
     /// The window's height with a one-line prompt: the body's insets, the header,
     /// its gap, and the input row. A wrapped draft grows the window from here.
@@ -2199,6 +2222,13 @@ struct DetachedComposeView: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { focused = true }
         }
         .onChange(of: desiredHeight) { _, h in onDesiredHeight(h) }
+        .onChange(of: draft) { _, value in
+            guard let trigger = typedNoteTrigger,
+                  !value.hasPrefix(trigger) else { return }
+            typedNoteTrigger = nil
+            override = value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? nil : .chat
+        }
         // Debounced classification of THIS window's line, mirroring
         // `NotchModel.scheduleClassification` (140ms, then the engine) plus the
         // date read that upgrades a timed note to a reminder. `.task(id:)`
@@ -2252,13 +2282,45 @@ struct DetachedComposeView: View {
                     // line wrong, exactly as in the notch; always consumed so
                     // focus never wanders out of the box.
                     onTab: {
+                        typedNoteTrigger = nil
                         override = Self.nextDestination(after: override ?? destination)
                         return true
                     },
+                    // Match the notch's fresh prompt: the hand-typed sigil is
+                    // retained and pins this detached line to Note. If the
+                    // composer was armed for Agent, Note explicitly leaves it.
+                    onInitialNoteTrigger: { trigger in
+                        model.setAgentBucket(false)
+                        typedNoteTrigger = String(trigger)
+                        override = .note
+                    },
                     onCaretWidth: { caretWidth = $0 },
+                    onCaretY: { caretY = $0 },
                     onHeightChange: { inputHeight = $0 }
                 )
                 .frame(height: inputHeight)
+                .padding(.trailing,
+                         typedNoteTrigger == nil
+                            ? 0
+                            : InlineModeHint.reservedTrailingWidth(
+                                text: "You are using Note mode",
+                                fontSize: NotchBody.idleFontSize))
+                .background {
+                    if typedNoteTrigger != nil {
+                        GeometryReader { geo in
+                            InlineModeHint(
+                                text: "You are using Note mode",
+                                fontSize: NotchBody.idleFontSize,
+                                caretWidth: caretWidth,
+                                caretY: caretY,
+                                availableWidth: geo.size.width,
+                                tint: Tokens.noteInk)
+                            .frame(height: geo.size.height, alignment: .center)
+                        }
+                        .allowsHitTesting(false)
+                    }
+                }
+                .animation(.smooth(duration: 0.25), value: typedNoteTrigger != nil)
                 if draft.isEmpty && caretWidth == 0 {
                     Text(L(model.idlePlaceholderKey))
                         .font(.sf(NotchBody.idleFontSize))
@@ -2301,6 +2363,7 @@ struct DetachedComposeView: View {
         guard !line.isEmpty else { return }
         let where_ = destination
         state.composeDraft = ""
+        typedNoteTrigger = nil
         override = nil
         reading = .empty
         due = nil
@@ -2748,11 +2811,21 @@ struct DetachedAgentTaskView: View {
 
     @ObservedObject private var manager = AgentTaskManager.shared
     @State private var followUp = ""
+    @State private var followUpHeight = PromptField.lineHeight(
+        for: NotchBody.followUpFontSize)
     /// The task's last seen value — keeps the window readable if the task is
     /// dismissed from the tray while this window is open.
     @State private var lastKnown: AgentTaskManager.AgentTask?
+    /// The tail-follow release, same rule the panel's detail page uses: chase the
+    /// newest line only while the reader is still at the bottom. Measured rather
+    /// than assumed, because this window's viewport is resizable.
+    @State private var followsTail = true
+    @State private var contentBottom: CGFloat = 0
+    @State private var viewportHeight: CGFloat = 0
 
     private static let bottomID = "detached-agent-bottom"
+    private static let scrollSpace = "detached-agent-scroll"
+    private static let tailSlack: CGFloat = 28
 
     private var task: AgentTaskManager.AgentTask? {
         manager.tasks.first { $0.id == taskID } ?? lastKnown
@@ -2791,14 +2864,20 @@ struct DetachedAgentTaskView: View {
                         let settledAnswer = task.isRunning ? "" : (task.exchanges.last?.answer ?? "")
                         let trail = task.log.droppingTrailingAnswer(settledAnswer)
                         if !trail.isEmpty {
-                            AgentWorkTrailView(entries: trail)
+                            // `live`: the trailing block is still being written,
+                            // so it must not fold under the reader.
+                            AgentWorkTrailView(entries: trail, live: task.isRunning)
                         }
                         if task.isRunning {
-                            CrossfadeText(text: task.activity ?? L("agent.thinking"),
-                                          font: 14, color: Tokens.text3)
-                                .tracking(-0.1)
-                                .lineLimit(1)
-                                .padding(.vertical, 2)
+                            // Dropped while a paragraph is visibly streaming just
+                            // above it — see `trailTailIsStreamingProse`.
+                            if !NotchBody.trailTailIsStreamingProse(task.log) {
+                                CrossfadeText(text: task.activity ?? L("agent.thinking"),
+                                              font: 14, color: Tokens.text3)
+                                    .tracking(-0.1)
+                                    .lineLimit(1)
+                                    .padding(.vertical, 2)
+                            }
                         } else if let answer = task.exchanges.last?.answer, !answer.isEmpty {
                             MarkdownBlocks(source: answer, baseFont: 15)
                         }
@@ -2811,6 +2890,26 @@ struct DetachedAgentTaskView: View {
                     .padding(.top, ThreadScroll.runway)
                     .padding(.bottom, ThreadScroll.runway)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(GeometryReader { geo in
+                        Color.clear.preference(
+                            key: DetachedAgentContentBottomKey.self,
+                            value: geo.frame(in: .named(Self.scrollSpace)).maxY)
+                    })
+                }
+                .coordinateSpace(name: Self.scrollSpace)
+                // Overlay, not a wrapper: the viewport's height is needed to know
+                // where "the bottom" is, and measuring it must not touch layout.
+                .overlay(GeometryReader { geo in
+                    Color.clear.preference(key: DetachedAgentViewportKey.self,
+                                           value: geo.size.height)
+                })
+                .onPreferenceChange(DetachedAgentViewportKey.self) { height in
+                    viewportHeight = height
+                    refreshTailFollow()
+                }
+                .onPreferenceChange(DetachedAgentContentBottomKey.self) { bottom in
+                    contentBottom = bottom
+                    refreshTailFollow()
                 }
                 // Sticky affordances inside the record (a code block's copy
                 // button) park below the top fade band, not in it.
@@ -2818,12 +2917,31 @@ struct DetachedAgentTaskView: View {
                 .scrollEdgeFade(top: true, bottom: true, fade: ThreadScroll.runway)
                 .progressiveEdgeBlur(top: ThreadScroll.band, bottom: ThreadScroll.band,
                                      topRadius: ThreadScroll.blurRadius)
-                .onChange(of: task.log.count) { _, _ in
-                    withAnimation(.easeOut(duration: 0.2)) {
-                        proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                .onChange(of: task.log.count) { _, _ in followTail(proxy) }
+                // The trailing block GROWS token by token, which moves the tail
+                // without changing the row count.
+                .onChange(of: task.log.last?.title) { _, _ in followTail(proxy) }
+                .onAppear {
+                    followsTail = true
+                    proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    if !followsTail {
+                        GlassIconButton(systemName: "arrow.down",
+                                        help: L("agent.trail.toBottom"),
+                                        size: 26, glyphSize: 11,
+                                        showsTooltip: false) {
+                            followsTail = true
+                            withAnimation(.easeOut(duration: 0.2)) {
+                                proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                            }
+                        }
+                        .padding(.trailing, 4)
+                        .padding(.bottom, 4)
+                        .transition(.scale(scale: 0.8).combined(with: .opacity))
                     }
                 }
-                .onAppear { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
+                .animation(.spring(response: 0.3, dampingFraction: 0.85), value: followsTail)
             }
             followUpRow(task)
                 .padding(.top, 8)
@@ -2872,26 +2990,55 @@ struct DetachedAgentTaskView: View {
             .fixedSize()
     }
 
+    /// Whether the content's end still sits at (or just below) the viewport's
+    /// bottom edge — the one thing that decides if the page keeps chasing the
+    /// tail. Both measurements arrive independently, so this runs on either.
+    private func refreshTailFollow() {
+        guard viewportHeight > 0 else { return }
+        let atTail = contentBottom - viewportHeight <= Self.tailSlack
+        if atTail != followsTail { followsTail = atTail }
+    }
+
+    private func followTail(_ proxy: ScrollViewProxy) {
+        guard followsTail else { return }
+        withAnimation(.easeOut(duration: 0.2)) {
+            proxy.scrollTo(Self.bottomID, anchor: .bottom)
+        }
+    }
+
     private func followUpRow(_ task: AgentTaskManager.AgentTask) -> some View {
         // Mid-run the field stays live: Enter queues the line and the manager
         // dispatches it as the next round on settle — typed input is never
         // dropped. Only a run that settled without ever reporting a session id
         // (nothing to resume, ever) goes dead.
         let dead = !task.isRunning && task.sessionID == nil
-        return HStack(spacing: 10) {
-            TextField(L(task.isRunning ? "agent.followUp.queue"
-                                       : "agent.followUp.placeholder"),
-                      text: $followUp)
-                .textFieldStyle(.plain)
-                .font(.sf(NotchBody.followUpFontSize))
-                .foregroundStyle(Tokens.text1)
-                .onSubmit { sendFollowUp(task) }
+        return HStack(alignment: .bottom, spacing: 10) {
+            PromptField(
+                text: $followUp,
+                placeholder: L(task.isRunning ? "agent.followUp.queue"
+                                               : "agent.followUp.placeholder"),
+                fontSize: NotchBody.followUpFontSize,
+                maxVisibleLines: NotchBody.promptMaxLines,
+                onSubmit: { sendFollowUp(task) },
+                onCommandSubmit: {
+                    guard task.isRunning, task.sessionID != nil,
+                          !followUp.trimmingCharacters(
+                            in: .whitespacesAndNewlines).isEmpty
+                    else { return false }
+                    sendFollowUp(task, interrupting: true)
+                    return true
+                },
+                onHeightChange: { followUpHeight = $0 }
+            )
+            .frame(height: followUpHeight)
             if !followUp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                SendButton(compact: true) { sendFollowUp(task) }
-                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+                AgentFollowUpKeyHints(
+                    showsInterrupt: task.isRunning && task.sessionID != nil)
+                    .frame(height: max(27, followUpHeight), alignment: .center)
+                    .transition(.opacity)
             }
         }
-        .frame(minHeight: 27)
+        .frame(minHeight: max(27, followUpHeight))
         .padding(.leading, 13)
         .padding(.trailing, 6)
         .padding(.vertical, 6)
@@ -2902,10 +3049,37 @@ struct DetachedAgentTaskView: View {
         .disabled(dead)
     }
 
-    private func sendFollowUp(_ task: AgentTaskManager.AgentTask) {
+    /// `interrupting` stops the round in flight and re-opens the session with
+    /// this line straight away; the plain path queues it for the next round.
+    private func sendFollowUp(_ task: AgentTaskManager.AgentTask,
+                              interrupting: Bool = false) {
         let line = followUp.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !line.isEmpty else { return }
         followUp = ""
-        manager.followUp(taskID: task.id, prompt: line)
+        // Sending says you want to watch what happens next.
+        followsTail = true
+        if interrupting {
+            manager.interrupt(taskID: task.id, prompt: line)
+        } else {
+            manager.followUp(taskID: task.id, prompt: line)
+        }
+    }
+}
+
+/// Where the detached agent window's scroll content ends, and how tall its
+/// viewport is — together they say whether the page is still at the tail.
+private struct DetachedAgentContentBottomKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        let next = nextValue()
+        if next != 0 { value = next }
+    }
+}
+
+private struct DetachedAgentViewportKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        let next = nextValue()
+        if next != 0 { value = next }
     }
 }

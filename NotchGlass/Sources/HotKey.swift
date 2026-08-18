@@ -304,6 +304,9 @@ final class ForceClickMonitor {
     }
 
     private func handlePressure(_ pressure: Float, hasTouches: Bool) {
+        // The rung can be switched off entirely — then pressure is ignored and
+        // the herald never draws, so a plain click stays a plain click.
+        guard ForceClickPressure.current.isEnabled else { return }
         latestPressure = pressure
         peakPressure = max(peakPressure, pressure)
         guard hasTouches else {
@@ -332,66 +335,24 @@ final class ForceClickMonitor {
     }
 }
 
-/// The settings test pad's tap into the live gesture.
-///
-/// A pressure rung is a feeling, not a number — no label or diagram can tell you
-/// what "Firm" costs your finger, only pressing can. But the pad can't open its
-/// own reader: `RawTrackpadPressureSource` keeps a single active client and that
-/// one belongs to the app's monitor. So the pad *arms* this while the pointer
-/// rests on it, and the monitor routes the press here — to a bar the finger
-/// drives — instead of to the herald and the composer.
-@MainActor
-final class ForceClickProbe: ObservableObject {
-    static let shared = ForceClickProbe()
-
-    /// The pointer is resting on the on-screen test pad, so the next press is a
-    /// rehearsal: it draws here and opens nothing.
-    @Published var isArmed = false
-    /// How far the trial press has come, 0…1; nil between presses.
-    @Published private(set) var progress: Double?
-    /// Latched from the moment a trial press crosses the rung until the finger
-    /// lifts, so "that was enough" stays legible for longer than one frame.
-    @Published private(set) var reached = false
-    /// Whether pressure reaches the app at all on this machine.
-    @Published var isSupported = false
-
-    private init() {}
-
-    /// Raw frames arrive ~125 times a second and mostly repeat themselves.
-    /// Publishing each one would hand SwiftUI a re-layout per frame for movement
-    /// too small to see, so the bar advances in visible steps.
-    private static let step: Double = 64
-
-    func update(_ value: Double?) {
-        guard let value else {
-            guard progress != nil || reached else { return }
-            progress = nil
-            reached = false
-            return
-        }
-        let stepped = (value * Self.step).rounded() / Self.step
-        guard stepped != progress else { return }
-        progress = stepped
-    }
-
-    func fire() {
-        progress = 1
-        reached = true
-    }
-}
-
 /// How firmly a normal click must continue before Notchi treats it as a Force
 /// Click. Each rung combines an absolute pressure floor with the rise from the
 /// first click, so a late raw frame cannot make an ordinary click look forced.
 enum ForceClickPressure: String, CaseIterable, Identifiable {
+    case off
     case light
     case medium
     case firm
 
     var id: String { rawValue }
 
+    /// Whether the gesture should respond at all. `off` disarms the monitor so
+    /// pressing harder on selected text does nothing.
+    var isEnabled: Bool { self != .off }
+
     var label: String {
         switch self {
+        case .off:    return L("forceClick.off")
         case .light:  return L("forceClick.light")
         case .medium: return L("forceClick.medium")
         case .firm:   return L("forceClick.firm")
@@ -400,25 +361,28 @@ enum ForceClickPressure: String, CaseIterable, Identifiable {
 
     fileprivate var ratio: Float {
         switch self {
-        case .light:  return 1.45
-        case .medium: return 1.70
-        case .firm:   return 2.00
+        case .off:    return 1
+        case .light:  return 1.70
+        case .medium: return 2.00
+        case .firm:   return 2.35
         }
     }
 
     fileprivate var minimumRise: Float {
         switch self {
-        case .light:  return 38
-        case .medium: return 65
-        case .firm:   return 95
+        case .off:    return 1
+        case .light:  return 65
+        case .medium: return 95
+        case .firm:   return 130
         }
     }
 
     fileprivate var minimumPressure: Float {
         switch self {
-        case .light:  return 150
-        case .medium: return 200
-        case .firm:   return 260
+        case .off:    return 1
+        case .light:  return 200
+        case .medium: return 260
+        case .firm:   return 330
         }
     }
 
