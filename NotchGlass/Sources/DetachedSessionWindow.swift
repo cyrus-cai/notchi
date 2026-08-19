@@ -95,6 +95,13 @@ final class DetachedThreadStore: ObservableObject {
 /// AppKit's edge-resize on a borderless window.
 private final class DetachedWindow: NSWindow {
     var closesOnEscape = false
+    /// The app's editable chords (⌘P pin, ⌘C copy, ⌘R regenerate — see
+    /// `DetachedSessionWindowController.handleAppShortcut`). A detached window is
+    /// its own key window, so the panel's `KeyEventCatcher` — which only acts
+    /// while ITS window is key — never sees these keys; the window has to answer
+    /// them itself, or its chips would advertise chords that do nothing here.
+    /// Returns true when the chord was claimed.
+    var onAppShortcut: ((NSEvent) -> Bool)?
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
@@ -113,6 +120,7 @@ private final class DetachedWindow: NSWindow {
             close()
             return true
         }
+        if onAppShortcut?(event) == true { return true }
         return super.performKeyEquivalent(with: event)
     }
 }
@@ -181,6 +189,12 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
     /// Merge-back machinery (settled phase).
     private var moveObserver: NSObjectProtocol?
     private var mergeArmed = false
+
+    /// This window has held the keyboard at least once. The empty-composer
+    /// dismissal below hangs off *losing* key, and a window that never got it
+    /// (the activation lost a race with the source app) must not be closed by
+    /// the resign that never had a matching become.
+    private var hasHeldKey = false
 
     private static var reduceMotion: Bool {
         NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
@@ -861,6 +875,9 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
         w.isMovableByWindowBackground = true
         w.appearance = NSAppearance(named: .darkAqua)
         w.closesOnEscape = compactShortcut
+        w.onAppShortcut = { [weak self] event in
+            self?.handleAppShortcut(event) ?? false
+        }
         w.minSize = bareComposer
             ? Self.compactComposerMinSize
             : (compactShortcut ? Self.compactMinSize
@@ -1253,6 +1270,58 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
         if state.phase == .settled { applyPinLevel() }
     }
 
+    /// The app's editable chords, answered by the window that has the keyboard.
+    /// The panel's `KeyEventCatcher` bails whenever its own window isn't key
+    /// (one catcher per screen, all of them watching the same local monitor), so
+    /// every chord the panel owns is dead inside a torn-out window unless it is
+    /// re-served here — including ⌘P, which this window's pin chip advertises in
+    /// its tooltip.
+    ///
+    /// Only the chords whose action EXISTS in this window are claimed; the rest
+    /// fall through to the system, exactly as they do over settings in the
+    /// panel. ⌘F (the recent-list filter), ⌘⇧I (the picker card), ⌘N (a fresh
+    /// chat) and ⌃⇧= (detach) all name panel-only surfaces — a detached window
+    /// has no recent list, no picker and no idle prompt, and it is already
+    /// detached — so swallowing them here would only make them fizzle.
+    private func handleAppShortcut(_ event: NSEvent) -> Bool {
+        // While a chord is being recorded in Shortcuts the keyboard belongs to
+        // the recorder — same rule the panel's catcher opens with.
+        if ShortcutRecording.isActive { return false }
+        // ⌘P floats/unfloats the window — the keyboard twin of the header's pin
+        // chip. Unguarded by the field editor: ⌘P is not a text-editing key, and
+        // pinning mid-follow-up is exactly when you want it.
+        if AppShortcutStore.matches(.pin, event: event) {
+            togglePin()
+            return true
+        }
+        // ⌘C / ⌘R mirror the answer footer's copy and regenerate. Guarded on the
+        // follow-up field the way the panel guards its composer: with the caret
+        // in text, ⌘C copies the selection and ⌘R stays out of the way.
+        if window.firstResponder is NSText { return false }
+        guard let store = threadStore,
+              !store.turns.contains(where: { $0.streaming }) else { return false }
+        if AppShortcutStore.matches(.copyAnswer, event: event) {
+            // Verbatim markdown — the `doc.on.doc` footer button's text, not the
+            // plain-text twin beside it (which has no chord in the panel either).
+            let answer = store.turns.last(where: { $0.role == "assistant" })?.text
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !answer.isEmpty else { return false }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(answer, forType: .string)
+            model?.rebaselineClipboardAfterInAppWrite()
+            return true
+        }
+        if AppShortcutStore.matches(.regenerate, event: event) {
+            // The footer's own gate: only the last settled turn, and never an
+            // agent report (it has no round to re-run).
+            guard let last = store.turns.last, last.role == "assistant",
+                  !last.isAgent else { return false }
+            model?.regenerateDetachedAnswer(threadID: store.threadID)
+            return true
+        }
+        return false
+    }
+
     // MARK: Merge back (drag the window home to the notch)
 
     /// While the settled window rides a user drag, watch its position against
@@ -1352,6 +1421,80 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
 
     // MARK: NSWindowDelegate
 
+    func windowDidBecomeKey(_ notification: Notification) {
+        hasHeldKey = true
+        // The user came back mid-retreat (clicked the capsule while it was on its
+        // way out). Put the window back at full strength — the fade already wrote
+        // alpha down the animator's path, so it has to be written back by hand.
+        guard state.exiting else { return }
+        state.exiting = false
+        window?.animator().alphaValue = 1
+    }
+
+    /// A force-click composer nobody typed into takes itself off screen the
+    /// moment the keyboard leaves it.
+    ///
+    /// Nothing else ever closed it. Unpinned it only *slips behind* the app in
+    /// front, which reads as gone — but it is still there, on every Space
+    /// (`.moveToActiveSpace`), and the next `NSApp.activate(ignoringOtherApps:)`
+    /// from any other part of the app raises it back over everything. A gesture
+    /// as easy to trip as a force click then leaves a trail of empty capsules
+    /// that keep reappearing, which is what `retirePointerWindows` was patching
+    /// from the far end (retire the *previous* one when a new one opens) instead
+    /// of never leaving one behind.
+    ///
+    /// Only the untouched composer goes. A draft, an answer, or a tack is the
+    /// user's, and stays until they close it.
+    func windowDidResignKey(_ notification: Notification) {
+        guard isUntouchedComposer else { return }
+        // Resign also fires on the way *to* another window of this app, and
+        // AppKit can hand key across in two steps. Settle first, then check.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isUntouchedComposer,
+                  let window = self.window, window.isVisible, !window.isKeyWindow
+            else { return }
+            self.fadeOutAndClose()
+        }
+    }
+
+    /// A pointer-side composer with nothing in it and nothing holding it open.
+    private var isUntouchedComposer: Bool {
+        guard compactShortcut, hasHeldKey, !state.pinned, !isDrawingPressure,
+              case .shortcutComposer = state.session
+        else { return false }
+        return state.compactPromptDraft
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// The entrance, run backwards: the face settles back toward the pointer it
+    /// grew out of while the window sinks under it.
+    ///
+    /// A bare alpha ramp on its own was the stiff version — the capsule arrives by
+    /// swelling out of the caret over a 0.36s spring and left by simply ceasing to
+    /// be there, on a curve half that long, with nothing moving. The shape has to
+    /// go the way it came: `state.exiting` collapses the face on its entrance
+    /// anchor, and the window's own alpha carries the shadow (which AppKit derives
+    /// from the silhouette and will not fade with SwiftUI's opacity) out with it.
+    private func fadeOutAndClose() {
+        guard let window else { return }
+        guard !Self.reduceMotion else { return window.close() }
+        state.exiting = true
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.26
+            // Holds near full for the first third, so the collapse is *seen*
+            // before the window is gone; a symmetric ease would have faded the
+            // shape out from under its own move.
+            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.55, 0, 0.85, 0.35)
+            window.animator().alphaValue = 0
+        } completionHandler: { [weak self] in
+            // Key came back during the retreat: `windowDidBecomeKey` has already
+            // put it back, and this completion is the tail of a cancelled fade.
+            guard let self, let window = self.window,
+                  !window.isKeyWindow, self.state.exiting else { return }
+            window.close()
+        }
+    }
+
     func windowWillClose(_ notification: Notification) {
         endRide()
         stopCompactGlide()
@@ -1422,6 +1565,9 @@ final class DetachedWindowState: ObservableObject {
     /// An entrance here would read as a second, foreign window popping over the
     /// line the user just typed, which is exactly what the morph exists to avoid.
     @Published var openingFromComposer = false
+    /// The window is on its way out (`fadeOutAndClose`). The composer face reads
+    /// it to collapse back onto its entrance anchor instead of just vanishing.
+    @Published var exiting = false
 
     init(session: DetachedSession) {
         self.session = session
@@ -1594,6 +1740,11 @@ struct DetachedSessionRootView: View {
         .scaleEffect(entered || state.grownIn ? 1 : 0.92, anchor: state.entranceAnchor)
         .opacity(entered || state.grownIn ? 1 : 0)
         .offset(y: entered || state.grownIn ? 0 : -4)
+        // Leaving. Only the shape moves here — the fade belongs to the window,
+        // whose alpha takes the shadow with it (`fadeOutAndClose`); fading the
+        // content too would multiply the two and cut the retreat in half.
+        .scaleEffect(state.exiting ? 0.93 : 1, anchor: state.entranceAnchor)
+        .animation(reduceMotion ? nil : .easeIn(duration: 0.24), value: state.exiting)
         .onAppear { playEntrance() }
         .onChange(of: state.entranceToken) { _, _ in playEntrance() }
     }
@@ -1618,12 +1769,23 @@ struct DetachedSessionRootView: View {
 
     private func slab(corner: CGFloat) -> some View {
         ZStack {
-            if !isBareComposer { DetachedWindowGlass() }
+            if !isBareComposer {
+                DetachedWindowGlass()
+                // Bare glass IS the window: pressing it moves the window, the
+                // way pressing a titlebar does (see `WindowDragArea`). It lies
+                // under everything, so the header chips, the thread and the
+                // follow-up line keep their own clicks — this catches only the
+                // presses none of them wanted.
+                WindowDragArea()
+            }
             // The full session from frame one — riding and settled look the
             // same; merging just dissolves on the way home.
             sessionBody
                 .opacity(state.phase == .merging ? 0 : 1)
         }
+        // An image opened out of this window's thread covers this window, not
+        // the panel it was torn from — each surface hosts its own lightbox.
+        .imageLightboxHost()
         // The glass carves the window's rounded form itself; the rim rides on
         // top of the clipped result so the edge highlight stays crisp.
         .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
@@ -1707,7 +1869,7 @@ private struct WindowCloseButton: View {
                 Image(systemName: "xmark")
                     .font(.sf(11, weight: .semibold))
             }
-        ])
+        ], showsTooltips: false)
     }
 }
 
@@ -1768,7 +1930,7 @@ enum CompactShortcutMetrics {
     /// top/bottom padding is added by the caller (`DetachedThreadView`).
     static var answerChrome: CGFloat {
         inset * 2 + DetachedThreadView.headerHeight
-            + DetachedThreadView.followUpGap + DetachedThreadView.followUpHeight
+            + DetachedThreadView.compactFollowUpGap + DetachedThreadView.followUpHeight
     }
 
     // MARK: Where the caret lands
@@ -1957,6 +2119,37 @@ struct DetachedWindowGlass: View {
     }
 }
 
+/// The window's grab surface — its titlebar, in a window that has no titlebar.
+///
+/// A borderless window moves by `isMovableByWindowBackground`, and that only
+/// fires when a mouse-down reaches the window itself unclaimed. In this card
+/// almost nothing does: the answer is AppKit-backed selectable text
+/// (`SelectionTextField`) and the follow-up line is a text view, and BOTH
+/// answer `mouseDownCanMoveWindow = false` — so a press anywhere on the
+/// answer, which is nearly the whole card, starts a text selection and the
+/// window stays exactly where it was. Grabbing the card and moving it simply
+/// did nothing.
+///
+/// This view is the explicit alternative, laid behind the content: whatever
+/// SwiftUI would have done with the press, a press that lands on bare glass
+/// drags the window. Content on top of it — the chips, the thread, the input —
+/// still gets its own clicks; this only ever sees what nothing else claimed.
+struct WindowDragArea: NSViewRepresentable {
+    final class DragView: NSView {
+        override var mouseDownCanMoveWindow: Bool { true }
+        /// The card is summoned beside the pointer while another app is
+        /// frontmost, so the very first press on it is often the activating
+        /// click — it has to move the window too, not be eaten by activation.
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+        override func mouseDown(with event: NSEvent) {
+            window?.performDrag(with: event)
+        }
+    }
+
+    func makeNSView(context: Context) -> NSView { DragView() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
 // MARK: - Empty prompt-shortcut window
 
 /// A selected-text shortcut with no saved instruction. The selection is already
@@ -2119,8 +2312,6 @@ private struct CompactShortcutPromptView: View {
 /// that this very window then holds — the composer becomes the conversation in
 /// place (`DetachedSessionWindowController.adoptThread`).
 ///
-/// It classifies its own text rather than borrowing `model.liveIntent`: that one
-/// reads the *panel's* box, which is empty while this window has the line.
 struct DetachedComposeView: View {
     @ObservedObject var state: DetachedWindowState
     @ObservedObject var model: NotchModel
@@ -2138,7 +2329,6 @@ struct DetachedComposeView: View {
     @State private var caretY: CGFloat = 0
     @State private var inputHeight: CGFloat = PromptField.lineHeight(for: NotchBody.idleFontSize)
     /// This window's own read of its own line — see the type comment.
-    @State private var reading: IntentEngine.Reading = .empty
     @State private var due: Date?
     /// Tab's manual destination override, scoped to the line being written
     /// exactly like the panel's (`NotchModel.manualPanelOverride`).
@@ -2168,30 +2358,25 @@ struct DetachedComposeView: View {
     }
 
     /// Where Enter sends this line. Same resolution as the panel's
-    /// `effectiveSubmitPanel`: an explicit Tab override beats a confident read,
-    /// which beats the resting "ambiguous → ask" default.
+    /// `effectiveSubmitPanel`: Ask until the user pins something by hand, and
+    /// nothing reads the text to change that. A pinned Capture names the bucket,
+    /// not the leaf — the date still decides Notes vs Reminders under it, which
+    /// is invisible here (both faces say Capture).
     private var destination: NotchModel.Panel {
-        if let override { return override }
-        guard reading.confidence >= NotchModel.intentActionFloor else { return .chat }
-        switch reading.intent {
-        case .ask:       return .chat
-        // A future time in a note upgrades it to a reminder — the same rule the
-        // panel applies in `suggestedPanel`.
-        case .note:      return due != nil ? .reminder : .note
-        case .ambiguous: return .chat
-        }
+        guard let override else { return .chat }
+        return override == .note && due != nil ? .reminder : override
     }
 
-    /// An armed Agent bucket owns the line regardless of what the classifier
-    /// reads — the same precedence `submitCurrent()` uses.
+    /// An armed Agent bucket owns the line regardless of any pin — the same
+    /// precedence `submitCurrent()` uses.
     private var goesToAgent: Bool { model.agentComposeActive }
 
     private var hintLabel: String {
         if goesToAgent { return L("hint.agent") }
         switch destination {
-        case .chat:     return L("hint.ask")
-        case .note:     return L("hint.note")
-        case .reminder: return L("hint.remind")
+        case .chat:              return L("hint.ask")
+        // One word for both Capture leaves, same as the panel's pill.
+        case .note, .reminder:   return L("hint.capture")
         }
     }
 
@@ -2229,27 +2414,23 @@ struct DetachedComposeView: View {
             override = value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 ? nil : .chat
         }
-        // Debounced classification of THIS window's line, mirroring
-        // `NotchModel.scheduleClassification` (140ms, then the engine) plus the
-        // date read that upgrades a timed note to a reminder. `.task(id:)`
-        // cancels the in-flight read on every keystroke, so only the text
-        // actually in the box can ever label it.
+        // The date read that decides which service a capture is filed through,
+        // mirroring the panel's `scheduleDueDetection`. Nothing classifies this
+        // window's line any more — the destination is whatever the user pinned.
+        // `.task(id:)` cancels the in-flight read on every keystroke.
         .task(id: trimmed) {
             let snapshot = trimmed
             guard !snapshot.isEmpty else {
-                reading = .empty
                 due = nil
                 return
             }
             try? await Task.sleep(nanoseconds: 140_000_000)
             guard !Task.isCancelled else { return }
-            let read = await IntentEngine.shared.classify(snapshot)
             let when = await Task.detached {
                 RemindersService.futureDate(in: snapshot)
                     ?? RemindersService.recurrenceDate(in: snapshot)
             }.value
             guard !Task.isCancelled else { return }
-            reading = read
             due = when
         }
     }
@@ -2365,17 +2546,17 @@ struct DetachedComposeView: View {
         state.composeDraft = ""
         typedNoteTrigger = nil
         override = nil
-        reading = .empty
         due = nil
         onSubmit(line, where_)
     }
 
-    /// Tab's cycle — Ask → Note → Remind → Ask, matching `toggleSubmitPanel`.
+    /// Tab's cycle — Ask ⇄ Capture, matching `toggleSubmitPanel`. Note and
+    /// Remind are not separate stops: which leaf a capture lands in follows the
+    /// time the line names, so there is nothing here for Tab to step through.
     private static func nextDestination(after current: NotchModel.Panel) -> NotchModel.Panel {
         switch current {
-        case .chat:     return .note
-        case .note:     return .reminder
-        case .reminder: return .chat
+        case .chat:              return .note
+        case .note, .reminder:   return .chat
         }
     }
 }
@@ -2479,11 +2660,12 @@ struct DetachedThreadView: View {
     private var scrollBottomInset: CGFloat {
         compactShortcut ? Self.restingBottomGap : ThreadScroll.runway
     }
-    /// The compact card's resting rhythm, taken from the panel's short layout:
-    /// the header's 18pt quiet gap over the thread, and 24pt under it —
-    /// `restingBottomGap` + `followUpGap` — before the follow-up line.
+    /// The compact card keeps the panel's 18pt quiet gap above the thread, but
+    /// leaves no reserved space below it or above the follow-up line. The
+    /// pointer-side window needs the densest possible bottom edge; ordinary
+    /// detached windows still use `ThreadScroll.runway` and `followUpGap`.
     static let restingTopGap: CGFloat = 18
-    static let restingBottomGap: CGFloat = 24 - followUpGap
+    static let restingBottomGap: CGFloat = 0
     /// The panel's own rhythm — `NotchBody.panelPadding`, the SAME on all four
     /// sides, so the follow-up capsule sits as far from the bottom edge as it
     /// does from the sides and 15 reads concentric against the window's 30pt
@@ -2501,6 +2683,7 @@ struct DetachedThreadView: View {
     /// glass) and the follow-up row's, so the compact window can budget for the
     /// chrome it now carries (`CompactShortcutMetrics.answerChrome`).
     static let headerHeight: CGFloat = 32
+    static let compactFollowUpGap: CGFloat = 0
     static let followUpGap: CGFloat = 8
     static let followUpHeight: CGFloat = 39
     /// The fade and frost bands are exactly the gaps the thread rests between —
@@ -2605,7 +2788,8 @@ struct DetachedThreadView: View {
             // Every detached thread can be continued where it stands — a
             // pointer-side answer no longer dead-ends at "copy it or close it".
             followUpRow
-                .padding(.top, Self.followUpGap)
+                .padding(.top, compactShortcut ? Self.compactFollowUpGap
+                                               : Self.followUpGap)
         }
         .padding(.horizontal, Self.cardHorizontalPadding)
         .padding(.top, Self.cardTopPadding)
@@ -2696,29 +2880,23 @@ struct DetachedThreadView: View {
     /// Disabled while a round streams: the tear-off dropped the round's task
     /// handle, so a mid-stream line couldn't supersede it.
     private var followUpRow: some View {
-        // Same composer the panel carries, down to the type size, the recessed
-        // surface and the glass `SendButton` — a torn-off session is the same
-        // conversation in a bigger frame, so its input can't be a different
-        // control. (It used to be a bare `arrow.up.circle.fill` with no hover,
-        // no press-give and no entrance, over a flat 1pt-rimmed box.)
-        HStack(spacing: 10) {
-            TextField(L("result.followUp"), text: $followUp)
-                .textFieldStyle(.plain)
-                .font(.sf(NotchBody.followUpFontSize))
-                .foregroundStyle(Tokens.text1)
-                .onSubmit(sendFollowUp)
-            if !followUp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                SendButton(compact: true, action: sendFollowUp)
-                    .transition(.scale(scale: 0.6).combined(with: .opacity))
-            }
-        }
-        .frame(minHeight: 27)
-        .padding(.leading, 13)
-        .padding(.trailing, 6)
-        .padding(.vertical, 6)
-        .recessedSurface(in: Capsule(), lit: false)
-        .animation(.spring(response: 0.3, dampingFraction: 0.7),
-                   value: followUp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        // THE panel's composer, not a copy of it: `ComposerBox` is the same box
+        // the notch's own follow-up line is, down to the growing silhouette, the
+        // focus-lit recess and the glass `SendButton` — a torn-off session is
+        // the same conversation in a bigger frame, so its input can't be a
+        // different control. (It used to be a single-line SwiftUI `TextField` on
+        // a flat, never-lit `Capsule`: it couldn't grow with a wrapped line and
+        // its placeholder sat under composing pinyin.)
+        ComposerBox(
+            text: $followUp,
+            onSubmit: sendFollowUp,
+            placeholder: { Text(L("result.followUp")) },
+            trailing: {
+                if !followUp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    SendButton(compact: true, action: sendFollowUp)
+                        .transition(.scale(scale: 0.6).combined(with: .opacity))
+                }
+            })
         .opacity(streaming ? 0.45 : 1)
         .disabled(streaming)
     }
@@ -2811,8 +2989,6 @@ struct DetachedAgentTaskView: View {
 
     @ObservedObject private var manager = AgentTaskManager.shared
     @State private var followUp = ""
-    @State private var followUpHeight = PromptField.lineHeight(
-        for: NotchBody.followUpFontSize)
     /// The task's last seen value — keeps the window readable if the task is
     /// dismissed from the tray while this window is open.
     @State private var lastKnown: AgentTaskManager.AgentTask?
@@ -2855,34 +3031,13 @@ struct DetachedAgentTaskView: View {
             header(task)
             ScrollViewReader { proxy in
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
-                        UserQuestionBubble(text: task.prompt)
-                        // Once settled, the trail's last narration entry is the report
-                        // shown below — drop it so it isn't printed twice. While running
-                        // no report shows, so the whole trail stands (empty answer = no
-                        // strip). See `droppingTrailingAnswer`.
-                        let settledAnswer = task.isRunning ? "" : (task.exchanges.last?.answer ?? "")
-                        let trail = task.log.droppingTrailingAnswer(settledAnswer)
-                        if !trail.isEmpty {
-                            // `live`: the trailing block is still being written,
-                            // so it must not fold under the reader.
-                            AgentWorkTrailView(entries: trail, live: task.isRunning)
-                        }
-                        if task.isRunning {
-                            // Dropped while a paragraph is visibly streaming just
-                            // above it — see `trailTailIsStreamingProse`.
-                            if !NotchBody.trailTailIsStreamingProse(task.log) {
-                                CrossfadeText(text: task.activity ?? L("agent.thinking"),
-                                              font: 14, color: Tokens.text3)
-                                    .tracking(-0.1)
-                                    .lineLimit(1)
-                                    .padding(.vertical, 2)
-                            }
-                        } else if let answer = task.exchanges.last?.answer, !answer.isEmpty {
-                            MarkdownBlocks(source: answer, baseFont: 15)
-                        }
-                        Color.clear.frame(height: 1).id(Self.bottomID)
-                    }
+                    // The panel detail page's own record body, shared verbatim
+                    // (`AgentRecordBody`): every settled round's prompt, trail
+                    // and report, then the round in flight. This window used to
+                    // render the flat trail plus only the LATEST answer, so a
+                    // multi-round run lost every earlier report the moment it
+                    // was torn out of the notch.
+                    AgentRecordBody(task: task, bottomID: Self.bottomID)
                     // Runways: the trail rests between the header and the
                     // follow-up line, then scrolls into these empty bands — up
                     // behind the header, down behind the input — to fade +
@@ -2925,7 +3080,7 @@ struct DetachedAgentTaskView: View {
                     followsTail = true
                     proxy.scrollTo(Self.bottomID, anchor: .bottom)
                 }
-                .overlay(alignment: .bottomTrailing) {
+                .overlay(alignment: .bottom) {
                     if !followsTail {
                         GlassIconButton(systemName: "arrow.down",
                                         help: L("agent.trail.toBottom"),
@@ -2936,7 +3091,6 @@ struct DetachedAgentTaskView: View {
                                 proxy.scrollTo(Self.bottomID, anchor: .bottom)
                             }
                         }
-                        .padding(.trailing, 4)
                         .padding(.bottom, 4)
                         .transition(.scale(scale: 0.8).combined(with: .opacity))
                     }
@@ -3012,39 +3166,31 @@ struct DetachedAgentTaskView: View {
         // dropped. Only a run that settled without ever reporting a session id
         // (nothing to resume, ever) goes dead.
         let dead = !task.isRunning && task.sessionID == nil
-        return HStack(alignment: .bottom, spacing: 10) {
-            PromptField(
-                text: $followUp,
-                placeholder: L(task.isRunning ? "agent.followUp.queue"
-                                               : "agent.followUp.placeholder"),
-                fontSize: NotchBody.followUpFontSize,
-                maxVisibleLines: NotchBody.promptMaxLines,
-                onSubmit: { sendFollowUp(task) },
-                onCommandSubmit: {
-                    guard task.isRunning, task.sessionID != nil,
-                          !followUp.trimmingCharacters(
-                            in: .whitespacesAndNewlines).isEmpty
-                    else { return false }
-                    sendFollowUp(task, interrupting: true)
-                    return true
-                },
-                onHeightChange: { followUpHeight = $0 }
-            )
-            .frame(height: followUpHeight)
-            if !followUp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                AgentFollowUpKeyHints(
-                    showsInterrupt: task.isRunning && task.sessionID != nil)
-                    .frame(height: max(27, followUpHeight), alignment: .center)
-                    .transition(.opacity)
-            }
-        }
-        .frame(minHeight: max(27, followUpHeight))
-        .padding(.leading, 13)
-        .padding(.trailing, 6)
-        .padding(.vertical, 6)
-        .recessedSurface(in: Capsule(), lit: false)
-        .animation(.spring(response: 0.3, dampingFraction: 0.7),
-                   value: followUp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        // The panel agent page's own composer (`ComposerBox`), not a second one:
+        // same growing silhouette, same focus-lit recess, same ⏎/⌘⏎ hints — the
+        // page reads identically on both sides of a tear.
+        return ComposerBox(
+            text: $followUp,
+            onSubmit: { sendFollowUp(task) },
+            onCommandSubmit: {
+                guard task.isRunning, task.sessionID != nil,
+                      !followUp.trimmingCharacters(
+                        in: .whitespacesAndNewlines).isEmpty
+                else { return false }
+                sendFollowUp(task, interrupting: true)
+                return true
+            },
+            placeholder: {
+                Text(L(task.isRunning ? "agent.followUp.queue"
+                                      : "agent.followUp.placeholder"))
+            },
+            trailing: {
+                if !followUp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    AgentFollowUpKeyHints(
+                        showsInterrupt: task.isRunning && task.sessionID != nil)
+                        .transition(.opacity)
+                }
+            })
         .opacity(dead ? 0.45 : 1)
         .disabled(dead)
     }

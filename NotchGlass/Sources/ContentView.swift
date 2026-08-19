@@ -225,11 +225,19 @@ struct ContentView: View {
                 }
                 return true
             }
+            // ← / → walk an opened image's pile (see `ImageLightbox`). Consumed
+            // only while one is open, so the arrows stay the field editor's
+            // everywhere else.
+            if event.keyCode == 123, ImageLightboxCenter.shared.step(-1) { return true }
+            if event.keyCode == 124, ImageLightboxCenter.shared.step(1) { return true }
             // Esc: if the recent list is open, fold just that back to the input
             // first (one step "out"); only a second Esc closes the whole panel.
             // Works mid-request too — closing detaches the in-flight answer, which
             // finishes in the background and lands in Recent (see NotchModel).
             if event.keyCode == 53 {
+                // An opened image is the topmost thing on the glass → first Esc
+                // just puts it back down, before any panel-level step-out.
+                if ImageLightboxCenter.shared.dismiss() { return true }
                 // Clear confirmation armed → first Esc dismisses just the dialog,
                 // before any panel-level step-out / close.
                 if model.confirmingClear {
@@ -287,6 +295,18 @@ struct ContentView: View {
                     withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                         model.collapseHistory()
                     }
+                    return true
+                }
+                // Agent detail page with a live run → first Esc STOPS that run,
+                // keeping the whole trail on screen; a second Esc (now settled)
+                // closes the panel. The page carries no cancel control of its own
+                // — the tray row's two-step ✕ is behind the back chevron — so this
+                // is the only stop verb while you're watching the run, and it
+                // reads the way a terminal's Esc does. Not destructive in the
+                // one-way sense: the session id survives, so a follow-up resumes
+                // right where the run stopped.
+                if let id = model.agentDetailTaskID,
+                   AgentTaskManager.shared.cancel(taskID: id) {
                     return true
                 }
                 // Streaming → first Esc STOPS generation (XII-122), keeping the
@@ -883,6 +903,10 @@ struct NotchIsland: View {
                 .transition(.opacity.combined(with: .scale(scale: 0.96)))
             }
         }
+        // An opened image (see `ImageLightbox`) covers the panel it came from:
+        // hosted here, above the body but inside the island's own clip, so the
+        // backdrop blur stops at the glass edge like every other overlay.
+        .imageLightboxHost(topInset: metrics.restHeight)
         .clipShape(NotchShape(bottomRadius: bottomRadius))
         // The "slab of glass" look (per the reference): the dark body holds and
         // stays readable, the top reads near-solid and the lower body eases more

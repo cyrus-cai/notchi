@@ -33,10 +33,10 @@ struct WhatsNewView: View {
     /// moment — otherwise every release the jump flies past would claim the rail.
     @State private var trackingResumesAt: Date = .distantPast
 
-    /// Width of the version rail — enough for the "CURRENT VERSION" caps label to
-    /// sit on one line, and no wider: the reading column is what the 600pt panel
-    /// is for.
-    private let railWidth: CGFloat = 112
+    /// Width of the version rail — enough for a version number plus the current
+    /// badge on one line, and no wider: the reading column is what the 600pt
+    /// panel is for.
+    private let railWidth: CGFloat = 118
 
     /// How far below the viewport top a release's first line must pass before the
     /// rail calls it the one being read. A little slack, so a section counts as
@@ -366,11 +366,10 @@ struct WhatsNewView: View {
     // MARK: - Rail row
 
     /// One version in the rail: just the number, with the running build's release
-    /// carrying the "CURRENT VERSION" caps label under it. Quiet text that
-    /// brightens on hover, a faint fill when it's the release being read — the
-    /// same translucent-chip language as the Settings sidebar, at the panel's
-    /// standard chip radius (a capsule for the one-line rows, square-ish ends for
-    /// the two-line current one).
+    /// carrying a small caps badge beside it. Quiet text that brightens on hover,
+    /// a faint fill when it's the release being read — the same translucent-chip
+    /// language as the Settings sidebar. Every row is one line, so every row is a
+    /// capsule, the panel's default chip.
     private struct VersionItem: View {
         var version: String
         var isCurrent: Bool
@@ -379,37 +378,40 @@ struct WhatsNewView: View {
 
         @State private var hovering = false
 
-        /// A one-line row is a full capsule — the panel's default chip. Only the
-        /// current-version row, which carries a second line, steps down to a
-        /// square-ish radius so its ends don't blow out into half-circles.
-        private var shape: AnyShape {
-            isCurrent ? AnyShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                      : AnyShape(Capsule())
-        }
-
         var body: some View {
             Button(action: action) {
-                VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
                     Text(version)
                         .font(.sf(12.5, weight: .medium))
                         .lineLimit(1)
                         .foregroundStyle(selected ? Tokens.text1 : (hovering ? Tokens.text2 : Tokens.text3))
+                        .layoutPriority(1)
 
                     if isCurrent {
+                        // A tag, not a second line: caps inside a hairline
+                        // outline at the panel's small-tag radius — an outline
+                        // rather than a fill, so the badge doesn't fight the
+                        // row's own wash when this release is the selected one.
                         Text(L("whatsnew.currentBadge"))
                             .font(.sf(8.5, weight: .semibold))
-                            .tracking(0.6)
+                            .tracking(0.5)
                             .lineLimit(1)
-                            .minimumScaleFactor(0.8)
-                            .foregroundStyle(Tokens.text4)
+                            .minimumScaleFactor(0.75)
+                            .foregroundStyle(Tokens.text2)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2.5)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                    .strokeBorder(Tokens.hairline, lineWidth: 0.5)
+                            )
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 7)
                 .frame(minHeight: 30)
-                .background(shape.fill(.white.opacity(selected ? 0.08 : (hovering ? 0.04 : 0))))
-                .contentShape(shape)
+                .background(Capsule().fill(.white.opacity(selected ? 0.08 : (hovering ? 0.04 : 0))))
+                .contentShape(Capsule())
             }
             .buttonStyle(.plain)
             .onHover { hovering = $0 }

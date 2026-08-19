@@ -97,6 +97,13 @@ enum Tokens {
     static let noteInk      = Color(red: 1.00, green: 0.89, blue: 0.58)
     static let reminderTint = Color.orange
     static let reminderInk  = Color(red: 1.00, green: 0.78, blue: 0.56)
+    // Capture — the merged Note/Remind destination. Note and Remind keep their
+    // own faces where a single leaf is named (the Recent chips, the leaf word
+    // trailing the caret); the *mode* itself sits exactly between them, an amber
+    // halfway along yellow→orange, so the destination pill doesn't advertise
+    // itself as Note when Enter might file a reminder.
+    static let captureTint  = Color(red: 1.00, green: 0.71, blue: 0.02)
+    static let captureInk   = Color(red: 1.00, green: 0.84, blue: 0.57)
     static let agentTint    = Color(red: 0.64, green: 0.44, blue: 1.00)
     static let agentInk     = Color(red: 0.82, green: 0.72, blue: 1.00)
 

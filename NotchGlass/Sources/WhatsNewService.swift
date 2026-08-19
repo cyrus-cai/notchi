@@ -70,6 +70,26 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.6.3",
+            date: "2026-08-19",
+            features: [
+                "Note and Remind are one Capture mode: name a time and it files a reminder, otherwise a note. Capture stays pinned until you switch.",
+                "Several images in an answer stack into a fan you can expand, then open any card in a lightbox.",
+                "Ask can save a note or set a reminder for you; confirm on the card first.",
+                "A bare image URL in an answer shows as the image itself.",
+            ],
+            improvements: [
+                "Command Code is retired; the same models stay reachable through pi.",
+                "Appearance settings group placement and behavior more clearly.",
+                "Recent no longer folds away the moment you start typing.",
+                "An empty detached composer closes itself when you leave it.",
+                "CJK input candidates stay visible above the island while composing.",
+            ],
+            others: [
+                "About credits the Interaction Kit image gallery and its license.",
+            ]
+        ),
+        Entry(
             version: "0.6.2",
             date: "2026-08-18",
             features: [

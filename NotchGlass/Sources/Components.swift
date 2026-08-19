@@ -466,8 +466,10 @@ struct PromptField: NSViewRepresentable {
         func textDidBeginEditing(_ notification: Notification) {
             guard let tv = notification.object as? NSTextView else { return }
             PromptField.disableEditorMagic(tv)
-            // Drop the island below the IME candidate window while typing so the
-            // pinyin/kana/Hangul selection popup isn't covered by the panel.
+            // Registers the caret only — the island's LEVEL now follows the
+            // composition (`syncCompositionLevel`), not merely having focus. Dropping
+            // it for the whole session parked the island below the menu bar, which
+            // then drew over the black notch cap (see `NotchPanel.editingLevel`).
             (tv.window as? NotchPanel)?.beginFieldEditing()
         }
 
@@ -493,6 +495,8 @@ struct PromptField: NSViewRepresentable {
             // Belt-and-suspenders: macOS can re-arm prediction as you type, so keep
             // it disabled on every change (cheap idempotent set).
             PromptField.disableEditorMagic(tv)
+            // The commit edge, for the case where the storage observer isn't installed.
+            syncCompositionLevel(tv)
             // Keeping the caret in view is `report`'s job, not this one's — it is
             // the only place that knows whether the box is actually scrolling yet.
             // Chasing the caret from here scrolled a box that had merely WRAPPED,
@@ -504,10 +508,23 @@ struct PromptField: NSViewRepresentable {
         /// from inside `processEditing`, so defer one runloop tick before reading the
         /// layout — measuring mid-edit would read a half-applied state.
         @objc private func storageDidProcessEditing() {
+            // The window level, unlike the measurement, is read SYNCHRONOUSLY: this
+            // notification lands while the input server is handling the keystroke that
+            // set the marked text, so stepping aside now means the candidate window
+            // never gets a frame with the island on top of it.
+            if let tv = textView { syncCompositionLevel(tv) }
             DispatchQueue.main.async { [weak self] in
                 guard let self, let tv = self.textView else { return }
                 self.report(for: tv)
             }
+        }
+
+        /// Park the island under the IME candidate window for exactly as long as
+        /// there's a composition to show it for, and put it back above the menu bar
+        /// the instant the candidate commits — see `NotchPanel.editingLevel` for why
+        /// the level can't just stay down for the whole editing session.
+        private func syncCompositionLevel(_ tv: NSTextView) {
+            (tv.window as? NotchPanel)?.setComposing(tv.hasMarkedText())
         }
 
         @objc private func clipBoundsDidChange() {
@@ -889,18 +906,49 @@ struct HistorySearchField: NSViewRepresentable {
         func controlTextDidChange(_ note: Notification) {
             guard let field = note.object as? NSTextField else { return }
             parent.text = field.stringValue
+            syncCompositionLevel(field)
         }
 
         func controlTextDidBeginEditing(_ note: Notification) {
             guard let field = note.object as? NSTextField else { return }
             PromptField.disableEditorMagic(field.currentEditor())
-            // Same IME fix as PromptField: drop the island below the candidate window
-            // while this filter field is being typed into.
+            // Registers the caret only; the level follows the composition, exactly as
+            // in PromptField (see `NotchPanel.editingLevel`). The field editor's own
+            // storage is watched too, because marked text edits don't reliably reach
+            // `controlTextDidChange` — and the candidate window has to clear the
+            // island the moment the first pinyin letter lands.
             (field.window as? NotchPanel)?.beginFieldEditing()
+            if let editor = field.currentEditor() as? NSTextView,
+               let storage = editor.textStorage {
+                self.editor = editor
+                NotificationCenter.default.addObserver(
+                    self, selector: #selector(editorStorageDidProcessEditing),
+                    name: NSTextStorage.didProcessEditingNotification, object: storage)
+            }
         }
 
         func controlTextDidEndEditing(_ note: Notification) {
+            if let storage = editor?.textStorage {
+                NotificationCenter.default.removeObserver(
+                    self, name: NSTextStorage.didProcessEditingNotification, object: storage)
+            }
+            editor = nil
             ((note.object as? NSTextField)?.window as? NotchPanel)?.endFieldEditing()
+        }
+
+        /// The field editor this coordinator is currently watching for marked text.
+        private weak var editor: NSTextView?
+
+        deinit { NotificationCenter.default.removeObserver(self) }
+
+        @objc private func editorStorageDidProcessEditing() {
+            guard let editor else { return }
+            (editor.window as? NotchPanel)?.setComposing(editor.hasMarkedText())
+        }
+
+        private func syncCompositionLevel(_ field: NSTextField) {
+            guard let editor = field.currentEditor() as? NSTextView else { return }
+            (field.window as? NotchPanel)?.setComposing(editor.hasMarkedText())
         }
     }
 }
@@ -926,7 +974,7 @@ struct SendButton: View {
     var compact: Bool = false
     /// SF Symbol for the action the current text will trigger. Defaults to the
     /// classic send arrow; callers pass a note glyph when the input reads as a jot.
-    var icon: String = "arrow.right"
+    var icon: String = "arrow.up"
     /// The destination spelled out ("Ask" / "Note"). When set, the button renders
     /// as a labeled pill; when `nil`, it's the bare arrow circle (follow-up).
     var label: String? = nil
@@ -1000,8 +1048,234 @@ struct AgentFollowUpKeyHints: View {
         .foregroundStyle(Tokens.text4.opacity(0.72))
         .lineLimit(1)
         .fixedSize()
+        // `ComposerBox` bottom-aligns trailing content so it follows the last
+        // line of a growing draft. Give this label the same one-line slot as
+        // the editor, keeping their text vertically centred at rest.
+        .frame(height: 27, alignment: .center)
         .padding(.trailing, 6)
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// The body of an agent run's record: every settled round in order — its
+/// prompt, its own slice of the work trail, then its report — followed by the
+/// round still in flight and the activity ticker underneath it.
+///
+/// One implementation, because the panel's detail page and its torn-off window
+/// are the same page at two sizes. They had drifted: the panel walks
+/// `task.exchanges` so a follow-up thread keeps ALL prior answers on screen,
+/// while the detached window rendered the flat trail plus only
+/// `exchanges.last?.answer` — so tearing a multi-round run out of the notch
+/// silently dropped every earlier round's report (the exact bug the panel page
+/// had already been fixed for). The window also skipped `isLazy`, rebuilding
+/// hundreds of trail rows on a page that pins to its tail.
+///
+/// Callers own the scroll, the runways and the tail-follow; this owns what the
+/// record is made of.
+struct AgentRecordBody: View {
+    let task: AgentTaskManager.AgentTask
+    /// The tail spacer's id, so the host's ScrollViewReader can chase it.
+    let bottomID: String
+
+    var body: some View {
+        // The flat trail (`task.log`) spans every round; the settled rounds each
+        // own their own slice via `exchange.log`. Whatever's left over belongs to
+        // the round in flight — its "› " prompt marker plus the tool rows it has
+        // produced so far. Split by entry id, never by index, so a capped/trimmed
+        // trail still partitions cleanly.
+        let claimedIDs = Set(task.exchanges.flatMap { $0.log.map(\.id) })
+        let liveTail = task.log.filter { !claimedIDs.contains($0.id) }
+        VStack(alignment: .leading, spacing: 14) {
+            ForEach(Array(task.exchanges.enumerated()), id: \.offset) { _, exchange in
+                UserQuestionBubble(text: exchange.prompt)
+                // The trail's last narration entry IS this round's report (the
+                // parser records it in both places) — drop it so it isn't
+                // printed again by the answer just below. See
+                // `droppingTrailingAnswer`.
+                let trail = exchange.log.droppingTrailingAnswer(exchange.answer)
+                if !trail.isEmpty {
+                    // Lazy: a long run's trail is hundreds of rows and this page
+                    // pins to the tail — see `isLazy`'s doc.
+                    AgentWorkTrailView(entries: trail, isLazy: true)
+                }
+                if !exchange.answer.isEmpty {
+                    MarkdownBlocks(source: exchange.answer, baseFont: 15)
+                }
+            }
+            // The round still in flight has no settled exchange yet. Round one
+            // carries no "› " marker, so its prompt is the task headline; a
+            // follow-up round's prompt already rides the live tail as its
+            // leading "› " marker.
+            if task.isRunning {
+                if task.exchanges.isEmpty {
+                    UserQuestionBubble(text: task.prompt)
+                }
+                if !liveTail.isEmpty {
+                    // `live`: the trailing block is still being written, so it
+                    // must not fold under the reader.
+                    AgentWorkTrailView(entries: liveTail, isLazy: true, live: true)
+                }
+                // The collapsed row's ticker, following the trail — what the run
+                // is doing right now. Same 14pt/text3 face the status row wears.
+                // Drop it when the trail already shows the same live activity:
+                // tool parsers add the 12pt mono row as soon as a command starts,
+                // so repeating it here in the ticker's larger prose face made two
+                // adjacent commands look as though they used different styles.
+                // Streaming prose is the same duplication in another form.
+                let activity = task.activity ?? L("agent.thinking")
+                let trailAlreadyShowsActivity = liveTail.last.map { entry in
+                    entry.mono && entry.title.hasPrefix(activity)
+                } ?? false
+                if !NotchBody.trailTailIsStreamingProse(task.log),
+                   !trailAlreadyShowsActivity {
+                    CrossfadeText(text: activity,
+                                  font: 14, color: Tokens.text3)
+                        .tracking(-0.1)
+                        .lineLimit(1)
+                        .padding(.vertical, 2)
+                }
+            }
+            Color.clear.frame(height: 1).id(bottomID)
+        }
+    }
+}
+
+/// The app's **one** composer box — the recessed, growing input that every
+/// follow-up line is typed into, on whichever surface it appears: the panel's
+/// chat follow-up, the panel's agent-detail page, and the torn-off windows of
+/// both.
+///
+/// It exists because those four had drifted into two species. The panel's boxes
+/// grow on `NotchBody.composerShape` (a pill on its resting line that keeps the
+/// SAME corner once the draft wraps), lift floor and rim together on focus, and
+/// hand the placeholder slot to a SwiftUI label so it can clear the instant IME
+/// pinyin appears. The detached windows meanwhile ran a flat `Capsule` with
+/// `lit: false` and the native placeholder — a different rounding, no focus
+/// response, and in the thread window a single-line `TextField` that couldn't
+/// grow at all. A torn-off session is the same conversation in a bigger frame,
+/// so its input cannot be a different control.
+///
+/// The box owns its own height and caret-width state. Those only ever fed its
+/// own silhouette and its placeholder's fade, so keeping them in here is what
+/// lets a call site be a handful of lines.
+struct ComposerBox<Placeholder: View, Trailing: View>: View {
+    @Binding var text: String
+    var fontSize: CGFloat = NotchBody.followUpFontSize
+    var maxVisibleLines: Int = NotchBody.promptMaxLines
+    /// Flip true to pull first-responder into the box (see `PromptField`).
+    var focusTrigger: Bool = false
+    /// Whether the box currently holds the caret — floor and rim lift together.
+    var focused: Bool = false
+    /// A whisper of the destination's colour washed over the box while it holds
+    /// text — the panel chat field's routing tell, so the input leans toward
+    /// where Enter will send the line. `nil` on the surfaces that don't route.
+    var tint: Color? = nil
+    /// Flash the rim whenever this changes, in `pulseTint` — the peripheral twin
+    /// of the destination pill's word swap. `nil` = no pulse.
+    var pulse: AnyHashable? = nil
+    var pulseTint: Color = .white
+    var onSubmit: () -> Void
+    var onCommandSubmit: () -> Bool = { false }
+    var onBack: () -> Void = {}
+    var onTab: () -> Bool = { false }
+    @ViewBuilder var placeholder: () -> Placeholder
+    /// The control on the trailing edge — a `SendButton` on a chat line, the
+    /// `AgentFollowUpKeyHints` labels on an agent one. Shows and hides on the
+    /// caller's own terms; the row's height comes from the field, so appearing
+    /// here never moves the box.
+    @ViewBuilder var trailing: () -> Trailing
+
+    /// 0 until the field reports its first layout — until then the box is one
+    /// line of its own type size, which is exactly what it will measure.
+    @State private var height: CGFloat = 0
+    @State private var caretWidth: CGFloat = 0
+
+    private var fieldHeight: CGFloat {
+        height > 0 ? height : PromptField.lineHeight(for: fontSize)
+    }
+    /// The box's own outline: the field's slot (27pt at rest, taller once the
+    /// text wraps) plus 6pt of padding top and bottom.
+    private var shape: RoundedRectangle {
+        NotchBody.composerShape(height: max(27, fieldHeight) + 12)
+    }
+    private var isEmpty: Bool {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        // Bottom-aligned so the trailing control stays on the box's last line as
+        // a long follow-up unfolds upward, instead of floating at its middle.
+        let box = HStack(alignment: .bottom, spacing: 6) {
+            ZStack(alignment: .leading) {
+                PromptField(
+                    text: $text,
+                    // Empty on purpose: the box can only hard-swap its native
+                    // placeholder, so the slot belongs to the SwiftUI label
+                    // below, which cross-fades and yields to composing pinyin.
+                    placeholder: "",
+                    fontSize: fontSize,
+                    focusTrigger: focusTrigger,
+                    maxVisibleLines: maxVisibleLines,
+                    onSubmit: onSubmit,
+                    onBack: onBack,
+                    onTab: onTab,
+                    onCommandSubmit: onCommandSubmit,
+                    onCaretWidth: { caretWidth = $0 },
+                    onHeightChange: { height = $0 }
+                )
+                .frame(height: fieldHeight)
+                // Shown only while the editor is truly empty — committed text, a
+                // bare line break, and in-progress pinyin all hide it. (Raw
+                // `isEmpty`, not the trimmed one: a ⇧⏎-only field still shows
+                // glyphs, so the ghost must be gone.)
+                if text.isEmpty && caretWidth == 0 {
+                    placeholder()
+                        .font(.sf(fontSize))
+                        .foregroundStyle(Tokens.placeholder)
+                        .lineLimit(1)
+                        // Sit on the box's own ~2pt left inset, so the label
+                        // lands where the typed glyphs will.
+                        .padding(.leading, PromptField.textInset)
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
+                }
+            }
+            // One line at rest is 18pt but the row is pinned to the trailing
+            // control's 27pt — so a resting field centres in that slot and only
+            // a wrapped follow-up pushes the row taller.
+            .frame(height: max(27, fieldHeight))
+            // Drives the placeholder's fade during IME pre-composition: pinyin
+            // in the editor flips `caretWidth` while `text` is still empty, and
+            // without this key the label would hard-pop instead of fading.
+            .animation(.easeOut(duration: 0.16), value: caretWidth == 0)
+            .animation(.easeOut(duration: 0.16), value: text.isEmpty)
+
+            trailing()
+        }
+        .padding(.leading, 13)
+        .padding(.trailing, 6)
+        .padding(.vertical, 6)
+        .background(
+            shape.fill(focused ? Tokens.recessFillLit : Tokens.recessFill)
+                .overlay(
+                    shape.fill((tint ?? .clear).opacity(!isEmpty ? 0.045 : 0))
+                )
+        )
+        .clipShape(shape)
+        .overlay(
+            shape.strokeBorder(focused ? Tokens.recessRimLit : Tokens.recessRim,
+                               lineWidth: 0.5)
+        )
+        .animation(.smooth(duration: 0.25), value: tint)
+        .animation(.easeOut(duration: 0.2), value: focused)
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isEmpty)
+        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: fieldHeight)
+
+        if let pulse {
+            box.intentChangePulse(on: pulse, shape: shape, tint: pulseTint)
+        } else {
+            box
+        }
     }
 }
 
@@ -3909,18 +4183,37 @@ enum MarkdownParser {
     /// A `[label](url)` link standing alone on its line.
     private static let soloLink = #/^\[([^\]]+)\]\(\s*(\S+?)(?:\s+"[^"]*")?\s*\)$/#
 
+    /// A bare http(s) URL standing alone on its line.
+    private static let soloURL = #/^<?(https?://\S+?)>?$/#
+
     /// Turn one paragraph-shaped line into blocks, lifting media out of it:
     /// every `![alt](url)` becomes its own `.image` (or `.pdf` when the URL is
-    /// a PDF) below the line's remaining text, and a bare `[label](….pdf)` link
-    /// alone on the line becomes a `.pdf` preview. Anything else stays one
-    /// paragraph. Lifting is per-line only — images inside lists/quotes/tables
-    /// keep their textual form.
+    /// a PDF) below the line's remaining text, and a lone `[label](url)` link —
+    /// or a lone bare URL — pointing at an image or a PDF becomes that island
+    /// too. Anything else stays one paragraph. Lifting is per-line only — images
+    /// inside lists/quotes/tables keep their textual form.
+    ///
+    /// The link/bare-URL cases exist because models reach for a link far more
+    /// readily than for `![]()` syntax: a line whose whole content is an image
+    /// URL *is* the image, and showing it as a clickable string instead of the
+    /// picture is never what the user wanted.
     private static func paragraphOrMedia(_ line: String) -> [MarkdownBlock] {
+        // A line that is nothing but an image/PDF URL renders as the thing itself.
+        if let m = line.wholeMatch(of: soloURL) {
+            let url = String(m.1)
+            if isPDFURL(url) { return [.pdf(title: "", url: url)] }
+            if isImageURL(url) { return [.image(alt: "", url: url)] }
+        }
+
         // The cheap gate: no `](` means no reference of either kind.
         guard line.contains("](") else { return [.paragraph(text: line)] }
 
-        if let m = line.wholeMatch(of: soloLink), isPDFURL(String(m.2)) {
-            return [.pdf(title: String(m.1), url: String(m.2))]
+        if let m = line.wholeMatch(of: soloLink) {
+            let url = String(m.2)
+            if isPDFURL(url) { return [.pdf(title: String(m.1), url: url)] }
+            // A link whose target is an image file: render the image, keeping the
+            // label as its alt text so the fallback chip still reads sensibly.
+            if isImageURL(url) { return [.image(alt: String(m.1), url: url)] }
         }
 
         var text = line
@@ -3940,6 +4233,21 @@ enum MarkdownParser {
         let path = urlString.split(separator: "?", maxSplits: 1)[0]
             .split(separator: "#", maxSplits: 1)[0]
         return path.lowercased().hasSuffix(".pdf")
+    }
+
+    /// Image file types `AnswerMediaLoader` can actually decode through ImageIO.
+    /// Deliberately extension-based and conservative: SVG is absent because
+    /// ImageIO can't decode it, and an extension-less URL stays a link rather
+    /// than becoming a loading island that may never resolve to a picture.
+    private static let imageExtensions = ["png", "jpg", "jpeg", "gif", "webp",
+                                          "heic", "heif", "bmp", "tif", "tiff", "avif"]
+
+    /// Does the URL's path (query/fragment ignored) end in an image extension?
+    private static func isImageURL(_ urlString: String) -> Bool {
+        let path = urlString.split(separator: "?", maxSplits: 1)[0]
+            .split(separator: "#", maxSplits: 1)[0]
+            .lowercased()
+        return imageExtensions.contains { path.hasSuffix("." + $0) }
     }
 
     /// `1. item` / `2) item` → (number, text).
@@ -4474,19 +4782,28 @@ struct MarkdownBlocks: View {
 
     var body: some View {
         let parsed = blocks
+        // Consecutive images fold into one `ImageExpandStack` (see
+        // `markdownRenderItems`); every other block keeps its own row.
+        let items = markdownRenderItems(parsed)
         VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(parsed.enumerated()), id: \.offset) { i, block in
-                // Per-block styling lives in `MarkdownBlockRow`, shared with the
-                // streaming renderer (`StreamingMarkdown`) so a settled answer and a
-                // live one are laid out identically — they differ only in the tail
-                // fade/selection wrapping, never in how a block kind looks.
-                // `.equatable()` — see the row's `Equatable` conformance for why.
-                MarkdownBlockRow(block: block, baseFont: baseFont, color: color,
-                                 onInAppCopy: onInAppCopy,
-                                 fadeTail: streamingTail && !reduceMotion && i == parsed.count - 1,
-                                 hand: handwritten)
-                    .equatable()
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            ForEach(items) { item in
+                switch item {
+                case .gallery(_, let images):
+                    ImageExpandStack(images: images)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                case .block(let i, let block):
+                    // Per-block styling lives in `MarkdownBlockRow`, shared with the
+                    // streaming renderer (`StreamingMarkdown`) so a settled answer and a
+                    // live one are laid out identically — they differ only in the tail
+                    // fade/selection wrapping, never in how a block kind looks.
+                    // `.equatable()` — see the row's `Equatable` conformance for why.
+                    MarkdownBlockRow(block: block, baseFont: baseFont, color: color,
+                                     onInAppCopy: onInAppCopy,
+                                     fadeTail: streamingTail && !reduceMotion && i == parsed.count - 1,
+                                     hand: handwritten)
+                        .equatable()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
         }
     }
@@ -4520,28 +4837,45 @@ struct StreamingMarkdown: View {
 
     var body: some View {
         let parsed = blocks
-        // The tail is the block currently growing; the head is everything already
+        // Split on the grouped ITEMS, not the raw blocks: a growing run of images
+        // is one gallery, and the tail has to be that whole gallery — splitting on
+        // blocks would leave the newest image outside the pile it belongs to and
+        // re-lay the answer out every time one landed.
+        let items = markdownRenderItems(parsed)
+        // The tail is the item currently growing; the head is everything already
         // settled above it. An empty source yields no blocks — the caller shows
         // ThinkingDots in that case, so we just render nothing here.
-        let headCount = max(0, parsed.count - 1)
+        let headCount = max(0, items.count - 1)
         return VStack(alignment: .leading, spacing: 8) {
             if headCount > 0 {
                 // Settled blocks: render verbatim through the plain renderer so they
                 // never re-fade as later chunks arrive. Rebuilt from the same
                 // `source` prefix; cheap, and keeps inline/code handling identical.
-                ForEach(Array(parsed.prefix(headCount).enumerated()), id: \.offset) { _, block in
+                ForEach(items.prefix(headCount)) { item in
+                    switch item {
+                    case .gallery(_, let images):
+                        ImageExpandStack(images: images)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    case .block(_, let block):
+                        MarkdownBlockRow(block: block, baseFont: baseFont, color: color,
+                                         onInAppCopy: onInAppCopy, hand: handwritten)
+                            .equatable()
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+            if let tail = items.last {
+                switch tail {
+                case .gallery(_, let images):
+                    ImageExpandStack(images: images)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                case .block(_, let block):
                     MarkdownBlockRow(block: block, baseFont: baseFont, color: color,
                                      onInAppCopy: onInAppCopy, hand: handwritten)
                         .equatable()
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .modifier(TailFadeIn(token: tailToken(for: block)))
                 }
-            }
-            if let tail = parsed.last {
-                MarkdownBlockRow(block: tail, baseFont: baseFont, color: color,
-                                 onInAppCopy: onInAppCopy, hand: handwritten)
-                    .equatable()
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .modifier(TailFadeIn(token: tailToken(for: tail)))
             }
         }
     }
@@ -5415,9 +5749,13 @@ private struct MediaLoadingPlaceholder: View {
 
 /// The degraded form of a media reference whose download failed (or whose
 /// bytes weren't what the syntax claimed): a compact link-out chip, so the
-/// reference is still reachable, never silently dropped.
-private struct MediaLinkChip: View {
-    let icon: String
+/// reference is still reachable, never silently dropped. Not private: the
+/// lightbox wears the same chip for its way out to the source.
+struct MediaLinkChip: View {
+    /// The leading glyph that says what KIND of thing failed to load. Nil where
+    /// the chip is a plain way out to the source and the kind is already obvious
+    /// (the lightbox's link, under the picture itself).
+    var icon: String?
     let label: String
     var baseFont: CGFloat = 15
     var color: Color = Tokens.text1
@@ -5426,8 +5764,10 @@ private struct MediaLinkChip: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 6) {
-                Image(systemName: icon)
-                    .font(.sf(baseFont - 3, weight: .medium))
+                if let icon {
+                    Image(systemName: icon)
+                        .font(.sf(baseFont - 3, weight: .medium))
+                }
                 Text(label)
                     .font(.sf(baseFont - 1))
                     .lineLimit(1)
@@ -5461,6 +5801,10 @@ private struct AnswerImageView: View {
     /// pillarbox it inside a wider border).
     private static let heightCap: CGFloat = 360
 
+    /// Nil on a surface with no lightbox over it (a preview, settings copy) —
+    /// there the tap falls back to opening the source.
+    @Environment(\.imageLightboxHostID) private var lightboxHostID
+
     @State private var outcome: AnswerMediaLoader.Outcome?
 
     var body: some View {
@@ -5468,7 +5812,19 @@ private struct AnswerImageView: View {
             switch outcome {
             case .image(let image):
                 let ratio = image.size.width / max(image.size.height, 1)
-                Button { openAnswerMediaURL(urlString) } label: {
+                // Tapping opens the image itself (`ImageLightbox`), not the
+                // browser — same gesture a card in a gallery answers to. The
+                // source stays one chip away, inside the lightbox.
+                Button {
+                    if let hostID = lightboxHostID {
+                        ImageLightboxCenter.shared.present(
+                            .init(images: [AnswerImageRef(alt: alt, urlString: urlString)],
+                                  index: 0, host: hostID)
+                        )
+                    } else {
+                        openAnswerMediaURL(urlString)
+                    }
+                } label: {
                     Image(nsImage: image)
                         .resizable()
                         .aspectRatio(ratio, contentMode: .fit)
@@ -6262,9 +6618,10 @@ private struct AgentTrailProse: View {
 }
 
 /// The model's own reasoning, folded away behind one quiet line. Collapsed by
-/// default on purpose: while the run is live the same words are already rolling
-/// through the activity ticker, so the trail stays a record of what was DONE and
-/// the thinking is there when you go looking for it.
+/// default on purpose, and folded HERE only: raw reasoning used to roll through
+/// the activity ticker too, which put sliding half-sentences on the panel's one
+/// live line. The trail stays a record of what was DONE and the thinking is
+/// there when you go looking for it.
 private struct AgentTrailThinkingRow: View {
     let text: String
 

@@ -84,7 +84,7 @@ Notchi 能调用你的的**Codex**、**Claude Code**、**Grok** 等 CLI，支持
 
 - AI 服务：
   - 包括且不仅限于：OpenRouter、Vercel AI Gateway、OpenAI、Anthropic、Google Gemini、DeepSeek、Qwen、Kimi、GLM、MiniMax、MiMo，或你自己的 OpenAI 兼容端点
-  - 你还可以通过本地安装的、已登录的 Codex、Claude Code、Grok 或 Command Code CLI
+  - 你还可以通过本地安装的、已登录的 Codex、Claude Code、Grok 或 PI CLI
 - 网络搜索
   - 包括但不仅限于：Exa、Keenable 或 AnySearch
 
@@ -105,7 +105,7 @@ Notchi 采用 macOS Liquid Glass 绘制 —— 包括 macOS 26原生风格的边
 
 **我需要账号或 API 密钥吗？**
 
-Notchi 本身没有账号。对于托管的 AI，请连接一个服务商并提供其 API 密钥或受支持的登录流程。或者，通过本地已登录的 CLI 使用 Codex、Claude Code、Grok 或 Command Code。笔记和提醒不需要连接服务商。
+Notchi 本身没有账号。对于托管的 AI，请连接一个服务商并提供其 API 密钥或受支持的登录流程。或者，通过本地已登录的 CLI 使用 Codex、Claude Code、Grok 或 PI。笔记和提醒不需要连接服务商。
 
 **我能使用本地模型吗？**
 
@@ -115,7 +115,7 @@ Notchi 本身没有账号。对于托管的 AI，请连接一个服务商并提�
 
 可以，使用具备视觉能力的提问模型。
 
-**Notchi 能运行 Codex、Claude Code、Grok 或 Command Code 吗？**
+**Notchi 能运行 Codex、Claude Code、Grok 或 PI 吗？**
 
 可以。代理模式在你选择的项目文件夹内，运行你已经安装并登录的官方 CLI。
 

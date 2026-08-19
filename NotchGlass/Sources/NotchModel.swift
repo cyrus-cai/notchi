@@ -68,8 +68,8 @@ final class NotchModel: ObservableObject {
         case result    // showing an answer
     }
 
-    /// Where pressing Enter on the current line will *send* it — decided live by the
-    /// intent classifier as you type. This is a routing destination, NOT a rendered
+    /// Where pressing Enter on the current line will *send* it — whatever the user
+    /// last pinned, and nothing else. This is a routing destination, NOT a rendered
     /// surface: there's only ever one input on screen ("Type anything…"). It just
     /// determines whether Enter asks the AI or files the line somewhere.
     ///   · `chat`     — ask the AI a question (idle/load/result)
@@ -742,24 +742,21 @@ final class NotchModel: ObservableObject {
     @Published var text = "" {      // current input (idle prompt or follow-up)
         didSet {
             let empty = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            // The punctuation-triggered Note pin lives exactly as long as the
-            // hand-typed first glyph that created it.
+            // Deleting the hand-typed sigil retires its little explanation beside
+            // the caret — but NOT the mode it pinned. The pin is sticky now (see
+            // `manualPanelOverride`); switching back is Tab's job, or the pill's.
             if let trigger = typedNoteTriggerPrefix,
                !text.hasPrefix(trigger) {
                 typedNoteTriggerPrefix = nil
                 typedNoteModeActive = false
-                manualPanelOverride = empty ? nil : .chat
             }
-            // A Tab override is scoped to the line it was pressed on. The field
-            // emptying — submit cleared it, or the user deleted everything — ends
-            // that line, so the next one starts back on auto-classification.
-            // A `/`-pinned prompt shortcut is scoped the same way.
-            if manualPanelOverride != nil, empty {
-                manualPanelOverride = nil
-            }
+            // A `/`-pinned prompt shortcut is still scoped to its line — it runs
+            // its input through an AI instruction, so it parks the pinned mode
+            // while it's up. Letting it go hands that mode back.
             if promptShortcutMode != nil,
                empty {
                 promptShortcutMode = nil
+                manualPanelOverride = Self.storedSubmitMode
             }
             // The `/` menu's highlight is scoped to the menu being open: every
             // edit that shuts it (a space, a submit, a delete-all) parks the
@@ -775,22 +772,17 @@ final class NotchModel: ObservableObject {
             // from the newest item. `isRecallingText` shields the recall's own
             // fill from tripping this (it writes `text` too).
             if !isRecallingText { historyRecallIndex = nil }
-            // The recent list only renders over an empty prompt, so text arriving
-            // — typed OR an ↑ recall fill — folds it visually. Close it for REAL
-            // (state, not just the render gate): a hidden-but-true `showHistory`
-            // with a stale highlight would otherwise steal Enter from the visible
-            // text (`historyConfirmHighlighted`) and pop the list back open,
-            // highlight intact, the moment the box empties again.
+            // Text arriving no longer folds the recent list: the Recent chevron
+            // stays on the bucket row while you type (see `NotchBody.bucketRow` /
+            // `promptHidesRecent`), so the list is that control's state alone —
+            // closing it out from under a still-lit chevron was the incoherent half.
             //
-            // The `/` command word is the one exception: it's a menu query, not a
-            // line being written, and the card floats in its OWN window over the
-            // panel — so folding the panel underneath it just makes the surface
-            // jump out from under the menu the user is reading. The menu owns
-            // ↑/↓/Enter while it's up (see `slashMenuStep` / `confirmSlashCommand`),
-            // so an open list behind it can't steal those keys; and the moment the
-            // query stops naming a mode ("/usr/local, …") this fires and folds.
-            if showHistory, hasText, !slashMenuOpen {
-                showHistory = false
+            // The keyboard highlight DOES go, every keystroke. With text in the box
+            // the arrows belong to the caret (`PromptField` routes ↑/↓ to the field
+            // once it isn't empty), so a highlight left behind would be un-walkable
+            // — and a stale one must never steal Enter from the visible text.
+            // (`historyConfirmHighlighted` also guards on `!hasText` as a backstop.)
+            if hasText, highlightedHistoryIndex != nil {
                 highlightedHistoryIndex = nil
             }
             // Feed the "actively typing" signal that holds off hover-leave folding
@@ -798,7 +790,6 @@ final class NotchModel: ObservableObject {
             // submit/clear set "" programmatically and mustn't read as typing.
             if !isRecallingText, !text.isEmpty { noteUserTyping() }
             scheduleDueDetection()
-            scheduleClassification()
         }
     }
 
@@ -1612,12 +1603,53 @@ final class NotchModel: ObservableObject {
         }
     }
 
-    /// Destination forced by pressing Tab — the manual escape hatch for when the
-    /// classifier reads the line wrong. `nil` means no override: route by the
-    /// classifier as usual. Wins over `suggestedPanel` while set, and is scoped to
-    /// the current line: cleared the moment the field empties (submit, delete-all,
-    /// close), so the next line is auto-classified again. See `toggleSubmitPanel`.
-    @Published var manualPanelOverride: Panel? = nil
+    /// The destination the user has pinned by hand — a typed `:`, Tab, or a `/`
+    /// command. `nil` means Ask, the resting default; nothing reads the text to
+    /// change that.
+    ///
+    /// It STAYS pinned. It used to be scoped to one line — cleared the moment the
+    /// field emptied — so every capture bounced the pill back to Ask the instant
+    /// it was filed, and a run of five notes meant re-pinning five times. A mode
+    /// the user set by hand is a setting, not a gesture: it survives the submit,
+    /// the panel closing, and the app quitting (`storedSubmitMode`), and only the
+    /// same three doors that set it can change it back.
+    @Published var manualPanelOverride: Panel? = NotchModel.startingSubmitMode
+
+    /// The pin this launch opens with. Normally just what was stored — except on
+    /// the FIRST launch after the Note/Remind → Capture merge, which resets it to
+    /// Ask so the new single Capture door is read from the resting state rather
+    /// than from a leftover pinned Note/Remind. Runs once.
+    static var startingSubmitMode: Panel? {
+        let defaults = UserDefaults.standard
+        if !defaults.bool(forKey: captureMergeResetKey) {
+            defaults.set(true, forKey: captureMergeResetKey)
+            storedSubmitMode = nil
+        }
+        return storedSubmitMode
+    }
+    private static let captureMergeResetKey = "captureMergeModeReset"
+
+    /// The pinned destination as it survives a relaunch. Written only by the
+    /// explicit doors (Tab, `/`, a typed `:`) — never by the transient nils the
+    /// agent compose and image attach set on the live property, which are about
+    /// this line and shouldn't rewrite what the user chose.
+    static var storedSubmitMode: Panel? {
+        get { (UserDefaults.standard.string(forKey: submitModeKey)).flatMap(Panel.init(rawValue:)) }
+        set {
+            let defaults = UserDefaults.standard
+            if let newValue { defaults.set(newValue.rawValue, forKey: submitModeKey) }
+            else { defaults.removeObject(forKey: submitModeKey) }
+        }
+    }
+    private static let submitModeKey = "pinnedSubmitMode"
+
+    /// Pin a destination through one of the explicit doors: set it live AND
+    /// remember it. The one funnel, so a door can't be added later that changes
+    /// the mode without making it stick.
+    func pinSubmitPanel(_ panel: Panel?) {
+        manualPanelOverride = panel
+        Self.storedSubmitMode = panel
+    }
 
     /// True only for Note mode entered by typing its punctuation prefix. It
     /// drives the temporary explanation beside the caret and clears when that
@@ -1628,99 +1660,75 @@ final class NotchModel: ObservableObject {
     func activateTypedNoteMode(trigger: Character) {
         setAgentBucket(false)
         promptShortcutMode = nil
-        typedNoteTriggerPrefix = String(trigger)
-        typedNoteModeActive = true
-        manualPanelOverride = .note
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+            typedNoteTriggerPrefix = String(trigger)
+            typedNoteModeActive = true
+            pinSubmitPanel(.note)
+        }
     }
-
-    /// Confidence the classifier must clear before we'll act on it — both to route
-    /// Enter to the other surface AND to label the send button with that destination.
-    /// One shared floor on purpose: we never switch surfaces *more* eagerly than the
-    /// button is willing to say we will. Below it, the read is treated as unsure and
-    /// the current surface (→ ask, by the resting default) handles the line. Tuned
-    /// against the embedding engine's calibration (confidence = |2p−1|): on held-out
-    /// data 0.4 keeps ~3% confident-and-wrong while still routing ~70% of clear
-    /// lines; everything below falls to the ask default (or the LLM second opinion
-    /// on Apple Intelligence machines — see `scheduleClassification`).
-    static let intentActionFloor = 0.4
-
-    /// The engine's latest read of `text` — published asynchronously by
-    /// `scheduleClassification()` after a short debounce, since classification runs
-    /// off the main actor (embedding lookup ~10ms on the engine's actor). `.empty`
-    /// while the field is empty or a read is still in flight, which resolves to the
-    /// ask default everywhere it's consumed.
-    @Published private(set) var liveIntent: IntentEngine.Reading = .empty
 
     /// The first *future* moment the current text names (NSDataDetector, sub-ms,
-    /// recomputed synchronously in `text.didSet`). This is what splits the note
-    /// branch: the engine only reads ask-vs-note semantically; a note that names a
-    /// future time is a **reminder** — a structural fact, not a semantic one. The
-    /// same date routes the hint and becomes the due date `submitReminder()` files,
-    /// so the "Remind" label and the alarm can never disagree.
+    /// recomputed off `text.didSet`). This is what splits a capture between Notes
+    /// and Reminders — a structural fact, not a guess, and the only thing left
+    /// that reads the line at all. The same date becomes the due date
+    /// `submitReminder()` files, so the split and the alarm can never disagree.
+    /// It changes nothing on screen: Capture says Capture either way.
     @Published private(set) var detectedDue: Date? = nil
 
-    /// In-flight classification for the current text — superseded (cancelled) by
-    /// every keystroke, so only the read of what's actually in the box lands.
-    private var classifyTask: Task<Void, Never>?
-
-    /// Debounced re-classification of `text`, called from its `didSet`. Two stages:
-    ///   1. ~140ms after the last keystroke: embedding classify (fast, every Mac).
-    ///   2. If that read is *unsure* (< 0.5): wait for a real pause (~350ms more),
-    ///      then ask the on-device LLM for a second opinion — only exists on Apple
-    ///      Intelligence machines; `refine` returns nil everywhere else.
-    /// Each publish re-checks that `text` is still the snapshot it classified, so a
-    /// stale read can never label (or route) a line it wasn't computed from.
-    private func scheduleClassification() {
-        classifyTask?.cancel()
-        let snapshot = text
-        guard !snapshot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            liveIntent = .empty
-            return
-        }
-        classifyTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 140_000_000)
-            guard !Task.isCancelled, let self, self.text == snapshot else { return }
-            let reading = await IntentEngine.shared.classify(snapshot)
-            guard !Task.isCancelled, self.text == snapshot else { return }
-            self.liveIntent = reading
-
-            guard reading.confidence < 0.5 else { return }
-            try? await Task.sleep(nanoseconds: 350_000_000)
-            guard !Task.isCancelled, self.text == snapshot else { return }
-            guard let refined = await IntentEngine.shared.refine(snapshot),
-                  !Task.isCancelled, self.text == snapshot else { return }
-            self.liveIntent = refined
-        }
-    }
-
-    /// Which destination the text *confidently* wants, or `nil` when there's no
-    /// clear, confident lean (ambiguous, weak, or empty). Routing and the inline hint
-    /// both read this, so they can never disagree — if it's not sure enough to name a
-    /// destination, it's not sure enough to route there either. There is only ever one
-    /// rendered surface (the chat input); this just decides where Enter *sends* the
-    /// line, not what the panel looks like. The "ambiguous → ask" default is applied
-    /// at submit time by falling back to `.chat`, not here.
-    var suggestedPanel: Panel? {
-        guard liveIntent.confidence >= Self.intentActionFloor else { return nil }
-        switch liveIntent.intent {
-        case .ask:       return .chat
-        // Within the note branch, naming a future time upgrades the line to a
-        // reminder (a date on an *ask* changes nothing — "明天天气怎么样" still asks).
-        case .note:      return detectedDue != nil ? .reminder : .note
-        case .ambiguous: return nil
-        }
-    }
-
-    /// Where pressing Enter on the *current* text will actually land. Resolution
-    /// order: once a conversation is on screen every line is a follow-up question, so
-    /// it's always Ask — intent routing (Note/Remind) only applies to a *fresh* prompt
-    /// (XII-119). On a fresh prompt: a Tab override (the user said so explicitly) beats
-    /// the classifier's confident read, which beats `.chat` (the resting "ambiguous →
-    /// ask" default). This is exactly the resolution `submitCurrent()` uses, so the
-    /// inline hint can show its destination and never lie about it.
+    /// Where pressing Enter on the *current* text will actually land. Nothing
+    /// here reads the text: the destination is Ask until the USER says otherwise
+    /// (a typed `:`, Tab, or a `/` command), and it stays put until they say so
+    /// again. The classifier used to get a vote here and could flip the
+    /// destination out from under a half-typed line; a wrong guess silently filed
+    /// a question into Notes, and a right one still made the word beside the
+    /// caret jitter while you typed. Guessing is not worth either.
+    ///
+    /// The engine itself is still around — the ⌘C clipboard hint runs on it
+    /// (`senseClassify`), where an unsure read costs nothing because the user has
+    /// to confirm the hint anyway.
     var effectiveSubmitPanel: Panel {
         guard turns.isEmpty else { return .chat }
-        return manualPanelOverride ?? suggestedPanel ?? .chat
+        let resolved = manualPanelOverride ?? .chat
+        // Capture names the BUCKET, not which of its two leaves the line lands
+        // in: a captured line that names a time is filed in Reminders, everything
+        // else in Notes. This is invisible — nothing in the UI switches on it —
+        // it only picks which service `submitCurrent` hands the line to.
+        // `/remind` is the one thing that pins a leaf, so an explicit `.reminder`
+        // override (a dateless reminder) is left alone here.
+        if resolved == .note, detectedDue != nil { return .reminder }
+        return resolved
+    }
+
+    /// True while a typed-`:` capture line is still nothing but its trigger
+    /// glyph — the one moment the little explanation beside the caret is for.
+    /// The instant real text lands, that slot belongs to `captureLeaf`, which
+    /// says the thing the explanation can't: where *this* line is going.
+    var typedNoteHintOnly: Bool {
+        guard typedNoteModeActive, let trigger = typedNoteTriggerPrefix else { return false }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines) == trigger
+    }
+
+    /// Which leaf of Capture the line in the box is heading for — `.note` or
+    /// `.reminder` — or nil when the panel isn't capturing, or has nothing to
+    /// capture yet. The split is `effectiveSubmitPanel`'s own, driven by
+    /// `detectedDue` and recomputed off every keystroke; this only surfaces it.
+    /// Capture used to make that call in silence, so a line naming a time filed
+    /// itself into Reminders with nothing on screen having said so.
+    var captureLeaf: Panel? {
+        guard turns.isEmpty, !submitGoesToAgent, hasText, !typedNoteHintOnly else { return nil }
+        switch effectiveSubmitPanel {
+        case .chat:              return nil
+        case .note, .reminder:   return effectiveSubmitPanel
+        }
+    }
+
+    /// The word for `captureLeaf`, in the app's own destination vocabulary.
+    var captureLeafLabel: String? {
+        switch captureLeaf {
+        case .note:     return L("hint.note")
+        case .reminder: return L("hint.remind")
+        default:        return nil
+        }
     }
 
     /// Tab in the idle prompt: step where Enter will send the current line
@@ -1746,12 +1754,19 @@ final class NotchModel: ObservableObject {
         // chips, typed task) as a side effect of a key people mash. Leaving the
         // bucket is Shift-Tab's job (`toggleAgentBucket`) or the pill's Ask half.
         guard !agentComposeActive else { return }
-        typedNoteTriggerPrefix = nil
-        typedNoteModeActive = false
-        switch effectiveSubmitPanel {
-        case .chat:     manualPanelOverride = .note
-        case .note:     manualPanelOverride = .reminder
-        case .reminder: manualPanelOverride = .chat
+        // One spring for the whole switch. The four call sites (Tab in the panel,
+        // Tab in the detached window, and both ⌘-cycle paths) all called this
+        // bare, so the pill's word, the pill's WIDTH, and the model chip that
+        // only Ask carries each snapped to their new state in a single frame.
+        // Animating here rather than at the call sites means they can't drift
+        // apart again.
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+            typedNoteTriggerPrefix = nil
+            typedNoteModeActive = false
+            switch effectiveSubmitPanel {
+            case .chat:              pinSubmitPanel(.note)
+            case .note, .reminder:   pinSubmitPanel(nil)
+            }
         }
     }
 
@@ -1774,8 +1789,12 @@ final class NotchModel: ObservableObject {
             enterAgentCompose()
         } else {
             guard agentComposeActive else { return }
+            // Restore the pinned destination BEFORE Agent switches off. Otherwise
+            // `effectiveSubmitPanel` renders one transient Ask frame (the live
+            // override is nil while Agent is armed) and only then becomes Capture,
+            // making the destination half visibly jump on the way back.
+            manualPanelOverride = Self.storedSubmitMode
             exitAgentCompose()
-            manualPanelOverride = nil
         }
     }
 
@@ -1858,7 +1877,7 @@ final class NotchModel: ObservableObject {
     /// reach between them — this is the one surface that names all four at once,
     /// for the people who'd rather type the destination than learn two keys.
     enum SlashCommand: String, CaseIterable, Identifiable {
-        case ask, note, remind, agent
+        case ask, capture, remind, agent
 
         var id: String { rawValue }
 
@@ -1874,7 +1893,7 @@ final class NotchModel: ObservableObject {
             let base: [String]
             switch self {
             case .ask:    base = ["ask", "chat"]
-            case .note:   base = ["note", "notes", "memo"]
+            case .capture: base = ["capture", "note", "notes", "memo"]
             case .remind: base = ["remind", "reminder", "todo"]
             case .agent:  base = ["agent", "code", "task"]
             }
@@ -1979,15 +1998,15 @@ final class NotchModel: ObservableObject {
             case .ask:
                 setAgentBucket(false)
                 promptShortcutMode = nil
-                manualPanelOverride = nil
-            case .note:
+                pinSubmitPanel(nil)
+            case .capture:
                 setAgentBucket(false)
                 promptShortcutMode = nil
-                manualPanelOverride = .note
+                pinSubmitPanel(.note)
             case .remind:
                 setAgentBucket(false)
                 promptShortcutMode = nil
-                manualPanelOverride = .reminder
+                pinSubmitPanel(.reminder)
             case .agent:
                 promptShortcutMode = nil
                 manualPanelOverride = nil
@@ -2038,9 +2057,13 @@ final class NotchModel: ObservableObject {
         // owns the hint: Enter sends the line to the agent CLI.
         if submitGoesToAgent { return L("hint.agent") }
         switch effectiveSubmitPanel {
-        case .chat:     return L("hint.ask")
-        case .note:     return L("hint.note")
-        case .reminder: return L("hint.remind")
+        case .chat:              return L("hint.ask")
+        // Note and Remind are ONE destination wearing two faces: the word is the
+        // same "Capture" for both, and which leaf it lands in rides the dimmer
+        // suffix (`submitLabelSuffix`). Two peer words with two marks read as two
+        // modes to choose between — which is the choice the date detector already
+        // makes for you.
+        case .note, .reminder:   return L("hint.capture")
         }
     }
 
@@ -2525,6 +2548,207 @@ final class NotchModel: ObservableObject {
         }
         return "Settings updated after confirmation: "
             + effective.map(\.summary).joined(separator: "; ") + "."
+    }
+
+    // MARK: - Notes & reminders (create_note / create_reminder)
+
+    /// At most one capture can own a round's confirmation card. The harness runs a
+    /// turn's tool calls concurrently, so two `create_note` calls in one turn would
+    /// otherwise race two cards onto the same answer; the loser is told to file
+    /// them one at a time and simply calls again next round.
+    private var captureConfirmationAnswers: Set<UUID> = []
+
+    /// Entry point injected into `CreateNoteTool` / `CreateReminderTool` for this
+    /// answer round. Nothing is ever written on the model's say-so alone: the same
+    /// in-answer card `ask_user` and `manage_app_settings` use shows the exact text
+    /// (and, for a reminder, the exact due time) and only Confirm commits. The write
+    /// itself then goes through the same services — and the same Recent row — as a
+    /// hand-typed capture, so a note filed from chat is indistinguishable from one
+    /// jotted into the notch.
+    func handleCaptureRequest(answerID: UUID, request: CaptureRequest) async throws -> String {
+        let line = request.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !line.isEmpty else { return "Error: there was no text to save." }
+        guard line.count <= 4000 else {
+            return "Error: that is too long to file. Keep it under 4000 characters."
+        }
+
+        // Resolve the due date BEFORE the card, so what the user approves is the
+        // moment that will actually be filed — the card and the alarm can never
+        // disagree. An explicit `due` wins; without one we fall back to the same
+        // parsers a typed line goes through, so "每周一交周报" still repeats.
+        var due: Date?
+        if request.kind == .reminder {
+            if let raw = request.due {
+                guard let parsed = Self.parseCaptureDue(raw) else {
+                    return "Error: could not read due=\"\(raw)\". Give the user's local time as YYYY-MM-DDTHH:MM."
+                }
+                guard parsed > Date() else {
+                    return "Error: that due time is already past. Call current_datetime and pass a future local time."
+                }
+                due = parsed
+            } else {
+                due = RemindersService.futureDate(in: line)
+                    ?? RemindersService.recurrenceDate(in: line)
+            }
+        }
+
+        guard captureConfirmationAnswers.insert(answerID).inserted else {
+            return "Error: another note or reminder is already awaiting confirmation in this answer. File them one at a time."
+        }
+        defer { captureConfirmationAnswers.remove(answerID) }
+
+        let copy = captureConfirmationCopy(kind: request.kind, due: due)
+        let choice = try await awaitUserChoice(
+            answerID: answerID,
+            question: copy.question + "\n" + line,
+            options: [copy.cancel, copy.confirm],
+            inlineOptions: true)
+        guard choice == "The user chose: \"\(copy.confirm)\"" else {
+            return "Cancelled. Nothing was saved."
+        }
+
+        switch request.kind {
+        case .note:
+            return await commitNoteCapture(line)
+        case .reminder:
+            return await commitReminderCapture(line, due: due)
+        }
+    }
+
+    /// The confirmed note write, on whichever destination the user picked — Apple
+    /// Notes or their Markdown folder. Same services, same Recent row as `submitNote`.
+    private func commitNoteCapture(_ line: String) async -> String {
+        if NoteDestination.current == .markdownFolder {
+            let result: Result<String?, FileNotesError> = await withCheckedContinuation { cont in
+                FileNotesService.writeNote(line) { cont.resume(returning: $0) }
+            }
+            switch result {
+            case .success(let path):
+                persistCapture(line, source: .note, link: path)
+                return "Saved. The note was appended to the user's Markdown notes folder."
+            case .failure(let err):
+                return "Error: \(err.errorDescription ?? "couldn't write the note file.")"
+            }
+        }
+        let result: Result<String?, NotesError> = await withCheckedContinuation { cont in
+            NotesService.writeNote(line) { cont.resume(returning: $0) }
+        }
+        switch result {
+        case .success(let noteID):
+            persistCapture(line, source: .note, link: noteID)
+            return "Saved. The note is now in the user's Apple Notes."
+        case .failure(let err):
+            return "Error: \(err.errorDescription ?? "couldn't save to Apple Notes.")"
+        }
+    }
+
+    /// The confirmed reminder write. A `nil` due files a dateless reminder — it
+    /// shows in the list without ringing, which is honest and better than refusing.
+    private func commitReminderCapture(_ line: String, due: Date?) async -> String {
+        let result: Result<String?, RemindersError> = await withCheckedContinuation { cont in
+            RemindersService.createReminder(line, due: due) { cont.resume(returning: $0) }
+        }
+        switch result {
+        case .success(let link):
+            persistCapture(line, source: .reminder, link: link)
+            guard let due else {
+                return "Saved. The reminder is in the user's Reminders app, with no alarm time."
+            }
+            return "Saved. The reminder is in the user's Reminders app, due \(Self.captureDueDescription(due))."
+        case .failure(let err):
+            return "Error: \(err.errorDescription ?? "couldn't create the reminder.")"
+        }
+    }
+
+    /// Parse the `due` the model wrote. Local wall-clock forms first (`2026-08-20T15:00`,
+    /// `2026-08-20 15:00`, a bare day) — that is what the tool asks for and what a
+    /// user means by "3pm" — then a full ISO-8601 stamp for models that insist on
+    /// sending an offset. A bare day anchors to 9am, matching `recurrenceDate`.
+    private static func parseCaptureDue(_ raw: String) -> Date? {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+
+        let local = DateFormatter()
+        local.locale = Foundation.Locale(identifier: "en_US_POSIX")
+        local.timeZone = TimeZone.current
+        for format in ["yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd'T'HH:mm",
+                       "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd HH:mm"] {
+            local.dateFormat = format
+            if let date = local.date(from: text) { return date }
+        }
+        local.dateFormat = "yyyy-MM-dd"
+        if let day = local.date(from: text) {
+            return Calendar.current.date(bySettingHour: 9, minute: 0, second: 0, of: day) ?? day
+        }
+
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = iso.date(from: text) { return date }
+        iso.formatOptions = [.withInternetDateTime]
+        return iso.date(from: text)
+    }
+
+    /// The due time as the tool result states it back to the model — the user's
+    /// locale and timezone, so a follow-up sentence quotes the same moment the
+    /// card showed.
+    private static func captureDueDescription(_ due: Date) -> String {
+        let fmt = DateFormatter()
+        fmt.dateStyle = .medium
+        fmt.timeStyle = .short
+        fmt.locale = localeForInterfaceLanguage()
+        return fmt.string(from: due)
+    }
+
+    /// The interface language as a `Locale`, for the date strings this file shows
+    /// the user (and states back to the model).
+    private static func localeForInterfaceLanguage() -> Foundation.Locale {
+        switch Localization.shared.language.resolved {
+        case .en:     return Foundation.Locale(identifier: "en_US")
+        case .zhHans: return Foundation.Locale(identifier: "zh_Hans")
+        case .zhHant: return Foundation.Locale(identifier: "zh_Hant")
+        case .ja:     return Foundation.Locale(identifier: "ja_JP")
+        case .ko:     return Foundation.Locale(identifier: "ko_KR")
+        case .fr:     return Foundation.Locale(identifier: "fr_FR")
+        case .es:     return Foundation.Locale(identifier: "es_ES")
+        }
+    }
+
+    /// Card copy for a capture confirmation, in the interface language. A reminder
+    /// with a resolved time names it in the question, so the user approves the
+    /// alarm and not just the words.
+    private func captureConfirmationCopy(kind: CaptureRequest.Kind,
+                                         due: Date?) -> (question: String, confirm: String, cancel: String) {
+        let when = due.map { Self.captureDueDescription($0) }
+        switch Localization.shared.language.resolved {
+        case .zhHans:
+            let q = kind == .note ? "保存这条备忘录？"
+                : (when.map { "创建提醒，\($0) 提醒你？" } ?? "创建这条提醒？")
+            return (q, "保存", "取消")
+        case .zhHant:
+            let q = kind == .note ? "儲存這則備忘錄？"
+                : (when.map { "建立提醒，\($0) 提醒你？" } ?? "建立這則提醒？")
+            return (q, "儲存", "取消")
+        case .ja:
+            let q = kind == .note ? "このメモを保存しますか？"
+                : (when.map { "\($0) にリマインドしますか？" } ?? "このリマインダーを作成しますか？")
+            return (q, "保存", "キャンセル")
+        case .ko:
+            let q = kind == .note ? "이 메모를 저장할까요?"
+                : (when.map { "\($0)에 알릴까요?" } ?? "이 미리 알림을 만들까요?")
+            return (q, "저장", "취소")
+        case .fr:
+            let q = kind == .note ? "Enregistrer cette note ?"
+                : (when.map { "Créer un rappel pour le \($0) ?" } ?? "Créer ce rappel ?")
+            return (q, "Enregistrer", "Annuler")
+        case .es:
+            let q = kind == .note ? "¿Guardar esta nota?"
+                : (when.map { "¿Crear un recordatorio para el \($0)?" } ?? "¿Crear este recordatorio?")
+            return (q, "Guardar", "Cancelar")
+        case .en:
+            let q = kind == .note ? "Save this note?"
+                : (when.map { "Create a reminder for \($0)?" } ?? "Create this reminder?")
+            return (q, "Save", "Cancel")
+        }
     }
 
     /// Route canonical setting ids onto the category that owns their UI control.
@@ -3178,7 +3402,6 @@ final class NotchModel: ObservableObject {
         case "claudecode", "claude_code": return .claudeCode
         case "grokcode", "grok_code": return .grokCode
         case "pi", "picode", "pi_code": return .piCode
-        case "commandcode", "command_code": return .commandCode
         case "anthropic", "claude": return .anthropic
         case "gemini", "google": return .gemini
         case "deepseek", "deep_seek": return .deepseek
@@ -4078,11 +4301,11 @@ final class NotchModel: ObservableObject {
     }
     private static let customInstructionsKey = "customInstructions"
 
-    /// Background sensing must earn its interruption: the in-panel chip fires at
-    /// `intentActionFloor` (the user is already looking at the panel), but a hint
-    /// that lights up the closed notch on every copy needs a stronger read. Below
-    /// this the background default is *nothing* — the opposite of the input box,
-    /// whose default is Ask.
+    /// Background sensing must earn its interruption: it is now the only place
+    /// the engine gets a say at all, and a hint that lights up the closed notch on
+    /// every copy needs a strong read. Below this the background default is
+    /// *nothing* — and even above it the hint only offers; the user still presses
+    /// ⌘C again to file. Nothing is ever routed on a guess.
     static let senseActionFloor = 0.55
 
     /// How long a hint stays up with no response before it fades on its own.
@@ -5142,7 +5365,7 @@ final class NotchModel: ObservableObject {
         // Same "not yet" caution one level up: `agentAvailable` is false during the
         // probe window too, and closing the bucket there would drop the user out of
         // a mode they're still in.
-        guard AgentEngine.allCases.allSatisfy(\.isAvailabilityResolved) else { return }
+        guard AgentEngine.offered.allSatisfy(\.isAvailabilityResolved) else { return }
         guard agentAvailable else {
             agentComposeActive = false
             return
@@ -6200,7 +6423,10 @@ final class NotchModel: ObservableObject {
                 //    and reuses this round's question card as its mandatory write
                 //    confirmation gate;
                 //  · `search_history` — reads the archive off `history`, which is
-                //    main-actor state on this object.
+                //    main-actor state on this object;
+                //  · `create_note` / `create_reminder` — the second write surface,
+                //    gated on the same in-answer confirmation card and filing their
+                //    Recent row through the model that owns `history`.
                 var agentTools = ToolRegistry.standard(for: runProvider).tools
                 agentTools.append(ManageAppSettingsTool { [weak self] request in
                     guard let self else { throw CancellationError() }
@@ -6212,6 +6438,16 @@ final class NotchModel: ObservableObject {
                     return try await self.awaitUserChoice(answerID: answerID,
                                                           question: question,
                                                           options: options)
+                })
+                agentTools.append(CreateNoteTool { [weak self] request in
+                    guard let self else { throw CancellationError() }
+                    return try await self.handleCaptureRequest(answerID: answerID,
+                                                               request: request)
+                })
+                agentTools.append(CreateReminderTool { [weak self] request in
+                    guard let self else { throw CancellationError() }
+                    return try await self.handleCaptureRequest(answerID: answerID,
+                                                               request: request)
                 })
                 agentTools.append(SearchHistoryTool { [weak self] query in
                     // A round whose model went away has no archive to read; an empty

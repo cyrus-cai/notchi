@@ -52,8 +52,11 @@ enum APIKeyStore {
     static var selectedProvider: Provider {
         get {
             let raw = UserDefaults.standard.string(forKey: selectedProviderKey) ?? ""
-            if let chosen = Provider(rawValue: raw) { return chosen }
-            if let configured = Provider.allCases.first(where: { read($0) != nil }) {
+            // A pick saved before Command Code was retired still decodes — drop it
+            // here so it resolves like "never picked one" instead of selecting a
+            // backend that can no longer answer (see `CommandCodeCLIService.isRetired`).
+            if let chosen = Provider(rawValue: raw), chosen != .commandCode { return chosen }
+            if let configured = Provider.offered.first(where: { read($0) != nil }) {
                 return configured
             }
             return .openrouter

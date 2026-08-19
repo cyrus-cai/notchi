@@ -224,6 +224,12 @@ no markdown headers.
 When you mention a link, write it as a Markdown inline link — [visible text](url) \
 — never a bare URL, so it renders as a clickable link rather than plain text.
 
+When an image is what the user asked to see — a photo, chart, diagram, logo, \
+map, or screenshot — embed it as Markdown image syntax, ![alt](direct image url), \
+so it renders inline in the answer. Use the direct file URL (ending in .png, .jpg, \
+.webp, …), not the page it sits on, and never fall back to a plain link when you \
+have a real image URL.
+
 Speed is part of this product: you are a quick-launch assistant and every tool \
 call costs the user an extra round-trip. Default to answering directly, with NO \
 tool call, whenever the answer is stable knowledge: translations, rewriting or \
@@ -260,6 +266,13 @@ have I recorded", "what did I ask you yesterday", "summarize my week", "did I \
 ever note anything about X" → search_history. It reads their own questions, \
 notes, reminders and agent tasks, with timestamps. The current conversation is \
 already in front of you, so only reach for it to see beyond this thread.
+- Saving something for the user — "note this", "记一下", "remember that…" \
+→ create_note; anything that names a moment in time ("remind me tomorrow at \
+3", "每周一交周报") → create_reminder with an absolute local `due`. \
+Decide on your own when a request is a capture, and file the user's full final \
+text. Both tools present their own single Confirm/Cancel card before writing, so \
+never also call ask_user to confirm, and never say it was saved until the tool \
+result says so.
 
 You don't need to spell out your source every time; cite it only when it \
 matters — when the claim is contested, surprising, or the user would want to \
@@ -437,6 +450,13 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
 
     var id: String { rawValue }
 
+    /// The providers the app actually OFFERS — every case except the retired
+    /// `.commandCode` (see `CommandCodeCLIService.isRetired`). Every list the user
+    /// sees walks this, not `allCases`: the case itself has to stay so a pick saved
+    /// before the retirement still decodes and can repoint itself, but it must
+    /// never appear in a menu again.
+    static let offered: [Provider] = allCases.filter { $0 != .commandCode }
+
     /// The single source of truth for this provider's configuration. Everything
     /// that's pure per-vendor data is defined here, one self-contained block per
     /// provider — read the block and you know the whole provider.
@@ -558,7 +578,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
             // signed into. The `signupURL` points at the project — there's no key to
             // create; sign-in is `/login` inside pi's own TUI.
             return ProviderSpec(
-                displayName: "pi",
+                displayName: "PI",
                 endpoint: "https://pi.dev/unused",
                 models: [PiCLIService.defaultSentinel],
                 signupHost: "github.com",
@@ -2600,6 +2620,14 @@ enum ModelRatings {
     /// keeps its real vendor and never wears the host's logo. Gateways opt out
     /// entirely (`vendorName == nil`) — their ids already carry the vendor.
     static func vendor(for id: String, provider: Provider) -> String {
+        // pi's ids are `<pi-provider>/<model>`, and the leading segment is routing,
+        // not a brand — read plainly, `commandcode/deepseek/deepseek-v4-flash` would
+        // capitalize into a "Commandcode" monogram. `PiCLIService.vendor(forID:)`
+        // drops the slug and asks the model half, which names the real lab. The bare
+        // sentinel names no model at all, so it wears PI's own mark.
+        if provider == .piCode {
+            return id == PiCLIService.defaultSentinel ? "PI" : PiCLIService.vendor(forID: id)
+        }
         let v = vendor(for: id)
         guard let own = provider.vendorName, !knownVendors.contains(v) else { return v }
         return own

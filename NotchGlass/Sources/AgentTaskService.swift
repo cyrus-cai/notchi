@@ -17,7 +17,7 @@ enum AgentEngine: String, CaseIterable {
         case .claude: return "Claude"
         case .grok:   return "Grok"
         case .commandCode: return "Command Code"
-        case .pi:     return "pi"
+        case .pi:     return "PI"
         }
     }
 
@@ -72,9 +72,14 @@ enum AgentEngine: String, CaseIterable {
         }
     }
 
+    /// The engines the app offers — every case except the retired `.commandCode`
+    /// (see `CommandCodeCLIService.isRetired`). The case stays so past agent rows
+    /// still decode and draw their engine; it is simply never listed again.
+    static let offered: [AgentEngine] = allCases.filter { $0 != .commandCode }
+
     /// The engines that can actually run right now — drives the entry button
     /// (any) and the armed line's engine chip (a toggle only when both).
-    static var available: [AgentEngine] { allCases.filter(\.isAvailable) }
+    static var available: [AgentEngine] { offered.filter(\.isAvailable) }
 
     /// The engine to arm by default: the last one used, if it's still available,
     /// else whichever is. Persisted whenever the armed engine changes.
@@ -1246,9 +1251,17 @@ final class AgentTaskManager: ObservableObject {
     }
 
     /// Stop one running task. The termination handler files it as cancelled.
-    func cancel(taskID: UUID) {
+    ///
+    /// Returns whether this call is the one that requested the stop — false
+    /// when the task isn't running, or a stop is already on its way (the
+    /// process takes a beat to die, so a second press lands while the run
+    /// still reads as live). Callers that give Esc a stepped meaning use that
+    /// to hand the *next* press on to whatever comes after stopping.
+    @discardableResult
+    func cancel(taskID: UUID) -> Bool {
         guard let run = runs[taskID],
-              tasks.first(where: { $0.id == taskID })?.isRunning == true else { return }
+              tasks.first(where: { $0.id == taskID })?.isRunning == true,
+              !run.cancelRequested else { return false }
         run.cancelRequested = true
         if let p = run.process {
             p.terminate()
@@ -1257,6 +1270,7 @@ final class AgentTaskManager: ObservableObject {
             // directly; its exit watch files the cancel.
             kill(pid, SIGTERM)
         }
+        return true
     }
 
     /// Stop the round in flight and hand the agent a new instruction straight
@@ -2289,9 +2303,10 @@ private final class CodexAgentStreamState: AgentEventParser {
                     }
                 case "reasoning":
                     // The reasoning summary codex writes between tool calls.
-                    // It goes in the trail (folded behind a "Thinking" line) AND
-                    // rolls through the ticker, so a long think shows the words
-                    // moving instead of a frozen "Thinking…".
+                    // It goes in the trail, folded behind a "Thinking" line —
+                    // and nowhere else: the ticker stays the calm "Thinking…"
+                    // rather than sliding raw half-sentences of reasoning past
+                    // the reader.
                     let text = (item["text"] as? String)
                         ?? (item["summary"] as? [String])?.joined(separator: "\n")
                         ?? ""
@@ -2300,7 +2315,7 @@ private final class CodexAgentStreamState: AgentEventParser {
                         stream.replace(text, slot: StreamingBlocks.thinking,
                                        kind: .thinking, into: &progress)
                     }
-                    progress.activity = stream.ticker(StreamingBlocks.thinking)
+                    progress.activity = L("agent.thinking")
                     any = true
                     if type == "item.completed" { stream.close(StreamingBlocks.thinking) }
                 default:
@@ -2776,11 +2791,13 @@ private final class GrokAgentStreamState: AgentEventParser {
                 }
             case "thought":
                 // Reasoning deltas ride the same `data` field the answer does.
+                // They grow the folded "Thinking" row in the trail only — the
+                // ticker holds the calm phrase (see the codex parser).
                 if let t = obj["data"] as? String, !t.isEmpty {
                     stream.append(t, slot: StreamingBlocks.thinking,
                                   kind: .thinking, into: &progress)
                 }
-                progress.activity = stream.ticker(StreamingBlocks.thinking)
+                progress.activity = L("agent.thinking")
                 any = true
             case "end":
                 sawTerminal = true
@@ -2976,7 +2993,7 @@ private final class CommandCodeAgentStreamState: AgentEventParser {
                 stream.append(delta, slot: StreamingBlocks.thinking,
                               kind: .thinking, into: &progress)
             }
-            progress.activity = stream.ticker(StreamingBlocks.thinking)
+            progress.activity = L("agent.thinking")
             return true
         case "tool_running":
             guard let id = event["toolCallId"] as? String,
@@ -3247,7 +3264,7 @@ private final class PiAgentStreamState: AgentEventParser {
                         stream.append(delta, slot: StreamingBlocks.thinking,
                                       kind: .thinking, into: &progress)
                     }
-                    progress.activity = stream.ticker(StreamingBlocks.thinking)
+                    progress.activity = L("agent.thinking")
                     any = true
                 default:
                     continue   // toolcall_start / text_end / thinking_end / …

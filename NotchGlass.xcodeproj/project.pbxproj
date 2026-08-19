@@ -23,6 +23,7 @@
 		A1000051 /* InlineSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000050 /* InlineSettingsView.swift */; };
 		A1000731 /* ModelPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000730 /* ModelPickerView.swift */; };
 		A1000741 /* VendorLogos.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000740 /* VendorLogos.swift */; };
+		A1000C21 /* ImageStack.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000C20 /* ImageStack.swift */; };
 		A10007E1 /* LucideIcons.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10007E0 /* LucideIcons.swift */; };
 		A100001C /* HotKey.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000D /* HotKey.swift */; };
 		A1000A21 /* ForceClickHerald.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000A20 /* ForceClickHerald.swift */; };
@@ -112,6 +113,7 @@
 		A1000050 /* InlineSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlineSettingsView.swift; sourceTree = "<group>"; };
 		A1000730 /* ModelPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelPickerView.swift; sourceTree = "<group>"; };
 		A1000740 /* VendorLogos.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VendorLogos.swift; sourceTree = "<group>"; };
+		A1000C20 /* ImageStack.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageStack.swift; sourceTree = "<group>"; };
 		A10007E0 /* LucideIcons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LucideIcons.swift; sourceTree = "<group>"; };
 		A100000D /* HotKey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HotKey.swift; sourceTree = "<group>"; };
 		A1000A20 /* ForceClickHerald.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ForceClickHerald.swift; sourceTree = "<group>"; };
@@ -203,6 +205,7 @@
 				A1000050 /* InlineSettingsView.swift */,
 				A1000730 /* ModelPickerView.swift */,
 				A1000740 /* VendorLogos.swift */,
+				A1000C20 /* ImageStack.swift */,
 				A10007E0 /* LucideIcons.swift */,
 				A100000D /* HotKey.swift */,
 				A1000A20 /* ForceClickHerald.swift */,
@@ -353,6 +356,7 @@
 				A1000051 /* InlineSettingsView.swift in Sources */,
 				A1000731 /* ModelPickerView.swift in Sources */,
 				A1000741 /* VendorLogos.swift in Sources */,
+				A1000C21 /* ImageStack.swift in Sources */,
 				A10007E1 /* LucideIcons.swift in Sources */,
 				A100001C /* HotKey.swift in Sources */,
 				A1000A21 /* ForceClickHerald.swift in Sources */,
@@ -421,7 +425,7 @@
 				CODE_SIGN_ENTITLEMENTS = NotchGlass/Resources/NotchGlass.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 8;
+				CURRENT_PROJECT_VERSION = 9;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = NotchGlass/Resources/Info.plist;
@@ -429,7 +433,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.6.2;
+				MARKETING_VERSION = 0.6.3;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -444,7 +448,7 @@
 				CODE_SIGN_ENTITLEMENTS = NotchGlass/Resources/NotchGlass.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 8;
+				CURRENT_PROJECT_VERSION = 9;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = NotchGlass/Resources/Info.plist;
@@ -452,7 +456,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.6.2;
+				MARKETING_VERSION = 0.6.3;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;

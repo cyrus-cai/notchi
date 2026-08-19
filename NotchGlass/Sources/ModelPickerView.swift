@@ -436,21 +436,6 @@ final class ModelCatalogStore: ObservableObject {
                 liveByProvider[.grokCode] = ids.map { ModelInfo(id: $0, vendor: "xAI") }
             }
         }
-        // Command Code is keyless too, and an aggregator: its catalog comes from the
-        // CLI (`cmd --list-models`), and each id names its OWN vendor — Anthropic,
-        // OpenAI, Qwen … — so the rows carry the right mark instead of one house
-        // brand. Never publish the bare sentinel (the no-catalog fallback).
-        if liveByProvider[.commandCode] == nil {
-            let ids = await Task.detached(priority: .userInitiated) { () -> [String] in
-                CommandCodeCLIService.refreshModels()
-                return CommandCodeCLIService.availableModelIDs
-            }.value
-            if ids != [CommandCodeCLIService.defaultSentinel] {
-                liveByProvider[.commandCode] = ids.map {
-                    ModelInfo(id: $0, vendor: ModelRatings.vendor(for: $0))
-                }
-            }
-        }
         // pi is keyless too, and the widest aggregator of the five: its catalog is
         // every provider the user has signed pi into (`pi --list-models`), and each
         // id is `<pi-provider>/<model>` — the model half names the real lab, so the
@@ -472,7 +457,7 @@ final class ModelCatalogStore: ObservableObject {
         // below — see `resolveClaudeAliases`.
         resolveClaudeAliases()
         await withTaskGroup(of: (Provider, ModelCatalog.Result?).self) { group in
-            for p in Provider.allCases where liveByProvider[p] == nil {
+            for p in Provider.offered where liveByProvider[p] == nil {
                 // The custom endpoint joins the fetch as soon as it has a URL —
                 // its key is optional, so "no key" must not mean "no catalog"
                 // (a local Ollama / LM Studio serves `/v1/models` unauthenticated,
@@ -590,7 +575,7 @@ final class ModelCatalogStore: ObservableObject {
     /// straight to configuring it. `selected` is the provider in effect: its rows lead.
     func rows(selected: Provider) -> [PickerModel] {
         var rows: [PickerModel] = []
-        for p in Provider.allCases {
+        for p in Provider.offered {
             let hasKey = Self.ready(p)
             let infos: [ModelInfo]
             if let live = liveByProvider[p], !live.isEmpty {
@@ -1019,7 +1004,7 @@ struct AgentEngineMark: View {
                     .frame(width: size, height: size)
             }
         case .pi:
-            if let mark = VendorLogos.mark(for: "pi") {
+            if let mark = VendorLogos.mark(for: "PI") {
                 SVGPathShape(pathData: mark.path, viewBox: mark.viewBox)
                     .fill(tint, style: FillStyle(eoFill: true))
                     .frame(width: size, height: size)
@@ -1099,38 +1084,20 @@ struct AgentModelPickerView: View {
         return out
     }
 
-    /// The card's content width. The floor (174) is the original design; past
-    /// that, the width is DERIVED from the widest model row — the card's one
-    /// rigid block — because a card that outgrows a row spills under the
-    /// pointer. (Historically the marks row pushed that minimum past a
-    /// hard-coded 174 once Grok joined: the bar overflowed, SwiftUI centered
-    /// the spill, and the whole content column slid 8pt out of the popover's
-    /// margins — the 边距乱 bug.)
-    private var cardWidth: CGFloat {
-        // The widest model row, whole — the list is the card's widest block.
-        // `MenuCard.width` already counts the row and card padding, so its
-        // result can be a frame width directly (same as the recents card).
-        let rows = engineChoices.map { (shortLabel($0), nil as String?) }
-        let list = MenuCard.width(titles: rows, max: Self.maxWidth)
-        // The engine row spans the card too — counted so "Command Code" can't
-        // truncate on an engine whose model names happen to be short.
-        let engine = MenuCard.width(titles: [(groupTitle(for: selectedEngine), nil)])
-        // Clamped at BOTH ends. The floor keeps the card from collapsing around
-        // a one-word fleet; the ceiling is what stops the card being sized by
-        // whatever the longest id in an aggregator's catalog happens to be —
-        // model names are vendor strings, not a layout budget. Past it the row
-        // truncates (`MenuCardRow` is `lineLimit(1)` + tail), which is the right
-        // trade: a readable card with one clipped name beats a 400pt slab.
-        return min(max(174, list, engine), Self.maxWidth)
-    }
+    /// The card's content width — a FIXED constant, deliberately not derived
+    /// from the armed engine's rows. Deriving it meant the card resized on every
+    /// engine flip (a short fleet shrank it, a long id grew it) and the rows
+    /// slid out from under the pointer mid-switch — the same class of jump the
+    /// fixed four-row list window already fixed vertically. So width is pinned
+    /// to the narrow end: names longer than it truncate (`MenuCardRow` is
+    /// `lineLimit(1)` + tail), which is the right trade for a card that hangs
+    /// off the notch and carries two- or three-token model names.
+    private var cardWidth: CGFloat { Self.fixedWidth }
 
-    /// The card's hard ceiling. Deliberately far tighter than the recents /
-    /// folder cards' 260: those carry file paths and questions, whole sentences
-    /// that earn the width. This one carries model names — two or three tokens —
-    /// and a slider, and it hangs off the notch, so width it doesn't need is
-    /// just a bigger slab over the desktop. 186 fits the names that exist
-    /// ("Deepseek-v4-flash", "Kimi-k2.7-code") and clips the outliers.
-    private static let maxWidth: CGFloat = 186
+    /// The one width every engine draws at — the old design's floor. It fits the
+    /// engine caption ("Command Code") and the model names that exist; anything
+    /// past it was only ever a vendor id spending width it hadn't earned.
+    private static let fixedWidth: CGFloat = 174
 
     /// The armed engine's whole fleet. The other engine's sits behind its mark in
     /// the bottom bar — half the content of the old mixed list, and the rows can
@@ -1198,7 +1165,7 @@ struct AgentModelPickerView: View {
         case .commandCode: return "Command Code"
         // Same, one level out: pi's rows span several accounts as well as several
         // labs, so the caption is the CLI itself.
-        case .pi:     return "pi"
+        case .pi:     return "PI"
         }
     }
 

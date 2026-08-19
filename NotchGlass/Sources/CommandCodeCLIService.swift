@@ -62,6 +62,19 @@ struct CommandCodeCLIService: AIService {
 
     // MARK: - Availability
 
+    /// **Retired — the whole integration is blocked behind this.** Notch no longer
+    /// takes one-off third-party CLIs: the ~50 models Command Code fronted are all
+    /// reachable through pi, which aggregates them under the accounts the user
+    /// already has, so keeping a second aggregator only split the same catalog in
+    /// two. With this true, nothing lists Command Code, nothing spawns `cmd`, and
+    /// the engine reads as *resolved* unavailable — the difference that matters,
+    /// because a remembered pick only repoints itself off a resolved "no" (see
+    /// `AgentEngine.isKnownUnavailable`), never off a probe still in flight.
+    ///
+    /// The code below stays intact rather than being deleted so old persisted picks
+    /// and past agent rows still decode and draw; it is simply unreachable.
+    static let isRetired = true
+
     /// Absolute paths the CLI lives at, in priority order. `command-code` and
     /// `commandcode` come first because they name the product; the short `cmd`
     /// alias comes last precisely because it is a name anything could take — the
@@ -93,6 +106,7 @@ struct CommandCodeCLIService: AIService {
     /// launch warm-up holds while its own spawn runs. Never call it from a SwiftUI
     /// render or anywhere else on the main thread: use `resolvedBinaryIfReady()`.
     static func resolveBinary() -> String? {
+        guard !isRetired else { return nil }
         primeFromDisk()
         resolveLock.lock(); defer { resolveLock.unlock() }
         if let cached = cachedBinary { return cached }
@@ -111,6 +125,7 @@ struct CommandCodeCLIService: AIService {
     /// sat on the mutex for the whole spawn. That is exactly the first hover after a
     /// relaunch, and it read as the notch refusing to open.
     static func resolvedBinaryIfReady() -> String? {
+        guard !isRetired else { return nil }
         // Last launch's answer, if it's still on disk — a `UserDefaults` read and one
         // `stat`, so it is safe from a render and it makes the FIRST read of the
         // process the real one instead of "not yet" (see `primeFromDisk`).
@@ -132,6 +147,8 @@ struct CommandCodeCLIService: AIService {
     /// state when an engine looks dead has to ask this first, or the first hover
     /// after a relaunch throws away a perfectly live pick.
     static var isAvailabilityResolved: Bool {
+        // Retired is a FINAL no, not a pending one — see `isRetired`.
+        if isRetired { return true }
         primeFromDisk()
         guard resolveLock.try() else { return false }
         defer { resolveLock.unlock() }
@@ -143,6 +160,7 @@ struct CommandCodeCLIService: AIService {
     /// warm cache instead of spawning a process on the main thread. Idempotent: a
     /// second call while the first is still probing is a no-op.
     static func warmUp() {
+        guard !isRetired else { return }
         // Free and synchronous: after this the app already knows what it knew when it
         // last quit, so nothing below is on the critical path of the first render.
         primeFromDisk()
@@ -352,6 +370,7 @@ struct CommandCodeCLIService: AIService {
     /// set, or `~/.commandcode/auth.json` carries an `apiKey` entry. Only the
     /// *presence* of that marker is read, never the key itself.
     static func authExists() -> Bool {
+        guard !isRetired else { return false }
         if let key = ProcessInfo.processInfo.environment["COMMAND_CODE_API_KEY"],
            !key.trimmingCharacters(in: .whitespaces).isEmpty {
             return true
@@ -425,6 +444,7 @@ struct CommandCodeCLIService: AIService {
     /// a relaunch re-resolves the binary anyway). Kept for parity with the other CLI
     /// backends' picker path.
     static func refreshModels() {
+        guard !isRetired else { return }
         modelLock.lock()
         let alreadyHave = (cachedModels?.isEmpty == false)
         modelLock.unlock()

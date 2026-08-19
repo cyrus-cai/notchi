@@ -6,10 +6,11 @@ import Carbon.HIToolbox
 //
 // The deliberately small tool surface: read what the user already copied, tell
 // the time, do exact arithmetic, search the user's own Notch archive, ask the
-// user a clarifying question, run a web search, read a web page's text, and
-// manage this app's own preferences. The settings tool is the single narrow
-// write surface and has a mandatory in-app confirmation gate; there are still no
-// file-system writes, shell, or computer-use tools. The harness advertises
+// user a clarifying question, run a web search, read a web page's text, manage
+// this app's own preferences, and file a note or a reminder. Those last three are
+// the only write surfaces, and each one has a mandatory in-app confirmation gate
+// — the model may decide to call them, but the user decides whether they commit;
+// there are still no shell or computer-use tools. The harness advertises
 // exactly this set; growing it is a matter of adding a `NotchTool` and
 // registering it (see `ToolRegistry.standard(for:)`, or — for a tool that needs
 // the live model, like `search_history` / `ask_user` / `manage_app_settings` —
@@ -479,7 +480,7 @@ struct ManageAppSettingsTool: NotchTool {
     creating one. `scope` picks an existing binding by its current chord (option+s) or by a \
     distinctive part of its prompt; omit scope to create a new binding.
     - custom_instructions: text (empty clears it); proxy: URL/host, or auto to clear the manual proxy
-    - ai_provider: openrouter, vercel, openai, codex, claude_code, grok_code, command_code, pi_code, anthropic, gemini, deepseek, qwen, glm, kimi, minimax, mimo, custom
+    - ai_provider: openrouter, vercel, openai, codex, claude_code, grok_code, pi_code, anthropic, gemini, deepseek, qwen, glm, kimi, minimax, mimo, custom
     - ai_model: model id or default; optional scope is a provider (defaults to the active provider)
     - api_key: key text or empty to remove; scope is the provider (defaults to active). Never read keys back.
     - search_backend: native, keenable, exa, or anysearch
@@ -597,6 +598,108 @@ struct ManageAppSettingsTool: NotchTool {
         if let value = value as? Bool { return value ? "true" : "false" }
         if let value = value as? NSNumber { return value.stringValue }
         return nil
+    }
+}
+
+// MARK: - Notes & Reminders (create_note / create_reminder)
+
+/// Provider-neutral request passed from `create_note` / `create_reminder` into
+/// the live `NotchModel`, which owns the confirmation card and the actual write.
+/// Mirrors `AppSettingsRequest`: the tool stays UI-agnostic and knows nothing
+/// about Apple Notes, EventKit, or the user's note destination.
+struct CaptureRequest: Sendable {
+    enum Kind: String, Sendable { case note, reminder }
+
+    let kind: Kind
+    let text: String
+    /// For a reminder: the moment it should fire, as the model wrote it —
+    /// `2026-08-20T15:00` (local) or a full ISO-8601 stamp. `nil` lets the model
+    /// layer fall back to parsing the text itself, exactly as a typed capture does.
+    let due: String?
+}
+
+/// File a note from the chat composer. The second write surface after
+/// `manage_app_settings`, and gated the same way: the model may call it on its
+/// own judgment, but nothing is ever written until the user taps Confirm on the
+/// in-answer card.
+struct CreateNoteTool: NotchTool {
+    let name = "create_note"
+    let description = """
+    Saves a note for the user — into Apple Notes, or the Markdown folder they \
+    chose. Call this when the user asks you to note, save, jot, remember, or \
+    write down something with no time attached, and also when they clearly want \
+    to keep something you just produced (a summary, a list, a draft). The tool \
+    itself always shows exactly one Confirm/Cancel card before writing, so NEVER \
+    ask for a separate confirmation with ask_user, and never claim it was saved \
+    before you read this tool's result. Write the note's full final text — it is \
+    filed verbatim, and its first line becomes the title. Use create_reminder \
+    instead whenever the request names a time.
+    """
+    let schema: [String: Any] = [
+        "type": "object",
+        "properties": [
+            "text": [
+                "type": "string",
+                "description": "The complete note text to file, in the user's language. The first line becomes the title.",
+            ],
+        ],
+        "required": ["text"],
+    ]
+
+    let handle: @Sendable (CaptureRequest) async throws -> String
+
+    func execute(_ input: [String: Any]) async throws -> String {
+        guard let text = (input["text"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
+            return "Error: give the note text to save."
+        }
+        return try await handle(CaptureRequest(kind: .note, text: text, due: nil))
+    }
+}
+
+/// File a time-bound reminder (Apple Reminders, with an alarm). Same
+/// confirmation gate as `create_note`; the due date is the one thing this tool
+/// adds, and it is deliberately explicit rather than re-parsed from prose.
+struct CreateReminderTool: NotchTool {
+    let name = "create_reminder"
+    let description = """
+    Creates a reminder in the user's Reminders app, with an alarm at the time you \
+    give. Call this whenever the user asks to be reminded, or asks to save \
+    something that names a moment in time ("tomorrow 3pm", "next Monday", "in two \
+    hours"). The tool itself always shows exactly one Confirm/Cancel card before \
+    writing, so NEVER ask for a separate confirmation with ask_user, and never \
+    claim it was created before you read this tool's result. Resolve relative \
+    times yourself — call current_datetime first if you are unsure what "now" is — \
+    and pass an absolute local `due`. For a repeating reminder, keep the repeat \
+    phrase in `title` ("every day", "每周一", "monthly"): the repeat rule is read \
+    from that text. Use create_note when no time is involved.
+    """
+    let schema: [String: Any] = [
+        "type": "object",
+        "properties": [
+            "title": [
+                "type": "string",
+                "description": "What to remind the user about, in their language — one short line, keeping any repeat phrase such as \"every Monday\".",
+            ],
+            "due": [
+                "type": "string",
+                "description": "When it should fire, in the user's local time as YYYY-MM-DDTHH:MM (for example 2026-08-20T15:00). Must be in the future. Omit only for a reminder with genuinely no time.",
+            ],
+        ],
+        "required": ["title"],
+    ]
+
+    let handle: @Sendable (CaptureRequest) async throws -> String
+
+    func execute(_ input: [String: Any]) async throws -> String {
+        guard let title = (input["title"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty else {
+            return "Error: give the reminder title."
+        }
+        let due = (input["due"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return try await handle(CaptureRequest(kind: .reminder, text: title,
+                                               due: due?.isEmpty == false ? due : nil))
     }
 }
 

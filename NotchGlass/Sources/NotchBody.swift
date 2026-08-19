@@ -71,12 +71,6 @@ struct NotchBody: View {
     /// Vertical position of the prompt's last visible line, used by the
     /// punctuation-mode explanation that trails the caret.
     @State private var caretY: CGFloat = 0
-    /// Same live display width, but for the follow-up field. Its placeholder is a
-    /// SwiftUI overlay (so the copy can cross-fade — see `followUpPlaceholderLabel`),
-    /// and this is how the overlay knows to vanish the moment the editor shows
-    /// anything — including pinyin that hasn't committed to `model.text` yet, which
-    /// is exactly when the native placeholder would disappear.
-    @State private var followUpCaretWidth: CGFloat = 0
     /// The height the prompt box is asking for: one line at rest, growing with the
     /// wrapped text up to `NotchBody.promptMaxLines`, after which it scrolls inside
     /// itself. The input rows size themselves off these.
@@ -89,7 +83,6 @@ struct NotchBody: View {
     /// separate flags keep the hover honest either way (see `updateCue`).
     @State private var updateCueIdleHovered = false
     @State private var updateCueBarHovered = false
-    @State private var followUpHeight: CGFloat = PromptField.lineHeight(for: NotchBody.followUpFontSize)
     /// A thread opened by a prompt shortcut keeps its follow-up input folded into a
     /// small floating button (see `followUpButton`) until this flips — the run is a
     /// one-shot on a selection, so an always-open composer would cost a row of
@@ -102,8 +95,6 @@ struct NotchBody: View {
     /// exactly like the detached agent window's field; the box stays put after
     /// send so more can be lined up.
     @State private var agentDetailFollowUp: String = ""
-    @State private var agentDetailFollowUpCaretWidth: CGFloat = 0
-    @State private var agentDetailFollowUpHeight: CGFloat = PromptField.lineHeight(for: NotchBody.followUpFontSize)
     /// The detail page's own ⌘ metadata menu (engine / folder / completion) —
     /// the same chip a reopened record's follow-up row carries. Local state, not
     /// `model.isResultMetadataMenuOpen`: the two surfaces never coexist, but the
@@ -596,13 +587,18 @@ struct NotchBody: View {
         !promptHidesRecent && recentHasContent && model.showHistory
     }
 
-    /// Does what's in the box displace the Recent list? Any ordinary line does —
-    /// but the `/` command word doesn't: it's a query for the menu card floating
-    /// over the panel, so the panel behind holds its shape instead of collapsing
-    /// out from under the card the moment `/` is typed. (Mirrored in
-    /// `text.didSet`, which likewise leaves `showHistory` alone for that one case.)
+    /// Does the current prompt context displace the Recent list? Only the
+    /// Shortcuts-run prompt does: that window is one action's box, with no recall
+    /// surface behind it.
+    ///
+    /// Typed text used to displace it too — the list folded the moment a character
+    /// landed. That coupling died with the always-on Recent chevron (see
+    /// `bucketRow`): a disclosure that stays on the row while you type has to still
+    /// open, or it's a dead control. Recent is now the chevron's state alone, in
+    /// both an empty and a filled box. (`text.didSet` matches — it clears the
+    /// keyboard highlight on a keystroke but no longer closes the list.)
     private var promptHidesRecent: Bool {
-        model.usingPromptShortcutContext || (model.hasText && !model.slashMenuOpen)
+        model.usingPromptShortcutContext
     }
 
     // MARK: - Immersive history
@@ -904,8 +900,6 @@ struct NotchBody: View {
     /// happens invisibly inside its Ask half.
     private var bucketRow: some View {
         HStack(spacing: 6) {
-            // The Ask|Agent switch drops out while the Recent list is expanded —
-            // the compose-family pill shouldn't crowd the recall view.
             // The Ask|Agent switch — and the compose chips that unfurl beside it —
             // drop out while the Recent list is expanded: the recall view shouldn't
             // also carry the compose-family chrome.
@@ -924,13 +918,13 @@ struct NotchBody: View {
             }
             // The Recent (+ pin) cluster rides this row's trailing edge — on the
             // same line as the Ask|Agent pill, pushed right by the spacer — instead
-            // of hovering a row up in the input's trailing slot. The bare Recent
-            // chevron / pin hide while typing (the input's inline send hint owns that
-            // slot then), but Agent keeps its live "N running ⌄" count in place.
-            // Handed over to the manage bar's trailing edge once Recent is up (see
-            // `manageBar`), so the way out of the list sits in the bottom-right corner.
-            let runningLive = model.agentComposeActive && agentManager.runningTasks.count > 0
-            if (!model.hasText || runningLive) && !recentListShown {
+            // of hovering a row up in the input's trailing slot. It STAYS while
+            // typing: the input's trailing slot carries no send hint any more, so
+            // hiding the chevron mid-sentence only dropped the way into Recent and
+            // left a hole on that edge. Handed over to the manage bar's trailing edge
+            // once Recent is up (see `manageBar`), so the way out of the list sits in
+            // the bottom-right corner.
+            if !recentListShown {
                 let cluster = idleTrailingCluster
                 // The first-launch-after-update cue rides the same trailing edge,
                 // just inside the Recent chevron — glass beside glass. It keeps the
@@ -1105,7 +1099,6 @@ struct NotchBody: View {
         if ClaudeCLIService.isAvailable { out.append(.claudeCode) }
         if CodexCLIService.isAvailable { out.append(.codex) }
         if GrokCLIService.isAvailable { out.append(.grokCode) }
-        if CommandCodeCLIService.isAvailable { out.append(.commandCode) }
         if PiCLIService.isAvailable { out.append(.piCode) }
         return out
     }
@@ -1537,69 +1530,14 @@ struct NotchBody: View {
     /// report once it settles. Same information structure as the record a
     /// settled row opens; this is the during-the-run way in.
     private func agentDetailView(_ task: AgentTaskManager.AgentTask) -> some View {
-        // The flat trail (`task.log`) spans every round; the settled rounds each
-        // own their own slice via `exchange.log`. Whatever's left over belongs to
-        // the round in flight — its "› " prompt marker plus the tool rows it has
-        // produced so far. Split by entry id, never by index, so a capped/trimmed
-        // trail still partitions cleanly.
-        let claimedIDs = Set(task.exchanges.flatMap { $0.log.map(\.id) })
-        let liveTail = task.log.filter { !claimedIDs.contains($0.id) }
-        return VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 10) {
             agentDetailHeader(task)
             ScrollViewReader { proxy in
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
-                        // Every settled round in order — its prompt, its own slice
-                        // of the work trail, then its report — so a follow-up thread
-                        // keeps ALL prior answers on screen. (This page used to
-                        // collapse to the task headline + the single latest answer,
-                        // dropping every earlier round's report the moment a
-                        // follow-up started.) Same structure as the record a settled
-                        // Recent row reopens into.
-                        ForEach(Array(task.exchanges.enumerated()), id: \.offset) { _, exchange in
-                            UserQuestionBubble(text: exchange.prompt)
-                            // The trail's last narration entry IS this round's report
-                            // (the parser records it in both places) — drop it so it
-                            // isn't printed again by the answer just below. See
-                            // `droppingTrailingAnswer`.
-                            let trail = exchange.log.droppingTrailingAnswer(exchange.answer)
-                            if !trail.isEmpty {
-                                // Lazy: a long run's trail is hundreds of rows and
-                                // this page pins to the tail — see `isLazy`'s doc.
-                                AgentWorkTrailView(entries: trail, isLazy: true)
-                            }
-                            if !exchange.answer.isEmpty {
-                                MarkdownBlocks(source: exchange.answer, baseFont: 15)
-                            }
-                        }
-                        // The round still in flight has no settled exchange yet.
-                        // Round one carries no "› " marker, so its prompt is the task
-                        // headline; a follow-up round's prompt already rides the live
-                        // tail as its leading "› " marker.
-                        if task.isRunning {
-                            if task.exchanges.isEmpty {
-                                UserQuestionBubble(text: task.prompt)
-                            }
-                            if !liveTail.isEmpty {
-                                // `live`: the trailing block is still being
-                                // written, so it must not fold under the reader.
-                                AgentWorkTrailView(entries: liveTail, isLazy: true, live: true)
-                            }
-                            // The collapsed row's ticker, following the trail —
-                            // what the run is doing right now. Same 14pt/text3
-                            // face the status row wears. Dropped while a
-                            // paragraph is visibly streaming just above it: the
-                            // ticker would only echo that paragraph's own tail.
-                            if !NotchBody.trailTailIsStreamingProse(task.log) {
-                                CrossfadeText(text: task.activity ?? L("agent.thinking"),
-                                              font: 14, color: Tokens.text3)
-                                    .tracking(-0.1)
-                                    .lineLimit(1)
-                                    .padding(.vertical, 2)
-                            }
-                        }
-                        Color.clear.frame(height: 1).id(Self.agentDetailBottomID)
-                    }
+                    // What the record is made of — shared with the torn-off
+                    // window so the page reads identically on both sides of a
+                    // tear (`AgentRecordBody`).
+                    AgentRecordBody(task: task, bottomID: Self.agentDetailBottomID)
                     // Runway: the trail rests below the header, then scrolls up into
                     // this empty band to fade + frost out — the same soft top edge
                     // the detached agent window wears (`ThreadScroll`), so the page
@@ -1652,7 +1590,7 @@ struct NotchBody: View {
                 }
                 // The way back down, offered only once the follow has released —
                 // otherwise the page is already there and the chip is noise.
-                .overlay(alignment: .bottomTrailing) {
+                .overlay(alignment: .bottom) {
                     if !agentDetailFollowsTail {
                         GlassIconButton(systemName: "arrow.down",
                                         help: L("agent.trail.toBottom"),
@@ -1663,7 +1601,6 @@ struct NotchBody: View {
                                 proxy.scrollTo(Self.agentDetailBottomID, anchor: .bottom)
                             }
                         }
-                        .padding(.trailing, 4)
                         .transition(.scale(scale: 0.8).combined(with: .opacity))
                     }
                 }
@@ -1726,70 +1663,38 @@ struct NotchBody: View {
     }
 
     private func agentDetailComposer(_ task: AgentTaskManager.AgentTask) -> some View {
-        // Same growing box as the chat follow-up, so it rounds the same way.
-        let shape = NotchBody.composerShape(
-            height: max(27, agentDetailFollowUpHeight) + 12)
-        return HStack(alignment: .bottom, spacing: 6) {
-            ZStack(alignment: .leading) {
-                PromptField(
-                    text: $agentDetailFollowUp,
-                    placeholder: "",
-                    fontSize: NotchBody.followUpFontSize,
-                    focusTrigger: focused,
-                    maxVisibleLines: NotchBody.promptMaxLines,
-                    onSubmit: { submitAgentDetailFollowUp(task) },
-                    // ⌘⏎ is the accelerator for the chip below: stop the round
-                    // in flight and hand the agent this line right now.
-                    onCommandSubmit: {
-                        guard task.isRunning, task.sessionID != nil,
-                              !agentDetailFollowUp.trimmingCharacters(
-                                in: .whitespacesAndNewlines).isEmpty
-                        else { return false }
-                        submitAgentDetailFollowUp(task, interrupting: true)
-                        return true
-                    },
-                    onCaretWidth: { agentDetailFollowUpCaretWidth = $0 },
-                    onHeightChange: { agentDetailFollowUpHeight = $0 }
-                )
-                .frame(height: agentDetailFollowUpHeight)
-                if agentDetailFollowUp.isEmpty && agentDetailFollowUpCaretWidth == 0 {
-                    Text(L(task.isRunning ? "agent.followUp.queue"
-                                          : "agent.followUp.placeholder"))
-                        .font(.sf(NotchBody.followUpFontSize))
-                        .foregroundStyle(Tokens.placeholder)
-                        .lineLimit(1)
-                        .padding(.leading, PromptField.textInset)
-                        .allowsHitTesting(false)
+        // The shared box (`ComposerBox`) — the same control the chat follow-up
+        // is, and the same one this page's torn-off window carries.
+        ComposerBox(
+            text: $agentDetailFollowUp,
+            focusTrigger: focused,
+            focused: focused,
+            onSubmit: { submitAgentDetailFollowUp(task) },
+            // ⌘⏎ is the accelerator for the chip below: stop the round in
+            // flight and hand the agent this line right now.
+            onCommandSubmit: {
+                guard task.isRunning, task.sessionID != nil,
+                      !agentDetailFollowUp.trimmingCharacters(
+                        in: .whitespacesAndNewlines).isEmpty
+                else { return false }
+                submitAgentDetailFollowUp(task, interrupting: true)
+                return true
+            },
+            placeholder: {
+                Text(L(task.isRunning ? "agent.followUp.queue"
+                                      : "agent.followUp.placeholder"))
+            },
+            trailing: {
+                if !agentDetailFollowUp.trimmingCharacters(
+                    in: .whitespacesAndNewlines).isEmpty {
+                    // The field already owns both verbs: ⏎ sends/queues and ⌘⏎
+                    // interrupts the live round. State them plainly instead of
+                    // repeating them as an interrupt pill plus glass arrow.
+                    AgentFollowUpKeyHints(
+                        showsInterrupt: task.isRunning && task.sessionID != nil)
                         .transition(.opacity)
                 }
-            }
-            .frame(height: max(27, agentDetailFollowUpHeight))
-            .animation(.easeOut(duration: 0.16), value: agentDetailFollowUpCaretWidth == 0)
-
-            if !agentDetailFollowUp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                // The field already owns both verbs: ⏎ sends/queues and ⌘⏎
-                // interrupts the live round. State them plainly instead of
-                // repeating them as an interrupt pill plus glass arrow.
-                AgentFollowUpKeyHints(
-                    showsInterrupt: task.isRunning && task.sessionID != nil)
-                    .frame(height: max(27, agentDetailFollowUpHeight),
-                           alignment: .center)
-                    .transition(.opacity)
-            }
-        }
-        .padding(.leading, 13)
-        .padding(.trailing, 6)
-        .padding(.vertical, 6)
-        .background(
-            shape.fill(focused ? Tokens.recessFillLit : Tokens.recessFill)
-        )
-        .clipShape(shape)
-        .overlay(
-            shape.strokeBorder(focused ? Tokens.recessRimLit : Tokens.recessRim, lineWidth: 0.5)
-        )
-        .animation(.easeOut(duration: 0.2), value: focused)
-        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: agentDetailFollowUp.isEmpty)
-        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: agentDetailFollowUpHeight)
+            })
     }
 
     /// Queue the line as the run's next instruction and clear the field — the box
@@ -3562,8 +3467,27 @@ struct NotchBody: View {
         NotchBody.idleRowHeight - PromptField.lineHeight(for: NotchBody.idleFontSize)
     }
 
+    /// What trails the caret in the idle prompt — one slot, two tenants.
+    ///
+    /// A capture line names its leaf as you type: the same date read that decides
+    /// whether Enter files this into Notes or Reminders (`captureLeaf`), spelled
+    /// out beside the text, so typing a time into a line visibly turns it into a
+    /// reminder instead of that split happening in silence. Before there is a line
+    /// to read, a hand-typed `:` still explains the mode it pinned. Ask carries
+    /// nothing — the pill on the row below already says Ask.
+    private var trailingModeHint: (text: String, tint: Color)? {
+        if let leaf = model.captureLeaf, let word = model.captureLeafLabel {
+            return (word, leaf == .reminder ? Tokens.reminderInk : Tokens.noteInk)
+        }
+        if model.typedNoteModeActive {
+            return ("You are using Note mode", Tokens.noteInk)
+        }
+        return nil
+    }
+
     private func inputRow(placeholder: String, followUp: Bool) -> some View {
         let fontSize: CGFloat = followUp ? NotchBody.followUpFontSize : NotchBody.idleFontSize
+        let trailingHint = followUp ? nil : trailingModeHint
         return HStack(spacing: 12) {
             // The field and its fading placeholder. Where Enter sends the line is
             // spelled out by the destination pill on the row below, not by anything
@@ -3709,29 +3633,28 @@ struct NotchBody: View {
                     }
                 )
                 .frame(height: followUp ? nil : inputHeight)
-                // Only the explicit punctuation shortcut explains itself inline,
-                // in the same trailing position the old routing hint occupied.
-                .padding(.trailing,
-                         (!followUp && model.typedNoteModeActive)
-                            ? InlineModeHint.reservedTrailingWidth(
-                                text: "You are using Note mode", fontSize: fontSize)
-                            : 0)
+                // The one trailing slot beside the caret — the position the old
+                // routing hint occupied. In Capture it reads the leaf live; on a
+                // bare typed `:` it explains the mode that glyph just pinned.
+                .padding(.trailing, trailingHint.map {
+                    InlineModeHint.reservedTrailingWidth(text: $0.text, fontSize: fontSize)
+                } ?? 0)
                 .background {
-                    if !followUp && model.typedNoteModeActive {
+                    if let trailingHint {
                         GeometryReader { geo in
                             InlineModeHint(
-                                text: "You are using Note mode",
+                                text: trailingHint.text,
                                 fontSize: fontSize,
                                 caretWidth: caretWidth,
                                 caretY: caretY,
                                 availableWidth: geo.size.width,
-                                tint: Tokens.noteInk)
+                                tint: trailingHint.tint)
                             .frame(height: geo.size.height, alignment: .center)
                         }
                         .allowsHitTesting(false)
                     }
                 }
-                .animation(.smooth(duration: 0.25), value: model.typedNoteModeActive)
+                .animation(.smooth(duration: 0.25), value: trailingHint?.text)
 
                 // The placeholder, drawn as a SwiftUI label over the (natively
                 // placeholder-less) field so its appearance can FADE — on emptying
@@ -3944,132 +3867,58 @@ struct NotchBody: View {
             regenModel: report.regenModel)
     }
 
-    /// The follow-up box's own outline. Its height is the field's slot (27pt at
-    /// rest, taller once the text wraps) plus 6pt of padding top and bottom, so a
-    /// resting box is still a pill and a wrapped one keeps that same corner
-    /// instead of curving in over its own first line (`NotchBody.composerShape`).
-    private var followUpShape: RoundedRectangle {
-        NotchBody.composerShape(height: max(27, followUpHeight) + 12)
-    }
-
     private var followUpComposer: some View {
-        // Bottom-aligned so the send button stays on the box's last line as a long
-        // follow-up unfolds upward off the answer, instead of floating at its middle.
-        // A one-line box is 27pt — the button's own height — so the resting row is
-        // unchanged.
-        HStack(alignment: .bottom, spacing: 6) {
-            ZStack(alignment: .leading) {
-                PromptField(
-                    // The native placeholder stays empty on purpose: the box can only
-                    // hard-swap its placeholder string, so the slot is owned by the
-                    // SwiftUI labels below, which cross-fade their copy instead.
-                    text: $model.text,
-                    placeholder: "",
-                    fontSize: NotchBody.followUpFontSize,
-                    focusTrigger: focused,
-                    maxVisibleLines: NotchBody.promptMaxLines,
-                    // Route by intent, same as the idle prompt — a follow-up line
-                    // like "remind me to ping Alex tomorrow at 9am" files to
-                    // Reminders instead of being asked to the AI. A plain question
-                    // still resolves to `.chat` → `submit()`, which continues the
-                    // existing thread (firstTurn = turns.isEmpty), so the common
-                    // follow-up path is unchanged.
-                    onSubmit: { model.submitCurrent() },
-                    onBack: {
-                        withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
-                            model.newChat()
-                        }
-                    },
-                    // Tab cycles where Enter sends this line (Ask → Note → Remind →…)
-                    // when the classifier guessed wrong — the correction escape hatch,
-                    // matching the idle prompt. Empty-field Tab is still swallowed so
-                    // focus never wanders out of the field.
-                    onTab: {
-                        guard let event = NSApp.currentEvent,
-                              ReservedAppShortcut.cycleIntent.matches(event) else {
-                            return false
-                        }
-                        if model.hasText { model.toggleSubmitPanel() }
-                        return true
-                    },
-                    // Lets the overlay placeholder hide itself the instant the editor
-                    // shows ANYTHING — committed text or still-composing pinyin (which
-                    // isn't in `model.text` yet) — matching the native behaviour.
-                    onCaretWidth: { followUpCaretWidth = $0 },
-                    onHeightChange: { followUpHeight = $0 }
-                )
-                .frame(height: followUpHeight)
-                // No trailing ghost here either — a follow-up is always an ask
-                // anyway (`effectiveSubmitPanel` pins a thread to `.chat`), so the
-                // field keeps its full width and the destination's colour wash below
-                // is all the routing this row has to say.
-                // The placeholder, shown only while the editor is truly empty —
-                // committed text, a bare line break, and in-progress pinyin all
-                // hide it. (Raw `text.isEmpty`, not `hasText`: the latter trims,
-                // so a ⇧⏎-only field read as empty and kept the ghost.)
-                if model.text.isEmpty && followUpCaretWidth == 0 {
-                    followUpPlaceholderLabel
-                        // Nudge to sit on the box's own ~2pt left inset so the label
-                        // lands where the typed glyphs will, not 2pt left.
-                        .padding(.leading, PromptField.textInset)
-                        .allowsHitTesting(false)
-                        .transition(.opacity)
+        // The shared box (`ComposerBox`) — one implementation for the panel's
+        // chat line, the panel's agent page, and the torn-off windows of both.
+        // The two things only this surface has ride in as parameters: the
+        // destination's colour washed over the box while it holds text, and the
+        // rim pulse when that destination flips.
+        ComposerBox(
+            text: $model.text,
+            focusTrigger: focused,
+            focused: focused,
+            // A whisper of the destination's colour, the quiet twin of the
+            // tinted destination pill, so the field leans toward where Enter
+            // will send the line.
+            tint: model.submitTint,
+            // Keyed on the intent *category* so a recurrence-suffix edit
+            // doesn't pulse.
+            pulse: AnyHashable(model.effectiveSubmitPanel),
+            pulseTint: model.submitInk,
+            // Route by intent, same as the idle prompt — a follow-up line like
+            // "remind me to ping Alex tomorrow at 9am" files to Reminders
+            // instead of being asked to the AI. A plain question still resolves
+            // to `.chat` → `submit()`, which continues the existing thread
+            // (firstTurn = turns.isEmpty), so the common path is unchanged.
+            onSubmit: { model.submitCurrent() },
+            onBack: {
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                    model.newChat()
                 }
-            }
-            // The box at rest is one line (18pt) but the row is pinned to the send
-            // button's 27pt — so a resting field centres in that slot exactly as it
-            // always has, and only a wrapped follow-up pushes the row taller.
-            .frame(height: max(27, followUpHeight))
-            // Drives the placeholder's fade during IME pre-composition: pinyin
-            // showing in the editor flips `followUpCaretWidth` while `hasText` is
-            // still false, and the row-level hasText animation never fires — so
-            // without this key the placeholder would hard-pop instead of fading.
-            .animation(.easeOut(duration: 0.16), value: followUpCaretWidth == 0)
-            .animation(.easeOut(duration: 0.16), value: model.text.isEmpty)
-
+            },
+            // Tab cycles where Enter sends this line (Ask → Note → Remind →…)
+            // when the classifier guessed wrong — the correction escape hatch,
+            // matching the idle prompt. Empty-field Tab is still swallowed so
+            // focus never wanders out of the field.
+            onTab: {
+                guard let event = NSApp.currentEvent,
+                      ReservedAppShortcut.cycleIntent.matches(event) else {
+                    return false
+                }
+                if model.hasText { model.toggleSubmitPanel() }
+                return true
+            },
+            placeholder: { followUpPlaceholderLabel },
             // The send button appears the moment the user starts typing a
             // follow-up. (The "continue in ChatGPT/Claude" handoff used to rest
             // here while the field was empty; it now lives in the answer footer
             // with the other per-answer actions — see `AssistantTurnView`.)
-            if model.hasText {
-                SendButton(compact: true) { model.submitCurrent() }
-                    .transition(.scale(scale: 0.6).combined(with: .opacity))
-            }
-        }
-        // Height comes from the field's own slot above (27pt at rest, taller once the
-        // text wraps), so the row stays put when the send button shows/hides.
-        .padding(.leading, 13)
-        .padding(.trailing, 6)
-        .padding(.vertical, 6)
-        .background(
-            followUpShape
-                .fill(focused ? Tokens.recessFillLit : Tokens.recessFill)
-                // A whisper of the destination's colour washed over the box while
-                // there's text — the quiet twin of the tinted destination pill,
-                // so the field itself leans toward where Enter will send the line.
-                // Fades out on an empty field (destination is just the default).
-                .overlay(
-                    followUpShape
-                        .fill(model.submitTint
-                            .opacity(model.hasText ? 0.045 : 0))
-                )
-        )
-        .clipShape(followUpShape)
-        .overlay(
-            followUpShape
-                .strokeBorder(focused ? Tokens.recessRimLit : Tokens.recessRim, lineWidth: 0.5)
-        )
-        // Flash the field's rim when the destination flips (Ask⇄Note⇄Remind) — the
-        // peripheral twin of the pill's word swap, in the NEW
-        // destination's colour. Keyed on the intent *category* so a
-        // recurrence-suffix edit doesn't pulse.
-        .intentChangePulse(on: model.effectiveSubmitPanel,
-                           shape: followUpShape,
-                           tint: model.submitInk)
-        .animation(.smooth(duration: 0.25), value: model.effectiveSubmitPanel)
-        .animation(.easeOut(duration: 0.2), value: focused)
-        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: model.hasText)
-        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: followUpHeight)
+            trailing: {
+                if model.hasText {
+                    SendButton(compact: true) { model.submitCurrent() }
+                        .transition(.scale(scale: 0.6).combined(with: .opacity))
+                }
+            })
     }
 
     /// The follow-up field's placeholder, drawn as a SwiftUI label in the slot the
@@ -4094,9 +3943,6 @@ struct NotchBody: View {
                 Text(L(model.threadIsAgentRun ? "result.followUp.agent" : "result.followUp"))
             }
         }
-        .font(.sf(NotchBody.followUpFontSize))
-        .foregroundStyle(Tokens.placeholder)
-        .lineLimit(1)
     }
 
 }
@@ -4378,18 +4224,19 @@ fileprivate extension NotchModel {
 }
 
 /// The destination colour of an intent — the SAME palette everywhere a
-/// destination shows its face: Ask a cool blue, Note the Notes amber, Remind
-/// the Reminders orange. Read by the destination pill under the prompt, the
-/// follow-up field's background wash, and the intent-change rim pulse, so the
+/// destination shows its face: Ask a cool blue, Capture the amber sitting
+/// halfway between the Notes yellow and the Reminders orange (its two leaves
+/// route to both, so the mode wears neither). Read by the destination pill
+/// under the prompt, the follow-up field's background wash, and the
+/// intent-change rim pulse, so the
 /// input's colour story always matches the filter chips and capture chips.
 extension NotchModel.Panel {
     /// Saturated body colour — right for low-opacity WASHES over the dark glass
     /// (the follow-up box's background lean), where saturation survives dilution.
     var intentTint: Color {
         switch self {
-        case .chat:     return Tokens.askTint
-        case .note:     return Tokens.noteTint
-        case .reminder: return Tokens.reminderTint
+        case .chat:              return Tokens.askTint
+        case .note, .reminder:   return Tokens.captureTint
         }
     }
 
@@ -4399,9 +4246,8 @@ extension NotchModel.Panel {
     /// coloured *light* instead, keeping the hue legible and the ghost elegant.
     var intentInk: Color {
         switch self {
-        case .chat:     return Tokens.askInk
-        case .note:     return Tokens.noteInk
-        case .reminder: return Tokens.reminderInk
+        case .chat:              return Tokens.askInk
+        case .note, .reminder:   return Tokens.captureInk
         }
     }
 }
@@ -5249,6 +5095,12 @@ private final class MenuCardAnchorView: NSView {
     /// What a click outside the card reports to — see `installDismissMonitors`.
     private var onDismiss: ((Bool) -> Void)?
     private var clickMonitors: [Any] = []
+    /// The host window's move/resize notifications. The card is a child window
+    /// holding an ABSOLUTE screen frame, so anything that shifts the anchor
+    /// without re-running this probe's `layout()` — the island animating open,
+    /// the panel growing, a display change — would otherwise leave the card
+    /// parked at the last position it was told about. That is the drift.
+    private var frameObservers: [NSObjectProtocol] = []
 
     func apply(card: AnyView, open: Bool, centered: Bool, upperLeading: Bool,
                onDismiss: @escaping (Bool) -> Void) {
@@ -5298,6 +5150,7 @@ private final class MenuCardAnchorView: NSView {
         self.hosting = hosting
         self.isOpen = true
         installDismissMonitors()
+        installFrameObservers(on: host)
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.12
             panel.animator().alphaValue = 1
@@ -5306,12 +5159,30 @@ private final class MenuCardAnchorView: NSView {
 
     func closeMenu() {
         removeDismissMonitors()
+        removeFrameObservers()
         guard let panel else { return }
         self.panel = nil
         self.hosting = nil
         self.isOpen = false
         panel.parent?.removeChildWindow(panel)
         panel.orderOut(nil)
+    }
+
+    private func installFrameObservers(on host: NSWindow) {
+        guard frameObservers.isEmpty else { return }
+        let center = NotificationCenter.default
+        for name in [NSWindow.didMoveNotification, NSWindow.didResizeNotification,
+                     NSWindow.didChangeScreenNotification] {
+            frameObservers.append(
+                center.addObserver(forName: name, object: host, queue: .main) { [weak self] _ in
+                    self?.reposition()
+                })
+        }
+    }
+
+    private func removeFrameObservers() {
+        frameObservers.forEach(NotificationCenter.default.removeObserver)
+        frameObservers.removeAll()
     }
 
     // MARK: - Click-away
@@ -5530,6 +5401,8 @@ private struct BucketTogglePill: View {
     static let wipeSoft: CGFloat = 8
     static let wordTrailPad: CGFloat = wordPad - wipeSoft
     private static let wordGap: CGFloat = 2
+    /// The glass capsule's own inset around the two words.
+    static let sidePad: CGFloat = 3
 
     /// How wide the label's box is: the soft edge alone once the word is wiped
     /// shut, the gap plus the spelled-out word plus that edge when it is open.
@@ -5543,29 +5416,41 @@ private struct BucketTogglePill: View {
     }
 
     /// Where Enter sends the line right now, as far as the Ask half is concerned.
-    /// An armed Agent bucket owns the line, so the Ask half falls back to its
-    /// resting face rather than showing a destination it isn't going to use.
-    private var destination: NotchModel.Panel {
-        model.agentComposeActive ? .chat : model.effectiveSubmitPanel
+    /// An armed Agent bucket owns the line, so this half shows the face you'd get
+    /// BACK by tapping it — the pinned mode, which is exactly what leaving the
+    /// bucket restores (`setAgentBucket(false)`). It used to hard-code Ask, so a
+    /// pinned Capture turned back into a speech bubble the moment Agent was armed
+    /// and the half advertised a destination that tapping it wouldn't give you.
+    static func destination(_ model: NotchModel) -> NotchModel.Panel {
+        model.agentComposeActive ? (NotchModel.storedSubmitMode ?? .chat)
+                                 : model.effectiveSubmitPanel
     }
 
-    /// The Ask half's word — the destination *spelled out*: "Ask", "Note",
-    /// "Remind · Daily". This is the panel's one place where the routing shows
-    /// itself; there is no ghost trailing the caret any more.
-    private var askWord: String {
-        switch destination {
-        case .chat:     return L("hint.ask")
-        case .note:     return L("hint.note")
-        case .reminder: return L("hint.remind") + model.submitLabelSuffix
+    private var destination: NotchModel.Panel { Self.destination(model) }
+
+    /// The Ask half's word — the destination *spelled out*: "Ask",
+    /// "Capture · Note", "Capture · Reminder · Daily". This is the panel's one
+    /// place where the routing shows itself; there is no ghost trailing the caret
+    /// any more. Capture's two leaves share the noun and differ only in the dimmer
+    /// suffix, so the pair reads as one destination with two landing places rather
+    /// than two modes to pick between.
+    static func askWord(_ model: NotchModel) -> String {
+        switch destination(model) {
+        case .chat:              return L("hint.ask")
+        case .note, .reminder:   return L("hint.capture") + model.submitLabelSuffix
         }
     }
 
-    /// …and its mark, which changes with the word: bubble, pencil, bell.
+    private var askWord: String { Self.askWord(model) }
+
+    /// …and its mark: bubble for Ask, one pencil for both faces of Capture. The
+    /// bell used to sit on Remind, and a second mark is exactly what made the two
+    /// look like separate modes — whether it rings is the suffix's job to say, not
+    /// a different icon's.
     private var askMark: LucideIcons.Mark {
         switch destination {
-        case .chat:     return LucideIcons.messageCircle
-        case .note:     return LucideIcons.pencilLine
-        case .reminder: return LucideIcons.bell
+        case .chat:              return LucideIcons.messageCircle
+        case .note, .reminder:   return LucideIcons.pencilLine
         }
     }
 
@@ -5578,7 +5463,7 @@ private struct BucketTogglePill: View {
             // "Remind · Daily"→"Remind · Weekly" suffix edit doesn't (the same
             // distinction the field's rim pulse already draws).
             BucketWord(title: ask, icon: askMark, active: !agentOn,
-                       swapKey: destination) {
+                       swapKey: destination == .reminder ? .note : destination) {
                 model.setAgentBucket(false)
             }
             // The Agent half only exists where an agent CLI does. Without one the
@@ -5626,10 +5511,10 @@ private struct BucketTogglePill: View {
         // Match the Recent disclosure chevron's fixed 30pt (IdleTrailingCluster's
         // chipSize) so the pill and the trailing dropdown line up on the row.
         .frame(height: 30)
-        .padding(.horizontal, 3)
+        .padding(.horizontal, Self.sidePad)
         // The glass takes the DESTINATION's colour, not a fixed Ask blue: the pill
-        // is the routing's face now, so Note ambers and Remind oranges the capsule
-        // the way the ghost used to tint its word.
+        // is the routing's face now, so Capture ambers the capsule the way the
+        // ghost used to tint its word.
         .glassCapsule(in: Capsule(), brighter: false,
                       tint: agentOn ? Tokens.agentTint : destination.intentTint)
         // Fast and all but critically damped. A 30pt switch is not a panel: the

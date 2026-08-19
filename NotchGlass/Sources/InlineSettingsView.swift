@@ -393,6 +393,13 @@ struct InlineSettingsView: View {
     @State private var recordingShortcut: EditableShortcut?
     @State private var shortcutHints: [EditableShortcut: String] = [:]
 
+    /// The open pane's shared label column width (see `LabelColumnWidthKey`).
+    /// Zero means "not measured yet" — rows fall back to their own width for the
+    /// one frame before the measurement lands. Reset on every pane switch: each
+    /// category has its own set of labels, and General's longest must not stretch
+    /// Appearance's column.
+    @State private var labelColumnWidth: CGFloat = 0
+
     /// Whether the General pane's folded Advanced block is open.
     @State private var advancedSectionOpen = false
     /// Permissions are diagnostic/recovery controls rather than everyday
@@ -525,6 +532,19 @@ struct InlineSettingsView: View {
         }
     }
 
+    /// The widest label in the open pane, so every control in it can start at the
+    /// same x. Rows used to size their label to its own text (`minWidth: 64` and
+    /// `fixedSize`), which left one pane with as many control origins as it had
+    /// rows — the ragged right half is what read as clutter. A fixed pixel column
+    /// can't do this job: French and Spanish labels are visibly longer than the
+    /// English ones, so the number would either clip or waste half the pane.
+    private struct LabelColumnWidthKey: PreferenceKey {
+        static let defaultValue: CGFloat = 0
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+            value = max(value, nextValue())
+        }
+    }
+
     /// Scroll anchor for the key section — the one pane area whose unfold can
     /// push its own fields past the pane's height cap.
     private static let keySectionAnchor = "settings.keySection"
@@ -621,21 +641,35 @@ struct InlineSettingsView: View {
             case .shortcuts:
                 shortcutsSection
             case .appearance:
-                // Two groups, heaviest control first. Where it shows up —
-                // which screens carry an island, whether it also sits in
-                // the Dock and the menu bar — then how it behaves once
-                // there: how readily it opens under the pointer, yielding to
-                // full screen, animating on background work. Hover sensitivity
-                // sat in General for as long as General was a drawer; it is a
-                // property of the island, and this is the island's page.
+                // Two groups, and now they say so — the split was only ever in
+                // this comment while the pane rendered as one flat list.
+                //
+                // Where it shows up: which screens carry an island, whether it
+                // also sits in the Dock and the menu bar, and whether it yields
+                // to a full-screen app. Then how it behaves once there — how
+                // readily it opens under the pointer, how hard a force click has
+                // to press, what the closed notch does during background work.
+                // Hover sensitivity sat in General for as long as General was a
+                // drawer; it is a property of the island, and this is the
+                // island's page.
+                //
+                // Within each group the controls are ordered by shape, sliders
+                // before switches, so like sits with like instead of a toggle
+                // interrupting two sliders. The captions reuse the Model pane's
+                // `captionLabel()` register.
+                Text(L("general.showOn"))
+                    .captionLabel()
                 placementRow
                 dockIconRow
                 menuBarIconRow
+                fullscreenAutoHideRow
+                Text(L("appearance.behavior"))
+                    .captionLabel()
+                    .padding(.top, 2)
                 hoverSensitivityRow
                 if ForceClickFeature.isEnabled {
                     forceClickPressureRow
                 }
-                fullscreenAutoHideRow
                 liveActivityRow
                 if HandwritingFeature.isEnabled {
                     handwrittenAnswersRow
@@ -681,6 +715,9 @@ struct InlineSettingsView: View {
                 let over = height > settingsPaneHeight - Self.paneTopRunway + 0.5
                 if over != paneOverflows { paneOverflows = over }
             }
+            .onPreferenceChange(LabelColumnWidthKey.self) { width in
+                if abs(width - labelColumnWidth) > 0.5 { labelColumnWidth = width }
+            }
             .scrollIndicators(.never)
             // One fixed height for every pane (see `settingsPaneHeight`) — the
             // island never resizes between categories, and a greedy ScrollView
@@ -719,6 +756,10 @@ struct InlineSettingsView: View {
             .onChange(of: section) {
                 paneScrolledOffTop = false
                 statsHover = nil
+                // The new pane measures its own longest label; keeping the old
+                // pane's number would indent the first frame by a width no row
+                // here asked for.
+                labelColumnWidth = 0
             }
         }
     }
@@ -2033,8 +2074,8 @@ struct InlineSettingsView: View {
     private var providerRow: some View {
         settingRow(label: L("model.provider")) {
             GlassMenu(title: provider.displayName) {
-                let ready = Provider.allCases.filter(providerReady)
-                let unready = Provider.allCases.filter { !providerReady($0) }
+                let ready = Provider.offered.filter(providerReady)
+                let unready = Provider.offered.filter { !providerReady($0) }
                 if !ready.isEmpty {
                     SwiftUI.Section(L("model.picker.configured")) {
                         ForEach(ready) { p in
@@ -2146,17 +2187,15 @@ struct InlineSettingsView: View {
     /// Drawn as a two-card picker rather than a dropdown: "which screens" is a
     /// spatial choice, so each card shows a miniature laptop + external monitor
     /// with a bright pill on every screen that gets an island.
+    /// The two placement cards, on a line of their own.
+    ///
+    /// The label moved out to the group caption above ("SHOW ON"): as an inline
+    /// label it had to be nudged down by a hand-tuned 8pt to look level with the
+    /// cards' first inner line, and it pushed the heaviest control on the page
+    /// off the pane's left margin. Caption above, cards at the margin — no
+    /// vertical fudge left to keep true.
     private var placementRow: some View {
         HStack(alignment: .top, spacing: 12) {
-            Text(L("general.showOn"))
-                .font(.sf(13, weight: .medium))
-                .foregroundStyle(Tokens.text2)
-                .lineLimit(1)
-                .fixedSize()
-                .frame(minWidth: 64, alignment: .leading)
-                // Sit on the cards' first inner line, roughly where the other
-                // rows' baseline lands, instead of the cards' outer top edge.
-                .padding(.top, 8)
             ForEach(DisplayPlacement.allCases) { p in
                 placementCard(p)
             }
@@ -2199,18 +2238,24 @@ struct InlineSettingsView: View {
     ///
     /// Hidden is the app's natural state: a menu-bar-less accessory whose only
     /// presence is the island. Some users want one place to relaunch or quit
-    /// from, though. Drawn as a plain row — same shape as the menu-bar-icon
-    /// pick right below it.
+    /// from, though.
+    ///
+    /// Drawn as a switch, not a menu: the choice is Shown/Hidden and nothing
+    /// else, and a two-item popup makes you open it to learn that. The enum
+    /// stays — it carries the persisted value and the activation-policy mapping,
+    /// which a raw Bool would throw away.
     private var dockIconRow: some View {
-        settingRow(label: L("general.dockIcon"),
-                   info: L("general.dockIcon.footer")) {
-            GlassMenu(title: dockIconVisibility.label) {
-                ForEach(DockIconVisibility.allCases) { v in
-                    Button { selectDockIconVisibility(v) } label: {
-                        menuOption(v.label, selected: v == dockIconVisibility)
-                    }
-                }
-            }
+        settingRow(label: L("general.dockIcon.toggle"),
+                   info: L("general.dockIcon.footer"),
+                   aligned: true) {
+            Toggle("", isOn: Binding(
+                get: { dockIconVisibility == .shown },
+                set: { Haptics.levelChange(); selectDockIconVisibility($0 ? .shown : .hidden) }
+            ))
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .tint(Tokens.text2)
         }
     }
 
@@ -2219,14 +2264,15 @@ struct InlineSettingsView: View {
     /// summon shortcut has been forgotten. The choice applies immediately
     /// (AppDelegate adds/removes the status item).
     private var menuBarIconRow: some View {
-        settingRow(label: L("general.menuBarIcon")) {
-            GlassMenu(title: menuBarIconVisibility.label) {
-                ForEach(MenuBarIconVisibility.allCases) { v in
-                    Button { selectMenuBarIconVisibility(v) } label: {
-                        menuOption(v.label, selected: v == menuBarIconVisibility)
-                    }
-                }
-            }
+        settingRow(label: L("general.menuBarIcon.toggle"), aligned: true) {
+            Toggle("", isOn: Binding(
+                get: { menuBarIconVisibility == .shown },
+                set: { Haptics.levelChange(); selectMenuBarIconVisibility($0 ? .shown : .hidden) }
+            ))
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .tint(Tokens.text2)
         }
     }
 
@@ -2651,11 +2697,24 @@ struct InlineSettingsView: View {
     /// On by default; scoped to the virtual notch on external / non-notched
     /// displays (the built-in hardware notch is physical and never hides). The
     /// choice applies immediately — `AppDelegate` re-evaluates on the toggle.
+    /// Phrased as "Show in full screen", not "Hide in full screen": it sits under
+    /// two other switches that both read "Show in …", and one row flipping the
+    /// polarity mid-column makes you re-read all three to work out which way is
+    /// on.
+    ///
+    /// Only the wording and the binding flip — the stored value is still
+    /// `HideNotchInFullscreen.isEnabled`, still meaning *hide*. That's what
+    /// carries an existing preference across unchanged: someone who had hiding
+    /// switched on now sees "Show in full screen" switched off, which is the
+    /// same instruction read from the other end. No migration, nothing to
+    /// mis-translate. The agent-facing `hide_in_fullscreen` setting and its
+    /// `general.fullscreenAutoHide` label keep the old polarity too, matching
+    /// the key they're named for.
     private var fullscreenAutoHideRow: some View {
-        settingRow(label: L("general.fullscreenAutoHide")) {
+        settingRow(label: L("general.fullscreenAutoHide.toggle"), aligned: true) {
             Toggle("", isOn: Binding(
-                get: { hideInFullscreen },
-                set: { Haptics.levelChange(); selectHideInFullscreen($0) }
+                get: { !hideInFullscreen },
+                set: { Haptics.levelChange(); selectHideInFullscreen(!$0) }
             ))
             .labelsHidden()
             .toggleStyle(.switch)
@@ -2687,7 +2746,8 @@ struct InlineSettingsView: View {
     /// alike. The finished badge and the completion notification stay.
     private var liveActivityRow: some View {
         settingRow(label: L("appearance.liveActivity"),
-                   info: L("appearance.liveActivity.hint")) {
+                   info: L("appearance.liveActivity.hint"),
+                   aligned: true) {
             Toggle("", isOn: Binding(
                 get: { model.liveActivityEnabled },
                 set: { Haptics.levelChange(); model.liveActivityEnabled = $0 }
@@ -2705,7 +2765,8 @@ struct InlineSettingsView: View {
     /// one thing the label can't say, so it's the whole of the hint.
     private var handwrittenAnswersRow: some View {
         settingRow(label: L("appearance.handwritten"),
-                   info: L("appearance.handwritten.hint")) {
+                   info: L("appearance.handwritten.hint"),
+                   aligned: true) {
             Toggle("", isOn: Binding(
                 get: { model.handwrittenAnswers },
                 set: { Haptics.levelChange(); model.handwrittenAnswers = $0 }
@@ -2836,7 +2897,8 @@ struct InlineSettingsView: View {
     private var forceClickPressureRow: some View {
         let controlWidth: CGFloat = 190
         return settingRow(label: L("general.forceClickPressure"),
-                          info: L("general.forceClickPressure.hint")) {
+                          info: L("general.forceClickPressure.hint"),
+                          aligned: true) {
             VStack(spacing: 1) {
                 NativeDetentSlider(value: forceClickPressurePosition,
                                    ticks: ForceClickPressure.allCases.count,
@@ -2929,7 +2991,8 @@ struct InlineSettingsView: View {
     private var hoverSensitivityRow: some View {
         let controlWidth: CGFloat = 190
         return settingRow(label: L("general.hoverSensitivity"),
-                          info: L("general.hoverSensitivity.hint")) {
+                          info: L("general.hoverSensitivity.hint"),
+                          aligned: true) {
             VStack(spacing: 1) {
                 NativeDetentSlider(value: hoverSensitivityPosition,
                                    ticks: HoverSensitivity.allCases.count,
@@ -3311,7 +3374,7 @@ struct InlineSettingsView: View {
     /// request as things stand (key stored, or a signed-in CLI). Offering a
     /// provider with no key would be offering a pin that silently falls back.
     private var promptModelGroups: [PromptModelGroup] {
-        Provider.allCases
+        Provider.offered
             .filter(ModelCatalogStore.ready)
             .map { PromptModelGroup(provider: $0, models: $0.availableModels) }
     }
@@ -4035,6 +4098,23 @@ struct InlineSettingsView: View {
                 }
             }
 
+            // The two answer-gallery interactions (the fanning image stack and
+            // the image modal it opens into) are ports of Interaction Kit's web
+            // components — the geometry, springs and thresholds are theirs.
+            Text(L("about.interactionKit"))
+                .font(.sf(13, weight: .medium))
+                .foregroundStyle(Tokens.text1)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 12) {
+                aboutLink("Interaction Kit") {
+                    NSWorkspace.shared.open(URL(string: "https://interactionkit.org")!)
+                }
+                aboutLink("MIT License") {
+                    NSWorkspace.shared.open(URL(string: "https://opensource.org/license/mit")!)
+                }
+            }
+
             // The bundled Latin handwriting face (Settings → Appearance,
             // "Handwritten answers"). The OFL asks that the licence travel with
             // the software that ships the font.
@@ -4429,26 +4509,59 @@ struct InlineSettingsView: View {
     /// A label-on-the-left, control-on-the-right row, sized so the provider and
     /// model menus line up. Pass `info` to hang a collapsed ⓘ note right after the
     /// label — the same mark the answer footer uses for the model that replied.
+    /// One label + control line.
+    ///
+    /// `aligned` opts the row into the pane's shared label column: it reports its
+    /// natural label width up through `LabelColumnWidthKey` and takes the widest
+    /// one back, so every control in the pane starts at the same x. Off by
+    /// default — panes whose rows nest (`keySection`, `permissionsSection`) are
+    /// left on the old self-sizing behaviour until this is proven on Appearance.
+    ///
+    /// The measurement and the width are deliberately on DIFFERENT views: the
+    /// inner stack stays `fixedSize()` and is what gets measured, the resolved
+    /// column width is applied to a wrapper around it. Reporting from the same
+    /// view the frame sizes would feed the preference back into itself and
+    /// oscillate.
     private func settingRow<Content: View>(
         label: String,
         info: String? = nil,
+        aligned: Bool = false,
         @ViewBuilder _ content: () -> Content
     ) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
-            HStack(spacing: 3) {
-                Text(label)
-                    .font(.sf(13, weight: .medium))
-                    .foregroundStyle(Tokens.text2)
-                    .lineLimit(1)
-                    .fixedSize()
-                if let info {
-                    SettingInfo(info)
-                }
-            }
-            .frame(minWidth: 64, alignment: .leading)
+            settingLabel(label, info: info, aligned: aligned)
             content()
             Spacer(minLength: 0)
         }
+    }
+
+    /// The label half of a setting line, extracted so the rows that don't use
+    /// `settingRow`'s layout (the placement cards) can still sit in the column.
+    private func settingLabel(
+        _ label: String,
+        info: String? = nil,
+        aligned: Bool = false
+    ) -> some View {
+        HStack(spacing: 3) {
+            Text(label)
+                .font(.sf(13, weight: .medium))
+                .foregroundStyle(Tokens.text2)
+                .lineLimit(1)
+                .fixedSize()
+            if let info {
+                SettingInfo(info)
+            }
+        }
+        .frame(minWidth: 64, alignment: .leading)
+        .background(
+            GeometryReader { g in
+                Color.clear.preference(key: LabelColumnWidthKey.self,
+                                       value: aligned ? g.size.width : 0)
+            }
+        )
+        // `nil` keeps the row at its own width until the first measurement.
+        .frame(width: aligned && labelColumnWidth > 0 ? labelColumnWidth : nil,
+               alignment: .leading)
     }
 
     // MARK: - Logic (mirrors the old SettingsView)

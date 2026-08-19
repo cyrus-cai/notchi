@@ -84,7 +84,7 @@ Notchi can drive your **Codex**, **Claude Code**, **Grok**, and other CLIs, with
 
 - AI services:
   - Including but not limited to: OpenRouter, Vercel AI Gateway, OpenAI, Anthropic, Google Gemini, DeepSeek, Qwen, Kimi, GLM, MiniMax, MiMo, or your own OpenAI-compatible endpoint
-  - You can also use a locally installed, signed-in Codex, Claude Code, Grok, or Command Code CLI
+  - You can also use a locally installed, signed-in Codex, Claude Code, Grok, or PI CLI
 - Web search
   - Including but not limited to: Exa, Keenable, or AnySearch
 
@@ -105,7 +105,7 @@ Yes. On Macs without a notch and on external displays, Notchi draws a virtual no
 
 **Do I need an account or an API key?**
 
-Notchi itself has no account. For hosted AI, connect a provider with its API key or supported sign-in flow. Alternatively, use Codex, Claude Code, Grok, or Command Code through a locally installed CLI that is already signed in. Notes and reminders do not need a provider connection.
+Notchi itself has no account. For hosted AI, connect a provider with its API key or supported sign-in flow. Alternatively, use Codex, Claude Code, Grok, or PI through a locally installed CLI that is already signed in. Notes and reminders do not need a provider connection.
 
 **Can I use local models?**
 
@@ -115,7 +115,7 @@ Yes. Add any OpenAI-compatible endpoint in Settings; this works for Ollama, LM S
 
 Yes, with a vision-capable Ask model.
 
-**Can Notchi run Codex, Claude Code, Grok, or Command Code?**
+**Can Notchi run Codex, Claude Code, Grok, or PI?**
 
 Yes. Agent mode runs the official CLI you already installed and signed in to, inside the project folder you choose.
 

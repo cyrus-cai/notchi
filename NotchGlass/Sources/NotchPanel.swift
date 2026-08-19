@@ -15,19 +15,35 @@ final class NotchPanel: NSPanel {
     /// Resting level: above the menu bar and every normal window, where the island
     /// belongs when it isn't being typed into.
     static let restingLevel: NSWindow.Level = .statusBar
-    /// Level while a text field is actively being edited. The macOS input-method
+    /// Level while an IME composition is in flight. The macOS input-method
     /// candidate window (the pinyin/kana/Hangul selection popup) is drawn by the
-    /// input server ABOVE normal app windows but BELOW a `.statusBar` overlay — so at
-    /// the resting level it gets covered or clipped by the island, making CJK input
-    /// unusable. `.floating` keeps the island above ordinary windows yet below the
-    /// candidate window, so the selection popup shows through while editing. Restored
-    /// to `restingLevel` the moment editing ends.
+    /// input server at window layer 20 — ABOVE normal app windows but BELOW both the
+    /// menu bar (24) and a `.statusBar` overlay (25) — so at the resting level it
+    /// gets covered or clipped by the island, making CJK input unusable. `.floating`
+    /// keeps the island above ordinary windows yet below the candidate window, so the
+    /// selection popup shows through.
+    ///
+    /// It is **only** used while marked text actually exists (see `setComposing`).
+    /// Anything below layer 24 is also below the menu bar, so while the island sits
+    /// here macOS draws the menu bar — its titles and its item chips — straight over
+    /// the island's black notch cap, and the top of the "notch" visibly comes apart.
+    /// That used to happen on the FIRST keystroke of every editing session (NSTextView
+    /// posts `textDidBeginEditing` on the first edit, not on focus) and lasted until
+    /// the caret left, which is what the "typing pulls a gap open at the top of the
+    /// notch" report was. There is no level that clears the menu bar *and* stays under
+    /// the candidate window, so the drop is now scoped to the moments that need it:
+    /// a live composition, when the popup is on screen and the eye is on it anyway.
     static let editingLevel: NSWindow.Level = .floating
 
-    /// How many field editors are currently composing/editing. The island can host
-    /// more than one IME field (prompt + history search), so ref-count rather than a
-    /// bool — the level only climbs back to resting once the LAST one ends.
+    /// How many field editors currently hold the caret. The island can host more than
+    /// one IME field (prompt + history search), so ref-count rather than a bool — the
+    /// last one ending is what clears any leftover composition state.
     private var activeEditors = 0
+
+    /// Whether a field editor is mid-composition right now (marked text present).
+    /// This — not merely having the caret — is what puts the island at
+    /// `editingLevel`.
+    private var composing = false
 
     init(contentRect: NSRect) {
         super.init(
@@ -67,27 +83,39 @@ final class NotchPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 
-    /// A field editor started composing/editing — drop to `editingLevel` so the IME
-    /// candidate window can show above the island. Idempotent across multiple fields
-    /// via the ref-count. Call its `endFieldEditing()` counterpart on end-editing.
+    /// A field editor took the caret. The LEVEL deliberately doesn't move here —
+    /// editing alone doesn't summon a candidate window, and dropping below the menu
+    /// bar for a whole typing session is what tore the notch's top open (see
+    /// `editingLevel`). Call its `endFieldEditing()` counterpart on end-editing.
     func beginFieldEditing() {
         activeEditors += 1
-        if level != Self.editingLevel { level = Self.editingLevel }
     }
 
-    /// A field editor stopped editing. Once the last active editor ends, climb back
-    /// to the resting level so the island again floats above the menu bar at rest.
+    /// A field editor stopped editing. Once the last one ends, any composition it was
+    /// holding is over too, so the island climbs back above the menu bar.
     func endFieldEditing() {
         activeEditors = max(0, activeEditors - 1)
         if activeEditors == 0 { restRestingLevel() }
     }
 
+    /// The composition gate: `true` while the focused field holds marked text (the
+    /// candidate window is up, or about to be), `false` the moment it commits. Called
+    /// on every storage edit, so it must stay cheap and idempotent — it only touches
+    /// `level` when the state actually flips.
+    func setComposing(_ isComposing: Bool) {
+        guard composing != isComposing else { return }
+        composing = isComposing
+        let want = isComposing ? Self.editingLevel : Self.restingLevel
+        if level != want { level = want }
+    }
+
     /// Force the island back to its resting level and clear the editing ref-count.
     /// Called on panel close (and key-resign) so a missed end-editing notification —
     /// e.g. the panel closing mid-composition — can never strand it at `editingLevel`,
-    /// where it would sit below other windows at rest.
+    /// where it would sit below the menu bar and other windows at rest.
     func restRestingLevel() {
         activeEditors = 0
+        composing = false
         if level != Self.restingLevel { level = Self.restingLevel }
     }
 }

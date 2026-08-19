@@ -220,7 +220,7 @@ final class DoubleTapModifierMonitor {
     }
 }
 
-/// Keeps the unfinished Force Touch path dormant without discarding its
+/// Gates the Force Touch path so it can be parked without discarding its
 /// implementation or the user's saved pressure preference.
 enum ForceClickFeature {
     static let isEnabled = false
@@ -364,7 +364,7 @@ enum ForceClickPressure: String, CaseIterable, Identifiable {
         case .off:    return 1
         case .light:  return 1.70
         case .medium: return 2.00
-        case .firm:   return 2.35
+        case .firm:   return 2.20
         }
     }
 
@@ -373,7 +373,7 @@ enum ForceClickPressure: String, CaseIterable, Identifiable {
         case .off:    return 1
         case .light:  return 65
         case .medium: return 95
-        case .firm:   return 130
+        case .firm:   return 112
         }
     }
 
@@ -382,7 +382,7 @@ enum ForceClickPressure: String, CaseIterable, Identifiable {
         case .off:    return 1
         case .light:  return 200
         case .medium: return 260
-        case .firm:   return 330
+        case .firm:   return 300
         }
     }
 
