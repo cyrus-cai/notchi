@@ -47,7 +47,7 @@ final class HistoryArchiveWindowController: NSObject, NSWindowDelegate {
             // Chat (or back) must not retain the previous bucket's rows.
             window.contentView = NSHostingView(
                 rootView: HistoryArchiveView(model: model, scope: scope)
-                    .coordinateSpace(.named(TooltipCoordinateSpace.clipBox))
+                    .notchTooltipClipBox()
             )
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -82,7 +82,7 @@ final class HistoryArchiveWindowController: NSObject, NSWindowDelegate {
             rootView: HistoryArchiveView(model: model, scope: scope)
                 // Same as the detached window: this window's edges are the wall
                 // its hover tooltips clamp to.
-                .coordinateSpace(.named(TooltipCoordinateSpace.clipBox)))
+                .notchTooltipClipBox())
         window.delegate = self
         window.center()
         window.setFrameAutosaveName("NotchHistoryArchive")

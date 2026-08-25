@@ -223,7 +223,7 @@ final class DoubleTapModifierMonitor {
 /// Gates the Force Touch path so it can be parked without discarding its
 /// implementation or the user's saved pressure preference.
 enum ForceClickFeature {
-    static let isEnabled = false
+    static let isEnabled = true
 }
 
 /// Observes a Force Touch trackpad globally and fires once when a click continues
@@ -245,6 +245,72 @@ final class ForceClickMonitor {
     private var clickPressure: Float?
     private var peakPressure: Float = 0
     private var firedForCurrentPress = false
+    /// Observer for the wake notification that re-arms the pressure client.
+    private var wakeObserver: NSObjectProtocol?
+    /// When the last raw contact frame arrived, and when the client was last
+    /// rebuilt. The MultitouchSupport registration does not survive a sleep/wake
+    /// cycle (or the trackpad re-enumerating): the callback simply stops being
+    /// called, with no error and no way to notice from the inside. Both re-arm
+    /// paths below key off these.
+    private var lastFrameAt: Date?
+    private var lastRearmAt = Date.distantPast
+    /// Where the current press went down, and whether it has since travelled far
+    /// enough to be a drag rather than a click held in place.
+    private var pressOrigin: NSPoint?
+    private var pressMoved = false
+    /// Where the pointer was at the last sample, how far it has travelled along
+    /// its actual path since the press went down, and when it last moved by more
+    /// than hand tremor. Straight-line distance from the origin alone misses a
+    /// drag that curves back near where it started, and says nothing about
+    /// whether the hand is moving *right now* — which is the question that
+    /// separates a force click from someone leaning into a drag.
+    private var lastPointerPoint: NSPoint?
+    private var pressTravel: CGFloat = 0
+    private var lastMovedAt = Date.distantPast
+    /// The press has met the pressure bar and is serving out `fireHold`: where
+    /// the pointer was when it qualified, and when. Any movement before the hold
+    /// is up means this was the start of a drag, and the press is disarmed
+    /// instead of fired.
+    private var pendingFireAt: Date?
+    private var pendingFirePoint: NSPoint?
+    /// The press started on one of Notchi's own windows, so it is not a gesture
+    /// on someone else's text — see `pressIsOnOwnWindow`.
+    private var pressOnOwnWindow = false
+
+    /// How long a click may find the pressure stream silent before the client is
+    /// treated as dead. A click means fingers are on the pad, so frames should be
+    /// arriving at ~125Hz; a second of silence at that moment is not a still hand.
+    private static let staleFrameWindow: TimeInterval = 1
+    /// Floor between rebuilds, so clicking with an external mouse (no contact
+    /// frames, ever) doesn't rebuild the client on every click.
+    private static let rearmCooldown: TimeInterval = 10
+    /// How far the pointer may travel before the press stops being a candidate
+    /// for the gesture. A drag keeps the finger down on the pad and the hand
+    /// naturally leans into it, so without this every window drag crosses the
+    /// firing pressure somewhere across the screen and gets the shortcut fired
+    /// out from under it — the window is dropped and a composer opens instead.
+    /// macOS's own force click draws the same line: once the press starts moving
+    /// what is under it, it is a drag and nothing else.
+    private static let dragSlop: CGFloat = 6
+    /// How far the pointer may shift between two samples and still count as a
+    /// hand held in place. Below this the step is tremor: it neither adds to the
+    /// travelled path nor restarts the settle timer, so a long firm press can't
+    /// disarm itself by accumulating noise.
+    private static let stillSlop: CGFloat = 1.5
+    /// How long the pointer must be still before pressure counts again. Pressing
+    /// harder while the pointer is on its way somewhere is how a drag feels — the
+    /// hand leans in to keep hold — so pressure only builds toward the gesture
+    /// once the pointer has actually settled.
+    private static let settleWindow: TimeInterval = 0.12
+    /// How long the pointer must stay put *after* the pressure threshold is met
+    /// before the gesture actually fires. Reaching the threshold says the finger
+    /// pressed hard; only the next instant says whether it pressed hard to look
+    /// at something or to pick something up. A drag that starts with a firm press
+    /// — grabbing a window, a file, a text selection — crosses the threshold
+    /// before the pointer has moved at all, so a threshold test alone can never
+    /// tell the two apart. This window is what tells them apart, and it is short
+    /// enough to stay invisible in a press that really is a press.
+    private static let fireHold: TimeInterval = 0.11
 
     /// Whether this machine actually feeds pressure. False on a mouse, an old
     /// non-Force-Touch trackpad, or if the private framework ever stops loading —
@@ -257,7 +323,8 @@ final class ForceClickMonitor {
         self.action = action
         self.progress = progress
 
-        let mouseEvents: NSEvent.EventTypeMask = [.leftMouseDown, .leftMouseUp]
+        let mouseEvents: NSEvent.EventTypeMask = [.leftMouseDown, .leftMouseUp,
+                                                  .leftMouseDragged]
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: mouseEvents) {
             [weak self] event in
             self?.handleMouse(event)
@@ -267,35 +334,99 @@ final class ForceClickMonitor {
             self?.handleMouse(event)
             return event
         }
-        pressureSource = RawTrackpadPressureSource { [weak self] pressure, hasTouches in
-            self?.handlePressure(pressure, hasTouches: hasTouches)
-        }
+        openPressureSource()
 #if DEBUG
         if pressureSource == nil {
             NSLog("[ForceClick] raw trackpad pressure source unavailable")
         }
 #endif
+        // Waking is where the registration dies. Rebuilding it here is what keeps
+        // the gesture alive past the first sleep of a session — without it the
+        // monitor is only ever as good as the app's uptime, and the failure is
+        // invisible: pressing simply stops doing anything.
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.rearmPressureSource()
+        }
     }
 
     deinit {
         if let globalMonitor { NSEvent.removeMonitor(globalMonitor) }
         if let localMonitor { NSEvent.removeMonitor(localMonitor) }
+        if let wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+        }
+    }
+
+    /// (Re)open the raw contact-frame client. The private framework hands out one
+    /// registration per device and a dead one never revives, so recovery is always
+    /// a fresh source — dropping the old one first, since it still owns the
+    /// device's single callback slot until it deinits.
+    private func openPressureSource() {
+        pressureSource = nil
+        pressureSource = RawTrackpadPressureSource { [weak self] pressure, hasTouches in
+            self?.handlePressure(pressure, hasTouches: hasTouches)
+        }
+        lastFrameAt = nil
+        lastRearmAt = Date()
+    }
+
+    /// Rebuild the client unless one was just built — see `rearmCooldown`.
+    private func rearmPressureSource() {
+        guard Date().timeIntervalSince(lastRearmAt) > Self.rearmCooldown else { return }
+        openPressureSource()
     }
 
     private func handleMouse(_ event: NSEvent) {
         switch event.type {
         case .leftMouseDown:
+            // The wake notification covers the common death, but not every one:
+            // the client also goes quiet when the trackpad re-enumerates, and a
+            // missed notification would park the gesture for the rest of the
+            // session. A click with nothing on the pressure stream is that state,
+            // observed from the one moment it matters.
+            if let lastFrameAt,
+               Date().timeIntervalSince(lastFrameAt) > Self.staleFrameWindow {
+                rearmPressureSource()
+            }
             mouseIsDown = true
             firedForCurrentPress = false
+            // Screen coordinates on purpose: the global monitor reports another
+            // app's window, and this only ever asks how far the pointer went.
+            pressOrigin = NSEvent.mouseLocation
+            pressMoved = false
+            lastPointerPoint = pressOrigin
+            pressTravel = 0
+            lastMovedAt = .distantPast
+            pendingFireAt = nil
+            pendingFirePoint = nil
+            pressOnOwnWindow = Self.pressIsOnOwnWindow()
             peakPressure = latestPressure
             // The raw frame normally arrives just before mouse-down. If it races
             // behind, the first pressure frame below becomes the baseline instead.
             clickPressure = latestPressure > 1 ? latestPressure : nil
+        case .leftMouseDragged:
+            // The press is moving something. Disarm it for good — pressure
+            // reported for the rest of this drag belongs to holding on, not to
+            // pressing in.
+            guard mouseIsDown, !pressMoved else { break }
+            guard noteMotion() == .drag else { break }
+            pressMoved = true
+            progress(nil)
         case .leftMouseUp:
+            // Letting go inside the hold window settles it the other way: the
+            // press ended where it started, so it was a press. Fire now rather
+            // than swallow it — the pressure stream stops being consulted the
+            // moment the button is up.
+            if pendingFireAt != nil, !pressMoved, noteMotion() != .drag {
+                fire()
+            }
 #if DEBUG
-            NSLog("[ForceClick] baseline=%.1f peak=%.1f fired=%@",
-                  clickPressure ?? 0, peakPressure,
-                  firedForCurrentPress ? "yes" : "no")
+            NSLog("[ForceClick] baseline=%.1f peak=%.1f travel=%.1f fired=%@%@",
+                  clickPressure ?? 0, peakPressure, pressTravel,
+                  firedForCurrentPress ? "yes" : "no",
+                  pressMoved ? " (drag)" : "")
 #endif
             resetPress()
         default:
@@ -304,6 +435,9 @@ final class ForceClickMonitor {
     }
 
     private func handlePressure(_ pressure: Float, hasTouches: Bool) {
+        // Liveness is recorded before any gate: a frame arriving at all is what
+        // says the client is alive, whether or not this press is one we act on.
+        lastFrameAt = Date()
         // The rung can be switched off entirely — then pressure is ignored and
         // the herald never draws, so a plain click stays a plain click.
         guard ForceClickPressure.current.isEnabled else { return }
@@ -313,7 +447,49 @@ final class ForceClickMonitor {
             if !mouseIsDown { resetPress() }
             return
         }
-        guard mouseIsDown, !firedForCurrentPress else { return }
+        guard mouseIsDown, !firedForCurrentPress, !pressMoved, !pressOnOwnWindow
+        else { return }
+        // The dragged event above is the fast signal, but not a reliable one:
+        // a window drag (`performDrag(with:)`, or AppKit's own
+        // `isMovableByWindowBackground` tracking) pulls events straight off the
+        // queue, so the local monitor is never called for the whole ride. The
+        // pressure stream is not on that loop — it keeps arriving at ~125Hz —
+        // so the same question is asked here against the live pointer, which is
+        // what actually disarms a drag of one of our own windows.
+        let motion = noteMotion()
+        // A press already waiting out its hold answers only one question: did the
+        // pointer move? Any movement at all — not just enough to clear the drag
+        // slop — means the hand was on its way somewhere, so the press is a drag
+        // and stays disarmed for the rest of it.
+        if let pendingFireAt, let pendingFirePoint {
+            let now = NSEvent.mouseLocation
+            let drift = hypot(now.x - pendingFirePoint.x, now.y - pendingFirePoint.y)
+            if motion == .drag || drift > Self.stillSlop {
+                pressMoved = true
+                self.pendingFireAt = nil
+                self.pendingFirePoint = nil
+                progress(nil)
+                return
+            }
+            if Date().timeIntervalSince(pendingFireAt) >= Self.fireHold { fire() }
+            return
+        }
+        switch motion {
+        case .drag:
+            pressMoved = true
+            progress(nil)
+            return
+        case .moving:
+            // Still going somewhere. Don't let this frame count, and drop the
+            // baseline so the pressure being held to keep hold of whatever is
+            // under the pointer becomes the new floor once the hand settles —
+            // firing then takes a fresh push, not the weight already there.
+            clickPressure = nil
+            progress(nil)
+            return
+        case .still:
+            break
+        }
         guard let baseline = clickPressure else {
             if pressure > 1 { clickPressure = pressure }
             return
@@ -322,8 +498,86 @@ final class ForceClickMonitor {
         let reached = ForceClickPressure.current.progress(of: pressure, from: baseline)
         progress(reached)
         guard reached >= 1 else { return }
+        // Qualified on pressure. Hold it for a beat and see whether the pointer
+        // stays — `fireHold`.
+        pendingFireAt = Date()
+        pendingFirePoint = NSEvent.mouseLocation
+    }
+
+    /// Commit the gesture. Guarded so the two paths into it — the hold expiring
+    /// on the pressure stream, and the button coming up mid-hold — can't both
+    /// land for one press.
+    private func fire() {
+        guard !firedForCurrentPress else { return }
         firedForCurrentPress = true
+        pendingFireAt = nil
+        pendingFirePoint = nil
         action()
+    }
+
+    /// What the pointer is doing this instant, from the press's point of view.
+    private enum PressMotion {
+        /// Held in place — pressure may build toward the gesture.
+        case still
+        /// Moving, but not yet far enough to call the press a drag.
+        case moving
+        /// Travelled far enough that this press belongs to a drag for good.
+        case drag
+    }
+
+    /// Sample the pointer and fold it into the press's motion state. Called from
+    /// both the drag events and the ~125Hz pressure stream — the latter is the
+    /// one that matters, since a window drag pulls mouse events straight off the
+    /// queue and the monitors never see them.
+    private func noteMotion() -> PressMotion {
+        let now = NSEvent.mouseLocation
+        if let last = lastPointerPoint {
+            let step = hypot(now.x - last.x, now.y - last.y)
+            if step > Self.stillSlop {
+                pressTravel += step
+                lastMovedAt = Date()
+            }
+        }
+        lastPointerPoint = now
+        if let pressOrigin,
+           hypot(now.x - pressOrigin.x, now.y - pressOrigin.y) > Self.dragSlop {
+            return .drag
+        }
+        if pressTravel > Self.dragSlop { return .drag }
+        return Date().timeIntervalSince(lastMovedAt) < Self.settleWindow
+            ? .moving : .still
+    }
+
+    /// Is the pointer over one of our own windows?
+    ///
+    /// The gesture reads the selection in the app the user is pressing INSIDE
+    /// of, so a press on Notchi's own surfaces has nothing to act on. Left
+    /// unguarded it acts anyway, and the surface it lands on is almost always
+    /// the pointer-side box the last press just opened: grabbing that box to
+    /// move it presses it hard enough to fire again, which re-summons the very
+    /// window under the hand — it snaps back to the pointer, churns, and dies.
+    /// macOS's own force click doesn't act on the app you are pressing in
+    /// either.
+    ///
+    /// Asked of the window server rather than by which monitor delivered the
+    /// event: a click on a window of an inactive app is consumed by the
+    /// activation, so the local monitor cannot be relied on to see it.
+    ///
+    /// And asked as "what would this click actually hit", NOT "is the pointer
+    /// inside one of our frames". The island's canvas is a 760×640 transparent
+    /// panel pinned to the top of every screen: by frame it covers most of the
+    /// upper middle of the display, which is exactly where text gets selected,
+    /// so frame containment disqualified the gesture almost everywhere. The
+    /// window server hit-tests through the transparent pixels and names the
+    /// window the press really lands on.
+    @MainActor private static func ownWindowUnderPointer() -> Bool {
+        let number = NSWindow.windowNumber(at: NSEvent.mouseLocation,
+                                           belowWindowWithWindowNumber: 0)
+        return NSApp.window(withWindowNumber: number) != nil
+    }
+
+    private static func pressIsOnOwnWindow() -> Bool {
+        MainActor.assumeIsolated { ownWindowUnderPointer() }
     }
 
     private func resetPress() {
@@ -331,7 +585,44 @@ final class ForceClickMonitor {
         mouseIsDown = false
         clickPressure = nil
         firedForCurrentPress = false
+        pressOrigin = nil
+        pressMoved = false
+        lastPointerPoint = nil
+        pressTravel = 0
+        lastMovedAt = .distantPast
+        pendingFireAt = nil
+        pendingFirePoint = nil
+        pressOnOwnWindow = false
         if wasTracking { progress(nil) }
+    }
+}
+
+/// macOS's own force-click lookup — System Settings → Trackpad → "Look up &
+/// data detectors" set to *Force Click with One Finger*. It listens for exactly
+/// the press `ForceClickMonitor` watches, so while it is on a hard click on
+/// selected text opens the system's dictionary panel over ours. The system
+/// offers no way to turn it off programmatically, so all Notchi can do is read
+/// it and ask.
+///
+/// The popup's three positions map to two preferences: *Force Click with One
+/// Finger* sets `com.apple.trackpad.forceClick` in the global domain, *Tap with
+/// Three Fingers* sets `TrackpadThreeFingerTapGesture` in the trackpad domains,
+/// and *Off* clears both. Only the force-click one collides — a three-finger tap
+/// is a different gesture entirely — so that is the only one read here.
+enum SystemLookupGesture {
+    private static let key = "com.apple.trackpad.forceClick" as CFString
+
+    /// Read through `CFPreferences`, not `UserDefaults.standard`: System
+    /// Settings writes the global domain while Notchi is already running, and
+    /// the standard defaults serve a snapshot taken at launch. The explicit
+    /// synchronize picks up a change made moments ago in the other app.
+    static var usesForceClick: Bool {
+        CFPreferencesAppSynchronize(kCFPreferencesAnyApplication)
+        let value = CFPreferencesCopyValue(key,
+                                           kCFPreferencesAnyApplication,
+                                           kCFPreferencesCurrentUser,
+                                           kCFPreferencesAnyHost)
+        return (value as? NSNumber)?.boolValue ?? false
     }
 }
 
@@ -407,12 +698,34 @@ enum ForceClickPressure: String, CaseIterable, Identifiable {
 
     private static let key = "forceClickPressure"
 
+    /// Unset means **off** — a fresh install never arms the gesture. It collides
+    /// with macOS's own force-click lookup, which ships on, so an implicit
+    /// default of `.medium` handed brand-new users two panels on one press
+    /// before they had ever heard of the setting. Now the gate in Settings is
+    /// the only way it turns on: you pick a rung, the dialog walks you through
+    /// switching Apple's lookup off, and it arms.
     static var current: ForceClickPressure {
         get {
             UserDefaults.standard.string(forKey: key)
-                .flatMap(ForceClickPressure.init(rawValue:)) ?? .medium
+                .flatMap(ForceClickPressure.init(rawValue:)) ?? .off
         }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: key) }
+    }
+
+    /// Keep the old implicit default for Macs that already had it. Before this
+    /// change an unset key meant `.medium`, so someone who has been using the
+    /// gesture since 0.6.x never wrote anything down — flipping the default
+    /// alone would silently disarm them on update. Anyone who has launched Notchi
+    /// before (the same signals `OnboardingService` reads) gets `.medium`
+    /// stamped once; a true first run is left unset, i.e. off.
+    static func seedDefaultForExistingInstalls() {
+        let defaults = UserDefaults.standard
+        guard defaults.string(forKey: key) == nil else { return }
+        let launchedBefore = defaults.bool(forKey: "onboarding_intro_done")
+            || defaults.bool(forKey: "onboarding_opened_once")
+            || defaults.bool(forKey: "onboarding_guide_done")
+        guard launchedBefore else { return }
+        defaults.set(ForceClickPressure.medium.rawValue, forKey: key)
     }
 }
 
@@ -742,9 +1055,15 @@ struct PromptShortcut: Codable, Equatable, Identifiable {
     /// persisted rows (optional Codable = zero-migration), so already-added
     /// shortcuts work without any data rewrite.
     var name: String?
-    /// When true, the result opens in a compact window beside the pointer instead
-    /// of unfolding the notch. Optional keeps rows saved by older builds decodable.
+    /// Legacy destination value retained only so rows saved by older builds keep
+    /// decoding. Prompt shortcuts now always open beside the pointer.
     var opensBesidePointer: Bool?
+    /// Whether this row is offered as a button in the force click box
+    /// (`CompactShortcutPromptView.quickPicks`). That box holds four rows at
+    /// most, so a shortcut that isn't wanted under the pointer can step out and
+    /// leave the slot to one that is. `nil` — every row saved before this
+    /// existed — means shown, which is the behaviour those rows already had.
+    var showsInForceTouch: Bool?
     /// Pins this shortcut to one backend — a translation chord can stay on a cheap
     /// fast model at one provider while the notch's default answers everything
     /// else. Stored as two optionals (`Provider.rawValue` + model id) so an older
@@ -754,13 +1073,14 @@ struct PromptShortcut: Codable, Equatable, Identifiable {
     var model: String?
 
     init(id: UUID = UUID(), shortcut: ShortcutChord? = nil, prompt: String = "",
-         name: String? = nil, opensBesidePointer: Bool? = nil,
-         pin: ModelPin? = nil) {
+         name: String? = nil, opensBesidePointer: Bool? = true,
+         showsInForceTouch: Bool? = nil, pin: ModelPin? = nil) {
         self.id = id
         self.shortcut = shortcut
         self.prompt = prompt
         self.name = name
         self.opensBesidePointer = opensBesidePointer
+        self.showsInForceTouch = showsInForceTouch
         self.providerID = pin?.provider.rawValue
         self.model = pin?.model
     }
@@ -791,11 +1111,20 @@ struct PromptShortcut: Codable, Equatable, Identifiable {
         return trimmed.count > 24 ? String(trimmed.prefix(24)) + "…" : trimmed
     }
 
+    /// Nothing has been set on it: no chord, no prompt. A row added with `+` and
+    /// left untouched is exactly this, and it is never worth keeping.
+    var isBlank: Bool {
+        shortcut == nil && prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     var isReady: Bool {
         shortcut != nil && !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    var opensInPointerWindow: Bool { opensBesidePointer == true }
+    var opensInPointerWindow: Bool { true }
+
+    /// Shown in the force click box unless the row was explicitly taken out of it.
+    var appearsInForceTouch: Bool { showsInForceTouch != false }
 
     var canRunFromHotKey: Bool { isReady }
 }
@@ -806,7 +1135,17 @@ struct PromptShortcut: Codable, Equatable, Identifiable {
 enum PromptShortcutStore {
     private static let key = "promptShortcuts"
 
+    #if DEBUG
+    /// Rows for a screenshot run (`NOTCH_DEMO_FORCE=menu`), held in this process
+    /// only. Writing them to disk used to leave the demo's `prompt: "Demo"` rows
+    /// standing in the user's real shortcuts after the run ended.
+    static var debugOverride: [PromptShortcut]?
+    #endif
+
     static var current: [PromptShortcut] {
+        #if DEBUG
+        if let debugOverride { return debugOverride }
+        #endif
         guard let data = UserDefaults.standard.data(forKey: key),
               let shortcuts = try? JSONDecoder().decode([PromptShortcut].self, from: data)
         else { return [] }
@@ -853,11 +1192,13 @@ enum SelectedTextShortcutStore {
 /// before Notch opens and activates itself; after activation, the focused element
 /// would be Notch's own prompt field and the outside selection would be lost.
 ///
-/// No clipboard fallback exists here. Native controls usually expose
-/// `AXSelectedText` directly; browser/Electron/PDF surfaces commonly expose only
-/// a selected character range or a WebKit text-marker range, sometimes on an
-/// ancestor of the focused node. Try those representations in that order so the
-/// shortcut remains selection-first without mutating the user's clipboard.
+/// Native controls usually expose `AXSelectedText` directly;
+/// browser/Electron/PDF surfaces commonly expose only a selected character range
+/// or a WebKit text-marker range, sometimes on an ancestor of the focused node.
+/// Try those representations first. The asynchronous, user-invoked read adds one
+/// final compatibility edge: while the source app still owns focus, briefly send
+/// Command-C, read the copied string, then restore the user's previous pasteboard.
+/// The synchronous and ambient reads remain Accessibility-only.
 enum SelectedTextCapture {
     enum CaptureResult {
         case text(String)
@@ -865,11 +1206,62 @@ enum SelectedTextCapture {
         case noSelection
     }
 
+    /// Kept private so callers still see the intentionally small three-result
+    /// contract above. A secure field is a distinct internal result because an
+    /// empty Accessibility answer there must NEVER fall through to Command-C.
+    private enum AXCaptureResult {
+        case text(String)
+        case permissionRequired
+        case noSelection
+        case secure
+    }
+
+    /// Eager representations from before the temporary copy. Pasteboard owners
+    /// can offer several forms of one item (plain text, RTF, HTML, file URLs); keep
+    /// all readable forms instead of restoring only a flattened string.
+    private struct PasteboardSnapshot {
+        let items: [[NSPasteboard.PasteboardType: Data]]
+
+        init(_ pasteboard: NSPasteboard) {
+            items = (pasteboard.pasteboardItems ?? []).map { item in
+                Dictionary(uniqueKeysWithValues: item.types.compactMap { type in
+                    item.data(forType: type).map { (type, $0) }
+                })
+            }
+        }
+
+        func restore(to pasteboard: NSPasteboard) {
+            pasteboard.clearContents()
+            guard !items.isEmpty else { return }
+            let restored = items.map { representations -> NSPasteboardItem in
+                let item = NSPasteboardItem()
+                for (type, data) in representations {
+                    item.setData(data, forType: type)
+                }
+                return item
+            }
+            _ = pasteboard.writeObjects(restored)
+        }
+    }
+
     /// The one-shot read. Answers instantly from whatever tree exists right now —
     /// which is everything a native app needs, and (see `current(completion:)`)
     /// not always enough for web content.
     static func current(promptForPermission: Bool = true,
-                        front: NSRunningApplication? = nil) -> CaptureResult {
+                        front: NSRunningApplication? = nil,
+                        appScoped: Bool = false) -> CaptureResult {
+        switch currentAX(promptForPermission: promptForPermission,
+                         front: front,
+                         appScoped: appScoped) {
+        case .text(let selected): return .text(selected)
+        case .permissionRequired: return .permissionRequired
+        case .noSelection, .secure: return .noSelection
+        }
+    }
+
+    private static func currentAX(promptForPermission: Bool,
+                                  front: NSRunningApplication?,
+                                  appScoped: Bool) -> AXCaptureResult {
         let options = [
             kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: promptForPermission
         ] as CFDictionary
@@ -877,20 +1269,20 @@ enum SelectedTextCapture {
             return .permissionRequired
         }
 
-        guard let element = focusedElement(front: front) else {
-            return selectionInFocusedWindow(of: front).map(CaptureResult.text) ?? .noSelection
+        guard let element = focusedElement(front: front, appScoped: appScoped) else {
+            return selectionInFocusedWindow(of: front).map(AXCaptureResult.text) ?? .noSelection
         }
 
         switch selectionWalkingUp(from: element) {
         case .found(let selected): return .text(selected)
-        case .secure: return .noSelection
+        case .secure: return .secure
         case .none: break
         }
         // Focus can sit on a node that owns no selection of its own and whose
         // ancestors are plain containers — a Chromium window whose tree has only
         // just been built puts focus on the window itself, with the selection on
         // the web area a level or two below. Sweep down for it.
-        return selectionInFocusedWindow(of: front).map(CaptureResult.text) ?? .noSelection
+        return selectionInFocusedWindow(of: front).map(AXCaptureResult.text) ?? .noSelection
     }
 
     /// The reliable read, for the prompt shortcut. Chromium and Electron ship with
@@ -900,33 +1292,267 @@ enum SelectedTextCapture {
     /// there is no tree to read, and the read that finds nothing is itself what
     /// turns it on (so the *next* chord works, and the bug reads as random).
     ///
-    /// So: try once (native apps answer immediately and pay nothing), and only if
-    /// that finds nothing, ask the front app to switch its web tree on and re-read
-    /// on a background queue until it appears. Runs while the user still owns
-    /// focus — nothing has activated Notch yet — so the selection is still theirs
-    /// to read. `completion` always lands on the main queue.
+    /// So: try once (native apps answer immediately and pay nothing). If that finds
+    /// nothing, start waking the web tree and, while the source app still owns
+    /// focus, run a short Command-C probe. That is the representation apps such as
+    /// Preview, Office and non-standard web canvases most consistently support.
+    /// The user's pasteboard is restored immediately and only if nobody else
+    /// changed it during the probe. If copy still finds nothing, re-read the
+    /// warming Accessibility tree on a background queue.
+    ///
+    /// `firstPassEmpty` fires on the main queue after the short copy probe also
+    /// finds nothing, BEFORE the browser wake-up ladder runs. A caller that has
+    /// something to put on screen either way can put it there then and take a late
+    /// AX selection when it lands. `completion` always lands on the main queue and
+    /// arrives exactly once.
+    ///
+    /// The re-reads are app-scoped precisely because of that: by then the caller
+    /// has usually opened a window and taken focus, so the system-wide focused
+    /// element is no longer the app the user pressed in.
+    ///
+    /// `pointedAt` is where a *pointed* gesture landed — a force click, which is
+    /// aimed at a spot on screen the user can miss. It gates the Command-C probe
+    /// (see `nothingToCopy(under:)`); a chord passes `nil`, because a chord is
+    /// aimed at whatever owns focus and there is no meaningful pointer to read.
     static func current(promptForPermission: Bool = true,
+                        pointedAt: NSPoint? = nil,
+                        firstPassEmpty: (() -> Void)? = nil,
+                        pasteboardDidChange: (() -> Void)? = nil,
                         completion: @escaping (CaptureResult) -> Void) {
         let front = NSWorkspace.shared.frontmostApplication
-        let first = current(promptForPermission: promptForPermission, front: front)
+        let first = currentAX(promptForPermission: promptForPermission,
+                              front: front,
+                              appScoped: false)
         switch first {
-        case .text, .permissionRequired:
-            completion(first)
+        case .text(let selected):
+            completion(.text(selected))
+            return
+        case .permissionRequired:
+            completion(.permissionRequired)
+            return
+        case .secure:
+            // Never synthesize Copy while a password field owns focus.
+            completion(.noSelection)
             return
         case .noSelection:
             break
         }
+
+        // Start Chromium/Electron's lazy tree in parallel with the copy probe.
+        // If the probe fails, much of the tree's cold-start cost has already elapsed.
         DispatchQueue.global(qos: .userInitiated).async {
             enableWebAccessibility(for: front)
-            for wait in webTreeRetryWaits {
-                Thread.sleep(forTimeInterval: wait)
-                if case .text(let selected) = current(promptForPermission: false, front: front) {
-                    DispatchQueue.main.async { completion(.text(selected)) }
-                    return
-                }
-            }
-            DispatchQueue.main.async { completion(.noSelection) }
         }
+        // What happens when no copied selection arrives: open on nothing, then keep
+        // re-reading the tree that is still warming up.
+        let keepReading = {
+            firstPassEmpty?()
+            DispatchQueue.global(qos: .userInitiated).async {
+                for wait in webTreeRetryWaits {
+                    Thread.sleep(forTimeInterval: wait)
+                    switch currentAX(promptForPermission: false,
+                                     front: front,
+                                     appScoped: true) {
+                    case .text(let selected):
+                        DispatchQueue.main.async { completion(.text(selected)) }
+                        return
+                    case .secure:
+                        DispatchQueue.main.async { completion(.noSelection) }
+                        return
+                    case .permissionRequired, .noSelection:
+                        break
+                    }
+                }
+                DispatchQueue.main.async { completion(.noSelection) }
+            }
+        }
+
+        // A press that landed where there is provably nothing to copy never sends
+        // Command-C — that key is what makes the error tone.
+        if let pointedAt, nothingToCopy(under: pointedAt) { return keepReading() }
+
+        copiedSelection(from: front) { copied, changedByProbe in
+            if changedByProbe { pasteboardDidChange?() }
+            if let copied {
+                completion(.text(copied))
+                return
+            }
+            keepReading()
+        }
+    }
+
+    /// Is there provably nothing under the pointer for Command-C to copy?
+    ///
+    /// The probe below posts a real key equivalent into another app, and an app
+    /// with nothing to copy does not ignore it: the keystroke falls off the end of
+    /// its responder chain and the app sounds the system's error tone. That beep
+    /// is what a force click on a blank stretch of a window made — the press still
+    /// opened the composer (an empty Ask is a perfectly normal outcome), so the
+    /// gesture worked and sounded like it had failed.
+    ///
+    /// Answers true only on positive evidence: a text surface that reports an
+    /// empty selection, or something that owns no text at all. Anything
+    /// unreadable — no element, no role, a cold web tree, a plain group — stays a
+    /// probe, because that is exactly the case the probe exists for.
+    private static func nothingToCopy(under pointer: NSPoint) -> Bool {
+        // Accessibility hit-tests in flipped screen coordinates, measured from the
+        // top of the primary display.
+        guard let primary = NSScreen.screens.first else { return false }
+        let system = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(system, 0.2)
+        var hit: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(system, Float(pointer.x),
+                                               Float(primary.frame.maxY - pointer.y),
+                                               &hit) == .success,
+              let element = hit
+        else { return false }
+        AXUIElementSetMessagingTimeout(element, 0.2)
+        if isSecureTextField(element) { return true }
+        guard let role = attribute(kAXRoleAttribute, of: element) as? String
+        else { return false }
+        // A text surface owns its selection and answers for it, so an empty answer
+        // here is the real thing rather than a tree that hasn't been built.
+        if textRoles.contains(role) { return selectedText(in: element) == nil }
+        return barrenRoles.contains(role)
+    }
+
+    private static let textRoles: Set<String> = [
+        kAXTextAreaRole as String, kAXTextFieldRole as String,
+        kAXComboBoxRole as String, "AXWebArea"
+    ]
+
+    /// Roles that hold no copyable text of their own. A press on one of these is
+    /// the ordinary miss — the pointer was on a button, an icon, a scroller.
+    private static let barrenRoles: Set<String> = [
+        kAXButtonRole as String, kAXCheckBoxRole as String,
+        kAXRadioButtonRole as String, kAXPopUpButtonRole as String,
+        kAXMenuButtonRole as String, kAXImageRole as String,
+        kAXSliderRole as String, kAXIncrementorRole as String,
+        kAXProgressIndicatorRole as String, kAXScrollBarRole as String,
+        kAXSplitterRole as String, kAXToolbarRole as String,
+        kAXTabGroupRole as String, kAXDisclosureTriangleRole as String,
+        kAXColorWellRole as String, kAXMenuRole as String,
+        kAXMenuItemRole as String, kAXMenuBarRole as String,
+        kAXMenuBarItemRole as String
+    ]
+
+    /// Bob-style selection fallback: preserve the complete pasteboard, replace it
+    /// with a private sentinel, send Command-C to the still-frontmost source app,
+    /// and wait briefly for that app to replace the sentinel. Restoration is
+    /// conditional on `changeCount`, so a real clipboard change made by the user
+    /// during the probe always wins.
+    private static func copiedSelection(from front: NSRunningApplication?,
+                                        completion: @escaping (String?, Bool) -> Void) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard let front,
+              front.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier
+                == front.processIdentifier
+        else { return completion(nil, false) }
+
+        let pasteboard = NSPasteboard.general
+        let snapshot = PasteboardSnapshot(pasteboard)
+        let markerType = NSPasteboard.PasteboardType("com.notchi.selected-text-probe")
+        let marker = UUID().uuidString.data(using: .utf8)!
+        pasteboard.clearContents()
+        guard pasteboard.setData(marker, forType: markerType) else {
+            snapshot.restore(to: pasteboard)
+            return completion(nil, true)
+        }
+        let probeChangeCount = pasteboard.changeCount
+
+        guard postCopyShortcut() else {
+            let restored: Bool
+            if pasteboard.changeCount == probeChangeCount {
+                snapshot.restore(to: pasteboard)
+                restored = true
+            } else {
+                restored = false
+            }
+            return completion(nil, restored)
+        }
+
+        let deadline = ProcessInfo.processInfo.systemUptime + Self.copyProbeDeadline
+        func finish(_ selected: String?, observedChangeCount: Int) {
+            let restored: Bool
+            if pasteboard.changeCount == observedChangeCount {
+                snapshot.restore(to: pasteboard)
+                restored = true
+            } else {
+                restored = false
+            }
+            completion(selected, restored)
+        }
+        func poll() {
+            // If the user moved to another app during the probe, stop observing.
+            // Restore only when our sentinel is still the clipboard's last change;
+            // any later content belongs to the user or another app.
+            guard NSWorkspace.shared.frontmostApplication?.processIdentifier
+                    == front.processIdentifier else {
+                if pasteboard.changeCount == probeChangeCount {
+                    snapshot.restore(to: pasteboard)
+                    completion(nil, true)
+                } else {
+                    completion(nil, false)
+                }
+                return
+            }
+
+            let observed = pasteboard.changeCount
+            if observed != probeChangeCount {
+                let copied = pasteboard.string(forType: .string)
+                let selected = copied.flatMap {
+                    $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0
+                }
+                finish(selected, observedChangeCount: observed)
+                return
+            }
+            guard ProcessInfo.processInfo.systemUptime < deadline else {
+                finish(nil, observedChangeCount: probeChangeCount)
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.copyProbeInterval,
+                                          execute: poll)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.copyProbeFirstPoll,
+                                      execute: poll)
+    }
+
+    /// How long the Command-C probe waits for the source app to answer.
+    ///
+    /// This is dead time the user watches: a press that lands on *no* selection
+    /// never gets an answer, so it burns the whole budget before the composer is
+    /// allowed to open. The old 0.32s was set to be generous, and it is what a
+    /// force click on blank space felt like.
+    private static let copyProbeDeadline: TimeInterval = 0.15
+    /// When to look for the first time.
+    ///
+    /// Measured, not guessed: the fastest responder that can exist — a second
+    /// process holding a real NSTextView selection, answering ⌘C through the
+    /// normal key-equivalent path — answers in **31–40ms** (p50 ≈ 35ms, 40 runs).
+    /// Most of that is the synthetic key's trip through the HID event tap and the
+    /// window server, which every app pays before its own copy path even starts,
+    /// so nothing can beat it. Looking at 15ms was therefore always a wasted pass,
+    /// and looking sooner would only add more of them; the win is the opposite —
+    /// start just under the floor, then sample tightly, so a 32ms answer is seen
+    /// at ~36ms instead of at the old grid's 45ms.
+    private static let copyProbeFirstPoll: TimeInterval = 0.024
+    private static let copyProbeInterval: TimeInterval = 0.006
+
+    private static func postCopyShortcut() -> Bool {
+        guard let source = CGEventSource(stateID: .combinedSessionState),
+              let down = CGEvent(keyboardEventSource: source,
+                                 virtualKey: CGKeyCode(kVK_ANSI_C),
+                                 keyDown: true),
+              let up = CGEvent(keyboardEventSource: source,
+                               virtualKey: CGKeyCode(kVK_ANSI_C),
+                               keyDown: false)
+        else { return false }
+        down.flags = .maskCommand
+        up.flags = .maskCommand
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
+        return true
     }
 
     /// The **ambient** read, for the panel opening on its own rather than on a
@@ -1062,11 +1688,20 @@ enum SelectedTextCapture {
     /// Resolve the element that belonged to the foreground app at the instant the
     /// global shortcut fired. The system-wide focused element is the fast path;
     /// the application-level query covers frameworks that omit it there.
-    private static func focusedElement(front: NSRunningApplication? = nil) -> AXUIElement? {
-        let system = AXUIElementCreateSystemWide()
-        AXUIElementSetMessagingTimeout(system, 0.25)
-        if let focused = axElement(attribute(kAXFocusedUIElementAttribute, of: system)) {
-            return focused
+    /// `appScoped` skips the system-wide focused element and asks `front`
+    /// directly. That matters for a re-read that happens AFTER Notchi has taken
+    /// focus (the deferred half of `current(firstPassEmpty:completion:)`): the
+    /// system-wide focus is then Notchi's own field, so the system-wide answer
+    /// would be our composer's empty box rather than the selection we are still
+    /// looking for.
+    private static func focusedElement(front: NSRunningApplication? = nil,
+                                       appScoped: Bool = false) -> AXUIElement? {
+        if !appScoped {
+            let system = AXUIElementCreateSystemWide()
+            AXUIElementSetMessagingTimeout(system, 0.25)
+            if let focused = axElement(attribute(kAXFocusedUIElementAttribute, of: system)) {
+                return focused
+            }
         }
         guard let app = front ?? NSWorkspace.shared.frontmostApplication else { return nil }
         let application = AXUIElementCreateApplication(app.processIdentifier)

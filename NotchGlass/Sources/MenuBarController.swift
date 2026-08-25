@@ -242,7 +242,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 }
 
 /// Whether the app puts an icon in the menu bar — persisted in `UserDefaults`,
-/// toggled in Settings → Appearance, consumed by `AppDelegate` via
+/// toggled in Settings → General, consumed by `AppDelegate` via
 /// `MenuBarController`. Shown by default: with no Dock icon and no app menu, it
 /// is the only handle on the app that doesn't depend on remembering a shortcut
 /// or on the notch being reachable. Users who want the bar clean can hide it —

@@ -225,13 +225,16 @@ struct GrokCLIService: AIService {
     }
 
     /// Re-read the model cache off the main thread and store it. Called from
-    /// `warmUp()` at launch so the picker reads a warm cache. No-op once populated.
-    static func refreshModels() {
+    /// `warmUp()` at launch so the picker reads a warm cache. No-op once populated
+    /// — unless `force`, the manual-refresh route, which re-reads the CLI's cache
+    /// file (what a `grok` run refreshes) and keeps the old list if it reads empty.
+    static func refreshModels(force: Bool = false) {
         modelLock.lock()
         let alreadyHave = (cachedModels?.isEmpty == false)
         modelLock.unlock()
-        if alreadyHave { return }
+        if alreadyHave, !force { return }
         let models = readModelCache()
+        if force, models.isEmpty { return }
         modelLock.lock(); cachedModels = models; modelLock.unlock()
     }
 

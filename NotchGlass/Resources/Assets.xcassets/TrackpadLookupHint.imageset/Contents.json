@@ -1,0 +1,12 @@
+{
+  "images" : [
+    {
+      "filename" : "trackpad-lookup-hint.png",
+      "idiom" : "universal"
+    }
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}

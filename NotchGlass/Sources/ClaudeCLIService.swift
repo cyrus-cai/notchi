@@ -274,12 +274,15 @@ struct ClaudeCLIService: AIService {
     /// Blocking (seconds); call off the main thread. Cheap on a hit — it returns
     /// without spawning anything while the persisted cache was written by *this*
     /// CLI build, is inside the TTL, and already covers every alias. Callers are
-    /// meant to call it freely rather than gate it themselves.
-    static func refreshResolvedModels(aliases: [String]) {
+    /// meant to call it freely rather than gate it themselves. `force` (the manual
+    /// refresh) skips that gate and re-probes — the one way to catch an account
+    /// default that moved under an unchanged CLI build without waiting out the TTL.
+    static func refreshResolvedModels(aliases: [String], force: Bool = false) {
         let defaults = UserDefaults.standard
         let known = resolvedModels
         let fingerprint = binaryFingerprint()
-        if fingerprint != nil,
+        if !force,
+           fingerprint != nil,
            fingerprint == defaults.string(forKey: resolvedModelsFingerprintKey),
            let fetched = defaults.object(forKey: resolvedModelsFetchedAtKey) as? Date,
            Date().timeIntervalSince(fetched) < resolvedModelsTTL,

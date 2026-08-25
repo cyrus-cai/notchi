@@ -10,8 +10,8 @@
 
 **提问**、**笔记**、**提醒**，或者**将任务委推给 AI** —— 一切在 Mac 的刘海中完成。
 
-[notch.website](https://www.notch.website) ·
-[更新日志](https://www.notch.website/releases)
+[notch.website](https://notch.website) ·
+[更新日志](https://notch.website/releases)
 
 MIT · Apple Liquid Glass
 

@@ -280,6 +280,11 @@ extension EnvironmentValues {
 /// own measured height. Reused by the conversation thread and the RECENT list —
 /// don't hand-roll a per-view gradient; route every scroll area through here.
 struct ScrollEdgeFade: ViewModifier {
+    enum Axis {
+        case vertical
+        case horizontal
+    }
+
     /// Whether to taper the top / bottom edge. A region pinned under a header
     /// (so its top never overflows) can fade only the bottom, and vice versa.
     var top: Bool
@@ -289,15 +294,16 @@ struct ScrollEdgeFade: ViewModifier {
     /// Generous by default so a fade reads as a gradient, not a hard cut.
     var topFade: CGFloat = 64
     var bottomFade: CGFloat = 64
+    var axis: Axis = .vertical
 
     func body(content: Content) -> some View {
         content.mask(
             GeometryReader { geo in
-                let h = max(geo.size.height, 1)
+                let length = max(axis == .vertical ? geo.size.height : geo.size.width, 1)
                 // Clamp each taper independently, and cap the pair so they can't
                 // overlap and punch a hole through a short area.
-                let ft = min(topFade / h, 0.45)
-                let fb = min(bottomFade / h, 0.45)
+                let ft = min(topFade / length, 0.45)
+                let fb = min(bottomFade / length, 0.45)
                 LinearGradient(
                     stops: [
                         .init(color: .black.opacity(top ? 0 : 1), location: 0),
@@ -305,7 +311,8 @@ struct ScrollEdgeFade: ViewModifier {
                         .init(color: .black, location: bottom ? 1 - fb : 1),
                         .init(color: .black.opacity(bottom ? 0 : 1), location: 1),
                     ],
-                    startPoint: .top, endPoint: .bottom
+                    startPoint: axis == .vertical ? .top : .leading,
+                    endPoint: axis == .vertical ? .bottom : .trailing
                 )
             }
         )
@@ -329,6 +336,20 @@ extension View {
     /// Convenience: the same taper length on both edges (the common case).
     func scrollEdgeFade(top: Bool, bottom: Bool, fade: CGFloat = 64) -> some View {
         scrollEdgeFade(top: top, bottom: bottom, topFade: fade, bottomFade: fade)
+    }
+
+    /// The same shared dissolve for a horizontal scroller. `leading` and
+    /// `trailing` map to the vertical helper's start/end edges, so the gradient
+    /// math and softness stay identical in both orientations.
+    func scrollEdgeFade(
+        leading: Bool,
+        trailing: Bool,
+        leadingFade: CGFloat = 64,
+        trailingFade: CGFloat = 64
+    ) -> some View {
+        modifier(ScrollEdgeFade(top: leading, bottom: trailing,
+                                topFade: leadingFade, bottomFade: trailingFade,
+                                axis: .horizontal))
     }
 }
 
@@ -725,6 +746,53 @@ enum TooltipCoordinateSpace {
     static let clipBox = "notchTooltipClipBox"
 }
 
+/// The clip box's frame in the hosting view's global coordinate space. Passing
+/// the frame explicitly is more reliable than asking each deeply nested anchor
+/// to recover an ancestor's named-space bounds: on macOS that lookup can return
+/// `nil` inside a header/scroll-view composition, which used to leave the tip
+/// effectively unbounded and let right-edge hints run out of the window.
+private struct TooltipClipFrameEnvironmentKey: EnvironmentKey {
+    static let defaultValue: CGRect? = nil
+}
+
+private extension EnvironmentValues {
+    var tooltipClipFrame: CGRect? {
+        get { self[TooltipClipFrameEnvironmentKey.self] }
+        set { self[TooltipClipFrameEnvironmentKey.self] = newValue }
+    }
+}
+
+private struct TooltipClipFramePreferenceKey: PreferenceKey {
+    static let defaultValue: CGRect? = nil
+
+    static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) {
+        if let next = nextValue() { value = next }
+    }
+}
+
+/// Publishes the real clipping surface once, then supplies that frame to every
+/// tooltip below it. Keep this modifier on the view whose visible pixels form
+/// the wall (the island/window), not on a screen-wide hosting canvas.
+private struct TooltipClipBoxModifier: ViewModifier {
+    @State private var frame: CGRect?
+
+    func body(content: Content) -> some View {
+        content
+            // Retain the named space as a compatibility fallback for any frame
+            // before the explicit environment value has arrived.
+            .coordinateSpace(.named(TooltipCoordinateSpace.clipBox))
+            .background(
+                GeometryReader { geometry in
+                    Color.clear.preference(
+                        key: TooltipClipFramePreferenceKey.self,
+                        value: geometry.frame(in: .global))
+                }
+            )
+            .onPreferenceChange(TooltipClipFramePreferenceKey.self) { frame = $0 }
+            .environment(\.tooltipClipFrame, frame)
+    }
+}
+
 /// A hover tooltip drawn in the notch's own visual language instead of AppKit's
 /// stock yellow `.help()` bubble — the flat OS tooltip that hasn't changed in
 /// decades and reads as a foreign chip on the dark glass. This one is a small
@@ -739,6 +807,8 @@ enum TooltipCoordinateSpace {
 /// centred on it, as a zero-footprint overlay that never disturbs layout and
 /// never intercepts the click underneath.
 private struct NotchTooltip: ViewModifier {
+    @Environment(\.tooltipClipFrame) private var clipFrame
+
     let text: String
     /// Which side of the control the tip floats on. Footer icons live at the
     /// panel's bottom, so `.top` (up, into the answer) is the default; controls
@@ -831,8 +901,16 @@ private struct NotchTooltip: ViewModifier {
     /// (scrolling) layout chopped its left cap off against the scroll's clip. An
     /// overlap test keeps rejecting the header case (a box entirely to one side)
     /// while still claiming a scroll the anchor merely straddles by a few points.
-    private static func resolvedBounds(_ g: GeometryProxy) -> (minX: CGFloat, maxX: CGFloat) {
-        guard let clip = g.bounds(of: .named(TooltipCoordinateSpace.clipBox)) else {
+    private static func resolvedBounds(_ g: GeometryProxy,
+                                       clipFrame: CGRect?) -> (minX: CGFloat, maxX: CGFloat) {
+        let explicitBounds: (minX: CGFloat, maxX: CGFloat)? = clipFrame.map { clip in
+            let anchor = g.frame(in: .global)
+            return (clip.minX - anchor.minX, clip.maxX - anchor.minX)
+        }
+        let namedBounds = g.bounds(of: .named(TooltipCoordinateSpace.clipBox)).map {
+            (minX: $0.minX, maxX: $0.maxX)
+        }
+        guard let clip = explicitBounds ?? namedBounds else {
             return (-.greatestFiniteMagnitude, .greatestFiniteMagnitude)
         }
         var minX = clip.minX, maxX = clip.maxX
@@ -874,7 +952,7 @@ private struct NotchTooltip: ViewModifier {
             // wall. Zero-footprint (a clear backdrop).
             .background(
                 GeometryReader { g in
-                    let box = Self.resolvedBounds(g)
+                    let box = Self.resolvedBounds(g, clipFrame: clipFrame)
                     Color.clear.preference(
                         key: TooltipBoundsKey.self,
                         value: TooltipBounds(minX: box.minX,
@@ -1075,6 +1153,12 @@ private struct TooltipLabel: View {
 }
 
 extension View {
+    /// Marks the visible wall all descendant `notchTooltip`s must remain inside.
+    /// Apply once per independently clipped island/window surface.
+    func notchTooltipClipBox() -> some View {
+        modifier(TooltipClipBoxModifier())
+    }
+
     /// Attach a `NotchTooltip` — the in-house replacement for `.help()`. Use it on
     /// the answer-footer action icons (copy / save / regenerate / info / pin) and
     /// any other island control that wants a hover hint in the panel's own voice.

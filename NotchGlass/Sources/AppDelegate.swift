@@ -20,6 +20,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// arrive in bursts, and the on-screen window list settles a beat after them,
     /// so coalesce into one deferred `updateFullScreenHiding()`.
     private var fullScreenUpdateWork: DispatchWorkItem?
+    /// Retains the explicit Dot Dock artwork. AppKit's default tile can re-read
+    /// the bundle icon after an accessory app becomes regular, so Dot owns the
+    /// tile content directly; Original removes the view and restores default
+    /// Dock rendering.
+    private var appIconDockView: NSView?
+    /// Dot follows the system's effective light/dark appearance even though the
+    /// notch windows themselves deliberately render with a dark appearance.
+    private var appIconAppearanceObservation: NSKeyValueObservation?
 
     /// Pick the live backend for the selected provider when an API key is
     /// available (env var or the stored entry from Settings), otherwise fall
@@ -220,10 +228,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // to `.regular`; `applyDockIconVisibility` reads the persisted choice.
         applyDockIconVisibility()
 
+        // Restore the chosen artwork only after the activation policy has created
+        // the app's Dock identity. Applying it before `.regular` can be overwritten
+        // when AppKit installs the bundle's primary icon into the new Dock tile.
+        applyAppIconStyle()
+
         // …and the menu bar item, the counterpart handle: with no Dock icon the
         // status menu is the only way in that doesn't require remembering the
         // summon shortcut or reaching the notch (full-screen Spaces cover it).
         installMenuBar()
+
+        // Before anything reads the Force Click rung: an unset key now means off
+        // (see `ForceClickPressure.current`), so an existing install has its old
+        // implicit `.medium` written down here, once, rather than being disarmed
+        // by the changed default.
+        ForceClickPressure.seedDefaultForExistingInstalls()
 
         // Seed the configured flag to match the service the model launched with.
         model.isConfigured = AppDelegate.isConfigured()
@@ -523,6 +542,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             if env["NOTCH_OPEN"] == "1" { model.showHistory = true }
         }
+        // NOTCH_DEMO_FORCE=menu|answer poses the force-click box beside a point
+        // on screen, so the real surface can be shot without a trackpad press.
+        // `menu` opens the composer over NOTCH_DEMO_FORCE_TEXT with the rows in
+        // NOTCH_DEMO_FORCE_ROWS ("A|B|C"); `answer` opens the finished card for
+        // NOTCH_DEMO_FORCE_Q / NOTCH_DEMO_FORCE_A. NOTCH_DEMO_FORCE_AT="x,y" is
+        // in screenshot coordinates (top-left origin). Screenshot aid only.
+        if let pose = env["NOTCH_DEMO_FORCE"], !pose.isEmpty {
+            let screen = NSScreen.main?.frame ?? .zero
+            let at = (env["NOTCH_DEMO_FORCE_AT"] ?? "")
+                .split(separator: ",").compactMap { Double($0) }
+            let point = at.count == 2
+                ? NSPoint(x: screen.minX + at[0], y: screen.maxY - at[1])
+                : NSPoint(x: screen.midX, y: screen.midY)
+            let text = env["NOTCH_DEMO_FORCE_TEXT"]
+                ?? "Der Termin wurde auf Donnerstag verschoben."
+            if pose == "menu" {
+                let rows = env["NOTCH_DEMO_FORCE_ROWS"]
+                    ?? "Translate → En|Proofread|Summarize in three lines"
+                // Demo rows are process-local. Persisting them used to overwrite
+                // the user's actual Prompt shortcuts with `prompt: "Demo"` and
+                // leave that damage behind after the screenshot run ended.
+                PromptShortcutStore.debugOverride = rows.split(separator: "|").map {
+                    PromptShortcut(prompt: "Demo", name: String($0),
+                                   showsInForceTouch: true)
+                }
+            }
+            // The answer half of the pose, on its own so `menu` can hand over to
+            // it later through the very same controller — which is the real
+            // "the box becomes the answer" morph, not a second window.
+            let showAnswer = { [weak self] in
+                guard let self else { return }
+                let id = self.model.seedDemoDetachedThread(
+                    question: env["NOTCH_DEMO_FORCE_Q"] ?? text,
+                    answer: pose == "thinking" ? ""
+                        : (env["NOTCH_DEMO_FORCE_A"]
+                            ?? "The meeting was moved to Thursday."))
+                DetachedSessionWindowController.presentCompactShortcut(
+                    shortcutID: SelectedTextShortcutStore.actionID, threadID: id,
+                    title: L("shortcuts.promptAction.window.context"),
+                    model: self.model, near: point, sourceApplication: nil)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+                guard let self else { return }
+                if pose == "answer" || pose == "thinking" { return showAnswer() }
+                DetachedSessionWindowController.presentCompactShortcutComposer(
+                    shortcutID: SelectedTextShortcutStore.actionID,
+                    selectedText: text, model: self.model, near: point,
+                    sourceApplication: nil, forceTouch: true)
+                // NOTCH_DEMO_FORCE_THEN=<seconds> runs the shortcut for us that
+                // many seconds later, so a screen recording catches the whole
+                // gesture — box, hand-off, answer — in one take.
+                if let after = env["NOTCH_DEMO_FORCE_THEN"].flatMap(Double.init) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + after,
+                                                  execute: showAnswer)
+                }
+            }
+        }
         #endif
         #if DEBUG
         // Debug aid: render Settings → Stats to a PNG and quit, so the pane can be
@@ -533,6 +609,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             StatsSnapshot.renderIfRequested(history: self.model.history)
         }
         #endif
+
+
+
 
         // Debug aid: NOTCH_SETTINGS=1 opens the panel straight into the inline
         // settings view at launch (via the same path as ⌘,) so it can be
@@ -577,7 +656,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // The Settings → Appearance menu-bar-icon choice adds/removes the status
+        if AppIconStyleFeature.isEnabled {
+            // The Settings → Appearance icon cards replace the live Dock / app-
+            // switcher artwork. This is independent of whether the Dock icon is
+            // currently visible; a later show still uses the stored choice.
+            NotificationCenter.default.addObserver(
+                forName: .appIconStyleChanged,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    self?.applyAppIconStyle()
+                }
+            }
+            appIconAppearanceObservation = NSApp.observe(
+                \.effectiveAppearance,
+                options: [.new]
+            ) { [weak self] _, _ in
+                Task { @MainActor in
+                    guard AppIconStyle.current == .dot else { return }
+                    self?.applyAppIconStyle()
+                    NotificationCenter.default.post(
+                        name: .appIconAppearanceChanged,
+                        object: nil)
+                }
+            }
+        }
+
+        // The Settings → General menu-bar-icon choice adds/removes the status
         // item live.
         NotificationCenter.default.addObserver(
             forName: .menuBarIconVisibilityChanged,
@@ -901,6 +1007,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Missing/unsupported selections deliberately do not fall back to clipboard.
     private func runPromptShortcut(id: UUID) {
         guard let binding = PromptShortcutStore.shortcut(id: id), binding.canRunFromHotKey else { return }
+
+        // While the `/` menu owns the active prompt, the chord printed beside a
+        // visible shortcut row means "pick this row". Sending it through the
+        // ordinary global path would instead try to capture selected text from
+        // Notchi's own `/` field; there is no outside selection at that point, so
+        // the chord appeared to do nothing. Keep the global selection behaviour
+        // everywhere else, including when a stale open panel is not the key one.
+        if panels.values.contains(where: \.isKeyWindow), model.slashMenuOpen,
+           let match = model.slashMatches.first(where: {
+               guard case .shortcut(let shortcut) = $0 else { return false }
+               return shortcut.id == id
+           }) {
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                model.applySlashCommand(match)
+            }
+            return
+        }
+
         captureSelectedText { [weak self] selectedText, triggerPoint, sourceApplication in
             guard let self else { return }
             if binding.opensInPointerWindow {
@@ -942,7 +1066,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     selectedText: selectedText,
                     model: self.model,
                     near: triggerPoint,
-                    sourceApplication: sourceApplication)
+                    sourceApplication: sourceApplication,
+                    forceTouch: grownFromPressure)
             } else {
                 // The composer is opening in the notch, nowhere near the pointer:
                 // only the pointer-side window inherits the cue's geometry and
@@ -963,11 +1088,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard grownFromPressure else { return open(text, point, app) }
             ForceClickHerald.shared.whenExpanded { open(text, point, app) }
         }
+        // Did the box already open on an empty first read? Everything that lands
+        // later then only ever ADDS to it — re-opening would throw away a draft
+        // the user has already started typing into it.
+        var openedEarly = false
         captureSelectedText(
+            pointed: grownFromPressure,
+            // The direct AX read and short clipboard probe found nothing — which
+            // is the common case for a press that wasn't on a selection at all,
+            // and for a browser whose web tree is still cold. The composer opens
+            // now rather than after the remaining wake-up ladder; a late AX result
+            // can still arrive into the open window.
+            //
+            // Only the pointer-side destination takes this: unfolding the notch a
+            // beat early and then having context appear underneath is a bigger
+            // move than the wait it saves.
+            firstPassEmpty: config.opensInPointerWindow ? { point, app in
+                openedEarly = true
+                deliver("", point, app)
+            } : nil,
             // Nothing selected is not a failure — it's an ordinary Ask. The same
             // composer opens with no context: no badge, and a line that stands on
             // its own (`startPromptShortcutRound` already sends it that way).
-            noSelection: { point, app in deliver("", point, app) },
+            noSelection: { point, app in
+                guard !openedEarly else { return }
+                deliver("", point, app)
+            },
             // Denied, or a capture already in flight: no composer is coming, so the
             // cue has to be taken off screen. Left standing it is a glass pill above
             // every window that takes no click and no key, with the herald latched
@@ -976,7 +1122,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard grownFromPressure else { return }
                 ForceClickHerald.shared.abort()
             },
-            action: deliver)
+            action: { text, point, app in
+                guard openedEarly else { return deliver(text, point, app) }
+                DetachedSessionWindowController.attachCompactSelection(
+                    shortcutID: SelectedTextShortcutStore.actionID, text: text)
+            })
     }
 
     /// Shared selection edge for both kinds of global action. Nothing activates
@@ -991,6 +1141,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// capture still running); nothing follows it. Both used to be a bare `return`,
     /// which left whatever the caller had already put on screen standing there.
     private func captureSelectedText(
+        pointed: Bool = false,
+        firstPassEmpty: ((NSPoint, NSRunningApplication?) -> Void)? = nil,
         noSelection: @escaping (NSPoint, NSRunningApplication?) -> Void = { _, _ in },
         unavailable: @escaping () -> Void = {},
         action: @escaping (String, NSPoint, NSRunningApplication?) -> Void
@@ -1003,12 +1155,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // so a second chord during that beat must not start a second round.
         guard !isCapturingSelection else { return unavailable() }
         isCapturingSelection = true
-        // The capture answers immediately for a native app; over web content it may
-        // have to wake the app's accessibility tree first and call back a beat later
-        // (see `SelectedTextCapture.current(completion:)`). Nothing activates Notch
-        // until the text is in hand either way, so the user keeps focus — and their
-        // selection — for the whole wait.
-        SelectedTextCapture.current { [weak self] result in
+        // The capture answers immediately for a native app. If direct AX is empty,
+        // it uses the still-focused source app for a short Command-C probe before
+        // any early window can activate Notchi, then continues with app-scoped AX
+        // retries if needed (see `SelectedTextCapture.current(completion:)`).
+        // The early callback carries the SAME trigger context the late one does:
+        // both were read at the chord edge, before anything moved.
+        let early = firstPassEmpty.map { report in
+            { report(triggerPoint, sourceApplication) }
+        }
+        SelectedTextCapture.current(
+            // A press is aimed at a spot on screen; a chord is not. Only the
+            // press lets the capture skip a Command-C that would land on nothing
+            // (`SelectedTextCapture.nothingToCopy(under:)`).
+            pointedAt: pointed ? triggerPoint : nil,
+            firstPassEmpty: early,
+            pasteboardDidChange: { [weak self] in
+                // The compatibility probe restored the user's pasteboard, but
+                // restoration itself advances `changeCount`. Account for that
+                // internal write so Copy Sense and the next Ask do not treat the
+                // restored, older clipboard as a fresh user copy.
+                self?.model.rebaselineClipboardAfterInAppWrite()
+            }
+        ) { [weak self] result in
             guard let self else { return }
             self.isCapturingSelection = false
             switch result {
@@ -1068,7 +1237,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(visibility.activationPolicy)
         if visibility == .shown {
             NSApp.activate(ignoringOtherApps: true)
+            // AppKit commits a mid-session activation-policy change on the next
+            // main-loop turn. Reapply then so the newly-created tile cannot replace
+            // the user's selected artwork with the bundle icon.
+            DispatchQueue.main.async { [weak self] in
+                self?.applyAppIconStyle()
+            }
         }
+    }
+
+    /// Replace only the running app's icon artwork. The bundle's primary icon
+    /// stays untouched, so a fresh install and every existing preference remain
+    /// on the original design unless Dot is chosen in Appearance.
+    private func applyAppIconStyle() {
+        let dockTile = NSApp.dockTile
+        let style = AppIconStyle.current
+        switch style {
+        case .original:
+            // `nil` asks AppKit to restore the bundle's primary icon, including
+            // the current system's own mask and material treatment.
+            appIconDockView = nil
+            dockTile.contentView = nil
+            NSApp.applicationIconImage = nil
+        case .dot:
+            guard let image = style.image else { return }
+            NSApp.applicationIconImage = image
+            // Draw the selected artwork as the tile content as well. Merely
+            // assigning `applicationIconImage` is not enough for this LSUIElement
+            // app on macOS 26: the Dock keeps the bundle icon it installed when
+            // the activation policy changed. A custom content view is AppKit's
+            // explicit path for replacing that already-live tile.
+            let bounds = NSRect(origin: .zero, size: dockTile.size)
+            let container = NSView(frame: bounds)
+            // Original's visible artwork occupies 80.47% of its source canvas;
+            // Dot occupies 79.27%. The 1.5% optical correction is one visible
+            // pixel at the current Dock size and keeps their heights aligned.
+            let opticalScale: CGFloat = 1.015
+            let imageSize = NSSize(
+                width: bounds.width * opticalScale,
+                height: bounds.height * opticalScale)
+            let imageFrame = NSRect(
+                x: (bounds.width - imageSize.width) / 2,
+                y: (bounds.height - imageSize.height) / 2,
+                width: imageSize.width,
+                height: imageSize.height)
+            let imageView = NSImageView(frame: imageFrame)
+            imageView.image = image
+            imageView.imageAlignment = .alignCenter
+            imageView.imageScaling = .scaleProportionallyUpOrDown
+            container.addSubview(imageView)
+            appIconDockView = container
+            dockTile.contentView = container
+        }
+        // The Dock does not guarantee an automatic redraw when its source image
+        // changes. Force the visible tile to consume `applicationIconImage` now.
+        dockTile.display()
     }
 
     // MARK: - Menu bar
@@ -1479,6 +1702,68 @@ enum HoverSensitivity: String, CaseIterable, Identifiable {
         }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: key) }
     }
+}
+
+/// The artwork used by the running app in the Dock and app switcher. The bundle
+/// keeps `AppIcon` as its primary icon; this small preference only overrides the
+/// live `NSApplication` image when the user chooses the LED treatment.
+enum AppIconStyle: String, CaseIterable, Identifiable {
+    case original
+    case dot
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .original: return L("appIcon.original")
+        case .dot: return L("appIcon.dot")
+        }
+    }
+
+    var image: NSImage? {
+        switch self {
+        case .original:
+            return NSImage(named: "AppIcon")
+        case .dot:
+            return NSImage(named: Self.systemUsesDarkAppearance
+                           ? "DarkModeAppIcon"
+                           : "LightModeAppIcon")
+        }
+    }
+
+    private static var systemUsesDarkAppearance: Bool {
+        NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+    }
+
+    /// Both catalog images already resolve to their visible app-icon bounds.
+    /// Keeping one shared scale makes the two Appearance previews line up.
+    var previewScale: CGFloat {
+        1
+    }
+
+    private static let key = "appIconStyle"
+
+    /// The original icon is deliberately the fallback for new and existing
+    /// installs, including an unknown value left by a future build.
+    static var current: AppIconStyle {
+        get {
+            guard AppIconStyleFeature.isEnabled else { return .original }
+            let stored = UserDefaults.standard.string(forKey: key)
+            // Migrate the short-lived three-card build: either LED choice now
+            // means the single adaptive Dot style.
+            if stored == "lightMode" || stored == "darkMode" { return .dot }
+            return stored.flatMap(AppIconStyle.init(rawValue:)) ?? .original
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: key)
+        }
+    }
+}
+
+/// Keeps the alternate icon implementation ready without exposing or applying
+/// it in builds where the feature is not shipping yet.
+enum AppIconStyleFeature {
+    static let isEnabled = false
 }
 
 /// Whether the app shows an icon in the Dock — persisted in `UserDefaults`,

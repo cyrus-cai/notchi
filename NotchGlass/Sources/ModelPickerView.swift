@@ -368,7 +368,7 @@ final class ModelCatalogStore: ObservableObject {
     /// updated underneath it kept showing the previous model until a relaunch.
     /// Re-asking on every picker open is what makes the update land; the real
     /// cost control lives in `refreshResolvedModels`.
-    func resolveClaudeAliases() {
+    func resolveClaudeAliases(force: Bool = false) {
         guard !claudeResolveInFlight, ClaudeCLIService.isAvailable
         else { return }
         claudeResolveInFlight = true
@@ -379,7 +379,7 @@ final class ModelCatalogStore: ObservableObject {
         let probeAliases = aliases
         Task { [weak self] in
             let resolved = await Task.detached(priority: .utility) { () -> [String: String] in
-                ClaudeCLIService.refreshResolvedModels(aliases: probeAliases)
+                ClaudeCLIService.refreshResolvedModels(aliases: probeAliases, force: force)
                 return ClaudeCLIService.resolvedModels
             }.value
             guard let self else { return }
@@ -409,15 +409,25 @@ final class ModelCatalogStore: ObservableObject {
     /// their bundled list). Cheap and cancel-safe: results just overwrite the cache, a
     /// provider already cached this session is not re-fetched — nor, thanks to
     /// `ModelCatalog`'s own per-provider+key cache, is one fetched in an earlier session.
-    func loadAll() async {
-        await RemoteModelManifest.refreshIfDue()
+    ///
+    /// `force` is the manual refresh (Settings' refresh button next to the model chip):
+    /// every cache in the chain is bypassed at once — the curated manifest's 6h TTL,
+    /// this store's session cache, `ModelCatalog`'s hourly per-(provider, key) cache,
+    /// the CLI backends' once-per-launch catalogs and Claude Code's alias probe — so
+    /// one tap answers "what does every backend serve *right now*".
+    func loadAll(force: Bool = false) async {
+        if force {
+            await RemoteModelManifest.refreshNow()
+        } else {
+            await RemoteModelManifest.refreshIfDue()
+        }
         // Codex is keyless, so the keyed loop below skips it. Fetch its real model list
         // from the app-server off-main and publish it so the picker fills in reactively —
         // even if the launch warm-up hasn't finished yet. Never publish the bare "codex"
         // sentinel (that's the no-models-found fallback).
-        if liveByProvider[.codex] == nil {
+        if force || liveByProvider[.codex] == nil {
             let ids = await Task.detached(priority: .userInitiated) { () -> [String] in
-                CodexCLIService.refreshModels()
+                CodexCLIService.refreshModels(force: force)
                 return CodexCLIService.availableModelIDs
             }.value
             if ids != ["codex"] {
@@ -427,9 +437,9 @@ final class ModelCatalogStore: ObservableObject {
         // Grok is keyless too — its model ids come from the CLI's own cache file
         // (see `GrokCLIService`), read off-main and published so the picker fills in.
         // Never publish the bare "grok" sentinel (the no-models-found fallback).
-        if liveByProvider[.grokCode] == nil {
+        if force || liveByProvider[.grokCode] == nil {
             let ids = await Task.detached(priority: .userInitiated) { () -> [String] in
-                GrokCLIService.refreshModels()
+                GrokCLIService.refreshModels(force: force)
                 return GrokCLIService.availableModelIDs
             }.value
             if ids != ["grok"] {
@@ -441,9 +451,9 @@ final class ModelCatalogStore: ObservableObject {
         // id is `<pi-provider>/<model>` — the model half names the real lab, so the
         // rows carry the right mark rather than one house brand (see
         // `PiCLIService.vendor(forID:)`). Never publish the bare sentinel.
-        if liveByProvider[.piCode] == nil {
+        if force || liveByProvider[.piCode] == nil {
             let ids = await Task.detached(priority: .userInitiated) { () -> [String] in
-                PiCLIService.refreshModels()
+                PiCLIService.refreshModels(force: force)
                 return PiCLIService.availableModelIDs
             }.value
             if ids != [PiCLIService.defaultSentinel] {
@@ -453,11 +463,21 @@ final class ModelCatalogStore: ObservableObject {
                 }
             }
         }
+        // Command Code's catalog rides its installed CLI build, so nothing in the
+        // normal path re-reads it within a launch. A manual refresh re-probes it and
+        // republishes the store, since its rows come from `Provider.availableModels`
+        // (the static cache) rather than from `liveByProvider`.
+        if force {
+            await Task.detached(priority: .userInitiated) {
+                CommandCodeCLIService.refreshModels(force: true)
+            }.value
+            cliGeneration &+= 1
+        }
         // Claude Code's alias→concrete-id mapping, the CLI twin of the fetches
         // below — see `resolveClaudeAliases`.
-        resolveClaudeAliases()
+        resolveClaudeAliases(force: force)
         await withTaskGroup(of: (Provider, ModelCatalog.Result?).self) { group in
-            for p in Provider.offered where liveByProvider[p] == nil {
+            for p in Provider.offered where force || liveByProvider[p] == nil {
                 // The custom endpoint joins the fetch as soon as it has a URL —
                 // its key is optional, so "no key" must not mean "no catalog"
                 // (a local Ollama / LM Studio serves `/v1/models` unauthenticated,
@@ -465,11 +485,13 @@ final class ModelCatalogStore: ObservableObject {
                 if p == .custom {
                     guard CustomProvider.chatEndpoint != nil else { continue }
                     let key = APIKeyStore.keyOrEmpty(for: p)
-                    group.addTask { (p, await ModelCatalog.fetch(for: p, apiKey: key)) }
+                    group.addTask { (p, await ModelCatalog.fetch(for: p, apiKey: key,
+                                                                 force: force)) }
                     continue
                 }
                 guard let key = APIKeyStore.current(for: p) else { continue }
-                group.addTask { (p, await ModelCatalog.fetch(for: p, apiKey: key)) }
+                group.addTask { (p, await ModelCatalog.fetch(for: p, apiKey: key,
+                                                             force: force)) }
             }
             for await (p, live) in group {
                 if let live { adopt(live, for: p) }

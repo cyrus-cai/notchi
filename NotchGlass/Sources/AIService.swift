@@ -1639,13 +1639,21 @@ enum RemoteModelManifest {
     /// Fetch the manifest when the cached copy is older than `ttl` (or absent).
     /// Cheap no-op otherwise, so callers can invoke it opportunistically. Any
     /// failure leaves the previous cache in place.
-    static func refreshIfDue() async {
+    static func refreshIfDue() async { await refresh(force: false) }
+
+    /// Fetch the manifest right now, TTL be damned — the manual refresh route
+    /// (Settings' refresh button). Still single-flighted, so a second tap while
+    /// one is in the air returns immediately rather than stacking a request.
+    static func refreshNow() async { await refresh(force: true) }
+
+    private static func refresh(force: Bool) async {
         // A day/month rollover counts as due even inside the TTL: it's what makes
         // the server's `daily_requesters` an exact number rather than an estimate,
         // and it costs at most one extra request per machine per day of use.
         let periods = firstRequestPeriods()
         let due: Bool = withLock {
-            guard !fetching, cached == nil || isStale || !periods.isEmpty else { return false }
+            guard !fetching, force || cached == nil || isStale || !periods.isEmpty
+            else { return false }
             fetching = true
             return true
         }
@@ -2654,10 +2662,11 @@ enum ModelRatings {
     /// because every one of these labels already sits beside the Anthropic mark.
     /// Until a probe has ever landed, the bare alias stands in.
     static func prettyName(for id: String, provider: Provider) -> String {
-        // pi's ids are `<pi-provider>/<model>`, and a name that appears under two of
-        // its providers has to say which — see `PiCLIService.displayName(forID:)`.
+        // pi's ids are `<pi-provider>/<model>`. The account rides the picker's rows
+        // (`PiCLIService.displayName(forID:)`); a chip is short by the same rule
+        // that drops "Claude" from a Claude Code alias.
         if provider == .piCode, id != PiCLIService.defaultSentinel {
-            return PiCLIService.displayName(forID: id)
+            return PiCLIService.shortDisplayName(forID: id)
         }
         guard provider == .claudeCode,
               let resolved = ClaudeCLIService.resolvedModels[id]

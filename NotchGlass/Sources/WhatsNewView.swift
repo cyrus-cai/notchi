@@ -296,7 +296,10 @@ struct WhatsNewView: View {
             }
 
             if !entry.features.isEmpty {
-                noteGroup(heading: L("whatsnew.section.features"), lines: entry.features)
+                noteGroup(heading: L("whatsnew.section.features"),
+                          lines: entry.features,
+                          action: entry.action,
+                          actionAfter: entry.actionAfter)
             }
             if !entry.improvements.isEmpty {
                 noteGroup(heading: L("whatsnew.section.improvements"), lines: entry.improvements)
@@ -307,34 +310,120 @@ struct WhatsNewView: View {
             if !entry.others.isEmpty {
                 noteGroup(heading: L("whatsnew.section.others"), lines: entry.others)
             }
+
+            // Only when it has no line to hang under (see `noteGroup`).
+            if let action = entry.action, entry.actionAfter == nil {
+                actionBlock(action)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// A release's call to action, under its notes: the switch the release is
+    /// about, one click from the line that announces it. Reading "force click
+    /// selected text" and then having to go find the pressure setting is the
+    /// scavenger hunt this exists to skip.
+    private func actionButton(_ action: WhatsNewService.Entry.Action) -> some View {
+        Button {
+            switch action {
+            case .forceClickPressure:
+                model.settingsSection = InlineSettingsView.Section.appearance.rawValue
+                model.openSettings()
+            }
+        } label: {
+            Text(action.title)
+                .font(.sf(12, weight: .medium))
+                .foregroundStyle(Tokens.text1)
+                .padding(.horizontal, 14)
+                .frame(height: 28)
+        }
+        .buttonStyle(WhatsNewActionStyle())
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func shouldShowAction(_ action: WhatsNewService.Entry.Action) -> Bool {
+        switch action {
+        case .forceClickPressure:
+            !model.forceClickPressure.isEnabled
+        }
+    }
+
+    /// Keep the release's direct action and its visual hand-off together. The same
+    /// Trackpad crop appears in the conflict dialog; seeing it here makes the
+    /// destination recognizable before System Settings opens.
+    private func actionBlock(_ action: WhatsNewService.Entry.Action) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if shouldShowAction(action) {
+                actionButton(action)
+            }
+
+            switch action {
+            case .forceClickPressure:
+                Image("TrackpadLookupHint")
+                    .resizable()
+                    .aspectRatio(1400 / 692, contentMode: .fit)
+                    .frame(maxWidth: .infinity)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(Tokens.hairline, lineWidth: 0.75)
+                    )
+                    .accessibilityHidden(true)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// A titled sub-section — a small caps heading ("FEATURES" / "FIXES") over its
     /// own bullet list.
-    private func noteGroup(heading: String, lines: [String]) -> some View {
+    private func noteGroup(
+        heading: String,
+        lines: [String],
+        action: WhatsNewService.Entry.Action? = nil,
+        actionAfter: Int? = nil
+    ) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(heading)
                 .captionLabel()
 
-            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                bulletLine(line)
+            ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
+                let emphasized = action != nil && actionAfter == index
+                bulletLine(line, emphasized: emphasized)
+                // The button belongs to the line that announces it, not to the
+                // bottom of the release — a switch named in a bullet should be
+                // reachable from that bullet.
+                if let action, actionAfter == index {
+                    actionBlock(action)
+                        .padding(.leading, 13)   // onto the bullet's text column
+                        .padding(.top, 2)
+                }
             }
         }
     }
 
     /// One release-note bullet: a small leading dot and the line, wrapping freely.
-    private func bulletLine(_ text: String) -> some View {
+    private func bulletLine(_ text: String, emphasized: Bool = false) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Circle()
                 .fill(Tokens.text4)
-                .frame(width: 3, height: 3)
-                .padding(.top, 7)   // nudge the dot onto the first line's x-height
+                .overlay {
+                    if emphasized {
+                        Circle()
+                            .fill(
+                                AngularGradient(
+                                    colors: [.pink, .orange, .yellow, .green, .cyan, .blue, .purple, .pink],
+                                    center: .center
+                                )
+                            )
+                            .shadow(color: .cyan.opacity(0.28), radius: 4)
+                    }
+                }
+                .frame(width: emphasized ? 5 : 3, height: emphasized ? 5 : 3)
+                .padding(.top, emphasized ? 6 : 7)   // nudge the dot onto the first line's x-height
             Text(text)
-                .font(.sf(12.5))
+                .font(.sf(12.5, weight: emphasized ? .medium : .regular))
                 .lineSpacing(4)     // let wrapped lines breathe
-                .foregroundStyle(Tokens.text2)
+                .foregroundStyle(emphasized ? Tokens.text1 : Tokens.text2)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -425,5 +514,23 @@ private struct SectionOffsetsKey: PreferenceKey {
     static var defaultValue: [String: CGFloat] = [:]
     static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
         value.merge(nextValue()) { _, new in new }
+    }
+}
+
+
+/// The release-note call-to-action button: the island's own glass capsule, at the
+/// size the notes column reads at. Nothing but the label inside — a glyph on it
+/// would be a second thing to look at in a column that is otherwise pure text.
+private struct WhatsNewActionStyle: ButtonStyle {
+    @State private var hovering = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .glassCapsule(in: Capsule(), brighter: hovering)
+            .contentShape(Capsule())
+            .opacity(configuration.isPressed ? 0.72 : 1)
+            .scaleEffect(configuration.isPressed ? 0.985 : 1)
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
     }
 }

@@ -123,6 +123,15 @@ struct InlineSettingsView: View {
 
     @State private var loadingModels = false
 
+    /// Pointer over the model row — the refresh arrow rides its hover, the way the
+    /// shortcut rows' reset button does.
+    @State private var modelRowHovering = false
+
+    /// A manual refresh (the arrow beside the model chip) in flight — every catalog
+    /// cache bypassed at once, so this one can take a beat where the automatic
+    /// refreshes never do (CLI probes spawn processes).
+    @State private var refreshingModels = false
+
     /// A model waiting on a key: set when the user taps a keyless model in the
     /// picker. The key section opens on that provider, and the moment a key
     /// lands (paste-save or OpenRouter connect) this exact model is selected and
@@ -275,9 +284,9 @@ struct InlineSettingsView: View {
     enum Section: String, CaseIterable, Identifiable {
         case model = "Model"     // who answers: provider, API key, model override — and the search backend behind it
         case capture = "Capture" // how a line gets in and where it lands: copy sensing, selected text, Force Click, note destination
-        case appearance = "Appearance" // where it shows up: screens, full screen, Dock icon
+        case appearance = "Appearance" // notch style, interaction, and display placement
         case shortcuts = "Shortcuts" // editable keyboard controls, its own top-level settings category
-        case general = "General" // language, launch at login, permissions, + Advanced (proxy)
+        case general = "General" // language, app presence, permissions, + Advanced (proxy)
         case stats = "Stats"     // what the archive adds up to — read-only
         case about = "About"     // version + self-update
         case licenses = "Licenses" // third-party attribution and licences
@@ -338,6 +347,14 @@ struct InlineSettingsView: View {
     /// policy immediately.
     @State private var dockIconVisibility: DockIconVisibility = .current
 
+    /// The artwork shown when Notchi has a Dock / app-switcher presence. The
+    /// original icon remains the persisted fallback; changing cards applies the
+    /// running app image immediately.
+    @State private var appIconStyle: AppIconStyle = .current
+    /// Forces the Dot preview to resolve its other asset when macOS switches
+    /// between light and dark while Settings is open.
+    @State private var appIconAppearanceRevision = 0
+
     /// Whether the app shows a menu bar icon — mirrors the persisted value; writes
     /// go through `selectMenuBarIconVisibility` so `AppDelegate` adds or removes
     /// the status item immediately.
@@ -356,9 +373,6 @@ struct InlineSettingsView: View {
     /// Where the hover slider's ticks actually sit (normalized 0…1), so its
     /// labels line up under the marks rather than under an equal-width guess.
     @State private var hoverTickCenters: [CGFloat]?
-    /// How much additional trackpad pressure turns a click into the global
-    /// selected-text action. The monitor reads the persisted value live.
-    @State private var forceClickPressure: ForceClickPressure = .current
     /// Where the pressure slider's ticks actually sit; see `hoverTickCenters`.
     @State private var pressureTickCenters: [CGFloat]?
 
@@ -383,9 +397,12 @@ struct InlineSettingsView: View {
     /// User-authored global bindings are intentionally only a shortcut and one
     /// prompt. Their UUID exists solely so SwiftUI and AppDelegate can track rows.
     @State private var promptShortcuts: [PromptShortcut] = PromptShortcutStore.current
-    /// The delete affordance stays out of the resting row until its pointer is
-    /// nearby. Keeping the button's frame mounted prevents the fields from
-    /// shifting when it fades in.
+    /// The shortcut whose independent editor popover is open. The list itself
+    /// never expands or changes height; one id also guarantees only one editor is
+    /// presented at a time.
+    @State private var presentedPromptShortcutID: UUID?
+    /// Prompt rows stay visually still; hover reveals only the explicit Edit
+    /// action in the reserved trailing slot.
     @State private var hoveredPromptShortcutID: UUID?
     @State private var hoveredShortcutRow: EditableShortcut?
     /// At most one row records at a time. Hints belong to their row so a conflict
@@ -469,6 +486,30 @@ struct InlineSettingsView: View {
                 .padding(.top, 12)
             }
         }
+        .overlay {
+            if let id = presentedPromptShortcutID,
+               let shortcut = promptShortcuts.first(where: { $0.id == id }) {
+                ConfirmationDialogOverlay(
+                    onDismiss: { closePromptShortcutEditor(id) }
+                ) {
+                    promptShortcutCard(shortcut)
+                        .frame(width: 372)
+                }
+                // Settings is inset inside `NotchBody`; without reclaiming that
+                // inset, the scrim stops at the settings content and leaves the
+                // glass body's side and bottom gutters uncovered.
+                .padding(.horizontal, -NotchBody.panelPadding)
+                .padding(.top, -NotchBody.panelPadding)
+                .padding(.bottom, -NotchBody.panelPadding)
+                .transition(.opacity.combined(with: .scale(scale: 0.96)))
+            }
+        }
+        .animation(.easeOut(duration: 0.16), value: presentedPromptShortcutID)
+        // The Force Click gate is NOT mounted here: its scrim has to cover the
+        // whole glass panel, and the settings body stops short of the island's
+        // edges (the body's own padding showed as uncovered strips down the sides
+        // and along the bottom). It hangs off the island itself in `ContentView`,
+        // next to the Clear confirmation, on `model.forceClickLookupConflict`.
         .task {
             // A keyless model picked in the ⌘⇧I picker sent us here: adopt the pick,
             // aim the key section at its provider, and unfold it — from here it's the
@@ -489,6 +530,9 @@ struct InlineSettingsView: View {
             // be opened. Self-gating and cache-backed; usually a no-op.
             catalog.resolveClaudeAliases()
             await refreshModels()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .appIconAppearanceChanged)) { _ in
+            appIconAppearanceRevision &+= 1
         }
         .onChange(of: orAuth.phase) {
             // The OAuth flow just wrote a key from outside this view — sync the
@@ -630,39 +674,36 @@ struct InlineSettingsView: View {
                 noteDestinationRow
             case .general:
                 // What's left once the capture rows moved out is genuinely
-                // app-level: how it talks to you, whether it starts with the Mac,
-                // what the system lets it touch, and the escape hatch. Two live
-                // controls first, then the two folded blocks — nobody opens
-                // Settings to look at a proxy field.
+                // app-level: how it talks to you, where the app itself appears in
+                // macOS, what the system lets it touch, and the escape hatch.
+                // Dock and menu-bar presence belong beside launch-at-login rather
+                // than among the notch's own visual and interaction settings.
                 appLanguageRow
+                Text(L("general.appPresence"))
+                    .captionLabel()
+                    .padding(.top, 2)
                 launchAtLoginRow
+                dockIconRow
+                menuBarIconRow
                 permissionsSection
                 advancedSection
             case .shortcuts:
                 shortcutsSection
             case .appearance:
-                // Two groups, and now they say so — the split was only ever in
-                // this comment while the pane rendered as one flat list.
-                //
-                // Where it shows up: which screens carry an island, whether it
-                // also sits in the Dock and the menu bar, and whether it yields
-                // to a full-screen app. Then how it behaves once there — how
-                // readily it opens under the pointer, how hard a force click has
-                // to press, what the closed notch does during background work.
-                // Hover sensitivity sat in General for as long as General was a
-                // drawer; it is a property of the island, and this is the
-                // island's page.
-                //
-                // Within each group the controls are ordered by shape, sliders
-                // before switches, so like sits with like instead of a toggle
-                // interrupting two sliders. The captions reuse the Model pane's
-                // `captionLabel()` register.
-                Text(L("general.showOn"))
-                    .captionLabel()
-                placementRow
-                dockIconRow
-                menuBarIconRow
-                fullscreenAutoHideRow
+                // Three small, literal groups: visual style, how the notch reacts,
+                // and which displays carry it. App-level presence in macOS (launch,
+                // Dock, menu bar) lives together in General instead of diluting this
+                // page with a second meaning of "show".
+                if AppIconStyleFeature.isEnabled || HandwritingFeature.isEnabled {
+                    Text(L("appearance.style"))
+                        .captionLabel()
+                    if AppIconStyleFeature.isEnabled {
+                        appIconStyleRow
+                    }
+                    if HandwritingFeature.isEnabled {
+                        handwrittenAnswersRow
+                    }
+                }
                 Text(L("appearance.behavior"))
                     .captionLabel()
                     .padding(.top, 2)
@@ -671,9 +712,11 @@ struct InlineSettingsView: View {
                     forceClickPressureRow
                 }
                 liveActivityRow
-                if HandwritingFeature.isEnabled {
-                    handwrittenAnswersRow
-                }
+                Text(L("appearance.displays"))
+                    .captionLabel()
+                    .padding(.top, 2)
+                placementRow
+                fullscreenAutoHideRow
             case .stats:
                 statsSection
             case .about:
@@ -2168,12 +2211,66 @@ struct InlineSettingsView: View {
                     // settings out from under it.
                     model.isModelPickerOpen = modelPickerOpen
                 }
-                if loadingModels {
-                    ProgressView()
-                        .controlSize(.small)
+                // Manual refresh: the automatic paths are all cached (the curated
+                // manifest for 6h, a vendor's `/v1/models` for an hour, the CLI
+                // catalogs for the whole launch), which is right until a model ships
+                // mid-session and the list you're looking at is the stale one. One
+                // tap re-asks every backend. Doubles as the load indicator — the
+                // spinner it replaces was this same slot.
+                Button {
+                    Task { await manualRefreshModels() }
+                } label: {
+                    ZStack {
+                        if modelsBusy {
+                            ProgressView()
+                                .controlSize(.small)
+                                .scaleEffect(0.8)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.sf(11, weight: .semibold))
+                                .foregroundStyle(Tokens.text3)
+                        }
+                    }
+                    // Square frame so the chip style's capsule resolves to a true
+                    // circle rather than a vertical oval.
+                    .frame(width: 30, height: 30)
                 }
+                .buttonStyle(ShortcutChipStyle(rest: 0.055, restStroke: 0.1))
+                .disabled(modelsBusy)
+                .help(L("model.refresh"))
+                .opacity(refreshVisible ? 1 : 0)
+                .allowsHitTesting(refreshVisible)
             }
         }
+        // Fine print: the arrow shows on the row it belongs to rather than sitting
+        // beside the chip all day. It stays put while a refresh runs, so the pointer
+        // wandering off mid-fetch doesn't take the spinner with it.
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: Tokens.hoverFade)) {
+                modelRowHovering = hovering
+            }
+        }
+    }
+
+    /// Whether the refresh arrow is on screen — hovered, or busy and therefore
+    /// owed an indicator.
+    private var refreshVisible: Bool { modelRowHovering || modelsBusy }
+
+    /// Either refresh is running — the button wears the spinner for both, so the
+    /// row never shows two indicators for one idea.
+    private var modelsBusy: Bool { loadingModels || refreshingModels }
+
+    /// The refresh button's action: re-ask **everything** the model list is built
+    /// from — the curated manifest, every keyed provider's live `/v1/models` (the
+    /// custom endpoint included), the CLI backends' catalogs and Claude Code's
+    /// alias probe — ignoring every TTL along the way (see `loadAll(force:)`).
+    @MainActor
+    private func manualRefreshModels() async {
+        guard !refreshingModels else { return }
+        refreshingModels = true
+        await catalog.loadAll(force: true)
+        refreshingModels = false
     }
 
     // MARK: - General
@@ -2229,6 +2326,50 @@ struct InlineSettingsView: View {
         placement = newValue
         DisplayPlacement.current = newValue
         NotificationCenter.default.post(name: .displayPlacementChanged, object: nil)
+    }
+
+    /// Pick between the shipping icon and the adaptive Dot counterpart. The artwork
+    /// itself is the useful preview, so this uses the same compact cards as the
+    /// display-placement choice instead of hiding the difference in a menu.
+    private var appIconStyleRow: some View {
+        settingRow(label: L("appearance.appIcon"), verticalAlignment: .top) {
+            HStack(spacing: 8) {
+                ForEach(AppIconStyle.allCases) { style in
+                    appIconStyleCard(style)
+                }
+            }
+        }
+    }
+
+    private func appIconStyleCard(_ style: AppIconStyle) -> some View {
+        let selected = appIconStyle == style
+        return PickerCard(selected: selected, width: 80) {
+            selectAppIconStyle(style)
+        } content: {
+            VStack(spacing: 5) {
+                if let icon = style.image {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .scaledToFit()
+                        .scaleEffect(style.previewScale)
+                        .frame(width: 34, height: 34)
+                        .clipped()
+                }
+                Text(style.label)
+                    .font(.sf(10, weight: selected ? .semibold : .regular))
+                    .foregroundStyle(selected ? Tokens.text1 : Tokens.text3)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+        }
+    }
+
+    private func selectAppIconStyle(_ newValue: AppIconStyle) {
+        guard newValue != appIconStyle else { return }
+        Haptics.levelChange()
+        appIconStyle = newValue
+        AppIconStyle.current = newValue
+        NotificationCenter.default.post(name: .appIconStyleChanged, object: nil)
     }
 
     /// Whether the app shows a Dock icon. Off by default — the notch overlay is a
@@ -2907,7 +3048,7 @@ struct InlineSettingsView: View {
                     .accessibilityLabel(L("general.forceClickPressure"))
 
                 tickLabelRow(ForceClickPressure.allCases,
-                             selected: forceClickPressure,
+                             selected: model.forceClickPressure,
                              centers: pressureTickCenters,
                              width: controlWidth)
             }
@@ -2970,19 +3111,15 @@ struct InlineSettingsView: View {
     private var forceClickPressurePosition: Binding<Double> {
         Binding(
             get: {
-                Double(ForceClickPressure.allCases.firstIndex(of: forceClickPressure) ?? 2)
+                Double(ForceClickPressure.allCases.firstIndex(of: model.forceClickPressure) ?? 2)
             },
             set: { position in
                 let index = min(max(Int(position.rounded()), 0), ForceClickPressure.allCases.count - 1)
-                selectForceClickPressure(ForceClickPressure.allCases[index])
+                // The gate (hold the rung while macOS's own lookup is armed) lives
+                // on the model, because the dialog it raises does too.
+                model.selectForceClickPressure(ForceClickPressure.allCases[index])
             }
         )
-    }
-
-    private func selectForceClickPressure(_ newValue: ForceClickPressure) {
-        guard newValue != forceClickPressure else { return }
-        forceClickPressure = newValue
-        ForceClickPressure.current = newValue
     }
 
     /// How readily the resting notch unfurls when the pointer reaches it. The
@@ -3132,7 +3269,12 @@ struct InlineSettingsView: View {
         // Leaving the pane ends recording outright. The armed target used to
         // survive in `@State` while the monitor was dismantled, so coming back
         // silently re-armed the old row and the next chord landed on it.
-        .onDisappear { recordingShortcut = nil }
+        .onDisappear {
+            recordingShortcut = nil
+            presentedPromptShortcutID = nil
+            hoveredPromptShortcutID = nil
+            dropBlankPromptShortcuts()
+        }
         // Chat can rebind any of these too (`manage_app_settings`). Re-read the
         // stores when it does, so the pane never shows a binding that is no
         // longer the one the app is registering.
@@ -3147,10 +3289,9 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// Prompt shortcuts are a flat list, one row per shortcut, and every row is
-    /// its own editor: type the prompt on the left, set the chord on the right.
-    /// There is no folded pile and no per-row expand step — nothing to open
-    /// before a shortcut can be edited.
+    /// Prompt shortcuts stay compact in the list. Selecting one presents its
+    /// editor in the same centered dialog layer used by destructive confirmation;
+    /// the list itself never unfolds or moves the groups below it.
     private var promptShortcutsGroup: some View {
         VStack(alignment: .leading, spacing: 0) {
             // The title keeps the text position of every other group's title, and
@@ -3171,10 +3312,17 @@ struct InlineSettingsView: View {
                        alignment: .topLeading)
                 .overlay(alignment: .trailing) {
                     Button {
+                        // Added to the list, NOT to disk: an untouched row is
+                        // discarded when the editor closes (`dropBlankPromptShortcuts`),
+                        // and the first real edit is what persists it — every field
+                        // binding saves as it writes.
+                        let shortcut = PromptShortcut()
                         withAnimation(Tokens.stackSpring) {
-                            promptShortcuts.append(PromptShortcut())
+                            promptShortcuts.append(shortcut)
                         }
-                        PromptShortcutStore.save(promptShortcuts)
+                        DispatchQueue.main.async {
+                            presentedPromptShortcutID = shortcut.id
+                        }
                     } label: {
                         Image(systemName: "plus")
                             .font(.sf(10.5, weight: .semibold))
@@ -3190,127 +3338,105 @@ struct InlineSettingsView: View {
             // (the chip's height minus the line's); these top pads add the rest of
             // the clearance, so the title reads as a section header rather than as
             // a label stuck to the first row.
-            VStack(alignment: .leading, spacing: 5) {
-                ForEach(promptShortcuts) { binding in
-                    promptShortcutRow(binding)
-                        .transition(.opacity.combined(with: .move(edge: .top)))
+            Group {
+                if promptShortcuts.isEmpty {
+                    Text(L("shortcuts.promptAction.empty"))
+                        .font(.sf(12))
+                        .foregroundStyle(Tokens.text3)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 2)
+                } else {
+                    // One row of small cards running right, scrolled rather than
+                    // wrapped: the group keeps a fixed height however many
+                    // shortcuts there are, so adding a tenth one never pushes the
+                    // reference groups below it off the page.
+                    ScrollView(.horizontal) {
+                        HStack(spacing: 8) {
+                            ForEach(promptShortcuts) { binding in
+                                promptShortcutCardChip(binding)
+                                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                            }
+                        }
+                        // The glow bleeds a couple of points past each card.
+                        .padding(.horizontal, 3)
+                        .padding(.vertical, 3)
+                        // Give the last card a runway past the shared edge fade,
+                        // so it can scroll fully into view instead of remaining
+                        // dimmed when the list reaches its end.
+                        .padding(.trailing, 24)
+                    }
+                    .scrollIndicators(.never)
+                    // Match the panel's other overflowing lists: content
+                    // dissolves into the boundary instead of being sliced by the
+                    // scroll viewport. The resting leading edge stays crisp.
+                    .scrollEdgeFade(leading: false, trailing: true,
+                                    leadingFade: 0, trailingFade: 24)
+                    .padding(.horizontal, -3)
                 }
             }
             .padding(.top, 10)
         }
     }
 
-    /// Field and chord chip share one height so a row reads as a single control.
-    private static let promptRowHeight: CGFloat = 28
+    /// The card's fields and chips share a control height, so the two-column row
+    /// reads as one grid rather than a pile of unrelated controls.
+    private static let promptControlHeight: CGFloat = 30
 
     /// The header's add chip — smaller than a row's chips, and the height the
     /// title row reserves so the pane's top edge never shaves it.
     private static let promptAddChipSize: CGFloat = 24
 
-    private func promptShortcutRow(_ binding: PromptShortcut) -> some View {
-        let target = EditableShortcut.prompt(binding.id)
+    /// One shortcut, as a small card: its AI name over its chord. The whole card
+    /// is the control — clicking it opens the editor — and the pointer is answered
+    /// by the card's own surface lighting up, no revealed affordance.
+    ///
+    /// Width is CAPPED, not free: the name is generated prose, and one long one
+    /// would otherwise set the width for the whole flow.
+    private func promptShortcutCardChip(_ binding: PromptShortcut) -> some View {
         let hovered = hoveredPromptShortcutID == binding.id
-        return VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 5) {
-                ZStack(alignment: .leading) {
-                    if binding.prompt.isEmpty {
-                        Text(L("shortcuts.promptAction.placeholder"))
-                            .font(.sf(12.5))
-                            .foregroundStyle(Tokens.text4)
-                            .lineLimit(1)
-                            .allowsHitTesting(false)
+        let shape = RoundedRectangle(cornerRadius: 11, style: .continuous)
+        return Button {
+            presentedPromptShortcutID = binding.id
+        } label: {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(promptShortcutName(binding)
+                     ?? (binding.prompt.isEmpty
+                         ? L("shortcuts.promptAction.placeholder")
+                         : binding.prompt))
+                    .font(.sf(12, weight: .medium))
+                    .foregroundStyle(binding.prompt.isEmpty ? Tokens.text4 : Tokens.text1)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                if let chord = binding.shortcut?.displayString {
+                    HStack(spacing: 3) {
+                        ForEach(Array(Self.keyCaps(chord).enumerated()), id: \.offset) { _, cap in
+                            keyCap(cap)
+                        }
                     }
-                    TextField("", text: promptBinding(for: binding.id))
-                        .textFieldStyle(.plain)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .font(.sf(12.5))
-                        .foregroundStyle(Tokens.text1)
+                } else {
+                    Text(L("shortcuts.promptAction.set"))
+                        .font(.sf(11, weight: .medium))
+                        .foregroundStyle(Tokens.text4)
+                        .padding(.horizontal, 8)
+                        .frame(minHeight: 22)
+                        .overlay(
+                            Capsule().strokeBorder(
+                                .white.opacity(0.13),
+                                style: StrokeStyle(lineWidth: 0.5, dash: [2, 2]))
+                        )
                 }
-                .padding(.horizontal, 9)
-                .frame(height: Self.promptRowHeight)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.06)))
-                .overlay(RoundedRectangle(cornerRadius: 8)
-                    .strokeBorder(.white.opacity(0.11), lineWidth: 0.5))
-
-                // Where a shortcut opens is a low-frequency per-row property, so
-                // it lives in the overflow menu rather than as a permanent
-                // "Window" chip whose two states differed only by text colour and
-                // whose label never named its own opposite. The menu's checkmark
-                // is the state readout — the row itself carries no badge for it.
-                //
-                // One overflow chip now carries both the open-in choice and
-                // delete, so the row's tail is a single control instead of three
-                // abutting ones. Quiet until hover, like the reset affordance the
-                // app-shortcut rows use.
-                Menu {
-                    // An inline Picker renders as native checkmarked items, which
-                    // states the current choice outright rather than leaving it to
-                    // be inferred from a chip's shade.
-                    Picker("", selection: promptWindowBinding(for: binding.id)) {
-                        Text(L("shortcuts.promptAction.openIn.notch")).tag(false)
-                        Text(L("shortcuts.promptAction.openIn.window")).tag(true)
-                    }
-                    .pickerStyle(.inline)
-                    .labelsHidden()
-
-                    Divider()
-
-                    // Which backend answers this one shortcut. A submenu, not more
-                    // inline rows: the model lists are long enough to bury the two
-                    // choices above it and delete below. Every provider that can
-                    // actually serve right now gets its own section — the pin
-                    // carries the provider with it, so a shortcut can sit on a
-                    // different backend than the notch's default without either
-                    // one moving the other.
-                    promptModelMenu(for: binding.id)
-
-                    Divider()
-
-                    Button(role: .destructive) {
-                        deletePromptShortcut(binding.id)
-                    } label: {
-                        Text(L("shortcuts.promptAction.delete"))
-                    }
-                } label: {
-                    Image(systemName: "ellipsis")
-                        .font(.sf(10.5, weight: .semibold))
-                        .foregroundStyle(Tokens.text3)
-                        // Square frame so the chip style's capsule resolves to a
-                        // true circle rather than a vertical oval.
-                        .frame(width: Self.promptRowHeight, height: Self.promptRowHeight)
-                }
-                .menuStyle(.button)
-                .buttonStyle(ShortcutChipStyle(rest: 0.055, restStroke: 0.1))
-                .menuIndicator(.hidden)
-                .help(L("shortcuts.promptAction.more"))
-                .accessibilityLabel(L("shortcuts.promptAction.more"))
-                .opacity(hovered ? 1 : 0)
-                .allowsHitTesting(hovered)
-
-                Button {
-                    shortcutHints[target] = nil
-                    recordingShortcut = recordingShortcut == target ? nil : target
-                } label: {
-                    Text(recordingShortcut == target
-                         ? L("general.shortcut.recording")
-                         : (binding.shortcut?.displayString ?? L("shortcuts.promptAction.set")))
-                        .font(.sf(11.5, weight: recordingShortcut == target ? .semibold : .medium))
-                        .foregroundStyle(recordingShortcut == target ? Tokens.text1 : Tokens.text2)
-                        .padding(.horizontal, 10)
-                        .frame(minWidth: 48, minHeight: Self.promptRowHeight)
-                }
-                .buttonStyle(ShortcutChipStyle(active: recordingShortcut == target))
             }
-            if let hint = shortcutHints[target] {
-                Text(hint)
-                    .font(.sf(11))
-                    .foregroundStyle(Tokens.text3)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-            }
+            .frame(width: Self.promptCardWidth, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 9)
+            .background(PromptShortcutCardSurface(id: binding.id,
+                                                  hovering: hovered,
+                                                  shape: shape))
+            .contentShape(shape)
         }
-        .contentShape(Rectangle())
+        .buttonStyle(.plain)
+        .accessibilityLabel(L("shortcuts.promptAction.edit"))
         .onHover { hovering in
             withAnimation(.easeOut(duration: Tokens.hoverFade)) {
                 if hovering {
@@ -3320,6 +3446,213 @@ struct InlineSettingsView: View {
                 }
             }
         }
+    }
+
+    /// The card's text column — two of them plus their gap fit the pane's width.
+    private static let promptCardWidth: CGFloat = 118
+
+    /// The row's AI name, when it has one worth showing beside the prompt.
+    private func promptShortcutName(_ binding: PromptShortcut) -> String? {
+        guard let name = binding.name?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !name.isEmpty,
+              name.caseInsensitiveCompare(
+                binding.prompt.trimmingCharacters(in: .whitespacesAndNewlines)) != .orderedSame
+        else { return nil }
+        return name
+    }
+
+    private func closePromptShortcutEditor(_ id: UUID) {
+        if presentedPromptShortcutID == id { presentedPromptShortcutID = nil }
+        if recordingShortcut == .prompt(id) { recordingShortcut = nil }
+        dropBlankPromptShortcuts()
+    }
+
+    /// Forget the rows nothing was ever set on. Opening the editor is how a
+    /// shortcut is created, so backing out of it — Done, the ✕, or the scrim —
+    /// must not leave "Prompt for the selected text / Set" standing in the list
+    /// forever. A row with a prompt OR a chord is never touched: half-finished is
+    /// still something the user typed.
+    private func dropBlankPromptShortcuts() {
+        let blanks = promptShortcuts.filter(\.isBlank).map(\.id)
+        guard !blanks.isEmpty else { return }
+        for id in blanks {
+            shortcutHints[.prompt(id)] = nil
+            if recordingShortcut == .prompt(id) { recordingShortcut = nil }
+            if presentedPromptShortcutID == id { presentedPromptShortcutID = nil }
+        }
+        withAnimation(Tokens.stackSpring) {
+            promptShortcuts.removeAll(where: \.isBlank)
+        }
+        PromptShortcutStore.save(promptShortcuts)
+        NotificationCenter.default.post(name: .promptShortcutsChanged, object: nil)
+    }
+
+    /// The editor: one subject (the prompt, full width under its own label) over a
+    /// short settings list whose controls all land on the same right edge.
+    ///
+    /// The list used to run through `settingRow`, whose label column sizes itself
+    /// per row — so "Prompt", "Model" and "Show in force click" each pushed their
+    /// control to a different x and the card read as a pile of unrelated widgets.
+    /// Here the label takes the leading edge, a `Spacer` takes the slack, and the
+    /// control takes the trailing edge; the two menus, the chord cap and the
+    /// switch stack into one column. The destination pair became a menu for the
+    /// same reason — two side-by-side buttons carrying a sentence each ("Open in a
+    /// window beside the pointer") could only ever be shown truncated.
+    private func promptShortcutCard(_ binding: PromptShortcut) -> some View {
+        let target = EditableShortcut.prompt(binding.id)
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Text(promptShortcutName(binding)
+                     ?? (binding.prompt.isEmpty
+                         ? L("shortcuts.promptAction")
+                         : binding.prompt))
+                    .font(.sf(13.5, weight: .semibold))
+                    .foregroundStyle(Tokens.text1)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 0)
+                Button {
+                    closePromptShortcutEditor(binding.id)
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.sf(9, weight: .semibold))
+                        .foregroundStyle(Tokens.text3)
+                        .frame(width: 22, height: 22)
+                }
+                .buttonStyle(ShortcutChipStyle(rest: 0.035, restStroke: 0.08))
+                .accessibilityLabel(L("detached.close"))
+            }
+            .padding(.bottom, 14)
+
+            // The prompt is what this card is about, not one field among five: it
+            // gets the full width, under its own label, so a real instruction is
+            // readable while it's being written.
+            Text(L("shortcuts.group.prompt"))
+                .font(.sf(11.5, weight: .medium))
+                .foregroundStyle(Tokens.text3)
+                .padding(.bottom, 6)
+
+            ZStack(alignment: .leading) {
+                if binding.prompt.isEmpty {
+                    Text(L("shortcuts.promptAction.placeholder"))
+                        .font(.sf(12.5))
+                        .foregroundStyle(Tokens.text4)
+                        .lineLimit(1)
+                        .allowsHitTesting(false)
+                }
+                TextField("", text: promptBinding(for: binding.id))
+                    .textFieldStyle(.plain)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .font(.sf(12.5))
+                    .foregroundStyle(Tokens.text1)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: Self.promptControlHeight)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .recessedSurface(in: RoundedRectangle(cornerRadius: 8), lit: false)
+            .padding(.bottom, 14)
+
+            VStack(spacing: 8) {
+                promptCardRow(L("general.shortcut")) {
+                    Button {
+                        shortcutHints[target] = nil
+                        recordingShortcut = recordingShortcut == target ? nil : target
+                    } label: {
+                        Text(recordingShortcut == target
+                             ? L("general.shortcut.recording")
+                             : (binding.shortcut?.displayString
+                                ?? L("shortcuts.promptAction.set")))
+                            .font(.sf(11.5, weight: recordingShortcut == target
+                                ? .semibold : .medium))
+                            .foregroundStyle(recordingShortcut == target
+                                ? Tokens.text1 : Tokens.text2)
+                            .padding(.horizontal, 10)
+                            .frame(minWidth: 72, minHeight: Self.promptControlHeight)
+                    }
+                    .buttonStyle(ShortcutChipStyle(active: recordingShortcut == target))
+                }
+
+                promptCardRow(L("shortcuts.promptAction.model")) {
+                    promptModelPicker(for: binding.id)
+                }
+
+                promptCardRow(L("shortcuts.promptAction.openIn")) {
+                    Text(L("shortcuts.promptAction.openIn.window.short"))
+                        .font(.sf(11.5, weight: .medium))
+                        .foregroundStyle(Tokens.text2)
+                        .frame(height: Self.promptControlHeight)
+                }
+
+                if ForceClickFeature.isEnabled {
+                    promptCardRow(L("shortcuts.promptAction.forceTouch")) {
+                        Toggle("", isOn: promptForceTouchBinding(for: binding.id))
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .controlSize(.mini)
+                            .tint(Tokens.text2)
+                            .frame(height: Self.promptControlHeight)
+                    }
+                }
+            }
+
+            if let hint = shortcutHints[target] {
+                Text(hint)
+                    .font(.sf(11))
+                    .foregroundStyle(Tokens.text3)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .padding(.top, 8)
+            }
+
+            // Every field here writes through the moment it changes, but a card with
+            // no way to say "that's it" leaves the user guessing whether anything
+            // took — so the edit ends the way the app's other dialogs end: one
+            // primary capsule that closes it. Delete sits under it in the quiet
+            // register, on air alone (a rule across the card drew a second,
+            // competing edge inside a slab that already has one).
+            HStack(spacing: 10) {
+                Button {
+                    deletePromptShortcut(binding.id)
+                } label: {
+                    Text(L("shortcuts.promptAction.delete"))
+                        .font(.sf(12, weight: .medium))
+                        .foregroundStyle(Tokens.danger)
+                        .frame(maxWidth: .infinity, minHeight: 32)
+                }
+                .buttonStyle(PromptCardActionStyle(kind: .destructive))
+
+                Button {
+                    closePromptShortcutEditor(binding.id)
+                } label: {
+                    Text(L("shortcuts.promptAction.done"))
+                        .font(.sf(12.5, weight: .semibold))
+                        .foregroundStyle(Tokens.text1)
+                        .frame(maxWidth: .infinity, minHeight: 32)
+                }
+                .buttonStyle(PromptCardActionStyle(kind: .primary))
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding(.top, 16)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 16)
+    }
+
+    /// One line of the editor's settings list: label on the leading edge, control
+    /// on the trailing one, every control the same height.
+    private func promptCardRow<Content: View>(
+        _ label: String,
+        @ViewBuilder _ content: () -> Content
+    ) -> some View {
+        HStack(spacing: 12) {
+            Text(label)
+                .font(.sf(12.5))
+                .foregroundStyle(Tokens.text2)
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            content()
+        }
+        .frame(minHeight: Self.promptControlHeight)
     }
 
     private func promptBinding(for id: UUID) -> Binding<String> {
@@ -3344,23 +3677,6 @@ struct InlineSettingsView: View {
         )
     }
 
-    /// The row's open-in choice as a two-value selection, so the overflow menu can
-    /// drive it with a checkmarked Picker instead of a blind toggle.
-    private func promptWindowBinding(for id: UUID) -> Binding<Bool> {
-        Binding(
-            get: { promptShortcuts.first(where: { $0.id == id })?.opensInPointerWindow ?? false },
-            set: { value in
-                guard let index = promptShortcuts.firstIndex(where: { $0.id == id }) else { return }
-                let couldRun = promptShortcuts[index].canRunFromHotKey
-                promptShortcuts[index].opensBesidePointer = value
-                PromptShortcutStore.save(promptShortcuts)
-                if couldRun != promptShortcuts[index].canRunFromHotKey {
-                    NotificationCenter.default.post(name: .promptShortcutsChanged, object: nil)
-                }
-            }
-        )
-    }
-
     /// One provider's pinnable models, precomputed so the menu below stays a
     /// shallow expression — the nested ForEach/Section written inline in the row
     /// blew past the type checker's budget.
@@ -3379,34 +3695,59 @@ struct InlineSettingsView: View {
             .map { PromptModelGroup(provider: $0, models: $0.availableModels) }
     }
 
-    /// The row's model submenu: "Default model", then one checkmarked group per
-    /// provider that can serve. The group heading is a plain `Text` — the same
-    /// disabled-header idiom the answer footer's regenerate-with menu uses — and
-    /// each group is its own inline Picker over the shared pin, so the checkmark
-    /// lands next to the exact provider+model the shortcut runs on.
-    private func promptModelMenu(for id: UUID) -> some View {
+    /// A dedicated model control in the card, rather than a submenu inside an
+    /// unrelated overflow menu. The closed chip always names what this shortcut
+    /// will run; the menu keeps native sections and checkmarks for the long list.
+    private func promptModelPicker(for id: UUID) -> some View {
         let selection = promptModelBinding(for: id)
-        return Menu(L("shortcuts.promptAction.model")) {
-            Picker("", selection: selection) {
-                Text(L("shortcuts.promptAction.model.default"))
-                    .tag(ModelPin?.none)
+        return GlassMenu(title: promptModelDisplayName(for: id)) {
+            Button { selection.wrappedValue = nil } label: {
+                menuOption(L("shortcuts.promptAction.model.default"),
+                           selected: selection.wrappedValue == nil)
             }
-            .pickerStyle(.inline)
-            .labelsHidden()
 
             ForEach(promptModelGroups) { group in
-                Divider()
-                Text(group.provider.displayName)
-                Picker("", selection: selection) {
+                SwiftUI.Section(group.provider.displayName) {
                     ForEach(group.models, id: \.self) { name in
-                        Text(name).tag(ModelPin?.some(
-                            ModelPin(provider: group.provider, model: name)))
+                        let pin = ModelPin(provider: group.provider, model: name)
+                        Button { selection.wrappedValue = pin } label: {
+                            menuOption(ModelRatings.prettyName(for: name,
+                                                               provider: group.provider),
+                                       selected: selection.wrappedValue == pin)
+                        }
                     }
                 }
-                .pickerStyle(.inline)
-                .labelsHidden()
             }
         }
+    }
+
+    /// The model chip names the effective model: a row pin when present, otherwise
+    /// the current app default. Provider remains visible inside the opened menu,
+    /// where it helps disambiguate choices without making the closed chip verbose.
+    private func promptModelDisplayName(for id: UUID) -> String {
+        if let pin = promptShortcuts.first(where: { $0.id == id })?.pin {
+            return ModelRatings.prettyName(for: pin.model, provider: pin.provider)
+        }
+        let provider = APIKeyStore.selectedProvider
+        let fallback = APIKeyStore.effectiveModel(for: provider) ?? provider.defaultModel
+        return ModelRatings.prettyName(for: fallback, provider: provider)
+    }
+
+    /// Whether the force click box offers this row as a button. Persisted like
+    /// every other row property, and the composer reads the list fresh on each
+    /// appearance, so a change takes effect on the next press.
+    private func promptForceTouchBinding(for id: UUID) -> Binding<Bool> {
+        Binding(
+            get: {
+                promptShortcuts.first(where: { $0.id == id })?.appearsInForceTouch ?? true
+            },
+            set: { value in
+                guard let index = promptShortcuts.firstIndex(where: { $0.id == id }) else { return }
+                promptShortcuts[index].showsInForceTouch = value
+                PromptShortcutStore.save(promptShortcuts)
+                NotificationCenter.default.post(name: .promptShortcutsChanged, object: nil)
+            }
+        )
     }
 
     /// The row's pinned backend, `nil` meaning "the default model". Persisted like
@@ -3428,7 +3769,7 @@ struct InlineSettingsView: View {
         let target = EditableShortcut.prompt(id)
         if recordingShortcut == target { recordingShortcut = nil }
         shortcutHints[target] = nil
-        if hoveredPromptShortcutID == id { hoveredPromptShortcutID = nil }
+        if presentedPromptShortcutID == id { presentedPromptShortcutID = nil }
         withAnimation(Tokens.stackSpring) {
             promptShortcuts.removeAll { $0.id == id }
         }
@@ -3835,22 +4176,18 @@ struct InlineSettingsView: View {
             // current" reads as one thought instead of three scattered lines.
             HStack(alignment: .center, spacing: 12) {
                 // App icon, if the bundle carries one — falls back gracefully.
-                // The catalog asset, not `NSApp.applicationIconImage`: on macOS 26
-                // the running app's icon comes back already rendered for the current
-                // appearance, and this panel is dark — which handed back a darkened
-                // squircle wearing the system's specular rim, reading as a white
-                // hairline around the corners. The catalog entry declares no
-                // appearance variants, so reading it directly gives the artwork as
-                // drawn.
-                // The icon ships with the standard macOS ~10% transparent margin
-                // (so the Dock renders it correctly), which would otherwise make it
-                // read small here. Scale up by the inverse of that footprint so the
-                // squircle fills the 44pt frame; the frame clips the bled-out margin.
-                if let icon = NSImage(named: "AppIcon") ?? NSApp.applicationIconImage {
+                // The selected catalog asset, not `NSApp.applicationIconImage`:
+                // on macOS 26 the running icon comes back already rendered for the
+                // current appearance, which can add a system treatment inside this
+                // dark panel. Reading the asset gives either artwork as drawn.
+                // Both catalog assets use the same preview scale so their visible
+                // icon heights stay aligned here and in Appearance.
+                let iconStyle = AppIconStyle.current
+                if let icon = iconStyle.image ?? NSApp.applicationIconImage {
                     Image(nsImage: icon)
                         .resizable()
                         .scaledToFill()
-                        .scaleEffect(1024.0 / 824.0)
+                        .scaleEffect(iconStyle.previewScale)
                         .frame(width: 44, height: 44)
                         .clipped()
                 }
@@ -4526,9 +4863,10 @@ struct InlineSettingsView: View {
         label: String,
         info: String? = nil,
         aligned: Bool = false,
+        verticalAlignment: VerticalAlignment = .firstTextBaseline,
         @ViewBuilder _ content: () -> Content
     ) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
+        HStack(alignment: verticalAlignment, spacing: 12) {
             settingLabel(label, info: info, aligned: aligned)
             content()
             Spacer(minLength: 0)
@@ -4661,6 +4999,37 @@ struct InlineSettingsView: View {
             try? await Task.sleep(nanoseconds: 1_800_000_000)
             withAnimation(.easeOut(duration: 0.3)) { saved = false }
         }
+    }
+}
+
+/// The prompt editor's two closing actions: full width, fully rounded — the same
+/// capsule every other affordance on the island wears, just stretched across the
+/// card. `primary` is the island's own glass; `destructive` carries no resting
+/// surface at all, so ending the shortcut never reads as loud as finishing the
+/// edit — it only takes a whisper of red under the pointer.
+private struct PromptCardActionStyle: ButtonStyle {
+    enum Kind { case primary, destructive }
+    var kind: Kind
+
+    @State private var hovering = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        Group {
+            switch kind {
+            case .primary:
+                configuration.label
+                    .glassCapsule(in: Capsule(), brighter: hovering)
+            case .destructive:
+                configuration.label
+                    .background(Capsule().fill(
+                        Tokens.danger.opacity(hovering ? 0.13 : 0)))
+            }
+        }
+        .contentShape(Capsule())
+        .opacity(configuration.isPressed ? 0.72 : 1)
+        .scaleEffect(configuration.isPressed ? 0.985 : 1)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
     }
 }
 

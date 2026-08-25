@@ -402,28 +402,28 @@ struct PiCLIService: AIService {
         fetchedModels().map { ($0.id, displayName(forID: $0.id)) }
     }
 
-    /// The row/chip title for a pi id.
+    /// The row/chip title for a pi id: the model, then the account it runs through
+    /// (`commandcode/claude-opus-5` → "Claude-opus-5 · commandcode").
     ///
-    /// Normally just the model half, shaped like every other provider's rows
-    /// (`commandcode/claude-opus-5` → "Claude-opus-5"): the provider half is routing,
-    /// and naming it in every row would be noise in a list where most rows have only
-    /// one place they could have come from.
-    ///
-    /// Except when they don't. pi is the one backend where the SAME model legitimately
-    /// appears more than once — this Mac's catalog serves `gpt-5.4` through both a
-    /// Command Code account and a ChatGPT subscription, which are different bills and
-    /// different rate limits. Two rows reading "Gpt-5.4" would be a coin flip, so a
-    /// name that collides earns its provider back; the ones that don't stay short.
+    /// Every row names its provider, not just the ones that collide. Which account
+    /// serves a model is a different bill and a different rate limit — `gpt-5.4`
+    /// through Command Code and `gpt-5.4` through a ChatGPT subscription are not
+    /// interchangeable — and a suffix that appears only on the duplicates makes the
+    /// bare rows read as "no account in particular" rather than as the one account
+    /// they actually are. Say whose it is on every row.
     static func displayName(forID id: String) -> String {
         guard let slash = id.firstIndex(of: "/") else { return ModelRatings.prettyName(for: id) }
         let provider = String(id[..<slash])
-        let model = String(id[id.index(after: slash)...])
-        let pretty = ModelRatings.prettyName(for: model)
-        let sameName = fetchedModels().filter {
-            ModelRatings.prettyName(for: $0.model) == pretty
-        }
-        guard Set(sameName.map(\.provider)).count > 1 else { return pretty }
-        return "\(pretty) · \(provider)"
+        return "\(shortDisplayName(forID: id)) · \(provider)"
+    }
+
+    /// The same title without the account — what the **chips** wear (the Settings
+    /// model chip, the compose chip, a shortcut's pin). A chip is one line naming
+    /// what answers right now, next to a Provider row that already says pi; the
+    /// account belongs in the list you pick from, not in the badge you end up with.
+    static func shortDisplayName(forID id: String) -> String {
+        guard let slash = id.firstIndex(of: "/") else { return ModelRatings.prettyName(for: id) }
+        return ModelRatings.prettyName(for: String(id[id.index(after: slash)...]))
     }
 
     /// The model a flag-less run uses: whatever `~/.pi/agent/settings.json` names,
@@ -471,12 +471,13 @@ struct PiCLIService: AIService {
 
     /// Re-read the catalog off the main thread. No-op once populated — a relaunch
     /// re-resolves, and `revalidateSeed` handles the TTL. Kept for parity with the
-    /// other CLI backends' picker path.
-    static func refreshModels() {
+    /// other CLI backends' picker path. `force` (the manual-refresh route) re-spawns
+    /// `--list-models` regardless; a failed probe leaves the cached catalog alone.
+    static func refreshModels(force: Bool = false) {
         modelLock.lock()
         let alreadyHave = (cachedModels?.isEmpty == false)
         modelLock.unlock()
-        if alreadyHave { return }
+        if alreadyHave, !force { return }
         guard let binary = resolveBinary(), let models = probeModels(binary) else { return }
         adopt(models)
         remember(path: binary, models: models)

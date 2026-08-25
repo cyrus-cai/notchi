@@ -104,6 +104,14 @@ final class NotchModel: ObservableObject {
         /// is never persisted (no `CodingKey`), so a saved conversation never carries
         /// a stale activity line. `nil` whenever no tool is running.
         var toolActivity: String? = nil
+        /// The rest of a live answer's presentation state. These values are
+        /// runtime-only, just like `toolActivity`: detached windows mirror the
+        /// exact state the panel renders instead of reconstructing a second,
+        /// lossy "Thinking" state from the question text.
+        var thinkingWord: String? = nil
+        var thinkingOrbState: OrbState? = nil
+        var thinkingStartedAt: Date? = nil
+        var pendingQuestion: PendingUserQuestion? = nil
         /// Web sources behind this assistant answer, when it was grounded by a
         /// search tool (GLM today). Drives the clickable source badge under the
         /// answer. Persisted, so reopening a recent item keeps its sources.
@@ -231,6 +239,15 @@ final class NotchModel: ObservableObject {
         }
         var source: Source = .ask
 
+        /// The interaction that created this row, when it needs its own scoped
+        /// history surface. Ordinary panel asks and prompt shortcuts leave this
+        /// nil; a conversation started from the Force Touch popup is stamped here
+        /// so that popup's History button never mixes in unrelated Ask rows.
+        enum Origin: String, Codable {
+            case forceTouch
+        }
+        var origin: Origin? = nil
+
         /// Deep link back to the exact note/reminder this capture created, so
         /// tapping the row jumps straight to it in Apple Notes/Reminders instead
         /// of re-filling the input. The note's `x-coredata://` id (opened via
@@ -301,11 +318,12 @@ final class NotchModel: ObservableObject {
         init(id: UUID = UUID(), q: String, a: String, t: Date,
              turns: [Turn]? = nil, title: String? = nil,
              source: Source = .ask, link: String? = nil,
-             agentResume: AgentResume? = nil) {
+             agentResume: AgentResume? = nil, origin: Origin? = nil) {
             self.id = id; self.q = q; self.a = a; self.t = t
             self.turns = turns; self.title = title
             self.source = source; self.link = link
             self.agentResume = agentResume
+            self.origin = origin
         }
 
         // Custom decoder — the load-bearing reason this exists: history is decoded
@@ -321,7 +339,7 @@ final class NotchModel: ObservableObject {
         // cleanly with no migration. `id`/`q`/`a`/`t` are required — every saved
         // item has always had them.
         enum CodingKeys: String, CodingKey {
-            case id, q, a, t, turns, title, source, link, agentOutcome, agentResume,
+            case id, q, a, t, turns, title, source, origin, link, agentOutcome, agentResume,
                  agentInterrupted, failed
         }
 
@@ -334,6 +352,7 @@ final class NotchModel: ObservableObject {
             turns  = try c.decodeIfPresent([Turn].self,  forKey: .turns)
             title  = try c.decodeIfPresent(String.self,  forKey: .title)
             source = try c.decodeIfPresent(Source.self,  forKey: .source) ?? .ask
+            origin = try c.decodeIfPresent(Origin.self, forKey: .origin)
             link   = try c.decodeIfPresent(String.self,  forKey: .link)
             agentOutcome = try c.decodeIfPresent(String.self, forKey: .agentOutcome)
             agentResume = try c.decodeIfPresent(AgentResume.self, forKey: .agentResume)
@@ -578,6 +597,12 @@ final class NotchModel: ObservableObject {
     /// as the first run's confirmation gate.
     @Published var agentComposeFolder: URL? = nil
 
+    /// Every enabled skill Codex reports for the current agent folder. Loaded via
+    /// app-server rather than a filesystem scan so plugins, disabled entries, and
+    /// repo-scoped skills follow Codex's own rules exactly.
+    @Published private(set) var agentSkills: [CodexCLIService.Skill] = []
+    private var agentSkillsTask: Task<Void, Never>?
+
     /// Which agent CLI the armed task will run on (Codex / Claude Code). Seeded
     /// from the remembered choice (raw read — no process probe at init) and
     /// persisted on change, so the armed mode survives relaunches whole. Driven
@@ -768,6 +793,7 @@ final class NotchModel: ObservableObject {
             } else if slashHighlight >= slashMatches.count {
                 slashHighlight = max(slashMatches.count - 1, 0)
             }
+            if text == "/" { refreshAgentSkills(forceReload: true) }
             // Any real edit ends an ↑/↓ recall session, so the next ↑ starts fresh
             // from the newest item. `isRecallingText` shields the recall's own
             // fill from tripping this (it writes `text` too).
@@ -1356,15 +1382,21 @@ final class NotchModel: ObservableObject {
 
     func adoptDetachedThread(_ threadID: UUID) -> DetachedThreadStore {
         if let existing = detachedThreadStores[threadID] { return existing }
+        let historyItem = history.first(where: { $0.id == threadID })
         let seed: [Turn]
         if let round = inFlightRounds.first(where: { $0.threadID == threadID }) {
             seed = round.thread
         } else if threadHistoryID == threadID, !turns.isEmpty {
             seed = turns
         } else {
-            seed = history.first(where: { $0.id == threadID })?.conversation ?? []
+            seed = historyItem?.conversation ?? []
         }
-        let store = DetachedThreadStore(threadID: threadID, turns: seed)
+        let isAgent = historyItem?.source == .agent
+        let store = DetachedThreadStore(
+            threadID: threadID,
+            turns: seed,
+            agentFolderPath: isAgent ? historyItem?.link : nil,
+            completedAt: isAgent ? historyItem?.t : nil)
         detachedThreadStores[threadID] = store
         return store
     }
@@ -1409,8 +1441,9 @@ final class NotchModel: ObservableObject {
         seed.removeLast()
         guard let questionTurn = seed.last, questionTurn.role == "user" else { return }
         seed.removeLast()
-        regenOverrideModel = model
-        runDetachedRound(threadID: threadID, seed: seed, question: questionTurn.text)
+        let pin = model.map { ModelPin(provider: APIKeyStore.selectedProvider, model: $0) }
+        runDetachedRound(threadID: threadID, seed: seed,
+                         question: questionTurn.text, pin: pin)
     }
 
     /// The thread a detached-window round starts from: the window's live
@@ -1433,24 +1466,43 @@ final class NotchModel: ObservableObject {
     private func runDetachedRound(threadID: UUID, seed: [Turn], question: String,
                                   hideUserBubble: Bool = false,
                                   trackCompactTask: Bool = false,
-                                  pin: ModelPin? = nil) -> UUID? {
+                                  pin: ModelPin? = nil,
+                                  origin: HistoryItem.Origin? = nil) -> UUID? {
         // Never stack rounds on one thread from the window: the tear-off
         // dropped the round's task handle, so a second submit couldn't
         // supersede-cancel the first. The field is disabled while streaming;
         // this is the backstop.
         guard !seed.contains(where: { $0.streaming }) else { return nil }
-        // Armed after the guard so a refused round leaves no override behind for
-        // whatever submits next. Nil keeps whatever the caller already armed
-        // (`regenerateDetachedAnswer` sets its own pick before calling in).
-        if pin != nil { armModelPin(pin) }
+        // A detached round borrows the main submit pipeline, not the main
+        // composer's transient state. Preserve every value submit mutates
+        // synchronously, then give this round its own empty image payload and
+        // one-shot model pin. Otherwise a Force Touch fired while the main box
+        // holds pasted images or a pending regenerate choice can consume them.
+        let highlightedID = highlightedHistoryIndex.flatMap { index in
+            history.indices.contains(index) ? history[index].id : nil
+        }
         let saved = (turns: turns, threadID: threadHistoryID, mode: mode,
                      text: text, task: task, pinned: isAnswerPinned,
-                     error: askError, history: showHistory)
+                     error: askError, history: showHistory,
+                     highlightedID: highlightedID,
+                     fromPromptShortcut: fromPromptShortcut,
+                     composeImages: askComposeImages,
+                     regenModel: regenOverrideModel,
+                     regenProvider: regenOverrideProvider)
+        armModelPin(pin)
+        askComposeImages = []
         task = nil                                    // detach, never cancel
         turns = seed
         threadHistoryID = threadID
         text = question
         submit(hideUserBubble: hideUserBubble)
+        // A fresh submit synchronously parks its Recent placeholder. Stamp the
+        // entry point before handing the round off; `persistThread` carries this
+        // field forward when it replaces the placeholder with the settled row.
+        if let origin,
+           let index = history.firstIndex(where: { $0.id == threadHistoryID }) {
+            history[index].origin = origin
+        }
         // A regenerate that emptied the seed re-ids the thread (`submit`
         // treats it as fresh) — re-key the window's mirror so it keeps
         // hearing the round under the new id.
@@ -1483,6 +1535,13 @@ final class NotchModel: ObservableObject {
         isAnswerPinned = saved.pinned
         askError = saved.error
         showHistory = saved.history
+        highlightedHistoryIndex = saved.highlightedID.flatMap { id in
+            history.firstIndex(where: { $0.id == id })
+        }
+        fromPromptShortcut = saved.fromPromptShortcut
+        askComposeImages = saved.composeImages
+        regenOverrideModel = saved.regenModel
+        regenOverrideProvider = saved.regenProvider
         return landedThreadID
     }
 
@@ -1858,16 +1917,19 @@ final class NotchModel: ObservableObject {
     /// One row of the `/` menu. The menu's original four rows are *modes* — a
     /// `/` on the fresh prompt pins the next line's destination, exactly what the
     /// pill and the Tab cycle already reach. A user-defined prompt shortcut is a
-    /// fifth kind of row with the same shape: pin it and Enter runs the input
-    /// through that shortcut's instruction — a named, switchable mode of its own.
+    /// second kind of row with the same shape: pin it and Enter runs the input
+    /// through that shortcut's instruction. Codex skills are the third kind: they
+    /// arm Agent and leave their explicit `$name` invocation in the input.
     enum SlashMatch: Identifiable {
         case mode(SlashCommand)
         case shortcut(PromptShortcut)
+        case skill(CodexCLIService.Skill)
 
         var id: String {
             switch self {
             case .mode(let command): return "mode." + command.rawValue
             case .shortcut(let shortcut): return "shortcut." + shortcut.id.uuidString
+            case .skill(let skill): return "skill." + skill.name
             }
         }
     }
@@ -1921,27 +1983,57 @@ final class NotchModel: ObservableObject {
 
     /// The rows the current query leaves standing: the four modes (in the enum's
     /// declared order so the list never reshuffles under the highlight as you
-    /// type), then every *ready* prompt shortcut after them. A bare `/` matches
-    /// all of them. Agent is offered only when a local agent CLI is actually
-    /// installed — the same gate the bucket pill runs on. Prompt shortcuts are
-    /// their own named modes: they match on their name and their prompt, so a
-    /// Chinese name is `/`-addressable exactly like a localized mode title.
+    /// type), then every *ready* prompt shortcut and enabled Codex skill after
+    /// them. A bare `/` matches all of them. Agent is offered only when a local
+    /// agent CLI is actually installed — the same gate the bucket pill runs on.
+    /// Prompt shortcuts match on name and prompt; skills match on invocation and
+    /// display name.
     var slashMatches: [SlashMatch] {
         let query = text.hasPrefix("/") ? String(text.dropFirst()).lowercased() : ""
         let modes: [SlashMatch] = SlashCommand.allCases.compactMap { command in
             guard command != .agent || agentAvailable else { return nil }
-            guard !query.isEmpty || command.keywords.contains(where: { $0.hasPrefix(query) })
+            guard query.isEmpty || command.keywords.contains(where: { $0.hasPrefix(query) })
             else { return nil }
             return .mode(command)
         }
         let shortcuts: [SlashMatch] = PromptShortcutStore.current.compactMap { shortcut in
             guard shortcut.isReady else { return nil }
-            guard !query.isEmpty
+            guard query.isEmpty
                   || shortcut.name?.lowercased().hasPrefix(query) == true
                   || shortcut.prompt.lowercased().hasPrefix(query) else { return nil }
             return .shortcut(shortcut)
         }
-        return modes + shortcuts
+        let skills: [SlashMatch] = agentSkills.compactMap { skill in
+            guard AgentEngine.codex.isAvailable else { return nil }
+            guard query.isEmpty
+                    || skill.name.lowercased().hasPrefix(query)
+                    || skill.displayName.lowercased().hasPrefix(query) else { return nil }
+            return .skill(skill)
+        }
+        return modes + shortcuts + skills
+    }
+
+    /// Refresh on every fresh `/` so installing or editing a skill does not need an
+    /// app relaunch. Repeated keystrokes share the same in-flight request.
+    private func refreshAgentSkills(forceReload: Bool = false) {
+        guard agentSkillsTask == nil else { return }
+        let cwd = (agentComposeFolder ?? lastAgentFolder
+                   ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)).path
+        agentSkillsTask = Task { [weak self] in
+            let loaded = await CodexCLIService.loadSkills(cwd: cwd,
+                                                          forceReload: forceReload)
+            guard !Task.isCancelled, let self else { return }
+            // A transient app-server failure must not blank a previously good
+            // menu. A successful Codex list always includes system skills, so an
+            // empty response is safely treated as failure once we have a cache.
+            if !loaded.isEmpty || self.agentSkills.isEmpty {
+                self.agentSkills = loaded
+            }
+            self.agentSkillsTask = nil
+            if self.slashHighlight >= self.slashMatches.count {
+                self.slashHighlight = max(self.slashMatches.count - 1, 0)
+            }
+        }
     }
 
     /// ↓ / ↑ inside the menu, wrapping at both ends so the rows are a ring.
@@ -1988,7 +2080,9 @@ final class NotchModel: ObservableObject {
     /// a Tab override that was pressed a keystroke early: it holds through the
     /// whole line and lifts on submit. Note/Remind announce themselves through
     /// the prompt's placeholder until there's text for the inline ghost to trail;
-    /// Agent flips the pill; a prompt shortcut names itself in the hint.
+    /// Agent flips the pill; a prompt shortcut names itself in the hint; a skill
+    /// arms Codex Agent — keeping the armed model — and leaves its explicit
+    /// invocation ready to extend.
     func applySlashCommand(_ match: SlashMatch) {
         text = ""
         slashHighlight = 0
@@ -2016,6 +2110,31 @@ final class NotchModel: ObservableObject {
             setAgentBucket(false)
             manualPanelOverride = nil
             promptShortcutMode = shortcut
+        case .skill(let skill):
+            promptShortcutMode = nil
+            manualPanelOverride = nil
+            setAgentBucket(true)
+            armCodexForSkill()
+            text = "$\(skill.name) "
+        }
+    }
+
+    /// A skill has to run on Codex — the list comes from Codex's app-server and
+    /// `$name` is its invocation syntax — so picking one arms Codex. What it must
+    /// NOT do is cost the user their model: this used to blank `agentModelID`
+    /// unconditionally, which dropped the chip from "GPT-5.2 high" to a bare
+    /// "Codex high" AND persisted that loss to the remembered pick. Already on
+    /// Codex, nothing moves. Coming from another engine, the armed model belongs
+    /// to that engine, so it can't carry over — restore Codex's own last-used
+    /// pick instead of falling to the CLI default.
+    private func armCodexForSkill() {
+        guard agentArmedEngine != .codex else { return }
+        if let id = AgentModelMRU.entries(for: .codex).first?.model,
+           let choice = AgentEngine.codex.modelChoices.first(where: { $0.id == id }) {
+            selectAgentModel(choice)
+        } else {
+            agentArmedEngine = .codex
+            agentModelID = nil
         }
     }
 
@@ -2237,13 +2356,15 @@ final class NotchModel: ObservableObject {
 
     /// Pick a fresh thinking word, avoiding an immediate repeat. A pinned task word
     /// wins outright — the round says what it's doing and never drifts off it.
-    private func rerollThinkingWord() {
+    private func rerollThinkingWord(for answerID: UUID? = nil) {
         if let pinnedThinkingWord {
             thinkingWord = pinnedThinkingWord
+            if let answerID { mirrorThinkingWord(for: answerID) }
             return
         }
         let pool = NotchModel.thinkingWords.filter { $0 != thinkingWord }
         thinkingWord = pool.randomElement() ?? NotchModel.thinkingWords.randomElement() ?? thinkingWord
+        if let answerID { mirrorThinkingWord(for: answerID) }
     }
 
     /// How long each mood word lingers before rotating to the next. Slow enough to
@@ -2259,7 +2380,7 @@ final class NotchModel: ObservableObject {
 
     /// `question` is the line this round is answering: a task-shaped one (translate,
     /// summarize, …) pins the wait word to that job instead of rolling a mood word.
-    func startThinkingWordRotation(for question: String = "") {
+    func startThinkingWordRotation(for question: String = "", answerID: UUID) {
         thinkingWordTimer?.invalidate()
         thinkingActivity = nil
         thinkingStartedAt = Date()
@@ -2272,21 +2393,24 @@ final class NotchModel: ObservableObject {
             pinnedThinkingWord = nil
             pinnedThinkingOrb = .composing
         }
-        rerollThinkingWord()
+        rerollThinkingWord(for: answerID)
+        mirrorThinkingState(for: answerID)
         // A pinned word is the whole round's word — nothing to rotate.
         guard pinnedThinkingWord == nil else {
             thinkingWordTimer = nil
             return
         }
         let t = Timer(timeInterval: NotchModel.thinkingWordInterval, repeats: true) { [weak self] _ in
-            self?.rerollThinkingWord()
+            self?.rerollThinkingWord(for: answerID)
         }
         t.tolerance = 0.4
         RunLoop.main.add(t, forMode: .common)
         thinkingWordTimer = t
     }
 
-    func stopThinkingWordRotation() {
+    func stopThinkingWordRotation(for answerID: UUID) {
+        clearRuntimeThinkingState(for: answerID)
+        guard thinkingAnswerID == answerID else { return }
         thinkingWordTimer?.invalidate()
         thinkingWordTimer = nil
         thinkingActivity = nil
@@ -2302,9 +2426,10 @@ final class NotchModel: ObservableObject {
     /// while a tool from the same round is still running (the model spoke a
     /// preface before searching), and clearing the activity there is exactly what
     /// used to kill the "Searching the web…" line the moment any text landed.
-    /// Terminal paths (finish/error/stop) use `stopThinkingWordRotation()`, which
+    /// Terminal paths (finish/error/stop) use `stopThinkingWordRotation(for:)`, which
     /// clears everything.
-    func freezeThinkingWord() {
+    func freezeThinkingWord(for answerID: UUID) {
+        guard thinkingAnswerID == answerID else { return }
         thinkingWordTimer?.invalidate()
         thinkingWordTimer = nil
     }
@@ -2317,6 +2442,49 @@ final class NotchModel: ObservableObject {
         if label != nil { hasUsedToolThisRound = true }
         thinkingActivity = label
         thinkingActivityOrb = orb
+        if let thinkingAnswerID { mirrorThinkingState(for: thinkingAnswerID) }
+    }
+
+    /// Copy the panel's live wait state onto the answer turn itself. The turn is
+    /// the unit mirrored into a detached window, so both surfaces consume the
+    /// same values instead of the window inventing its own fallback state.
+    private func mirrorThinkingState(for answerID: UUID) {
+        updateRuntimeTurn(answerID) { turn in
+            turn.thinkingWord = thinkingWord
+            turn.toolActivity = thinkingActivity
+            turn.thinkingOrbState = thinkingOrbState
+            turn.thinkingStartedAt = thinkingStartedAt
+        }
+    }
+
+    /// Word rotation must not overwrite a detached tool's semantic orb. The
+    /// detached harness mirrors that orb directly; only the word changes on this
+    /// timer tick.
+    private func mirrorThinkingWord(for answerID: UUID) {
+        updateRuntimeTurn(answerID) { $0.thinkingWord = thinkingWord }
+    }
+
+    private func clearRuntimeThinkingState(for answerID: UUID) {
+        updateRuntimeTurn(answerID) { turn in
+            turn.thinkingStartedAt = nil
+            turn.pendingQuestion = nil
+        }
+    }
+
+    /// Mutate runtime-only presentation state everywhere this answer may live:
+    /// the panel, its in-flight snapshot, and the detached window mirror.
+    private func updateRuntimeTurn(_ answerID: UUID,
+                                   _ update: (inout Turn) -> Void) {
+        if let i = turns.firstIndex(where: { $0.id == answerID }) {
+            update(&turns[i])
+        }
+        guard let roundIndex = inFlightRounds.firstIndex(where: { $0.answerID == answerID }),
+              let turnIndex = inFlightRounds[roundIndex].thread.firstIndex(where: {
+                  $0.id == answerID
+              }) else { return }
+        update(&inFlightRounds[roundIndex].thread[turnIndex])
+        let round = inFlightRounds[roundIndex]
+        detachedThreadStores[round.threadID]?.turns = round.thread
     }
 
     // MARK: - Natural-language app settings
@@ -2764,14 +2932,15 @@ final class NotchModel: ObservableObject {
             // Search lives inside Model now — its rows are a group on that pane.
             return "model"
         case "capture", "notes", "note_destination", "notes_folder", "copy_sense",
-             "selection_context", "force_click":
+             "selection_context":
             return "capture"
-        case "general", "app_language", "launch_at_login", "hover_sensitivity", "proxy":
+        case "general", "app_language", "launch_at_login", "dock_icon", "menu_bar_icon",
+             "proxy":
             return "general"
         case "shortcuts", "summon_shortcut", "action_shortcut", "prompt_shortcut":
             return "shortcuts"
-        case "appearance", "dock_icon", "menu_bar_icon", "display_placement",
-             "hide_in_fullscreen", "live_activity":
+        case "appearance", "display_placement", "hide_in_fullscreen", "live_activity",
+             "hover_sensitivity", "force_click":
             return "appearance"
         case "stats", "usage", "statistics":
             return "stats"
@@ -3637,10 +3806,12 @@ final class NotchModel: ObservableObject {
                     return
                 }
                 userChoiceContinuations[questionID] = cont
-                pendingUserQuestions.append(PendingUserQuestion(
+                let pending = PendingUserQuestion(
                     id: questionID, answerID: answerID,
                     question: question, options: options,
-                    inlineOptions: inlineOptions))
+                    inlineOptions: inlineOptions)
+                pendingUserQuestions.append(pending)
+                updateRuntimeTurn(answerID) { $0.pendingQuestion = pending }
                 // Timeout backstop: an unanswered question (user walked away, panel
                 // stayed closed) must not hang the round forever — resolve with an
                 // explicit "no answer" the model is told to proceed on. Unstructured
@@ -3667,7 +3838,11 @@ final class NotchModel: ObservableObject {
     /// continuation and does nothing.
     private func resolveUserQuestion(_ questionID: UUID, with result: Result<String, Error>) {
         guard let cont = userChoiceContinuations.removeValue(forKey: questionID) else { return }
+        let answerID = pendingUserQuestions.first(where: { $0.id == questionID })?.answerID
         pendingUserQuestions.removeAll { $0.id == questionID }
+        if let answerID {
+            updateRuntimeTurn(answerID) { $0.pendingQuestion = nil }
+        }
         cont.resume(with: result)
     }
 
@@ -3882,6 +4057,36 @@ final class NotchModel: ObservableObject {
     /// confirmation card is mounted on the *island* — so it sits in the middle of
     /// the whole glass panel rather than anchored under the pill near the bottom.
     @Published var confirmingClear = false
+    /// The Force Click rung the user picked while macOS's own force-click lookup
+    /// is still armed — held here, unapplied, until `ForceClickLookupDialog`
+    /// gets an answer. Lives on the model (not `InlineSettingsView`) for the same
+    /// reason `confirmingClear` does: the card is mounted on the *island*, so its
+    /// scrim covers the whole glass panel instead of stopping at the settings
+    /// body's bounds and leaving the panel's padding uncovered.
+    @Published var forceClickLookupConflict: ForceClickPressure?
+    /// The armed Force Click rung, mirrored so the Settings slider and the dialog
+    /// (which now lives outside Settings) read and write one value.
+    @Published var forceClickPressure: ForceClickPressure = .current
+
+    /// Arm a rung, or hold it back. macOS's own force-click lookup listens for the
+    /// very same press, so with both live a hard click opens the system's
+    /// dictionary panel over ours — and there is no API to clear that preference,
+    /// only to read it. So when it is on, the rung is held (the slider stays put)
+    /// and `ForceClickLookupDialog` hands the user over to System Settings; every
+    /// other case applies straight away.
+    func selectForceClickPressure(_ newValue: ForceClickPressure) {
+        guard newValue != forceClickPressure else { return }
+        if newValue.isEnabled, SystemLookupGesture.usesForceClick {
+            forceClickLookupConflict = newValue
+            return
+        }
+        applyForceClickPressure(newValue)
+    }
+
+    func applyForceClickPressure(_ newValue: ForceClickPressure) {
+        forceClickPressure = newValue
+        ForceClickPressure.current = newValue
+    }
     /// Armed for the length of a confirmed Clear, and read by the recent rows to
     /// pick their removal transition. A single right-click → Delete slides *one*
     /// row out sideways, which reads as "that one, gone"; the same motion played
@@ -3994,6 +4199,13 @@ final class NotchModel: ObservableObject {
     /// The FULL filtered history, newest-first — every retained item, uncapped.
     /// Backs the standalone History window so nothing captured is ever out of reach.
     var archiveVisible: [HistoryItem] { filteredHistory }
+
+    /// Settled conversations created by the Force Touch popup, newest first.
+    /// This is the popup's private drawer rather than another Chat/Agent bucket,
+    /// so it never inherits those surfaces' search or source filters.
+    var forceTouchHistory: [HistoryItem] {
+        history.filter { $0.origin == .forceTouch && !$0.pending && $0.source.isThread }
+    }
 
     /// The unsearched size of the bucket currently owning Recent. Agent compose
     /// sees only agent conversations; Chat owns Ask / Notes / Reminders.
@@ -4136,6 +4348,7 @@ final class NotchModel: ObservableObject {
         self.ai = ai
         loadHistoryAsync()
         startClipboardSense()
+        refreshAgentSkills()
         // A debounced archive write may still be pending when the user quits;
         // flush it synchronously so a ⌘Q moments after an answer can't lose the
         // newest row.
@@ -4157,6 +4370,7 @@ final class NotchModel: ObservableObject {
 
     deinit {
         senseTimer?.invalidate()
+        agentSkillsTask?.cancel()
     }
 
     /// Swap the backend at runtime — used when the user saves an API key in
@@ -5188,7 +5402,8 @@ final class NotchModel: ObservableObject {
     /// captured selection identically and both remain invisible to panel state.
     @discardableResult
     func startPromptShortcutRound(prompt: String, selectedText: String,
-                                  pin: ModelPin? = nil) -> UUID? {
+                                  pin: ModelPin? = nil,
+                                  origin: HistoryItem.Origin? = nil) -> UUID? {
         let instruction = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         let context = selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !instruction.isEmpty else { return nil }
@@ -5205,7 +5420,8 @@ final class NotchModel: ObservableObject {
         """
         return runDetachedRound(
             threadID: UUID(), seed: [], question: question,
-            hideUserBubble: true, trackCompactTask: true, pin: pin)
+            hideUserBubble: true, trackCompactTask: true, pin: pin,
+            origin: origin)
     }
 
     /// Supersede a compact shortcut's previous headless round. This is a replace,
@@ -5214,6 +5430,14 @@ final class NotchModel: ObservableObject {
     func cancelCompactRound(threadID: UUID) {
         compactRoundTasks.removeValue(forKey: threadID)?.cancel()
         settlePending(threadID)
+    }
+
+    /// Leaving or replacing a Force Touch result is a presentation detach, like
+    /// folding the main panel: relinquish the handle that can supersede the round
+    /// without cancelling the unstructured task itself. Its in-flight snapshot
+    /// keeps streaming and persists the finished thread into Recent.
+    func detachCompactRound(threadID: UUID) {
+        compactRoundTasks.removeValue(forKey: threadID)
     }
 
     /// The single Enter entry point the input field calls. There's only one surface
@@ -5524,6 +5748,7 @@ final class NotchModel: ObservableObject {
         withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
             agentComposeFolder = url
         }
+        refreshAgentSkills(forceReload: true)
     }
 
     /// The compose row's model menu: picking a model picks its engine with it
@@ -6195,11 +6420,11 @@ final class NotchModel: ObservableObject {
 
         // Fresh thinking word for this answer's pre-stream wait, rotating slowly
         // while we wait so a long search/compose round doesn't freeze on one word.
-        startThinkingWordRotation(for: q)
         // Light the thinking dots for this round (cleared on the first token or when
         // the round ends) — they ride beside the notch even if the panel folds away.
         thinking = true
         thinkingAnswerID = answerID
+        startThinkingWordRotation(for: q, answerID: answerID)
         mode = .load
 
         // The task owns a value-type snapshot of the thread it's answering, plus
@@ -6324,6 +6549,30 @@ final class NotchModel: ObservableObject {
                 // a giant slab still clears quickly — just smoothly.
                 let paceMaxLag: TimeInterval = 1.2
                 let paceMinRate: Double = 40   // characters per second
+                // How long the close-out below is allowed to take. Short enough
+                // that the settled footer reads as arriving WITH the last words,
+                // long enough that a big remaining backlog still ramps out instead
+                // of landing as one frame's slab — the very thing the pacing above
+                // exists to prevent.
+                let drainWindow: TimeInterval = 0.25
+                // Non-nil once arrival has finished: the flat characters-per-second
+                // that empties whatever is still buffered within `drainWindow`,
+                // computed ONCE at that moment (see the close-out below). While it
+                // is nil the live rate law above applies.
+                //
+                // Why the live law must not keep running past the end of the
+                // stream: `rate = backlog / paceMaxLag` is derived from an
+                // invariant about a LIVE stream — "the display never trails what
+                // has arrived by more than 1.2s". Once nothing more is arriving
+                // there is nothing left to smooth against, and the law decays
+                // exponentially (τ = paceMaxLag) into the `paceMinRate` floor, so
+                // the tail crawls exactly where the reader has already caught up:
+                // a 240-character backlog took ~3s to finish, a short answer paid
+                // 40 c/s all the way out. Nothing downstream can settle until it
+                // does — `streaming` (and with it the answer's footer) flips only
+                // after this drains — so that crawl was read as the footer lagging
+                // the answer.
+                var closeOutRate: Double? = nil
                 var flushChunks: @MainActor () -> Void = {}
                 flushChunks = { [weak self] in
                     guard let self, !streamSettled else { return }
@@ -6337,7 +6586,10 @@ final class NotchModel: ObservableObject {
                     lastFlushAt = now
                     let backlog = acc.count - released
                     if backlog > 0 {
-                        let rate = max(paceMinRate, Double(backlog) / paceMaxLag)
+                        // Closing out (arrival done) → the flat rate fixed at that
+                        // moment; still streaming → the live self-regulating law.
+                        let rate = closeOutRate
+                            ?? max(paceMinRate, Double(backlog) / paceMaxLag)
                         releaseBudget += rate * dt
                         let step = min(backlog, Int(releaseBudget))
                         if step > 0 {
@@ -6363,7 +6615,7 @@ final class NotchModel: ObservableObject {
                         // Freeze ONLY — a full stop would also clear the tool
                         // activity, and a tool can still be running under this very
                         // text (a preface before a search): its line must survive.
-                        self.freezeThinkingWord()
+                        self.freezeThinkingWord(for: answerID)
                         // First chunk: flip to the result view so the answer appears
                         // to grow in place out of the thinking state.
                         if self.mode == .load { self.mode = .result }
@@ -6486,6 +6738,9 @@ final class NotchModel: ObservableObject {
                             // Calculate rather than falling back to a hard-coded verb.
                             if let i = thread.firstIndex(where: { $0.id == answerID }) {
                                 thread[i].toolActivity = label
+                                thread[i].thinkingOrbState = label == nil
+                                    ? (Self.taskStyle(for: q)?.orb ?? .composing)
+                                    : orb
                                 self.syncInFlight(answerID, thread)
                             }
                             // The activity line only shows on a still-on-screen
@@ -6548,10 +6803,17 @@ final class NotchModel: ObservableObject {
                     }
                 }
                 if Task.isCancelled { return }
-                // Let the paced reveal finish walking what's still buffered before
-                // settling, so the tail types out instead of snapping in. Bounded
-                // twice over: the rate invariant keeps the remaining walk under
-                // ~`paceMaxLag` seconds, and a hard deadline covers any stall.
+                // Arrival is over. Switch the throttle to close-out: one flat rate,
+                // fixed here, that empties whatever is still buffered in
+                // `drainWindow` — a short linear ramp instead of the live law's
+                // long exponential tail (see `closeOutRate`). The floor still
+                // applies so a couple of trailing characters don't crawl.
+                closeOutRate = max(paceMinRate,
+                                   Double(acc.count - released) / drainWindow)
+                // Let that close-out finish walking what's still buffered before
+                // settling, so the tail ramps out instead of snapping in. Bounded
+                // twice over: the flat rate empties the backlog in `drainWindow`,
+                // and a hard deadline covers any stall.
                 // Cancellation (Esc / superseded) breaks out — the catch paths
                 // settle instantly, and what the user saw at stop is what persists.
                 let drainDeadline = ProcessInfo.processInfo.systemUptime + 3
@@ -6567,7 +6829,7 @@ final class NotchModel: ObservableObject {
                 released = acc.count
                 flushChunks()
                 streamSettled = true
-                self.stopThinkingWordRotation()
+                self.stopThinkingWordRotation(for: answerID)
                 self.endThinking(for: answerID)
                 if let i = thread.firstIndex(where: { $0.id == answerID }) {
                     thread[i].streaming = false
@@ -6576,7 +6838,7 @@ final class NotchModel: ObservableObject {
                 // the user walked away while it streamed, so the panel folded back
                 // to the resting notch (the three dots). When so, fire a native
                 // banner so the finished answer doesn't just quietly go out.
-                let walkedAway = !self.isOnScreen(answerID: answerID)
+                let walkedAway = !self.isPresented(answerID: answerID)
                 self.markFinished(id: answerID)   // no-op when detached
                 self.persistThread(thread, threadID: threadID, answer: acc)
                 if walkedAway {
@@ -6594,7 +6856,7 @@ final class NotchModel: ObservableObject {
                 // overwrite it with the bare partial.
                 pendingFlush?.cancel()
                 streamSettled = true
-                self.stopThinkingWordRotation()
+                self.stopThinkingWordRotation(for: answerID)
                 self.endThinking(for: answerID)
                 let partial = acc.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !partial.isEmpty {
@@ -6611,7 +6873,7 @@ final class NotchModel: ObservableObject {
                         thread[i].text = saved
                         thread[i].streaming = false
                     }
-                    let walkedAway = !self.isOnScreen(answerID: answerID)
+                    let walkedAway = !self.isPresented(answerID: answerID)
                     self.persistThread(thread, threadID: threadID, answer: saved)
                     // Only touch the screen when this round still owns it.
                     if self.isOnScreen(answerID: answerID) {
@@ -6657,12 +6919,14 @@ final class NotchModel: ObservableObject {
                                                  needsSetup: !self.isConfigured,
                                                  answerID: answerID)
                         self.mode = .result
-                        // Metadata-only breadcrumb (no prompt/answer/key) — see DiagnosticsLog.
-                        DiagnosticsLog.shared.record(
-                            provider: APIKeyStore.selectedProvider.displayName,
-                            status: Self.httpStatus(from: error),
-                            error: error)
                     }
+                    // Metadata-only breadcrumb (no prompt/answer/key) — failures
+                    // go through the same diagnostics path whether the round is in
+                    // the main panel, a Force Touch window, or already detached.
+                    DiagnosticsLog.shared.record(
+                        provider: runProvider.displayName,
+                        status: Self.httpStatus(from: error),
+                        error: error)
                 }
             }
         }
@@ -6692,10 +6956,12 @@ final class NotchModel: ObservableObject {
         guard isStreaming else { return }
         task?.cancel()
         task = nil
-        stopThinkingWordRotation()
+        let activeAnswerIDs = turns.filter { $0.role == "assistant" && $0.streaming }.map(\.id)
+        for answerID in activeAnswerIDs {
+            stopThinkingWordRotation(for: answerID)
+        }
         thinking = false
         thinkingAnswerID = nil
-        setThinkingActivity(nil)
         // Settle the on-screen streaming flag(s), reading back the partial text.
         var partial = ""
         for i in turns.indices where turns[i].streaming {
@@ -7076,10 +7342,39 @@ final class NotchModel: ObservableObject {
         turns.contains { $0.id == answerID }
     }
 
+    /// Whether the answer is visibly mounted anywhere. Completion notifications
+    /// are only for a round the user actually left; a Force Touch window watching
+    /// its detached mirror is still a live presentation, even though it is not in
+    /// the main panel's `turns` array.
+    private func isPresented(answerID: UUID) -> Bool {
+        isOnScreen(answerID: answerID)
+            || detachedThreadStores.values.contains { store in
+                store.turns.contains { $0.id == answerID }
+            }
+    }
+
     /// Refresh a still-streaming round's reattach mirror with its task's current
     /// snapshot. No-op once the round has settled (its defer removed the entry).
-    private func syncInFlight(_ answerID: UUID, _ thread: [Turn]) {
+    private func syncInFlight(_ answerID: UUID, _ incoming: [Turn]) {
         guard let i = inFlightRounds.firstIndex(where: { $0.answerID == answerID }) else { return }
+        var thread = incoming
+        // Streaming callbacks own their value-type transcript, while presentation
+        // changes (word rotation and ask-user cards) update the in-flight mirror.
+        // Merge those runtime-only fields back before a text chunk publishes so a
+        // later chunk cannot overwrite the shared state with its older snapshot.
+        if let prior = inFlightRounds[i].thread.first(where: { $0.id == answerID }),
+           let j = thread.firstIndex(where: { $0.id == answerID }) {
+            if thread[j].thinkingWord == nil { thread[j].thinkingWord = prior.thinkingWord }
+            if thread[j].thinkingOrbState == nil {
+                thread[j].thinkingOrbState = prior.thinkingOrbState
+            }
+            if thread[j].thinkingStartedAt == nil {
+                thread[j].thinkingStartedAt = prior.thinkingStartedAt
+            }
+            if thread[j].pendingQuestion == nil {
+                thread[j].pendingQuestion = prior.pendingQuestion
+            }
+        }
         inFlightRounds[i].thread = thread
         // A detached window following this thread hears every snapshot too.
         detachedThreadStores[inFlightRounds[i].threadID]?.turns = thread
@@ -7300,6 +7595,7 @@ final class NotchModel: ObservableObject {
         // resume handle) rather than silently demoting it to a plain `.ask`.
         if let existing {
             item.source = existing.source
+            item.origin = existing.origin
             item.link = existing.link
             item.agentOutcome = existing.agentOutcome
             item.agentResume = existing.agentResume
@@ -7308,6 +7604,10 @@ final class NotchModel: ObservableObject {
             history.remove(at: i)
         }
         history.insert(item, at: 0)
+        if item.source == .agent, let store = detachedThreadStores[threadID] {
+            store.agentFolderPath = item.link
+            store.completedAt = item.t
+        }
         // No cap: the full archive is retained (see `persistCapture`).
         saveHistory()
 
@@ -7429,6 +7729,22 @@ final class NotchModel: ObservableObject {
                 }
             }
         }
+    }
+
+    /// Debug-only: park a finished exchange where `adoptDetachedThread` will find
+    /// it and hand back its thread id, so a pointer window can be posed on a real
+    /// answer without a live backend. Used by the `NOTCH_DEMO_FORCE=answer` env
+    /// path in `AppDelegate`.
+    func seedDemoDetachedThread(question: String, answer: String) -> UUID {
+        let id = UUID()
+        var seeded = [Turn(role: "user", text: question)]
+        // An empty answer is the "still thinking" pose — the card stands with the
+        // question attached and nothing under it yet.
+        if !answer.isEmpty { seeded.append(Turn(role: "assistant", text: answer)) }
+        turns = seeded
+        threadHistoryID = id
+        mode = .result
+        return id
     }
 
     /// Debug-only: show the "Added to Notes/Reminders" capture cue WITHOUT the

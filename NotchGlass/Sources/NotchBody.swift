@@ -266,8 +266,22 @@ struct NotchBody: View {
         // which has never held focus — so its ↓/↑ history-nav keys went dead. Re-arm
         // the focus latch on every switch *into* idle while open, so the caret (and
         // the keyboard history nav that rides on it) always lands back in the prompt.
+        // The same crossover in the other direction: submitting tears down the idle
+        // PromptField and mounts the follow-up box, again with no false→true edge on
+        // `focused` — so the caret would be left nowhere and the user would have to
+        // click before typing the next line. Re-arm on the way into a result too.
         .onChange(of: model.mode) { _, newMode in
-            if model.open, newMode == .idle {
+            if model.open, newMode == .idle || newMode == .result {
+                refocusInput()
+            }
+        }
+        // A settled answer hands the caret back to the follow-up field, so the next
+        // question can be typed straight away. The round's own layout churn (the
+        // streaming turn's footer appearing, the composer moving between sibling and
+        // overlay) can drop first-responder mid-write; this re-arms it the moment the
+        // last streaming turn settles.
+        .onChange(of: model.turns.contains { $0.streaming }) { _, isStreaming in
+            if !isStreaming, model.open, model.mode == .result {
                 refocusInput()
             }
         }
@@ -925,7 +939,7 @@ struct NotchBody: View {
             // once Recent is up (see `manageBar`), so the way out of the list sits in
             // the bottom-right corner.
             if !recentListShown {
-                let cluster = idleTrailingCluster
+                let cluster = idleTrailingCluster()
                 // The first-launch-after-update cue rides the same trailing edge,
                 // just inside the Recent chevron — glass beside glass. It keeps the
                 // row alive on its own when the cluster has nothing to draw (a first
@@ -973,12 +987,13 @@ struct NotchBody: View {
     /// glass cluster, configured against the model. Built here once and hosted in
     /// one of two places: the bucket row's trailing edge when a local agent CLI
     /// gives us that row, else the input row's own trailing slot.
-    private var idleTrailingCluster: IdleTrailingCluster {
+    private func idleTrailingCluster(chipSize: CGFloat = 30) -> IdleTrailingCluster {
         IdleTrailingCluster(
             pinned: model.isAnswerPinned,
             recentOpen: model.showHistory,
             showsRecent: recentHasContent,
             runningCount: model.agentComposeActive ? agentManager.runningTasks.count : 0,
+            chipSize: chipSize,
             togglePin: {
                 withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
                     model.toggleAnswerPin()
@@ -1839,7 +1854,9 @@ struct NotchBody: View {
 
             // The Recent (+ pin) cluster, handed over from the header for as long as
             // the list is up (see `bucketRow` / `inputRow`).
-            let cluster = idleTrailingCluster
+            // Sized to the ⋯ chip opposite it (34, not the prompt row's 30) — the
+            // bar's two corners are one pair of controls and have to read as one.
+            let cluster = idleTrailingCluster(chipSize: 34)
             if !cluster.isEmpty {
                 cluster
             }
@@ -1880,9 +1897,8 @@ struct NotchBody: View {
     }
 
     /// The version of a build that's downloaded and waiting, if any — what the
-    /// "Update to X" chips print. Nil at every other phase (idle, checking,
-    /// updating, failed), which is what keeps the chips off the rows until there
-    /// is actually something to install.
+    /// ordinary "Update to X" chips print, and what scopes 0.7.0's major-update
+    /// treatment. Nil at every other phase.
     private var pendingUpdateVersion: String? {
         if case .available(let v) = updater.phase { return v }
         return nil
@@ -2026,6 +2042,9 @@ struct NotchBody: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(ManageMenuRowStyle())
+        .onHover { inside in
+            if inside { Haptics.alignment() }
+        }
     }
 
     /// The collapsed-state reminder that a source filter is narrowing the list:
@@ -3150,8 +3169,22 @@ struct NotchBody: View {
             // offset to the top. Snap straight back to the bottom (no animation) so
             // there's no visible jump up — the streaming tail-follow below is what
             // gets the smooth motion.
+            //
+            // TWICE, on purpose. `onChange` runs while SwiftUI is still updating:
+            // the ScrollView's content at that instant is the OLD, shorter thread,
+            // so this first `scrollTo` clamps at the old maximum offset and stops
+            // short of the real bottom. Normally the streaming tail-follow below
+            // covers for it — but between submitting a follow-up and the first
+            // token there IS no text change to fire it, so the clamp is exactly
+            // what the reader is left staring at: the new question and its wait
+            // row sitting half below the fold, with the thread refusing to scroll
+            // down. The deferred pass runs after the appended turns have been laid
+            // out, when the anchor can actually be reached.
             .onChange(of: model.turns.count) { _, _ in
                 proxy.scrollTo(scrollBottomID, anchor: .bottom)
+                DispatchQueue.main.async {
+                    proxy.scrollTo(scrollBottomID, anchor: .bottom)
+                }
             }
             // Follow the tail smoothly as the answer streams in, so the freshest
             // text stays in view without the user scrolling by hand.
@@ -3160,9 +3193,25 @@ struct NotchBody: View {
                     proxy.scrollTo(scrollBottomID, anchor: .bottom)
                 }
             }
+            // An agent turn grows its work trail with the answer text still empty,
+            // so the text-keyed follow above never fires for it — the trail would
+            // extend down behind the composer unseen. Same tail, keyed on the log.
+            .onChange(of: model.turns.last?.agentLog?.count) { _, _ in
+                withAnimation(.easeOut(duration: 0.2)) {
+                    proxy.scrollTo(scrollBottomID, anchor: .bottom)
+                }
+            }
             // Entering the clipped layout (just crossed the ceiling) lands at the top
-            // by default; pin to the bottom so the newest text stays in view.
-            .onAppear { proxy.scrollTo(scrollBottomID, anchor: .bottom) }
+            // by default; pin to the bottom so the newest text stays in view. Same
+            // pre-layout caveat as the turn-count follow above — a ScrollView on its
+            // first appearance has no content height yet, so the immediate call can
+            // only clamp; the deferred one lands it on the anchor.
+            .onAppear {
+                proxy.scrollTo(scrollBottomID, anchor: .bottom)
+                DispatchQueue.main.async {
+                    proxy.scrollTo(scrollBottomID, anchor: .bottom)
+                }
+            }
         }
         // Per-edge fades: each taper tracks its own runway. The top matches the
         // floating header block (`resultHeaderReach`, 44pt) so text dissolves to
@@ -3286,10 +3335,13 @@ struct NotchBody: View {
                 AssistantTurnView(
                     text: turn.text,
                     streaming: turn.streaming,
-                    activity: turn.streaming ? model.currentActivity : nil,
-                    orbState: turn.streaming ? model.thinkingOrbState : .composing,
-                    thinkingWord: model.currentThinkingWord,
-                    thinkingSince: turn.streaming ? model.thinkingStartedAt : nil,
+                    activity: turn.streaming
+                        ? (turn.toolActivity ?? model.currentActivity) : nil,
+                    orbState: turn.streaming
+                        ? (turn.thinkingOrbState ?? model.thinkingOrbState) : .composing,
+                    thinkingWord: turn.thinkingWord ?? model.currentThinkingWord,
+                    thinkingSince: turn.streaming
+                        ? (turn.thinkingStartedAt ?? model.thinkingStartedAt) : nil,
                     sources: turn.sources,
                     hoveredSourceID: $hoveredSourceID,
                     sourceCloseWork: $sourceCloseWork,
@@ -3314,7 +3366,8 @@ struct NotchBody: View {
                     answerModel: turn.answerModel,
                     // The `ask_user` question card, when the model has paused this
                     // still-streaming answer on a choice only the user can make.
-                    pendingQuestion: turn.streaming ? model.pendingQuestion(for: turn.id) : nil,
+                    pendingQuestion: turn.streaming
+                        ? (turn.pendingQuestion ?? model.pendingQuestion(for: turn.id)) : nil,
                     onChooseOption: { questionID, option in
                         model.chooseUserOption(option, questionID: questionID)
                     }
@@ -3740,7 +3793,7 @@ struct NotchBody: View {
             card: { AnyView(SlashCommandMenu(model: model).menuCardBackground()) }))
     }
 
-    /// The first-launch-after-update cue: a "what's new" chip on the bucket row's
+    /// The first-launch-after-update cue: normally "What's New" on the bucket row's
     /// trailing edge, immediately left of the Recent chevron. Same glass language as
     /// the chevron cluster's "N running" capsule (`glassCapsule` + `GlassPressStyle`),
     /// so the two sit on that edge as one family. Tapping it opens the release-notes
@@ -3754,20 +3807,20 @@ struct NotchBody: View {
             Text(L("whatsnew.cue"))
                 .font(.sf(11.5, weight: .semibold))
                 .lineLimit(1)
-                .foregroundStyle(whatsNewHovered ? Tokens.text1 : Tokens.text2)
-                .padding(.horizontal, 10)
-                // The cluster's chip height — the cue lines up with the chevron
-                // beside it instead of sitting a hair short.
-                .frame(height: 30)
-                .glassCapsule(in: Capsule(), brighter: whatsNewHovered)
-                .contentShape(Capsule())
+            .foregroundStyle(whatsNewHovered ? Tokens.text1 : Tokens.text2)
+            .padding(.horizontal, 10)
+            // The cluster's chip height — the cue lines up with the chevron
+            // beside it instead of sitting a hair short.
+            .frame(height: 30)
+            .glassCapsule(in: Capsule(), brighter: whatsNewHovered)
+            .contentShape(Capsule())
         }
         .buttonStyle(GlassPressStyle())
         .onHover { whatsNewHovered = $0 }
         .animation(.easeOut(duration: 0.18), value: whatsNewHovered)
     }
 
-    /// The "Update to X" chip: the waiting-update action promoted OUT of the ⋯
+    /// The waiting-update chip: the action promoted OUT of the ⋯
     /// menu onto the surfaces themselves — the idle prompt's bucket row and the
     /// recent list's manage bar. A new build is the one thing worth surfacing,
     /// and a 5pt dot on the ⋯ chip asked the user to go looking for it. Same
@@ -3951,7 +4004,7 @@ struct NotchBody: View {
 /// metadata menu. The old version flattened all three values into one long hover
 /// tooltip; rows make them scannable, and the folder row earns the menu treatment
 /// by opening the working directory directly.
-private struct AgentRunMetadataMenu: View {
+struct AgentRunMetadataMenu: View {
     let engine: String?
     let folderPath: String?
     let completedAt: Date?
@@ -4546,6 +4599,10 @@ struct IdleTrailingCluster: View {
     /// With Recent open the count is redundant (the runs head the list), so the
     /// chevron comes back plain.
     var runningCount: Int = 0
+    /// The chip's diameter. Defaults one step down from the ⋯ chip — in the prompt
+    /// row these sit inside the input's chrome, not on the panel's. The manage bar
+    /// passes the ⋯'s own 34 so the bar's two corners read as a matched pair.
+    var chipSize: CGFloat = 30
     var togglePin: () -> Void
     var toggleRecent: () -> Void
 
@@ -4558,9 +4615,10 @@ struct IdleTrailingCluster: View {
 
     @State private var hovered: Segment? = nil
 
-    /// The ⋯ chip's diameter, one step down: these sit inside the prompt row, not on
-    /// the panel's chrome.
-    private let chipSize: CGFloat = 30
+    /// Glyph point size, held at the 11.5/30 ratio the 30pt chip was drawn at, so a
+    /// bigger chip doesn't end up with a proportionally smaller mark inside it.
+    private var glyphSize: CGFloat { chipSize * (11.5 / 30) }
+
 
     var body: some View {
         HStack(spacing: 6) {
@@ -4570,8 +4628,7 @@ struct IdleTrailingCluster: View {
             if pinned {
                 segment(.pin, engaged: true, action: togglePin,
                         tooltip: shortcutHelp("result.unpin", action: .pin)) {
-                    // A pinned pin tips upright, the way a pushed-in tack sits.
-                    Image(systemName: "pin")
+                    PinStateGlyph(pinned: true, size: glyphSize, weight: .semibold)
                 }
                 .transition(.scale(scale: 0.6).combined(with: .opacity))
             }
@@ -4613,7 +4670,7 @@ struct IdleTrailingCluster: View {
             HStack(spacing: 5) {
                 AgentStatusDot(running: true, outcome: nil)
                 Text(L("agent.running.count", runningCount))
-                    .font(.sf(11.5, weight: .semibold))
+                    .font(.sf(glyphSize, weight: .semibold))
                     .monospacedDigit()
                     .contentTransition(.numericText(value: Double(runningCount)))
                     // Roll the digit natively, the way the row clock ticks: the
@@ -4621,7 +4678,7 @@ struct IdleTrailingCluster: View {
                     // fire — on the outer Button it only drives the layout.
                     .animation(reduceMotion ? nil : .snappy(duration: 0.3), value: runningCount)
                 Image(systemName: "chevron.down")
-                    .font(.sf(10, weight: .semibold))
+                    .font(.sf(glyphSize - 1.5, weight: .semibold))
                     .rotationEffect(.degrees(recentOpen ? 180 : 0))
                     .animation(.spring(response: 0.32, dampingFraction: 0.8), value: recentOpen)
             }
@@ -4649,7 +4706,7 @@ struct IdleTrailingCluster: View {
         let hovering = hovered == segment
         return Button(action: action) {
             glyph()
-                .font(.sf(11.5, weight: .semibold))
+                .font(.sf(glyphSize, weight: .semibold))
                 .foregroundStyle(hovering ? Tokens.text1 : (engaged ? Tokens.text2 : Tokens.text3))
                 .frame(width: chipSize, height: chipSize)
                 .glassCapsule(in: Circle(), brighter: hovering)
@@ -4701,11 +4758,7 @@ struct ResultTrailingCluster: View {
                               tooltip: shortcutHelp(pinned ? "result.unpin" : "result.pin",
                                                     action: .pin),
                               action: togglePin) {
-                // A pinned pin tips upright, the way a pushed-in tack sits — a small
-                // physical cue that it's engaged, on top of the engaged tint.
-                Image(systemName: "pin")
-                    .font(.sf(11, weight: .medium))
-                    .rotationEffect(.degrees(pinned ? 0 : 32))
+                PinStateGlyph(pinned: pinned, size: 11, weight: .medium)
             })
             return segs
         }(), glass: false)
@@ -5322,50 +5375,66 @@ private struct SlashCommandMenu: View {
     /// sit side by side (the card widens to fit both) rather than the chord
     /// truncating the name under it.
     static func chord(for match: NotchModel.SlashMatch) -> String? {
-        guard case .shortcut(let shortcut) = match else { return nil }
-        return shortcut.shortcut?.displayString
+        switch match {
+        case .shortcut(let shortcut): return shortcut.shortcut?.displayString
+        case .skill: return "Skill"
+        case .mode: return nil
+        }
     }
 
     private static func title(for match: NotchModel.SlashMatch) -> String {
         switch match {
         case .mode(let command): return command.title
         case .shortcut(let shortcut): return shortcut.displayName
+        case .skill(let skill): return skill.displayName
         }
     }
 
-    /// Measured off ALL the rows the menu can ever hold — every mode plus every
-    /// ready prompt shortcut, not just the ones currently matching — so the card
-    /// holds still as the list filters down instead of breathing in and out per
-    /// keystroke.
-    static var cardWidth: CGFloat {
+    /// Measured off ALL the rows the menu can ever hold — modes, ready prompt
+    /// shortcuts, and enabled skills — so the card holds still as the list filters
+    /// down instead of breathing in and out per keystroke.
+    private var cardWidth: CGFloat {
         let modes = NotchModel.SlashCommand.allCases.map { ($0.title, String?.none) }
         let shortcuts = PromptShortcutStore.current.filter(\.isReady)
             .map { ($0.displayName, $0.shortcut?.displayString) }
-        return MenuCard.width(titles: modes + shortcuts)
+        let skills = model.agentSkills.map { ($0.displayName, String?.some("Skill")) }
+        return MenuCard.width(titles: modes + shortcuts + skills, max: 260)
+    }
+
+    private var menuHeight: CGFloat {
+        let rows = min(model.slashMatches.count, 9)
+        guard rows > 0 else { return 0 }
+        return MenuCard.cardPad * 2
+            + CGFloat(rows) * MenuCard.rowHeight
+            + CGFloat(rows - 1) * MenuCard.rowSpacing
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 1) {
-            ForEach(Array(model.slashMatches.enumerated()), id: \.element.id) { index, match in
-                MenuCardRow(
-                    title: Self.title(for: match),
-                    accessory: Self.chord(for: match),
-                    selected: index == model.slashHighlight,
-                    onHoverIn: { model.slashHighlight = index },
-                    action: {
-                        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
-                            model.applySlashCommand(match)
+        ScrollView(.vertical) {
+            LazyVStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
+                ForEach(Array(model.slashMatches.enumerated()), id: \.element.id) { index, match in
+                    MenuCardRow(
+                        title: Self.title(for: match),
+                        accessory: Self.chord(for: match),
+                        selected: index == model.slashHighlight,
+                        onHoverIn: { model.slashHighlight = index },
+                        action: {
+                            withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                                model.applySlashCommand(match)
+                            }
                         }
-                    }
-                )
+                    )
+                }
             }
+            .padding(MenuCard.cardPad)
         }
-        .padding(MenuCard.cardPad)
+        .scrollIndicators(.hidden)
+        .frame(height: menuHeight)
         // Sized by its own words, pinned left under the caret — a menu, not a bar.
         // An explicit width rather than `fixedSize()`: under a fixed size every row
         // gets its IDEAL width, so the selected row's wash would stop at the end of
         // its own word instead of spanning the card.
-        .frame(width: SlashCommandMenu.cardWidth, alignment: .leading)
+        .frame(width: cardWidth, alignment: .leading)
     }
 }
 

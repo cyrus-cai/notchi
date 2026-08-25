@@ -188,6 +188,16 @@ struct CodexCLIService: AIService {
         let efforts: [String]
     }
 
+    /// One enabled skill Codex can use for an agent run. `skills/list` already
+    /// applies the user's config, plugin installs, system skills, and the selected
+    /// project's repo scope; the slash menu only needs the invocation name and its
+    /// friendlier display name.
+    struct Skill: Equatable, Identifiable, Sendable {
+        let name: String
+        let displayName: String
+        var id: String { name }
+    }
+
     private static let modelLock = NSLock()
     /// The account's model list, fetched once from `codex app-server` and cached.
     /// `nil` = not fetched yet; an empty array = fetched but the query failed (so we
@@ -221,13 +231,17 @@ struct CodexCLIService: AIService {
     static var listedModels: [Model] { fetchedModels() }
 
     /// Fetch the account's model list off the main thread and cache it. Called from
-    /// `warmUp()` at launch so the picker reads a warm cache. No-op once cached.
-    static func refreshModels() {
+    /// `warmUp()` at launch so the picker reads a warm cache. No-op once cached —
+    /// unless `force`, the manual-refresh route, which re-asks the app-server and
+    /// only replaces the cache when the answer is a real list (a failed query must
+    /// not blank a good one).
+    static func refreshModels(force: Bool = false) {
         modelLock.lock()
         let alreadyHave = (cachedModels?.isEmpty == false)
         modelLock.unlock()
-        if alreadyHave { return }
+        if alreadyHave, !force { return }
         let models = queryModelList() ?? []
+        if force, models.isEmpty { return }
         modelLock.lock(); cachedModels = models; modelLock.unlock()
     }
 
@@ -288,6 +302,54 @@ struct CodexCLIService: AIService {
         if p.isRunning { p.terminate() }
         try? writer.close()
         return timedOut ? nil : box.models
+    }
+
+    /// Ask the same app-server Codex itself uses for the complete effective skill
+    /// list at `cwd`. This avoids teaching Notchi a second, inevitably stale copy
+    /// of Codex's discovery rules (user, repo, plugin, admin, and system roots).
+    static func loadSkills(cwd: String, forceReload: Bool = false) async -> [Skill] {
+        await Task.detached(priority: .utility) {
+            querySkillList(cwd: cwd, forceReload: forceReload) ?? []
+        }.value
+    }
+
+    private static func querySkillList(cwd: String, forceReload: Bool) -> [Skill]? {
+        guard let binary = resolveBinary() else { return nil }
+        let p = ShellEnvironment.makeProcess(binary, ["app-server"])
+        let inPipe = Pipe(), outPipe = Pipe()
+        p.standardInput = inPipe
+        p.standardOutput = outPipe
+        p.standardError = FileHandle.nullDevice
+
+        let sem = DispatchSemaphore(value: 0)
+        let box = SkillQueryState()
+        outPipe.fileHandleForReading.readabilityHandler = { h in
+            let d = h.availableData
+            guard !d.isEmpty else { return }
+            if box.ingest(d) { sem.signal() }
+        }
+
+        do { try p.run() } catch { return nil }
+
+        let initReq = #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"notch","title":"Notch","version":"1.0"}}}"# + "\n"
+        let listObject: [String: Any] = [
+            "jsonrpc": "2.0", "id": 2, "method": "skills/list",
+            "params": ["cwds": [cwd], "forceReload": forceReload]
+        ]
+        guard var listData = try? JSONSerialization.data(withJSONObject: listObject) else {
+            if p.isRunning { p.terminate() }
+            return nil
+        }
+        listData.append(0x0A)
+        let writer = inPipe.fileHandleForWriting
+        writer.write(Data(initReq.utf8))
+        writer.write(listData)
+
+        let timedOut = sem.wait(timeout: .now() + 8) == .timedOut
+        outPipe.fileHandleForReading.readabilityHandler = nil
+        if p.isRunning { p.terminate() }
+        try? writer.close()
+        return timedOut ? nil : box.skills
     }
 
     // MARK: - Re-authorize
@@ -544,6 +606,50 @@ private final class ModelQueryState {
                                              isDefault: (entry["isDefault"] as? Bool) == true,
                                              efforts: efforts)
             }
+            return true
+        }
+        return false
+    }
+}
+
+/// The `skills/list` counterpart to `ModelQueryState`. The app-server can emit
+/// notifications between the request and response, so this also line-buffers and
+/// ignores everything except response id 2.
+private final class SkillQueryState {
+    private let lock = NSLock()
+    private var buffer = Data()
+    private(set) var skills: [CodexCLIService.Skill] = []
+
+    func ingest(_ data: Data) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        buffer.append(data)
+        while let nl = buffer.firstIndex(of: 0x0A) {
+            let line = buffer.subdata(in: buffer.startIndex..<nl)
+            buffer.removeSubrange(buffer.startIndex...nl)
+            guard !line.isEmpty,
+                  let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+                  (obj["id"] as? Int) == 2,
+                  let result = obj["result"] as? [String: Any],
+                  let entries = result["data"] as? [[String: Any]]
+            else { continue }
+
+            var seen = Set<String>()
+            skills = entries
+                .flatMap { ($0["skills"] as? [[String: Any]]) ?? [] }
+                .compactMap { raw -> CodexCLIService.Skill? in
+                    guard (raw["enabled"] as? Bool) == true,
+                          let name = raw["name"] as? String, !name.isEmpty,
+                          seen.insert(name).inserted
+                    else { return nil }
+                    let interface = raw["interface"] as? [String: Any]
+                    let display = (interface?["displayName"] as? String)
+                        .flatMap { $0.isEmpty ? nil : $0 }
+                    return CodexCLIService.Skill(name: name,
+                                                 displayName: display ?? name)
+                }
+                .sorted {
+                    $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending
+                }
             return true
         }
         return false

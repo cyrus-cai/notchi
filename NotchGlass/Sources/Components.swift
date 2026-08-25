@@ -1286,6 +1286,9 @@ struct ComposerBox<Placeholder: View, Trailing: View>: View {
 /// affordance reads as a piece of the same glass island, not a flat icon.
 struct GlassIconButton: View {
     var systemName: String
+    /// Optional destination cue for controls that open another surface. The
+    /// glyph cross-fades quickly on hover instead of using a symbol morph.
+    var hoverSystemName: String? = nil
     var help: String
     /// Which side the hover hint floats on — `.top` by default, since these chips
     /// sit at the panel's bottom edge where up is where the room is.
@@ -1303,15 +1306,23 @@ struct GlassIconButton: View {
 
     @State private var hovering = false
 
+    @ViewBuilder
+    private var glyph: some View {
+        if let hoverSystemName {
+            Image(systemName: hovering ? hoverSystemName : systemName)
+                .contentTransition(.opacity)
+                .animation(.easeOut(duration: 0.08), value: hovering)
+        } else {
+            Image(systemName: systemName)
+                .contentTransition(.symbolEffect(.replace))
+        }
+    }
+
     var body: some View {
         Button(action: action) {
-            Image(systemName: systemName)
+            glyph
                 .font(.sf(glyphSize, weight: .regular))
                 .foregroundStyle(hovering ? Tokens.text1 : Tokens.text3)
-                // Cross-fade the glyph when `systemName` flips (e.g. ⋯ ⇄ back chevron
-                // on the manage chip). No-op for the static-icon callers since their
-                // symbol never changes.
-                .contentTransition(.symbolEffect(.replace))
                 .frame(width: size, height: size)
                 .glassCapsule(in: Circle(), brighter: hovering)
                 .contentShape(Circle())
@@ -1328,6 +1339,30 @@ struct GlassIconButton: View {
     }
 }
 
+/// The one state transition every pin affordance uses: a loose, tilted outline
+/// settles into a filled upright tack. Keeping the symbol replacement, angle and
+/// timing together prevents the panel and detached-window variants from drifting.
+struct PinStateGlyph: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var pinned: Bool
+    var size: CGFloat
+    var weight: Font.Weight
+    /// Lets a persistent chrome slot morph from its non-pin role into this pin
+    /// without replacing the view (the compact composer's sliders are that case).
+    var alternateSystemName: String? = nil
+    var alternateSize: CGFloat? = nil
+
+    var body: some View {
+        let systemName = alternateSystemName ?? (pinned ? "pin.fill" : "pin")
+        Image(systemName: systemName)
+            .font(.sf(alternateSize ?? size, weight: weight))
+            .rotationEffect(.degrees(alternateSystemName == nil && !pinned ? 32 : 0))
+            .contentTransition(.symbolEffect(.replace))
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: systemName)
+    }
+}
+
 /// A row of glyphs riding one Liquid Glass capsule — the panel/detached-window
 /// trailing-cluster species, extracted so every caller shares one implementation.
 /// The capsule is a quiet whisper of glass at rest and comes to full rim+specular
@@ -1337,19 +1372,44 @@ struct GlassIconButton: View {
 /// all build on this — don't hand-roll another two-icon glass pill.
 struct GlassSegmentCluster: View {
     struct Segment {
+        /// Stable semantic identity for clusters whose leading/trailing segments
+        /// can appear or disappear. When omitted, the original index identity is
+        /// preserved for fixed clusters.
+        var id: String?
         var engaged: Bool
         var tooltip: String
         var action: () -> Void
-        var glyph: AnyView
+        var glyph: (Bool) -> AnyView
 
-        init<Glyph: View>(engaged: Bool = false, tooltip: String,
+        init<Glyph: View>(id: String? = nil, engaged: Bool = false, tooltip: String,
                           action: @escaping () -> Void,
-                          @ViewBuilder glyph: () -> Glyph) {
+                          @ViewBuilder glyph: @escaping () -> Glyph) {
+            self.id = id
             self.engaged = engaged
             self.tooltip = tooltip
             self.action = action
-            self.glyph = AnyView(glyph())
+            self.glyph = { _ in AnyView(glyph()) }
         }
+
+        init<Glyph: View>(id: String? = nil, engaged: Bool = false, tooltip: String,
+                          action: @escaping () -> Void,
+                          @ViewBuilder hoverAwareGlyph: @escaping (Bool) -> Glyph) {
+            self.id = id
+            self.engaged = engaged
+            self.tooltip = tooltip
+            self.action = action
+            self.glyph = { hovering in AnyView(hoverAwareGlyph(hovering)) }
+        }
+    }
+
+    private enum SegmentIdentity: Hashable {
+        case semantic(String)
+        case index(Int)
+    }
+
+    private struct IdentifiedSegment: Identifiable {
+        let id: SegmentIdentity
+        let segment: Segment
     }
 
     var segments: [Segment]
@@ -1375,9 +1435,18 @@ struct GlassSegmentCluster: View {
     /// 55% of a dark pill over a white page is a pale smudge, not quiet chrome.
     var smoked: Bool = false
 
-    // Identity is by index (stable across rebuilds), so the hover highlight
-    // survives re-renders — a per-segment UUID would churn and drop it.
-    @State private var hoveredIndex: Int? = nil
+    // Fixed clusters keep their index identity. A cluster with conditional
+    // segments can supply semantic ids so removing a neighbour does not make
+    // SwiftUI replace every glyph after it — and the hover follows the actual
+    // button while it slides into its new slot.
+    @State private var hoveredSegmentID: SegmentIdentity? = nil
+    /// Is the pointer anywhere on the CLUSTER — which is not the same question as
+    /// "is it on a segment". Crossing from one mark to the other passes through
+    /// the pill's own padding and the gap between them, and there the per-segment
+    /// hovers read `nil` for a beat: the pill was fading out and back in every
+    /// time the pointer moved between its two halves. The capsule belongs to the
+    /// whole control, so it takes the whole control's hover.
+    @State private var clusterHovered = false
 
     /// With one glassed segment the pill *is* the segment: its own brightening
     /// already answers "the pointer is here", so the per-segment round highlight
@@ -1386,15 +1455,25 @@ struct GlassSegmentCluster: View {
     /// its keep only when there are siblings to tell apart.
     private var segmentHighlight: Bool { !glass || segments.count > 1 }
 
+    private var identifiedSegments: [IdentifiedSegment] {
+        segments.enumerated().map { index, segment in
+            IdentifiedSegment(
+                id: segment.id.map(SegmentIdentity.semantic) ?? .index(index),
+                segment: segment
+            )
+        }
+    }
+
     var body: some View {
         HStack(spacing: glass ? 2 : 6) {
-            ForEach(Array(segments.enumerated()), id: \.offset) { index, seg in
+            ForEach(identifiedSegments) { item in
+                let seg = item.segment
                 if showsTooltips {
-                    segmentButton(index: index, segment: seg)
+                    segmentButton(id: item.id, segment: seg)
                         .notchTooltip(seg.tooltip, edge: tipEdge)
                         .accessibilityLabel(seg.tooltip)
                 } else {
-                    segmentButton(index: index, segment: seg)
+                    segmentButton(id: item.id, segment: seg)
                         .accessibilityLabel(seg.tooltip)
                 }
             }
@@ -1405,20 +1484,35 @@ struct GlassSegmentCluster: View {
         // lights fully when hovered or while a segment is engaged.
         .background {
             if glass {
-                let lit = hoveredIndex != nil || segments.contains { $0.engaged }
+                let lit = clusterHovered || segments.contains { $0.engaged }
+                // At rest the pill is barely there: no rim, no contact shadow,
+                // and the glass itself down to a whisper — a drawn outline
+                // standing around two marks that are doing nothing reads as a
+                // second frame inside the card's own rim, and even the material's
+                // own specular edge is that outline at any real opacity. The
+                // hover is what makes it a control: the whole capsule comes back
+                // — glass, rim and all — under the pointer (see `rim:`).
                 Color.clear
-                    .glassCapsule(in: Capsule(), brighter: lit, smoked: smoked)
-                    .opacity(smoked ? 1 : (lit ? 1 : 0.55))
+                    .glassCapsule(in: Capsule(), brighter: lit, smoked: smoked,
+                                  rim: lit ? 1 : 0)
+                    .opacity(smoked ? 1 : (lit ? 1 : 0.15))
             }
         }
-        .animation(.easeOut(duration: 0.18), value: hoveredIndex)
+        .onHover { inside in
+            clusterHovered = inside
+            // Leaving fast can outrun a segment's own exit — drop the highlight
+            // with the cluster rather than leaving one mark lit behind us.
+            if !inside { hoveredSegmentID = nil }
+        }
+        .animation(.easeOut(duration: 0.18), value: hoveredSegmentID)
+        .animation(.easeOut(duration: 0.18), value: clusterHovered)
         .animation(.easeOut(duration: 0.18), value: segments.map(\.engaged))
     }
 
-    private func segmentButton(index: Int, segment seg: Segment) -> some View {
-        let hovering = hoveredIndex == index
+    private func segmentButton(id: SegmentIdentity, segment seg: Segment) -> some View {
+        let hovering = hoveredSegmentID == id
         return Button(action: seg.action) {
-            seg.glyph
+            seg.glyph(hovering)
                 // Glassed: pure white, the pill behind carries the resting
                 // dimming. Bare: the glyph does it itself, and rests QUIET —
                 // the answer-footer icons' level (text3), not a second row of
@@ -1428,18 +1522,34 @@ struct GlassSegmentCluster: View {
                                       : (hovering || seg.engaged ? Tokens.text1
                                                                  : Tokens.text3))
                 .frame(width: chip, height: chip)
-                .background(
-                    Circle().fill(.white.opacity(
-                        segmentHighlight
-                            ? (seg.engaged ? 0.20 : (hovering && glass ? 0.12 : 0))
-                            : 0))
-                )
+                .background {
+                    if glass {
+                        Circle().fill(.white.opacity(
+                            segmentHighlight
+                                ? (seg.engaged ? 0.20 : (hovering ? 0.12 : 0))
+                                : 0))
+                    } else {
+                        // Bare cluster: there is no pill to brighten, so the glass
+                        // arrives per glyph — one round chip that lights under the
+                        // pointer and fades back to nothing, instead of a slab
+                        // sitting behind both marks at rest.
+                        // Quiet: the resting glass strength, at less than full
+                        // opacity. Under a single glyph, a fully lit chip reads
+                        // as a button that appeared — this should read as the
+                        // pointer catching a little light. An engaged segment (a
+                        // live pin) is the exception: it means "on", so it takes
+                        // the full brightened chip.
+                        Color.clear
+                            .glassCapsule(in: Circle(), brighter: seg.engaged)
+                            .opacity(seg.engaged ? 1 : (hovering ? 0.65 : 0))
+                    }
+                }
                 .contentShape(Circle())
         }
         .buttonStyle(GlassPressStyle())
         .onHover { inside in
-            if inside { hoveredIndex = index }
-            else if hoveredIndex == index { hoveredIndex = nil }
+            if inside { hoveredSegmentID = id }
+            else if hoveredSegmentID == id { hoveredSegmentID = nil }
         }
     }
 }
@@ -1647,8 +1757,12 @@ extension View {
     /// composer chrome wears (`CompactComposerGlass`, `DetachedWindowGlass`), so
     /// the pill reads as the island's glass on any backdrop, light or dark.
     @ViewBuilder
+    /// `rim` scales the specular border. A chip that only means something once
+    /// the pointer is on it (`GlassSegmentCluster`) rests at 0: the glass is
+    /// still there, but nothing draws its outline until the hover lights it.
     func glassCapsule<S: InsettableShape>(in shape: S, brighter: Bool, tint: Color? = nil,
-                                          smoked: Bool = false) -> some View {
+                                          smoked: Bool = false,
+                                          rim: Double = 1) -> some View {
         self
             .background {
                 if #available(macOS 26.0, *) {
@@ -1683,8 +1797,8 @@ extension View {
                 shape.strokeBorder(
                     LinearGradient(
                         colors: [
-                            .white.opacity(brighter ? 0.32 : 0.20),
-                            .white.opacity(0.06),
+                            .white.opacity((brighter ? 0.32 : 0.20) * rim),
+                            .white.opacity(0.06 * rim),
                         ],
                         startPoint: .top, endPoint: .bottom
                     ),
@@ -1695,7 +1809,7 @@ extension View {
             // Real Liquid Glass barely casts a shadow — it reads as a thin chip of
             // glass, not a floating card. Just a whisper of a contact shadow to
             // seat it on the island; the specular rim does the rest of the work.
-            .shadow(color: .black.opacity(0.10), radius: 1.5, y: 0.5)
+            .shadow(color: .black.opacity(0.10 * rim), radius: 1.5, y: 0.5)
     }
 }
 
@@ -1744,6 +1858,95 @@ struct FlowLayout: Layout {
     }
 }
 
+/// The app's existing centered dialog layer: one whole-surface scrim and the
+/// exact airy Liquid Glass slab used by destructive confirmation. Editors that
+/// need the same modal hierarchy reuse this container instead of inventing a
+/// popover or another card treatment.
+struct ConfirmationDialogOverlay<Content: View>: View {
+    var onDismiss: () -> Void
+    var outerPadding: CGFloat = 24
+    /// Light caught in the slab's rim, in colour (see `ConfirmationDialogGlass`).
+    /// Off for the destructive confirmations — a card asking whether to throw work
+    /// away should not be the prettiest thing on screen.
+    var edgeGlow: Bool = false
+    let content: Content
+
+    init(onDismiss: @escaping () -> Void,
+         outerPadding: CGFloat = 24,
+         edgeGlow: Bool = false,
+         @ViewBuilder content: () -> Content) {
+        self.onDismiss = onDismiss
+        self.outerPadding = outerPadding
+        self.edgeGlow = edgeGlow
+        self.content = content()
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.45)
+                .contentShape(Rectangle())
+                .onTapGesture(perform: onDismiss)
+
+            content
+                .background { ConfirmationDialogGlass(edgeGlow: edgeGlow) }
+                .padding(outerPadding)
+        }
+    }
+}
+
+private struct ConfirmationDialogGlass: View {
+    var edgeGlow: Bool = false
+
+    /// The hues the rim refracts, in the order they run around it. Deliberately
+    /// desaturated and few: real glass splits light into a narrow band, and four
+    /// pale hues at low alpha read as that, where a full spectrum reads as a toy.
+    private static let rimHues: [Color] = [
+        Color(red: 0.52, green: 0.80, blue: 1.00),   // cool blue
+        Color(red: 0.72, green: 0.58, blue: 1.00),   // violet
+        Color(red: 1.00, green: 0.62, blue: 0.78),   // rose
+        Color(red: 1.00, green: 0.84, blue: 0.60),   // warm amber
+        Color(red: 0.52, green: 0.80, blue: 1.00),   // back to the start
+    ]
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 22, style: .continuous)
+        ZStack {
+            shape.fill(.clear)
+                .nativeGlass(in: shape)
+                .overlay(shape.fill(Color.black.opacity(0.16)))
+            shape
+                .fill(LinearGradient(colors: [.white.opacity(0.12), .clear],
+                                     startPoint: .top, endPoint: .center))
+                .blendMode(.plusLighter)
+
+            if edgeGlow {
+                // Colour only in the RIM, and only as light: an angular sweep of
+                // pale hues, blurred so it has no drawn edge of its own and added
+                // (plusLighter) so it brightens the glass instead of painting a
+                // border on it. Two passes — a tight one that lives in the hairline
+                // and a wide, fainter one that bleeds a few points inward.
+                let sweep = AngularGradient(colors: Self.rimHues,
+                                            center: .center, angle: .degrees(-45))
+                shape.strokeBorder(sweep, lineWidth: 1.4)
+                    .blur(radius: 2.5)
+                    .blendMode(.plusLighter)
+                    .opacity(0.55)
+                shape.strokeBorder(sweep, lineWidth: 4)
+                    .blur(radius: 9)
+                    .blendMode(.plusLighter)
+                    .opacity(0.22)
+            }
+
+            shape.strokeBorder(
+                LinearGradient(colors: [.white.opacity(0.34), .white.opacity(0.08)],
+                               startPoint: .top, endPoint: .bottom),
+                lineWidth: 0.75)
+        }
+        .compositingGroup()
+        .shadow(color: .black.opacity(0.40), radius: 22, y: 12)
+    }
+}
+
 /// The destructive "Clear recent history?" confirmation, rendered as a card
 /// **centered over the whole island** rather than a popover anchored to the Clear
 /// pill (which dropped it down near the bottom of the panel). A dim scrim catches
@@ -1766,13 +1969,7 @@ struct ClearHistoryConfirm: View {
     }
 
     var body: some View {
-        ZStack {
-            // Scrim over the whole island — darkens the panel behind the card and
-            // catches a tap-outside to dismiss, like the native dialog's backdrop.
-            Color.black.opacity(0.45)
-                .contentShape(Rectangle())
-                .onTapGesture(perform: onCancel)
-
+        ConfirmationDialogOverlay(onDismiss: onCancel) {
             VStack(spacing: 14) {
                 VStack(spacing: 6) {
                     Text(L(agentOnly ? "clear.agent.title" : "clear.title"))
@@ -1821,13 +2018,70 @@ struct ClearHistoryConfirm: View {
             .padding(.horizontal, 20)
             .padding(.vertical, 18)
             .frame(maxWidth: 280)
+        }
+    }
+}
+
+/// The Force Click gate: macOS's own "Look up & data detectors" is bound to the
+/// same press, so arming Notchi's gesture while that is on would put two panels
+/// on one click. Shown *instead of* applying the setting — the rung the user
+/// picked is held until they come back, which is why the dialog is a hand-off to
+/// System Settings rather than a warning to wave away.
+///
+/// One button, on purpose: there is no "arm it anyway". Two panels on one press
+/// is broken, not a trade-off, so the only way forward is the System Settings
+/// hand-off (the scrim still dismisses, leaving the rung unarmed).
+///
+/// Wears the `ClearHistoryConfirm` clothes (scrim, Liquid Glass slab, the same
+/// `ConfirmDialogButton` pair) because it is the same object: a card centered
+/// over the island that owns the panel until it's answered.
+struct ForceClickLookupDialog: View {
+    /// Opens System Settings → Trackpad. The dialog stays up behind it: the
+    /// preference is re-read when Notchi comes back, and the held rung applies
+    /// itself the moment it reads Off.
+    var onOpenSettings: () -> Void
+    var onCancel: () -> Void
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.45)
+                .contentShape(Rectangle())
+                .onTapGesture(perform: onCancel)
+
+            VStack(spacing: 12) {
+                VStack(spacing: 6) {
+                    Text(L("forceClick.lookup.title"))
+                        .font(.sf(15, weight: .semibold))
+                        .foregroundStyle(Tokens.text1)
+                    Text(L("forceClick.lookup.body"))
+                        .font(.sf(12))
+                        .foregroundStyle(Tokens.text3)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                // Which row, on which page — the sentence above names it, the
+                // picture points at it.
+                Image("TrackpadLookupHint")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .strokeBorder(Tokens.hairline, lineWidth: 0.75)
+                    )
+                    .accessibilityHidden(true)
+
+                ConfirmDialogButton(title: L("forceClick.lookup.open"),
+                                    kind: .neutral,
+                                    action: onOpenSettings)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+            .frame(maxWidth: 320)
             .background {
-                // Real Liquid Glass, same recipe as the app's other floating cards
-                // (`GlassPopoverBackground`): `nativeGlass` for the refraction, a
-                // light veil for text contrast — light, not the popovers' occluding
-                // 0.42, because this card floats over the island's *own* glass and
-                // a scrim, so it can stay airy — then the sheen + specular rim that
-                // make it read as a slab of glass rather than a drawn box.
+                // Same glass recipe as `ClearHistoryConfirm` — see the note there.
                 let shape = RoundedRectangle(cornerRadius: 22, style: .continuous)
                 ZStack {
                     shape.fill(.clear)
@@ -1845,7 +2099,7 @@ struct ClearHistoryConfirm: View {
                 .compositingGroup()
                 .shadow(color: .black.opacity(0.40), radius: 22, y: 12)
             }
-            .padding(24)
+            .padding(12)
         }
     }
 }
@@ -2908,10 +3162,16 @@ struct AssistantTurnView: View {
     /// Non-nil only on a settled agent report turn; renders as a quiet completion
     /// stamp at the end of the footer. `nil` (no stamp) for ordinary chat answers.
     var completedAt: Date? = nil
-    /// Compact pointer-side prompt windows move Copy into their header and omit
-    /// the entire settled action row. Ordinary panel and detached-thread answers
-    /// keep the full footer.
+    /// Whether this answer surface carries the full action row.
     var showsFooter: Bool = true
+    /// Show the footer from the answer's first text instead of waiting for the
+    /// request to settle. The compact pointer-side card runs this way: its window
+    /// sizes itself to its content, so a footer that appeared only at settle would
+    /// add its height after the fact and land below the fold while the AppKit
+    /// frame animation caught up. Present from the first token, it is simply part
+    /// of the stack the window is measured from. Regenerate stays disabled until
+    /// cleanup ends either way.
+    var stabilizesFooterWhileStreaming: Bool = false
     /// Keep the model info and agent completion stamp in the footer. The main
     /// panel's agent report moves those two pieces into the command chip beside
     /// its follow-up composer; detached threads keep the original footer metadata.
@@ -3034,6 +3294,12 @@ struct AssistantTurnView: View {
     /// the wait state then).
     private var showActivityRow: Bool {
         streaming && hasText && activity != nil && pendingQuestion == nil
+    }
+
+    /// A compact answer's toolbar follows the renderer's own completion edge, not
+    /// request cleanup. Every other surface preserves settled-only behavior.
+    private var footerIsVisible: Bool {
+        !streaming || stabilizesFooterWhileStreaming
     }
 
     /// The distinct hosts to walk through, in first-seen order. `sources` is the
@@ -3175,15 +3441,16 @@ struct AssistantTurnView: View {
                 .transition(.opacity)
             }
 
-            // Settled footer: the source badge (when web-grounded, XII-118) plus a
+            // Answer footer: the source badge (when web-grounded, XII-118) plus a
             // quiet toolbar of answer actions — copy · regenerate · continue in
             // ChatGPT/Claude — in one row under the answer. Info on the left,
             // actions in escalating order (take it → redo it → leave with it).
-            // Only once settled — a mid-stream badge would jump as rounds add
-            // sources, and copying/regenerating half an answer isn't useful. The
-            // action icons share `turnHovered` so they surface together (see
-            // `AnswerFooterButton`).
-            if showsFooter && !streaming && (hasText || !sources.isEmpty) {
+            // Most surfaces wait for request settlement. A compact pointer-side
+            // answer shows the row from its first text; regenerate remains disabled
+            // until request cleanup ends. The icons share `turnHovered`.
+            if showsFooter
+                && (!streaming || stabilizesFooterWhileStreaming)
+                && (hasText || !sources.isEmpty) {
                 // Optically align the row's left edge with the answer text above
                 // it. When a bare icon leads, its 11pt glyph sits centered in a
                 // 22pt hit-frame, so it rests ~5pt inset from x=0 — the row reads
@@ -3272,6 +3539,7 @@ struct AssistantTurnView: View {
                                 }
                             }
                         }
+                        .disabled(streaming)
                     }
                     // The model that produced this answer — an ⓘ glyph whose
                     // tooltip is the model name. Prefer the concrete model the
@@ -3305,6 +3573,11 @@ struct AssistantTurnView: View {
                 }
                 .padding(.leading, leadInset)
                 .padding(.top, leadTop)
+                .opacity(footerIsVisible ? 1 : 0)
+                .allowsHitTesting(footerIsVisible)
+                .accessibilityHidden(!footerIsVisible)
+                // No transition: the final text and this opacity land together.
+                .animation(nil, value: footerIsVisible)
             }
         }
         .onHover { turnHovered = $0 }
@@ -6952,6 +7225,57 @@ enum ManageMenuMetrics {
     }
 }
 
+/// The stable colour wash shared by a Prompt Shortcut everywhere it appears.
+/// Its UUID, rather than list position or process-seeded `hashValue`, chooses the
+/// hue, so Settings and the compact picker always show the
+/// same shortcut with the same light across launches and reordering.
+private enum PromptShortcutCardPalette {
+    static let hues: [Color] = [
+        Color(red: 0.22, green: 0.48, blue: 0.68),
+        Color(red: 0.38, green: 0.30, blue: 0.62),
+        Color(red: 0.60, green: 0.27, blue: 0.39),
+        Color(red: 0.56, green: 0.40, blue: 0.20),
+        Color(red: 0.20, green: 0.51, blue: 0.43),
+    ]
+
+    static func light(_ id: UUID) -> Color {
+        let bytes = withUnsafeBytes(of: id.uuid) { Array($0) }
+        let sum = bytes.reduce(0) { $0 &+ Int($1) }
+        return hues[sum % hues.count]
+    }
+}
+
+struct PromptShortcutCardSurface<S: InsettableShape>: View {
+    let id: UUID
+    let hovering: Bool
+    let shape: S
+
+    var body: some View {
+        let light = PromptShortcutCardPalette.light(id)
+        ZStack {
+            shape.fill(.black.opacity(0.42))
+            shape.fill(light.opacity(hovering ? 0.20 : 0.07))
+            shape.fill(.white.opacity(hovering ? 0.045 : 0))
+            shape.fill(
+                LinearGradient(
+                    stops: [
+                        .init(color: light.opacity(0.46), location: 0),
+                        .init(color: light.opacity(0.14), location: 0.38),
+                        .init(color: light.opacity(0.01), location: 0.88),
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+            .blendMode(.plusLighter)
+            .opacity(hovering ? 0.88 : 0.55)
+            shape.strokeBorder(.white.opacity(hovering ? 0.28 : 0.09),
+                               lineWidth: hovering ? 0.8 : 0.5)
+        }
+        .compositingGroup()
+    }
+}
+
 /// One row of a `MenuCard`: a word, and at most one bit of trailing furniture.
 ///
 /// The wash is a full capsule — one short word wide, it reads as a pill at this
@@ -6965,6 +7289,13 @@ struct MenuCardRow: View {
     let title: String
     /// The row's one bit of trailing furniture: a shortcut chord, a `CLI` tag.
     var accessory: String? = nil
+    /// The row's type size and slot. Defaulted to the `/` menu's own numbers —
+    /// a completion list under a caret reads at 11.5 — and raised where the rows
+    /// are the surface's primary buttons rather than a filtered list of words
+    /// (the prompt-shortcut composer).
+    var fontSize: CGFloat = MenuCard.fontSize
+    var accessoryFontSize: CGFloat = MenuCard.accessoryFontSize
+    var height: CGFloat = MenuCard.rowHeight
     /// Draw the word in the emphasized weight — for menus where the highlight
     /// means "this is the one in effect" rather than "this is where the cursor is".
     var emphasized: Bool = false
@@ -6973,6 +7304,9 @@ struct MenuCardRow: View {
     /// its rows (the agent picker's springy glide) — the row still takes the
     /// selected ink, it just doesn't paint a second highlight under it.
     var wash: Bool = true
+    /// Prompt Shortcut rows reuse the exact stable colour surface from Settings.
+    /// Nil leaves every ordinary menu row on its existing neutral wash.
+    var promptShortcutID: UUID? = nil
     /// For menus whose highlight follows the pointer: called as the row catches
     /// the cursor, so hover and the keyboard drive the SAME highlight instead of
     /// painting a second one.
@@ -6986,24 +7320,29 @@ struct MenuCardRow: View {
         return Button(action: action) {
             HStack(spacing: 6) {
                 Text(title)
-                    .font(.sf(MenuCard.fontSize, weight: emphasized && selected ? .medium : .regular))
-                    .foregroundStyle(selected ? Tokens.text1 : Tokens.text3)
+                    .font(.sf(fontSize, weight: emphasized && selected ? .medium : .regular))
+                    .foregroundStyle(selected || (promptShortcutID != nil && hovering)
+                        ? Tokens.text1 : Tokens.text3)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 if let accessory {
                     Spacer(minLength: 0)
                     Text(accessory)
-                        .font(.sf(MenuCard.accessoryFontSize, weight: .regular))
+                        .font(.sf(accessoryFontSize, weight: .regular))
                         .foregroundStyle(selected ? Tokens.text2 : Tokens.text4)
                         .lineLimit(1)
                         .fixedSize()
                 }
             }
             .padding(.horizontal, MenuCard.rowPad)
-            .frame(height: MenuCard.rowHeight)
+            .frame(height: height)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background {
-                if wash, selected {
+                if let promptShortcutID {
+                    PromptShortcutCardSurface(id: promptShortcutID,
+                                              hovering: hovering,
+                                              shape: shape)
+                } else if wash, selected {
                     shape.fill(Color.white.opacity(0.14))
                 } else if hovering, !selected {
                     shape.fill(Color.white.opacity(0.06))

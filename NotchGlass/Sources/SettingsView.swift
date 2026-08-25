@@ -24,7 +24,11 @@ extension Notification.Name {
     /// Posted after the user toggles the Dock icon (Settings → General), so
     /// `AppDelegate` can switch the app's activation policy live.
     static let dockIconVisibilityChanged = Notification.Name("dockIconVisibilityChanged")
-    /// Posted after the user toggles the menu bar icon (Settings → Appearance),
+    /// Posted after the user chooses an app icon (Settings → Appearance), so
+    /// the Dock and app switcher update without a relaunch.
+    static let appIconStyleChanged = Notification.Name("appIconStyleChanged")
+    static let appIconAppearanceChanged = Notification.Name("appIconAppearanceChanged")
+    /// Posted after the user toggles the menu bar icon (Settings → General),
     /// so `AppDelegate` can add or remove the status item right away.
     static let menuBarIconVisibilityChanged = Notification.Name("menuBarIconVisibilityChanged")
     /// Posted after the user toggles "Hide in full screen" (Settings → General),

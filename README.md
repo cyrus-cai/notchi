@@ -10,8 +10,8 @@
 
 **Ask**, **save a note**, **set a reminder**, or **hand a task to an AI agent** — all from your Mac's notch.
 
-[notch.website](https://www.notch.website) ·
-[Release Notes](https://www.notch.website/releases)
+[notch.website](https://notch.website) ·
+[Release Notes](https://notch.website/releases)
 
 MIT · Apple Liquid Glass
 

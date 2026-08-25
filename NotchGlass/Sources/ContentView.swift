@@ -844,7 +844,7 @@ struct NotchIsland: View {
         // frame, so this is the wall a capsule actually gets chopped against. (It
         // used to be published on the screen-wide hosting canvas in
         // `AppDelegate.makePanel`, which never clamped anything.)
-        .coordinateSpace(.named(TooltipCoordinateSpace.clipBox))
+        .notchTooltipClipBox()
         .padding(.top, -topBleed)   // pull the form up so it bleeds off the top
         .background(GlassMaterial(bottomRadius: bottomRadius,
                                   expanded: isOpen,
@@ -902,6 +902,38 @@ struct NotchIsland: View {
                 )
                 .transition(.opacity.combined(with: .scale(scale: 0.96)))
             }
+        }
+        // The Force Click gate, mounted on the island for the same reason as the
+        // Clear card above: its scrim has to reach the glass edges. Inside
+        // Settings it only covered the settings body, leaving the panel's padding
+        // showing as pale strips down both sides and along the bottom.
+        .overlay {
+            if model.forceClickLookupConflict != nil, isOpen, model.showSettings {
+                ForceClickLookupDialog(
+                    onOpenSettings: {
+                        if let url = URL(string: "x-apple.systempreferences:com.apple.Trackpad-Settings.extension") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    },
+                    onCancel: {
+                        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                            model.forceClickLookupConflict = nil
+                        }
+                    }
+                )
+                .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.16), value: model.forceClickLookupConflict)
+        // Coming back from System Settings is the answer: if the lookup gesture is
+        // off now, the held rung arms itself and the dialog leaves — nothing left
+        // to confirm, so asking again would just be a second click.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            guard let held = model.forceClickLookupConflict,
+                  !SystemLookupGesture.usesForceClick else { return }
+            model.applyForceClickPressure(held)
+            Haptics.levelChange()
+            withAnimation(.easeOut(duration: 0.16)) { model.forceClickLookupConflict = nil }
         }
         // An opened image (see `ImageLightbox`) covers the panel it came from:
         // hosted here, above the body but inside the island's own clip, so the

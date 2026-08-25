@@ -442,13 +442,14 @@ struct CommandCodeCLIService: AIService {
     /// Re-read the catalog off the main thread. No-op once populated — the catalog is
     /// baked into the installed CLI build, so it only moves when the CLI updates (and
     /// a relaunch re-resolves the binary anyway). Kept for parity with the other CLI
-    /// backends' picker path.
-    static func refreshModels() {
+    /// backends' picker path. `force` (the manual-refresh route) re-spawns
+    /// `--list-models` regardless; a failed probe leaves the cached catalog alone.
+    static func refreshModels(force: Bool = false) {
         guard !isRetired else { return }
         modelLock.lock()
         let alreadyHave = (cachedModels?.isEmpty == false)
         modelLock.unlock()
-        if alreadyHave { return }
+        if alreadyHave, !force { return }
         guard let binary = resolveBinary(), let models = probeModels(binary) else { return }
         adopt(models)
         remember(path: binary, models: models)

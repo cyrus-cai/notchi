@@ -30,8 +30,29 @@ final class WhatsNewService: ObservableObject {
         var improvements: [String]
         var fixes: [String]
         var others: [String]
+        var action: Action?
+        /// Which `features` line the action's button hangs under (0-based). `nil`
+        /// puts it at the end of the release's notes.
+        var actionAfter: Int?
 
         var id: String { version }
+
+        /// The one thing a release wants the reader to be able to DO, offered as a
+        /// button under its notes — a switch announced in a bullet is otherwise a
+        /// scavenger hunt through Settings.
+        ///
+        /// A closed enum, not a closure: `Entry` is `Equatable` (the panel animates
+        /// on it) and closures aren't. The view owns where each case goes.
+        enum Action: String, Equatable {
+            /// Settings → Appearance, where Force click pressure lives.
+            case forceClickPressure
+
+            var title: String {
+                switch self {
+                case .forceClickPressure: L("whatsnew.action.forceClick")
+                }
+            }
+        }
 
         init(
             version: String,
@@ -40,12 +61,15 @@ final class WhatsNewService: ObservableObject {
             features: [String] = [],
             improvements: [String] = [],
             fixes: [String] = [],
-            others: [String] = []
+            others: [String] = [],
+            action: Action? = nil,
+            actionAfter: Int? = nil
         ) {
             self.version = version; self.date = date
             self.heroAssetName = heroAssetName
             self.features = features; self.improvements = improvements
             self.fixes = fixes; self.others = others
+            self.action = action; self.actionAfter = actionAfter
         }
     }
 
@@ -70,8 +94,30 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.7.0",
+            date: "2026-08-25",
+            features: [
+                "Force click selected text in any app to open a composer beside the pointer and use your Prompt Shortcuts.",
+                "Force Touch keeps its own history, so you can reopen an earlier answer inside the same card.",
+                "Agent’s / menu now lists enabled Codex skills and inserts their $name invocation.",
+            ],
+            improvements: [
+                "Edit a Prompt Shortcut’s prompt, chord, model, and Force Touch visibility in one card.",
+                "Prompt Shortcuts now open beside the pointer, keep one width from prompt to answer, and remain draggable.",
+                "Selected-text capture now works across more browser, Electron, and PDF surfaces while preserving your clipboard.",
+                "Appearance is grouped into Style, Behavior, and Displays, while Dock and menu-bar presence live in General.",
+                "Model settings can refresh model lists on demand and distinguish matching names across backends.",
+            ],
+            fixes: [
+                "Closing a Force Touch card no longer interrupts generation, and the completed answer still appears in history.",
+            ],
+            action: .forceClickPressure,
+            actionAfter: 0
+        ),
+        Entry(
             version: "0.6.3",
             date: "2026-08-19",
+            heroAssetName: "WhatsNew063Promo",
             features: [
                 "Note and Remind are one Capture mode: name a time and it files a reminder, otherwise a note. Capture stays pinned until you switch.",
                 "Several images in an answer stack into a fan you can expand, then open any card in a lightbox.",
@@ -415,7 +461,7 @@ final class WhatsNewService: ObservableObject {
             version: "0.2.4",
             date: "2026-07-25",
             features: [
-                "New menu bar icon — open Notch, start a chat, switch model, reach History and Settings. Toggle it in Settings → Appearance.",
+                "New menu bar icon — open Notch, start a chat, switch model, reach History and Settings. Toggle it in Settings → General.",
             ],
             improvements: [
                 "The progress line now names what it's searching for.",
