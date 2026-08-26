@@ -3123,8 +3123,8 @@ struct InlineSettingsView: View {
     }
 
     /// How readily the resting notch unfurls when the pointer reaches it. The
-    /// three ordered policies map directly to a native, tick-mark-only NSSlider:
-    /// Low, Balanced, and Instant.
+    /// four ordered policies map directly to a native, tick-mark-only NSSlider:
+    /// Click, Low, Balanced, and Instant.
     private var hoverSensitivityRow: some View {
         let controlWidth: CGFloat = 190
         return settingRow(label: L("general.hoverSensitivity"),
@@ -3148,7 +3148,8 @@ struct InlineSettingsView: View {
     private var hoverSensitivityPosition: Binding<Double> {
         Binding(
             get: {
-                Double(HoverSensitivity.allCases.firstIndex(of: hoverSensitivity) ?? 1)
+                Double(HoverSensitivity.allCases.firstIndex(of: hoverSensitivity)
+                       ?? HoverSensitivity.allCases.firstIndex(of: .balanced) ?? 0)
             },
             set: { position in
                 let index = min(max(Int(position.rounded()), 0), HoverSensitivity.allCases.count - 1)
@@ -3160,7 +3161,9 @@ struct InlineSettingsView: View {
     private func selectHoverSensitivity(_ newValue: HoverSensitivity) {
         guard newValue != hoverSensitivity else { return }
         hoverSensitivity = newValue
-        HoverSensitivity.current = newValue
+        // Through the model, not straight to `UserDefaults`: the island renders
+        // the click level's flex off an observable mirror, which has to move too.
+        model.applyHoverSensitivity(newValue)
     }
 
     private func selectHideInFullscreen(_ newValue: Bool) {
@@ -3495,9 +3498,7 @@ struct InlineSettingsView: View {
     /// control to a different x and the card read as a pile of unrelated widgets.
     /// Here the label takes the leading edge, a `Spacer` takes the slack, and the
     /// control takes the trailing edge; the two menus, the chord cap and the
-    /// switch stack into one column. The destination pair became a menu for the
-    /// same reason — two side-by-side buttons carrying a sentence each ("Open in a
-    /// window beside the pointer") could only ever be shown truncated.
+    /// switch stack into one column.
     private func promptShortcutCard(_ binding: PromptShortcut) -> some View {
         let target = EditableShortcut.prompt(binding.id)
         return VStack(alignment: .leading, spacing: 0) {
@@ -3575,13 +3576,6 @@ struct InlineSettingsView: View {
 
                 promptCardRow(L("shortcuts.promptAction.model")) {
                     promptModelPicker(for: binding.id)
-                }
-
-                promptCardRow(L("shortcuts.promptAction.openIn")) {
-                    Text(L("shortcuts.promptAction.openIn.window.short"))
-                        .font(.sf(11.5, weight: .medium))
-                        .foregroundStyle(Tokens.text2)
-                        .frame(height: Self.promptControlHeight)
                 }
 
                 if ForceClickFeature.isEnabled {
@@ -3701,11 +3695,6 @@ struct InlineSettingsView: View {
     private func promptModelPicker(for id: UUID) -> some View {
         let selection = promptModelBinding(for: id)
         return GlassMenu(title: promptModelDisplayName(for: id)) {
-            Button { selection.wrappedValue = nil } label: {
-                menuOption(L("shortcuts.promptAction.model.default"),
-                           selected: selection.wrappedValue == nil)
-            }
-
             ForEach(promptModelGroups) { group in
                 SwiftUI.Section(group.provider.displayName) {
                     ForEach(group.models, id: \.self) { name in
@@ -3721,16 +3710,13 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// The model chip names the effective model: a row pin when present, otherwise
-    /// the current app default. Provider remains visible inside the opened menu,
-    /// where it helps disambiguate choices without making the closed chip verbose.
+    /// The model chip names the shortcut's saved model. Provider remains visible
+    /// inside the opened menu, where it helps disambiguate choices without making
+    /// the closed chip verbose.
     private func promptModelDisplayName(for id: UUID) -> String {
-        if let pin = promptShortcuts.first(where: { $0.id == id })?.pin {
-            return ModelRatings.prettyName(for: pin.model, provider: pin.provider)
-        }
-        let provider = APIKeyStore.selectedProvider
-        let fallback = APIKeyStore.effectiveModel(for: provider) ?? provider.defaultModel
-        return ModelRatings.prettyName(for: fallback, provider: provider)
+        let pin = promptShortcuts.first(where: { $0.id == id })?.pin
+            ?? PromptShortcut.currentModelPin
+        return ModelRatings.prettyName(for: pin.model, provider: pin.provider)
     }
 
     /// Whether the force click box offers this row as a button. Persisted like
@@ -3750,12 +3736,14 @@ struct InlineSettingsView: View {
         )
     }
 
-    /// The row's pinned backend, `nil` meaning "the default model". Persisted like
-    /// every other row property; it never touches the app-wide provider/model
-    /// setting.
-    private func promptModelBinding(for id: UUID) -> Binding<ModelPin?> {
+    /// The row's pinned backend. Every selection is a concrete provider/model
+    /// pair; changing the app-wide default cannot rewrite it.
+    private func promptModelBinding(for id: UUID) -> Binding<ModelPin> {
         Binding(
-            get: { promptShortcuts.first(where: { $0.id == id })?.pin },
+            get: {
+                promptShortcuts.first(where: { $0.id == id })?.pin
+                    ?? PromptShortcut.currentModelPin
+            },
             set: { value in
                 guard let index = promptShortcuts.firstIndex(where: { $0.id == id }) else { return }
                 promptShortcuts[index].pin = value

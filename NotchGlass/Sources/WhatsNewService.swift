@@ -94,6 +94,27 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.7.1",
+            date: "2026-08-26",
+            features: [
+                "A new hover sensitivity level that opens only on click.",
+                "Follow-ups accept pasted images.",
+                "In Agent, \u{2318}\u{21A9} starts the task and opens its detail page.",
+            ],
+            improvements: [
+                "Selected text appears as a quote below your instruction.",
+                "A Prompt Shortcut always runs on the model it shows.",
+                "Ask replies run as long as the question needs.",
+                "Detached windows scroll to the newest reply.",
+            ],
+            fixes: [
+                "A single ~ no longer swallows the rest of the line.",
+                "The panel opens straight down instead of drifting sideways.",
+                "An unfocused Notchi window responds to the first click.",
+                "The Force Click card no longer leaves a gap when history is open.",
+            ]
+        ),
+        Entry(
             version: "0.7.0",
             date: "2026-08-25",
             features: [

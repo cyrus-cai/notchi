@@ -95,9 +95,11 @@ final class PromptTextView: NSTextView {
     /// compose's image attach exists for) AppKit validates Edit ▸ Paste to
     /// disabled and ⌘V dies before `paste(_:)` is ever called. Claim image
     /// types too, purely so the paste command fires; `paste(_:)` below decides
-    /// what actually happens to them.
+    /// what actually happens to them. `.fileURL` rides along for the other half
+    /// of `pasteboardImage()`: an image copied in Finder arrives as a file URL,
+    /// which a plain-text view reads no better than raw pixels.
     override var readablePasteboardTypes: [NSPasteboard.PasteboardType] {
-        super.readablePasteboardTypes + [.png, .tiff]
+        super.readablePasteboardTypes + [.png, .tiff, .fileURL]
     }
 
     override func paste(_ sender: Any?) {
@@ -1175,6 +1177,10 @@ struct ComposerBox<Placeholder: View, Trailing: View>: View {
     var pulse: AnyHashable? = nil
     var pulseTint: Color = .white
     var onSubmit: () -> Void
+    /// Let the owning compose attach a clipboard image before the editor falls
+    /// back to its ordinary text paste. Follow-up surfaces opt in only when the
+    /// destination can actually receive image input.
+    var onPasteImage: () -> Bool = { false }
     var onCommandSubmit: () -> Bool = { false }
     var onBack: () -> Void = {}
     var onTab: () -> Bool = { false }
@@ -1219,6 +1225,7 @@ struct ComposerBox<Placeholder: View, Trailing: View>: View {
                     onSubmit: onSubmit,
                     onBack: onBack,
                     onTab: onTab,
+                    onPasteImage: onPasteImage,
                     onCommandSubmit: onCommandSubmit,
                     onCaretWidth: { caretWidth = $0 },
                     onHeightChange: { height = $0 }
@@ -1276,6 +1283,76 @@ struct ComposerBox<Placeholder: View, Trailing: View>: View {
         } else {
             box
         }
+    }
+}
+
+/// Thumbnails for images explicitly pasted into a compose. Shared by the idle
+/// prompt and every follow-up surface so an attachment has the same preview,
+/// removal affordance, and overflow treatment before the first and later rounds.
+struct ComposeImagesAttachedLine: View {
+    let images: [NSImage]
+    let onRemove: (Int) -> Void
+
+    @State private var hoveredIndex: Int?
+
+    /// A task can carry 20 images, far more than fits across the panel or a
+    /// detached window, so the strip shows the first few and counts the rest.
+    private static let stripMax = 6
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(Array(images.prefix(Self.stripMax).enumerated()),
+                    id: \.offset) { index, image in
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: 34, height: 24)
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
+                    )
+                    .overlay(alignment: .topTrailing) {
+                        Button { onRemove(index) } label: {
+                            Image(systemName: "xmark")
+                                .font(.sf(8, weight: .bold))
+                                .foregroundStyle(Tokens.text1)
+                                .frame(width: 15, height: 15)
+                                .background(Circle().fill(Color.black.opacity(0.66)))
+                                .contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .offset(x: 5, y: -5)
+                        .opacity(hoveredIndex == index ? 1 : 0)
+                        .allowsHitTesting(hoveredIndex == index)
+                    }
+                    .onHover { inside in
+                        withAnimation(.easeOut(duration: 0.12)) {
+                            hoveredIndex = inside
+                                ? index
+                                : (hoveredIndex == index ? nil : hoveredIndex)
+                        }
+                    }
+            }
+            if images.count > Self.stripMax {
+                Text("+\(images.count - Self.stripMax)")
+                    .font(.sf(10, weight: .medium))
+                    .monospacedDigit()
+                    .foregroundStyle(Tokens.text4)
+                    .frame(width: 26, height: 24)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(Color.white.opacity(0.06))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
+                    )
+            }
+        }
+        // The x badges overhang their thumbnails; give the row that room back.
+        .padding(.top, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -3940,7 +4017,7 @@ struct InlineMarkdownText: View {
         // markdown parse — by the time SwiftUI reads the line, `x^2` is already
         // `x²` and any character surviving conversion that markdown would
         // reinterpret (`*`, `_`, …) is escaped.
-        let source = MathTypeset.inline(raw)
+        let source = MarkdownParser.escapingLoneTildes(MathTypeset.inline(raw))
         var text: AttributedString
         // SwiftUI's built-in inline-markdown parsing covers **bold**, *italic*,
         // and `code` — exactly the subset we need.
@@ -4597,6 +4674,56 @@ enum MarkdownParser {
         String(repeating: "  ", count: max(0, indent))
     }
 
+    /// Escape lone `~` so cmark can't read a pair of them as strikethrough.
+    ///
+    /// GFM treats `~text~` as a strike, so an answer like `白天 8~12℃ / 夜间 -2~2℃`
+    /// — the ordinary Chinese way to write a range — loses both tildes and comes
+    /// back struck through. Runs of two or more tildes are left alone (real
+    /// `~~strikethrough~~` still works), as is anything inside a code span, where
+    /// a backslash would print literally rather than escape.
+    static func escapingLoneTildes(_ line: String) -> String {
+        guard line.contains("~") else { return line }
+        let chars = Array(line)
+        var out = ""
+        var i = 0
+        while i < chars.count {
+            switch chars[i] {
+            case "\\":
+                // An existing escape covers the next character; copy both.
+                out.append(chars[i])
+                if i + 1 < chars.count { out.append(chars[i + 1]) }
+                i += 2
+            case "`":
+                // A backtick run opens a code span closed by a run of the same
+                // length. Copy the whole span verbatim; an unclosed run is just text.
+                let open = i
+                while i < chars.count, chars[i] == "`" { i += 1 }
+                let fence = i - open
+                out.append(contentsOf: chars[open..<i])
+                var j = i
+                while j < chars.count {
+                    guard chars[j] == "`" else { j += 1; continue }
+                    let start = j
+                    while j < chars.count, chars[j] == "`" { j += 1 }
+                    if j - start == fence {
+                        out.append(contentsOf: chars[i..<j])
+                        i = j
+                        break
+                    }
+                }
+            case "~":
+                let start = i
+                while i < chars.count, chars[i] == "~" { i += 1 }
+                if i - start == 1 { out.append("\\") }
+                out.append(contentsOf: chars[start..<i])
+            default:
+                out.append(chars[i])
+                i += 1
+            }
+        }
+        return out
+    }
+
     /// Strip inline markdown (`**bold**`, `*italic*`, `` `code` ``, `[label](url)`)
     /// from one line, leaving the visible text. Uses the same SwiftUI markdown
     /// parser as `InlineMarkdownText` so the two stay consistent; falls back to the
@@ -4604,7 +4731,7 @@ enum MarkdownParser {
     private static func stripInline(_ line: String) -> String {
         // Inline math first, same as the visible renderer, so a copied line
         // reads `x²`, not `$x^2$`.
-        let source = MathTypeset.inline(line)
+        let source = escapingLoneTildes(MathTypeset.inline(line))
         if let parsed = try? AttributedString(
             markdown: source,
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
@@ -6482,6 +6609,78 @@ struct SourceBadge: View {
     }
 }
 
+extension View {
+    /// Float the hovered source badge's popup above this view. Attach it to an
+    /// ancestor OUTSIDE the conversation ScrollView: the hovered badge publishes
+    /// its frame through `SourcePopoverKey`, we resolve it in this view's
+    /// coordinate space and place the panel just ABOVE the badge, clamped to the
+    /// left edge so a badge near the right doesn't push it off-screen. Rendered
+    /// here, the popup escapes the scroll's clip that was chopping its top off
+    /// (XII-118).
+    ///
+    /// EVERY surface that shows a `SourceBadge` must carry this — the badge alone
+    /// only publishes an anchor, so a window without the overlay renders the pill
+    /// and then nothing happens on hover. The panel and the detached thread
+    /// window both go through this one implementation so neither can drift.
+    ///
+    /// `hoveredID` / `closeWork` are the host's shared "which badge is open" and
+    /// deferred-close state, the same pair the badges are handed.
+    func sourcePopoverOverlay(hoveredID: Binding<UUID?>,
+                              closeWork: Binding<DispatchWorkItem?>) -> some View {
+        overlayPreferenceValue(SourcePopoverKey.self) { request in
+            GeometryReader { geo in
+                if let request {
+                    let rect = geo[request.anchor]
+                    SourcePopoverPanel(
+                        sources: request.sources,
+                        keepOpen: {
+                            // Cursor reached the panel — cancel the pending close
+                            // and keep this badge open.
+                            closeWork.wrappedValue?.cancel()
+                            closeWork.wrappedValue = nil
+                            hoveredID.wrappedValue = request.id
+                        },
+                        dismiss: {
+                            // Left the panel — close after the same grace period so
+                            // a slip back toward the pill doesn't flicker it shut.
+                            closeWork.wrappedValue?.cancel()
+                            let work = DispatchWorkItem {
+                                if hoveredID.wrappedValue == request.id {
+                                    hoveredID.wrappedValue = nil
+                                }
+                            }
+                            closeWork.wrappedValue = work
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.14,
+                                                          execute: work)
+                        }
+                    )
+                    // Horizontal fixed (the panel sets its own width); leave
+                    // vertical flexible so the panel's own maxHeight cap applies and
+                    // overflowing rows scroll instead of growing the card.
+                    .fixedSize(horizontal: true, vertical: false)
+                    // Anchor the panel's BOTTOM-leading right at the badge's top,
+                    // so it pops up over the answer. No visual gap is subtracted
+                    // here: the panel carries its own transparent `bridgeGap` strip
+                    // at its bottom, which spans the gap as a continuous hover
+                    // region so the pill → panel crossing never falls into a dead
+                    // zone.
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                    // Held inside the host on BOTH sides: at the badge's own left
+                    // edge normally, pulled back when the card would otherwise
+                    // hang out past the right rim (the compact window is barely
+                    // wider than the card).
+                    .offset(x: min(max(0, rect.minX),
+                                   max(0, geo.size.width - SourcePopoverPanel.width)),
+                            y: rect.minY - geo.size.height)
+                    .transition(.opacity)
+                }
+            }
+            .allowsHitTesting(request != nil)
+            .animation(.easeInOut(duration: 0.16), value: request)
+        }
+    }
+}
+
 /// The floating source list — a self-contained card backed by the **same Liquid
 /// Glass** the island uses (`nativeGlass`: genuine `.glassEffect(.clear)` on
 /// macOS 26+, blurred fallback below) so the wallpaper refracts through it and the
@@ -6516,6 +6715,12 @@ struct SourcePopoverPanel: View {
     /// panel's hover region, so hover stays continuous the whole way across.
     /// Must match the gap the caller leaves in `NotchBody` (`bridgeGap`).
     static let bridgeGap: CGFloat = 6
+
+    /// The card's fixed width. Public because the host overlay clamps the panel
+    /// inside its own bounds with it — a compact pointer-side window is only a
+    /// little wider than this card, so a badge at the reading inset would push
+    /// its right edge out through the window without the clamp.
+    static let width: CGFloat = 350
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -6560,7 +6765,7 @@ struct SourcePopoverPanel: View {
         .padding(.vertical, scrolls ? 0 : Self.cardPadding)
         // A fixed width gives the rows a definite bound to truncate long titles
         // against (instead of stretching the popup to the longest line).
-        .frame(width: 350, alignment: .leading)
+        .frame(width: Self.width, alignment: .leading)
         .background {
             // Real Liquid Glass: the high-transparency `.clear` material refracts
             // the wallpaper through the whole card; a soft dark veil over it keeps

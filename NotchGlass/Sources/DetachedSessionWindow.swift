@@ -72,13 +72,19 @@ final class DetachedThreadStore: ObservableObject {
     @Published var turns: [NotchModel.Turn]
     @Published var agentFolderPath: String?
     @Published var completedAt: Date?
+    /// Whether this thread's next destination can receive image input. Agent
+    /// records follow their persisted CLI engine; ordinary Ask threads follow
+    /// the active chat model at the moment the window is created.
+    let followUpSupportsImages: Bool
 
     init(threadID: UUID, turns: [NotchModel.Turn],
-         agentFolderPath: String? = nil, completedAt: Date? = nil) {
+         agentFolderPath: String? = nil, completedAt: Date? = nil,
+         followUpSupportsImages: Bool = false) {
         self.threadID = threadID
         self.turns = turns
         self.agentFolderPath = agentFolderPath
         self.completedAt = completedAt
+        self.followUpSupportsImages = followUpSupportsImages
     }
 
     /// The round finished (persisted to Recent) — freeze the mirror: no caret,
@@ -841,7 +847,15 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
         // only the answer grows it from there. Dropping to the waiting card's own
         // floor shrank the box under the line just submitted, which is a window closing and
         // another opening, not a card filling in.
-        compactFloorHeight = max(window.frame.height, Self.compactInitialHeight)
+        //
+        // The BOX, though — not the drawer under it. An open History ledger is
+        // hung below the input and leaves with the composer's face, so its rows
+        // must come off this measurement first. Left in, they became the answer's
+        // floor (`resizeCompactThread` never goes below it), and a one-line reply
+        // submitted from an open ledger opened a card as tall as the whole recent
+        // list, its answer stranded at the top of a void.
+        compactFloorHeight = max(composerHeightWithoutLedger(),
+                                 Self.compactInitialHeight)
         // The box the user typed in opens DOWNWARD and nothing else: same width,
         // same top edge, same left edge. It used to widen to the answer's
         // reading box (`compactWidth`) on the way, which moved the trailing edge
@@ -849,6 +863,15 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
         // the user had just pressed Enter on. One axis moves, and it is the one
         // the answer is arriving on.
         resizeCompactThread(to: compactFloorHeight, reset: true, animated: true)
+    }
+
+    /// The window's height with the History drawer's rows discounted — what the
+    /// composer alone occupies. Equal to the frame while the ledger is folded.
+    private func composerHeightWithoutLedger() -> CGFloat {
+        guard state.forceTouchHistoryExpanded else { return window.frame.height }
+        let ledger = CompactShortcutPromptView.historyBlock(
+            model?.forceTouchHistory.count ?? 0)
+        return max(window.frame.height - ledger, 0)
     }
 
     /// Keep History inside the pointer-side shell. From the composer the clock
@@ -1465,9 +1488,10 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
             onReplaceOriginal: { [weak self] text in
                 self?.replaceOriginalText(with: text) ?? false
             },
-            onFollowUp: { [weak self] line in
+            onFollowUp: { [weak self] line, images in
                 guard let self, let id = self.threadStore?.threadID else { return }
-                self.model?.submitDetachedFollowUp(threadID: id, question: line)
+                self.model?.submitDetachedFollowUp(threadID: id, question: line,
+                                                   images: images)
             },
             onRegenerate: { [weak self] in
                 guard let self, let id = self.threadStore?.threadID else { return }
@@ -2337,7 +2361,7 @@ struct DetachedSessionRootView: View {
     // `AgentTaskManager` directly).
     var onInAppCopy: () -> Void = {}
     var onReplaceOriginal: (String) -> Bool = { _ in false }
-    var onFollowUp: (String) -> Void = { _ in }
+    var onFollowUp: (String, [NSImage]) -> Void = { _, _ in }
     var onRegenerate: () -> Void = {}
     var onRegenerateWith: (String) -> Void = { _ in }
     var onChooseOption: (UUID, String) -> Void = { _, _ in }
@@ -3393,8 +3417,15 @@ private struct CompactShortcutPromptView: View {
     /// uses (`cardHeight`), so the controller can put the window there in one set
     /// before the face mounts and the face's own first report is then a no-op.
     static func expandedHeight(withPicks: Bool, historyCount: Int) -> CGFloat {
-        restingHeight(withPicks: withPicks)
-            + historyTopRunway + historyHeight(historyCount)
+        restingHeight(withPicks: withPicks) + historyBlock(historyCount)
+    }
+
+    /// Everything the open ledger adds under the input: its lead-in runway and
+    /// the rows themselves. Named because it is also what has to come back OFF
+    /// the window when the drawer's face leaves (see `openCompactAnswer`) — the
+    /// ledger is a drawer hung under the box, never part of the box.
+    static func historyBlock(_ count: Int) -> CGFloat {
+        historyTopRunway + historyHeight(count)
     }
 
     private var trimmed: String {
@@ -3428,11 +3459,7 @@ private struct CompactShortcutPromptView: View {
     }
 
     private var historyBlockHeight: CGFloat {
-        Self.historyTopRunway + historyContentHeight
-    }
-
-    private var historyContentHeight: CGFloat {
-        Self.historyHeight(historyItems.count)
+        Self.historyBlock(historyItems.count)
     }
 
     private var desiredHeight: CGFloat {
@@ -3666,6 +3693,15 @@ private struct CompactShortcutPromptView: View {
                 focusTrigger: focused,
                 maxVisibleLines: NotchBody.promptMaxLines,
                 onSubmit: send,
+                // Match the visible disclosure: with an empty Force Touch
+                // composer, ↓ pulls the popup-local History ledger open.
+                onDown: {
+                    guard state.forceTouchInvocation,
+                          !state.forceTouchHistoryExpanded
+                    else { return false }
+                    onToggleHistory()
+                    return true
+                },
                 onTab: { true },
                 onCaretWidth: { caretWidth = $0 },
                 onHeightChange: { inputHeight = $0 }
@@ -4012,7 +4048,7 @@ struct DetachedThreadView: View {
     var onClose: () -> Void
     var onInAppCopy: () -> Void
     var onReplaceOriginal: (String) -> Bool
-    var onFollowUp: (String) -> Void
+    var onFollowUp: (String, [NSImage]) -> Void
     var onRegenerate: () -> Void
     var onRegenerateWith: (String) -> Void
     var onChooseOption: (UUID, String) -> Void
@@ -4021,9 +4057,15 @@ struct DetachedThreadView: View {
     var onDesiredHeight: (CGFloat) -> Void = { _ in }
 
     @State private var followUp = ""
+    @State private var followUpImages: [NSImage] = []
     @State private var hoveredSourceID: UUID?
     @State private var sourceCloseWork: DispatchWorkItem?
     @State private var metadataMenuOpen = false
+    /// The WHOLE thread's laid-out height, mirrored out of the content probe
+    /// below. `compactAnswerIsCapped` reads it: whether the card has stopped
+    /// growing and handed the tail to its ScrollView is a property of the
+    /// thread, not of the newest answer's text (see there).
+    @State private var measuredContentHeight: CGFloat = 0
 
     private static let bottomID = "detached-thread-bottom"
 
@@ -4241,6 +4283,25 @@ struct DetachedThreadView: View {
                 // layers cannot follow a live scroll into the transparent bands
                 // around the compact card.
                 .clipped()
+                // A follow-up appends two turns at once — the question bubble
+                // and the empty assistant turn waiting under it. Neither carries
+                // any text, so the tail-follow below (keyed on the answer's
+                // characters) cannot fire for them: a capped card left the new
+                // question below the fold, behind the composer, until the first
+                // token finally landed. Follow the tail on the append itself.
+                //
+                // TWICE, on purpose: `onChange` runs while SwiftUI is still
+                // updating, so the ScrollView's content at that instant is the
+                // OLD, shorter thread and this first `scrollTo` can only clamp at
+                // the old maximum offset. The deferred pass runs once the
+                // appended turns have been laid out, when the anchor can actually
+                // be reached. (Same shape as the panel's own result view.)
+                .onChange(of: store.turns.count) { _, _ in
+                    proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                    DispatchQueue.main.async {
+                        proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                    }
+                }
                 .onChange(of: store.turns.last?.text.count ?? 0) { _, _ in
                     guard streaming else { return }
                     // The compact window opens to fit its answer, so there is
@@ -4279,6 +4340,10 @@ struct DetachedThreadView: View {
         .padding(.bottom, cardBottom)
         .onPreferenceChange(DetachedThreadContentHeightKey.self) { measured in
             guard compactShortcut, measured > 0 else { return }
+            // Recorded BEFORE the wait gate below: `compactAnswerIsCapped` must
+            // know how tall the thread stands even in the rounds this view
+            // deliberately declines to resize the window for.
+            measuredContentHeight = measured
             // A wait is not a reason to move a window: the waiting card opens
             // once, to its own floor (`compactInitialHeight`), and only the
             // answer grows it past that (`compactFloorHeight`). That holds for
@@ -4302,13 +4367,29 @@ struct DetachedThreadView: View {
             guard compactShortcut, !latestAnswerText.isEmpty else { return }
             onDesiredHeight(estimatedCompactWindowHeight(for: latestAnswerText))
         }
+        // The hovered source badge's popup, floated at the window level — outside
+        // the thread's ScrollView, which would otherwise clip it. Without this the
+        // badge in a detached window published its anchor to nobody: the pill sat
+        // there and hovering it did nothing at all. Same modifier the panel uses.
+        .sourcePopoverOverlay(hoveredID: $hoveredSourceID, closeWork: $sourceCloseWork)
     }
 
-    /// The answer has outgrown the window's ceiling — past here the window stops
+    /// The thread has outgrown the window's ceiling — past here the window stops
     /// opening and the ScrollView takes over, which is the only point at which a
     /// compact answer needs its tail followed.
+    ///
+    /// Measured off the THREAD, not the newest answer. The AppKit estimate alone
+    /// asks "would this one answer's prose fill a whole 520pt window?", which in
+    /// a follow-up round is answered by an assistant turn that is still empty —
+    /// so a second question landing in an already-capped card followed nothing at
+    /// all, and the new bubble plus its wait row sat below the fold behind the
+    /// composer. The content probe reports the complete stack (every turn, both
+    /// bubbles of every round), so it knows what the estimate cannot. The
+    /// estimate stays as the streaming backstop it was, for the beat before a
+    /// geometry pass lands.
     private var compactAnswerIsCapped: Bool {
-        estimatedCompactWindowHeight(for: latestAnswerText)
+        max(compactWindowHeight(forContentHeight: measuredContentHeight),
+            estimatedCompactWindowHeight(for: latestAnswerText))
             > DetachedSessionWindowController.compactMaxHeight
     }
 
@@ -4384,44 +4465,55 @@ struct DetachedThreadView: View {
         // different control. (It used to be a single-line SwiftUI `TextField` on
         // a flat, never-lit `Capsule`: it couldn't grow with a wrapped line and
         // its placeholder sat under composing pinyin.)
-        HStack(alignment: .bottom, spacing: 6) {
-            ComposerBox(
-                text: $followUp,
-                onSubmit: sendFollowUp,
-                placeholder: { Text(L("result.followUp")) },
-                trailing: {
-                    if !followUp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        SendButton(compact: true, action: sendFollowUp)
-                            .transition(.scale(scale: 0.6).combined(with: .opacity))
+        VStack(alignment: .leading, spacing: 8) {
+            if !followUpImages.isEmpty {
+                ComposeImagesAttachedLine(images: followUpImages) { index in
+                    guard followUpImages.indices.contains(index) else { return }
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                        followUpImages.remove(at: index)
                     }
-                })
-                .opacity(streaming ? 0.45 : 1)
-                .disabled(streaming)
-
-            if hasAgentMetadata {
-                GlassIconButton(systemName: "command", help: L("agent.detail"),
-                                size: 39, glyphSize: 13,
-                                showsTooltip: false) {
-                    metadataMenuOpen.toggle()
                 }
-                .modifier(MenuCardWindow(
-                    open: metadataMenuOpen,
-                    upperLeading: true,
-                    onDismiss: { _ in metadataMenuOpen = false },
-                    card: {
-                        AnyView(AgentRunMetadataMenu(
-                            engine: agentRunCaption,
-                            folderPath: store.agentFolderPath,
-                            completedAt: store.completedAt,
-                            onOpenFolder: {
-                                metadataMenuOpen = false
-                                if let path = store.agentFolderPath {
-                                    NSWorkspace.shared.open(URL(fileURLWithPath: path))
-                                }
-                            })
-                            .manageMenuCardBackground())
-                    }))
-                    .transition(.scale(scale: 0.7).combined(with: .opacity))
+            }
+            HStack(alignment: .bottom, spacing: 6) {
+                ComposerBox(
+                    text: $followUp,
+                    onSubmit: sendFollowUp,
+                    onPasteImage: pasteFollowUpImage,
+                    placeholder: { Text(L("result.followUp")) },
+                    trailing: {
+                        if hasFollowUpInput {
+                            SendButton(compact: true, action: sendFollowUp)
+                                .transition(.scale(scale: 0.6).combined(with: .opacity))
+                        }
+                    })
+                    .opacity(streaming ? 0.45 : 1)
+                    .disabled(streaming)
+
+                if hasAgentMetadata {
+                    GlassIconButton(systemName: "command", help: L("agent.detail"),
+                                    size: 39, glyphSize: 13,
+                                    showsTooltip: false) {
+                        metadataMenuOpen.toggle()
+                    }
+                    .modifier(MenuCardWindow(
+                        open: metadataMenuOpen,
+                        upperLeading: true,
+                        onDismiss: { _ in metadataMenuOpen = false },
+                        card: {
+                            AnyView(AgentRunMetadataMenu(
+                                engine: agentRunCaption,
+                                folderPath: store.agentFolderPath,
+                                completedAt: store.completedAt,
+                                onOpenFolder: {
+                                    metadataMenuOpen = false
+                                    if let path = store.agentFolderPath {
+                                        NSWorkspace.shared.open(URL(fileURLWithPath: path))
+                                    }
+                                })
+                                .manageMenuCardBackground())
+                        }))
+                        .transition(.scale(scale: 0.7).combined(with: .opacity))
+                }
             }
         }
         .animation(.spring(response: 0.3, dampingFraction: 0.78),
@@ -4429,10 +4521,31 @@ struct DetachedThreadView: View {
     }
 
     private func sendFollowUp() {
-        let line = followUp.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !line.isEmpty, !streaming else { return }
+        var line = followUp.trimmingCharacters(in: .whitespacesAndNewlines)
+        let images = followUpImages
+        guard !streaming else { return }
+        if line.isEmpty {
+            guard !images.isEmpty else { return }
+            line = NotchModel.agentImageOnlyPrompt(count: images.count)
+        }
         followUp = ""
-        onFollowUp(line)
+        followUpImages = []
+        onFollowUp(line, images)
+    }
+
+    private var hasFollowUpInput: Bool {
+        !followUp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !followUpImages.isEmpty
+    }
+
+    private func pasteFollowUpImage() -> Bool {
+        guard store.followUpSupportsImages,
+              let image = NotchModel.pasteboardImage() else { return false }
+        guard followUpImages.count < NotchModel.composeImageLimit else { return true }
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+            followUpImages.append(image)
+        }
+        return true
     }
 
     /// One header for every detached thread, pointer-side shortcut answers
@@ -4548,6 +4661,7 @@ struct DetachedAgentTaskView: View {
 
     @ObservedObject private var manager = AgentTaskManager.shared
     @State private var followUp = ""
+    @State private var followUpImages: [NSImage] = []
     /// The task's last seen value — keeps the window readable if the task is
     /// dismissed from the tray while this window is open.
     @State private var lastKnown: AgentTaskManager.AgentTask?
@@ -4656,8 +4770,18 @@ struct DetachedAgentTaskView: View {
                 }
                 .animation(.spring(response: 0.3, dampingFraction: 0.85), value: followsTail)
             }
-            followUpRow(task)
-                .padding(.top, 8)
+            VStack(alignment: .leading, spacing: 8) {
+                if !followUpImages.isEmpty {
+                    ComposeImagesAttachedLine(images: followUpImages) { index in
+                        guard followUpImages.indices.contains(index) else { return }
+                        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                            followUpImages.remove(at: index)
+                        }
+                    }
+                }
+                followUpRow(task)
+            }
+            .padding(.top, 8)
         }
         .padding(.horizontal, DetachedThreadView.cardHorizontalPadding)
         .padding(.top, DetachedThreadView.cardTopPadding)
@@ -4731,10 +4855,10 @@ struct DetachedAgentTaskView: View {
         return ComposerBox(
             text: $followUp,
             onSubmit: { sendFollowUp(task) },
+            onPasteImage: { pasteFollowUpImage(task) },
             onCommandSubmit: {
                 guard task.isRunning, task.sessionID != nil,
-                      !followUp.trimmingCharacters(
-                        in: .whitespacesAndNewlines).isEmpty
+                      hasFollowUpInput
                 else { return false }
                 sendFollowUp(task, interrupting: true)
                 return true
@@ -4744,7 +4868,7 @@ struct DetachedAgentTaskView: View {
                                       : "agent.followUp.placeholder"))
             },
             trailing: {
-                if !followUp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if hasFollowUpInput {
                     AgentFollowUpKeyHints(
                         showsInterrupt: task.isRunning && task.sessionID != nil)
                         .transition(.opacity)
@@ -4758,16 +4882,41 @@ struct DetachedAgentTaskView: View {
     /// this line straight away; the plain path queues it for the next round.
     private func sendFollowUp(_ task: AgentTaskManager.AgentTask,
                               interrupting: Bool = false) {
-        let line = followUp.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !line.isEmpty else { return }
+        var line = followUp.trimmingCharacters(in: .whitespacesAndNewlines)
+        let images = followUpImages
+        if line.isEmpty {
+            guard !images.isEmpty else { return }
+            line = NotchModel.agentImageOnlyPrompt(count: images.count)
+        }
         followUp = ""
+        followUpImages = []
         // Sending says you want to watch what happens next.
         followsTail = true
-        if interrupting {
-            manager.interrupt(taskID: task.id, prompt: line)
-        } else {
-            manager.followUp(taskID: task.id, prompt: line)
+        Task {
+            let jpegs = await Task.detached(priority: .userInitiated) {
+                images.compactMap { NotchModel.encodeJPEGForVision($0) }
+            }.value
+            if interrupting {
+                manager.interrupt(taskID: task.id, prompt: line, imagesJPEG: jpegs)
+            } else {
+                manager.followUp(taskID: task.id, prompt: line, imagesJPEG: jpegs)
+            }
         }
+    }
+
+    private var hasFollowUpInput: Bool {
+        !followUp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !followUpImages.isEmpty
+    }
+
+    private func pasteFollowUpImage(_ task: AgentTaskManager.AgentTask) -> Bool {
+        guard task.engine.supportsImageInput,
+              let image = NotchModel.pasteboardImage() else { return false }
+        guard followUpImages.count < NotchModel.composeImageLimit else { return true }
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+            followUpImages.append(image)
+        }
+        return true
     }
 }
 

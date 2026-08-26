@@ -31,11 +31,6 @@ struct NotchBody: View {
     /// as an elapsed clock and only becomes the ✕ under the pointer, so a list of
     /// runs reads as durations at a glance and never as a row of close buttons.
     @State private var hoveredAgentRowID: UUID? = nil
-    /// Which attached-image thumbnail the pointer is over. Each thumbnail's ×
-    /// removal badge only appears while its own thumbnail is hovered, so the
-    /// strip rests as clean previews instead of a row of close buttons.
-    @State private var hoveredComposeImageIndex: Int? = nil
-
     /// Pointer over the one-time "turn this off in Settings" line
     /// (`selectionContextHintLine`) — it brightens like every other quiet link.
     @State private var hoveringSelectionHint = false
@@ -95,6 +90,9 @@ struct NotchBody: View {
     /// exactly like the detached agent window's field; the box stays put after
     /// send so more can be lined up.
     @State private var agentDetailFollowUp: String = ""
+    /// Images pasted into the live agent detail's follow-up box. They belong to
+    /// that one queued/resumed round and clear as soon as it is handed off.
+    @State private var agentDetailFollowUpImages: [NSImage] = []
     /// The detail page's own ⌘ metadata menu (engine / folder / completion) —
     /// the same chip a reopened record's follow-up row carries. Local state, not
     /// `model.isResultMetadataMenuOpen`: the two surfaces never coexist, but the
@@ -440,14 +438,14 @@ struct NotchBody: View {
                         recallCounterLine(recall)
                             .transition(moduleTransition)
                     } else if !model.askComposeImages.isEmpty {
-                        composeImagesAttachedLine(model.askComposeImages) {
+                        ComposeImagesAttachedLine(images: model.askComposeImages) {
                             model.removeAskComposeImage(at: $0)
                         }
                         .padding(.bottom, 8)
                         .transition(moduleTransition)
                     }
                 } else if !model.agentComposeImages.isEmpty {
-                    composeImagesAttachedLine(model.agentComposeImages) {
+                    ComposeImagesAttachedLine(images: model.agentComposeImages) {
                         model.removeAgentComposeImage(at: $0)
                     }
                     .padding(.bottom, 8)
@@ -651,13 +649,13 @@ struct NotchBody: View {
                     }
                     if model.agentComposeActive {
                         if !model.agentComposeImages.isEmpty {
-                            composeImagesAttachedLine(model.agentComposeImages) {
+                            ComposeImagesAttachedLine(images: model.agentComposeImages) {
                                 model.removeAgentComposeImage(at: $0)
                             }
                             .padding(.bottom, 8)
                         }
                     } else if !model.askComposeImages.isEmpty {
-                        composeImagesAttachedLine(model.askComposeImages) {
+                        ComposeImagesAttachedLine(images: model.askComposeImages) {
                             model.removeAskComposeImage(at: $0)
                         }
                         .padding(.bottom, 8)
@@ -764,75 +762,6 @@ struct NotchBody: View {
             .tracking(0.2)
             .foregroundStyle(Tokens.text4)
             .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    /// How many thumbnails the attached strip shows before folding the rest into
-    /// a "+N" chip. The real cap is `NotchModel.agentImageLimit` (20) — far more
-    /// than fits across a 540pt panel, so the strip shows the first few and the
-    /// "+N" chip carries the rest.
-    private static let agentThumbStripMax = 6
-
-    /// The agent compose's attached images: a strip of thumbnails in the same
-    /// language as the copied-image preview above, each with its own × — unlike
-    /// the ambient clipboard preview (which self-refreshes), these were explicit
-    /// ⌘Vs and need an explicit way back out, one at a time. The run hands exactly
-    /// these images to the agent. Shared with the settled card's follow-up field,
-    /// which clears its own attachments — hence the injected remove action.
-    private func composeImagesAttachedLine(_ images: [NSImage],
-                                           onRemove: @escaping (Int) -> Void) -> some View {
-        HStack(spacing: 6) {
-            ForEach(Array(images.prefix(Self.agentThumbStripMax).enumerated()),
-                    id: \.offset) { index, image in
-                Image(nsImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(width: 34, height: 24)
-                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
-                            .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
-                    )
-                    .overlay(alignment: .topTrailing) {
-                        Button { onRemove(index) } label: {
-                            Image(systemName: "xmark")
-                                .font(.sf(8, weight: .bold))
-                                .foregroundStyle(Tokens.text1)
-                                .frame(width: 15, height: 15)
-                                .background(Circle().fill(Color.black.opacity(0.66)))
-                                .contentShape(Circle())
-                        }
-                        .buttonStyle(.plain)
-                        .offset(x: 5, y: -5)
-                        // Rest as a clean preview; the × only appears while the
-                        // pointer is over this thumbnail.
-                        .opacity(hoveredComposeImageIndex == index ? 1 : 0)
-                        .allowsHitTesting(hoveredComposeImageIndex == index)
-                    }
-                    .onHover { inside in
-                        withAnimation(.easeOut(duration: 0.12)) {
-                            hoveredComposeImageIndex = inside ? index : (hoveredComposeImageIndex == index ? nil : hoveredComposeImageIndex)
-                        }
-                    }
-            }
-            if images.count > Self.agentThumbStripMax {
-                Text("+\(images.count - Self.agentThumbStripMax)")
-                    .font(.sf(10, weight: .medium))
-                    .monospacedDigit()
-                    .foregroundStyle(Tokens.text4)
-                    .frame(width: 26, height: 24)
-                    .background(
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
-                            .fill(Color.white.opacity(0.06))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
-                            .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
-                    )
-            }
-        }
-        // The × badges overhang their thumbnails — give the row the 4pt back.
-        .padding(.top, 4)
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// The carried-selection chip in its slot above the input (see
@@ -1648,32 +1577,42 @@ struct NotchBody: View {
     /// name, and a chip that appeared only at settle would move the send button
     /// mid-run.
     private func agentDetailFollowUpRow(_ task: AgentTaskManager.AgentTask) -> some View {
-        HStack(alignment: .bottom, spacing: 6) {
-            agentDetailComposer(task)
-                .frame(maxWidth: .infinity)
-
-            GlassIconButton(systemName: "command",
-                            help: L("agent.detail"),
-                            size: 39,
-                            glyphSize: 13,
-                            showsTooltip: false) {
-                agentDetailMetadataOpen.toggle()
+        VStack(alignment: .leading, spacing: 8) {
+            if !agentDetailFollowUpImages.isEmpty {
+                ComposeImagesAttachedLine(images: agentDetailFollowUpImages) { index in
+                    guard agentDetailFollowUpImages.indices.contains(index) else { return }
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                        agentDetailFollowUpImages.remove(at: index)
+                    }
+                }
             }
-            .modifier(MenuCardWindow(
-                open: agentDetailMetadataOpen,
-                upperLeading: true,
-                onDismiss: { _ in agentDetailMetadataOpen = false },
-                card: {
-                    AnyView(AgentRunMetadataMenu(
-                        engine: task.engine.displayName,
-                        folderPath: task.folder.path,
-                        completedAt: task.finishedAt,
-                        onOpenFolder: {
-                            agentDetailMetadataOpen = false
-                            NSWorkspace.shared.open(task.folder)
-                        })
-                        .manageMenuCardBackground())
-                }))
+            HStack(alignment: .bottom, spacing: 6) {
+                agentDetailComposer(task)
+                    .frame(maxWidth: .infinity)
+
+                GlassIconButton(systemName: "command",
+                                help: L("agent.detail"),
+                                size: 39,
+                                glyphSize: 13,
+                                showsTooltip: false) {
+                    agentDetailMetadataOpen.toggle()
+                }
+                .modifier(MenuCardWindow(
+                    open: agentDetailMetadataOpen,
+                    upperLeading: true,
+                    onDismiss: { _ in agentDetailMetadataOpen = false },
+                    card: {
+                        AnyView(AgentRunMetadataMenu(
+                            engine: task.engine.displayName,
+                            folderPath: task.folder.path,
+                            completedAt: task.finishedAt,
+                            onOpenFolder: {
+                                agentDetailMetadataOpen = false
+                                NSWorkspace.shared.open(task.folder)
+                            })
+                            .manageMenuCardBackground())
+                    }))
+            }
         }
     }
 
@@ -1685,12 +1624,12 @@ struct NotchBody: View {
             focusTrigger: focused,
             focused: focused,
             onSubmit: { submitAgentDetailFollowUp(task) },
+            onPasteImage: { pasteAgentDetailFollowUpImage(task) },
             // ⌘⏎ is the accelerator for the chip below: stop the round in
             // flight and hand the agent this line right now.
             onCommandSubmit: {
                 guard task.isRunning, task.sessionID != nil,
-                      !agentDetailFollowUp.trimmingCharacters(
-                        in: .whitespacesAndNewlines).isEmpty
+                      hasAgentDetailFollowUpInput
                 else { return false }
                 submitAgentDetailFollowUp(task, interrupting: true)
                 return true
@@ -1700,8 +1639,7 @@ struct NotchBody: View {
                                       : "agent.followUp.placeholder"))
             },
             trailing: {
-                if !agentDetailFollowUp.trimmingCharacters(
-                    in: .whitespacesAndNewlines).isEmpty {
+                if hasAgentDetailFollowUpInput {
                     // The field already owns both verbs: ⏎ sends/queues and ⌘⏎
                     // interrupts the live round. State them plainly instead of
                     // repeating them as an interrupt pill plus glass arrow.
@@ -1722,17 +1660,48 @@ struct NotchBody: View {
     /// one out (`AgentTaskManager.interrupt`).
     private func submitAgentDetailFollowUp(_ task: AgentTaskManager.AgentTask,
                                            interrupting: Bool = false) {
-        let line = agentDetailFollowUp.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !line.isEmpty else { return }
+        var line = agentDetailFollowUp.trimmingCharacters(in: .whitespacesAndNewlines)
+        let images = agentDetailFollowUpImages
+        if line.isEmpty {
+            guard !images.isEmpty else { return }
+            line = NotchModel.agentImageOnlyPrompt(count: images.count)
+        }
         agentDetailFollowUp = ""
+        agentDetailFollowUpImages = []
         // Sending is a statement that you want to watch what happens next, so it
         // re-arms the tail follow however far up the page had been scrolled.
         agentDetailFollowsTail = true
-        if interrupting {
-            AgentTaskManager.shared.interrupt(taskID: task.id, prompt: line)
-        } else {
-            AgentTaskManager.shared.followUp(taskID: task.id, prompt: line)
+        Task {
+            let jpegs = await Task.detached(priority: .userInitiated) {
+                images.compactMap { NotchModel.encodeJPEGForVision($0) }
+            }.value
+            if interrupting {
+                AgentTaskManager.shared.interrupt(taskID: task.id, prompt: line,
+                                                  imagesJPEG: jpegs)
+            } else {
+                AgentTaskManager.shared.followUp(taskID: task.id, prompt: line,
+                                                 imagesJPEG: jpegs)
+            }
         }
+    }
+
+    private var hasAgentDetailFollowUpInput: Bool {
+        !agentDetailFollowUp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !agentDetailFollowUpImages.isEmpty
+    }
+
+    private func pasteAgentDetailFollowUpImage(
+        _ task: AgentTaskManager.AgentTask
+    ) -> Bool {
+        guard task.engine.supportsImageInput,
+              let image = NotchModel.pasteboardImage() else { return false }
+        guard agentDetailFollowUpImages.count < NotchModel.composeImageLimit else {
+            return true
+        }
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+            agentDetailFollowUpImages.append(image)
+        }
+        return true
     }
 
     /// The detail page's top bar: back chevron (the page is a peek, not a mode —
@@ -2848,55 +2817,9 @@ struct NotchBody: View {
         .animation(.spring(response: 0.42, dampingFraction: 0.82), value: model.noteSaving)
         // Float the source popup here, at the result-view level — OUTSIDE the
         // conversation ScrollView — so it's never clipped by the scroll's height
-        // (which was chopping the popup's top off, XII-118). The hovered badge
-        // publishes its frame via `SourcePopoverKey`; we resolve it in this view's
-        // coordinate space and place the panel just ABOVE the badge, clamped to the
-        // left edge so a badge near the right doesn't push it off-screen.
-        .overlayPreferenceValue(SourcePopoverKey.self) { request in
-            GeometryReader { geo in
-                if let request {
-                    let rect = geo[request.anchor]
-                    SourcePopoverPanel(
-                        sources: request.sources,
-                        keepOpen: {
-                            // Cursor reached the panel — cancel the pending close
-                            // and keep this badge open.
-                            sourceCloseWork?.cancel()
-                            sourceCloseWork = nil
-                            hoveredSourceID = request.id
-                        },
-                        dismiss: {
-                            // Left the panel — close after the same grace period so
-                            // a slip back toward the pill doesn't flicker it shut.
-                            sourceCloseWork?.cancel()
-                            let work = DispatchWorkItem {
-                                if hoveredSourceID == request.id { hoveredSourceID = nil }
-                            }
-                            sourceCloseWork = work
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.14, execute: work)
-                        }
-                    )
-                    // Horizontal fixed (the panel sets its own 380pt width); leave
-                    // vertical flexible so the panel's own maxHeight cap applies and
-                    // overflowing rows scroll instead of growing the card.
-                    .fixedSize(horizontal: true, vertical: false)
-                    // Anchor the panel's BOTTOM-leading right at the badge's top,
-                    // so it pops up over the answer. `.bottomLeading` alignment +
-                    // an offset of (badge.minX, badge.minY) positions the panel's
-                    // bottom-left at the badge's top-left. No visual gap is
-                    // subtracted here: the panel carries its own transparent
-                    // `bridgeGap` strip at its bottom (see `SourcePopoverPanel`),
-                    // which spans the gap as a continuous hover region so the
-                    // pill → panel crossing never falls into a dead zone.
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
-                    .offset(x: max(0, rect.minX),
-                            y: rect.minY - geo.size.height)
-                    .transition(.opacity)
-                }
-            }
-            .allowsHitTesting(request != nil)
-            .animation(.easeInOut(duration: 0.16), value: request)
-        }
+        // (which was chopping the popup's top off, XII-118). Shared with every
+        // other surface that shows a source badge (see `sourcePopoverOverlay`).
+        .sourcePopoverOverlay(hoveredID: $hoveredSourceID, closeWork: $sourceCloseWork)
     }
 
     /// Stand-in for the follow-up field while on the offline stub: a full-width
@@ -3853,35 +3776,42 @@ struct NotchBody: View {
     }
 
     private var followUpRow: some View {
-        HStack(alignment: .bottom, spacing: 6) {
-            followUpComposer
-                .frame(maxWidth: .infinity)
-
-            if let metadata = agentFollowUpMetadata {
-                GlassIconButton(systemName: "command",
-                                help: L("agent.detail"),
-                                size: 39,
-                                glyphSize: 13,
-                                showsTooltip: false) {
-                    model.isResultMetadataMenuOpen.toggle()
+        VStack(alignment: .leading, spacing: 8) {
+            if !model.askComposeImages.isEmpty {
+                ComposeImagesAttachedLine(images: model.askComposeImages) {
+                    model.removeAskComposeImage(at: $0)
                 }
-                .modifier(MenuCardWindow(
-                    open: model.isResultMetadataMenuOpen,
-                    upperLeading: true,
-                    onDismiss: { _ in model.isResultMetadataMenuOpen = false },
-                    card: {
-                        AnyView(AgentRunMetadataMenu(
-                            engine: agentFollowUpRunCaption?
-                                .components(separatedBy: " · ").first,
-                            folderPath: model.currentThreadAgentFolder,
-                            completedAt: model.currentThreadCompletedAt,
-                            onOpenFolder: {
-                                model.isResultMetadataMenuOpen = false
-                                model.openThreadAgentFolder()
-                            })
-                            .manageMenuCardBackground())
-                    }))
-                    .transition(.scale(scale: 0.7).combined(with: .opacity))
+            }
+            HStack(alignment: .bottom, spacing: 6) {
+                followUpComposer
+                    .frame(maxWidth: .infinity)
+
+                if let metadata = agentFollowUpMetadata {
+                    GlassIconButton(systemName: "command",
+                                    help: L("agent.detail"),
+                                    size: 39,
+                                    glyphSize: 13,
+                                    showsTooltip: false) {
+                        model.isResultMetadataMenuOpen.toggle()
+                    }
+                    .modifier(MenuCardWindow(
+                        open: model.isResultMetadataMenuOpen,
+                        upperLeading: true,
+                        onDismiss: { _ in model.isResultMetadataMenuOpen = false },
+                        card: {
+                            AnyView(AgentRunMetadataMenu(
+                                engine: agentFollowUpRunCaption?
+                                    .components(separatedBy: " · ").first,
+                                folderPath: model.currentThreadAgentFolder,
+                                completedAt: model.currentThreadCompletedAt,
+                                onOpenFolder: {
+                                    model.isResultMetadataMenuOpen = false
+                                    model.openThreadAgentFolder()
+                                })
+                                .manageMenuCardBackground())
+                        }))
+                        .transition(.scale(scale: 0.7).combined(with: .opacity))
+                }
             }
         }
         .animation(.spring(response: 0.3, dampingFraction: 0.78),
@@ -3944,6 +3874,7 @@ struct NotchBody: View {
             // to `.chat` → `submit()`, which continues the existing thread
             // (firstTurn = turns.isEmpty), so the common path is unchanged.
             onSubmit: { model.submitCurrent() },
+            onPasteImage: { model.handleComposePasteImage() },
             onBack: {
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                     model.newChat()
@@ -3967,7 +3898,7 @@ struct NotchBody: View {
             // here while the field was empty; it now lives in the answer footer
             // with the other per-answer actions — see `AssistantTurnView`.)
             trailing: {
-                if model.hasText {
+                if model.hasText || !model.askComposeImages.isEmpty {
                     SendButton(compact: true) { model.submitCurrent() }
                         .transition(.scale(scale: 0.6).combined(with: .opacity))
                 }
@@ -4822,6 +4753,39 @@ struct RecentEntryStyle: ButtonStyle {
 struct UserQuestionBubble: View {
     let text: String
 
+    /// Prompt shortcuts keep the captured text inside an explicit wire envelope so
+    /// the model cannot mistake it for the instruction. That envelope is transport
+    /// syntax, not user-facing copy: when it reaches a visible question bubble,
+    /// present the captured body as a real quote instead of exposing the tags.
+    private var selectedTextQuote: (instruction: String, selection: String)? {
+        let opening = "<selected_text>"
+        let closing = "</selected_text>"
+        guard let openRange = text.range(of: opening),
+              let closeRange = text.range(of: closing,
+                                          range: openRange.upperBound..<text.endIndex),
+              text[closeRange.upperBound...]
+                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
+
+        let selection = text[openRange.upperBound..<closeRange.lowerBound]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !selection.isEmpty else { return nil }
+        return (
+            instruction: text[..<openRange.lowerBound]
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            selection: selection
+        )
+    }
+
+    /// What the bubble visibly lays out (the transport tags do not consume lines or
+    /// influence the corner shape once they have become a quote).
+    private var visibleText: String {
+        guard let quote = selectedTextQuote else { return text }
+        return quote.instruction.isEmpty
+            ? quote.selection
+            : quote.instruction + "\n" + quote.selection
+    }
+
     /// Whether the user tapped to expand a truncated question. Starts collapsed so a
     /// pasted wall of text never dominates the thread on first render.
     @State private var expanded = false
@@ -4858,30 +4822,70 @@ struct UserQuestionBubble: View {
     private var expandedOverflows: Bool { estimatedLines(exceed: 12) }
 
     private func estimatedLines(exceed cap: Int) -> Bool {
-        var lines = 0
-        for segment in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            lines += 1 + segment.count / 48
-            if lines > cap { return true }
-        }
-        return false
+        estimatedLineCount(for: visibleText) > cap
+    }
+
+    private func estimatedLineCount(for value: String) -> Int {
+        value.split(separator: "\n", omittingEmptySubsequences: false)
+            .reduce(0) { $0 + 1 + $1.count / 48 }
     }
 
     /// Pill only for a genuinely short question; anything that could wrap past a line
     /// or two reads better as a rounded card.
-    private var radius: CGFloat { isTruncated || text.count > 44 ? multiLineRadius : pillRadius }
+    private var radius: CGFloat {
+        isTruncated || visibleText.count > 44 ? multiLineRadius : pillRadius
+    }
 
+    @ViewBuilder
     private var questionText: some View {
-        Text(text)
-            .font(.sf(14.5, weight: .medium))
-            .tracking(-0.1)
-            .foregroundStyle(Tokens.text2)
-            // Collapsed to a fixed cap until the user expands; nil = unlimited.
-            .lineLimit(expanded ? nil : collapsedLineLimit)
-            .fixedSize(horizontal: false, vertical: true)
-            // The question itself is selectable too — drag to highlight and
-            // copy it, same as the answer below. (It's a settled user turn,
-            // never streaming, so there's no tail-follow scroll to fight.)
+        if let quote = selectedTextQuote {
+            VStack(alignment: .leading, spacing: 8) {
+                if !quote.instruction.isEmpty {
+                    Text(quote.instruction)
+                        .font(.sf(14.5, weight: .medium))
+                        .tracking(-0.1)
+                        .foregroundStyle(Tokens.text2)
+                        // Reserve at least one collapsed line for the quote itself.
+                        .lineLimit(expanded ? nil : collapsedLineLimit - 1)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Text(quote.selection)
+                    .font(.sf(14.5, weight: .medium))
+                    .tracking(-0.1)
+                    .foregroundStyle(Tokens.text3)
+                    .lineLimit(expanded ? nil : max(
+                        1,
+                        collapsedLineLimit - min(
+                            collapsedLineLimit - 1,
+                            estimatedLineCount(for: quote.instruction)
+                        )
+                    ))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 11)
+                    .overlay(alignment: .leading) {
+                        Capsule()
+                            .fill(Tokens.text4.opacity(0.8))
+                            .frame(width: 2)
+                            .padding(.vertical, 2)
+                    }
+            }
+            // The question itself is selectable too — drag to highlight and copy
+            // both the instruction and its quote, without the transport tags.
             .textSelection(.enabled)
+        } else {
+            Text(text)
+                .font(.sf(14.5, weight: .medium))
+                .tracking(-0.1)
+                .foregroundStyle(Tokens.text2)
+                // Collapsed to a fixed cap until the user expands; nil = unlimited.
+                .lineLimit(expanded ? nil : collapsedLineLimit)
+                .fixedSize(horizontal: false, vertical: true)
+                // The question itself is selectable too — drag to highlight and
+                // copy it, same as the answer below. (It's a settled user turn,
+                // never streaming, so there's no tail-follow scroll to fight.)
+                .textSelection(.enabled)
+        }
     }
 
     var body: some View {
@@ -5533,7 +5537,14 @@ private struct BucketTogglePill: View {
             // distinction the field's rim pulse already draws).
             BucketWord(title: ask, icon: askMark, active: !agentOn,
                        swapKey: destination == .reminder ? .note : destination) {
-                model.setAgentBucket(false)
+                // Already on this half: click cycles Ask ⇄ Capture — the same
+                // roll Tab already drives (`toggleSubmitPanel`). Coming back from
+                // Agent just lands on the pinned face (`setAgentBucket(false)`).
+                if agentOn {
+                    model.setAgentBucket(false)
+                } else {
+                    model.toggleSubmitPanel()
+                }
             }
             // The Agent half only exists where an agent CLI does. Without one the
             // pill is a single word — the live destination, and nothing to switch.
@@ -5603,7 +5614,8 @@ private struct BucketTogglePill: View {
 /// bubble / pencil / bell — on the first, a code bracket `</>` for Agent); the
 /// active one spells its name out beside it, the inactive one collapses to the bare
 /// icon — dim, brightening on hover, the way over to the other side.
-/// Clicking the active half is a no-op — the pill sets a bucket, never surprises.
+/// Clicking the active Ask half cycles Ask ⇄ Capture (same path as Tab); the
+/// active Agent half stays a no-op — arming is cheap, re-arming is not a switch.
 ///
 /// **The pill has two switches, so it has two axes.** Changing BUCKET
 /// (Ask⇄Agent) is horizontal: the well glides, one word wipes open while the

@@ -1072,9 +1072,19 @@ struct PromptShortcut: Codable, Equatable, Identifiable {
     var providerID: String?
     var model: String?
 
+    /// Snapshot the app's current backend into a concrete shortcut pin. Prompt
+    /// shortcuts are saved actions, so their model must not drift when the app's
+    /// default provider or model changes later.
+    static var currentModelPin: ModelPin {
+        let provider = APIKeyStore.selectedProvider
+        let model = APIKeyStore.effectiveModel(for: provider) ?? provider.defaultModel
+        return ModelPin(provider: provider, model: model)
+    }
+
     init(id: UUID = UUID(), shortcut: ShortcutChord? = nil, prompt: String = "",
          name: String? = nil, opensBesidePointer: Bool? = true,
-         showsInForceTouch: Bool? = nil, pin: ModelPin? = nil) {
+         showsInForceTouch: Bool? = nil,
+         pin: ModelPin? = PromptShortcut.currentModelPin) {
         self.id = id
         self.shortcut = shortcut
         self.prompt = prompt
@@ -1149,7 +1159,20 @@ enum PromptShortcutStore {
         guard let data = UserDefaults.standard.data(forKey: key),
               let shortcuts = try? JSONDecoder().decode([PromptShortcut].self, from: data)
         else { return [] }
-        return shortcuts
+
+        // Rows saved before model pinning (and rows that used the former
+        // "Default model" option) have no complete provider/model pair. Freeze
+        // the default that is in effect on first load after this update so they
+        // stop changing with the app-wide setting from then on.
+        let fallback = PromptShortcut.currentModelPin
+        var migrated = shortcuts
+        var changed = false
+        for index in migrated.indices where migrated[index].pin == nil {
+            migrated[index].pin = fallback
+            changed = true
+        }
+        if changed { save(migrated) }
+        return migrated
     }
 
     static func save(_ shortcuts: [PromptShortcut]) {

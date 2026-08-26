@@ -54,6 +54,14 @@ enum AgentEngine: String, CaseIterable {
     /// engine's default.
     var isKnownUnavailable: Bool { isAvailabilityResolved && !isAvailable }
 
+    /// Image input is wired only for the CLIs that expose a real headless image
+    /// transport: Codex uses `-i`, while Claude accepts vision blocks through
+    /// stream-json. The other runners must leave an image paste to AppKit instead
+    /// of showing an attachment they would silently drop.
+    var supportsImageInput: Bool {
+        self == .codex || self == .claude
+    }
+
     /// The terminal command that picks this engine's session back up. Neither
     /// CLI is spawned with `--ephemeral` / `--no-session-persistence`, so a run
     /// Notch lost track of (quit, crash) is still resumable by hand — the
@@ -793,16 +801,17 @@ final class AgentTaskManager: ObservableObject {
     /// JPEG-encoded off-main): codex attaches them natively (one `-i <file>` per
     /// image); claude has no image flag, so the prompt goes in as a stream-json
     /// user message carrying base64 vision blocks instead of plain stdin text.
+    @discardableResult
     func start(folder: URL, prompt: String, engine: AgentEngine,
                model: String? = nil, effort: AgentEffort? = nil,
-               imagesJPEG: [Data] = []) {
+               imagesJPEG: [Data] = []) -> UUID? {
         guard let binary = Self.binary(for: engine) else {
             // The entry button is availability-gated, so a missing binary or
             // sign-in here means the user pressed ⏎ and nothing happened —
             // worth a breadcrumb (metadata only, never the prompt).
             DiagnosticsLog.shared.record(provider: "Agent/\(engine.displayName)",
                                          kind: "agent-binary-missing")
-            return
+            return nil
         }
 
         let t = AgentTask(engine: engine, modelID: model, folder: folder,
@@ -812,6 +821,7 @@ final class AgentTaskManager: ObservableObject {
         launch(taskID: t.id, binary: binary, engine: engine, folder: folder,
                prompt: prompt, model: model, effort: effort,
                imagesJPEG: imagesJPEG, resumeSession: nil)
+        return t.id
     }
 
     /// Continue a settled task in the same CLI session — the multi-turn path.

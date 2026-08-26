@@ -359,6 +359,10 @@ struct WhatsNewView: View {
 
             switch action {
             case .forceClickPressure:
+                Text(L("whatsnew.forceClick.caption"))
+                    .font(.sf(12, weight: .medium))
+                    .foregroundStyle(Tokens.text2)
+
                 Image("TrackpadLookupHint")
                     .resizable()
                     .aspectRatio(1400 / 692, contentMode: .fit)

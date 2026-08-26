@@ -1511,7 +1511,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 hasHardwareNotch: hasNotch
             ))
 
-        let hosting = NSHostingView(rootView: root)
+        let hosting = FirstMouseHostingView(rootView: root)
         hosting.frame = rect
         // Let clicks pass through the transparent canvas to apps underneath;
         // only the glass form itself is interactive.
@@ -1520,6 +1520,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         position(panel, on: screen, id: id)
         panel.orderFrontRegardless()
         return panel
+    }
+
+    /// The canvas, with one AppKit behaviour SwiftUI can't reach: a click that
+    /// arrives while the panel isn't key is DELIVERED, not spent making it key.
+    ///
+    /// The island is an overlay you poke at without leaving whatever you were in,
+    /// so it is almost never the key window when you reach for it. AppKit's
+    /// default swallows that first press — which is exactly the press the click
+    /// level's open gesture rides on, and it read as the notch ignoring the click
+    /// (or needing a second one). Everything reachable in this panel is the
+    /// user's own overlay; there is no "click to focus first" step to protect.
+    private final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     }
 
     /// Center the canvas horizontally and flush its top edge to the very top of
@@ -1652,6 +1665,11 @@ enum HideNotchInFullscreen {
 ///
 /// Declared low→high; the picker renders `allCases` in this order.
 enum HoverSensitivity: String, CaseIterable, Identifiable {
+    /// Hover never opens the panel. The notch acknowledges the pointer with a
+    /// haptic tap and a few points of outward flex (`NotchModel.hoverPeek`), and
+    /// a click is what unfurls it — the level for anyone whose pointer lives on
+    /// the menu bar and who wants the island to stay folded until asked.
+    case click
     /// Anything arriving within 45° of horizontal is deferred to the entry watch
     /// at almost any speed, not just at sweep speed — so drifting along the menu
     /// bar only opens the panel if the pointer actually stops on the notch. A
@@ -1669,6 +1687,7 @@ enum HoverSensitivity: String, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
+        case .click:    return L("hover.click")
         case .low:      return L("hover.low")
         case .balanced: return L("hover.balanced")
         case .instant:  return L("hover.instant")
@@ -1682,6 +1701,9 @@ enum HoverSensitivity: String, CaseIterable, Identifiable {
     /// (`NotchModel.isMenuBarSweep`) gets its threshold from the selected policy.
     var blockedAngle: Double {
         switch self {
+        // Never read: `opensOnClickOnly` answers first and this level never
+        // opens on contact at all, so there is no approach left to judge.
+        case .click:    return 0
         // 45° is the natural ceiling: it's exactly "the approach travelled
         // further sideways than downward". Past it the gate would start
         // deferring approaches that are more vertical than horizontal, which no
@@ -1691,6 +1713,11 @@ enum HoverSensitivity: String, CaseIterable, Identifiable {
         case .instant:  return 0
         }
     }
+
+    /// True on the level where hover alone never unfurls the panel — the one
+    /// gate that has to run BEFORE the vector tests, since on this level there
+    /// is no approach good enough to open on.
+    var opensOnClickOnly: Bool { self == .click }
 
     private static let key = "hoverSensitivity"
 

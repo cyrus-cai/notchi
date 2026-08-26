@@ -57,13 +57,13 @@ protocol AIService: Sendable {
 /// The one place a wire output cap is still spoken about.
 ///
 /// Notch does **not** cap output length on the wire. Reply length is a matter of
-/// style, and it is already set where style belongs: the persona says "keep it
-/// under 90 words" (`notchSystemPrompt`). `max_tokens` cannot express that — it
+/// style, and it is already set where style belongs: the persona says to keep the
+/// answer short (`notchSystemPrompt`). `max_tokens` cannot express that — it
 /// isn't a request for brevity, it's a guillotine, and it falls mid-sentence.
 ///
 /// The cap we used to send (a flat 1024) never once shortened an answer: a
-/// 90-word reply is ~150 tokens, five to eight times under it. The only thing it
-/// ever did was cut off models that *think*, because on a reasoning model
+/// few-sentence reply is ~150 tokens, five to eight times under it. The only
+/// thing it ever did was cut off models that *think*, because on a reasoning model
 /// `max_tokens` is not the answer's budget — reasoning and answer come out of one
 /// pot. Measured on the wire, one question, cap vs no cap:
 ///
@@ -82,7 +82,7 @@ enum ReplyTokens {
     /// Anthropic is the exception, and only because its Messages API *requires*
     /// `max_tokens` — omitting it is a 400. So this is a ceiling in the "nothing
     /// should ever legitimately reach it" sense, not a length knob: high enough
-    /// that thinking plus a 90-word answer never comes close, low enough to stay
+    /// that thinking plus a short answer never comes close, low enough to stay
     /// within what every Claude model accepts as a max output.
     ///
     /// Untested here — this machine has no Anthropic key, so unlike the numbers
@@ -114,7 +114,7 @@ enum ReplyTokens {
 /// So the breakage moves with the model roster, and a per-model allow/deny list
 /// would have to be re-litigated on every OpenAI release for a knob we don't want
 /// in the first place. The field is simply not sent — every provider's default is
-/// fine for a 90-word answer.
+/// fine for a short answer.
 ///
 /// No members: unlike `ReplyTokens` there is no value left to hold, so this is a
 /// greppable anchor for the request builders that cite it.
@@ -218,8 +218,11 @@ extension AIService {
 /// never memory — for changeable facts.
 let notchSystemPrompt = """
 You are a helpful assistant living in the notch of a Mac. Answer the user's \
-question concisely and warmly in the user's language. Keep it under 90 words, \
-no markdown headers.
+question concisely and warmly in the user's language. Keep the answer short — \
+a few sentences is usually right — and never pad; go longer only when the \
+question genuinely needs it. Concision is a rule about the answer you write, \
+not about how hard you think: reason as thoroughly as the question deserves, \
+then say it briefly. No markdown headers.
 
 When you mention a link, write it as a Markdown inline link — [visible text](url) \
 — never a bare URL, so it renders as a clickable link rather than plain text.

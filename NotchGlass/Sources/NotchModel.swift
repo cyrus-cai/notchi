@@ -459,6 +459,27 @@ final class NotchModel: ObservableObject {
     /// fade in only under the cursor — at a glance the answer is all there is.
     @Published var pointerInside = false
 
+    /// Mirrors `HoverSensitivity.current` so the island's SwiftUI tree re-renders
+    /// when the level changes. The persisted value stays the source of truth (the
+    /// hover gate reads it live); this is the observable shadow, and every writer
+    /// goes through `applyHoverSensitivity`.
+    @Published private(set) var hoverSensitivity: HoverSensitivity = .current
+
+    /// The `.click` level's hover acknowledgement: WHICH screen's resting notch is
+    /// flexed a few points out under the pointer, saying "yes, I'm here — click
+    /// me". It is a *gesture*, not an open — the panel stays folded until the
+    /// click lands. Per display, because every screen hosts its own island off
+    /// this one model and only the one under the pointer should stir. Raised by
+    /// `hoverEntered`, dropped by the peek watch (and by any open, so the flex
+    /// never survives into the unfurl).
+    @Published private(set) var hoverPeek: CGDirectDisplayID? = nil
+
+    /// Whether `display`'s resting notch is wearing the click level's flex.
+    func isPeeking(on display: CGDirectDisplayID?) -> Bool {
+        guard let display, let peek = hoverPeek else { return false }
+        return peek == display
+    }
+
     /// This thread was opened by a user-defined prompt shortcut (`runPromptShortcut`)
     /// rather than by typing into the panel. Such a run is a one-shot — the user
     /// hit a hotkey on a selection and wants to read the answer — so the result
@@ -1073,6 +1094,16 @@ final class NotchModel: ObservableObject {
         // (`collapseOnLeave` has carried the mirror of this test for exits all
         // along; this is the missing half.)
         guard MouseVelocityTracker.shared.cursorMoved(within: 0.2) else { return }
+        // The click level answers a hover with a gesture instead of an unfurl:
+        // one haptic tap and a few points of outward flex (see `hoverPeek`), so
+        // the notch is visibly awake and reachable while the panel stays folded
+        // until the click. Nothing below this line runs — the vector gate and the
+        // entry watch both exist to decide *when* to open on hover, and here the
+        // answer is never.
+        if sensitivity.opensOnClickOnly {
+            beginHoverPeek(on: display)
+            return
+        }
         // A fast, near-horizontal crossing is someone travelling ALONG the menu
         // bar to a target on the other side of the notch — the single biggest
         // source of accidental unfurls, since the resting hover strip spans the
@@ -1104,6 +1135,10 @@ final class NotchModel: ObservableObject {
         case .instant:  return false
         case .balanced: minSpeed = 900
         case .low:      minSpeed = 150
+        // Unreachable — `hoverEntered` peels `.click` off before the gate — but
+        // "every approach is refused" is the honest answer for the level, and it
+        // keeps the nesting property true if another caller ever appears.
+        case .click:    return true
         }
         let speed = (v.dx * v.dx + v.dy * v.dy).squareRoot()
         guard speed >= minSpeed else { return false }
@@ -1152,6 +1187,101 @@ final class NotchModel: ObservableObject {
         // like. It opens on the calm unfurl, which is what a stopped cursor
         // should get anyway.
         openPanel(on: display, velocity: MouseVelocityTracker.shared.entryVelocity())
+    }
+
+    // MARK: - Click to open (the `.click` sensitivity)
+
+    /// How far the resting notch swells out under the pointer at the click level,
+    /// and — the same number, deliberately — how far past the resting rect the
+    /// pointer may drift before the swell drops. Small on purpose: the shape has
+    /// to read as the notch *noticing* you, not as it opening. Anything bigger and
+    /// it starts promising an unfurl it isn't going to deliver. `NotchIsland`
+    /// turns it into the scale it renders.
+    static let hoverPeekOut: CGFloat = 5
+
+    /// Poll interval of the peek watch — the entry watch's cadence, for the same
+    /// reason: short enough that the flex drops the moment the pointer is gone.
+    private static let hoverPeekTick: TimeInterval = 0.1
+    private var hoverPeekTask: Task<Void, Never>?
+
+    /// Raise the acknowledgement flex, tap once, and watch for the pointer to go.
+    ///
+    /// The leave is POLLED against the static resting rect rather than driven by
+    /// the island's `.onHover`, because the flex moves the island's own tracking
+    /// boundary — precisely the geometry that synthesizes bogus enter/exit events
+    /// (see `pointerInsideIsland`). Judging both edges against a rect the flex
+    /// can't move, and releasing at the flex's own reach rather than at the rect's
+    /// edge, gives the peek plain hysteresis: it cannot flap, and drifting onto
+    /// the flexed shoulder doesn't cancel the very gesture that put it there.
+    private func beginHoverPeek(on display: CGDirectDisplayID?) {
+        // Geometry has to be known — the watch below is the only thing that ever
+        // lowers the flex, and it can't answer against a rect it can't compute.
+        guard let display,
+              pointerInsideRestingNotch(on: display, slop: 0) == true else { return }
+        if hoverPeek != display {
+            hoverPeek = display
+            // The same tap the open would have given, at the moment the notch
+            // acknowledges the pointer. It IS the feedback here: with no unfurl
+            // to watch, the flex alone is a very quiet "seen you".
+            Haptics.alignment()
+        }
+        armHoverPeekWatch(display: display)
+    }
+
+    private func armHoverPeekWatch(display: CGDirectDisplayID?) {
+        hoverPeekTask?.cancel()
+        hoverPeekTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(NotchModel.hoverPeekTick * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            self.hoverPeekTask = nil
+            guard self.hoverPeek != nil, !self.open else { return self.endHoverPeek() }
+            guard self.pointerInsideRestingNotch(on: display,
+                                                 slop: NotchModel.hoverPeekOut) == true
+            else { return self.endHoverPeek() }
+            self.armHoverPeekWatch(display: display)
+        }
+    }
+
+    /// Drop the flex and stop watching. Idempotent — the open path, the level
+    /// change and the watch itself all call it.
+    func endHoverPeek() {
+        hoverPeekTask?.cancel()
+        hoverPeekTask = nil
+        if hoverPeek != nil { hoverPeek = nil }
+    }
+
+    /// A click landed on the resting notch. Only the click level mounts the
+    /// target (see `NotchIsland`), so a click arriving here is unambiguously the
+    /// open gesture.
+    ///
+    /// It opens at ZERO velocity, deliberately. The entry vector exists to let a
+    /// hover-open inherit the momentum of the approach that caused it — but a
+    /// click has no approach: the pointer has been parked on the notch since the
+    /// peek went up. Feeding it `entryVelocity()` anyway read the last 120ms of
+    /// samples, which by then is nothing but the hand's final settle and the
+    /// click's own jitter — a couple of points, but over a few milliseconds, so
+    /// hundreds of points per second. Every click therefore unfurled with a
+    /// sideways lean and shove it had no reason to have. A parked pointer gets
+    /// the calm, centered bloom.
+    func notchClicked(on display: CGDirectDisplayID?) {
+        // The press fires this; the rest of that drag's ticks find it already
+        // open and turn back.
+        guard !open else { return }
+        // The flex is NOT retired here. Dropping it in this call would put it in
+        // the same transaction as `open`, and the island's own peek animation
+        // would then govern the unfurl instead of the open spring. The rendered
+        // swell already collapses on the open (see `NotchIsland.peekScaleX`); the
+        // watch clears the flag a tick later, when nothing on screen depends on it.
+        openPanel(on: display)
+    }
+
+    /// The one writer of the hover level: persists it and updates the observable
+    /// shadow the island renders from, so switching away from `.click` retires a
+    /// standing flex instead of leaving it stuck out.
+    func applyHoverSensitivity(_ newValue: HoverSensitivity) {
+        HoverSensitivity.current = newValue
+        hoverSensitivity = newValue
+        if !newValue.opensOnClickOnly { endHoverPeek() }
     }
 
     // MARK: - Detached session windows (tear-off / 分裂)
@@ -1392,11 +1522,20 @@ final class NotchModel: ObservableObject {
             seed = historyItem?.conversation ?? []
         }
         let isAgent = historyItem?.source == .agent
+        let supportsImages: Bool
+        if isAgent,
+           let rawEngine = historyItem?.agentResume?.engine,
+           let engine = AgentEngine(rawValue: rawEngine) {
+            supportsImages = engine.supportsImageInput
+        } else {
+            supportsImages = activeModelSupportsVision
+        }
         let store = DetachedThreadStore(
             threadID: threadID,
             turns: seed,
             agentFolderPath: isAgent ? historyItem?.link : nil,
-            completedAt: isAgent ? historyItem?.t : nil)
+            completedAt: isAgent ? historyItem?.t : nil,
+            followUpSupportsImages: supportsImages)
         detachedThreadStores[threadID] = store
         return store
     }
@@ -1412,18 +1551,23 @@ final class NotchModel: ObservableObject {
     /// everything is put back and the new round is left detached ("detach,
     /// never cancel" — the same hand-off as the tear-off itself). The round's
     /// snapshots reach the window via `syncInFlight` → `detachedThreadStores`.
-    func submitDetachedFollowUp(threadID: UUID, question: String) {
-        let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !q.isEmpty else { return }
+    func submitDetachedFollowUp(threadID: UUID, question: String,
+                                images: [NSImage] = []) {
+        var q = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        if q.isEmpty {
+            guard !images.isEmpty else { return }
+            q = Self.agentImageOnlyPrompt(count: images.count)
+        }
         // The panel is sitting on this very thread: an ordinary panel submit —
         // both surfaces hear every chunk.
         if threadHistoryID == threadID, !turns.isEmpty {
             text = q
+            askComposeImages = images
             submit()
             return
         }
         runDetachedRound(threadID: threadID, seed: detachedSeed(for: threadID),
-                         question: q)
+                         question: q, images: images)
     }
 
     /// Regenerate the last settled answer from a detached thread window — the
@@ -1467,7 +1611,8 @@ final class NotchModel: ObservableObject {
                                   hideUserBubble: Bool = false,
                                   trackCompactTask: Bool = false,
                                   pin: ModelPin? = nil,
-                                  origin: HistoryItem.Origin? = nil) -> UUID? {
+                                  origin: HistoryItem.Origin? = nil,
+                                  images: [NSImage] = []) -> UUID? {
         // Never stack rounds on one thread from the window: the tear-off
         // dropped the round's task handle, so a second submit couldn't
         // supersede-cancel the first. The field is disabled while streaming;
@@ -1490,7 +1635,7 @@ final class NotchModel: ObservableObject {
                      regenModel: regenOverrideModel,
                      regenProvider: regenOverrideProvider)
         armModelPin(pin)
-        askComposeImages = []
+        askComposeImages = images
         task = nil                                    // detach, never cancel
         turns = seed
         threadHistoryID = threadID
@@ -1520,7 +1665,8 @@ final class NotchModel: ObservableObject {
             // already holding the pair, so the window adopts a live thread rather
             // than an empty one waiting for the first token.
             detachedThreadStores[threadHistoryID] =
-                DetachedThreadStore(threadID: threadHistoryID, turns: turns)
+                DetachedThreadStore(threadID: threadHistoryID, turns: turns,
+                                    followUpSupportsImages: activeModelSupportsVision)
         }
         let landedThreadID = threadHistoryID
         if trackCompactTask, let task {
@@ -2639,7 +2785,7 @@ final class NotchModel: ObservableObject {
             case .liveActivity(let enabled):
                 liveActivityEnabled = enabled
             case .hoverSensitivity(let value):
-                HoverSensitivity.current = value
+                applyHoverSensitivity(value)
             case .noteDestination(let value):
                 NoteDestination.current = value
             case .notesFolder(let path):
@@ -4812,7 +4958,6 @@ final class NotchModel: ObservableObject {
     /// `velocity` is the cursor's approach vector (zero for non-hover opens);
     /// it must land before `open` so the island's animation reads it fresh.
     func openPanel(on display: CGDirectDisplayID?, velocity: CGVector = .zero) {
-        entryVelocity = velocity
         if let display { activeDisplay = display }
         // Only the *closed→open* edge sets the clipboard baseline. Hover fires
         // `openPanel` again on every re-enter and on display migration while already
@@ -4823,6 +4968,16 @@ final class NotchModel: ObservableObject {
         // pre-open resting value forward is what lets that copy-then-open read as
         // fresh in `clipboardContextIfEligible`.
         if !open {
+            // The entry vector belongs to the closed→open EDGE and nowhere else.
+            // Setting it on every call meant the synthetic enter that the unfurling
+            // island fires at its own parked pointer — the island arriving at the
+            // cursor, which `hoverEntered` forwards straight back here — overwrote
+            // the real approach with whatever the last 120ms held. On a click open
+            // that is the press's own jitter: a couple of points over a few
+            // milliseconds, i.e. hundreds of points per second, pointing wherever
+            // the hand happened to twitch. `applyEntryKick` then read it off the
+            // `isOpen` edge and shoved the panel sideways on every single open.
+            entryVelocity = velocity
             // Seed the hover flag from where the pointer really is: a hover-open
             // already had `.onHover` set it, but a hot-key summon under a resting
             // cursor gets no fresh enter event, and its chips would stay hidden
@@ -5285,12 +5440,12 @@ final class NotchModel: ObservableObject {
         submit(hideUserBubble: true)
     }
 
-    /// Arm the next `submit()` with a shortcut's pinned backend. A pin whose
-    /// provider can no longer serve (key deleted, CLI signed out) is dropped
-    /// rather than fired at a backend that will only fail — the shortcut still
-    /// runs, on the current default.
+    /// Arm the next `submit()` with a shortcut's pinned backend. Once saved, that
+    /// provider/model pair is authoritative: losing its key or CLI session should
+    /// surface that backend's error, never silently reroute the shortcut through
+    /// the app's current default.
     private func armModelPin(_ pin: ModelPin?) {
-        guard let pin, ModelCatalogStore.ready(pin.provider) else {
+        guard let pin else {
             regenOverrideModel = nil
             regenOverrideProvider = nil
             return
@@ -5621,7 +5776,11 @@ final class NotchModel: ObservableObject {
         if agentComposeActive {
             guard agentComposeImages.count < Self.composeImageLimit else { return true }
         } else {
-            guard activeModelSupportsVision else { return false }
+            if let engine = agentThreadContinuation {
+                guard engine.supportsImageInput else { return false }
+            } else {
+                guard activeModelSupportsVision else { return false }
+            }
             guard askComposeImages.count < Self.composeImageLimit else { return true }
         }
         // A pasted image is real input, exactly like typed text — so fold the
@@ -5777,27 +5936,41 @@ final class NotchModel: ObservableObject {
     /// owned by the manager — closing the panel doesn't touch it; a notification
     /// announces the finish. Submitting does NOT end the compose: the bucket is a
     /// mode you stay in, so the next task starts armed on the same project.
-    private func submitAgent() {
+    /// The Agent-bucket meaning of Command-Return: start this task and follow it
+    /// straight into its live detail page. Kept separate from plain Return, which
+    /// deliberately leaves the compose bucket visible for quickly starting more
+    /// independent tasks.
+    @discardableResult
+    func submitAgentAndOpenDetail() -> Bool {
+        guard agentComposeActive else { return false }
+        return submitAgent(openDetail: true)
+    }
+
+    @discardableResult
+    private func submitAgent(openDetail: Bool = false) -> Bool {
         var prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
         // Attached images alone are a valid task — a screenshot of the bug IS
         // the description. The CLIs still need some text next to the pixels, so
         // a wordless send rides a minimal stand-in instruction.
         if prompt.isEmpty {
-            guard !agentComposeImages.isEmpty else { return }
+            guard !agentComposeImages.isEmpty else { return false }
             prompt = Self.agentImageOnlyPrompt(count: agentComposeImages.count)
         }
         // No single-task gate: tasks run in parallel — a submit while others
         // are working just spawns another run.
         if let folder = agentComposeFolder {
-            startAgentRun(folder: folder, prompt: prompt)
+            startAgentRun(folder: folder, prompt: prompt, openDetail: openDetail)
         } else {
             pickAgentFolder { [weak self] folder in
-                self?.startAgentRun(folder: folder, prompt: prompt)
+                self?.startAgentRun(folder: folder, prompt: prompt,
+                                    openDetail: openDetail)
             }
         }
+        return true
     }
 
-    private func startAgentRun(folder: URL, prompt: String) {
+    private func startAgentRun(folder: URL, prompt: String,
+                               openDetail: Bool = false) {
         // Pass the model pick only if it still belongs to the armed engine —
         // a stale cross-engine leftover would 404 the run.
         let engine = agentArmedEngine
@@ -5825,9 +5998,14 @@ final class NotchModel: ObservableObject {
                     images.compactMap { Self.encodeJPEGForVision($0) }
                 }.value
             }
-            AgentTaskManager.shared.start(folder: folder, prompt: prompt,
-                                              engine: engine, model: model,
-                                              effort: effort, imagesJPEG: jpegs)
+            if let taskID = AgentTaskManager.shared.start(
+                folder: folder, prompt: prompt, engine: engine, model: model,
+                effort: effort, imagesJPEG: jpegs
+            ), openDetail {
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
+                    self.agentDetailTaskID = taskID
+                }
+            }
         }
         text = ""
         // The bucket survives its own send: sending a task doesn't mean you're done
@@ -6033,37 +6211,50 @@ final class NotchModel: ObservableObject {
     /// round then runs like any background task — the panel drops to idle, the
     /// status row carries the live activity — and on settle it re-files the SAME
     /// Recent row (task id == row id), so reopening lands on the grown thread.
-    func continueAgentThread(prompt: String) {
+    func continueAgentThread(prompt: String, images: [NSImage] = []) {
         guard let item = history.first(where: { $0.id == threadHistoryID }),
               let resume = item.agentResume,
               let engine = AgentEngine(rawValue: resume.engine) else { return }
-        let manager = AgentTaskManager.shared
-        if manager.tasks.contains(where: { $0.id == item.id }) {
-            // The run's task is still in the tray (its status row not yet
-            // dismissed) — a plain follow-up round on it. Settled → spawns
-            // now; still running → the manager queues it for the next round,
-            // so a line typed mid-run is never dropped.
-            manager.followUp(taskID: item.id, prompt: prompt)
-        } else {
-            // The task is gone (row dismissed, or the app relaunched since):
-            // rebuild the prior rounds from the record and spawn a resumed run
-            // under the row's own id.
-            var rounds: [AgentTaskManager.AgentExchange] = []
-            var askedTurn: Turn? = nil
-            for turn in item.conversation {
-                if turn.role == "user" {
-                    askedTurn = turn
-                } else if let asked = askedTurn {
-                    rounds.append(.init(prompt: asked.text, answer: turn.text,
-                                        imageFiles: asked.imageFiles,
-                                        log: turn.agentLog ?? []))
-                    askedTurn = nil
+        let dispatch: ([Data]) -> Void = { jpegs in
+            let manager = AgentTaskManager.shared
+            if manager.tasks.contains(where: { $0.id == item.id }) {
+                // The run's task is still in the tray (its status row not yet
+                // dismissed) — a plain follow-up round on it. Settled → spawns
+                // now; still running → the manager queues it for the next round,
+                // so a line typed mid-run is never dropped.
+                manager.followUp(taskID: item.id, prompt: prompt, imagesJPEG: jpegs)
+            } else {
+                // The task is gone (row dismissed, or the app relaunched since):
+                // rebuild the prior rounds from the record and spawn a resumed run
+                // under the row's own id.
+                var rounds: [AgentTaskManager.AgentExchange] = []
+                var askedTurn: Turn? = nil
+                for turn in item.conversation {
+                    if turn.role == "user" {
+                        askedTurn = turn
+                    } else if let asked = askedTurn {
+                        rounds.append(.init(prompt: asked.text, answer: turn.text,
+                                            imageFiles: asked.imageFiles,
+                                            log: turn.agentLog ?? []))
+                        askedTurn = nil
+                    }
                 }
+                manager.resume(taskID: item.id, engine: engine,
+                               folder: URL(fileURLWithPath: resume.folderPath),
+                               headline: item.q, session: resume.session,
+                               priorRounds: rounds, prompt: prompt,
+                               imagesJPEG: jpegs)
             }
-            manager.resume(taskID: item.id, engine: engine,
-                           folder: URL(fileURLWithPath: resume.folderPath),
-                           headline: item.q, session: resume.session,
-                           priorRounds: rounds, prompt: prompt)
+        }
+        if images.isEmpty {
+            dispatch([])
+        } else {
+            Task {
+                let jpegs = await Task.detached(priority: .userInitiated) {
+                    images.compactMap { Self.encodeJPEGForVision($0) }
+                }.value
+                dispatch(jpegs)
+            }
         }
         newChat()
     }
@@ -6319,7 +6510,8 @@ final class NotchModel: ObservableObject {
         // does the line fall through to the chat model, report as context.
         if agentThreadContinuation != nil {
             text = ""
-            continueAgentThread(prompt: q)
+            askComposeImages = []
+            continueAgentThread(prompt: q, images: pastedImages)
             return
         }
         // Clear any prior error state — this attempt replaces it (XII-85).
@@ -6336,10 +6528,9 @@ final class NotchModel: ObservableObject {
         // override builds against ITS provider.
         let pinnedProvider = overrideProvider ?? APIKeyStore.selectedProvider
         let overrideService: AIService? = overrideModel.flatMap { m in
-            // Keyless backends (the CLI providers) and the custom endpoint
-            // authenticate their own way, so readiness — not a stored key — is the
-            // test, and the key rides along as "" where there is none.
-            guard ModelCatalogStore.ready(pinnedProvider) else { return nil }
+            // Build the explicitly selected backend even if its credentials have
+            // since disappeared. The resulting request will surface that setup
+            // error instead of falling back to an unrelated default provider.
             return AppDelegate.makeService(provider: pinnedProvider,
                                            apiKey: APIKeyStore.keyOrEmpty(for: pinnedProvider),
                                            model: m)

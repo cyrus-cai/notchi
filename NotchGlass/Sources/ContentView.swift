@@ -88,16 +88,22 @@ struct ContentView: View {
             // ignores the keyboard entirely — including Esc, which the recorder
             // uses to cancel.
             if ShortcutRecording.isActive { return false }
-            // ⌘↵ submits the current line to the *other family* — Ask ⇄ Capture
-            // (Note/Remind) — the one-key correction for when the inline hint reads
-            // the line wrong (see NotchModel.submitOtherFamily; Tab remains the
-            // precise three-way pick). Fresh prompt only: intent routing never
-            // applies to follow-ups, and it needs text to send. keyCode 36 is Return.
+            // In Agent, ⌘↵ starts this task and opens its live detail page.
+            // Outside Agent it keeps its original meaning: submit the current line
+            // to the *other family* — Ask ⇄ Capture (Note/Remind) — as the
+            // one-key correction for a misread intent. Fresh prompt only; intent
+            // routing never applies to follow-ups. keyCode 36 is Return.
             if ReservedAppShortcut.sendOther.matches(event),
-               model.mode == .idle, model.hasText,
-               !model.showSettings, !model.showWhatsNew, !model.showHistory {
-                model.submitOtherFamily()
-                return true
+               model.mode == .idle,
+               !model.showSettings, !model.showWhatsNew, !model.showHistory,
+               model.agentDetailTaskID == nil {
+                if model.agentComposeActive {
+                    return model.submitAgentAndOpenDetail()
+                }
+                if model.hasText {
+                    model.submitOtherFamily()
+                    return true
+                }
             }
             // The prompt's two destination switches are customizable too. They
             // stay scoped to the live composer so the same chord remains free in
@@ -743,6 +749,64 @@ struct NotchIsland: View {
         return senseEarContent.right + senseEarPad * 2
     }
 
+    /// The click level's hover acknowledgement is live on THIS island: the notch
+    /// is flexed a few points out under the pointer, with the panel still folded.
+    /// Scoped to this display so the pointer on one screen doesn't nudge the
+    /// resting notch on every other one.
+    /// Whether the click level's flex is raised for THIS island. Deliberately
+    /// free of `isOpen`: it is the key the peek animation is scoped to, and if it
+    /// flipped on the open edge the peek's own spring would fire on that
+    /// transaction and take the unfurl with it. The rendered swell is what
+    /// collapses on the open (`peekScaleX`/`peekScaleY` read `isOpen`), so it
+    /// merges into the expansion on the open spring; the flag itself is retired a
+    /// tick later by the peek watch, with nothing left on screen to move.
+    private var peeking: Bool {
+        model.isPeeking(on: metrics.displayID)
+    }
+
+    /// The click level's acknowledgement, as a scale on the composited island —
+    /// deliberately NOT a layout change. Growing the frame and the corner radius
+    /// re-laid out the island and rebuilt the whole glass stack (native glass
+    /// region, the blurred shadow's cached texture, the rim stroke, the
+    /// compositing group) on every frame — for a move of a few points, which
+    /// layout then quantizes to whole pixels, so the flex crept across three or
+    /// four pixel steps instead of gliding. A scale is a GPU transform:
+    /// sub-pixel, no relayout, nothing re-rendered.
+    ///
+    /// The two axes are scaled SEPARATELY, and neither is `hoverPeekOut / width`.
+    /// A single uniform scale grows a wide, flat shape almost entirely sideways —
+    /// 10pt across, 4pt down — which reads as the notch stretching into its busy
+    /// ears, not as it leaning out toward you. These two put the same `hoverPeekOut`
+    /// on every exposed edge instead: the island dilates, so the gesture has no
+    /// direction of its own beyond "out".
+    private var peekScaleX: CGFloat {
+        guard peeking, !isOpen else { return 1 }
+        return (width + NotchModel.hoverPeekOut * 2) / max(width, 1)
+    }
+
+    private var peekScaleY: CGFloat {
+        guard peeking, !isOpen else { return 1 }
+        let h = max(metrics.restHeight, 1)
+        return (h + NotchModel.hoverPeekOut) / h
+    }
+
+    /// Where the island's top-center scale anchor falls inside the resting zone's
+    /// own box — the zone is `topBleed` taller than the island it sits in, and its
+    /// top hangs that far above the screen edge the outer scale hinges on. The
+    /// camera dot and the ears counter-scale about THIS point, which is what keeps
+    /// the drawn lens on the physical camera while the shell dilates around it.
+    private var peekContentAnchor: UnitPoint {
+        UnitPoint(x: 0.5, y: topBleed / max(metrics.restHeight + topBleed, 1))
+    }
+
+    /// True when a click on the resting island is the open gesture. Only then is
+    /// the tap target armed: mounting it unconditionally would make the resting
+    /// notch swallow clicks on every level, and on a virtual notch (drawn over an
+    /// external screen's menu bar) those clicks belong to the menu bar.
+    private var clickToOpenArmed: Bool {
+        !isOpen && model.hoverSensitivity.opensOnClickOnly
+    }
+
     private var width: CGFloat {
         if isOpen { return model.openWidth }
         return Tokens.notchWidth + earLeft + earRight
@@ -816,6 +880,10 @@ struct NotchIsland: View {
                 }
             }
             .frame(height: metrics.restHeight + topBleed)
+            // Undo the click level's dilation for the zone's *contents*: the shell
+            // grows, the camera lens and the ears hold still. Exact inverse about
+            // the same point in space, on the same transaction as the outer scale.
+            .scaleEffect(x: 1 / peekScaleX, y: 1 / peekScaleY, anchor: peekContentAnchor)
 
             // The glass body unfurls below the notch zone when open. On the way out
             // it fades FIRST (driven by `model.closing`), while the shell holds its
@@ -951,6 +1019,13 @@ struct NotchIsland: View {
         // touch to say it'll take the session back on release.
         .scaleEffect(model.detachMergeHint ? 1.02 : 1, anchor: .top)
         .animation(.spring(response: 0.32, dampingFraction: 0.7), value: model.detachMergeHint)
+        // The click level's hover acknowledgement — the resting notch dilating a
+        // few points under the pointer. Top-anchored so it hinges off the bezel
+        // and the black stays fused to the housing. This one `.animation` carries
+        // the counter-scale inside the resting zone too (same subtree, same
+        // transaction), which is why the lens never wobbles against the shell.
+        .scaleEffect(x: peekScaleX, y: peekScaleY, anchor: .top)
+        .animation(peekSettle, value: peeking)
         // The entry kick deforms the whole composited island — anchored at the
         // top edge so it hinges off the bezel. The system glass backdrop does
         // NOT ride along with SwiftUI render transforms, so the deform briefly
@@ -966,6 +1041,19 @@ struct NotchIsland: View {
         // top of the open spring's own per-frame layout work.
         .modifier(EntryKickEffect(tx: kick.tx, shear: kick.shear, squash: kick.squash).ignoredByLayout())
         .contentShape(NotchShape(bottomRadius: bottomRadius))
+        // The click level's target: at rest, on that level only, the island IS a
+        // button. Masked rather than conditionally mounted so the shape stops
+        // claiming clicks the moment the level changes back.
+        //
+        // A zero-distance drag, NOT a tap: `TapGesture` resolves on mouse-UP, so
+        // the panel sat still for however long the press lasted and then unfurled
+        // — the click read as laggy against a hover-open, which fires the instant
+        // the pointer arrives. This opens on the press itself. (`notchClicked`
+        // ignores the rest of the drag's ticks.)
+        .gesture(DragGesture(minimumDistance: 0)
+                    .onChanged { _ in model.notchClicked(on: metrics.displayID) },
+                 including: clickToOpenArmed ? .gesture : .none)
+
         // Tear-off lives on the header strip only (the grips in NotchBody's
         // resultHeader / agentDetailHeader) — dragging the body or free glass
         // must never split the session by accident.
@@ -1124,6 +1212,16 @@ struct NotchIsland: View {
     private var busySettle: Animation {
         guard !reduceMotion else { return .easeOut(duration: 0.30) }
         return .spring(response: 0.50, dampingFraction: 0.95)
+    }
+
+    /// The click level's swell, in and out: quick — it is an acknowledgement, and
+    /// a leisurely one reads as the panel starting to open — and overshoot-free,
+    /// so the retract can never render the island narrower than the hardware notch
+    /// it is impersonating (the constraint `busySettle` exists for; the swell hangs
+    /// over live menu bar exactly the same way).
+    private var peekSettle: Animation {
+        guard !reduceMotion else { return .easeOut(duration: 0.16) }
+        return .spring(response: 0.26, dampingFraction: 0.95)
     }
 
     /// The retract animation (XII-108): instead of a flat ease-out, the shell
