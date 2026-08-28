@@ -122,10 +122,28 @@ enum ProxyConfig {
 
     private nonisolated(unsafe) static var sessionCache: URLSession?
 
+    /// A one-off session carrying the same manual-proxy settings as `urlSession`
+    /// but owning `delegate`. Needed for the updater's download: `URLSession.shared`
+    /// can't have a delegate, and a *per-task* delegate handed to the async
+    /// `download(for:delegate:)` never receives the download-progress callbacks —
+    /// the caller has to own the session for those to arrive. Invalidate it when
+    /// the transfer is done (the session retains its delegate).
+    static func session(delegate: URLSessionDelegate) -> URLSession {
+        URLSession(configuration: proxiedConfiguration(),
+                   delegate: delegate, delegateQueue: nil)
+    }
+
     private static func makeSession() -> URLSession {
+        guard normalize(manual).flatMap(URL.init(string:))?.host != nil else { return .shared }
+        return URLSession(configuration: proxiedConfiguration())
+    }
+
+    /// `.default`, plus the manual proxy if one is set.
+    private static func proxiedConfiguration() -> URLSessionConfiguration {
+        let config = URLSessionConfiguration.default
         guard let url = normalize(manual).flatMap(URL.init(string:)),
               let host = url.host
-        else { return .shared }
+        else { return config }
         let scheme = url.scheme?.lowercased() ?? "http"
         let port = url.port ?? (scheme.hasPrefix("socks") ? 1080 : 80)
         var proxies: [AnyHashable: Any] = [:]
@@ -141,9 +159,8 @@ enum ProxyConfig {
             proxies[kCFNetworkProxiesHTTPSProxy as String] = host
             proxies[kCFNetworkProxiesHTTPSPort as String] = port
         }
-        let config = URLSessionConfiguration.default
         config.connectionProxyDictionary = proxies
-        return URLSession(configuration: config)
+        return config
     }
 
     // MARK: - Normalizing what the user typed

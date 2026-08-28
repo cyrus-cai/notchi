@@ -94,6 +94,15 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.7.3",
+            date: "2026-08-29",
+            improvements: [
+                "The update chip stays in place while an update runs and fills with the download's progress.",
+                "The panel holds open until the update finishes, then closes before Notchi relaunches.",
+                "A failed update can be retried from the chip itself.",
+            ]
+        ),
+        Entry(
             version: "0.7.2",
             date: "2026-08-28",
             heroAssetName: "WhatsNew072Promo",

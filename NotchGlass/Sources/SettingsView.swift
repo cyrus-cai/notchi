@@ -18,6 +18,11 @@ extension Notification.Name {
     /// Posted by the app menu's "Check for Updates…" command so `AppDelegate`
     /// can open Settings → About and kick off a user-initiated update check.
     static let checkForUpdatesRequested = Notification.Name("checkForUpdatesRequested")
+    /// Posted the instant before an installed update quits and reopens the app,
+    /// so `AppDelegate` can fold the panel on purpose first. Without it the whole
+    /// island blinks out mid-"Installing…" and comes back a second later with no
+    /// motion in between.
+    static let updateWillRelaunch = Notification.Name("updateWillRelaunch")
     /// Posted after the user changes the Display placement (Settings → Display),
     /// so `AppDelegate` can create/destroy per-screen panels immediately.
     static let displayPlacementChanged = Notification.Name("displayPlacementChanged")

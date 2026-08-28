@@ -875,7 +875,7 @@ struct NotchBody: View {
                 // run with no history and no pin).
                 // A waiting build says so in words right here, on the home page —
                 // not as a dot behind the ⋯ menu (see `updateCue`).
-                let pending = model.hasText ? nil : pendingUpdateVersion
+                let pending = model.hasText ? nil : updateChipFace
                 // One chip on that edge, never two: an update waiting outranks the
                 // notes for the build already running, so "What's New" stands down
                 // until the update is taken.
@@ -884,7 +884,7 @@ struct NotchBody: View {
                 if !cluster.isEmpty || showsCue || pending != nil {
                     Spacer(minLength: 8)
                     if let pending {
-                        updateCue(version: pending, height: 30,
+                        updateCue(face: pending, height: 30,
                                   hovered: $updateCueIdleHovered)
                             .transition(.scale(scale: 0.7).combined(with: .opacity))
                     }
@@ -897,6 +897,11 @@ struct NotchBody: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        // The update chip arrives, changes face, and leaves on this row. Without
+        // a transaction covering the change its `.transition` never runs and the
+        // chip simply blinks out of existence the moment the update is taken —
+        // which is precisely when the user is looking for a sign it worked.
+        .animation(.spring(response: 0.38, dampingFraction: 0.86), value: updateChipFace)
         .padding(.top, 10)
         // The second grip on the idle page (see `detachGrip`): the bucket row's
         // free strip between the pill and the Recent cluster pulls the whole
@@ -1795,8 +1800,8 @@ struct NotchBody: View {
             // floats above this row, covering nothing), and the menu drops its own
             // update row meanwhile (see `updateMenuRow`), so the action lives in
             // exactly one place.
-            if let pending = pendingUpdateVersion {
-                updateCue(version: pending, height: 34,
+            if let pending = updateChipFace {
+                updateCue(face: pending, height: 34,
                           hovered: $updateCueBarHovered)
                     .transition(
                         .move(edge: .leading)
@@ -1858,6 +1863,9 @@ struct NotchBody: View {
         .onChange(of: model.agentComposeActive) { _, _ in
             collapseManageMenu()
         }
+        // Same reason as the bucket row: give the update chip's arrival, face
+        // changes, and exit a transaction to ride, or they cut.
+        .animation(.spring(response: 0.38, dampingFraction: 0.86), value: updateChipFace)
         // One inset, both sides: the ⋯ and the Recent chevron sit the same distance
         // from their own edge, so the bar's two corners read as a matched pair. The
         // call site supplies the outward pull (the body's own 15pt is too generous
@@ -1871,6 +1879,29 @@ struct NotchBody: View {
     private var pendingUpdateVersion: String? {
         if case .available(let v) = updater.phase { return v }
         return nil
+    }
+
+    /// What the update chip on the bar is showing, if anything. The chip used to
+    /// exist only while a build was waiting, so taking the update made it vanish
+    /// mid-tap and the download ran with nothing on screen at all. It now stays
+    /// through the whole story — waiting, downloading, installing, failed — and
+    /// changes face in place.
+    enum UpdateChipFace: Equatable {
+        case ready(String)      // a newer build is published
+        case downloading(Double) // fetching the zip; 0…1 of the bytes
+        case installing         // unpacking and swapping the bundle
+        case failed             // it didn't take — tapping tries the same build again
+    }
+
+    private var updateChipFace: UpdateChipFace? {
+        switch updater.phase {
+        case .available(let v): return .ready(v)
+        case .updating:
+            if case .downloading(let f) = updater.stage { return .downloading(f) }
+            return .installing
+        case .failed: return .failed
+        case .unknown, .upToDate: return nil
+        }
     }
 
     /// The ⋯ entry: a single Liquid Glass chip that pops the manage menu up above
@@ -1968,7 +1999,10 @@ struct NotchBody: View {
     /// in here would be the same tap twice.
     @ViewBuilder
     private var updateMenuRow: some View {
-        if pendingUpdateVersion != nil {
+        // A failure keeps the row: the chip beside it retries the same build, but
+        // "check again" is a different thing to want, and it must not vanish just
+        // because the last attempt didn't take.
+        if updateChipFace != nil, updateChipFace != .failed {
             EmptyView()
         } else {
             manageMenuRow(icon: LucideIcons.circleFadingArrowUp,
@@ -3753,26 +3787,88 @@ struct NotchBody: View {
     ///
     /// `height` matches whichever row hosts it — 30 on the bucket row, 34 on the
     /// manage bar — so the chip lines up with the chevron / ⋯ beside it.
-    private func updateCue(version: String, height: CGFloat,
+    private func updateCue(face: UpdateChipFace, height: CGFloat,
                            hovered: Binding<Bool>) -> some View {
-        Button {
-            updater.update()
+        // Only the two resting faces are actions. A running update ignores taps
+        // (there's nothing a second one would do) but keeps the hover-free glass
+        // it already had, rather than greying out into a disabled control.
+        let working: Bool = {
+            switch face {
+            case .downloading, .installing: return true
+            case .ready, .failed: return false
+            }
+        }()
+        let failed = face == .failed
+        // The fill: 0 while a build only waits, the byte fraction as it arrives,
+        // and full for the swap — so the chip IS the progress bar, and the tap
+        // that starts the update lands on something that visibly begins moving.
+        let fill: Double = {
+            switch face {
+            case .ready, .failed: return 0
+            case .downloading(let f): return max(0.04, min(1, f))
+            case .installing: return 1
+            }
+        }()
+        return Button {
+            switch face {
+            case .ready: updater.update()
+            // A failure retries in place. It deliberately does NOT open the
+            // releases page: the panel shouldn't throw the user out to a browser
+            // on its own — the manual download is still one line away in
+            // Settings → About, where it's spelled out.
+            case .failed: updater.retry()
+            case .downloading, .installing: break
+            }
         } label: {
             HStack(spacing: 5) {
+                // The same arrow throughout, failure included — the red is
+                // already the signal, and a second mark beside it only adds
+                // something to decode.
                 LucideIcon(mark: LucideIcons.circleFadingArrowUp, size: 12)
-                Text(L("about.update.to", version))
+                Text(updateCueLabel(face))
                     .font(.sf(11.5, weight: .semibold))
                     .lineLimit(1)
             }
-            .foregroundStyle(hovered.wrappedValue ? Tokens.text1 : Tokens.text2)
+            .foregroundStyle(failed ? Tokens.danger.opacity(0.92)
+                                    : (hovered.wrappedValue ? Tokens.text1 : Tokens.text2))
             .padding(.horizontal, 10)
             .frame(height: height)
-            .glassCapsule(in: Capsule(), brighter: hovered.wrappedValue)
+            .glassCapsule(in: Capsule(), brighter: hovered.wrappedValue && !working,
+                          tint: failed ? Tokens.danger : nil)
+            // The progress wash rides on top of the glass and under nothing —
+            // a brighter run of the same white the capsule is already lit with,
+            // so a filling chip reads as the same object gaining light rather
+            // than a foreign bar dropped inside it.
+            .overlay(alignment: .leading) {
+                GeometryReader { geo in
+                    Rectangle()
+                        .fill(.white.opacity(0.13))
+                        .frame(width: max(0, geo.size.width * fill))
+                }
+                .clipShape(Capsule())
+                .allowsHitTesting(false)
+                .opacity(working ? 1 : 0)
+            }
             .contentShape(Capsule())
         }
         .buttonStyle(GlassPressStyle())
+        .allowsHitTesting(!working)
         .onHover { hovered.wrappedValue = $0 }
         .animation(.easeOut(duration: 0.18), value: hovered.wrappedValue)
+        // The label and the fill are the only things that move between faces:
+        // the capsule itself stays put and re-sizes around the new word, so the
+        // chip morphs in place instead of one chip leaving and another arriving.
+        .animation(.spring(response: 0.34, dampingFraction: 0.9), value: face)
+    }
+
+    /// The word on the update chip for each face.
+    private func updateCueLabel(_ face: UpdateChipFace) -> String {
+        switch face {
+        case .ready(let v):   return L("about.update.to", v)
+        case .downloading:    return L("about.updating")
+        case .installing:     return L("about.installing")
+        case .failed:         return L("about.updateFailed.short")
+        }
     }
 
     private var followUpRow: some View {

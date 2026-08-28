@@ -4258,31 +4258,29 @@ struct InlineSettingsView: View {
                 updater.update()
             }
         case .updating:
+            // The download is the long part of an update, so say how far along it
+            // is rather than spinning for a minute with nothing to read. The
+            // figure sits outside `updateSlot` on purpose: keying the cross-fade
+            // on it would re-run the fade on every percent.
             HStack(spacing: 7) {
                 ProgressView().controlSize(.small)
-                Text(L("about.updating"))
+                Text(updater.stage == .installing ? L("about.installing") : L("about.updating"))
                     .font(.sf(12, weight: .semibold))
                     .foregroundStyle(Tokens.text2)
+                if case .downloading(let f) = updater.stage {
+                    Text("\(Int(f * 100))%")
+                        .font(.sf(11.5, weight: .medium))
+                        .monospacedDigit()
+                        .foregroundStyle(Tokens.text4)
+                }
             }
         case .failed:
-            Button {
-                NSWorkspace.shared.open(UpdaterService.releasesPage)
-            } label: {
-                HStack(spacing: 7) {
-                    Circle()
-                        .fill(Tokens.danger)
-                        .frame(width: 6, height: 6)
-                    Text(L("about.updateFailed"))
-                        .font(.sf(11.5, weight: .medium))
-                        .foregroundStyle(Tokens.danger.opacity(0.92))
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(Capsule(style: .continuous).fill(Tokens.danger.opacity(0.12)))
-                .overlay(Capsule(style: .continuous).strokeBorder(Tokens.danger.opacity(0.22), lineWidth: 0.5))
-                .contentShape(Capsule(style: .continuous))
-            }
-            .buttonStyle(.plain)
+            // A statement, not an errand: no dot to decode and no jump out to a
+            // web page — the update simply didn't take, and trying later is the
+            // whole of what there is to do. (The chip on the panel retries.)
+            Text(L("about.updateFailed"))
+                .font(.sf(11.5, weight: .medium))
+                .foregroundStyle(Tokens.danger.opacity(0.92))
         case .checking:
             HStack(spacing: 7) {
                 ProgressView()

@@ -5285,6 +5285,15 @@ final class NotchModel: ObservableObject {
             cancelLeaveWatch()
             return
         }
+        // An update the user just started holds the panel too. It runs for as
+        // long as the download takes and ends by quitting and relaunching the
+        // app — folding the panel mid-way would take the only progress on screen
+        // with it and make the relaunch arrive out of nowhere. Esc still closes
+        // deliberately; only the leave-fold stands down.
+        if UpdaterService.shared.phase == .updating {
+            cancelLeaveWatch()
+            return
+        }
         // The pointer leaving a *resting* notch on a screen that isn't hosting
         // the open panel has nothing to fold — and must never close the island
         // that's actually in use on another display.

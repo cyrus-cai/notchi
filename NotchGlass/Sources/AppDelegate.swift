@@ -544,6 +544,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // posed without a real newer release. Screenshot aid only.
         if let v = env["NOTCH_DEMO_UPDATE"], !v.isEmpty {
             UpdaterService.shared._debugPinAvailable(v)
+            // With NOTCH_DEMO_UPDATE_AUTO=1 it also presses Update itself after a
+            // beat — the REAL download and swap, against the real latest release.
+            // How the update path gets exercised end to end without a pointer.
+            if env["NOTCH_DEMO_UPDATE_AUTO"] == "1" {
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 4_000_000_000)
+                    UpdaterService.shared.update()
+                }
+            }
+        }
+        // NOTCH_DEMO_UPDATE_FLOW=<version> plays the whole update story on a timer
+        // (waiting → downloading → installing → failed) against no real release,
+        // so the chip's transitions can be watched without one. Debug aid only.
+        if let v = env["NOTCH_DEMO_UPDATE_FLOW"], !v.isEmpty {
+            UpdaterService.shared._debugRunFlow(
+                v, failing: env["NOTCH_DEMO_UPDATE_FAIL"] == "1",
+                auto: env["NOTCH_DEMO_UPDATE_AUTO"] == "1")
         }
         // NOTCH_DEMO_AGENT_RUN=<activity line> seeds one RUNNING agent card
         // (prompt via NOTCH_DEMO_AGENT_PROMPT, elapsed seconds via
@@ -773,6 +790,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // actually on (mouse position), not wherever the notch lives.
                     self.model.openSettings(on: self.displayForSummon())
                 }
+            }
+        }
+
+        // The installed update is about to quit and reopen the app. Close the
+        // panel the way any other close closes it, so the last thing on screen is
+        // the island folding — not the whole surface vanishing between frames.
+        NotificationCenter.default.addObserver(
+            forName: .updateWillRelaunch,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.model.beginClose()
             }
         }
 

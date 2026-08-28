@@ -28,6 +28,17 @@ final class UpdaterService: ObservableObject {
 
     @Published private(set) var phase: Phase = .unknown
 
+    /// How far a running update has got — what the chip's fill draws.
+    /// `.downloading` carries the byte fraction (0…1) reported by the transfer;
+    /// `.installing` covers the extract-and-swap that follows, which has no
+    /// measurable progress but is short. Only meaningful while `phase == .updating`.
+    enum Stage: Equatable {
+        case downloading(Double)
+        case installing
+    }
+
+    @Published private(set) var stage: Stage = .downloading(0)
+
     /// A user-initiated "Check for updates" in flight, and its momentary result.
     /// Separate from `phase` so the manual button can show a spinner and a brief
     /// "up to date" confirmation without touching the silent auto-check contract
@@ -167,6 +178,59 @@ final class UpdaterService: ObservableObject {
         phase = .available(version)
     }
     private var demoPinned = false
+
+    /// Sim hook (`NOTCH_DEMO_UPDATE_FLOW=<version>`): pin a waiting build and, when
+    /// the chip is actually tapped, play the whole update story — the download
+    /// filling, the install, and the ending — with no real release to fetch and
+    /// nothing on disk touched. So the flow can be *clicked* through rather than
+    /// only posed.
+    ///
+    /// It plays the SUCCESS ending by default: the real quit-and-relaunch, which
+    /// is the one part of the flow that can't be faked convincingly by holding a
+    /// phase. `NOTCH_DEMO_UPDATE_FAIL=1` plays the failure ending instead, which
+    /// loops back to the waiting build a few seconds later so the next tap
+    /// replays it. Debug builds only.
+    /// `NOTCH_DEMO_UPDATE_AUTO=1` also presses the chip itself after a beat, so
+    /// the whole run can be recorded without driving the pointer.
+    func _debugRunFlow(_ version: String, failing: Bool, auto: Bool = false) {
+        demoPinned = true
+        demoSim = version
+        demoSimFails = failing
+        phase = .available(version)
+        guard auto else { return }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            update()
+        }
+    }
+
+    private var demoSimFails = false
+
+    /// Non-nil while the sim hook is armed — makes `update()` play the timeline
+    /// instead of downloading and swapping anything.
+    private var demoSim: String?
+
+    private func runSimulatedUpdate(_ version: String) {
+        stage = .downloading(0)
+        phase = .updating
+        Task { @MainActor in
+            // ~7s of download, long enough for the fill to read as a fill.
+            for i in 1...70 {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                stage = .downloading(Double(i) / 70)
+            }
+            stage = .installing
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            guard demoSimFails else {
+                // The real ending, not a mimed one — the app quits and reopens.
+                await finishAndRelaunch(Bundle.main.bundleURL)
+                return
+            }
+            phase = .failed
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            phase = .available(version)
+        }
+    }
     #else
     private let demoPinned = false
     #endif
@@ -188,9 +252,14 @@ final class UpdaterService: ObservableObject {
     /// Download the latest release and swap it in. Runs the file work off the
     /// main actor; on success the app relaunches itself (this call never returns
     /// to a UI that needs cleaning up), on failure the old bundle is rolled back
-    /// and the Version row shows the releases-page fallback.
+    /// and the chip offers a retry.
     func update() {
-        guard case .available = phase else { return }
+        guard case .available(let version) = phase else { return }
+        attemptedVersion = version
+        #if DEBUG
+        if let version = demoSim { runSimulatedUpdate(version); return }
+        #endif
+        stage = .downloading(0)
         phase = .updating
         Task {
             do {
@@ -201,25 +270,123 @@ final class UpdaterService: ObservableObject {
                       let url = URL(string: Self.token != nil ? asset.url : asset.browser_download_url)
                 else { throw UpdateError.badResponse }
 
-                let (tmp, resp) = try await ProxyConfig.urlSession.download(
-                    for: Self.request(url, accept: "application/octet-stream"))
+                // The zip is tens of megabytes on an ordinary connection — long
+                // enough that an unmarked wait reads as nothing happening. The
+                // download reports its byte count back so the chip can fill as it
+                // arrives, and hands back a zip already parked at a stable path.
+                let (zip, resp) = try await Downloader.run(
+                    Self.request(url, accept: "application/octet-stream")
+                ) { fraction in
+                    Task { @MainActor [weak self] in
+                        guard let self, self.phase == .updating,
+                              case .downloading = self.stage else { return }
+                        self.stage = .downloading(fraction)
+                    }
+                }
                 guard (resp as? HTTPURLResponse)?.statusCode == 200 else {
+                    try? FileManager.default.removeItem(at: zip)
                     throw UpdateError.badResponse
                 }
-                // URLSession's temp file may be reclaimed once this scope moves
-                // on — park the zip somewhere stable before the detached work.
-                let zip = tmp.deletingLastPathComponent()
-                    .appendingPathComponent("notch-update-\(ProcessInfo.processInfo.globallyUniqueString).zip")
-                try FileManager.default.moveItem(at: tmp, to: zip)
-
+                stage = .installing
                 let dest = Bundle.main.bundleURL
                 try await Task.detached(priority: .userInitiated) {
                     try Self.swapBundle(zip: zip, dest: dest)
                 }.value
-                Self.relaunch(dest)
+                await finishAndRelaunch(dest)
             } catch {
                 phase = .failed
             }
+        }
+    }
+
+    /// The updater's download, run as a classic `URLSessionDownloadTask` on a
+    /// session this object owns.
+    ///
+    /// Not `URLSession.download(for:delegate:)`: a *per-task* delegate handed to
+    /// that async call never receives `didWriteData`, so the progress the chip
+    /// draws would stay at zero for the whole transfer (verified — zero callbacks
+    /// against the real release asset). Owning the session is what makes the
+    /// progress callbacks arrive.
+    ///
+    /// The finished file is moved to a stable path inside the delegate callback,
+    /// because URLSession deletes it the moment that callback returns.
+    private final class Downloader: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+        private let onFraction: @Sendable (Double) -> Void
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<(URL, URLResponse), Error>?
+
+        private init(onFraction: @escaping @Sendable (Double) -> Void) {
+            self.onFraction = onFraction
+        }
+
+        /// Downloads `request`, reporting 0…1 as the bytes land. Returns the zip
+        /// at a path the caller owns (and must clean up) plus the response.
+        static func run(_ request: URLRequest,
+                        onFraction: @escaping @Sendable (Double) -> Void)
+        async throws -> (URL, URLResponse) {
+            let downloader = Downloader(onFraction: onFraction)
+            let session = ProxyConfig.session(delegate: downloader)
+            defer { session.finishTasksAndInvalidate() }
+            return try await withCheckedThrowingContinuation { continuation in
+                downloader.lock.lock()
+                downloader.continuation = continuation
+                downloader.lock.unlock()
+                session.downloadTask(with: request).resume()
+            }
+        }
+
+        /// Resume the continuation exactly once — both the finish and the
+        /// completion callback fire, in either order, on a failed transfer.
+        private func settle(_ result: Result<(URL, URLResponse), Error>) {
+            lock.lock()
+            let continuation = self.continuation
+            self.continuation = nil
+            lock.unlock()
+            continuation?.resume(with: result)
+        }
+
+        func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                        didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
+                        totalBytesExpectedToWrite: Int64) {
+            // A server that doesn't send a length reports -1; leave the chip on
+            // its last known fill rather than jumping around.
+            guard totalBytesExpectedToWrite > 0 else { return }
+            onFraction(min(1, Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)))
+        }
+
+        func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                        didFinishDownloadingTo location: URL) {
+            let parked = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("notch-update-\(ProcessInfo.processInfo.globallyUniqueString).zip")
+            do {
+                try FileManager.default.moveItem(at: location, to: parked)
+                settle(.success((parked, downloadTask.response ?? URLResponse())))
+            } catch {
+                settle(.failure(error))
+            }
+        }
+
+        func urlSession(_ session: URLSession, task: URLSessionTask,
+                        didCompleteWithError error: Error?) {
+            guard let error else { return }   // success already settled above
+            settle(.failure(error))
+        }
+    }
+
+    /// The version the running attempt is for. Kept so a failure can be tried
+    /// again in place — the failed chip retries rather than sending the user out
+    /// to a web page.
+    private var attemptedVersion: String?
+
+    /// Try the same update again after a failure. Falls back to a fresh check if
+    /// we've somehow lost which version it was.
+    func retry() {
+        guard phase == .failed else { return }
+        if let version = attemptedVersion {
+            phase = .available(version)
+            update()
+        } else {
+            check()
         }
     }
 
@@ -324,6 +491,16 @@ final class UpdaterService: ObservableObject {
         try p.run()
         p.waitUntilExit()
         guard p.terminationStatus == 0 else { throw UpdateError.toolFailed }
+    }
+
+    /// Fold the panel, let that motion land, then quit and reopen. The pause is
+    /// the whole point: terminating straight out of "Installing…" reads as a
+    /// crash, while an island that closes first makes the relaunch look like the
+    /// end of the action it was.
+    private func finishAndRelaunch(_ bundle: URL) async {
+        NotificationCenter.default.post(name: .updateWillRelaunch, object: nil)
+        try? await Task.sleep(nanoseconds: 420_000_000)
+        Self.relaunch(bundle)
     }
 
     /// Spawn a detached `open` for the (new) bundle and quit. The half-second
