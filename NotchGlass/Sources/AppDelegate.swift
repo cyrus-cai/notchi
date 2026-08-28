@@ -180,6 +180,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let canvasWidth: CGFloat = 760
     private let canvasHeight: CGFloat = 640
 
+    /// How far the canvas extends ABOVE the screen's top edge — and it has to,
+    /// or the island goes dead on the screen's very top row, which is exactly
+    /// where a pointer thrown at the notch ends up.
+    ///
+    /// Shove the cursor up and macOS parks it at `y == screen.frame.maxY`: the
+    /// boundary itself. Every rect test in the stack — the WindowServer's own
+    /// routing included — is half-open (`[minY, maxY)`), so with the canvas top
+    /// flush to that edge the topmost row belonged to NO window of ours. The
+    /// press was delivered to whatever sat underneath instead: traced, it showed
+    /// up on the global monitor with `window=none` and nothing after it, while
+    /// the same click a few points lower opened in 15ms.
+    ///
+    /// Nothing exists above the screen edge to steal, so the strip costs
+    /// nothing; `makePanel` insets the content by the same amount, which keeps
+    /// every drawn pixel exactly where it was.
+    static let canvasTopOverreach: CGFloat = 4
+
     /// Resolve a duplicate-instance launch: the NEWEST instance survives (in the
     /// reinstall flow that's the freshly installed build; in the Xcode dev loop
     /// it's the copy you just ran) and every older duplicate is told to quit.
@@ -243,6 +260,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // implicit `.medium` written down here, once, rather than being disarmed
         // by the changed default.
         ForceClickPressure.seedDefaultForExistingInstalls()
+
+        // Trace the click level's press → unfurl path (see `ClickOpenProbe`) —
+        // temporary instrumentation for the "sometimes takes two clicks" report.
+        ClickOpenProbe.shared.start(model: model)
 
         // Seed the configured flag to match the service the model launched with.
         model.isConfigured = AppDelegate.isConfigured()
@@ -1482,12 +1503,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// metrics so the SwiftUI tree knows which display it's on, how tall its
     /// resting notch is, and whether to draw the camera dot.
     private func makePanel(on screen: NSScreen, id: CGDirectDisplayID) -> NotchPanel {
-        let rect = NSRect(x: 0, y: 0, width: canvasWidth, height: canvasHeight)
+        let overreach = Self.canvasTopOverreach
+        let rect = NSRect(x: 0, y: 0, width: canvasWidth, height: canvasHeight + overreach)
         let panel = NotchPanel(contentRect: rect)
 
         let hasNotch = screen.safeAreaInsets.top > 0
-        let root = ContentView(model: model)
-            .frame(width: canvasWidth, height: canvasHeight, alignment: .top)
+        let hardwareNotchWidth = Self.hardwareNotchWidth(of: screen)
+        let root = ZStack(alignment: .top) {
+            ContentView(model: model)
+                .frame(width: canvasWidth, height: canvasHeight, alignment: .top)
+                // Push the drawing back down by the overreach, so the strip above
+                // the screen edge is empty canvas and the island still starts
+                // exactly at the top of the visible screen.
+                .padding(.top, overreach)
+                .frame(width: canvasWidth, height: canvasHeight + overreach, alignment: .top)
+
+            // A real in-bounds target for the physical top row. The first
+            // `overreach` points sit above the screen; the extra two overlap the
+            // visible notch, putting y == screen.maxY strictly INSIDE the target
+            // instead of on another half-open max edge. It only exists while the
+            // click level is armed, and its width is the measured hardware cutout
+            // so live menu-bar pixels on either shoulder remain click-through.
+            TopEdgeClickTarget(model: model, displayID: id)
+                .frame(width: hardwareNotchWidth ?? Tokens.notchWidth,
+                       height: overreach + 2)
+        }
+            .frame(width: canvasWidth, height: canvasHeight + overreach, alignment: .top)
             // The live string store — observed app-wide so an App Language switch
             // re-renders every panel's SwiftUI tree instantly, no relaunch.
             .environmentObject(Localization.shared)
@@ -1535,6 +1576,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     }
 
+    /// The click level's last two visible top-edge points, hosted inside the
+    /// overreaching canvas instead of outside the island's layout bounds. SwiftUI
+    /// can route this target all the way to its gesture because no ancestor has
+    /// to accept an out-of-bounds hit first.
+    private struct TopEdgeClickTarget: View {
+        @ObservedObject var model: NotchModel
+        let displayID: CGDirectDisplayID
+
+        private var armed: Bool {
+            !model.isOpen(on: displayID) && model.hoverSensitivity.opensOnClickOnly
+        }
+
+        var body: some View {
+            Color.clear
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { _ in model.notchClicked(on: displayID) },
+                    including: armed ? .gesture : .none
+                )
+                .allowsHitTesting(armed)
+        }
+    }
+
     /// Center the canvas horizontally and flush its top edge to the very top of
     /// the screen, so the SwiftUI notch sits exactly where the hardware notch
     /// (or the menu bar, on external screens) is.
@@ -1544,7 +1609,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // AppKit's origin is bottom-left; place the canvas so its top aligns
         // with the screen's top edge.
         let y = full.maxY - canvasHeight
-        let frame = NSRect(x: x, y: y, width: canvasWidth, height: canvasHeight)
+        // Bottom stays put; the extra height goes on top, past the screen edge.
+        let frame = NSRect(x: x, y: y,
+                           width: canvasWidth,
+                           height: canvasHeight + Self.canvasTopOverreach)
         panel.setFrame(frame, display: true)
         // Tell the model where this canvas sits on screen and how tall its
         // resting notch is — the ground-truth pointer test that filters
@@ -1556,6 +1624,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             frame,
             restHeight: hasNotch ? screen.safeAreaInsets.top + 1 : Self.menuBarHeight(of: screen),
             hardwareNotchWidth: Self.hardwareNotchWidth(of: screen),
+            topOverreach: Self.canvasTopOverreach,
             for: id)
     }
 

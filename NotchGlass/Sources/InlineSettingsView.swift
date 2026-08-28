@@ -155,6 +155,9 @@ struct InlineSettingsView: View {
 
     /// Whether the custom cross-provider model picker overlay is open.
     @State private var modelPickerOpen = false
+    /// The Prompt Shortcut editor uses the same model menu, but owns a separate
+    /// presentation bit so opening it cannot disturb Settings' main model row.
+    @State private var promptModelPickerOpen = false
 
     /// Connectivity-test state. `testing` drives the spinner; `testResult` is the
     /// last verdict shown under the key field (nil = nothing tested yet).
@@ -2154,31 +2157,7 @@ struct InlineSettingsView: View {
                 Button {
                     modelPickerOpen = true
                 } label: {
-                    HStack(spacing: 7) {
-                        // The model wears its vendor mark and reads by name — the
-                        // chip is about the model, not the plumbing behind it.
-                        VendorLogo(vendor: ModelRatings.vendor(for: effectiveModelID,
-                                                              provider: provider),
-                                   fallback: effectiveModelID)
-                            .frame(width: 15, height: 15)
-                        // Claude Code's ids are rolling aliases — the chip names the
-                        // concrete model behind one ("Opus 5"), not the family word.
-                        Text(ModelRatings.prettyName(for: effectiveModelID,
-                                                     provider: provider))
-                            .font(.sf(13))
-                            .foregroundStyle(Tokens.text1)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                        Image(systemName: "chevron.up.chevron.down")
-                            .font(.sf(10, weight: .semibold))
-                            .foregroundStyle(Tokens.text3)
-                    }
-                    .padding(.leading, 10)
-                    .padding(.trailing, 9)
-                    .frame(height: 30)
-                    .background(Capsule().fill(.white.opacity(0.06)))
-                    .overlay(Capsule().strokeBorder(.white.opacity(0.12), lineWidth: 0.5))
-                    .contentShape(Capsule())
+                    modelPickerLabel(provider: provider, modelID: effectiveModelID)
                 }
                 .buttonStyle(.plain)
                 .fixedSize()
@@ -2209,7 +2188,7 @@ struct InlineSettingsView: View {
                     // Suspend the panel's leave-collapse while the menu is up so
                     // moving the pointer into it (a separate window) never folds the
                     // settings out from under it.
-                    model.isModelPickerOpen = modelPickerOpen
+                    model.isModelPickerOpen = modelPickerOpen || promptModelPickerOpen
                 }
                 // Manual refresh: the automatic paths are all cached (the curated
                 // manifest for 6h, a vendor's `/v1/models` for an hour, the CLI
@@ -2251,6 +2230,31 @@ struct InlineSettingsView: View {
                 modelRowHovering = hovering
             }
         }
+    }
+
+    /// The shared closed state for every full model menu. Keeping the vendor mark,
+    /// name, chevrons, glass, and metrics in one label prevents a secondary picker
+    /// (such as Prompt Shortcuts) from drifting into a parallel style again.
+    private func modelPickerLabel(provider: Provider, modelID: String) -> some View {
+        HStack(spacing: 7) {
+            VendorLogo(vendor: ModelRatings.vendor(for: modelID, provider: provider),
+                       fallback: modelID)
+                .frame(width: 15, height: 15)
+            Text(ModelRatings.prettyName(for: modelID, provider: provider))
+                .font(.sf(13))
+                .foregroundStyle(Tokens.text1)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Image(systemName: "chevron.up.chevron.down")
+                .font(.sf(10, weight: .semibold))
+                .foregroundStyle(Tokens.text3)
+        }
+        .padding(.leading, 10)
+        .padding(.trailing, 9)
+        .frame(height: 30)
+        .background(Capsule().fill(.white.opacity(0.06)))
+        .overlay(Capsule().strokeBorder(.white.opacity(0.12), lineWidth: 0.5))
+        .contentShape(Capsule())
     }
 
     /// Whether the refresh arrow is on screen — hovered, or busy and therefore
@@ -3467,6 +3471,8 @@ struct InlineSettingsView: View {
     private func closePromptShortcutEditor(_ id: UUID) {
         if presentedPromptShortcutID == id { presentedPromptShortcutID = nil }
         if recordingShortcut == .prompt(id) { recordingShortcut = nil }
+        promptModelPickerOpen = false
+        model.isModelPickerOpen = modelPickerOpen
         dropBlankPromptShortcuts()
     }
 
@@ -3671,52 +3677,34 @@ struct InlineSettingsView: View {
         )
     }
 
-    /// One provider's pinnable models, precomputed so the menu below stays a
-    /// shallow expression — the nested ForEach/Section written inline in the row
-    /// blew past the type checker's budget.
-    private struct PromptModelGroup: Identifiable {
-        let provider: Provider
-        let models: [String]
-        var id: String { provider.rawValue }
-    }
-
-    /// Providers a shortcut can actually be pinned to: the ones that can serve a
-    /// request as things stand (key stored, or a signed-in CLI). Offering a
-    /// provider with no key would be offering a pin that silently falls back.
-    private var promptModelGroups: [PromptModelGroup] {
-        Provider.offered
-            .filter(ModelCatalogStore.ready)
-            .map { PromptModelGroup(provider: $0, models: $0.availableModels) }
-    }
-
-    /// A dedicated model control in the card, rather than a submenu inside an
-    /// unrelated overflow menu. The closed chip always names what this shortcut
-    /// will run; the menu keeps native sections and checkmarks for the long list.
+    /// Prompt Shortcuts use the same cross-provider menu as the main model picker:
+    /// the same family fold, score badges, hover detail card, and provider hierarchy.
+    /// Only callable providers are included because a shortcut pin must be runnable
+    /// immediately; key setup still belongs to the main Model settings pane.
     private func promptModelPicker(for id: UUID) -> some View {
         let selection = promptModelBinding(for: id)
-        return GlassMenu(title: promptModelDisplayName(for: id)) {
-            ForEach(promptModelGroups) { group in
-                SwiftUI.Section(group.provider.displayName) {
-                    ForEach(group.models, id: \.self) { name in
-                        let pin = ModelPin(provider: group.provider, model: name)
-                        Button { selection.wrappedValue = pin } label: {
-                            menuOption(ModelRatings.prettyName(for: name,
-                                                               provider: group.provider),
-                                       selected: selection.wrappedValue == pin)
-                        }
-                    }
-                }
-            }
+        let pin = selection.wrappedValue
+        return Button {
+            promptModelPickerOpen = true
+        } label: {
+            modelPickerLabel(provider: pin.provider, modelID: pin.model)
         }
-    }
-
-    /// The model chip names the shortcut's saved model. Provider remains visible
-    /// inside the opened menu, where it helps disambiguate choices without making
-    /// the closed chip verbose.
-    private func promptModelDisplayName(for id: UUID) -> String {
-        let pin = promptShortcuts.first(where: { $0.id == id })?.pin
-            ?? PromptShortcut.currentModelPin
-        return ModelRatings.prettyName(for: pin.model, provider: pin.provider)
+        .buttonStyle(.plain)
+        .fixedSize()
+        .modelMenu(isPresented: $promptModelPickerOpen,
+                   models: catalog.rows(selected: pin.provider).filter { $0.hasKey },
+                   selectedProvider: pin.provider,
+                   selectedID: pin.model,
+                   onSelect: { provider, modelID in
+                       selection.wrappedValue = ModelPin(provider: provider, model: modelID)
+                   },
+                   onConfigure: { _ in })
+        .onChange(of: promptModelPickerOpen) {
+            if promptModelPickerOpen {
+                Task { await catalog.loadAll() }
+            }
+            model.isModelPickerOpen = modelPickerOpen || promptModelPickerOpen
+        }
     }
 
     /// Whether the force click box offers this row as a button. Persisted like

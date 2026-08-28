@@ -3318,9 +3318,9 @@ private struct CompactShortcutPromptView: View {
     private static let inputVerticalPadding: CGFloat = 4
     /// The input's type size: the card's own row type, not the notch's 16.5 idle
     /// prompt. That size is scaled to the island — dropped into this small card
-    /// it towers over the shortcut titles right above it, and the box reads as
-    /// two type scales stacked. One size for the whole card.
-    private static let fontSize = pickFontSize
+    /// it towers over the shortcut titles right below it, and the box reads as
+    /// two type scales stacked.
+    private static let fontSize: CGFloat = 14.5
     static var restingRowHeight: CGFloat {
         max(34, max(27, PromptField.lineHeight(for: fontSize))
             + inputVerticalPadding * 2)
@@ -3330,8 +3330,10 @@ private struct CompactShortcutPromptView: View {
     }
     /// The shortcut rows' type and slot, raised from the `/` menu's numbers for
     /// the same reason: there they are a completion list under a caret, here they
-    /// are the surface's primary buttons.
-    static let pickFontSize: CGFloat = 14.5
+    /// are the surface's primary buttons. Held a notch under the input above
+    /// them: the line the caret sits on leads the card, and matching it exactly
+    /// made the coloured chips read as a second prompt rather than as its answers.
+    static let pickFontSize: CGFloat = 13.5
     static let pickRowHeight: CGFloat = 32
     static let historyRowHeight: CGFloat = 34
     /// Match the main flow: let the Recent content extend naturally until it

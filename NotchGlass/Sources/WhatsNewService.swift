@@ -94,6 +94,18 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.7.2",
+            date: "2026-08-28",
+            heroAssetName: "WhatsNew072Promo",
+            features: [
+                "Hover over any model to compare its speed, intelligence, cost efficiency, context window, and capabilities.",
+            ],
+            improvements: [
+                "Models that cannot read images now continue with the text instead of failing the whole reply.",
+                "Prompt Shortcut cards use richer colored glass and a clearer visual hierarchy.",
+            ]
+        ),
+        Entry(
             version: "0.7.1",
             date: "2026-08-26",
             features: [

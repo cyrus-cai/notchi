@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import QuartzCore
 
 /// One model in the picker's menu: the model itself plus which provider serves it and
 /// whether that provider has a usable key. Keyless models still appear (so the user
@@ -33,9 +34,9 @@ struct PickerModel: Identifiable {
 /// custom list. It was a 300pt floating panel whose rows arrived in one long
 /// cross-provider run, which is both more screen than the question deserves and an
 /// order nobody could name. An `NSMenu` fixes both at once: the top level is the
-/// providers you can call, each one opening its own models, so the ordering is a
-/// fact ("who serves it, then that provider's own order") instead of a ranking, and
-/// the whole thing occupies exactly as much space as a menu.
+/// providers you can call, each one opening its own models. Families keep their
+/// catalog order while siblings rank by cost efficiency, so comparisons stay local
+/// instead of turning the whole menu into one cross-vendor leaderboard.
 ///
 /// Within a provider, its shortlist (`PickerModel.featured` — the picks plus the
 /// newest arrivals) sits above a separator, the rest of the catalog below it, so the
@@ -101,11 +102,14 @@ private struct ModelMenuPresenter: NSViewRepresentable {
         DispatchQueue.main.async { context.coordinator.present(from: view) }
     }
 
-    final class Coordinator: NSObject {
+    final class Coordinator: NSObject, NSMenuDelegate {
         var parent: ModelMenuPresenter
         /// True from the moment a present is scheduled until the menu closes — a
         /// re-render while the menu is up must not stack a second one.
         var showing = false
+        /// The card that rides beside the menu. Built lazily so a copy that never
+        /// opens the picker never makes a window.
+        private let detail = ModelDetailPanel.shared
 
         init(_ parent: ModelMenuPresenter) { self.parent = parent }
 
@@ -137,6 +141,7 @@ private struct ModelMenuPresenter: NSViewRepresentable {
 
         private func finish() {
             showing = false
+            detail.scheduleHide()
             if parent.isPresented { parent.isPresented = false }
         }
 
@@ -158,8 +163,17 @@ private struct ModelMenuPresenter: NSViewRepresentable {
 
         // MARK: Building
 
-        private func buildMenu() -> NSMenu {
+        /// Every menu and submenu comes from here so each one reaches the delegate.
+        /// `willHighlightItem` is per-menu, and a model row lives in a submenu two
+        /// levels down — a delegate on the root alone would hear nothing.
+        private func newMenu() -> NSMenu {
             let menu = NSMenu()
+            menu.delegate = self
+            return menu
+        }
+
+        private func buildMenu() -> NSMenu {
+            let menu = newMenu()
             let models = parent.models
             // Locked to one provider: its models, flat. A single-item provider level
             // would be a step that leads nowhere.
@@ -199,16 +213,16 @@ private struct ModelMenuPresenter: NSViewRepresentable {
                let current = models.first(where: { $0.info.id == parent.selectedID }) {
                 item.subtitle = current.displayName
             }
-            let sub = NSMenu()
+            let sub = newMenu()
             fill(sub, with: models)
             item.submenu = sub
             return item
         }
 
-        /// A provider's models: the shortlist, then one "More models" item holding the
-        /// rest of its catalog. The tail is the long half — dozens of near-duplicate
-        /// and single-purpose ids — so it goes behind a door instead of being laid out
-        /// under the picks. An empty list still says so rather than opening blank.
+        /// A provider's models: every model with a useful cost-efficiency score,
+        /// plus exceptionally intelligent 5/5 models even when their score is low.
+        /// Each family contributes at most five rows; unscored, low-scoring, and
+        /// overflow siblings live under "More models".
         private func fill(_ menu: NSMenu, with models: [PickerModel]) {
             guard !models.isEmpty else {
                 let empty = NSMenuItem(title: L("model.picker.empty"), action: nil,
@@ -217,25 +231,76 @@ private struct ModelMenuPresenter: NSViewRepresentable {
                 menu.addItem(empty)
                 return
             }
-            // The model in effect always rides up top, shortlisted or not — its tick is
-            // the one thing the menu must show without opening anything.
-            let isCurrent = { (m: PickerModel) in
-                m.provider == self.parent.selectedProvider && m.info.id == self.parent.selectedID
+            let ranked = rankedWithinFamilies(models)
+            var primary: [PickerModel] = []
+            var moreModels: [PickerModel] = []
+            var visibleByFamily: [String: Int] = [:]
+            for model in ranked {
+                let family = familyKey(model)
+                if showsOutsideMoreModels(model), visibleByFamily[family, default: 0] < 5 {
+                    primary.append(model)
+                    visibleByFamily[family, default: 0] += 1
+                } else {
+                    moreModels.append(model)
+                }
             }
-            var featured = models.filter { $0.featured || isCurrent($0) }
-            var rest = models.filter { !$0.featured && !isCurrent($0) }
-            // Nothing shortlisted (a gateway of vendors we ship no mark for): show the
-            // catalog itself rather than a lone "More models" wrapping the whole list.
-            if featured.isEmpty { featured = rest; rest = [] }
-            for m in featured { menu.addItem(modelItem(m)) }
-            guard !rest.isEmpty else { return }
-            menu.addItem(.separator())
+            for m in primary { menu.addItem(modelItem(m)) }
+            guard !moreModels.isEmpty else { return }
+            if !primary.isEmpty { menu.addItem(.separator()) }
             let more = NSMenuItem(title: L("model.picker.moreModels"), action: nil,
                                   keyEquivalent: "")
-            let sub = NSMenu()
-            for m in rest { sub.addItem(modelItem(m)) }
+            let sub = newMenu()
+            for m in moreModels { sub.addItem(modelItem(m)) }
             more.submenu = sub
             menu.addItem(more)
+        }
+
+        /// The main list keeps every scored model at 60 or above. Below that floor,
+        /// only a model whose displayed Intelligence meter is the full 5/5 remains;
+        /// the meter uses the measured bar first and the existing curated fallback.
+        private func showsOutsideMoreModels(_ model: PickerModel) -> Bool {
+            guard let stats = Provider.modelStats(model.info.id),
+                  let value = stats.value else { return false }
+            let intelligence = stats.intelligenceBar ?? model.info.intelligence
+            return value >= 60 || intelligence == 5
+        }
+
+        /// Preserve the catalog's family order, but rank siblings by the same
+        /// 0–100 cost-efficiency score shown on the detail card. A missing score is
+        /// normal for an unbenchmarked model, so those rows stay stable at the end
+        /// of their family rather than being assigned a made-up value.
+        private func rankedWithinFamilies(_ models: [PickerModel]) -> [PickerModel] {
+            var familyOrder: [String] = []
+            var families: [String: [(offset: Int, model: PickerModel)]] = [:]
+            for (offset, model) in models.enumerated() {
+                let family = familyKey(model)
+                if families[family] == nil { familyOrder.append(family) }
+                families[family, default: []].append((offset, model))
+            }
+            return familyOrder.flatMap { family in
+                (families[family] ?? []).sorted { a, b in
+                    let av = Provider.modelStats(a.model.info.id)?.value
+                    let bv = Provider.modelStats(b.model.info.id)?.value
+                    switch (av, bv) {
+                    case let (x?, y?) where x != y: return x > y
+                    case (_?, nil):                 return true
+                    case (nil, _?):                 return false
+                    default:                        return a.offset < b.offset
+                    }
+                }.map(\.model)
+            }
+        }
+
+        /// The leading product word is the family users scan: Claude, Gemini,
+        /// GPT, Kimi, MiniMax, Qwen, and so on. Stop before a version digit or the
+        /// first separator so Gemini and Gemma remain distinct while every Gemini
+        /// generation still compares together.
+        private func familyKey(_ model: PickerModel) -> String {
+            let title = model.displayName.components(separatedBy: " · ").first
+                ?? model.displayName
+            let lower = title.lowercased()
+            let boundary = lower.firstIndex { $0 == "-" || $0 == " " || $0.isNumber }
+            return boundary.map { String(lower[..<$0]) } ?? lower
         }
 
         private func modelItem(_ m: PickerModel) -> NSMenuItem {
@@ -245,6 +310,9 @@ private struct ModelMenuPresenter: NSViewRepresentable {
             item.representedObject = Box(m)
             item.state = (m.provider == parent.selectedProvider
                           && m.info.id == parent.selectedID) ? .on : .off
+            if let value = Provider.modelStats(m.info.id)?.value {
+                item.badge = NSMenuItemBadge(string: "\(value)")
+            }
             // A model whose provider has no key can still be picked — it just routes
             // to that provider's key setup instead of switching the backend, and says
             // so rather than sitting there greyed with no explanation. Pre-14.4 has no
@@ -258,6 +326,24 @@ private struct ModelMenuPresenter: NSViewRepresentable {
             }
             return item
         }
+
+        // MARK: Detail card
+
+        /// Follow the highlight. Rows that aren't a model — a provider, "More
+        /// models", a section header, or nothing at all — take the card away
+        /// rather than leaving the last model's figures stranded next to
+        /// something they don't describe.
+        func menu(_ menu: NSMenu, willHighlight item: NSMenuItem?) {
+            guard let m = (item?.representedObject as? Box)?.model else {
+                detail.scheduleHide()
+                return
+            }
+            detail.show(m)
+        }
+
+        /// Covers the submenu case too: stepping back out of a provider closes
+        /// that menu, and the card has to go with it.
+        func menuDidClose(_ menu: NSMenu) { detail.scheduleHide() }
 
         /// `representedObject` is `Any?`; `PickerModel` is a struct, so it rides in a
         /// class box rather than relying on bridging.
@@ -276,6 +362,789 @@ private struct ModelMenuPresenter: NSViewRepresentable {
         }
     }
 }
+// MARK: - Model detail card
+
+/// What one model is, beside the menu that lists it.
+///
+/// The menu row carries the name and nothing else, on purpose: the figures that
+/// decide a pick — how smart, how fast, how good a deal — are three numbers, and
+/// three numbers crammed onto every row is a column of digits nobody can read
+/// without a legend. So the menu stays a menu and the detail hangs off the
+/// highlighted row, one model at a time, where each figure gets a label and a
+/// meter instead of a bare integer.
+///
+/// The meters are the scale `ModelRatings` already defines (5 = the top of the
+/// field, 1 = the bottom). Where Artificial Analysis has measured a model, the
+/// bar comes from that measurement, ranked against the manifest's own lineup —
+/// see `barScale` in `docs/api/model-stats.js` for why the lineup and not AA's
+/// whole catalog. Where it hasn't, the bar falls back to the curated table, which
+/// is the same scale by construction.
+struct ModelDetailCard: View {
+    let model: PickerModel
+    /// The reading to draw *right now*, which mid-hover is somewhere between the
+    /// last model's figures and this one's. See `Figures`.
+    let figures: Figures
+    /// Whether the pointer is over the scoring link. Pushed in rather than sensed:
+    /// see `scoringLinkFrame(in:)`.
+    let scoringHovered: Bool
+    let onOpenScoringDetails: () -> Void
+
+    /// Menu-adjacent, so it takes the corner radius of the things macOS pops up
+    /// next to a menu rather than the tighter one a panel body uses.
+    private static let shape = RoundedRectangle(cornerRadius: 22, style: .continuous)
+
+    private var stats: RemoteModelManifest.ModelStats? { Provider.modelStats(model.info.id) }
+
+    /// The row title, split at the qualifier the catalogs append when a bare model
+    /// name would collide across engines ("Gpt-5.6-terra · commandcode").
+    ///
+    /// Left whole it wraps wherever the column runs out, which strands the "·" on
+    /// a line of its own and then truncates the engine — the separator is the
+    /// narrowest thing on the line, so it is exactly where a greedy wrap lands.
+    /// Split, the break is the one the name already implies.
+    private var title: (name: String, qualifier: String?) {
+        let parts = model.displayName.components(separatedBy: " · ")
+        guard parts.count > 1, let last = parts.last else { return (model.displayName, nil) }
+        return (parts.dropLast().joined(separator: " · "), last)
+    }
+
+    /// AA's measurement first, the curated guess second. `ModelInfo.speed` and
+    /// `.intelligence` are always populated (heuristic at worst), so these two
+    /// meters are never absent; `value` has no curated equivalent and simply
+    /// doesn't draw when unmeasured.
+    ///
+    /// The card draws whatever it is handed rather than reading these off the
+    /// model, because the interesting positions are the ones *between* two models:
+    /// hovering down the menu moves the meters and the gauge from where they were
+    /// to where they belong instead of cutting between stills. `targetFigures` is
+    /// where that travel ends; `ModelDetailPanel` drives it.
+    static func targetFigures(for model: PickerModel) -> Figures {
+        let stats = Provider.modelStats(model.info.id)
+        return Figures(value: Double(stats?.value ?? 0),
+                       speed: Double(stats?.speedBar ?? model.info.speed),
+                       intelligence: Double(stats?.intelligenceBar ?? model.info.intelligence))
+    }
+
+    /// 0–100, and only ever measured — there is no curated stand-in for "how much
+    /// intelligence per dollar", so an unmeasured model simply has no ring. Its
+    /// *presence* doesn't animate: the ring is part of the card's layout, and a
+    /// gauge shrinking away while the title reflows next to it reads as a glitch.
+    /// An unmeasured model rests at 0, so a measured neighbour still counts up
+    /// from nothing.
+    static func hasValue(_ model: PickerModel) -> Bool {
+        Provider.modelStats(model.info.id)?.value != nil
+    }
+
+    /// The three figures mid-travel: the gauge out of 100, the two meters out of 5.
+    /// Continuous rather than the integers they come from — the whole point is the
+    /// positions in between.
+    struct Figures: Equatable {
+        var value: Double = 0
+        var speed: Double = 0
+        var intelligence: Double = 0
+
+        /// Straight-line blend. The easing lives in the driver, so this stays the
+        /// one obvious thing.
+        func lerp(to other: Figures, _ t: Double) -> Figures {
+            Figures(value: value + (other.value - value) * t,
+                    speed: speed + (other.speed - speed) * t,
+                    intelligence: intelligence + (other.intelligence - intelligence) * t)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .center, spacing: 8) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(title.name)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Tokens.text1)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let qualifier = title.qualifier {
+                        Text(qualifier)
+                            .font(.system(size: 9.5, weight: .medium))
+                            .foregroundStyle(Tokens.text3)
+                            .lineLimit(1)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill(Tokens.ink.opacity(0.14))
+                                    .overlay(
+                                        Capsule(style: .continuous)
+                                            .strokeBorder(Color.white.opacity(0.10), lineWidth: 0.5)
+                                    )
+                            )
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                if Self.hasValue(model) { ValueRing(score: figures.value) }
+            }
+
+            Meter(title: L("model.detail.speed"), level: figures.speed)
+            Meter(title: L("model.detail.intelligence"), level: figures.intelligence)
+
+            if let context = model.info.contextLabel {
+                HStack(spacing: 8) {
+                    Text(L("model.detail.context"))
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Tokens.text3)
+                    Spacer(minLength: 8)
+                    if let words = model.info.contextWordsLabel {
+                        Text(L("model.detail.words", words))
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(Tokens.text4)
+                    }
+                    Text(context)
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(Tokens.text1)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 7) {
+                // NOT `model.info.vision`. That field comes from
+                // `ModelRatings.looksVision`, a 2023-shaped allowlist that reads
+                // vision off the id ("claude", "gemini", "-vl") and therefore
+                // tells every GLM 5 model it can't see — the exact bug
+                // `Provider.modelSupportsVision` was written to replace, using the
+                // manifest's generated blocklist plus what a rejected image
+                // actually taught us.
+                Capability(symbol: "eye", title: L("model.detail.vision"),
+                           supported: Provider.modelSupportsVision(model.info.id))
+                // A vendor that publishes no `supported_parameters` leaves
+                // `info.toolUse` false, which is an absence of data being rendered
+                // as a "no". The provider gate is the real answer.
+                Capability(symbol: "wrench.and.screwdriver", title: L("model.detail.toolUse"),
+                           supported: model.info.toolUse || model.provider.supportsTools)
+                // Only ever stated in the positive. Reasoning has no authoritative
+                // source here — `looksReasoning` matches on "thinking"/"-r1"-ish
+                // ids and misses every hybrid model that reasons without saying so
+                // in its name — so a "Reasoning Unsupported" row would be a guess
+                // printed as a fact. No row means we don't know, which is true.
+                if model.info.reasoning {
+                    Capability(symbol: "brain", title: L("model.detail.reasoning"),
+                               supported: true)
+                }
+                if stats != nil { scoringDetailsLink }
+            }
+        }
+        .padding(12)
+        .frame(width: ModelDetailPanel.width, alignment: .leading)
+        .background {
+            // This card floats over arbitrary apps, so the glass needs its own dark
+            // legibility veil: a bright page otherwise washes out the secondary
+            // labels and scoring explanation even though the backdrop still blurs.
+            ZStack {
+                Self.shape.fill(.clear)
+                    .nativeGlass(in: Self.shape, tintOpacity: 0.34)
+                    .overlay(Self.shape.fill(Color.black.opacity(0.28)))
+                Self.shape
+                    .fill(LinearGradient(colors: [.white.opacity(0.10), .clear],
+                                         startPoint: .top, endPoint: .center))
+                    .blendMode(.plusLighter)
+                Self.shape.strokeBorder(
+                    LinearGradient(colors: [.white.opacity(0.32), .white.opacity(0.07)],
+                                   startPoint: .top, endPoint: .bottom),
+                    lineWidth: 0.75)
+            }
+            .compositingGroup()
+        }
+        .environment(\.colorScheme, .dark)
+    }
+
+    /// The full methodology belongs on a durable, linkable page rather than in a
+    /// translucent menu card. Only measured cards offer the link; a card running
+    /// entirely on the curated fallback has no AA figures to explain.
+    ///
+    /// It sits below the capability rows as a footnote, not as a peer of them: at
+    /// rest it is meta-weight text with the arrow barely there, and only under the
+    /// pointer does it brighten to say it is a control.
+    private var scoringDetailsLink: some View {
+        Button(action: onOpenScoringDetails) {
+            HStack(spacing: 7) {
+                Text(L("model.detail.scoringDetails"))
+                    .font(.system(size: 11.5, weight: .medium))
+                Spacer(minLength: 4)
+                // Held in the layout at rest rather than removed, so arriving on
+                // the row reveals the arrow instead of shuffling the text.
+                Image(systemName: "arrow.up.right")
+                    .font(.system(size: 11, weight: .medium))
+                    .opacity(scoringHovered ? 1 : 0)
+            }
+            .foregroundStyle(scoringHovered ? Tokens.text1 : Tokens.text4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.top, 1)
+    }
+
+    /// Where the link lands on screen, given the panel it is drawn in.
+    ///
+    /// The card cannot sense its own hover: `onHover` is fed by tracking areas,
+    /// and this card lives beside a tracking `NSMenu` whose nested event loop
+    /// delivers no mouse-moved events to other windows — and even if it flipped a
+    /// `@State`, SwiftUI's update pass never gets a turn to redraw it (the same
+    /// reason `figures` are pushed in frame by frame). So `ModelDetailPanel`'s
+    /// pointer poll does the hit test against this rect and pushes the answer back
+    /// in as `scoringHovered`. Screen coordinates, so measured up from the card's
+    /// bottom edge, which is where the link sits.
+    static func scoringLinkFrame(in panelFrame: NSRect) -> NSRect {
+        let font = NSFont.systemFont(ofSize: 11.5, weight: .medium)
+        let height = ceil(font.ascender - font.descender)
+        return NSRect(x: panelFrame.minX + 12, y: panelFrame.minY + 12,
+                      width: panelFrame.width - 24, height: height)
+    }
+
+    /// Cost efficiency, in the corner rather than as a third meter.
+    ///
+    /// It doesn't belong on the same scale as the other two: speed and
+    /// intelligence are properties of the model, and this is a verdict about the
+    /// two of them against the price — a different kind of statement, and the one
+    /// people skim for. A gauge reads as a score out of a fixed maximum, which is
+    /// exactly what it is (0–100 against the manifest's lineup).
+    ///
+    /// The label rides the outside of the arc rather than sitting under it: a line
+    /// of text below the gauge was a second element competing with the model name
+    /// for the top of the card, and "Cost efficiency" set flat is wider than the
+    /// gauge it belongs to. Curved, it is part of the same object.
+    private struct ValueRing: View {
+        /// Continuous while it travels; the number in the middle is this rounded,
+        /// so it counts through every value on the way rather than jumping.
+        let score: Double
+
+        private static let size: CGFloat = 40
+        private static let stroke: CGFloat = 4.5
+        /// Three quarters of the way round, leaving the bottom open. A closed ring
+        /// reads as a pie chart — a whole divided up — and this is a scale a value
+        /// travels along, which is what the gap says. The label then sits in the
+        /// gap, where the arc isn't.
+        private static let sweep: CGFloat = 0.75
+        /// `Arc` starts at 3 o'clock and runs clockwise, so it is rotated to begin
+        /// at 7:30 for its ends to land either side of the gap.
+        private static let start: Double = 135
+        private static let labelFont = NSFont.systemFont(ofSize: 7.5, weight: .semibold)
+        /// Clear of the stroke's outer edge.
+        private static let labelRadius: CGFloat = size / 2 + stroke / 2 + 5.5
+
+        var body: some View {
+            ZStack {
+                ZStack {
+                    Arc(sweep: Self.sweep)
+                        .stroke(Tokens.accent.opacity(0.18),
+                                style: StrokeStyle(lineWidth: Self.stroke, lineCap: .round))
+                    Arc(sweep: Self.sweep * CGFloat(min(100, max(0, score)) / 100))
+                        .stroke(Tokens.accent,
+                                style: StrokeStyle(lineWidth: Self.stroke, lineCap: .round))
+                }
+                .rotationEffect(.degrees(Self.start))
+                .frame(width: Self.size, height: Self.size)
+
+                Text("\(Int(score.rounded()))")
+                    .font(.brand(14))
+                    // Counting through 8 → 9 → 10 must not shove the digits
+                    // sideways on every frame.
+                    .monospacedDigit()
+                    .foregroundStyle(Tokens.text1)
+                    // The gap is at the bottom, so the arc's optical centre sits a
+                    // hair above its geometric one.
+                    .offset(y: -1)
+
+                CurvedText(text: L("model.detail.value").uppercased(),
+                           font: Self.labelFont,
+                           radius: Self.labelRadius)
+                    .foregroundStyle(Tokens.ink.opacity(0.50))
+            }
+            // Square so the arcs and the label share a centre — then the dead
+            // strip underneath is taken back, because the label is on top and
+            // nothing below the gauge's own radius is drawn. Left in, it sets the
+            // height of the whole title row and opens a band above "Speed". The
+            // larger overlap also lets Speed's label use the empty space left of
+            // the gauge while its meter itself still clears the arc below.
+            .frame(width: Self.labelRadius * 2 + 8, height: Self.labelRadius * 2 + 8)
+            .padding(.bottom, -18)
+        }
+    }
+
+    /// Text set along the top of a circle, reading left to right.
+    ///
+    /// Each glyph is measured and placed at its own angle rather than stepped by a
+    /// constant: at this size a uniform step turns "COST EFFICIENCY" into visibly
+    /// uneven spacing, because an `I` is a third the width of a `C`.
+    ///
+    /// It rides the top and not the bottom because the bottom is where the gauge's
+    /// gap is: a line of text sitting in that gap closes the ring back up, which is
+    /// the one thing the gap was opened for.
+    ///
+    /// Position and rotation are computed outright rather than composed from
+    /// nested `rotationEffect`s. The composed version is shorter and it is how
+    /// this was written twice, both times mirrored: whether a positive angle
+    /// carries a glyph left or right depends on a sign convention that is easy to
+    /// reason about backwards and impossible to check by reading. Trig against a
+    /// stated frame — origin at the centre, y downward, φ measured from the top and
+    /// positive to the right — has one reading.
+    private struct CurvedText: View {
+        let text: String
+        let font: NSFont
+        let radius: CGFloat
+        /// Extra advance per glyph. Set uppercase at 7.5pt, the default fit is too
+        /// tight to read; it is folded into the measured widths rather than applied
+        /// as SwiftUI `.tracking`, which would space the glyphs without the arc
+        /// maths knowing about it.
+        var tracking: CGFloat = 1.1
+
+        var body: some View {
+            let chars = Array(text)
+            let widths = chars.map { c in
+                NSAttributedString(string: String(c), attributes: [.font: font])
+                    .size().width + tracking
+            }
+            let total = widths.reduce(0, +)
+            ZStack {
+                ForEach(chars.indices, id: \.self) { i in
+                    // Signed arc distance from the run's midpoint to this glyph's
+                    // centre — negative to the left, positive to the right.
+                    let offset = widths[0..<i].reduce(0, +) + widths[i] / 2 - total / 2
+                    let phi = Double(offset / radius)
+                    Text(String(chars[i]))
+                        .font(Font(font))
+                        // Over the top, the tangent tilts down to the right — a
+                        // clockwise turn, which is `rotationEffect`'s positive.
+                        .rotationEffect(.radians(phi))
+                        .offset(x: radius * sin(phi), y: -radius * cos(phi))
+                }
+            }
+        }
+    }
+
+    /// A circle's first `sweep` of a turn, starting at 3 o'clock. Its own shape
+    /// rather than `Circle().trim(…)` because a trimmed circle still strokes a
+    /// full-circle path under the hood and `lineCap: .round` on a zero-length trim
+    /// leaves a dot floating at the start — a score of 0 has to draw nothing.
+    private struct Arc: Shape {
+        let sweep: CGFloat
+
+        func path(in rect: CGRect) -> Path {
+            var p = Path()
+            guard sweep > 0.001 else { return p }
+            p.addArc(center: CGPoint(x: rect.midX, y: rect.midY),
+                     radius: min(rect.width, rect.height) / 2,
+                     startAngle: .degrees(0),
+                     endAngle: .degrees(360 * Double(min(1, sweep))),
+                     clockwise: false)
+            return p
+        }
+    }
+
+    /// One labelled 1–5 meter, in the card's own Liquid Glass language: a lozenge
+    /// of lit glass sliding along a groove cut into the panel, with ticks at the
+    /// segment joins so the level is countable and not just a length.
+    ///
+    /// The glass here is *painted*, not sampled. A real `.glassEffect` at 7pt tall
+    /// samples the same backdrop the card it sits on already samples, so it comes
+    /// out as a flat grey slot — the same reason `ManageMenuRowStyle` gave up on a
+    /// material for its hover wash. What actually reads as glass at this size is
+    /// the lighting: a top edge in shadow and a bottom edge catching light for the
+    /// groove, and for the run a vertical falloff plus one specular sliver and a
+    /// little spill onto the track around it.
+    private struct Meter: View {
+        let title: String
+        /// 0–5, continuous while it travels between two models' whole levels.
+        let level: Double
+
+        private static let height: CGFloat = 7
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(title)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Tokens.text3)
+                GeometryReader { geo in
+                    let w = geo.size.width
+                    let filled = w * CGFloat(min(5, max(0, level)) / 5)
+                    ZStack(alignment: .leading) {
+                        groove
+                        // Below its own height the capsule is a squashed disc, not
+                        // a lozenge, and the specular sliver inside it collapses to
+                        // a dot — an empty meter shows the groove and nothing else.
+                        if filled >= Self.height * 0.5 {
+                            lozenge.frame(width: filled)
+                        }
+                        ForEach(1..<5, id: \.self) { i in
+                            let x = w * CGFloat(i) / 5
+                            Circle()
+                                // A tick inside the filled run has to knock out of
+                                // it, not sit on top in the same white. Both sides
+                                // are pitched to be findable rather than read: the
+                                // bar's length is the figure, and ticks loud enough
+                                // to count first turn it into a row of dots.
+                                .fill(x <= filled ? Color.black.opacity(0.20)
+                                                  : Tokens.ink.opacity(0.18))
+                                .frame(width: 2, height: 2)
+                                .offset(x: x - 1)
+                        }
+                    }
+                }
+                .frame(height: Self.height)
+            }
+        }
+
+        /// The track, carved rather than drawn: dark inside, its top edge holding
+        /// the shadow of the lip above it and its bottom edge catching the light
+        /// that made it — which is the whole of what tells an eye "recessed".
+        private var groove: some View {
+            Capsule()
+                .fill(Color.black.opacity(0.40))
+                .overlay(
+                    Capsule().strokeBorder(
+                        LinearGradient(colors: [.black.opacity(0.8), .black.opacity(0.35),
+                                                .white.opacity(0.24)],
+                                       startPoint: .top, endPoint: .bottom),
+                        lineWidth: 1)
+                )
+        }
+
+        /// The filled run: white, but lit rather than flat — brighter along the top
+        /// where the light lands, falling off toward the bottom, one soft specular
+        /// band just inside the top edge, and a faint spill onto the groove so the
+        /// run sits *in* the track instead of on it.
+        private var lozenge: some View {
+            Capsule()
+                .fill(LinearGradient(colors: [.white.opacity(0.36),
+                                              .white.opacity(0.24),
+                                              .white.opacity(0.13)],
+                                     startPoint: .top, endPoint: .bottom))
+                .overlay(
+                    Capsule()
+                        .fill(LinearGradient(colors: [.white.opacity(0.58), .white.opacity(0)],
+                                             startPoint: .top, endPoint: .bottom))
+                        // Inset off every edge so it reads as a reflection floating
+                        // in the glass, not as a second stripe drawn on top of it.
+                        .padding(.horizontal, 1.6)
+                        .padding(.top, 0.7)
+                        .padding(.bottom, Self.height * 0.5)
+                        .blur(radius: 0.7)
+                        .blendMode(.plusLighter)
+                )
+                .overlay(
+                    Capsule().strokeBorder(
+                        LinearGradient(colors: [.white.opacity(0.55), .white.opacity(0.06)],
+                                       startPoint: .top, endPoint: .bottom),
+                        lineWidth: 0.5)
+                )
+                .shadow(color: .white.opacity(0.08), radius: 2.5)
+                .shadow(color: .black.opacity(0.24), radius: 1.5, y: 0.5)
+        }
+    }
+
+    /// A capability, present or pointedly absent. An unsupported one still gets a
+    /// row — "this model cannot do it" is the answer someone is looking for, and
+    /// an omitted row reads as "unknown".
+    private struct Capability: View {
+        let symbol: String
+        let title: String
+        let supported: Bool
+
+        var body: some View {
+            HStack(spacing: 7) {
+                // The same glyph either way — the row is about a capability, and
+                // the capability doesn't change when the answer is no. Swapping in
+                // a slash made the icon column stop meaning anything, since you
+                // could no longer tell which row you were on without reading it.
+                // Dimming and the word carry the answer.
+                Image(systemName: symbol)
+                    .symbolRenderingMode(.monochrome)
+                    .font(.system(size: 11, weight: supported ? .medium : .regular))
+                    .frame(width: 14)
+                Text(supported ? title : L("model.detail.unsupported", title))
+                    .font(.system(size: 11.5, weight: supported ? .medium : .regular))
+            }
+            // Full contrast against a quarter of it. The first pass ran these at
+            // 0.74 and 0.40, which is a legible difference in isolation and not one
+            // you can read at a glance down a stack of three rows — the whole job
+            // of this block is to be answerable without comparing rows to
+            // each other.
+            .foregroundStyle(supported ? Tokens.text1 : Tokens.ink.opacity(0.26))
+        }
+    }
+}
+
+/// The window the card lives in.
+///
+/// A borderless non-activating panel rather than anything attached to the menu,
+/// because `NSMenu` has no accessory view and no public frame — it is not a view
+/// hierarchy you can hang something off. So the card is its own window, parked
+/// against whichever menu window is currently furthest right (the open submenu),
+/// and torn down when tracking ends.
+///
+/// The card behaves like menu-adjacent reference material and disappears as soon
+/// as the pointer leaves the model menu that produced it.
+final class ModelDetailPanel {
+    /// There can be several SwiftUI presenter coordinators over the app's lifetime,
+    /// but only one native menu can be tracked at a time. Sharing the panel prevents
+    /// an old coordinator from stranding its window and a later panel from treating
+    /// that orphan as the menu it should anchor beside.
+    static let shared = ModelDetailPanel()
+
+    /// Wide enough for a two-word model name beside the gauge, and no wider — the
+    /// card hangs off a menu and is read at a glance, not settled into.
+    static let width: CGFloat = 208
+    /// Clear of the menu's shadow without reading as a separate thing.
+    private static let gap: CGFloat = 6
+
+    private var panel: NSPanel?
+    private var host: NSHostingView<ModelDetailCard>?
+    private var model: PickerModel?
+    private var anchorFrame: NSRect?
+    private var hideWork: DispatchWorkItem?
+    private var hoverTimer: Timer?
+
+    /// What the card is drawing, and the travel it is on. See `tick()`.
+    private var figures = ModelDetailCard.Figures()
+    private var travelFrom = ModelDetailCard.Figures()
+    private var travelTo = ModelDetailCard.Figures()
+    private var travelStart: CFTimeInterval = 0
+    /// The pointer poll's verdict on the scoring link, pushed into the card. See
+    /// `ModelDetailCard.scoringLinkFrame(in:)`.
+    private var scoringHovered = false
+    private var ticker: Timer?
+    /// Long enough to read as movement, short enough that a fast scan down the
+    /// menu never waits on it — a new row retargets mid-flight anyway.
+    private static let travel: CFTimeInterval = 0.34
+
+    func show(_ model: PickerModel) {
+        hideWork?.cancel()
+        hoverTimer?.invalidate()
+        hoverTimer = nil
+        // A card coming back from hidden starts from nothing — the gauge sweeps up
+        // and the counters count. Row to row it carries on from whatever is
+        // currently on screen instead.
+        let appearing = panel?.isVisible != true
+        if appearing || self.model?.id != model.id {
+            retarget(to: ModelDetailCard.targetFigures(for: model), fromZero: appearing)
+        }
+        self.model = model
+        if let menu = menuFrame(excluding: panel) { anchorFrame = menu }
+        render()
+        scheduleHoverCheck()
+    }
+
+    /// Aim the figures somewhere new. Mid-flight the reading currently *drawn* is
+    /// the new starting point, so running down the menu keeps moving rather than
+    /// snapping back to the last model's resting numbers first.
+    private func retarget(to target: ModelDetailCard.Figures, fromZero: Bool) {
+        travelFrom = fromZero ? ModelDetailCard.Figures() : figures
+        travelTo = target
+        figures = travelFrom
+        travelStart = CACurrentMediaTime()
+        guard travelFrom != travelTo else { stopTicker(); return }
+        startTicker()
+    }
+
+    /// The card sits beside a tracking `NSMenu`, whose nested event loop never gives
+    /// SwiftUI's animation pass a turn — the same reason `render()` lays out by
+    /// hand. So the travel is stepped from a timer scheduled in the common run loop
+    /// modes (`NSEventTrackingRunLoopMode` is one), and every frame is pushed into
+    /// the hosting view explicitly.
+    private func startTicker() {
+        guard ticker == nil else { return }
+        let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            self?.tick()
+        }
+        RunLoop.main.add(t, forMode: .common)
+        ticker = t
+    }
+
+    private func stopTicker() {
+        ticker?.invalidate()
+        ticker = nil
+    }
+
+    private func tick() {
+        guard model != nil else { stopTicker(); return }
+        let t = min(1, max(0, (CACurrentMediaTime() - travelStart) / Self.travel))
+        // Ease out cubic: leaves at speed, settles without overshoot. A spring
+        // would carry a meter past its own end cap and the gauge past 100, which
+        // at this size reads as a glitch rather than as bounce.
+        figures = travelFrom.lerp(to: travelTo, 1 - pow(1 - t, 3))
+        if t >= 1 {
+            figures = travelTo
+            stopTicker()
+        }
+        render(reposition: false)
+    }
+
+    private func render(reposition: Bool = true) {
+        guard let model else { return }
+        let card = ModelDetailCard(model: model, figures: figures,
+                                   scoringHovered: scoringHovered) { [weak self] in
+            guard let url = URL(string: "https://notch.website/scoring") else { return }
+            self?.hide()
+            NSWorkspace.shared.open(url)
+        }
+        let host = self.host ?? {
+            let h = NSHostingView(rootView: card)
+            self.host = h
+            return h
+        }()
+        host.rootView = card
+        let panel = self.panel ?? makePanel(hosting: host)
+        // Menu tracking runs its own event loop, which SwiftUI's normal update
+        // pass does not get a turn in — lay out by hand or the card shows the
+        // previous model's numbers at the previous model's height.
+        host.layoutSubtreeIfNeeded()
+        let size = host.fittingSize
+        // An animation frame only redraws inside a card that is already placed;
+        // re-deriving the frame and re-ordering the window sixty times a second
+        // would fight the menu for stacking order for no visible gain.
+        if reposition || panel.frame.size != size {
+            guard let frame = position(size: size, besides: anchorFrame) else { return }
+            panel.setFrame(frame, display: true)
+        }
+        if reposition || !panel.isVisible { panel.orderFrontRegardless() }
+        panel.displayIfNeeded()
+        // `displayIfNeeded` only marks the layer; the commit that puts it on screen
+        // rides the run loop, and the menu's nested loop doesn't get to ours. Push
+        // the transaction through by hand or a repaint that changes no geometry —
+        // the hover wash, a counter that keeps its width — sits invisible until the
+        // menu closes.
+        CATransaction.flush()
+    }
+
+    func hide() {
+        hideWork?.cancel()
+        hideWork = nil
+        hoverTimer?.invalidate()
+        hoverTimer = nil
+        stopTicker()
+        figures = ModelDetailCard.Figures()
+        scoringHovered = false
+        panel?.orderOut(nil)
+        model = nil
+        anchorFrame = nil
+    }
+
+    /// Menu delegate callbacks cover row-to-row movement. The pointer can also leave
+    /// the entire native menu while its last item remains highlighted, so keep a
+    /// lightweight location watch running for the lifetime of the visible card.
+    /// The card is now interactive, so the valid hover region is the menu OR the
+    /// card; leaving both still closes it immediately.
+    private func scheduleHoverCheck() {
+        hoverTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.04, repeats: true) { [weak self] timer in
+            guard let self, self.model != nil else {
+                timer.invalidate()
+                return
+            }
+            guard self.containsPointer else {
+                self.hide()
+                return
+            }
+            self.refreshScoringHover()
+        }
+        // `NSMenu` owns a nested event-tracking loop while it is open. A main-queue
+        // delayed block can wait until that loop ends, which made the card appear to
+        // gain hover only after the menu closed. Common mode runs during tracking.
+        RunLoop.main.add(timer, forMode: .common)
+        hoverTimer = timer
+    }
+
+    private func refreshScoringHover() {
+        guard let panel, panel.isVisible else { return }
+        let location = NSEvent.mouseLocation
+        // During native menu tracking the window server can keep reporting the menu
+        // as the window under the pointer even though this higher-level panel is
+        // visibly in front. The panel owns its whole frame, so use its geometry as
+        // the source of truth and keep hover live before the menu closes.
+        let hovered = ModelDetailCard.scoringLinkFrame(in: panel.frame).contains(location)
+        guard hovered != scoringHovered else { return }
+        scoringHovered = hovered
+        render(reposition: false)
+    }
+
+    /// A short delay lets a new model highlight cancel an outgoing row's hide.
+    func scheduleHide() {
+        scheduleHide(after: 0.12)
+    }
+
+    private func scheduleHide(after delay: TimeInterval) {
+        hideWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            // Crossing the small gap from the native menu into the card closes
+            // the menu first. Keep the card only when the pointer actually made
+            // that crossing; otherwise the old highlighted card must disappear.
+            if self.panel?.frame.contains(NSEvent.mouseLocation) == true {
+                self.scheduleHoverCheck()
+            } else {
+                self.hide()
+            }
+        }
+        hideWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private var containsPointer: Bool {
+        let location = NSEvent.mouseLocation
+        return anchorFrame?.contains(location) == true
+            || panel?.frame.contains(location) == true
+    }
+
+    private func makePanel(hosting host: NSHostingView<ModelDetailCard>) -> NSPanel {
+        let p = NSPanel(contentRect: NSRect(origin: .zero, size: host.fittingSize),
+                        styleMask: [.borderless, .nonactivatingPanel],
+                        backing: .buffered, defer: false)
+        p.contentView = host
+        p.isOpaque = false
+        p.backgroundColor = .clear
+        p.hasShadow = true
+        // One notch above the menus themselves, so a card that does overlap a
+        // shadow lands on top of it rather than under.
+        p.level = NSWindow.Level(rawValue: NSWindow.Level.popUpMenu.rawValue + 1)
+        p.ignoresMouseEvents = false
+        p.becomesKeyOnlyIfNeeded = true
+        p.hidesOnDeactivate = false
+        p.animationBehavior = .none
+        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        panel = p
+        return p
+    }
+
+    /// The open menu's frame, found by scanning for the window the menu is drawn
+    /// in — `NSMenu` publishes no frame of its own.
+    ///
+    /// Furthest-right wins because that is the deepest open submenu, which is the
+    /// one holding the highlighted row. Our own panel is excluded by number: it
+    /// sits at a menu-ish level too and would otherwise leapfrog itself further
+    /// right on every highlight.
+    private func menuFrame(excluding mine: NSPanel?) -> NSRect? {
+        let skip = mine?.windowNumber
+        return NSApp.windows
+            .filter { w in
+                w.isVisible && w.windowNumber != skip
+                    && w.level.rawValue >= NSWindow.Level.popUpMenu.rawValue
+                    && w.frame.width > 60 && w.frame.height > 40
+            }
+            .max { $0.frame.maxX < $1.frame.maxX }?
+            .frame
+    }
+
+    /// Right of the menu, top-aligned with it; flipped to the left when the right
+    /// edge of the screen is closer than the card is wide, and pushed back up when
+    /// a long menu would otherwise hang the card off the bottom.
+    private func position(size: NSSize, besides menu: NSRect?) -> NSRect? {
+        guard let menu else { return nil }
+        let screen = (NSScreen.screens.first { $0.frame.intersects(menu) } ?? NSScreen.main)?
+            .visibleFrame ?? .zero
+        var x = menu.maxX + Self.gap
+        if x + size.width > screen.maxX { x = menu.minX - Self.gap - size.width }
+        x = max(screen.minX, min(x, screen.maxX - size.width))
+        var y = menu.maxY - size.height
+        y = max(screen.minY, min(y, screen.maxY - size.height))
+        return NSRect(x: x, y: y, width: size.width, height: size.height)
+    }
+}
+
 // MARK: - Catalog store
 
 /// The catalog every picker reads: what each provider serves, which of those models
@@ -417,6 +1286,10 @@ final class ModelCatalogStore: ObservableObject {
     /// one tap answers "what does every backend serve *right now*".
     func loadAll(force: Bool = false) async {
         if force {
+            // Also the escape hatch for a model wrongly learned as text-only: that
+            // set has no TTL of its own, so this button is the only thing that can
+            // clear it. See `VisionProbe.forget`.
+            VisionProbe.forget()
             await RemoteModelManifest.refreshNow()
         } else {
             await RemoteModelManifest.refreshIfDue()

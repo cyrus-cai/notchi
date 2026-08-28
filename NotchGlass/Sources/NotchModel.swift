@@ -419,6 +419,7 @@ final class NotchModel: ObservableObject {
     // Open / closed drives the grow-out-of-the-notch animation.
     @Published var open = false {
         didSet {
+            if open != oldValue { ClickOpenProbe.shared.note("open=\(open)") }
             if open {
                 // A bucket that came back armed from the last launch still has to be
                 // re-seeded (folder, live engine) — see `rearmPersistedAgentBucket`.
@@ -990,10 +991,23 @@ final class NotchModel: ObservableObject {
 
     func registerPanelFrame(_ frame: CGRect, restHeight: CGFloat,
                             hardwareNotchWidth: CGFloat?,
+                            topOverreach: CGFloat = 0,
                             for display: CGDirectDisplayID) {
         panelScreenFrames[display] = frame
         restHeights[display] = restHeight
         hardwareNotchWidths[display] = hardwareNotchWidth
+        topOverreaches[display] = topOverreach
+    }
+
+    /// How far this display's canvas extends ABOVE the screen's top edge (see
+    /// `AppDelegate.canvasTopOverreach`). Every "where is the notch on screen"
+    /// derivation goes through `screenTop(of:)` rather than the panel frame's own
+    /// max, so the overreach can't quietly shift the island's geometry up.
+    private var topOverreaches: [CGDirectDisplayID: CGFloat] = [:]
+
+    private func screenTop(of display: CGDirectDisplayID) -> CGFloat? {
+        guard let panel = panelScreenFrames[display] else { return nil }
+        return panel.maxY - (topOverreaches[display] ?? 0)
     }
 
     /// Deliberately a plain var write — this fires per frame during the island's
@@ -1045,12 +1059,20 @@ final class NotchModel: ObservableObject {
     /// design constant here made ~3.5pt of live menu bar on each shoulder open
     /// the panel on contact.
     private func pointerInsideRestingNotch(on display: CGDirectDisplayID?, slop: CGFloat) -> Bool? {
+        guard let rect = restingNotchRect(on: display) else { return nil }
+        return rect.insetBy(dx: -slop, dy: -slop).contains(NSEvent.mouseLocation)
+    }
+
+    /// The rect itself, in screen coordinates — split out so the click probe can
+    /// report where the press landed relative to it, not just in/out.
+    private func restingNotchRect(on display: CGDirectDisplayID?) -> CGRect? {
         guard let display,
               let panel = panelScreenFrames[display],
+              let top = screenTop(of: display),
               let restHeight = restHeights[display] else { return nil }
         let width = hardwareNotchWidths[display] ?? Tokens.notchWidth
         var rect = CGRect(x: panel.midX - width / 2,
-                          y: panel.maxY - restHeight,
+                          y: top - restHeight,
                           width: width,
                           height: restHeight)
         // While the resting notch is flexed into its ears — background work's
@@ -1061,8 +1083,21 @@ final class NotchModel: ObservableObject {
             rect.origin.x -= restingEarLeft
             rect.size.width += restingEarLeft + restingEarRight
         }
-        return rect.insetBy(dx: -slop, dy: -slop).contains(NSEvent.mouseLocation)
+        // Reach PAST the screen's top edge. This rect's top IS that edge, and
+        // `CGRect.contains` excludes its own max edge — so a pointer shoved all
+        // the way up (`NSEvent.mouseLocation.y` lands exactly on the boundary)
+        // tested as OUTSIDE the notch, and the island went dead in precisely the
+        // spot people aim for: hover dropped, no peek, no open, until the cursor
+        // came back down a few points. Nothing above the screen edge exists to
+        // claim, so growing the rect upward costs nothing anywhere else.
+        rect.size.height += Self.topEdgeReach
+        return rect
     }
+
+    /// How far the resting-notch hover rect reaches above the screen's top edge —
+    /// see `restingNotchRect`. Any positive value fixes the boundary case; keep
+    /// it small so the number reads as the edge fix it is.
+    private static let topEdgeReach: CGFloat = 2
 
     /// The hover-enter entry point (the view calls this, not `openPanel`,
     /// so keyboard summons and notification taps stay ungated): drop enters
@@ -1078,12 +1113,16 @@ final class NotchModel: ObservableObject {
     /// complaint: reaching for a menu bar item near the notch kept unfurling the
     /// panel over it. See `cursorReallyEntered` and `isMenuBarSweep`.
     func hoverEntered(on display: CGDirectDisplayID?, velocity: CGVector) {
+        ClickOpenProbe.shared.hover("entered display=\(display.map(String.init) ?? "nil") open=\(open)")
         if open {
             if pointerInsideIsland(on: display, slop: 16) == false { return }
             openPanel(on: display, velocity: velocity)
             return
         }
-        if pointerInsideRestingNotch(on: display, slop: 0) == false { return }
+        if pointerInsideRestingNotch(on: display, slop: 0) == false {
+            ClickOpenProbe.shared.hover("entered DROPPED: pointer outside resting rect")
+            return
+        }
         let sensitivity = HoverSensitivity.current
         // The pointer has to have DONE the entering. A stationary cursor can be
         // handed a mouseEntered by AppKit whenever the tracked geometry moves
@@ -1093,7 +1132,10 @@ final class NotchModel: ObservableObject {
         // not the cursor arriving at the island, and it must not open anything.
         // (`collapseOnLeave` has carried the mirror of this test for exits all
         // along; this is the missing half.)
-        guard MouseVelocityTracker.shared.cursorMoved(within: 0.2) else { return }
+        guard MouseVelocityTracker.shared.cursorMoved(within: 0.2) else {
+            ClickOpenProbe.shared.hover("entered DROPPED: cursor had not moved")
+            return
+        }
         // The click level answers a hover with a gesture instead of an unfurl:
         // one haptic tap and a few points of outward flex (see `hoverPeek`), so
         // the notch is visibly awake and reachable while the panel stays folded
@@ -1217,8 +1259,12 @@ final class NotchModel: ObservableObject {
         // Geometry has to be known — the watch below is the only thing that ever
         // lowers the flex, and it can't answer against a rect it can't compute.
         guard let display,
-              pointerInsideRestingNotch(on: display, slop: 0) == true else { return }
+              pointerInsideRestingNotch(on: display, slop: 0) == true else {
+            ClickOpenProbe.shared.hover("peek DROPPED: pointer outside resting rect")
+            return
+        }
         if hoverPeek != display {
+            ClickOpenProbe.shared.note("peek up display=\(display)")
             hoverPeek = display
             // The same tap the open would have given, at the moment the notch
             // acknowledges the pointer. It IS the feedback here: with no unfurl
@@ -1247,7 +1293,10 @@ final class NotchModel: ObservableObject {
     func endHoverPeek() {
         hoverPeekTask?.cancel()
         hoverPeekTask = nil
-        if hoverPeek != nil { hoverPeek = nil }
+        if hoverPeek != nil {
+            ClickOpenProbe.shared.note("peek down")
+            hoverPeek = nil
+        }
     }
 
     /// A click landed on the resting notch. Only the click level mounts the
@@ -1264,6 +1313,7 @@ final class NotchModel: ObservableObject {
     /// sideways lean and shove it had no reason to have. A parked pointer gets
     /// the calm, centered bloom.
     func notchClicked(on display: CGDirectDisplayID?) {
+        ClickOpenProbe.shared.note("gesture: notchClicked display=\(display.map(String.init) ?? "nil") open=\(open) closing=\(closing)")
         // The press fires this; the rest of that drag's ticks find it already
         // open and turn back.
         guard !open else { return }
@@ -1282,6 +1332,67 @@ final class NotchModel: ObservableObject {
         HoverSensitivity.current = newValue
         hoverSensitivity = newValue
         if !newValue.opensOnClickOnly { endHoverPeek() }
+    }
+
+    // MARK: - Click-to-open probe (temporary instrumentation)
+
+    /// Everything the press → unfurl path gates on, in one payload-free
+    /// snapshot. Read by `ClickOpenProbe` when a left press lands near a
+    /// resting notch, so a click that fails to open says *where* it was lost.
+    struct ClickProbeState {
+        var display: CGDirectDisplayID?
+        var insideRestingNotch: Bool?
+        var insideIsland: Bool?
+        /// Press offset from the resting rect, in points: 0 when inside, else
+        /// how far outside on each axis.
+        var dx: CGFloat?
+        var dy: CGFloat?
+        /// The pointer's y and the resting rect's top edge, in screen points —
+        /// the pair that exposes the top-of-screen boundary case.
+        var pointerY: CGFloat
+        var restTop: CGFloat?
+        var open: Bool
+        var closing: Bool
+        var peeking: Bool
+        var activeDisplay: CGDirectDisplayID?
+        var sensitivity: String
+        /// Mirrors `NotchIsland.clickToOpenArmed`: whether the tap target is
+        /// mounted on this display right now.
+        var gestureArmed: Bool
+    }
+
+    func clickProbeState() -> ClickProbeState {
+        let point = NSEvent.mouseLocation
+        // The screen whose canvas holds the pointer; falls back to the active
+        // one so a press just off the canvas still reports against something.
+        // Same top-edge inclusion as `restingNotchRect` — without it the probe
+        // itself loses the pointer exactly where the bug lived.
+        let display = panelScreenFrames.first {
+            $0.value.insetBy(dx: 0, dy: -Self.topEdgeReach).contains(point)
+        }?.key ?? activeDisplay
+        let rect = restingNotchRect(on: display)
+        var dx: CGFloat?
+        var dy: CGFloat?
+        if let rect {
+            dx = point.x < rect.minX ? point.x - rect.minX
+               : (point.x > rect.maxX ? point.x - rect.maxX : 0)
+            dy = point.y < rect.minY ? point.y - rect.minY
+               : (point.y > rect.maxY ? point.y - rect.maxY : 0)
+        }
+        return ClickProbeState(
+            display: display,
+            insideRestingNotch: pointerInsideRestingNotch(on: display, slop: 0),
+            insideIsland: pointerInsideIsland(on: display, slop: 0),
+            dx: dx,
+            dy: dy,
+            pointerY: point.y,
+            restTop: rect?.maxY,
+            open: open,
+            closing: closing,
+            peeking: isPeeking(on: display),
+            activeDisplay: activeDisplay,
+            sensitivity: hoverSensitivity.label,
+            gestureArmed: !isOpen(on: display) && hoverSensitivity.opensOnClickOnly)
     }
 
     // MARK: - Detached session windows (tear-off / 分裂)
@@ -1746,9 +1857,10 @@ final class NotchModel: ObservableObject {
     func restingNotchScreenRect(on display: CGDirectDisplayID?) -> CGRect? {
         guard let display,
               let panel = panelScreenFrames[display],
+              let top = screenTop(of: display),
               let restHeight = restHeights[display] else { return nil }
         return CGRect(x: panel.midX - Tokens.notchWidth / 2,
-                      y: panel.maxY - restHeight,
+                      y: top - restHeight,
                       width: Tokens.notchWidth, height: restHeight)
     }
 
@@ -4958,6 +5070,7 @@ final class NotchModel: ObservableObject {
     /// `velocity` is the cursor's approach vector (zero for non-hover opens);
     /// it must land before `open` so the island's animation reads it fresh.
     func openPanel(on display: CGDirectDisplayID?, velocity: CGVector = .zero) {
+        ClickOpenProbe.shared.note("openPanel edge=\(!open) display=\(display.map(String.init) ?? "nil")")
         if let display { activeDisplay = display }
         // Only the *closed→open* edge sets the clipboard baseline. Hover fires
         // `openPanel` again on every re-enter and on display migration while already

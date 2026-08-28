@@ -7435,12 +7435,15 @@ enum ManageMenuMetrics {
 /// hue, so Settings and the compact picker always show the
 /// same shortcut with the same light across launches and reordering.
 private enum PromptShortcutCardPalette {
+    /// Saturated, not tinted: the card washes these at a strength where a muted
+    /// hue would only read as grey. The smoke below them (`.black`) is what
+    /// keeps the surface dark, so the pigment itself stays pure.
     static let hues: [Color] = [
-        Color(red: 0.22, green: 0.48, blue: 0.68),
-        Color(red: 0.38, green: 0.30, blue: 0.62),
-        Color(red: 0.60, green: 0.27, blue: 0.39),
-        Color(red: 0.56, green: 0.40, blue: 0.20),
-        Color(red: 0.20, green: 0.51, blue: 0.43),
+        Color(red: 0.16, green: 0.52, blue: 0.84),
+        Color(red: 0.44, green: 0.27, blue: 0.84),
+        Color(red: 0.80, green: 0.20, blue: 0.44),
+        Color(red: 0.84, green: 0.47, blue: 0.11),
+        Color(red: 0.08, green: 0.64, blue: 0.49),
     ]
 
     static func light(_ id: UUID) -> Color {
@@ -7458,24 +7461,52 @@ struct PromptShortcutCardSurface<S: InsettableShape>: View {
     var body: some View {
         let light = PromptShortcutCardPalette.light(id)
         ZStack {
-            shape.fill(.black.opacity(0.42))
-            shape.fill(light.opacity(hovering ? 0.20 : 0.07))
-            shape.fill(.white.opacity(hovering ? 0.045 : 0))
+            // Smoke first, pigment on top of it. The colour is laid at a strength
+            // that would be garish on bare glass; sitting over this much black it
+            // reads as smoked coloured glass instead of a tint.
+            shape.fill(.clear)
+                .nativeGlass(in: shape, tintOpacity: 0.16)
+                .overlay(shape.fill(.black.opacity(0.36)))
+
+            // The body of the glass: the whole pane is coloured, not just its lit
+            // corner.
+            shape.fill(light.opacity(hovering ? 0.13 : 0.08))
+
+            // Real glass is deepest where the light has travelled furthest
+            // through it, so the pigment gathers toward the bottom edge rather
+            // than fading out there.
             shape.fill(
                 LinearGradient(
                     stops: [
-                        .init(color: light.opacity(0.46), location: 0),
-                        .init(color: light.opacity(0.14), location: 0.38),
-                        .init(color: light.opacity(0.01), location: 0.88),
+                        .init(color: .clear, location: 0.3),
+                        .init(color: light.opacity(hovering ? 0.12 : 0.075), location: 1),
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+
+            // The lit corner.
+            shape.fill(
+                LinearGradient(
+                    stops: [
+                        .init(color: light.opacity(hovering ? 0.19 : 0.13), location: 0),
+                        .init(color: .white.opacity(hovering ? 0.07 : 0.05), location: 0.34),
+                        .init(color: .clear, location: 0.84),
                     ],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
                 )
             )
             .blendMode(.plusLighter)
-            .opacity(hovering ? 0.88 : 0.55)
-            shape.strokeBorder(.white.opacity(hovering ? 0.28 : 0.09),
-                               lineWidth: hovering ? 0.8 : 0.5)
+
+            // The rim takes the pigment too — a neutral white edge around a
+            // coloured pane reads as a sticker laid on it.
+            shape.strokeBorder(
+                LinearGradient(colors: [light.opacity(hovering ? 0.25 : 0.17),
+                                        .white.opacity(0.03)],
+                               startPoint: .top, endPoint: .bottom),
+                lineWidth: 0.5)
         }
         .compositingGroup()
     }

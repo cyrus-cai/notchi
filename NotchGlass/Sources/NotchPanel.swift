@@ -78,6 +78,15 @@ final class NotchPanel: NSPanel {
         ]
     }
 
+    /// Keep the frame exactly where we put it. The canvas deliberately reaches a
+    /// few points ABOVE the screen's top edge (see
+    /// `AppDelegate.canvasTopOverreach`) so the screen's very top row routes to
+    /// this window instead of falling through; AppKit's default constraining
+    /// would pull that strip back down onto the visible frame and undo it.
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        frameRect
+    }
+
     // A borderless panel returns false by default; allow it so the prompt field
     // can become first responder when the user types into the glass.
     override var canBecomeKey: Bool { true }

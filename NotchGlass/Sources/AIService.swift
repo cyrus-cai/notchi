@@ -617,7 +617,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
                 endpoint: "https://open.bigmodel.cn/api/paas/v4/chat/completions",
                 models: ["glm-5", "glm-5.1", "glm-5-turbo", "glm-4.6"],
                 signupHost: "open.bigmodel.cn",
-                signupURL: "https://open.bigmodel.cn/usercenter/apikeys/api_key",
+                signupURL: "https://open.bigmodel.cn/coding-plan/personal/overview",
                 envVarName: "GLM_API_KEY")
         case .qwen:
             return ProviderSpec(
@@ -805,28 +805,64 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
+    /// A model id reduced to the form the manifest's `textOnly` blocklist is keyed
+    /// by. Must stay in lockstep with `normalize()` in
+    /// `scripts/gen-model-modalities.mjs`, which builds that list.
+    ///
+    /// Only ever strips things that are never semantic: the vendor prefix
+    /// (`z-ai/glm-5.3` and a direct-dialed `glm-5.3` are one model), OpenRouter's
+    /// `~` router marker, and a `:free` / `:nitro` routing suffix. Folding `.` to
+    /// `-` is what lets Anthropic's native `claude-sonnet-4-6` meet the catalog's
+    /// `claude-sonnet-4.6` — the same model spelled two ways.
+    ///
+    /// Variant suffixes are deliberately NOT stripped. Modality is a per-variant
+    /// fact: `glm-5.3` reads no images while `glm-5.3-flash` reads images and
+    /// video. Normalizing `-flash` away to match a family is exactly the
+    /// misclassification this whole path exists to fix.
+    static func normalizedModelID(_ model: String) -> String {
+        var s = model.lowercased()
+        while s.hasPrefix("~") { s.removeFirst() }
+        if let slash = s.lastIndex(of: "/") { s = String(s[s.index(after: slash)...]) }
+        if let colon = s.firstIndex(of: ":") { s = String(s[..<colon]) }
+        return s.replacingOccurrences(of: ".", with: "-")
+    }
+
     /// Whether `model` accepts image input (XII-121) — the gate for the
     /// clipboard-image thumbnail: a text-only model never shows a preview it
-    /// can't consume. Judged from the id string alone, because Settings lets the
-    /// user type any id and OpenRouter serves `vendor/slug` ids, so there's no
-    /// enum to switch on. Curated vision families plus the generic markers
-    /// vendors put in vision-model names; an unrecognized id (including the
-    /// `openrouter/free` auto-router, whose routed model is undisclosed until
-    /// request time) reads as text-only — only a model known to read images
-    /// earns the thumbnail.
+    /// can't consume.
+    ///
+    /// Answered from the remote manifest's `textOnly` blocklist, which is
+    /// regenerated from OpenRouter's catalog (the one vendor catalog publishing
+    /// per-model input modalities as data) and reaches installed copies on the
+    /// same 6h refresh as the model shortlists — so a newly released model stops
+    /// being wrong without an app release.
+    ///
+    /// **An unknown id reads as vision-capable**, which inverts the old bundled
+    /// allowlist. That allowlist encoded a 2023-shaped world and had gone stale in
+    /// the obvious way: it recognized GLM's vision line only by a trailing `v`
+    /// (`glm-4v`), a convention Zhipu dropped when the 5.x line went natively
+    /// multimodal, so every GLM 5 model was told it couldn't see. Inverting also
+    /// changes what a miss costs — the blocklist covers most of what Notch dials,
+    /// and the ids it misses skew NEW, where multimodal is now the norm. A wrong
+    /// yes costs one ignored attachment; a wrong no silently removes a feature the
+    /// model has. When a provider does reject the image, the turn retries without
+    /// it and remembers (`VisionProbe`), so a wrong yes self-corrects once.
     static func modelSupportsVision(_ model: String) -> Bool {
-        let m = model.lowercased()
-        // Families whose current lineup takes images end to end.
-        let visionFamilies = ["claude", "gemini", "gpt-4o", "gpt-4.1", "gpt-4-turbo",
-                              "gpt-5", "grok-4", "llama-4", "pixtral", "llava", "internvl"]
-        if visionFamilies.contains(where: m.contains) { return true }
-        // Vendor-agnostic markers vision variants carry in the id itself
-        // (qwen3-vl, mimo-vl, minimax-vl-01, moonshot-v1-…-vision-preview, …).
-        let markers = ["vision", "-vl", "vl-", "omni"]
-        if markers.contains(where: m.contains) { return true }
-        // GLM's vision line is the trailing v (glm-4v, glm-4.5v, glm-4.6v).
-        if m.hasPrefix("glm"), m.hasSuffix("v") { return true }
-        return false
+        let id = normalizedModelID(model)
+        if VisionProbe.knownTextOnly(id) { return false }
+        return !RemoteModelManifest.isTextOnly(normalizedID: id)
+    }
+
+    /// Published benchmark figures for `model` — intelligence, time-to-answer and
+    /// value rank — or `nil` when the manifest has nothing on it. Sourced from
+    /// Artificial Analysis and refreshed on the manifest's own 6h timer, so a
+    /// newly benchmarked model starts showing numbers without an app release.
+    ///
+    /// Provider-agnostic on purpose: the same model dialled direct and through
+    /// OpenRouter normalizes to one key and reads the same figures, which is what
+    /// makes the picker's numbers comparable down a list that mixes both.
+    static func modelStats(_ model: String) -> RemoteModelManifest.ModelStats? {
+        RemoteModelManifest.stats(normalizedID: normalizedModelID(model))
     }
 
     // MARK: Server-side web search (XII-118)
@@ -1046,7 +1082,10 @@ struct OpenAICompatAIService: AIService {
             let task = Task {
                 // System prompt first, then the running conversation verbatim —
                 // so a follow-up is answered with every prior turn in context.
-                let chat = [Message(role: "system", content: system)]
+                // `var` for the one reason spelled out at the 400 below: a model
+                // wrongly believed to read images gets its attachments stripped and
+                // the turn replayed, rather than the picture costing the answer.
+                var chat = [Message(role: "system", content: system)]
                     + messages.map { Message(role: $0.role, content: $0.content, images: $0.images) }
 
                 // Retry the connect/first-token phase on a transient blip (network
@@ -1090,6 +1129,20 @@ struct OpenAICompatAIService: AIService {
                             // what stops an answer.
                             if http.statusCode == 400, askingForUsage,
                                StreamUsage.markRejected(endpoint) { continue }
+                            // The model refusing the attachment rather than the
+                            // request. `modelSupportsVision` defaults an unknown id
+                            // to "can see", so this is where that optimism is paid
+                            // for: drop the images, learn the model for next time,
+                            // and replay — the user gets their answer about the text
+                            // instead of an error about the picture.
+                            if http.statusCode == 400, chat.contains(where: { !$0.images.isEmpty }),
+                               VisionProbe.isSignal(bodyText) {
+                                VisionProbe.remember(model)
+                                chat = chat.map {
+                                    Message(role: $0.role, content: $0.content, images: [])
+                                }
+                                continue
+                            }
                             throw ServiceError.http(provider: provider.displayName,
                                                     status: http.statusCode, body: bodyText)
                         }
@@ -1334,6 +1387,9 @@ struct AnthropicAIService: AIService {
                 // any token reached the UI so a reply is never duplicated.
                 var yieldedAny = false
                 var attempt = 0
+                // Set by the image-rejection 400 below, which replays the turn
+                // without the attachments. See `VisionProbe`.
+                var dropImages = false
                 while true {
                     do {
                         var req = URLRequest(url: provider.endpoint)
@@ -1350,7 +1406,10 @@ struct AnthropicAIService: AIService {
                         let body = RequestBody(
                             model: model,
                             system: system,
-                            messages: messages.map { .init(role: $0.role, content: $0.content, images: $0.images) },
+                            messages: messages.map {
+                                .init(role: $0.role, content: $0.content,
+                                      images: dropImages ? [] : $0.images)
+                            },
                             maxTokens: ReplyTokens.anthropicRequiredCeiling,
                             stream: true
                         )
@@ -1362,6 +1421,15 @@ struct AnthropicAIService: AIService {
                         }
                         guard (200..<300).contains(http.statusCode) else {
                             let bodyText = await OpenAICompatAIService.drainErrorBody(bytes.lines)
+                            // Same bargain as the OpenAI-compatible path: an image
+                            // the model won't take costs one replay, not the turn.
+                            if http.statusCode == 400, !dropImages,
+                               messages.contains(where: { !$0.images.isEmpty }),
+                               VisionProbe.isSignal(bodyText) {
+                                VisionProbe.remember(model)
+                                dropImages = true
+                                continue
+                            }
                             throw OpenAICompatAIService.ServiceError.http(provider: provider.displayName,
                                                                           status: http.statusCode, body: bodyText)
                         }
@@ -1586,6 +1654,48 @@ enum RemoteModelManifest {
         /// Engines whose `efforts` table beats a live probe of the user's own CLI.
         /// Normally empty — see `effortsOverridesProbe`.
         let effortsOverride: Set<String>
+        /// Normalized ids of models that CANNOT read images — a blocklist, keyed by
+        /// `Provider.normalizedModelID`. Absent from this set means "offer the
+        /// attach"; see `Provider.modelSupportsVision` for why the default is yes.
+        let textOnly: Set<String>
+        /// Published benchmark figures, keyed by `Provider.normalizedModelID`.
+        /// Absent for most of any vendor's catalog — see `ModelStats`.
+        let stats: [String: ModelStats]
+    }
+
+    /// What Artificial Analysis publishes about one model, as ridden out by the
+    /// website's daily pull (`docs/api/model-stats.js`). Every field is optional
+    /// because AA measures far less than it lists: it scores ~600 models but has
+    /// a *timing* for under 200 of them, so a blank is the normal case and not a
+    /// decode failure. Nothing here is ever guessed — a figure AA doesn't publish
+    /// stays nil and the UI leaves that slot empty.
+    struct ModelStats {
+        /// Artificial Analysis Intelligence Index — a composite of MMLU-Pro, GPQA,
+        /// HLE, LiveCodeBench and friends, on a scale where today's frontier sits
+        /// around 60. Comparable across vendors; not a percentage of anything.
+        let intelligence: Double?
+        /// Median seconds to the first token **of the answer**, thinking excluded.
+        ///
+        /// Deliberately not AA's `time_to_first_token`: vendors that stream their
+        /// reasoning (GLM, DeepSeek, Kimi) start emitting in about a second while
+        /// vendors that hide it (OpenAI, Anthropic, Google) don't emit until the
+        /// answer begins, so ranking a mixed list by that field reports a
+        /// streaming policy as a hundredfold speed difference. This field means
+        /// the same thing for both — see TIME_TO_ANSWER in `api/model-stats.js`.
+        let timeToAnswer: Double?
+        /// Intelligence per dollar, scored 0–100 against the manifest's own
+        /// lineup — the number the card draws in its ring. A score rather than the
+        /// raw ratio because that ratio spans three orders of magnitude and its
+        /// top end moves whenever a cheap model ships; the ordering is identical.
+        let value: Int?
+        /// Speed and intelligence as 1–5 meter levels, which is what the picker
+        /// draws. Ranked on the server against **the manifest's own lineup**, not
+        /// against AA's whole catalog: AA scores 608 models whose median
+        /// intelligence is about 12, so a catalog-wide rank puts every model anyone
+        /// would dial in the top fifth and the meter says nothing. See `barScale`
+        /// in `docs/api/model-stats.js`.
+        let intelligenceBar: Int?
+        let speedBar: Int?
     }
 
     /// Parsed manifest, seeded from the persisted copy so the very first read
@@ -1637,6 +1747,21 @@ enum RemoteModelManifest {
     ///     "effortsOverride": ["commandCode"]
     static func effortsOverridesProbe(engine: String) -> Bool {
         withLock { cached?.effortsOverride.contains(engine) ?? false }
+    }
+
+    /// Whether the manifest positively says `normalizedID` reads no images.
+    /// `false` covers both "known to read images" and "never heard of it" — the
+    /// caller wants one bit and treats an unknown model as capable, so the two
+    /// collapse here rather than leaking an optional to every call site.
+    static func isTextOnly(normalizedID: String) -> Bool {
+        withLock { cached?.textOnly.contains(normalizedID) ?? false }
+    }
+
+    /// The published benchmark figures for `normalizedID`, or `nil` when the
+    /// manifest carries none for it — which is the common case for anything off
+    /// the beaten path, and for every install that has not fetched yet.
+    static func stats(normalizedID: String) -> ModelStats? {
+        withLock { cached?.stats[normalizedID] }
     }
 
     /// Fetch the manifest when the cached copy is older than `ttl` (or absent).
@@ -1746,6 +1871,14 @@ enum RemoteModelManifest {
             let providers: [String: [String]]
             var efforts: [String: [String: [String]]]? = nil
             var effortsOverride: [String]? = nil
+            var textOnly: [String]? = nil
+            /// `[intelligence, timeToAnswer, value, intelligenceBar, speedBar]`,
+            /// any slot nullable. An array rather than an object
+            /// because this table covers the whole catalog and key names would be
+            /// two thirds of its bytes on the wire. Trailing slots may simply be
+            /// absent — a manifest written before the bars existed decodes as a
+            /// row with none, and the card falls back to the curated table.
+            var stats: [String: [Double?]]? = nil
         }
         guard let manifest = try? JSONDecoder().decode(Manifest.self, from: data)
         else { return nil }
@@ -1764,7 +1897,32 @@ enum RemoteModelManifest {
         // probe — naming one with nothing behind it would silence the probe and
         // put nothing in its place.
         let override = Set(manifest.effortsOverride ?? []).intersection(efforts.keys)
-        return Payload(providers: providers, efforts: efforts, effortsOverride: override)
+        // Re-normalized on the way in rather than trusted: the generator and this
+        // file have to agree on the key format, and normalizing both sides means a
+        // hand-edited or half-migrated entry still lands on the right key.
+        let textOnly = Set((manifest.textOnly ?? [])
+            .filter { !$0.isEmpty }
+            .map { Provider.normalizedModelID($0) })
+        // Normalized on the way in for the same reason `textOnly` is: the
+        // generator and this file have to agree on the key format, and doing it
+        // on both sides means a hand-edited entry still lands on the right key.
+        // A row whose three slots are all absent is dropped rather than stored —
+        // it would render as an empty column and cost a lookup to discover that.
+        var stats: [String: ModelStats] = [:]
+        for (id, values) in (manifest.stats ?? [:]) where !id.isEmpty {
+            let at = { (i: Int) in i < values.count ? values[i] : nil }
+            let bar = { (i: Int) in at(i).map { min(5, max(1, Int($0.rounded()))) } }
+            let entry = ModelStats(intelligence: at(0),
+                                   timeToAnswer: at(1),
+                                   value: at(2).map { Int($0.rounded()) },
+                                   intelligenceBar: bar(3),
+                                   speedBar: bar(4))
+            guard entry.intelligence != nil || entry.timeToAnswer != nil || entry.value != nil
+            else { continue }
+            stats[Provider.normalizedModelID(id)] = entry
+        }
+        return Payload(providers: providers, efforts: efforts, effortsOverride: override,
+                       textOnly: textOnly, stats: stats)
     }
 }
 
@@ -2017,10 +2175,12 @@ enum ModelCatalog {
                 ids.map { byID[$0]
                     ?? ModelInfo(id: $0, vendor: ModelRatings.vendor(for: $0, provider: provider)) }
             }
-            // OpenRouter's catalog is its FULL marketplace — hundreds of ids, most
-            // of them paid, which a freshly-connected $0 account can't call. Offer
-            // only what actually works free: the auto-router, then the flagship-
-            // class free models (biggest first), then the rest alphabetically.
+            // OpenRouter's catalog is its full marketplace. Keep that complete
+            // chat catalog available: a pasted key may have credits, and hiding
+            // every paid model makes the provider look like a free-only backend.
+            // The auto-router and usage-ranked free lineup still lead; the picker
+            // folds the remaining marketplace behind its normal score/More models
+            // hierarchy rather than deleting it here.
             if provider == .openrouter {
                 // Real usage ranks the free lineup; fetched with the same key,
                 // in parallel with nothing (models is already in hand). A nil
@@ -2031,7 +2191,10 @@ enum ModelCatalog {
                     entries.filter { $0.id.hasSuffix(":free") }
                         .map { (id: $0.id, description: $0.description) },
                     usage: usage)
-                let ids = ["openrouter/free"] + featured + rest
+                let paid = entries.map(\.id).filter {
+                    $0 != "openrouter/free" && !$0.hasSuffix(":free")
+                }
+                let ids = ["openrouter/free"] + featured + rest + paid
                 return Result(models: ids, openRouterFeatured: Set(featured),
                               infos: infos(for: ids))
             }
@@ -2189,9 +2352,22 @@ struct ModelInfo: Identifiable, Equatable, Sendable {
         var label: String { self == .advanced ? "Adv. AI" : "Pro" }
     }
 
+    /// The same window in words, e.g. "150k" for a 200k-token model — tokens are
+    /// the unit the vendor bills in and nobody thinks in. The 0.75 ratio is the
+    /// usual English rule of thumb; it is an order-of-magnitude aid sitting next
+    /// to the exact figure, not a second precise number.
+    var contextWordsLabel: String? {
+        guard let t = contextTokens, t > 0 else { return nil }
+        return ModelInfo.compact(Int(Double(t) * 0.75))
+    }
+
     /// Human context, e.g. "200k". `nil` context → `nil`.
     var contextLabel: String? {
         guard let t = contextTokens, t > 0 else { return nil }
+        return ModelInfo.compact(t)
+    }
+
+    private static func compact(_ t: Int) -> String {
         if t >= 1_000_000 { return String(format: "%.1fM", Double(t) / 1_000_000).replacingOccurrences(of: ".0M", with: "M") }
         if t >= 1_000 { return "\(t / 1_000)k" }
         return "\(t)"
@@ -3129,6 +3305,80 @@ private enum AgentWire {
 /// 400 itself**: the vendor names the requirement, we honor it and replay the same
 /// turn once, then remember the model id so the round-trip is paid once per launch.
 /// A model id nobody has heard of yet needs no code change.
+/// The locally-learned half of the vision gate, and the safety net under
+/// `Provider.modelSupportsVision`'s "an unknown model can see" default.
+///
+/// Shaped after `ToolReasoningOptOut` below — is-this-the-signal / remember /
+/// applies — with one difference: this one persists. That opt-out re-learns
+/// itself within a turn and costs nothing to forget, while forgetting *this* puts
+/// a broken attachment button back in front of the user on every relaunch.
+///
+/// The entries are what the manifest's blocklist missed: a model too new or too
+/// niche for OpenRouter's catalog that turned out not to read images after all.
+/// Whenever the manifest catches up, its answer and this one agree and this set
+/// is simply redundant.
+enum VisionProbe {
+    private static let defaultsKey = "visionProbe.textOnly"
+    private static let lock = NSLock()
+    private static var models: Set<String> =
+        Set(UserDefaults.standard.stringArray(forKey: defaultsKey) ?? [])
+
+    /// Whether an error body is the vendor rejecting the IMAGE specifically, as
+    /// opposed to any of the other things a 400 can mean. Deliberately narrow: a
+    /// false positive here silently strips a picture the model could have read,
+    /// which is harder to notice than the error it replaces. Every branch needs a
+    /// term naming the attachment itself, so a bare "unsupported parameter" or a
+    /// context-length 400 can't match.
+    static func isSignal(_ body: String) -> Bool {
+        let b = body.lowercased()
+        let namesImage = b.contains("image") || b.contains("image_url")
+            || b.contains("vision") || b.contains("multimodal")
+        guard namesImage else { return false }
+        let refuses = ["not support", "unsupported", "does not accept", "invalid",
+                       "only supported", "not allowed", "cannot process",
+                       "does not match", "no such content"]
+        return refuses.contains(where: b.contains)
+    }
+
+    /// Record that `model` refused an image. Idempotent, and the write only
+    /// happens the first time a given model teaches us this.
+    static func remember(_ model: String) {
+        let id = Provider.normalizedModelID(model)
+        lock.lock()
+        guard !models.contains(id) else { lock.unlock(); return }
+        models.insert(id)
+        let snapshot = models.sorted()
+        lock.unlock()
+        UserDefaults.standard.set(snapshot, forKey: defaultsKey)
+    }
+
+    /// Takes an id already through `Provider.normalizedModelID` — the caller in
+    /// `modelSupportsVision` has normalized it once and shouldn't pay for it twice.
+    static func knownTextOnly(_ normalizedID: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return models.contains(normalizedID)
+    }
+
+    /// Drop everything learned so far — wired to Settings' manual refresh, whose
+    /// contract is to re-ask every source the model row is built from and ignore
+    /// every TTL on the way.
+    ///
+    /// This set is the one input with no TTL at all, which makes it the only one
+    /// that can be permanently wrong: a single 400 whose body happens to pair
+    /// "image" with a refusal word — a corrupt upload, a rate-limit notice that
+    /// mentions the attachment, one bad afternoon at the vendor — hides the attach
+    /// button on a model that can see, forever, and outranks a manifest that says
+    /// otherwise. Clearing it here costs at most one repeated learn and gives that
+    /// state the escape hatch it otherwise doesn't have.
+    static func forget() {
+        lock.lock()
+        guard !models.isEmpty else { lock.unlock(); return }
+        models.removeAll()
+        lock.unlock()
+        UserDefaults.standard.removeObject(forKey: defaultsKey)
+    }
+}
+
 private enum ToolReasoningOptOut {
     private static let lock = NSLock()
     private static var models: Set<String> = []
