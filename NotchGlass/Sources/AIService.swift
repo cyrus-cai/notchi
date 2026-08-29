@@ -1683,7 +1683,7 @@ enum RemoteModelManifest {
         /// streaming policy as a hundredfold speed difference. This field means
         /// the same thing for both — see TIME_TO_ANSWER in `api/model-stats.js`.
         let timeToAnswer: Double?
-        /// Intelligence per dollar, scored 0–100 against the manifest's own
+        /// Intelligence per dollar, scored 1–100 against the manifest's own
         /// lineup — the number the card draws in its ring. A score rather than the
         /// raw ratio because that ratio spans three orders of magnitude and its
         /// top end moves whenever a cheap model ships; the ordering is identical.
@@ -1914,7 +1914,7 @@ enum RemoteModelManifest {
             let bar = { (i: Int) in at(i).map { min(5, max(1, Int($0.rounded()))) } }
             let entry = ModelStats(intelligence: at(0),
                                    timeToAnswer: at(1),
-                                   value: at(2).map { Int($0.rounded()) },
+                                   value: at(2).map { min(100, max(1, Int($0.rounded()))) },
                                    intelligenceBar: bar(3),
                                    speedBar: bar(4))
             guard entry.intelligence != nil || entry.timeToAnswer != nil || entry.value != nil

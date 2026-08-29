@@ -1014,9 +1014,10 @@ struct NotchBody: View {
 
     /// The rows the Ask chip's quick menu shows: the selection in effect first, then
     /// the most recently asked-through models (`AskModelMRU`), skipping duplicates
-    /// and providers that can't serve right now, capped at the MRU's five. No
-    /// padding: fewer than five recents just means a shorter menu — every row is
-    /// something the user actually used or picked, never a catalog filler.
+    /// and providers that can't serve right now, capped at the MRU's ten. No
+    /// padding: fewer recents than that just means a shorter menu — every row is
+    /// something the user actually used or picked, never a catalog filler. Past
+    /// five the menu keeps its height and scrolls (see `AskRecentModelPickerView`).
     ///
     /// With nothing configured there are no recents worth listing — the "selection
     /// in effect" is a provider default nobody chose and every MRU slot is empty —

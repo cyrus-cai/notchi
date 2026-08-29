@@ -558,7 +558,7 @@ final class NotchModel: ObservableObject {
     @Published var showAgentPicker = false
 
     /// The Ask model chip's quick menu — the agent quick picker's card on the chat
-    /// side, listing the five most recently used models (`AskModelMRU`). `NotchBody`
+    /// side, listing the ten most recently used models (`AskModelMRU`). `NotchBody`
     /// hangs the popover off the panel body like the other two pickers.
     @Published var showAskModelPicker = false
 

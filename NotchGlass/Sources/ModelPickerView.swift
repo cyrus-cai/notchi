@@ -266,7 +266,7 @@ private struct ModelMenuPresenter: NSViewRepresentable {
         }
 
         /// Preserve the catalog's family order, but rank siblings by the same
-        /// 0–100 cost-efficiency score shown on the detail card. A missing score is
+        /// 1–100 cost-efficiency score shown on the detail card. A missing score is
         /// normal for an unbenchmarked model, so those rows stay stable at the end
         /// of their family rather than being assigned a made-up value.
         private func rankedWithinFamilies(_ models: [PickerModel]) -> [PickerModel] {
@@ -425,7 +425,7 @@ struct ModelDetailCard: View {
                        intelligence: Double(stats?.intelligenceBar ?? model.info.intelligence))
     }
 
-    /// 0–100, and only ever measured — there is no curated stand-in for "how much
+    /// 1–100, and only ever measured — there is no curated stand-in for "how much
     /// intelligence per dollar", so an unmeasured model simply has no ring. Its
     /// *presence* doesn't animate: the ring is part of the card's layout, and a
     /// gauge shrinking away while the title reflows next to it reads as a glitch.
@@ -602,7 +602,7 @@ struct ModelDetailCard: View {
     /// intelligence are properties of the model, and this is a verdict about the
     /// two of them against the price — a different kind of statement, and the one
     /// people skim for. A gauge reads as a score out of a fixed maximum, which is
-    /// exactly what it is (0–100 against the manifest's lineup).
+    /// exactly what it is (1–100 against the manifest's lineup).
     ///
     /// The label rides the outside of the arc rather than sitting under it: a line
     /// of text below the gauge was a second element competing with the model name
@@ -633,7 +633,7 @@ struct ModelDetailCard: View {
                     Arc(sweep: Self.sweep)
                         .stroke(Tokens.accent.opacity(0.18),
                                 style: StrokeStyle(lineWidth: Self.stroke, lineCap: .round))
-                    Arc(sweep: Self.sweep * CGFloat(min(100, max(0, score)) / 100))
+                    Arc(sweep: Self.sweep * CGFloat(min(100, max(1, score)) / 100))
                         .stroke(Tokens.accent,
                                 style: StrokeStyle(lineWidth: Self.stroke, lineCap: .round))
                 }
@@ -1649,7 +1649,7 @@ struct AgentFolderPickerView: View {
 // MARK: - Ask recents quick menu
 
 /// The Ask side's "recently used models" memory: the (provider, model) pairs most
-/// recently asked through, newest first, capped at five. Fed by every chat submit
+/// recently asked through, newest first, capped at ten. Fed by every chat submit
 /// (including one-shot regenerate overrides) and by explicit picks, persisted in
 /// UserDefaults so the chip menu remembers across launches. This is what the Ask
 /// model chip's quick menu lists — the full cross-provider catalog stays in
@@ -1660,7 +1660,7 @@ enum AskModelMRU {
         let model: String
     }
 
-    static let capacity = 5
+    static let capacity = 10
     private static let defaultsKey = "ask_model_mru"
 
     /// Newest first. Entries whose provider no longer decodes (a removed enum case
@@ -1713,6 +1713,9 @@ struct AskRecentModelPickerView: View {
     /// A local keyDown monitor is the only reliable way to own the arrow keys inside a
     /// popover — a focused field editor swallows them before SwiftUI sees them.
     @State private var keyMonitor: Any?
+    /// Whether the list is mid-scroll at either edge — the gate for the fades.
+    @State private var scrolledOffTop = false
+    @State private var scrolledOffBottom = false
 
     init(rows: [Row], selectedProvider: Provider, selectedModelID: String,
          onSelect: @escaping (Row) -> Void, onMoreModels: @escaping () -> Void,
@@ -1724,31 +1727,93 @@ struct AskRecentModelPickerView: View {
         _current = State(initialValue: Row(provider: selectedProvider, id: selectedModelID))
     }
 
+    /// The list window is a FIXED five rows. The recents run to ten, but a card
+    /// that grew a row per remembered model would stand taller than the compose it
+    /// hangs off — so five rows is the window and the rest scrolls, and the card's
+    /// height stops depending on how many models the user has been through.
+    /// Rows are a fixed height at a fixed spacing, so the height is arithmetic —
+    /// demanded explicitly rather than `.frame(maxHeight:)`, which inside a
+    /// floating card just takes whatever height was last proposed and clips.
+    private static let listRows = 5
+    /// How deep the list dissolves at whichever edge is mid-scroll — two thirds of
+    /// a row, enough to see a row go instead of reading as a hard cut.
+    private static let edgeFade: CGFloat = 18
+
+    /// Sized to content while the recents are short, capped at the window once
+    /// they outgrow it.
+    private var listHeight: CGFloat {
+        CGFloat(max(1, min(rows.count, Self.listRows))) * MenuCard.rowStride - MenuCard.rowSpacing
+    }
+
+    /// What the rows actually add up to — the other half of the bottom-edge test
+    /// (the observer reports the offset, not the remaining travel).
+    private var contentHeight: CGFloat {
+        CGFloat(max(1, rows.count)) * MenuCard.rowStride - MenuCard.rowSpacing
+    }
+
+    /// Whether the list outgrows the window and scrolls — the gate for the fades.
+    private var overflowing: Bool { rows.count > Self.listRows }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
-            ForEach(rows, id: \.self) { r in
-                MenuCardRow(
-                    title: ModelRatings.prettyName(for: r.id, provider: r.provider),
-                    // Backends driven by the user's own signed-in CLI wear the tag:
-                    // in a list that otherwise means "a key we hold", it says where
-                    // this one actually runs and why it needed no setup.
-                    accessory: r.provider.isCLI ? "CLI" : nil,
-                    // The highlight here means "the model in effect", not "where the
-                    // cursor is" — so it carries the emphasized weight, and hover
-                    // does NOT move it (arming commits the pick straight to the
-                    // store; the `/` menu's follow-the-pointer highlight would
-                    // switch models just by sweeping past a row).
-                    emphasized: true,
-                    selected: r == current) {
-                        // Menu semantics: one click picks and dismisses. Clicking
-                        // the already-armed row just dismisses.
-                        if r != current { arm(r) }
-                        onDone()
+            ScrollViewReader { proxy in
+                ScrollView(showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
+                        ForEach(rows, id: \.self) { r in
+                            MenuCardRow(
+                                title: ModelRatings.prettyName(for: r.id, provider: r.provider),
+                                // Backends driven by the user's own signed-in CLI wear the tag:
+                                // in a list that otherwise means "a key we hold", it says where
+                                // this one actually runs and why it needed no setup.
+                                accessory: r.provider.isCLI ? "CLI" : nil,
+                                // The highlight here means "the model in effect", not "where the
+                                // cursor is" — so it carries the emphasized weight, and hover
+                                // does NOT move it (arming commits the pick straight to the
+                                // store; the `/` menu's follow-the-pointer highlight would
+                                // switch models just by sweeping past a row).
+                                emphasized: true,
+                                selected: r == current) {
+                                    // Menu semantics: one click picks and dismisses. Clicking
+                                    // the already-armed row just dismisses.
+                                    if r != current { arm(r) }
+                                    onDone()
+                                }
+                                .id(r)
+                        }
                     }
+                    // Zero-size probe on the scroll CONTENT reads the clip view's
+                    // offset. Only the two CROSSINGS are stored, never the live
+                    // offset: driving a gradient's length from the offset rebuilds
+                    // the mask on every tick.
+                    .onScrollOffsetChange { offset in
+                        let top = offset > 0.5
+                        if top != scrolledOffTop { scrolledOffTop = top }
+                        let bottom = offset < contentHeight - listHeight - 0.5
+                        if bottom != scrolledOffBottom { scrolledOffBottom = bottom }
+                    }
+                }
+                // The shared dissolve at both overflow edges instead of a hard cut,
+                // gated on actual overflow so a short recents list is never dimmed.
+                .scrollEdgeFade(top: overflowing && scrolledOffTop,
+                                bottom: overflowing && scrolledOffBottom,
+                                fade: Self.edgeFade)
+                .frame(height: listHeight)
+                // Open on the model in effect — with ten recents it can sit below
+                // the fold, and a menu that opens blind to its own selection makes
+                // the user hunt for their bearings.
+                .onAppear { proxy.scrollTo(current, anchor: .center) }
+                // ↑/↓ re-arms live, so follow the armed row. A click picks and
+                // dismisses, so this only ever runs for keyboard moves.
+                .onChange(of: current) {
+                    withAnimation(.easeOut(duration: 0.12)) {
+                        proxy.scrollTo(current, anchor: .center)
+                    }
+                }
             }
-            // The tail row out of the recents and into the whole catalog. A
-            // hairline sets it apart from the models above: it isn't a model to
-            // arm, it's a door — and the ↑/↓ cursor deliberately skips it.
+            // The tail row out of the recents and into the whole catalog. It sits
+            // OUTSIDE the scroller — a door you can always reach, not a row that
+            // can scroll away. A hairline sets it apart from the models above: it
+            // isn't a model to arm, and the ↑/↓ cursor deliberately skips it.
             Rectangle().fill(.white.opacity(0.07))
                 .frame(height: 0.5)
                 .padding(.horizontal, MenuCard.rowPad)
