@@ -29,6 +29,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         var openModelSettings: () -> Void
         var openWhatsNew: () -> Void
         var checkForUpdates: () -> Void
+        /// The Force Touch pause. While it runs the gesture's own popup — where it
+        /// was turned off — can't be summoned, so this menu is the only place it can
+        /// be brought back early, which is why it reports the window, offers the way
+        /// out, and stays installed for the duration (see `apply`).
+        var isForceTouchDisabled: () -> Bool
+        var forceTouchResumesAt: () -> Date?
+        var disableForceTouch: (NotchModel.ForceTouchDisable) -> Void
+        var resumeForceTouch: () -> Void
     }
 
     private var statusItem: NSStatusItem?
@@ -41,10 +49,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     // MARK: - Presence
 
-    /// Create or tear down the status item to match the persisted setting.
-    /// Idempotent — safe to call at launch and on every toggle.
+    /// Create or tear down the status item to match the persisted setting — with
+    /// one override: while Force Touch is paused the icon stays, because it is the
+    /// only place the gesture can be brought back before the window is up.
     func apply() {
-        if MenuBarIconVisibility.current == .shown {
+        if MenuBarIconVisibility.current == .shown || actions.isForceTouchDisabled() {
             install()
         } else {
             remove()
@@ -137,6 +146,23 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
 
+        // Force Touch, on or off. While a pause is running this is the only place
+        // it can be ended early — the popup that owns the chip is exactly what is
+        // not opening — so the row says when it comes back and offers to do it now.
+        if actions.isForceTouchDisabled() {
+            let status = NSMenuItem(
+                title: L("disable.menuBar.status", Self.timeString(actions.forceTouchResumesAt())),
+                action: nil, keyEquivalent: "")
+            status.isEnabled = false
+            menu.addItem(status)
+            menu.addItem(item(L("disable.menuBar.resume"), #selector(resumeForceTouch)))
+        } else {
+            let off = NSMenuItem(title: L("disable.menuBar.turnOff"), action: nil,
+                                 keyEquivalent: "")
+            off.submenu = buildDisableMenu()
+            menu.addItem(off)
+        }
+
         // The one setting worth reaching without opening Settings — Notch's
         // equivalent of a recorder's input-device picker.
         let modelItem = NSMenuItem(title: L("menuBar.model"), action: nil, keyEquivalent: "")
@@ -171,6 +197,31 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         quit.keyEquivalent = "q"
         quit.keyEquivalentModifierMask = [.command]
         menu.addItem(quit)
+    }
+
+    /// The two rungs, matching the popup's card exactly.
+    private func buildDisableMenu() -> NSMenu {
+        let menu = NSMenu()
+        let rungs: [(String, NotchModel.ForceTouchDisable)] = [
+            (L("disable.scope.hour"), .oneHour),
+            (L("disable.scope.halfDay"), .twelveHours),
+        ]
+        for (title, scope) in rungs {
+            let entry = NSMenuItem(title: title, action: #selector(disableForceTouch(_:)),
+                                   keyEquivalent: "")
+            entry.target = self
+            entry.representedObject = scope
+            menu.addItem(entry)
+        }
+        return menu
+    }
+
+    /// When the pause lapses, in the user's own short time format ("3:45 PM").
+    private static func timeString(_ date: Date?) -> String {
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        formatter.dateStyle = .none
+        return formatter.string(from: date ?? Date())
     }
 
     /// The recently-used models, same list the in-panel ⌘⇧I picker shows, with
@@ -233,6 +284,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     @objc private func openModelSettings() { actions.openModelSettings() }
     @objc private func openWhatsNew() { actions.openWhatsNew() }
     @objc private func checkForUpdates() { actions.checkForUpdates() }
+    @objc private func resumeForceTouch() { actions.resumeForceTouch() }
+
+    @objc private func disableForceTouch(_ sender: NSMenuItem) {
+        guard let scope = sender.representedObject as? NotchModel.ForceTouchDisable
+        else { return }
+        actions.disableForceTouch(scope)
+    }
     @objc private func quit() { NSApp.terminate(nil) }
 
     @objc private func selectModel(_ sender: NSMenuItem) {

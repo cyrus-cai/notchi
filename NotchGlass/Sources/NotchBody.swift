@@ -1199,6 +1199,9 @@ struct NotchBody: View {
         let engine = model.agentArmedEngine
         if let id = model.agentModelID,
            let choice = engine.modelChoices.first(where: { $0.id == id }) {
+            if engine == .pi {
+                return PiCLIService.shortDisplayName(forID: id)
+            }
             return Self.strippingModelFamily(choice.label, engine: engine)
         }
         return engine.displayName
@@ -1214,8 +1217,9 @@ struct NotchBody: View {
         case .claude: family = "claude"
         case .grok:   family = "grok"
         // Command Code fronts a dozen labs — there is no one family word to drop,
-        // and the vendor is exactly what tells its models apart. pi fronts more
-        // still (a dozen labs across several accounts), for the same reason.
+        // and the vendor is exactly what tells its models apart. PI reaches this
+        // fallback only for labels without a concrete catalog id; concrete PI ids
+        // use `shortDisplayName` above so the provider stays in the picker only.
         case .commandCode, .pi: return label
         }
         for sep in ["-", " "] {

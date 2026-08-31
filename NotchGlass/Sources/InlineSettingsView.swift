@@ -373,11 +373,6 @@ struct InlineSettingsView: View {
     /// persisted value; writes go through `selectHoverSensitivity`. Read live by
     /// `NotchModel.hoverEntered`, so a change applies to the very next hover.
     @State private var hoverSensitivity: HoverSensitivity = .current
-    /// Where the hover slider's ticks actually sit (normalized 0…1), so its
-    /// labels line up under the marks rather than under an equal-width guess.
-    @State private var hoverTickCenters: [CGFloat]?
-    /// Where the pressure slider's ticks actually sit; see `hoverTickCenters`.
-    @State private var pressureTickCenters: [CGFloat]?
 
     /// Whether the island auto-hides while a full-screen app covers its screen —
     /// mirrors the persisted value; writes go through `selectHideInFullscreen`,
@@ -713,6 +708,9 @@ struct InlineSettingsView: View {
                 hoverSensitivityRow
                 if ForceClickFeature.isEnabled {
                     forceClickPressureRow
+                    if model.isForceTouchDisabled {
+                        forceClickPausedNotice
+                    }
                 }
                 liveActivityRow
                 Text(L("appearance.displays"))
@@ -3035,6 +3033,11 @@ struct InlineSettingsView: View {
         }
     }
 
+    /// Height of the native slider itself, without the tick-label row beneath
+    /// it. The row's own label centers on this, so it sits level with the track
+    /// instead of drifting toward the labels below.
+    static let sliderHeight: CGFloat = 22
+
     /// The global selected-text gesture has no keyboard binding: this is its one
     /// setting. Four ordered positions, quantized like the hover-sensitivity
     /// slider right above it — Off, Light, Medium, Firm. Off disarms the
@@ -3043,48 +3046,82 @@ struct InlineSettingsView: View {
         let controlWidth: CGFloat = 190
         return settingRow(label: L("general.forceClickPressure"),
                           info: L("general.forceClickPressure.hint"),
-                          aligned: true) {
+                          aligned: true,
+                          verticalAlignment: .sliderTrack) {
             VStack(spacing: 1) {
                 NativeDetentSlider(value: forceClickPressurePosition,
-                                   ticks: ForceClickPressure.allCases.count,
-                                   tickCenters: $pressureTickCenters)
-                    .frame(width: controlWidth, height: 22)
+                                   ticks: ForceClickPressure.allCases.count)
+                    .frame(width: controlWidth, height: Self.sliderHeight)
                     .accessibilityLabel(L("general.forceClickPressure"))
 
                 tickLabelRow(ForceClickPressure.allCases,
                              selected: model.forceClickPressure,
-                             centers: pressureTickCenters,
                              width: controlWidth)
             }
+            .alignmentGuide(.sliderTrack) { _ in Self.sliderHeight / 2 }
         }
     }
 
-    /// Labels under a detent slider, each centered on its tick's real x-position
-    /// (from the slider's `rectOfTickMark`), so text sits squarely under the
-    /// marks instead of under an equal-width division of the control.
+    /// The pause taken from the Force Touch popup itself, said out loud on the
+    /// slider it contradicts. Without it this row reads "Medium" while pressing
+    /// harder does nothing, and the only account of why is a menu-bar item the
+    /// user may never open — a setting that silently lies about its own state.
+    ///
+    /// Only mounted while a pause is actually running, so it is a passing notice
+    /// rather than a permanent line of chrome, and it carries the way out with it.
+    private var forceClickPausedNotice: some View {
+        HStack(spacing: 8) {
+            Text(L("disable.settings.paused",
+                   Self.pauseEndsAt(model.forceTouchDisabledUntil)))
+                .font(.sf(11))
+                .foregroundStyle(Tokens.text3)
+                .fixedSize(horizontal: false, vertical: true)
+            SettingActionButton(title: L("disable.settings.resume")) {
+                model.resumeForceTouch()
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.top, -2)
+        .transition(.opacity)
+    }
+
+    /// When the pause lapses, in the user's own short time format.
+    private static func pauseEndsAt(_ date: Date?) -> String {
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        formatter.dateStyle = .none
+        return formatter.string(from: date ?? Date())
+    }
+
+    /// Labels under a detent slider, one per tick mark. The inner ones sit
+    /// centered on the x where AppKit draws their mark (see
+    /// `NativeDetentSlider.tickFractions`); the two end ones are pinned flush to
+    /// the control's edges instead of centered on their mark.
+    ///
+    /// Pinning, not clamping: a clamp only moves an end label when it is wide
+    /// enough to overhang, so `Instant` ended up flush right while `Firm` sat a
+    /// few points inside it — two stacked sliders whose end columns didn't line
+    /// up. Flush edges make every row's first and last label share one x, in any
+    /// language, and keep an end label off the row's own text (`Off` is
+    /// `Désactivé` in French).
     private func tickLabelRow<Option: Identifiable & Equatable & Hashable>(
         _ options: [Option],
         selected: Option,
-        centers: [CGFloat]?,
         width: CGFloat
     ) -> some View where Option: RawRepresentable, Option.RawValue == String {
-        ZStack {
-            if let centers, centers.count == options.count {
-                ForEach(Array(options.enumerated()), id: \.element) { index, option in
-                    tickLabel(option, selected: selected)
-                        .position(x: centers[index] * width, y: 7)
-                }
-            } else {
-                // Until AppKit reports where its tick marks actually landed, fall
-                // back to an even split — the row must never render blank.
-                HStack(spacing: 0) {
-                    ForEach(Array(options.enumerated()), id: \.element) { index, option in
-                        tickLabel(option, selected: selected)
-                            .frame(maxWidth: .infinity,
-                                   alignment: index == 0 ? .leading
-                                       : (index == options.count - 1 ? .trailing : .center))
+        let fractions = NativeDetentSlider.tickFractions(count: options.count, width: width)
+        let last = options.count - 1
+        return ZStack(alignment: .topLeading) {
+            ForEach(Array(options.enumerated()), id: \.element) { index, option in
+                let fraction = fractions[index]
+                tickLabel(option, selected: selected)
+                    .fixedSize()
+                    .alignmentGuide(.leading) { label in
+                        if index == 0 { return 0 }
+                        if index == last { return label.width - width }
+                        let centered = label.width / 2 - width * fraction
+                        return Swift.min(Swift.max(centered, label.width - width), 0)
                     }
-                }
             }
         }
         .frame(width: width, height: 14)
@@ -3133,19 +3170,19 @@ struct InlineSettingsView: View {
         let controlWidth: CGFloat = 190
         return settingRow(label: L("general.hoverSensitivity"),
                           info: L("general.hoverSensitivity.hint"),
-                          aligned: true) {
+                          aligned: true,
+                          verticalAlignment: .sliderTrack) {
             VStack(spacing: 1) {
                 NativeDetentSlider(value: hoverSensitivityPosition,
-                                   ticks: HoverSensitivity.allCases.count,
-                                   tickCenters: $hoverTickCenters)
-                    .frame(width: controlWidth, height: 22)
+                                   ticks: HoverSensitivity.allCases.count)
+                    .frame(width: controlWidth, height: Self.sliderHeight)
                     .accessibilityLabel(L("general.hoverSensitivity"))
 
                 tickLabelRow(HoverSensitivity.allCases,
                              selected: hoverSensitivity,
-                             centers: hoverTickCenters,
                              width: controlWidth)
             }
+            .alignmentGuide(.sliderTrack) { _ in Self.sliderHeight / 2 }
         }
     }
 
@@ -3509,6 +3546,9 @@ struct InlineSettingsView: View {
         let target = EditableShortcut.prompt(binding.id)
         return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
+                // Read-only: the name is the AI's, not a field. It used to be a
+                // TextField, which made the card's heading look like the first
+                // thing to fill in — it isn't, the prompt is.
                 Text(promptShortcutName(binding)
                      ?? (binding.prompt.isEmpty
                          ? L("shortcuts.promptAction")
@@ -4871,8 +4911,17 @@ struct InlineSettingsView: View {
                                        value: aligned ? g.size.width : 0)
             }
         )
+        // `minWidth`, not `width`: the column is a floor, never a clamp. A hard
+        // width pins the label to a number that can briefly be too small for it
+        // — the pane's own measurement lands a frame late, and a language switch
+        // relengthens every label before the max catches up — and the text
+        // inside is `fixedSize`, so it doesn't shrink or truncate, it overflows
+        // its frame straight across the control next to it. As a floor the row
+        // just sits at its natural width for that frame. Steady state is
+        // identical: the column IS the widest natural label, so every row is
+        // exactly it.
         // `nil` keeps the row at its own width until the first measurement.
-        .frame(width: aligned && labelColumnWidth > 0 ? labelColumnWidth : nil,
+        .frame(minWidth: aligned && labelColumnWidth > 0 ? labelColumnWidth : nil,
                alignment: .leading)
     }
 
@@ -5294,135 +5343,131 @@ private struct PickerCard<Content: View>: View {
 }
 
 /// A native `NSSlider` quantized to a fixed ladder of tick positions — the
-/// "multi-segment" control behind the hover-sensitivity row (3 ticks) and the
-/// agent card's thinking-strength dial (N ticks). Ticks sit below the track;
-/// dragging snaps to the nearest one, so `value` only ever lands on an integer
-/// position in `0…ticks-1`.
+/// "multi-segment" control behind the hover-sensitivity row and the Agent
+/// card's thinking-strength dial. Nothing here draws: the stock AppKit control
+/// keeps its own shape, tick marks and interaction animation. The representable
+/// only hands it a plain host view and puts it at that host's local origin, so
+/// its promoted Liquid Glass knob has no SwiftUI-origin offset to reconcile.
+/// Centers a setting row's label on a detent slider's *track*, not on the whole
+/// control. The control is a `VStack` of slider + tick labels, so both
+/// `.center` and the default `.firstTextBaseline` leave the label sitting off
+/// the track — visibly high against one slider, and inconsistent between two
+/// stacked rows whose labels differ in height.
+private enum SliderTrackAlignment: AlignmentID {
+    static func defaultValue(in d: ViewDimensions) -> CGFloat { d[VerticalAlignment.center] }
+}
+
+extension VerticalAlignment {
+    static let sliderTrack = VerticalAlignment(SliderTrackAlignment.self)
+}
+
 struct NativeDetentSlider: NSViewRepresentable {
     @Binding var value: Double
     /// Number of detents on the ladder (tick marks + the positions they mark).
-    /// Two ticks are the minimum the system allows; 3 = the old
-    /// `NativeThreeStepSlider` exactly.
+    /// Two ticks are the minimum the system allows.
     let ticks: Int
-    /// Normalized x-position of each tick's center inside the slider, 0…1
-    /// (nil while the NSView isn't laid out yet). Labels align to these instead
-    /// of a naive equal-width split, because the AppKit track is inset from the
-    /// view's edges by half a thumb on each side. Defaults to nil for sliders
-    /// that draw no label row.
-    @Binding var tickCenters: [CGFloat]?
 
-    init(value: Binding<Double>, ticks: Int, tickCenters: Binding<[CGFloat]?> = .constant(nil)) {
-        _value = value
-        self.ticks = ticks
-        _tickCenters = tickCenters
+    static let controlSize: NSControl.ControlSize = .regular
+
+    /// The stock knob's width at `controlSize`, read from AppKit rather than
+    /// hard-coded — but measured once at launch (`primeMetrics`), never from
+    /// inside a view body. `-[NSSliderCell knobThickness]` drives an AppKit
+    /// render pass, and taking that while SwiftUI is evaluating a body re-enters
+    /// the view graph and trips an AttributeGraph precondition — a hard crash on
+    /// opening Settings → Appearance, where the first slider is built. The
+    /// measured `.regular` width stands in until the probe runs.
+    /// Only trustworthy off an unlaid-out slider for `.regular` (`.small`
+    /// reports 18 here but draws 10) — recheck against a rendered control
+    /// before changing `controlSize`.
+    private(set) static var knobWidth: CGFloat = 20
+
+    /// Measure the stock knob off the view-update path. Called once from
+    /// `applicationDidFinishLaunching`, before any settings pane can render.
+    static func primeMetrics() {
+        let probe = NSSlider()
+        probe.controlSize = controlSize
+        knobWidth = probe.knobThickness
     }
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(value: $value, tickCenters: $tickCenters)
-    }
-
-    func makeNSView(context: Context) -> SliderView {
-        let slider = SliderView(value: value,
-                                minValue: 0,
-                                maxValue: Double(ticks - 1),
-                                target: context.coordinator,
-                                action: #selector(Coordinator.valueChanged(_:)))
-        slider.onTickGeometryChange = { [weak coordinator = context.coordinator] centers in
-            coordinator?.publish(tickCenters: centers)
+    /// Normalized x of each detent inside a control `width` points wide. The end
+    /// detents rest half a knob in from the edges, and AppKit draws its tick
+    /// marks on those rest positions — so a label row lines up with the marks by
+    /// following these, not an equal-width split of the control.
+    static func tickFractions(count: Int, width: CGFloat) -> [CGFloat] {
+        guard count > 1, width > knobWidth else {
+            return (0..<count).map { CGFloat($0) / CGFloat(Swift.max(count - 1, 1)) }
         }
+        let step = (width - knobWidth) / CGFloat(count - 1)
+        return (0..<count).map { (knobWidth / 2 + CGFloat($0) * step) / width }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(value: $value) }
+
+    func makeNSView(context: Context) -> SliderHostView {
+        let slider = NSSlider(value: value,
+                              minValue: 0,
+                              maxValue: Double(ticks - 1),
+                              target: context.coordinator,
+                              action: #selector(Coordinator.valueChanged(_:)))
         slider.sliderType = .linear
         slider.numberOfTickMarks = ticks
         slider.tickMarkPosition = .below
         slider.allowsTickMarkValuesOnly = true
         slider.altIncrementValue = 1
         slider.isContinuous = true
-        slider.controlSize = .small
+        // `.regular` is the wide-and-flat system knob (20 x 16); `.small` draws
+        // a narrow vertical pill (10 x 18) that reads as a different control.
+        slider.controlSize = Self.controlSize
+        // The one appearance override: every other control in this panel is
+        // tinted `Tokens.text2`, so the fill stays monochrome instead of
+        // becoming the panel's lone accent-blue element.
         slider.trackFillColor = NSColor.white.withAlphaComponent(0.55)
-        return slider
+        return SliderHostView(slider: slider)
     }
 
-    func updateNSView(_ slider: SliderView, context: Context) {
+    func updateNSView(_ host: SliderHostView, context: Context) {
+        let slider = host.slider
         context.coordinator.value = $value
-        context.coordinator.tickCenters = $tickCenters
-        // The ladder itself has to be re-applied, not just the value: SwiftUI
-        // REUSES this NSSlider when `ticks` changes, and `makeNSView` only ever
-        // ran once. A slider left holding the old count is not cosmetic — it
-        // CRASHED the app: `rectOfTickMark(at:)` below raises an NSException for
-        // an index past `numberOfTickMarks`, and an ObjC exception out of a
-        // SwiftUI update is a hard termination, not a caught error. The way in
-        // was arming a model whose rung count is higher than the armed one's
-        // (pi's models offer five rungs; plenty of others offer two or three),
-        // with the effort bar already on screen.
         if slider.numberOfTickMarks != ticks {
             slider.numberOfTickMarks = ticks
             slider.maxValue = Double(ticks - 1)
         }
-        // Re-clamp on tick-count changes (e.g. the agent card's rungs can
-        // shrink when the armed model changes) so the thumb can't sit past the
-        // last detent it's now allowed to hit.
-        let max = Double(ticks - 1)
-        if value > max { value = max }
-        if slider.doubleValue != value {
-            slider.doubleValue = value
-        }
-        slider.reportTickGeometry()
+        let maximum = Double(ticks - 1)
+        if value > maximum { value = maximum }
+        if slider.doubleValue != value { slider.doubleValue = value }
     }
 
-    /// Reports its own tick geometry from `layout()`. Reading it during
-    /// `updateNSView` alone is too early — SwiftUI runs that before AppKit has
-    /// sized the view, so `bounds.width` is still 0 and nothing ever measures
-    /// again; that left the label row permanently empty.
-    final class SliderView: NSSlider {
-        var onTickGeometryChange: (([CGFloat]) -> Void)?
+    /// A neutral AppKit frame owner between SwiftUI and `NSSlider`. The slider's
+    /// frame is always `(0, 0, bounds.width, bounds.height)`, so its promoted
+    /// interaction layer has no SwiftUI-origin offset to add or omit.
+    final class SliderHostView: NSView {
+        let slider: NSSlider
+
+        init(slider: NSSlider) {
+            self.slider = slider
+            super.init(frame: .zero)
+            addSubview(slider)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { nil }
+
+        override var intrinsicContentSize: NSSize { slider.intrinsicContentSize }
 
         override func layout() {
             super.layout()
-            reportTickGeometry()
-        }
-
-        /// Normalized center of each tick mark, 0…1. Two detents are AppKit's
-        /// minimum, so anything less has no geometry to read — asking anyway
-        /// raises the same `rectOfTickMark(at:)` exception as an out-of-range
-        /// index.
-        func reportTickGeometry() {
-            let width = bounds.width
-            guard width > 0, numberOfTickMarks >= 2 else { return }
-            let centers = (0..<numberOfTickMarks).map { index -> CGFloat in
-                (rectOfTickMark(at: index).midX / width).clamped(to: 0...1)
-            }
-            onTickGeometryChange?(centers)
+            slider.frame = bounds
         }
     }
 
     final class Coordinator: NSObject {
         var value: Binding<Double>
-        var tickCenters: Binding<[CGFloat]?>
 
-        init(value: Binding<Double>, tickCenters: Binding<[CGFloat]?>) {
-            self.value = value
-            self.tickCenters = tickCenters
-        }
+        init(value: Binding<Double>) { self.value = value }
 
         @objc func valueChanged(_ sender: NSSlider) {
             value.wrappedValue = sender.doubleValue
         }
-
-        /// Hops to the next runloop pass: the measurement can land inside a
-        /// SwiftUI update (or inside AppKit's layout), and writing state there
-        /// is what SwiftUI warns about.
-        func publish(tickCenters centers: [CGFloat]) {
-            guard tickCenters.wrappedValue != centers else { return }
-            DispatchQueue.main.async { [self] in
-                guard tickCenters.wrappedValue != centers else { return }
-                tickCenters.wrappedValue = centers
-            }
-        }
-    }
-}
-
-private extension CGFloat {
-    func clamped(to range: ClosedRange<CGFloat>) -> CGFloat {
-        Swift.min(Swift.max(self, range.lowerBound), range.upperBound)
     }
 }
 

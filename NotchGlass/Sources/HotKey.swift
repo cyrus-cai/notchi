@@ -655,7 +655,7 @@ enum ForceClickPressure: String, CaseIterable, Identifiable {
         case .off:    return 1
         case .light:  return 1.70
         case .medium: return 2.00
-        case .firm:   return 2.20
+        case .firm:   return 2.45
         }
     }
 
@@ -664,7 +664,7 @@ enum ForceClickPressure: String, CaseIterable, Identifiable {
         case .off:    return 1
         case .light:  return 65
         case .medium: return 95
-        case .firm:   return 112
+        case .firm:   return 140
         }
     }
 
@@ -673,7 +673,7 @@ enum ForceClickPressure: String, CaseIterable, Identifiable {
         case .off:    return 1
         case .light:  return 200
         case .medium: return 260
-        case .firm:   return 300
+        case .firm:   return 360
         }
     }
 

@@ -2099,6 +2099,48 @@ struct ClearHistoryConfirm: View {
     }
 }
 
+/// The Force Touch pause chooser: "Turn off Force Touch?" — how long, not
+/// whether.
+///
+/// Wears `ClearHistoryConfirm`'s scope-choice clothes on purpose: it is the same
+/// question in the same shape (a centered card, time rungs stacked mild-first,
+/// Cancel dropped out of the material), so the two read as one control the app
+/// asks twice rather than two inventions.
+///
+/// Nothing here is destructive — the gesture comes back on its own — so both
+/// rungs stay plain glass and no red appears on this card at all. Turning Force
+/// Touch off for good lives on its Settings slider, not here.
+struct ForceTouchDisableConfirm: View {
+    var onCancel: () -> Void
+    var onConfirm: (NotchModel.ForceTouchDisable) -> Void
+
+    var body: some View {
+        ConfirmationDialogOverlay(onDismiss: onCancel) {
+            VStack(spacing: 14) {
+                // Title only. The two rungs under it already say what the card
+                // does, and a paragraph explaining what stays working was answering
+                // a question nobody asks of a timer.
+                Text(L("disable.title"))
+                    .font(.sf(15, weight: .semibold))
+                    .foregroundStyle(Tokens.text1)
+
+                VStack(spacing: 8) {
+                    ConfirmDialogButton(title: L("disable.scope.hour"),
+                                        kind: .neutral) { onConfirm(.oneHour) }
+                    ConfirmDialogButton(title: L("disable.scope.halfDay"),
+                                        kind: .neutral) { onConfirm(.twelveHours) }
+                    ConfirmDialogButton(title: L("clear.cancel"),
+                                        kind: .quiet,
+                                        action: onCancel)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 18)
+            .frame(maxWidth: 280)
+        }
+    }
+}
+
 /// The Force Click gate: macOS's own "Look up & data detectors" is bound to the
 /// same press, so arming Notchi's gesture while that is on would put two panels
 /// on one click. Shown *instead of* applying the setting — the rung the user
@@ -3303,6 +3345,27 @@ struct AssistantTurnView: View {
         return s.isEmpty ? id : s
     }
 
+    /// The regenerate model list, shared by the chevron menu and the glyph's
+    /// right-click menu so both gestures open exactly the same thing. The model
+    /// that produced this answer is greyed and disabled — it's the plain
+    /// regenerate the glyph already does.
+    @ViewBuilder
+    private func regenerateModelItems(_ regenerateWith: @escaping (String) -> Void) -> some View {
+        Text(L("result.regenerate.with"))
+        ForEach(regenerateModels, id: \.model) { option in
+            Button {
+                regenerateWith(option.model)
+            } label: {
+                if option.isCurrent {
+                    Text(L("result.regenerate.current", option.model))
+                } else {
+                    Text(option.model)
+                }
+            }
+            .disabled(option.isCurrent)
+        }
+    }
+
     /// True while the cursor is anywhere over this turn (answer text or footer).
     /// Drives the footer's island-hover: the action icons rest nearly invisible
     /// and surface together as one toolbar when the cursor enters the answer,
@@ -3587,33 +3650,15 @@ struct AssistantTurnView: View {
                         }
                     }
                     if let onRegenerate {
-                        AnswerFooterButton(icon: "arrow.clockwise",
-                                           help: shortcutHelp(
-                                               regenerateModels.isEmpty
-                                                   ? "result.regenerate"
-                                                   : "result.regenerate.menu",
-                                               action: .regenerate),
-                                           rowHovered: turnHovered) {
-                            onRegenerate()
-                        }
-                        // Right-click → pick a model for a one-shot regenerate
-                        // (XII-135). Left-click stays "regenerate with the same
-                        // model". The current model is shown greyed + disabled.
-                        .contextMenu {
-                            if !regenerateModels.isEmpty, let onRegenerateWith {
-                                Text(L("result.regenerate.with"))
-                                ForEach(regenerateModels, id: \.model) { option in
-                                    Button {
-                                        onRegenerateWith(option.model)
-                                    } label: {
-                                        if option.isCurrent {
-                                            Text(L("result.regenerate.current", option.model))
-                                        } else {
-                                            Text(option.model)
-                                        }
-                                    }
-                                    .disabled(option.isCurrent)
-                                }
+                        AnswerFooterRegenerateControl(
+                            help: shortcutHelp("result.regenerate", action: .regenerate),
+                            menuHelp: L("result.regenerate.with"),
+                            rowHovered: turnHovered,
+                            hasMenu: !regenerateModels.isEmpty && onRegenerateWith != nil,
+                            action: onRegenerate
+                        ) {
+                            if let onRegenerateWith {
+                                regenerateModelItems(onRegenerateWith)
                             }
                         }
                         .disabled(streaming)
@@ -6502,6 +6547,112 @@ private struct AnswerFooterButton: View {
         .animation(.easeOut(duration: 0.18), value: rowHovered)
         .animation(.easeOut(duration: 0.15), value: confirmed)
         .notchTooltip(help, shows: showsTooltip)
+    }
+}
+
+/// The footer's regenerate control: one button with a tail. The glyph re-runs
+/// the answer with the same model; the chevron flush against it drops the model
+/// list. The chevron exists because that pick used to live on right-click only —
+/// a menu nobody found (a trackpad user had to two-finger tap a 22pt icon to
+/// learn it was there) — and it surfaces only under the pointer on this very
+/// control, so a resting footer stays the marks it always was.
+///
+/// The two halves share ONE Liquid Glass capsule, lit whenever either is
+/// pointed at: they are two ends of a single control, and two abutting pills
+/// would say otherwise. Same material as the island's other chips
+/// (`GlassSegmentCluster`, the code block's copy chip). Nothing else in the
+/// footer takes glass — a row of standing pills would outweigh the answer above
+/// it; here the capsule is what tells you the chevron is a separate target.
+private struct AnswerFooterRegenerateControl<Items: View>: View {
+    let help: String
+    let menuHelp: String
+    /// True while the cursor is anywhere over the owning turn — surfaces the
+    /// whole footer as one unit at half strength.
+    let rowHovered: Bool
+    let hasMenu: Bool
+    let action: () -> Void
+    @ViewBuilder var items: () -> Items
+
+    /// ONE hover flag for the whole control, read from the capsule's own tracking
+    /// area — not one per half. Two `.onHover`s meant crossing from the glyph to
+    /// the chevron went `glyph: false` → (a frame with neither half lit) →
+    /// `chevron: true`, and that empty frame collapsed the tail to zero width and
+    /// dropped the glass, only for the pointer to relight it: a visible flicker
+    /// every time you slid across the seam.
+    @State private var hovering = false
+
+    /// The capsule's width. Narrower than the glyph's square: the chevron is a
+    /// tail, not a second icon.
+    private static var chevronWidth: CGFloat { 16 }
+
+    /// The pointer is on the control — either half, or the padding between them.
+    private var lit: Bool { hovering }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Button(action: action) {
+                Image(systemName: "arrow.clockwise")
+                    .font(.sf(11, weight: .regular))
+                    .foregroundStyle(lit ? Tokens.text2 : Tokens.text3)
+                    .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .notchTooltip(help)
+
+            if hasMenu {
+                Menu(content: items) {
+                    Image(systemName: "chevron.down")
+                        .font(.sf(8, weight: .semibold))
+                        .foregroundStyle(lit ? Tokens.text2 : Tokens.text3)
+                        .frame(width: Self.chevronWidth, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                // The chevron belongs to the regenerate glyph, not to the row:
+                // it opens only when the pointer is actually on this control
+                // (and stays open once the pointer crosses onto the chevron
+                // itself). Everywhere else it isn't dim, it isn't there — zero
+                // width, clipped, so the icons after it close the gap. Width and
+                // opacity ride the same curve as the glass behind them, so the
+                // capsule and its tail arrive as one motion.
+                .frame(width: lit ? Self.chevronWidth : 0)
+                .opacity(lit ? 1 : 0)
+                .clipped()
+                .allowsHitTesting(lit)
+                // Unconditional: `shows: lit` swapped the branch of a
+                // `_ConditionalContent` as the control lit, rebuilding the Menu
+                // underneath the pointer. The tip only appears on hover anyway,
+                // and the chevron is only hit-testable while lit.
+                .notchTooltip(menuHelp)
+            }
+        }
+        // Air inside the capsule: flush against the glyphs it read as shrink-wrap
+        // rather than a chip. The padding is constant — it belongs to the
+        // control, not to the hover — so the row doesn't shuffle when the glass
+        // arrives.
+        .padding(.horizontal, 4)
+        // The whole capsule is one hover target, so the seam between the glyph
+        // and its tail isn't a gap the pointer can fall through.
+        .contentShape(Capsule())
+        .onHover { hovering = $0 }
+        .background {
+            // A whisper of a chip, not a button plate: the resting fill and rim
+            // (`brighter: false`, rim pulled back) rather than the lit ones, and
+            // the whole layer held under full strength. It only has to separate
+            // the two halves from the bare icons beside them.
+            Color.clear
+                .glassCapsule(in: Capsule(), brighter: false, rim: 0.6)
+                .opacity(lit ? 0.75 : 0)
+        }
+        // Rest → row hover → pointed at: the same three levels the bare footer
+        // icons keep, so the control still belongs to that toolbar.
+        .opacity(lit ? 1.0 : rowHovered ? 0.7 : 0.25)
+        .animation(.easeOut(duration: Tokens.hoverFade), value: lit)
+        .animation(.easeOut(duration: 0.18), value: rowHovered)
     }
 }
 

@@ -5,27 +5,58 @@ import SwiftUI
 /// corners round as the form grows.
 struct NotchShape: InsettableShape {
     var bottomRadius: CGFloat
+    /// Radius of the **inverse (concave) top shoulders** — the flare the physical
+    /// cutout has, where the black is widest right at the screen's top edge and
+    /// curves inward to the body's own width a few points down. Without it the
+    /// form ends in a hard vertical cut against the menu bar; with it the panel
+    /// melts into the bezel the way the hardware notch does. 0 = square corners
+    /// (the resting island, which lives inside the real cutout and inherits the
+    /// hardware's own curve).
+    var topRadius: CGFloat = 0
     /// Inset applied by `.strokeBorder` (and `inset(by:)`) so a stroked edge
     /// stays fully inside the fill instead of being clipped in half.
     var inset: CGFloat = 0
 
-    var animatableData: CGFloat {
-        get { bottomRadius }
-        set { bottomRadius = newValue }
+    var animatableData: AnimatablePair<CGFloat, CGFloat> {
+        get { AnimatablePair(bottomRadius, topRadius) }
+        set {
+            bottomRadius = newValue.first
+            topRadius = newValue.second
+        }
     }
 
     func path(in rect: CGRect) -> Path {
         let rect = rect.insetBy(dx: inset, dy: inset)
         let r = min(bottomRadius, min(rect.width, rect.height) / 2)
+        // The flare can never eat the bottom corners or cross the middle.
+        let tr = max(0, min(topRadius,
+                            min(rect.width / 2 - r, rect.height - r)))
+        // The shoulders curve in from the rect's own top — which IS the screen's
+        // visible edge: the island's black bleeds above it via a negative top
+        // padding, so the drawn form starts higher than this box does.
+        let flareY = rect.minY
         var p = Path()
         p.move(to: CGPoint(x: rect.minX, y: rect.minY))
         p.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
-        p.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - r))
-        p.addArc(center: CGPoint(x: rect.maxX - r, y: rect.maxY - r),
+        // Top-right shoulder: straight down through the bleed, then the concave
+        // quarter-turn into the body's right edge.
+        p.addLine(to: CGPoint(x: rect.maxX, y: flareY))
+        if tr > 0 {
+            p.addQuadCurve(to: CGPoint(x: rect.maxX - tr, y: flareY + tr),
+                           control: CGPoint(x: rect.maxX - tr, y: flareY))
+        }
+        p.addLine(to: CGPoint(x: rect.maxX - tr, y: rect.maxY - r))
+        p.addArc(center: CGPoint(x: rect.maxX - tr - r, y: rect.maxY - r),
                  radius: r, startAngle: .degrees(0), endAngle: .degrees(90), clockwise: false)
-        p.addLine(to: CGPoint(x: rect.minX + r, y: rect.maxY))
-        p.addArc(center: CGPoint(x: rect.minX + r, y: rect.maxY - r),
+        p.addLine(to: CGPoint(x: rect.minX + tr + r, y: rect.maxY))
+        p.addArc(center: CGPoint(x: rect.minX + tr + r, y: rect.maxY - r),
                  radius: r, startAngle: .degrees(90), endAngle: .degrees(180), clockwise: false)
+        // Top-left shoulder, mirrored.
+        p.addLine(to: CGPoint(x: rect.minX + tr, y: flareY + tr))
+        if tr > 0 {
+            p.addQuadCurve(to: CGPoint(x: rect.minX, y: flareY),
+                           control: CGPoint(x: rect.minX + tr, y: flareY))
+        }
         p.closeSubpath()
         return p
     }
@@ -56,6 +87,8 @@ struct NotchShape: InsettableShape {
 ///     bottom, fading on the straight sides.
 struct GlassMaterial: View {
     var bottomRadius: CGFloat
+    /// The island's concave top shoulders — see `NotchShape.topRadius`.
+    var topRadius: CGFloat = 0
     /// Whether the island is expanded. Resting (false) blends with the physical
     /// black bezel → near-opaque dark; expanded (true) becomes the translucent
     /// Control-Center glass that refracts the background.
@@ -91,7 +124,7 @@ struct GlassMaterial: View {
     }
 
     var body: some View {
-        let shape = NotchShape(bottomRadius: bottomRadius)
+        let shape = NotchShape(bottomRadius: bottomRadius, topRadius: topRadius)
 
         // Build the whole material — glass + tint + cap + rim — then HARD-CUT it
         // to the shape as the final step. Clipping the composited group (rather

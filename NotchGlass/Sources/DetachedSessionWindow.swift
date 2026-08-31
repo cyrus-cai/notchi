@@ -2825,6 +2825,10 @@ struct DetachedSessionRootView: View {
                 onToggleHistory: onToggleForceTouchHistory,
                 onOpenHistory: onOpenForceTouchHistory,
                 onOpenSettings: openShortcutSettings,
+                onDisable: { scope in
+                    model.disableForceTouch(scope)
+                    onClose()
+                },
                 onDesiredHeight: liveHeight(from: state.session),
                 onCaretOffset: onCaretOffset)
                 .id(state.compactPromptGeneration)
@@ -3286,6 +3290,10 @@ private struct CompactShortcutPromptView: View {
     var onOpenHistory: (UUID) -> Void
     /// Straight to the page where these shortcuts are edited.
     var onOpenSettings: () -> Void = {}
+    /// Put Force Touch away — the pause chip's answer. The controller runs it
+    /// against the model and shuts this window, since the popup it belongs to is
+    /// exactly what the user just asked to stop seeing.
+    var onDisable: (NotchModel.ForceTouchDisable) -> Void = { _ in }
     var onDesiredHeight: (CGFloat) -> Void = { _ in }
     /// Where this face's text cursor actually landed, in the window's own
     /// coordinates. The window is placed by it (`alignCaret`).
@@ -3295,6 +3303,8 @@ private struct CompactShortcutPromptView: View {
 
     @State private var focused = false
     @State private var caretWidth: CGFloat = 0
+    /// Whether the pause chooser is up over this card.
+    @State private var confirmingDisable = false
     @State private var inputHeight: CGFloat =
         PromptField.lineHeight(for: CompactShortcutPromptView.fontSize)
     /// Read once per appearance rather than per render: the list is the user's
@@ -3579,6 +3589,30 @@ private struct CompactShortcutPromptView: View {
         .frame(height: cardHeight, alignment: .top)
         .animation(.spring(response: 0.32, dampingFraction: 0.86), value: inputHeight)
         .animation(CompactHistoryMotion.spring, value: trimmed.isEmpty)
+        // The chooser covers this whole card — scrim included — the way the Clear
+        // card covers the island. Clipped to the card's own silhouette: the scrim
+        // is a rectangle, and unclipped it planted four square corners outside the
+        // 30pt radius the glass is drawn with. It is only reachable from the
+        // ledger's bottom bar, so the window is always at its expanded height when
+        // this can appear and the card has room to centre in.
+        .overlay {
+            if confirmingDisable {
+                ForceTouchDisableConfirm(
+                    onCancel: {
+                        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                            confirmingDisable = false
+                        }
+                    },
+                    onConfirm: { scope in
+                        confirmingDisable = false
+                        onDisable(scope)
+                    }
+                )
+                .clipShape(RoundedRectangle(cornerRadius: Self.cardCornerRadius,
+                                            style: .continuous))
+                .transition(.opacity.combined(with: .scale(scale: 0.96)))
+            }
+        }
     }
 
     /// The field and its one trailing slot: collapsed History at rest, replaced
@@ -3666,6 +3700,7 @@ private struct CompactShortcutPromptView: View {
         .overlay(alignment: .bottom) {
             HStack(spacing: 6) {
                 settingsControl
+                disableControl
                 Spacer(minLength: 8)
                 CompactHistoryDisclosure(
                     expanded: true,
@@ -3684,6 +3719,26 @@ private struct CompactShortcutPromptView: View {
             action: onOpenSettings)
     }
 
+    /// Turning Force Touch off, next to Settings on the ledger's own bottom bar.
+    /// It is the one trigger that fires without being asked for — it rides a press
+    /// you were making anyway — so the surface it opens is where "not right now"
+    /// belongs, rather than three levels into Settings.
+    ///
+    /// The chip only asks; how long is answered on `ForceTouchDisableConfirm`, the
+    /// same stacked card the Clear action uses for its time scopes.
+    private var disableControl: some View {
+        GlassIconButton(
+            systemName: "power",
+            help: L("recent.menu.disable"),
+            size: 34,
+            showsTooltip: false
+        ) {
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                confirmingDisable = true
+            }
+        }
+    }
+
     /// The instruction line sits directly on the compact card's glass so the
     /// composer reads as one continuous surface rather than a nested recess.
     private var inputRow: some View {
@@ -3700,6 +3755,16 @@ private struct CompactShortcutPromptView: View {
                 onDown: {
                     guard state.forceTouchInvocation,
                           !state.forceTouchHistoryExpanded
+                    else { return false }
+                    onToggleHistory()
+                    return true
+                },
+                // …and ↑ puts it away again — the plain inverse of the ↓ that
+                // pulled it open, so the ledger opens and closes on the two keys
+                // that already mean "down into it" and "back up out of it".
+                onUp: {
+                    guard state.forceTouchInvocation,
+                          state.forceTouchHistoryExpanded
                     else { return false }
                     onToggleHistory()
                     return true

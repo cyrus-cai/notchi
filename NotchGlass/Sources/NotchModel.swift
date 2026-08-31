@@ -8365,6 +8365,71 @@ final class NotchModel: ObservableObject {
         return true
     }
 
+    // MARK: - Force Touch pause
+
+    /// How long the force-click trigger stays out of the way. Two rungs, both
+    /// timed — "stepping out" and "not for the rest of the day". Turning the
+    /// gesture off for good is not one of them: that is the `ForceClickPressure`
+    /// slider in Settings, and a second way to reach the same state from a popup
+    /// would be one switch too many for a choice that never expires.
+    enum ForceTouchDisable: Equatable {
+        case oneHour
+        case twelveHours
+
+        var seconds: TimeInterval {
+            switch self {
+            case .oneHour:     return 60 * 60
+            case .twelveHours: return 12 * 60 * 60
+            }
+        }
+    }
+
+    private static let forceTouchDisabledUntilKey = "forceTouchDisabledUntil"
+
+    /// When the force-click pause runs out — `nil` while the gesture is live.
+    /// Persisted, so quitting (or a crash) inside the window comes back still
+    /// paused rather than quietly undoing the choice. A lapsed date reads as live:
+    /// `isForceTouchDisabled` compares against the clock, so the gate is right even
+    /// if nothing has cleaned up yet.
+    @Published private(set) var forceTouchDisabledUntil: Date? = {
+        let stored = UserDefaults.standard
+            .double(forKey: NotchModel.forceTouchDisabledUntilKey)
+        guard stored > 0 else { return nil }
+        let date = Date(timeIntervalSinceReferenceDate: stored)
+        return date > Date() ? date : nil
+    }() {
+        didSet {
+            guard forceTouchDisabledUntil != oldValue else { return }
+            if let until = forceTouchDisabledUntil {
+                UserDefaults.standard.set(until.timeIntervalSinceReferenceDate,
+                                          forKey: Self.forceTouchDisabledUntilKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: Self.forceTouchDisabledUntilKey)
+            }
+        }
+    }
+
+    /// Whether a timed pause is running. Only the force-click trigger asks: the
+    /// notch, the hot-key and the menu bar all keep working, because what is being
+    /// put away is the gesture that fires on a press you were making anyway — not
+    /// the app.
+    var isForceTouchDisabled: Bool {
+        guard let until = forceTouchDisabledUntil else { return false }
+        return until > Date()
+    }
+
+    /// Put the force-click trigger away for a while.
+    func disableForceTouch(_ scope: ForceTouchDisable) {
+        forceTouchDisabledUntil = Date().addingTimeInterval(scope.seconds)
+    }
+
+    /// End the pause early — Settings' Resume, the menu bar's, and what the expiry
+    /// wake-up calls. Idempotent.
+    func resumeForceTouch() {
+        guard forceTouchDisabledUntil != nil else { return }
+        forceTouchDisabledUntil = nil
+    }
+
     /// How much of the archive a Clear wipes. The confirmation only offers the
     /// choice when the narrow scope is actually narrower — see
     /// `historyCountWithinLastDay`.

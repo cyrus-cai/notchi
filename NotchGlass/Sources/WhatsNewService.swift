@@ -94,6 +94,23 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.7.5",
+            date: "2026-08-31",
+            features: [
+                "You can pause Force Touch for one or twelve hours, and turn it back on at any time.",
+            ],
+            improvements: [
+                "Hover over a recent Ask or Agent model to see its details.",
+                "Regenerate an answer with a different model from the new model menu.",
+                "Notchi now sits flush with the physical notch and flows more smoothly into the menu bar.",
+                "Press ↑ to fold Force Touch history back up.",
+                "Firm Force Touch is now less likely to trigger by accident.",
+            ],
+            fixes: [
+                "Longer translated labels no longer overlap nearby controls.",
+            ]
+        ),
+        Entry(
             version: "0.7.4",
             date: "2026-08-29",
             improvements: [

@@ -532,17 +532,15 @@ struct ModelDetailCard: View {
         .padding(12)
         .frame(width: ModelDetailPanel.width, alignment: .leading)
         .background {
-            // This card floats over arbitrary apps, so the glass needs its own dark
-            // legibility veil: a bright page otherwise washes out the secondary
-            // labels and scoring explanation even though the backdrop still blurs.
+            // Keep the companion genuinely transparent. A semantic `.menu`
+            // `NSVisualEffectView` inside this detached panel resolves to a dense,
+            // almost opaque fill; clear Liquid Glass with an integrated smoked
+            // tint lets the app beneath visibly refract through the card instead.
+            // 0.58 brings the glass luminance over a white page into the native
+            // menu's range without adding a separate opaque veil.
             ZStack {
                 Self.shape.fill(.clear)
-                    .nativeGlass(in: Self.shape, tintOpacity: 0.34)
-                    .overlay(Self.shape.fill(Color.black.opacity(0.28)))
-                Self.shape
-                    .fill(LinearGradient(colors: [.white.opacity(0.10), .clear],
-                                         startPoint: .top, endPoint: .center))
-                    .blendMode(.plusLighter)
+                    .nativeGlass(in: Self.shape, tintOpacity: 0.58)
                 Self.shape.strokeBorder(
                     LinearGradient(colors: [.white.opacity(0.32), .white.opacity(0.07)],
                                    startPoint: .top, endPoint: .bottom),
@@ -912,7 +910,10 @@ final class ModelDetailPanel {
     /// menu never waits on it — a new row retargets mid-flight anyway.
     private static let travel: CFTimeInterval = 0.34
 
-    func show(_ model: PickerModel) {
+    /// `beside` is supplied by custom SwiftUI menus, whose window is not an
+    /// `NSMenu` window and therefore cannot be discovered by `menuFrame`. Native
+    /// model menus leave it nil and keep using the window scan below.
+    func show(_ model: PickerModel, beside explicitAnchor: NSRect? = nil) {
         hideWork?.cancel()
         hoverTimer?.invalidate()
         hoverTimer = nil
@@ -924,7 +925,11 @@ final class ModelDetailPanel {
             retarget(to: ModelDetailCard.targetFigures(for: model), fromZero: appearing)
         }
         self.model = model
-        if let menu = menuFrame(excluding: panel) { anchorFrame = menu }
+        if let explicitAnchor {
+            anchorFrame = explicitAnchor
+        } else if let menu = menuFrame(excluding: panel) {
+            anchorFrame = menu
+        }
         render()
         scheduleHoverCheck()
     }
@@ -1716,6 +1721,11 @@ struct AskRecentModelPickerView: View {
     /// Whether the list is mid-scroll at either edge — the gate for the fades.
     @State private var scrolledOffTop = false
     @State private var scrolledOffBottom = false
+    /// The quick menu is a custom child panel rather than an `NSMenu`, so the
+    /// shared model-detail panel cannot discover its frame from AppKit's menu
+    /// windows. This probe retains the SwiftUI card's exact screen rect and lets
+    /// each hovered row hang the existing detail card off its right edge.
+    @StateObject private var detailAnchor = ModelDetailAnchor()
 
     init(rows: [Row], selectedProvider: Provider, selectedModelID: String,
          onSelect: @escaping (Row) -> Void, onMoreModels: @escaping () -> Void,
@@ -1779,6 +1789,14 @@ struct AskRecentModelPickerView: View {
                                     onDone()
                                 }
                                 .id(r)
+                                .onHover { inside in
+                                    if inside, let frame = detailAnchor.frame {
+                                        ModelDetailPanel.shared.show(detailModel(for: r),
+                                                                     beside: frame)
+                                    } else if !inside {
+                                        ModelDetailPanel.shared.scheduleHide()
+                                    }
+                                }
                         }
                     }
                     // Zero-size probe on the scroll CONTENT reads the clip view's
@@ -1827,8 +1845,12 @@ struct AskRecentModelPickerView: View {
         // Sized by its own rows like the `/` card, capped so one long model id
         // can't stretch the menu across the panel.
         .frame(width: cardWidth, alignment: .leading)
+        .background(ModelDetailAnchorProbe(anchor: detailAnchor))
         .onAppear(perform: installKeyMonitor)
-        .onDisappear(perform: removeKeyMonitor)
+        .onDisappear {
+            removeKeyMonitor()
+            ModelDetailPanel.shared.scheduleHide()
+        }
     }
 
     /// Wide enough for every row whole — the models with their CLI tags, and the
@@ -1844,6 +1866,27 @@ struct AskRecentModelPickerView: View {
     private func arm(_ r: Row) {
         current = r
         onSelect(r)
+    }
+
+    /// Reuse the catalog's full metadata whenever the recent row is still present
+    /// there. A stale/live-only recent can outlast the catalog snapshot, so keep a
+    /// bare-id fallback; it carries the same curated speed/intelligence inference
+    /// the full picker uses until richer metadata arrives.
+    private func detailModel(for row: Row) -> PickerModel {
+        if let model = ModelCatalogStore.shared.rows(selected: row.provider)
+            .first(where: { $0.provider == row.provider && $0.info.id == row.id }) {
+            return model
+        }
+        let name = ModelRatings.prettyName(for: row.id, provider: row.provider)
+        let info = ModelInfo(id: row.id,
+                             vendor: ModelRatings.vendor(for: row.id, provider: row.provider),
+                             name: name)
+        return PickerModel(provider: row.provider,
+                           providerName: row.provider.displayName,
+                           hasKey: ModelCatalogStore.ready(row.provider),
+                           featured: false,
+                           info: info,
+                           displayName: name)
     }
 
     private func installKeyMonitor() {
@@ -1867,6 +1910,34 @@ struct AskRecentModelPickerView: View {
         guard !rows.isEmpty else { return }
         let cur = rows.firstIndex(of: current) ?? -1
         arm(rows[min(max(cur + delta, 0), rows.count - 1)])
+    }
+}
+
+/// A stable reference to the custom quick menu's SwiftUI root. Its screen frame
+/// is read at hover time, so the detail card follows a menu that moved with the
+/// island without publishing geometry on every layout pass.
+@MainActor
+private final class ModelDetailAnchor: ObservableObject {
+    weak var view: NSView?
+
+    var frame: NSRect? {
+        guard let view, let window = view.window else { return nil }
+        return window.convertToScreen(view.convert(view.bounds, to: nil))
+    }
+}
+
+private struct ModelDetailAnchorProbe: NSViewRepresentable {
+    let anchor: ModelDetailAnchor
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        view.setAccessibilityElement(false)
+        anchor.view = view
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        anchor.view = view
     }
 }
 
@@ -2024,6 +2095,9 @@ struct AgentModelPickerView: View {
     /// Bools rather than the live offset — see the observer in `body`.
     @State private var scrolledOffTop = false
     @State private var scrolledOffBottom = false
+    /// The Agent picker is also a custom child panel, so give the shared detail
+    /// window the same exact screen anchor the Ask recents menu supplies.
+    @StateObject private var detailAnchor = ModelDetailAnchor()
     /// The armed row's wash is one shared shape that *slides* between rows
     /// instead of blinking off one row and on another — the springy glide is the
     /// card's one piece of motion. It lives as a single offset-driven shape
@@ -2302,11 +2376,15 @@ struct AgentModelPickerView: View {
         // from this size; a child spilling past it is what desynced the three.
         .frame(width: cardWidth)
         .padding(MenuCard.cardPad)
+        .background(ModelDetailAnchorProbe(anchor: detailAnchor))
         .onAppear {
             syncMirrors()
             installKeyMonitor()
         }
-        .onDisappear(perform: removeKeyMonitor)
+        .onDisappear {
+            removeKeyMonitor()
+            ModelDetailPanel.shared.scheduleHide()
+        }
         .onChange(of: choices) { syncMirrors() }
         .onChange(of: efforts) { syncMirrors() }
         .onChange(of: selectedEngine) { syncMirrors() }
@@ -2328,6 +2406,46 @@ struct AgentModelPickerView: View {
             onDone()
         }
         .id(c)
+        .onHover { inside in
+            guard inside else {
+                ModelDetailPanel.shared.scheduleHide()
+                return
+            }
+            guard let frame = detailAnchor.frame,
+                  let model = detailModel(for: c) else {
+                ModelDetailPanel.shared.scheduleHide()
+                return
+            }
+            ModelDetailPanel.shared.show(model, beside: frame)
+        }
+    }
+
+    /// Project an Agent CLI choice into the catalog model the shared detail card
+    /// already understands. Concrete catalog metadata wins; a just-landed CLI
+    /// model still gets the same curated fallback until that catalog catches up.
+    private func detailModel(for choice: AgentModelChoice) -> PickerModel? {
+        guard let id = choice.id else { return nil }
+        let provider: Provider
+        switch choice.engine {
+        case .codex:       provider = .codex
+        case .claude:      provider = .claudeCode
+        case .grok:        provider = .grokCode
+        case .commandCode: provider = .commandCode
+        case .pi:          provider = .piCode
+        }
+        if let model = ModelCatalogStore.shared.rows(selected: provider)
+            .first(where: { $0.provider == provider && $0.info.id == id }) {
+            return model
+        }
+        let info = ModelInfo(id: id,
+                             vendor: ModelRatings.vendor(for: id, provider: provider),
+                             name: choice.label)
+        return PickerModel(provider: provider,
+                           providerName: provider.displayName,
+                           hasKey: ModelCatalogStore.ready(provider),
+                           featured: false,
+                           info: info,
+                           displayName: choice.label)
     }
 
     /// The rule between the used few and the rest of the catalog. Tighter than

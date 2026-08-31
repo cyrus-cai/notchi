@@ -117,7 +117,18 @@ enum Tokens {
     // sits exactly over the bezel cutout rather than looking like a fat pill.
     static let notchWidth: CGFloat = 192
     static let notchTopHeight: CGFloat = 32        // constant black "hardware" zone
-    static let notchRestRadius: CGFloat = 9        // resting bottom corner radius
+    /// The island's bottom corner radius while it's the notch — resting and under
+    /// the click level's hover peek. Pinned by the hardware: the resting island's
+    /// corners are drawn a point below the cutout, so they have to trace it
+    /// exactly. The expanded panel keeps its own, much rounder corner
+    /// (`NotchIsland.bottomRadius`).
+    static let notchRestRadius: CGFloat = 9
+    /// Radius of the expanded island's concave top shoulders — the flare that
+    /// melts the form into the menu bar the way the physical cutout's own
+    /// corners do, instead of ending in a vertical cut. Kept small and hardware-
+    /// sized: a wide sweep here reads as a bite taken out of the panel, not as
+    /// the bezel transition it's imitating.
+    static let notchShoulderFlare: CGFloat = 7
 
     // Open widths per state — the island grows wider as content gets richer.
     static let openWidthIdle: CGFloat = 540
@@ -239,6 +250,21 @@ struct NotchMetrics {
     /// Whether this screen has a real camera housing. Drives the camera dot —
     /// drawing a fake lens on an external monitor reads as a mistake.
     var hasHardwareNotch: Bool = true
+    /// Width of the REAL cutout on this screen, measured from the gap between the
+    /// menu bar's two auxiliary areas (185pt on a 14"); nil where there is none.
+    var hardwareNotchWidth: CGFloat? = nil
+
+    /// The width the RESTING island draws at — the measured cutout wherever there
+    /// is one, the drawing constant only on notch-less screens (there the island
+    /// *is* the notch, so the constant defines it).
+    ///
+    /// It used to be `Tokens.notchWidth` (192) everywhere, overhanging the real
+    /// 185pt cutout by ~3.5pt per side. Those points land on live screen, and the
+    /// island's straight side edges painted them black — covering the hardware's
+    /// own curved shoulders, so the notch ended in a hard vertical cut instead of
+    /// the rounded transition macOS draws. Drawn at the cutout's exact width the
+    /// resting island sits entirely *inside* it and the transition survives.
+    var restWidth: CGFloat { hardwareNotchWidth ?? Tokens.notchWidth }
 }
 
 private struct NotchMetricsKey: EnvironmentKey {

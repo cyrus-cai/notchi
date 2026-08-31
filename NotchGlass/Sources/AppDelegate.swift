@@ -16,6 +16,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panels: [CGDirectDisplayID: NotchPanel] = [:]
     private let model = NotchModel(ai: AppDelegate.makeService())
     private var openObserver: AnyCancellable?
+    /// Watches the Force Touch pause so it can end itself when the window lapses.
+    private var forceTouchPauseObserver: AnyCancellable?
+    /// The wake-up that ends that pause. Re-armed on every change to the window.
+    private var forceTouchPauseExpiry: DispatchWorkItem?
     /// Debounces the full-screen re-evaluation: Space/app-activation events can
     /// arrive in bursts, and the on-screen window list settles a beat after them,
     /// so coalesce into one deferred `updateFullScreenHiding()`.
@@ -240,6 +244,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // Measure the stock slider knob here, while nothing is rendering: doing
+        // it lazily from a settings row's body re-enters SwiftUI's view graph
+        // mid-update and aborts (see `NativeDetentSlider.knobWidth`).
+        NativeDetentSlider.primeMetrics()
+
         // Agent app by default: no Dock icon, no app menu — it's a pure overlay.
         // The user can opt into a Dock icon (Settings → General), which flips this
         // to `.regular`; `applyDockIconVisibility` reads the persisted choice.
@@ -455,6 +464,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                     self.appToRestoreOnClose = nil
                 }
+            }
+
+        // The Force Touch pause (the popup's power chip). Two jobs: keep the menu
+        // bar's own handle installed while it runs, since that is the only place
+        // the gesture can be brought back early, and arm the wake-up that ends the
+        // window. `@Published` replays the current value on subscribe, so a pause
+        // restored from a previous launch is armed here too.
+        forceTouchPauseObserver = model.$forceTouchDisabledUntil
+            .removeDuplicates()
+            .sink { [weak self] until in
+                guard let self else { return }
+                self.forceTouchPauseExpiry?.cancel()
+                self.forceTouchPauseExpiry = nil
+                if let until, until > Date() {
+                    let work = DispatchWorkItem { [weak self] in
+                        self?.model.resumeForceTouch()
+                    }
+                    self.forceTouchPauseExpiry = work
+                    DispatchQueue.main.asyncAfter(deadline: .now() + until.timeIntervalSinceNow,
+                                                  execute: work)
+                }
+                self.menuBar?.apply()
             }
 
         // Debug aid: NOTCH_OPEN=1 opens the panel at launch (and optionally seeds
@@ -1107,6 +1138,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// settle before it appears — a selection that answers instantly would otherwise
     /// open the real composer over a cue still mid-flight.
     private func runSelectedTextShortcut(grownFromPressure: Bool = false) {
+        // Paused — and this is the trigger the pause is mostly FOR: a force click
+        // fires on a press the user was making anyway, so "not right now" has to
+        // stop it before the cue is even drawn.
+        guard !model.isForceTouchDisabled else {
+            ForceClickHerald.shared.abort()
+            return
+        }
         let config = SelectedTextShortcutStore.current
         let open: (String, NSPoint, NSRunningApplication?) -> Void = {
             [weak self] selectedText, triggerPoint, sourceApplication in
@@ -1386,7 +1424,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             },
             checkForUpdates: { [weak self] in
                 self?.checkForUpdatesFromMenu()
-            }
+            },
+            isForceTouchDisabled: { [weak self] in self?.model.isForceTouchDisabled ?? false },
+            forceTouchResumesAt: { [weak self] in self?.model.forceTouchDisabledUntil },
+            disableForceTouch: { [weak self] scope in self?.model.disableForceTouch(scope) },
+            resumeForceTouch: { [weak self] in self?.model.resumeForceTouch() }
         ))
         menuBar?.apply()
     }
@@ -1579,7 +1621,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // has no notch — so the margin, not calibration, is the fix.)
                 restHeight: hasNotch ? screen.safeAreaInsets.top + 1
                                      : Self.menuBarHeight(of: screen),
-                hasHardwareNotch: hasNotch
+                hasHardwareNotch: hasNotch,
+                // The resting island draws at exactly this width, so it never
+                // overhangs the cutout onto live screen (see `NotchMetrics.restWidth`).
+                hardwareNotchWidth: hardwareNotchWidth
             ))
 
         let hosting = FirstMouseHostingView(rootView: root)
@@ -1668,11 +1713,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// it to decide hovers put a few points of the judgement zone on live menu
     /// bar to either side.
     private static func hardwareNotchWidth(of screen: NSScreen) -> CGFloat? {
-        guard let left = screen.auxiliaryTopLeftArea,
-              let right = screen.auxiliaryTopRightArea else { return nil }
-        let width = right.minX - left.maxX
-        return width > 0 ? width : nil
+        let id = screen.displayID
+        if let left = screen.auxiliaryTopLeftArea,
+           let right = screen.auxiliaryTopRightArea {
+            let width = right.minX - left.maxX
+            if width > 0 {
+                if let id { measuredNotchWidths[id] = width }
+                return width
+            }
+        }
+        // The measurement can vanish on a screen that definitely has a cutout:
+        // `auxiliaryTopLeftArea` is nil whenever the menu bar is hidden (auto-hide
+        // on, or a full-screen app frontmost at the moment we ask). Falling back
+        // to the drawing constant there would put the island back to overhanging
+        // the cutout onto live screen, so prefer the last real measurement.
+        if let id, let remembered = measuredNotchWidths[id] { return remembered }
+        // Never measured, but the screen reports a top safe area — it HAS a cutout
+        // we simply can't size right now. Estimate it from the screen's own width
+        // (the notch runs ~12% of it across every notched Mac and every scaling
+        // mode) and deliberately lean NARROW: drawn short the island just hides
+        // deeper inside the cutout, drawn wide it paints over live screen.
+        guard screen.safeAreaInsets.top > 0 else { return nil }
+        return min(Tokens.notchWidth, screen.frame.width * 0.115)
     }
+
+    /// Last successfully measured cutout width per display — see the fallback
+    /// chain in `hardwareNotchWidth(of:)`.
+    private static var measuredNotchWidths: [CGDirectDisplayID: CGFloat] = [:]
 
     /// The resting-zone height for a notch-less screen: match the menu bar so
     /// the virtual notch nests inside it. `visibleFrame` already subtracts the

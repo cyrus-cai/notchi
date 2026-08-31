@@ -781,7 +781,16 @@ struct NotchIsland: View {
     /// direction of its own beyond "out".
     private var peekScaleX: CGFloat {
         guard peeking, !isOpen else { return 1 }
-        return (width + NotchModel.hoverPeekOut * 2) / max(width, 1)
+        // Measured at the body's STRAIGHT sides, not at its top edge. The peek
+        // flare carves `topFlare` off each side of the drawn form, so the plain
+        // `(width + out * 2) / width` scale landed those sides back exactly
+        // where they rested — every point of the dilation went into the
+        // shoulders and the island read as growing straight down. Scaling
+        // against the flared body puts the real `hoverPeekOut` on each side;
+        // the shoulders reach a touch further and taper back in, which is the
+        // bezel transition they exist for.
+        let w = max(width, 1)
+        return (w + NotchModel.hoverPeekOut * 2) / max(w - topFlare * 2, 1)
     }
 
     private var peekScaleY: CGFloat {
@@ -808,12 +817,56 @@ struct NotchIsland: View {
     }
 
     private var width: CGFloat {
-        if isOpen { return model.openWidth }
-        return Tokens.notchWidth + earLeft + earRight
+        // Open: the body keeps `openWidth`; the frame carries the two shoulder
+        // flares on top of it, so the form's straight sides land exactly where
+        // they always did and only the top edge reaches wider (see `topFlare`).
+        if isOpen { return model.openWidth + topFlare * 2 }
+        return metrics.restWidth + earLeft + earRight
     }
 
+    /// The expanded panel keeps its own round corner; the notch keeps the
+    /// hardware's. The peek's dilation is a non-uniform scale that stretches the
+    /// drawn corner along with everything else, so the resting radius is passed
+    /// pre-shrunk by the mean of the two axes — the *rendered* corner then holds
+    /// at `notchRestRadius` through the flex instead of fattening a point.
     private var bottomRadius: CGFloat {
-        isOpen ? 30 : Tokens.notchRestRadius
+        if isOpen { return 30 }
+        return Tokens.notchRestRadius / ((peekScaleX + peekScaleY) / 2)
+    }
+
+    /// The concave shoulders the expanded panel melts into the menu bar with —
+    /// the hardware cutout's own transition, which the resting island gets for
+    /// free by sitting inside it but the expanded form has to draw for itself.
+    /// Zero at rest: there the island IS the cutout, so nothing should reach
+    /// past it (see `NotchMetrics.restWidth`).
+    /// Clamped to the black zone's own height so the curve always lives inside
+    /// it: the resting height varies by machine and by screen (a 33pt cutout on
+    /// this Mac, a taller one on a 16", a 24pt menu bar on an external display).
+    private var topFlare: CGFloat {
+        let cap = metrics.restHeight / 2          // never eat the black zone
+        if isOpen { return min(Tokens.notchShoulderFlare, cap) }
+        // No cutout on this screen (external display, non-notched Mac): the drawn
+        // island IS the notch, so it has to carry the transition itself — always,
+        // not just while dilating. There's no hardware curve here to inherit.
+        if !metrics.hasHardwareNotch { return min(Tokens.notchShoulderFlare, cap) }
+        // The click level's hover dilation pushes the island past the cutout on
+        // both sides, so it stops inheriting the hardware's transition and owes
+        // one of its own — the SAME shoulder the expanded panel draws, not a
+        // smaller one. A shoulder scaled down to the peek's own 5pt of travel
+        // has nothing to sweep through and reads as a little black tab stuck on
+        // each top corner; at full size it's the curve the panel melts into the
+        // menu bar with, just on a smaller form. `peekScaleX` scales against the
+        // flared body, so the straight sides still land exactly `hoverPeekOut`
+        // out and only the shoulders reach further.
+        if peeking { return min(Tokens.notchShoulderFlare, cap) }
+        return 0
+    }
+
+    /// The island's shape at this instant. Built in one place so the clip, the
+    /// rim, the glass material and the hit area can never disagree — and so the
+    /// flare animates on the open spring with the bottom radius.
+    private var islandShape: NotchShape {
+        NotchShape(bottomRadius: bottomRadius, topRadius: topFlare)
     }
 
     var body: some View {
@@ -857,7 +910,7 @@ struct NotchIsland: View {
                 if busy {
                     BackgroundWorkEars(
                         stage: .running(verb: busyVerb, since: busySince),
-                        notchWidth: Tokens.notchWidth,
+                        notchWidth: metrics.restWidth,
                         earLeft: earLeft,
                         earRight: earRight)
                         .offset(y: topBleed / 2)
@@ -872,7 +925,7 @@ struct NotchIsland: View {
                 // never slide under the housing and render half-hidden.
                 if sensing {
                     ClipboardSenseEars(sense: model.clipboardSense,
-                                       notchWidth: Tokens.notchWidth,
+                                       notchWidth: metrics.restWidth,
                                        earLeft: earLeft,
                                        earRight: earRight)
                         .offset(y: topBleed / 2)
@@ -893,6 +946,10 @@ struct NotchIsland: View {
             // transition still carries the open fade-in (and the final unmount).
             if isOpen {
                 NotchBody(model: model)
+                    // The shoulders widen the FRAME, not the content box — pad
+                    // them back off so the body lays out in exactly `openWidth`,
+                    // flush with the form's straight sides.
+                    .padding(.horizontal, topFlare)
                     .opacity(model.closing ? 0 : 1)
                     // Ease the dissolve over the model's content-fade window so it
                     // completes just as `beginClose` fires the shell retract.
@@ -915,6 +972,7 @@ struct NotchIsland: View {
         .notchTooltipClipBox()
         .padding(.top, -topBleed)   // pull the form up so it bleeds off the top
         .background(GlassMaterial(bottomRadius: bottomRadius,
+                                  topRadius: topFlare,
                                   expanded: isOpen,
                                   cameraZone: metrics.restHeight))
         // The destructive "Clear recent history?" confirmation floats centered over
@@ -1007,14 +1065,14 @@ struct NotchIsland: View {
         // hosted here, above the body but inside the island's own clip, so the
         // backdrop blur stops at the glass edge like every other overlay.
         .imageLightboxHost(topInset: metrics.restHeight)
-        .clipShape(NotchShape(bottomRadius: bottomRadius))
+        .clipShape(islandShape)
         // The "slab of glass" look (per the reference): the dark body holds and
         // stays readable, the top reads near-solid and the lower body eases more
         // translucent (that vertical gradient lives in GlassMaterial's veil), and
         // the EDGES are defined by a lit beveled rim — bright along the bottom and
         // sides, brightest at the rounded corners. Stamped on top of the composited
         // island so the highlight traces the edge crisply instead of being clipped.
-        .overlay(IslandRim(shape: NotchShape(bottomRadius: bottomRadius)))
+        .overlay(IslandRim(shape: islandShape))
         // A settled detached window dragged over the notch: the island swells a
         // touch to say it'll take the session back on release.
         .scaleEffect(model.detachMergeHint ? 1.02 : 1, anchor: .top)
@@ -1040,7 +1098,7 @@ struct NotchIsland: View {
         // anchor/geometry recomputation on every frame of the kick — right on
         // top of the open spring's own per-frame layout work.
         .modifier(EntryKickEffect(tx: kick.tx, shear: kick.shear, squash: kick.squash).ignoredByLayout())
-        .contentShape(NotchShape(bottomRadius: bottomRadius))
+        .contentShape(islandShape)
         // The click level's target: at rest, on that level only, the island IS a
         // button. Masked rather than conditionally mounted so the shape stops
         // claiming clicks the moment the level changes back.
