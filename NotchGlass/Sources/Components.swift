@@ -1078,6 +1078,14 @@ struct AgentRecordBody: View {
     let task: AgentTaskManager.AgentTask
     /// The tail spacer's id, so the host's ScrollViewReader can chase it.
     let bottomID: String
+    /// Empty scroll space between the record's last row and the tail anchor —
+    /// the runway the trail travels DOWN into, behind the host's floating
+    /// composer, fading and frosting out on the way (see the hosts' bottom
+    /// runways). It has to sit ABOVE the anchor: `scrollTo(anchor: .bottom)`
+    /// aligns the anchor's bottom edge with the viewport's, so a runway placed
+    /// below it would park the newest line at the viewport bottom — behind the
+    /// box — which is exactly what the sibling layout used to do.
+    var tailRunway: CGFloat = 0
 
     var body: some View {
         // The flat trail (`task.log`) spans every round; the settled rounds each
@@ -1087,56 +1095,62 @@ struct AgentRecordBody: View {
         // trail still partitions cleanly.
         let claimedIDs = Set(task.exchanges.flatMap { $0.log.map(\.id) })
         let liveTail = task.log.filter { !claimedIDs.contains($0.id) }
-        VStack(alignment: .leading, spacing: 14) {
-            ForEach(Array(task.exchanges.enumerated()), id: \.offset) { _, exchange in
-                UserQuestionBubble(text: exchange.prompt)
-                // The trail's last narration entry IS this round's report (the
-                // parser records it in both places) — drop it so it isn't
-                // printed again by the answer just below. See
-                // `droppingTrailingAnswer`.
-                let trail = exchange.log.droppingTrailingAnswer(exchange.answer)
-                if !trail.isEmpty {
-                    // Lazy: a long run's trail is hundreds of rows and this page
-                    // pins to the tail — see `isLazy`'s doc.
-                    AgentWorkTrailView(entries: trail, isLazy: true)
+        // Two stacks, not one: the record keeps its own 14pt rhythm, while the
+        // runway and the anchor sit in a 0-spaced stack below it — dropping the
+        // spacing SwiftUI would otherwise insert on both sides of the runway.
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 14) {
+                ForEach(Array(task.exchanges.enumerated()), id: \.offset) { _, exchange in
+                    UserQuestionBubble(text: exchange.prompt)
+                    // The trail's last narration entry IS this round's report (the
+                    // parser records it in both places) — drop it so it isn't
+                    // printed again by the answer just below. See
+                    // `droppingTrailingAnswer`.
+                    let trail = exchange.log.droppingTrailingAnswer(exchange.answer)
+                    if !trail.isEmpty {
+                        // Lazy: a long run's trail is hundreds of rows and this page
+                        // pins to the tail — see `isLazy`'s doc.
+                        AgentWorkTrailView(entries: trail, isLazy: true)
+                    }
+                    if !exchange.answer.isEmpty {
+                        MarkdownBlocks(source: exchange.answer, baseFont: 15)
+                    }
                 }
-                if !exchange.answer.isEmpty {
-                    MarkdownBlocks(source: exchange.answer, baseFont: 15)
+                // The round still in flight has no settled exchange yet. Round one
+                // carries no "› " marker, so its prompt is the task headline; a
+                // follow-up round's prompt already rides the live tail as its
+                // leading "› " marker.
+                if task.isRunning {
+                    if task.exchanges.isEmpty {
+                        UserQuestionBubble(text: task.prompt)
+                    }
+                    if !liveTail.isEmpty {
+                        // `live`: the trailing block is still being written, so it
+                        // must not fold under the reader.
+                        AgentWorkTrailView(entries: liveTail, isLazy: true, live: true)
+                    }
+                    // The collapsed row's ticker, following the trail — what the run
+                    // is doing right now. Same 14pt/text3 face the status row wears.
+                    // Drop it when the trail already shows the same live activity:
+                    // tool parsers add the 12pt mono row as soon as a command starts,
+                    // so repeating it here in the ticker's larger prose face made two
+                    // adjacent commands look as though they used different styles.
+                    // Streaming prose is the same duplication in another form.
+                    let activity = task.activity ?? L("agent.thinking")
+                    let trailAlreadyShowsActivity = liveTail.last.map { entry in
+                        entry.mono && entry.title.hasPrefix(activity)
+                    } ?? false
+                    if !NotchBody.trailTailIsStreamingProse(task.log),
+                       !trailAlreadyShowsActivity {
+                        CrossfadeText(text: activity,
+                                      font: 14, color: Tokens.text3)
+                            .tracking(-0.1)
+                            .lineLimit(1)
+                            .padding(.vertical, 2)
+                    }
                 }
             }
-            // The round still in flight has no settled exchange yet. Round one
-            // carries no "› " marker, so its prompt is the task headline; a
-            // follow-up round's prompt already rides the live tail as its
-            // leading "› " marker.
-            if task.isRunning {
-                if task.exchanges.isEmpty {
-                    UserQuestionBubble(text: task.prompt)
-                }
-                if !liveTail.isEmpty {
-                    // `live`: the trailing block is still being written, so it
-                    // must not fold under the reader.
-                    AgentWorkTrailView(entries: liveTail, isLazy: true, live: true)
-                }
-                // The collapsed row's ticker, following the trail — what the run
-                // is doing right now. Same 14pt/text3 face the status row wears.
-                // Drop it when the trail already shows the same live activity:
-                // tool parsers add the 12pt mono row as soon as a command starts,
-                // so repeating it here in the ticker's larger prose face made two
-                // adjacent commands look as though they used different styles.
-                // Streaming prose is the same duplication in another form.
-                let activity = task.activity ?? L("agent.thinking")
-                let trailAlreadyShowsActivity = liveTail.last.map { entry in
-                    entry.mono && entry.title.hasPrefix(activity)
-                } ?? false
-                if !NotchBody.trailTailIsStreamingProse(task.log),
-                   !trailAlreadyShowsActivity {
-                    CrossfadeText(text: activity,
-                                  font: 14, color: Tokens.text3)
-                        .tracking(-0.1)
-                        .lineLimit(1)
-                        .padding(.vertical, 2)
-                }
-            }
+            Spacer(minLength: 0).frame(height: tailRunway)
             Color.clear.frame(height: 1).id(bottomID)
         }
     }
@@ -3090,6 +3104,9 @@ struct CrossfadeText: View {
     let text: String
     var font: CGFloat = 15
     var color: Color = Tokens.text2
+    /// The sweep is a live-work cue. Settled labels that reuse this component
+    /// keep the text transition but must not continue advertising activity.
+    var shimmers: Bool = true
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -3124,7 +3141,7 @@ struct CrossfadeText: View {
             Text(shown)
                 .font(.sf(font, weight: .regular))
                 .foregroundStyle(color)
-                .modifier(WaitShimmer(active: !reduceMotion))
+                .modifier(WaitShimmer(active: shimmers && !reduceMotion))
                 .id(shown)
                 .transition(reduceMotion
                     ? .opacity
@@ -3213,20 +3230,129 @@ struct WaitElapsedSuffix: View {
     /// When the round started thinking; nil hides the suffix entirely.
     let since: Date?
     var font: CGFloat = 15
+    /// A FINISHED duration. Non-nil stops the clock: the value is printed as-is
+    /// and never advances again. The process anchor above a written answer passes
+    /// this — the wait it measures is over, and a stopwatch still running beside
+    /// a finished result reads as though the round were somehow still going.
+    var stopped: TimeInterval? = nil
 
     /// How long the wait must run before the timer surfaces.
     private static let threshold: TimeInterval = 6
 
+    private func label(_ seconds: Int) -> some View {
+        Text("\(seconds)s")
+            .font(.sf(font - 2))
+            .monospacedDigit()
+            .foregroundStyle(Tokens.text4)
+            .transition(.opacity)
+    }
+
     var body: some View {
-        if let since {
+        if let stopped {
+            if Int(stopped) >= Int(Self.threshold) { label(Int(stopped)) }
+        } else if let since {
             TimelineView(.periodic(from: since, by: 1)) { context in
                 let s = Int(context.date.timeIntervalSince(since))
-                if s >= Int(Self.threshold) {
-                    Text("\(s)s")
-                        .font(.sf(font - 2))
-                        .monospacedDigit()
-                        .foregroundStyle(Tokens.text4)
-                        .transition(.opacity)
+                if s >= Int(Self.threshold) { label(s) }
+            }
+        }
+    }
+}
+
+/// One address in the reading list: the page's host, opening the page itself on
+/// click, with the chevron only under the cursor. Deliberately NOT a status line
+/// — the header row above the list already says what is happening, so repeating
+/// "Reading " on every row was four words of noise per page.
+///
+/// Typography follows `SourceRow`, the app's other list of pages: quiet by
+/// default, one shade up on hover, never a highlighted "current" row.
+private struct ReadingSourceRow: View {
+    let source: WebSource
+    var font: CGFloat
+    @State private var hovering = false
+
+    var body: some View {
+        Button {
+            if let url = URL(string: source.url) { NSWorkspace.shared.open(url) }
+        } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text(source.host)
+                    .font(.sf(font))
+                    .foregroundStyle(hovering ? Tokens.text2 : Tokens.text3)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Image(systemName: "chevron.right")
+                    .font(.sf(font - 4, weight: .semibold))
+                    .foregroundStyle(Tokens.text4)
+                    .opacity(hovering ? 1 : 0)
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+    }
+}
+
+/// Every page a round pulled in, all of them listed — the batch is not walked or
+/// truncated any more. The list holds a FIXED viewport (`visibleRows` rows) and
+/// scrolls its overflow inside it, so a seven-source round shows the same height
+/// as a two-source one and can never push the composer down the panel.
+///
+/// The shell is `SourcePopover`'s, deliberately: explicit height math (a
+/// `ScrollView` has no intrinsic size to cap), `.basedOnSize` bounce so a short
+/// list doesn't rubber-band, and the shared `scrollEdgeFade` taper instead of a
+/// hard cut at both overflow edges.
+private struct ReadingSourceList: View {
+    let sources: [WebSource]
+    var font: CGFloat
+    /// Follow the newest address as a LIVE round appends more (a second search
+    /// round). Only meaningful while the list is the wait block; the collapsed
+    /// anchor's copy opens at the top, where the first result is.
+    var sticksToBottom: Bool = false
+
+    private static let visibleRows = 4
+    private static let rowSpacing: CGFloat = 2
+    private static let fade: CGFloat = 12
+    private static let bottomID = "reading-list-tail"
+
+    private var rowHeight: CGFloat { PromptField.lineHeight(for: font) }
+
+    /// The viewport this list will occupy. Public so a collapsing container can
+    /// animate against a concrete number — a height of `nil` (let it size itself)
+    /// has nothing to interpolate, which is why the anchor's list used to snap
+    /// open and shut while only its opacity crossfaded.
+    static func viewportHeight(count: Int, font: CGFloat) -> CGFloat {
+        let row = PromptField.lineHeight(for: font)
+        let shown = CGFloat(min(count, visibleRows))
+        return shown * row + max(0, shown - 1) * rowSpacing
+    }
+
+    var body: some View {
+        let scrolls = sources.count > Self.visibleRows
+        let height = Self.viewportHeight(count: sources.count, font: font)
+        ScrollViewReader { proxy in
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: Self.rowSpacing) {
+                    ForEach(sources) { source in
+                        ReadingSourceRow(source: source, font: font)
+                            .frame(height: rowHeight)
+                    }
+                    Color.clear.frame(height: 1).id(Self.bottomID)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+            .scrollEdgeFade(top: scrolls, bottom: scrolls,
+                            topFade: Self.fade, bottomFade: Self.fade)
+            .frame(height: height)
+            // Only fires on growth AFTER the first layout, which is exactly the
+            // case worth chasing: a later round adding addresses. A batch that is
+            // already complete when the list appears opens at its first result.
+            .onChange(of: sources.count) { _, _ in
+                guard sticksToBottom else { return }
+                withAnimation(.easeOut(duration: 0.2)) {
+                    proxy.scrollTo(Self.bottomID, anchor: .bottom)
                 }
             }
         }
@@ -3372,31 +3498,35 @@ struct AssistantTurnView: View {
     /// instead of each icon lighting up on its own.
     @State private var turnHovered = false
 
-    /// While the "Reading the results…" cue is up, the page titles are walked one
-    /// at a time on a timer rather than snapping to the latest. A search round
-    /// hands back all its sources at once, so without a paced walk the line would
-    /// jump straight to the last title and every page before it would flash past
-    /// unread. `readingIndex` is which source is currently shown; the timer below
-    /// advances it, holding each title for `readingDwell` before the next.
-    @State private var readingIndex = 0
+    /// The reader's own last call on the reading block, once they've made one.
+    /// `nil` = still following the round itself (open while it reads, shut once it
+    /// answers). A tap latches this and the block stops steering itself.
+    @State private var userExpanded: Bool? = nil
 
-    /// The rotation clock. A Combine timer publisher (not a hand-rolled `Timer` +
-    /// `RunLoop.add`): `.onReceive` runs its closure in the *current* view context,
-    /// so bumping `readingIndex` re-renders correctly. The earlier hand-rolled
-    /// `Timer` captured a stale `self`, so its `readingIndex += 1` wrote to an
-    /// orphaned `@State` box that never drove a re-render — the line looked frozen
-    /// on the first host. `.autoconnect()` starts it on subscribe; we gate the tick
-    /// on `isReading` so it only advances while the read cue is actually up.
-    private let readingClock = Timer.publish(every: Self.readingDwell, on: .main, in: .common)
-        .autoconnect()
+    /// False until the block has drawn once, so its first appearance can OPEN
+    /// rather than pop in at full height.
+    @State private var blockOpened = false
 
-    /// How long each host stays on the line before rotating to the next. Kept
-    /// unhurried on purpose: each address should sit long enough to actually read,
-    /// not flick past. The trade-off is that the post-search "reading" window is
-    /// short (the model often starts answering within a beat, which clears the cue),
-    /// so a long dwell means only the first host or two are seen before the answer
-    /// takes over — but a readable pace matters more than walking the whole list.
-    private static let readingDwell: TimeInterval = 1.2
+    /// How long this round spent before it had anything to say — latched at the
+    /// first token and never touched again, so the anchor's suffix is a finished
+    /// duration rather than a clock that keeps running under the answer.
+    @State private var processElapsed: TimeInterval? = nil
+
+
+    /// The gutter the orb occupies on the block's headline while the round is
+    /// still working. It CLOSES with the orb rather than being held empty: a
+    /// settled anchor left indented by a gutter nothing occupies reads as
+    /// misaligned against the answer right under it. The width interpolates, so
+    /// the headline travels to the answer's left edge instead of jumping there.
+    private static let waitOrbSize: CGFloat = 20
+    /// Gap between that gutter and the headline; closes with it.
+    private static let waitOrbGap: CGFloat = 8
+
+    /// Status type runs one step under the answer's. The wait line used to be set
+    /// at the answer's own size, which made a running tool read as loudly as the
+    /// reply it was still fetching. The elapsed suffix takes its own −2 from here,
+    /// so the two keep the gradient they always had.
+    private var waitFont: CGFloat { max(11, baseFont - 2) }
 
     /// True exactly while the post-search read cue is on screen — the window in
     /// which page titles should rotate. Drives both `waitLine` and the timer.
@@ -3413,6 +3543,18 @@ struct AssistantTurnView: View {
     /// comes back whenever the answer is momentarily empty again between rounds.
     private var hasText: Bool { !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
+    /// The answer as the user should actually read/copy it. Provider-native
+    /// citation metadata turns numeric markers into clickable Markdown links.
+    /// Sonar responses whose gateway dropped that metadata lose only the orphan
+    /// markers — the prose remains unchanged and no fake citation is presented.
+    private var renderedText: String {
+        CitationMarkup.rendered(
+            text,
+            sources: sources,
+            stripUnresolved: CitationMarkup.shouldStripUnresolved(
+                answerModel: answerModel, regenModel: regenModel))
+    }
+
     /// Show the wait overlay while streaming with no visible answer yet. The wait
     /// yields the INSTANT real text lands — no grace period: the line renders on
     /// top of the answer (it's an overlay), so any hold past the first tokens
@@ -3421,7 +3563,9 @@ struct AssistantTurnView: View {
     /// into the answer on the shared fade. Suppressed while an `ask_user`
     /// question card is up: the card IS the wait state then, and a "Waiting for
     /// your choice…" line above it would just say it twice.
-    private var showWait: Bool { streaming && !hasText && pendingQuestion == nil }
+    private var showWait: Bool {
+        streaming && !hasText && pendingQuestion == nil && !showsReadingBlock
+    }
 
     /// The mid-answer activity row. Once real text lands, `showWait` is off for
     /// good — but a tool can still be running under that text (the model spoke a
@@ -3442,20 +3586,44 @@ struct AssistantTurnView: View {
         !streaming || stabilizesFooterWhileStreaming
     }
 
-    /// The distinct hosts to walk through, in first-seen order. `sources` is the
-    /// URL-deduped list accumulated across *all* search rounds, so a later round
-    /// that pulls a different page of a site already shown (a fresh URL, same host)
-    /// would otherwise make the line read out that host a second time. Collapsing
-    /// to distinct hosts here means each site is walked once no matter how many of
-    /// its pages land across rounds — the line only ever advances to a genuinely
-    /// new address. If every result is the same host, this is just that one host
-    /// (nothing to switch to), which is the intended "unless they're all the same"
-    /// fallback.
-    private var readingHosts: [String] {
+    /// The pages this answer pulled in, one row per distinct host in first-seen
+    /// order. `sources` is URL-deduped and accumulates across *all* search rounds,
+    /// so a later round that pulls a second page of a site already listed would
+    /// otherwise repeat that address; collapsing by host means each site appears
+    /// once no matter how many of its pages land. The first URL seen for a host is
+    /// the one its row opens.
+    private var readingSources: [WebSource] {
         var seen = Set<String>()
-        var out: [String] = []
-        for s in sources where seen.insert(s.host).inserted { out.append(s.host) }
+        var out: [WebSource] = []
+        for s in sources where seen.insert(s.host).inserted { out.append(s) }
         return out
+    }
+
+    /// The list's own headline — how big the batch actually is. A single result
+    /// takes the generic cue instead, since "1 results" is not a sentence.
+    private var readingHeader: String {
+        sources.count == 1
+            ? L("agent.activity.composing")
+            : L("agent.activity.readingResultsCount", sources.count)
+    }
+
+    /// The reading block is up from the first result onward — through the read,
+    /// through the answer, and on the settled turn. It is never handed off to
+    /// another view, which is what lets every state change inside it animate.
+    private var showsReadingBlock: Bool { !sources.isEmpty }
+
+    /// Open while the round is still reading, shut once it has spoken — unless the
+    /// reader has taken the block over, in which case their call stands.
+    private var readingExpanded: Bool { userExpanded ?? !hasText }
+
+    /// The block's one headline, evolving in place: the live wait line while the
+    /// round is still working ("Reading 8 results…", "Searching …"), then the
+    /// settled anchor. Same slot, same face — `CrossfadeText` dissolves one into
+    /// the next instead of a view swapping out from under it.
+    private var headerLine: String {
+        guard streaming, !hasText else { return L("agent.process.searchedWeb") }
+        if isReading { return readingHeader }
+        return waitLine ?? readingHeader
     }
 
     /// The single string the wait line shows, so the slot is always ONE line that
@@ -3466,13 +3634,6 @@ struct AssistantTurnView: View {
     /// address it's reading, in the same slot. Otherwise it's the live activity
     /// line, or the mood word. nil = nothing to show.
     private var waitLine: String? {
-        if isReading, !readingHosts.isEmpty {
-            // Walk the DISTINCT hosts. The clock bumps `readingIndex` unbounded;
-            // the modulo maps it onto the live distinct-host list (read fresh every
-            // render, so hosts from a newer round are included), wrapping back to
-            // the first once it has walked them all.
-            return L("agent.activity.readingPage", readingHosts[readingIndex % readingHosts.count])
-        }
         if let activity { return activity }
         return thinkingWord.isEmpty ? nil : thinkingWord
     }
@@ -3483,29 +3644,131 @@ struct AssistantTurnView: View {
     private func waitRow(_ line: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             ThinkingOrb(state: orbState)
-                .centeredOnTextGlyphs(fontSize: baseFont)
+                .centeredOnTextGlyphs(fontSize: waitFont)
             // Word and timer sit on ONE shared baseline. Centering them (the
             // HStack default) doesn't align text of two different sizes: the
             // smaller suffix's baseline lands ~0.5pt above the word's — a whole
             // retina pixel of visible float right beside it. The orb rides the
             // same baseline, optically centred on the glyphs.
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                CrossfadeText(text: line, font: baseFont, color: Tokens.text2)
+                CrossfadeText(text: line, font: waitFont, color: Tokens.text2)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 // The elapsed suffix sits OUTSIDE the dissolving word (a sibling,
                 // fixed size) so the ticking seconds never ride the word-change
                 // transition, and a long activity line truncates while the timer
                 // stays visible.
-                WaitElapsedSuffix(since: thinkingSince, font: baseFont)
+                WaitElapsedSuffix(since: thinkingSince, font: waitFont)
                     .fixedSize()
             }
         }
     }
 
+    /// One block for the whole life of a searched answer: a header line that
+    /// evolves in place ("Reading 8 results…" → "Searched the web") over the list
+    /// of pages, which opens itself while the round reads and closes itself the
+    /// moment the answer starts.
+    ///
+    /// Why it is ONE view the whole way through: the live list used to be a wait
+    /// OVERLAY that vanished, and the collapsed anchor a separate sibling that
+    /// appeared. Two views swapping cannot be animated into each other — the
+    /// handover was a hard cut no transition could bridge, whatever easing sat on
+    /// either side. Here nothing is swapped: the words dissolve, the timer stops,
+    /// the orb fades out of its gutter, and the list's height closes, all on the
+    /// same beat, and the answer under it rises into the room that frees up.
+    private var readingBlock: some View {
+        let expanded = readingExpanded
+        let working = streaming && !hasText
+        let listHeight = ReadingSourceList.viewportHeight(count: readingSources.count,
+                                                          font: waitFont)
+        // Spacing 0: the gap under the headline is the LIST's own top padding, so
+        // it collapses with the list instead of leaving a stranded band behind.
+        return VStack(alignment: .leading, spacing: 0) {
+            Button {
+                userExpanded = !expanded
+            } label: {
+                HStack(alignment: .firstTextBaseline, spacing: 0) {
+                    // Fades AND closes: the gutter's width is animated to zero with
+                    // the orb inside it, so the settled headline slides left onto
+                    // the answer's own edge. Sized before the baseline guide so the
+                    // guide still reads the orb's real height at width 0.
+                    Group {
+                        if working {
+                            ThinkingOrb(state: orbState)
+                                .transition(.opacity)
+                        }
+                    }
+                        // Removing the orb stops its TimelineView after the fade;
+                        // a zero-width transparent orb still keeps animating and
+                        // can leak a clipped dot below the settled headline.
+                        .frame(height: Self.waitOrbSize)
+                        .frame(width: working ? Self.waitOrbSize : 0, alignment: .leading)
+                        .clipped()
+                        .opacity(working ? 1 : 0)
+                        .padding(.trailing, working ? Self.waitOrbGap : 0)
+                        .centeredOnTextGlyphs(fontSize: waitFont)
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        CrossfadeText(text: headerLine, font: waitFont,
+                                      color: working ? Tokens.text2 : Tokens.text3,
+                                      shimmers: working)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Image(systemName: "chevron.down")
+                            .font(.sf(waitFont - 4, weight: .semibold))
+                            .foregroundStyle(Tokens.text4)
+                            .rotationEffect(.degrees(expanded ? 0 : -90))
+                        // Ticking while the round waits, frozen at the first token
+                        // (`stopped` wins) — the same slot either way, so the
+                        // digits simply stop instead of the label being replaced.
+                        WaitElapsedSuffix(since: thinkingSince, font: waitFont,
+                                          stopped: processElapsed)
+                            .fixedSize()
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            // Always mounted, opened by HEIGHT — an `if` would insert the list at
+            // full size and only crossfade it, which is what made open and shut
+            // read as a jump. Clipped so the rows slide out of view under the
+            // headline rather than overrunning the answer while the frame closes.
+            ReadingSourceList(sources: readingSources, font: waitFont,
+                              sticksToBottom: working)
+                .padding(.top, 5)
+                // Hang the addresses off the headline's text column — which is the
+                // orb's gutter while the round works, and the block's own left edge
+                // once that gutter has closed.
+                .padding(.leading, working ? Self.waitOrbSize + Self.waitOrbGap : 0)
+                .frame(height: expanded && blockOpened ? listHeight + 5 : 0,
+                       alignment: .top)
+                .clipped()
+                .opacity(expanded && blockOpened ? 1 : 0)
+                .allowsHitTesting(expanded)
+        }
+        .animation(.easeOut(duration: Self.blockMotion), value: expanded)
+        .animation(.easeOut(duration: Self.blockMotion), value: working)
+        .animation(.easeOut(duration: Self.blockMotion), value: readingSources.count)
+        // The first draw OPENS instead of popping in at full height — the same
+        // motion the block later closes with, run in reverse.
+        .onAppear {
+            withAnimation(.easeOut(duration: Self.blockMotion)) { blockOpened = true }
+        }
+    }
+
+    /// The block's one timing. Every part of the handover — height, orb, words,
+    /// chevron — runs on this, so they read as one movement rather than several.
+    private static let blockMotion: TimeInterval = 0.26
+
     var body: some View {
         VStack(alignment: .leading,
                spacing: pendingQuestion != nil && !hasText ? 0 : 6) {
+            // What this answer read (see `readingBlock`) — present from the first
+            // result through the settled turn.
+            if showsReadingBlock {
+                readingBlock
+                    .padding(.bottom, 1)
+                    .transition(.opacity)
+            }
             // The answer — the SAME view whether streaming or settled, so the
             // stream→settle edge never rebuilds it. While streaming it reflows in
             // place as `text` grows; once settled it's identical but selectable.
@@ -3518,7 +3781,7 @@ struct AssistantTurnView: View {
             // to disable mid-stream — the tail-follow `scrollTo` collapsing a drag —
             // only bites in the long, clipped/scrolling layout; the jump-free guarantee
             // matters more, and most answers are short and never scroll.)
-            MarkdownBlocks(source: text, baseFont: baseFont, color: color,
+            MarkdownBlocks(source: renderedText, baseFont: baseFont, color: color,
                            onInAppCopy: onInAppCopy, streamingTail: streaming)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textSelection(.enabled)
@@ -3543,9 +3806,7 @@ struct AssistantTurnView: View {
                     // layers — `waitLine` folds all of those into a single string
                     // so the slot just dissolves from one to the next.
                     Group {
-                        if let waitLine {
-                            waitRow(waitLine)
-                        }
+                        if let waitLine { waitRow(waitLine) }
                     }
                     .opacity(showWait ? 1 : 0)
                     .allowsHitTesting(false)
@@ -3626,7 +3887,7 @@ struct AssistantTurnView: View {
                                            confirms: true) {
                             NSPasteboard.general.clearContents()
                             NSPasteboard.general.setString(
-                                text.trimmingCharacters(in: .whitespacesAndNewlines),
+                                renderedText.trimmingCharacters(in: .whitespacesAndNewlines),
                                 forType: .string
                             )
                             onInAppCopy?()
@@ -3641,7 +3902,7 @@ struct AssistantTurnView: View {
                                                confirms: true) {
                                 NSPasteboard.general.clearContents()
                                 NSPasteboard.general.setString(
-                                    MarkdownParser.plainText(text)
+                                    MarkdownParser.plainText(renderedText)
                                         .trimmingCharacters(in: .whitespacesAndNewlines),
                                     forType: .string
                                 )
@@ -3709,17 +3970,13 @@ struct AssistantTurnView: View {
         // The question card fades in when the model asks and out when the pick (or
         // timeout) releases the round — same beat as the wait overlay's fade.
         .animation(.easeInOut(duration: Self.fade), value: pendingQuestion)
-        // A clock tick means the host on the line has had its full dwell — advance
-        // to the next one so each host occupies exactly one dwell while the cue
-        // is up. (No hold once the answer starts: the wait yields immediately.)
-        .onReceive(readingClock) { _ in
-            guard isReading else { return }
-            readingIndex += 1
-        }
-        // Each time the read cue opens, restart the walk from the first host so a
-        // new search begins fresh rather than continuing a stale offset.
-        .onChange(of: isReading) { _, reading in
-            if reading { readingIndex = 0 }
+        .animation(.easeOut(duration: Self.fade), value: showsReadingBlock)
+        // Stop the clock the moment the answer starts. `hasText` is the same edge
+        // the wait itself yields on, so the number the anchor keeps is exactly
+        // what the wait line last showed.
+        .onChange(of: hasText) { _, written in
+            guard written, processElapsed == nil, let thinkingSince else { return }
+            processElapsed = Date().timeIntervalSince(thinkingSince)
         }
     }
 }

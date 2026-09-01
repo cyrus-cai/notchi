@@ -775,6 +775,7 @@ enum Strings {
         // AI service errors / stub
         "service.error.http": "%@ request failed (HTTP %lld).",
         "service.error.malformed": "%@ returned an unexpected response.",
+        "service.error.cutOff": "%@ cut the answer off — the connection dropped mid-reply.",
         "stub.noModel": "No model connected yet — this is the offline stub. Open Settings (⌘,) and connect a free OpenRouter account (or paste an API key) to get live answers.",
 
         // OpenRouter OAuth
@@ -794,7 +795,11 @@ enum Strings {
         "agent.activity.refining": "Digging deeper…",
         "agent.activity.searchQuery": "Searching “%@”",
         "agent.activity.refiningQuery": "Digging into “%@”",
+        "agent.activity.planningSearchQuery": "Planning a search for “%@”…",
         "agent.activity.composing": "Reading the results…",
+        "agent.activity.readingResultsCount": "Reading %lld results…",
+        // The collapsed anchor above an answer that searched — opens the page list.
+        "agent.process.searchedWeb": "Searched the web",
         // While reading results, the line names the page (its host) being read.
         "agent.activity.readingPage": "Reading %@",
         "agent.activity.clipboard": "Reading the clipboard…",
@@ -1414,6 +1419,7 @@ enum Strings {
 
         "service.error.http": "%@ 请求失败（HTTP %lld）。",
         "service.error.malformed": "%@ 返回了异常响应。",
+        "service.error.cutOff": "%@ 的回答被中断——连接在回复过程中断开。",
         "stub.noModel": "尚未连接模型，当前为离线占位回复。请打开设置（⌘,），连接免费的 OpenRouter 账号或粘贴 API 密钥，即可获得实时回答。",
 
         "or.error.noPort": "无法为登录回调打开本地端口",
@@ -1431,7 +1437,10 @@ enum Strings {
         "agent.activity.refining": "正在进一步查证…",
         "agent.activity.searchQuery": "正在搜索「%@」",
         "agent.activity.refiningQuery": "正在查证「%@」",
+        "agent.activity.planningSearchQuery": "正在规划「%@」的搜索…",
         "agent.activity.composing": "正在整理搜索结果…",
+        "agent.activity.readingResultsCount": "正在查看 %lld 条结果…",
+        "agent.process.searchedWeb": "已搜索网页",
         "agent.activity.readingPage": "正在阅读 %@…",
         "agent.activity.clipboard": "正在读取剪贴板…",
         "agent.activity.open": "正在用浏览器打开…",
@@ -2048,6 +2057,7 @@ enum Strings {
 
         "service.error.http": "%@ 請求失敗（HTTP %lld）。",
         "service.error.malformed": "%@ 回傳了異常回應。",
+        "service.error.cutOff": "%@ 的回答被中斷——連線在回覆過程中斷開。",
         "stub.noModel": "尚未連接模型，目前為離線佔位回覆。請開啟設定（⌘,），連接免費的 OpenRouter 帳號或貼上 API 金鑰，即可獲得即時回答。",
 
         "or.error.noPort": "無法為登入回呼開啟本地連接埠",
@@ -2065,7 +2075,10 @@ enum Strings {
         "agent.activity.refining": "正在進一步查證…",
         "agent.activity.searchQuery": "正在搜尋「%@」",
         "agent.activity.refiningQuery": "正在查證「%@」",
+        "agent.activity.planningSearchQuery": "正在規劃「%@」的搜尋…",
         "agent.activity.composing": "正在整理搜尋結果…",
+        "agent.activity.readingResultsCount": "正在查看 %lld 筆結果…",
+        "agent.process.searchedWeb": "已搜尋網頁",
         "agent.activity.readingPage": "正在閱讀 %@…",
         "agent.activity.clipboard": "正在讀取剪貼簿…",
         "agent.activity.open": "正在用瀏覽器開啟…",
@@ -2657,6 +2670,7 @@ enum Strings {
 
         "service.error.http": "%@ のリクエストが失敗しました（HTTP %lld）。",
         "service.error.malformed": "%@ が想定外の応答を返しました。",
+        "service.error.cutOff": "%@ の回答が途中で切れました（接続が切断されました）。",
         "stub.noModel": "まだモデルが接続されていません。これはオフラインの仮の返答です。設定（⌘,）から無料の OpenRouter アカウントを接続するか、API キーを貼り付けると、実際の回答が返ってきます。",
 
         "or.error.noPort": "サインインのリダイレクト用にローカルポートを開けませんでした",
@@ -2674,7 +2688,10 @@ enum Strings {
         "agent.activity.refining": "さらに詳しく確認しています…",
         "agent.activity.searchQuery": "「%@」を検索中",
         "agent.activity.refiningQuery": "「%@」をさらに確認中",
+        "agent.activity.planningSearchQuery": "「%@」の検索を計画中…",
         "agent.activity.composing": "検索結果を読んでいます…",
+        "agent.activity.readingResultsCount": "%lld 件の結果を確認中…",
+        "agent.process.searchedWeb": "ウェブを検索しました",
         "agent.activity.readingPage": "%@ を読んでいます",
         "agent.activity.clipboard": "クリップボードを読んでいます…",
         "agent.activity.open": "ブラウザで開いています…",
@@ -3266,6 +3283,7 @@ enum Strings {
 
         "service.error.http": "%@ 요청이 실패했습니다(HTTP %lld).",
         "service.error.malformed": "%@가 예상치 못한 응답을 반환했습니다.",
+        "service.error.cutOff": "%@의 답변이 중간에 끊겼습니다 — 연결이 끊어졌습니다.",
         "stub.noModel": "아직 모델이 연결되지 않았습니다 — 지금은 오프라인 임시 응답입니다. 설정(⌘,)에서 무료 OpenRouter 계정을 연결하거나 API 키를 붙여넣으면 실제 답변을 받을 수 있습니다.",
 
         "or.error.noPort": "로그인 리디렉션용 로컬 포트를 열지 못했습니다",
@@ -3283,7 +3301,10 @@ enum Strings {
         "agent.activity.refining": "더 자세히 확인하는 중…",
         "agent.activity.searchQuery": "“%@” 검색 중",
         "agent.activity.refiningQuery": "“%@” 더 자세히 확인하는 중",
+        "agent.activity.planningSearchQuery": "“%@” 검색을 계획하는 중…",
         "agent.activity.composing": "검색 결과를 읽는 중…",
+        "agent.activity.readingResultsCount": "검색 결과 %lld개를 읽는 중…",
+        "agent.process.searchedWeb": "웹을 검색했습니다",
         "agent.activity.readingPage": "%@ 읽는 중",
         "agent.activity.clipboard": "클립보드를 읽는 중…",
         "agent.activity.open": "브라우저에서 여는 중…",
@@ -3463,8 +3484,8 @@ enum Strings {
         "error.generic": "Un problème est survenu. Réessayez.", "error.retry": "Réessayer", "error.openSettings": "Ouvrir Réglages",
         "error.noAnswer": "Aucune réponse reçue.", "recent.badge.failed": "Échec", "notify.answerReady.title": "Réponse prête",
         "time.justNow": "à l’instant", "time.minutesAgo": "il y a %lld min", "time.hoursAgo": "il y a %lld h", "time.daysAgo": "il y a %lld j",
-        "agent.activity.search": "Recherche sur le web…", "agent.activity.refining": "Recherche approfondie…", "agent.activity.searchQuery": "Recherche de « %@ »",
-        "agent.activity.composing": "Lecture des résultats…", "agent.activity.readingPage": "Lecture de %@", "agent.activity.clipboard": "Lecture du presse-papiers…", "agent.activity.open": "Ouverture dans le navigateur…",
+        "agent.activity.search": "Recherche sur le web…", "agent.activity.refining": "Recherche approfondie…", "agent.activity.searchQuery": "Recherche de « %@ »", "agent.activity.planningSearchQuery": "Planification de la recherche « %@ »…",
+        "agent.activity.composing": "Lecture des résultats…", "agent.activity.readingResultsCount": "Lecture de %lld résultats…", "agent.process.searchedWeb": "Recherche web effectuée", "agent.activity.readingPage": "Lecture de %@", "agent.activity.clipboard": "Lecture du presse-papiers…", "agent.activity.open": "Ouverture dans le navigateur…",
         "agent.activity.time": "Vérification de l’heure…", "agent.activity.calc": "Calcul…", "agent.activity.history": "Recherche dans votre historique…",
         "agent.activity.askUser": "En attente de votre choix…", "agent.activity.working": "Travail en cours…", "agent.activity.runningTool": "Exécution de %@…",
         "agent.activity.thinking": "Réflexion…", "source.badge.help": "Sources", "source.badge.fallback": "Sources"
@@ -3605,8 +3626,8 @@ enum Strings {
         "feedback.fileFailed": "No se pudo escribir el archivo de nota. Inténtalo de nuevo.", "feedback.addedReminders": "Añadido a Recordatorios%@", "feedback.remindersFailed": "No se pudo guardar en Recordatorios. Inténtalo de nuevo.",
         "error.generic": "Algo salió mal. Inténtalo de nuevo.", "error.retry": "Intentarlo de nuevo", "error.openSettings": "Abrir Configuración", "error.noAnswer": "No se recibió respuesta.",
         "recent.badge.failed": "Fallido", "notify.answerReady.title": "Respuesta lista", "time.justNow": "ahora mismo", "time.minutesAgo": "hace %lld min", "time.hoursAgo": "hace %lld h", "time.daysAgo": "hace %lld d",
-        "agent.activity.search": "Buscando en la web…", "agent.activity.refining": "Investigando más…", "agent.activity.searchQuery": "Buscando «%@»", "agent.activity.composing": "Leyendo los resultados…",
-        "agent.activity.readingPage": "Leyendo %@", "agent.activity.clipboard": "Leyendo el portapapeles…", "agent.activity.open": "Abriendo en el navegador…", "agent.activity.time": "Comprobando la hora…", "agent.activity.calc": "Calculando…",
+        "agent.activity.search": "Buscando en la web…", "agent.activity.refining": "Investigando más…", "agent.activity.searchQuery": "Buscando «%@»", "agent.activity.planningSearchQuery": "Planificando la búsqueda de «%@»…", "agent.activity.composing": "Leyendo los resultados…",
+        "agent.activity.readingResultsCount": "Leyendo %lld resultados…", "agent.process.searchedWeb": "Búsqueda web realizada", "agent.activity.readingPage": "Leyendo %@", "agent.activity.clipboard": "Leyendo el portapapeles…", "agent.activity.open": "Abriendo en el navegador…", "agent.activity.time": "Comprobando la hora…", "agent.activity.calc": "Calculando…",
         "agent.activity.history": "Buscando en tu historial…", "agent.activity.askUser": "Esperando tu elección…", "agent.activity.working": "Trabajando…", "agent.activity.runningTool": "Ejecutando %@…", "agent.activity.thinking": "Pensando…",
         "source.badge.help": "Fuentes", "source.badge.fallback": "Fuentes"
     ])

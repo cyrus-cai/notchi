@@ -4244,9 +4244,25 @@ struct DetachedThreadView: View {
         compactShortcut ? Self.compactCardPadding : Self.cardBottomPadding
     }
     private var topFade: CGFloat { scrollTopInset }
-    private var bottomFade: CGFloat { scrollBottomInset }
     private var topBand: CGFloat { min(ThreadScroll.band, scrollTopInset) }
-    private var bottomBand: CGFloat { min(ThreadScroll.band, scrollBottomInset) }
+    /// The gap the composer stands in above the card's bottom edge.
+    private var followUpGap: CGFloat {
+        compactShortcut ? Self.compactFollowUpGap : Self.followUpGap
+    }
+    /// The runway the thread travels DOWN into, behind the floating composer:
+    /// the box's own 39pt reach from the viewport's bottom edge, the gap it used
+    /// to stand in as a sibling row, and whatever resting space this face already
+    /// kept under its content. The scroll's frame grew by exactly the gap + row
+    /// the sibling layout occupied, so a card is the same height it always was —
+    /// the thread simply dissolves behind the box now instead of ending on a hard
+    /// cut above it (the result view's design, one composer treatment everywhere).
+    private var followUpRunway: CGFloat {
+        scrollBottomInset + followUpGap + Self.followUpHeight
+    }
+    /// Fade and frost fall across the runway, never over resting text: the band
+    /// is kept 4pt shorter so it tapers to clear before the last resting row.
+    private var bottomFade: CGFloat { followUpRunway }
+    private var bottomBand: CGFloat { max(followUpRunway - 4, 0) }
 
 
     /// The window height a compact card wants for a turn stack this tall — the
@@ -4302,106 +4318,125 @@ struct DetachedThreadView: View {
         VStack(alignment: .leading, spacing: 0) {
             header
                 .padding(.horizontal, headerHorizontal)
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
-                        ForEach(renderedTurns) { turn in
-                            turnView(turn)
+            // The thread and the composer share one slot: every detached thread
+            // can be continued where it stands, and the line to continue it in
+            // FLOATS over the scroll's bottom — the panel result view's design,
+            // so one composer treatment covers every surface. The scroll's frame
+            // absorbed the gap + row the sibling layout spent, so the card is the
+            // same height it was and the thread now dissolves behind the box
+            // instead of hard-cutting above it.
+            ZStack(alignment: .bottom) {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        // Two stacks: the thread keeps its own 14pt rhythm, and the
+                        // runway + anchor ride a 0-spaced stack under it so SwiftUI
+                        // doesn't insert spacing on both sides of the runway.
+                        VStack(alignment: .leading, spacing: 0) {
+                            VStack(alignment: .leading, spacing: 14) {
+                                ForEach(renderedTurns) { turn in
+                                    turnView(turn)
+                                }
+                                Color.clear.frame(height: 1)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            // A ScrollView otherwise accepts the viewport's finite height
+                            // proposal and the probe below only reports that clipped box.
+                            // Ask for the stack's ideal vertical size so the probe sees the
+                            // complete laid-out answer, including lines below the fold.
+                            .fixedSize(horizontal: false, vertical: true)
+                            // Measured BARE — inside the gaps, not around them — so the
+                            // window's height is built from the turn stack plus whichever
+                            // gaps this face rests it between (`compactWindowHeight`),
+                            // rather than from a number that already has one pair baked in.
+                            // The runway below is deliberately OUTSIDE this subtree: it is
+                            // the chrome the window already budgets for, not content.
+                            .background(GeometryReader { geo in
+                                Color.clear.preference(
+                                    key: DetachedThreadContentHeightKey.self,
+                                    value: geo.size.height)
+                            })
+                            // The runway sits ABOVE the anchor on purpose:
+                            // `scrollTo(anchor: .bottom)` aligns the anchor's bottom edge
+                            // with the viewport's, so a runway placed below it would park
+                            // the newest turn at the viewport bottom — behind the box.
+                            // (Less the anchor's own point, so the reach is exact.)
+                            Spacer(minLength: 0)
+                                .frame(height: max(followUpRunway - 1, 0))
+                            Color.clear.frame(height: 1).id(Self.bottomID)
                         }
-                        Color.clear.frame(height: 1).id(Self.bottomID)
+                        // The gap rows rest above and then scroll away into — behind
+                        // the header — fading and frosting out. A session window can
+                        // afford the full 28pt runway; the compact card pays for it in
+                        // its own height, so it rests on the panel's short rhythm
+                        // (see `scrollTopInset`).
+                        .padding(.top, scrollTopInset)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    // A ScrollView otherwise accepts the viewport's finite height
-                    // proposal and the probe below only reports that clipped box.
-                    // Ask for the stack's ideal vertical size so the probe sees the
-                    // complete laid-out answer, including lines below the fold.
-                    .fixedSize(horizontal: false, vertical: true)
-                    // Measured BARE — inside the gaps, not around them — so the
-                    // window's height is built from the turn stack plus whichever
-                    // gaps this face rests it between (`compactWindowHeight`),
-                    // rather than from a number that already has one pair baked in.
-                    .background(GeometryReader { geo in
-                        Color.clear.preference(
-                            key: DetachedThreadContentHeightKey.self,
-                            value: geo.size.height)
-                    })
-                    // The gaps rows rest between and then scroll away into — up
-                    // behind the header, down behind the input — fading and
-                    // frosting out on both edges. A session window can afford
-                    // the full 28pt runways; the compact card pays for them in
-                    // its own height, so it rests on the panel's short rhythm
-                    // (see `scrollTopInset`).
-                    .padding(.top, scrollTopInset)
-                    .padding(.bottom, scrollBottomInset)
-                }
-                .scrollIndicators(.automatic)
-                // Sticky affordances inside the thread (a code block's copy
-                // button) park below the top fade band, not in it.
-                .environment(\.stickyScrollTopInset, topFade)
-                .scrollEdgeFade(top: true, bottom: true,
-                                topFade: topFade, bottomFade: bottomFade)
-                // ONE merged pass, not the two stacked modifiers — see
-                // `ProgressiveEdgeBlur`: stacking them rebuilds the whole thread
-                // four times over on mount.
-                .progressiveEdgeBlur(top: topBand, bottom: bottomBand,
-                                     topRadius: ThreadScroll.blurRadius)
-                // The fade/blur modifiers render copies of the scroll surface.
-                // Clip the composed result at the viewport itself so those
-                // layers cannot follow a live scroll into the transparent bands
-                // around the compact card.
-                .clipped()
-                // A follow-up appends two turns at once — the question bubble
-                // and the empty assistant turn waiting under it. Neither carries
-                // any text, so the tail-follow below (keyed on the answer's
-                // characters) cannot fire for them: a capped card left the new
-                // question below the fold, behind the composer, until the first
-                // token finally landed. Follow the tail on the append itself.
-                //
-                // TWICE, on purpose: `onChange` runs while SwiftUI is still
-                // updating, so the ScrollView's content at that instant is the
-                // OLD, shorter thread and this first `scrollTo` can only clamp at
-                // the old maximum offset. The deferred pass runs once the
-                // appended turns have been laid out, when the anchor can actually
-                // be reached. (Same shape as the panel's own result view.)
-                .onChange(of: store.turns.count) { _, _ in
-                    proxy.scrollTo(Self.bottomID, anchor: .bottom)
-                    DispatchQueue.main.async {
+                    .scrollIndicators(.automatic)
+                    // Sticky affordances inside the thread (a code block's copy
+                    // button) park below the top fade band, not in it.
+                    .environment(\.stickyScrollTopInset, topFade)
+                    .scrollEdgeFade(top: true, bottom: true,
+                                    topFade: topFade, bottomFade: bottomFade)
+                    // ONE merged pass, not the two stacked modifiers — see
+                    // `ProgressiveEdgeBlur`: stacking them rebuilds the whole thread
+                    // four times over on mount.
+                    .progressiveEdgeBlur(top: topBand, bottom: bottomBand,
+                                         topRadius: ThreadScroll.blurRadius)
+                    // The fade/blur modifiers render copies of the scroll surface.
+                    // Clip the composed result at the viewport itself so those
+                    // layers cannot follow a live scroll into the transparent bands
+                    // around the compact card.
+                    .clipped()
+                    // A follow-up appends two turns at once — the question bubble
+                    // and the empty assistant turn waiting under it. Neither carries
+                    // any text, so the tail-follow below (keyed on the answer's
+                    // characters) cannot fire for them: a capped card left the new
+                    // question below the fold, behind the composer, until the first
+                    // token finally landed. Follow the tail on the append itself.
+                    //
+                    // TWICE, on purpose: `onChange` runs while SwiftUI is still
+                    // updating, so the ScrollView's content at that instant is the
+                    // OLD, shorter thread and this first `scrollTo` can only clamp at
+                    // the old maximum offset. The deferred pass runs once the
+                    // appended turns have been laid out, when the anchor can actually
+                    // be reached. (Same shape as the panel's own result view.)
+                    .onChange(of: store.turns.count) { _, _ in
                         proxy.scrollTo(Self.bottomID, anchor: .bottom)
-                    }
-                }
-                .onChange(of: store.turns.last?.text.count ?? 0) { _, _ in
-                    guard streaming else { return }
-                    // The compact window opens to fit its answer, so there is
-                    // nothing to follow until the answer outgrows the cap —
-                    // and following the few points the waiting orb overflows a
-                    // still-closed box would nudge the first line up exactly as
-                    // it lands.
-                    if compactShortcut, !compactAnswerIsCapped { return }
-                    proxy.scrollTo(Self.bottomID, anchor: .bottom)
-                }
-                // Regular detached threads append their footer on settle. At the
-                // ceiling it lands below the fold, so follow their tail once more
-                // after layout. A compact answer carries its footer from the first
-                // token (`stabilizesFooterWhileStreaming`), so settling adds no
-                // height there and the tail is already where the reader left it.
-                .onChange(of: streaming) { _, nowStreaming in
-                    guard !nowStreaming else { return }
-                    guard !compactShortcut else { return }
-                    proxy.scrollTo(Self.bottomID, anchor: .bottom)
-                    DispatchQueue.main.async {
-                        withAnimation(.easeOut(duration: 0.2)) {
+                        DispatchQueue.main.async {
                             proxy.scrollTo(Self.bottomID, anchor: .bottom)
                         }
                     }
+                    .onChange(of: store.turns.last?.text.count ?? 0) { _, _ in
+                        guard streaming else { return }
+                        // The compact window opens to fit its answer, so there is
+                        // nothing to follow until the answer outgrows the cap —
+                        // and following the few points the waiting orb overflows a
+                        // still-closed box would nudge the first line up exactly as
+                        // it lands.
+                        if compactShortcut, !compactAnswerIsCapped { return }
+                        proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                    }
+                    // Regular detached threads append their footer on settle. At the
+                    // ceiling it lands below the fold, so follow their tail once more
+                    // after layout. A compact answer carries its footer from the first
+                    // token (`stabilizesFooterWhileStreaming`), so settling adds no
+                    // height there and the tail is already where the reader left it.
+                    .onChange(of: streaming) { _, nowStreaming in
+                        guard !nowStreaming else { return }
+                        guard !compactShortcut else { return }
+                        proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                        DispatchQueue.main.async {
+                            withAnimation(.easeOut(duration: 0.2)) {
+                                proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                            }
+                        }
+                    }
                 }
+                .padding(.horizontal, cardHorizontal)
+
+                followUpRow
+                    .padding(.horizontal, followUpHorizontal)
             }
-            .padding(.horizontal, cardHorizontal)
-            // Every detached thread can be continued where it stands — a
-            // pointer-side answer no longer dead-ends at "copy it or close it".
-            followUpRow
-                .padding(.horizontal, followUpHorizontal)
-                .padding(.top, compactShortcut ? Self.compactFollowUpGap
-                                               : Self.followUpGap)
         }
         .padding(.top, cardTop)
         .padding(.bottom, cardBottom)
@@ -4742,6 +4777,14 @@ struct DetachedAgentTaskView: View {
     private static let bottomID = "detached-agent-bottom"
     private static let scrollSpace = "detached-agent-scroll"
     private static let tailSlack: CGFloat = 28
+    /// The floating composer's reach up from the viewport's bottom edge: its own
+    /// 39pt box plus the 8pt gap it used to stand in as a sibling row.
+    private static let followUpReach: CGFloat =
+        DetachedThreadView.followUpHeight + DetachedThreadView.followUpGap
+    /// …and the empty scroll space the trail travels down into behind it, which
+    /// keeps the record resting exactly where it did (`ThreadScroll.runway`
+    /// under the last row) with the box now floating over that space.
+    private static let followUpRunway: CGFloat = followUpReach + ThreadScroll.runway
 
     private var task: AgentTaskManager.AgentTask? {
         manager.tasks.first { $0.id == taskID } ?? lastKnown
@@ -4769,86 +4812,103 @@ struct DetachedAgentTaskView: View {
     private func content(_ task: AgentTaskManager.AgentTask) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             header(task)
-            ScrollViewReader { proxy in
-                ScrollView {
-                    // The panel detail page's own record body, shared verbatim
-                    // (`AgentRecordBody`): every settled round's prompt, trail
-                    // and report, then the round in flight. This window used to
-                    // render the flat trail plus only the LATEST answer, so a
-                    // multi-round run lost every earlier report the moment it
-                    // was torn out of the notch.
-                    AgentRecordBody(task: task, bottomID: Self.bottomID)
-                    // Runways: the trail rests between the header and the
-                    // follow-up line, then scrolls into these empty bands — up
-                    // behind the header, down behind the input — to fade +
-                    // frost out on both edges (see ThreadScroll).
-                    .padding(.top, ThreadScroll.runway)
-                    .padding(.bottom, ThreadScroll.runway)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(GeometryReader { geo in
-                        Color.clear.preference(
-                            key: DetachedAgentContentBottomKey.self,
-                            value: geo.frame(in: .named(Self.scrollSpace)).maxY)
+            // Trail and composer share one slot: the input FLOATS over the
+            // scroll's bottom, the same design the panel's result view and detail
+            // page wear, so the trail dissolves behind the box instead of ending
+            // on a hard cut above a sibling row. The scroll simply takes the
+            // height that row used to occupy — the window is unchanged.
+            ZStack(alignment: .bottom) {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        // The panel detail page's own record body, shared verbatim
+                        // (`AgentRecordBody`): every settled round's prompt, trail
+                        // and report, then the round in flight. This window used to
+                        // render the flat trail plus only the LATEST answer, so a
+                        // multi-round run lost every earlier report the moment it
+                        // was torn out of the notch.
+                        AgentRecordBody(task: task, bottomID: Self.bottomID,
+                                        // The runway the trail travels down into,
+                                        // behind the floating composer — it has to
+                                        // sit above the tail anchor, see there.
+                                        tailRunway: Self.followUpRunway)
+                        // Runways: the trail rests between the header and the
+                        // follow-up line, then scrolls into these empty bands — up
+                        // behind the header, down behind the input — to fade +
+                        // frost out on both edges (see ThreadScroll).
+                        .padding(.top, ThreadScroll.runway)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(GeometryReader { geo in
+                            Color.clear.preference(
+                                key: DetachedAgentContentBottomKey.self,
+                                value: geo.frame(in: .named(Self.scrollSpace)).maxY)
+                        })
+                    }
+                    .coordinateSpace(name: Self.scrollSpace)
+                    // Overlay, not a wrapper: the viewport's height is needed to know
+                    // where "the bottom" is, and measuring it must not touch layout.
+                    .overlay(GeometryReader { geo in
+                        Color.clear.preference(key: DetachedAgentViewportKey.self,
+                                               value: geo.size.height)
                     })
+                    .onPreferenceChange(DetachedAgentViewportKey.self) { height in
+                        viewportHeight = height
+                        refreshTailFollow()
+                    }
+                    .onPreferenceChange(DetachedAgentContentBottomKey.self) { bottom in
+                        contentBottom = bottom
+                        refreshTailFollow()
+                    }
+                    // Sticky affordances inside the record (a code block's copy
+                    // button) park below the top fade band, not in it.
+                    .environment(\.stickyScrollTopInset, ThreadScroll.runway)
+                    // Each taper is exactly its own runway — the bottom one reaches
+                    // across the floating box, so text frosts and fades away behind
+                    // it while the resting tail above stays at full strength. The
+                    // frost band is kept 4pt shorter, so it clears the resting row.
+                    .scrollEdgeFade(top: true, bottom: true,
+                                    topFade: ThreadScroll.runway,
+                                    bottomFade: Self.followUpRunway)
+                    .progressiveEdgeBlur(top: ThreadScroll.band,
+                                         bottom: max(Self.followUpRunway - 4, 0),
+                                         topRadius: ThreadScroll.blurRadius)
+                    .onChange(of: task.log.count) { _, _ in followTail(proxy) }
+                    // The trailing block GROWS token by token, which moves the tail
+                    // without changing the row count.
+                    .onChange(of: task.log.last?.title) { _, _ in followTail(proxy) }
+                    .onAppear {
+                        followsTail = true
+                        proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                    }
+                    .overlay(alignment: .bottom) {
+                        if !followsTail {
+                            GlassIconButton(systemName: "arrow.down",
+                                            help: L("agent.trail.toBottom"),
+                                            size: 26, glyphSize: 11,
+                                            showsTooltip: false) {
+                                followsTail = true
+                                withAnimation(.easeOut(duration: 0.2)) {
+                                    proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                                }
+                            }
+                            // Above the floating composer, not behind it.
+                            .padding(.bottom, Self.followUpReach + 4)
+                            .transition(.scale(scale: 0.8).combined(with: .opacity))
+                        }
+                    }
+                    .animation(.spring(response: 0.3, dampingFraction: 0.85), value: followsTail)
                 }
-                .coordinateSpace(name: Self.scrollSpace)
-                // Overlay, not a wrapper: the viewport's height is needed to know
-                // where "the bottom" is, and measuring it must not touch layout.
-                .overlay(GeometryReader { geo in
-                    Color.clear.preference(key: DetachedAgentViewportKey.self,
-                                           value: geo.size.height)
-                })
-                .onPreferenceChange(DetachedAgentViewportKey.self) { height in
-                    viewportHeight = height
-                    refreshTailFollow()
-                }
-                .onPreferenceChange(DetachedAgentContentBottomKey.self) { bottom in
-                    contentBottom = bottom
-                    refreshTailFollow()
-                }
-                // Sticky affordances inside the record (a code block's copy
-                // button) park below the top fade band, not in it.
-                .environment(\.stickyScrollTopInset, ThreadScroll.runway)
-                .scrollEdgeFade(top: true, bottom: true, fade: ThreadScroll.runway)
-                .progressiveEdgeBlur(top: ThreadScroll.band, bottom: ThreadScroll.band,
-                                     topRadius: ThreadScroll.blurRadius)
-                .onChange(of: task.log.count) { _, _ in followTail(proxy) }
-                // The trailing block GROWS token by token, which moves the tail
-                // without changing the row count.
-                .onChange(of: task.log.last?.title) { _, _ in followTail(proxy) }
-                .onAppear {
-                    followsTail = true
-                    proxy.scrollTo(Self.bottomID, anchor: .bottom)
-                }
-                .overlay(alignment: .bottom) {
-                    if !followsTail {
-                        GlassIconButton(systemName: "arrow.down",
-                                        help: L("agent.trail.toBottom"),
-                                        size: 26, glyphSize: 11,
-                                        showsTooltip: false) {
-                            followsTail = true
-                            withAnimation(.easeOut(duration: 0.2)) {
-                                proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                VStack(alignment: .leading, spacing: 8) {
+                    if !followUpImages.isEmpty {
+                        ComposeImagesAttachedLine(images: followUpImages) { index in
+                            guard followUpImages.indices.contains(index) else { return }
+                            withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                                followUpImages.remove(at: index)
                             }
                         }
-                        .padding(.bottom, 4)
-                        .transition(.scale(scale: 0.8).combined(with: .opacity))
                     }
+                    followUpRow(task)
                 }
-                .animation(.spring(response: 0.3, dampingFraction: 0.85), value: followsTail)
             }
-            VStack(alignment: .leading, spacing: 8) {
-                if !followUpImages.isEmpty {
-                    ComposeImagesAttachedLine(images: followUpImages) { index in
-                        guard followUpImages.indices.contains(index) else { return }
-                        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
-                            followUpImages.remove(at: index)
-                        }
-                    }
-                }
-                followUpRow(task)
-            }
-            .padding(.top, 8)
         }
         .padding(.horizontal, DetachedThreadView.cardHorizontalPadding)
         .padding(.top, DetachedThreadView.cardTopPadding)

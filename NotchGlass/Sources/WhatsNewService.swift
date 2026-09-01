@@ -94,6 +94,17 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.7.6",
+            date: "2026-09-01",
+            improvements: [
+                "Web searches show the topic immediately and keep progress visible through reasoning, searching, and reading.",
+                "Sites being read appear together in a vertical list, then collapse into an expandable source list with the answer.",
+            ],
+            fixes: [
+                "A dropped connection no longer leaves a cut-off reply looking complete.",
+            ]
+        ),
+        Entry(
             version: "0.7.5",
             date: "2026-08-31",
             features: [

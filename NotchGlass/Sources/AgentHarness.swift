@@ -17,6 +17,14 @@ import Foundation
 
 /// One incremental event from a single agent turn.
 enum TurnEvent: Sendable {
+    /// The provider has begun a reasoning phase. This deliberately carries no
+    /// raw chain-of-thought text: the UI can stop showing a silent spinner while
+    /// keeping private/internal reasoning private.
+    case reasoningStarted
+    /// A provider-designated, user-facing reasoning summary. Unlike raw
+    /// `reasoning_content` / `thinking_delta`, this is safe to surface as a short
+    /// progress line while the answer is still being prepared.
+    case reasoningSummary(String)
     /// A chunk of visible answer text to append (same semantics as the plain
     /// `stream`'s yielded String).
     case text(String)
@@ -25,6 +33,11 @@ enum TurnEvent: Sendable {
     /// only place the real model surfaces (the request only names the router);
     /// the UI shows it under the answer. Emitted at most once per turn.
     case model(String)
+    /// Citation metadata carried beside a provider's generated text (for example
+    /// Perplexity's top-level `citations` / `search_results` fields). Keeping it
+    /// structured lets the renderer turn `[N]` into a real link instead of
+    /// showing a source-looking number with nowhere to go.
+    case sources([WebSource])
     /// A tool-call block just OPENED in the stream: the model has committed to
     /// running `name`, but its arguments are still streaming in. Emitted so the
     /// UI can raise the activity line the moment the decision is visible instead
@@ -54,6 +67,11 @@ struct WebSource: Codable, Equatable, Sendable, Identifiable {
     let url: String
     /// The publication date as the provider reported it, if any (e.g. "2026-06-23").
     var date: String?
+    /// The provider-assigned number used by the answer's inline `[N]` markers.
+    /// Search-tool sources leave this nil because each separate tool round starts
+    /// at 1, making a merged multi-round mapping ambiguous. Response-native
+    /// citation metadata can set it unambiguously.
+    var citationIndex: Int? = nil
 
     /// The page's host with any leading `www.` dropped — "www.tmtpost.com" →
     /// "tmtpost.com", "finance.sina.com.cn" → "finance.sina.com.cn". This is the
@@ -86,6 +104,53 @@ struct WebSource: Codable, Equatable, Sendable, Identifiable {
             return labels[labels.count - 3]
         }
         return secondToLast
+    }
+}
+
+/// Resolves provider-authored numeric citation markers for display.
+///
+/// A marker becomes a link only when the response supplied its real URL.
+/// Perplexity Sonar has one honest fallback: Vercel AI Gateway's OpenAI-compatible
+/// endpoint can preserve Sonar's `[N]` prose while omitting all source metadata.
+/// Those orphan markers are removed instead of being shown as citations the user
+/// cannot inspect. Other models keep unmatched bracketed numbers because they may
+/// be ordinary prose rather than citation syntax.
+enum CitationMarkup {
+    static func rendered(_ text: String,
+                         sources: [WebSource],
+                         stripUnresolved: Bool) -> String {
+        var mapped: [Int: String] = [:]
+        for source in sources {
+            if let index = source.citationIndex, mapped[index] == nil {
+                mapped[index] = source.url
+            }
+        }
+        guard !mapped.isEmpty || stripUnresolved else { return text }
+
+        guard let regex = try? NSRegularExpression(pattern: #"(?<!\[)\[(\d+)\](?!\()"#)
+        else { return text }
+        let full = NSRange(text.startIndex..<text.endIndex, in: text)
+        let matches = regex.matches(in: text, range: full)
+        guard !matches.isEmpty else { return text }
+
+        var out = text
+        for match in matches.reversed() {
+            guard let whole = Range(match.range(at: 0), in: out),
+                  let digits = Range(match.range(at: 1), in: out),
+                  let index = Int(out[digits])
+            else { continue }
+            if let url = mapped[index] {
+                out.replaceSubrange(whole, with: "[[\(index)]](<\(url)>)")
+            } else if stripUnresolved {
+                out.removeSubrange(whole)
+            }
+        }
+        return out
+    }
+
+    static func shouldStripUnresolved(answerModel: String?, regenModel: String?) -> Bool {
+        let id = (answerModel ?? regenModel ?? "").lowercased()
+        return id.contains("perplexity/") || id.hasPrefix("sonar")
     }
 }
 
@@ -367,6 +432,11 @@ struct AgentHarness {
         // `searchStopNudge`. Counts only search rounds because only search is prone
         // to the loop; a clipboard/time read never spirals.
         var searchRounds = 0
+        // A search/read tool just handed back structured sources and the UI is
+        // walking their count/hosts. Raw reasoning often starts immediately on
+        // the following model turn; keep that weaker signal from replacing the
+        // more informative, source-backed read cue before it can be seen.
+        var preserveFetchCue = false
         // Whether the "this turn produced no answer" recovery has already been
         // spent. It is allowed exactly once per run: a second silent turn means the
         // model isn't going to speak, and looping on it would only trade a blank
@@ -411,12 +481,26 @@ struct AgentHarness {
                                                       tools: toolsThisTurn) {
                 try Task.checkCancellation()
                 switch event {
+                case .reasoningStarted:
+                    // A real provider event replaces the previously silent
+                    // pre-tool wait without exposing the model's private notes.
+                    if !preserveFetchCue {
+                        onActivity(L("agent.activity.thinking"), .composing)
+                    }
+                case .reasoningSummary(let summary):
+                    // Only provider-designated summaries reach this event. Keep
+                    // the one-line status compact enough for the result panel.
+                    if !preserveFetchCue,
+                       let label = Self.reasoningStatusLabel(summary) {
+                        onActivity(label, .composing)
+                    }
                 case .text(let piece):
                     let visible = markupFilter.feed(piece)
                     guard !visible.isEmpty else { continue }
                     if !clearedGapLabel {
                         onActivity(nil, .composing)
                         clearedGapLabel = true
+                        preserveFetchCue = false
                     }
                     assistantText += visible
                     onText(visible)
@@ -428,6 +512,8 @@ struct AgentHarness {
                         reportedModel = true
                         onModel?(ran)
                     }
+                case .sources(let responseSources):
+                    if !responseSources.isEmpty { onSources(responseSources) }
                 case .toolCallStarted(let name):
                     // The model has committed to a tool; its arguments are still
                     // streaming. Raise the activity line NOW, from the name alone,
@@ -439,6 +525,7 @@ struct AgentHarness {
                     let preview = [ToolInvocation(id: "", name: canonicalName, input: [:])]
                     onActivity(activityLabel(for: preview, isRepeatRound: didTool),
                                Self.orbState(for: preview, isRepeatRound: didTool))
+                    preserveFetchCue = false
                     // Text after this point is call-adjacent prose, not the answer
                     // displacing the label — don't let it clear the line.
                     clearedGapLabel = true
@@ -604,7 +691,11 @@ struct AgentHarness {
             // stays out of `isSearchTool`: it must not count as a search round or
             // draw the stop-searching nudge — reading a page is how the model
             // *escapes* the re-search loop, not another lap of it.
-            if pendingCalls.contains(where: { Self.isSearchTool($0.name) || $0.name == "read_page" }) {
+            let fetchedMaterial = pendingCalls.contains {
+                Self.isSearchTool($0.name) || $0.name == "read_page"
+            }
+            preserveFetchCue = fetchedMaterial
+            if fetchedMaterial {
                 // The read-the-results gap is still the search flow — keep the globe.
                 onActivity(L("agent.activity.composing"), .searching)
             } else {
@@ -636,6 +727,33 @@ struct AgentHarness {
             iteration += 1
             _ = stopReason  // reason is informational; presence of calls drives the loop
         }
+    }
+
+    /// Collapse a provider's display-safe reasoning summary into the single
+    /// progress line used by the result panel. Markdown wrappers are presentation
+    /// noise here; long prose is clipped rather than turning the status into a
+    /// second answer.
+    private static func reasoningStatusLabel(_ summary: String) -> String? {
+        guard var line = summary
+            .components(separatedBy: .newlines)
+            .map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) })
+            .first(where: { !$0.isEmpty })
+        else { return nil }
+
+        while line.hasPrefix("#") {
+            line.removeFirst()
+            line = line.trimmingCharacters(in: .whitespaces)
+        }
+        if line.hasPrefix("**"), line.hasSuffix("**"), line.count > 4 {
+            line.removeFirst(2)
+            line.removeLast(2)
+        }
+        guard !line.isEmpty else { return nil }
+        let limit = 88
+        if line.count > limit {
+            line = String(line.prefix(limit)).trimmingCharacters(in: .whitespaces) + "…"
+        }
+        return line
     }
 
     /// Execute all of a turn's tool calls at once, preserving request order in the

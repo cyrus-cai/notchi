@@ -1478,100 +1478,145 @@ struct NotchBody: View {
     /// agent page must never make the island taller than the recent list does.
     private let agentDetailScrollHeight: CGFloat = 235
 
+    /// The gap the composer used to sit below the scroll in, and the runway the
+    /// trail now travels down into behind it. The floating composer's own 39pt
+    /// box plus that gap is what the scroll's viewport absorbs
+    /// (`agentDetailScrollViewport`), so the page's total height is exactly what
+    /// it was as a sibling row — the island never resizes for this change.
+    private let agentDetailFollowUpGap: CGFloat = 10
+    private var agentDetailFollowUpReach: CGFloat {
+        agentDetailFollowUpGap + NotchBody.followUpRowHeight
+    }
+    /// The scroll's real viewport height with the composer floating over it. The
+    /// tail-follow test compares the content's bottom against this, so the two
+    /// must be the same number.
+    private func agentDetailScrollViewport(hasComposer: Bool) -> CGFloat {
+        agentDetailScrollHeight + (hasComposer ? agentDetailFollowUpReach : 0)
+    }
+
     /// A live run's detail page: the task prompt, then the full work trail —
     /// the agent's narration as prose, each tool call a collapsible mono row —
     /// with the activity ticker at the tail while it works, and the final
     /// report once it settles. Same information structure as the record a
     /// settled row opens; this is the during-the-run way in.
     private func agentDetailView(_ task: AgentTaskManager.AgentTask) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        // The composer is only there while the run can still be talked to; with
+        // nothing to resume the page is the record alone and the scroll keeps its
+        // bare height.
+        let hasComposer = task.isRunning || task.sessionID != nil
+        return VStack(alignment: .leading, spacing: 10) {
             agentDetailHeader(task)
-            ScrollViewReader { proxy in
-                ScrollView {
-                    // What the record is made of — shared with the torn-off
-                    // window so the page reads identically on both sides of a
-                    // tear (`AgentRecordBody`).
-                    AgentRecordBody(task: task, bottomID: Self.agentDetailBottomID)
-                    // Runway: the trail rests below the header, then scrolls up into
-                    // this empty band to fade + frost out — the same soft top edge
-                    // the detached agent window wears (`ThreadScroll`), so the page
-                    // reads identically on both sides of a tear.
-                    .padding(.top, ThreadScroll.runway)
-                    .padding(.bottom, 10)
-                    // Where the content's bottom edge currently sits inside the
-                    // viewport — the one measurement that says whether the reader
-                    // is at the tail. (macOS 14 is the floor here, so this is the
-                    // GeometryReader form rather than `onScrollGeometryChange`.)
-                    .background(GeometryReader { geo in
-                        Color.clear.preference(
-                            key: AgentDetailContentBottomKey.self,
-                            value: geo.frame(in: .named(Self.agentDetailSpace)).maxY)
-                    })
-                }
-                .coordinateSpace(name: Self.agentDetailSpace)
-                .onPreferenceChange(AgentDetailContentBottomKey.self) { bottom in
-                    // Slack = how far the content's end sits BELOW the viewport's
-                    // bottom edge. A screenful of tolerance, so the animated
-                    // tail-follow's own intermediate frames never read as "the
-                    // user scrolled away".
-                    let atTail = bottom - agentDetailScrollHeight <= Self.agentDetailTailSlack
-                    if atTail != agentDetailFollowsTail { agentDetailFollowsTail = atTail }
-                }
-                // The shared dissolve at the top edge only — the page pins to the
-                // tail, so the newest line rests at the bottom and must stay at
-                // full strength (a bottom taper would permanently dim it).
-                .scrollEdgeFade(top: true, bottom: false, topFade: ThreadScroll.runway)
-                // Frost rests while the run streams (same discipline as the result
-                // view's ConditionalTopBlur): the blurred copy re-rasterizes on
-                // every content change, and a live trail changes constantly.
-                .modifier(ConditionalTopBlur(active: !task.isRunning,
-                                             height: ThreadScroll.band,
-                                             maxRadius: ThreadScroll.blurRadius))
-                // Follow the tail while entries stream in, like a terminal —
-                // unless the reader has scrolled up, in which case the page
-                // stays where they put it (`agentDetailFollowsTail`).
-                .onChange(of: task.log.count) { _, _ in
-                    followAgentDetailTail(proxy)
-                }
-                // The trailing block GROWS token by token now, which moves the
-                // tail without changing the row count.
-                .onChange(of: task.log.last?.title) { _, _ in
-                    followAgentDetailTail(proxy)
-                }
-                .onAppear {
-                    agentDetailFollowsTail = true
-                    proxy.scrollTo(Self.agentDetailBottomID, anchor: .bottom)
-                }
-                // The way back down, offered only once the follow has released —
-                // otherwise the page is already there and the chip is noise.
-                .overlay(alignment: .bottom) {
-                    if !agentDetailFollowsTail {
-                        GlassIconButton(systemName: "arrow.down",
-                                        help: L("agent.trail.toBottom"),
-                                        size: 26, glyphSize: 11,
-                                        showsTooltip: false) {
-                            agentDetailFollowsTail = true
-                            withAnimation(.easeOut(duration: 0.2)) {
-                                proxy.scrollTo(Self.agentDetailBottomID, anchor: .bottom)
-                            }
-                        }
-                        .transition(.scale(scale: 0.8).combined(with: .opacity))
+            ZStack(alignment: .bottom) {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        // What the record is made of — shared with the torn-off
+                        // window so the page reads identically on both sides of a
+                        // tear (`AgentRecordBody`).
+                        AgentRecordBody(task: task,
+                                        bottomID: Self.agentDetailBottomID,
+                                        // The trail scrolls DOWN into this, behind
+                                        // the floating composer, instead of ending
+                                        // on a hard cut above a sibling row.
+                                        tailRunway: hasComposer
+                                            ? agentDetailFollowUpReach : 10)
+                        // Runway: the trail rests below the header, then scrolls up into
+                        // this empty band to fade + frost out — the same soft top edge
+                        // the detached agent window wears (`ThreadScroll`), so the page
+                        // reads identically on both sides of a tear.
+                        .padding(.top, ThreadScroll.runway)
+                        // Where the content's bottom edge currently sits inside the
+                        // viewport — the one measurement that says whether the reader
+                        // is at the tail. (macOS 14 is the floor here, so this is the
+                        // GeometryReader form rather than `onScrollGeometryChange`.)
+                        .background(GeometryReader { geo in
+                            Color.clear.preference(
+                                key: AgentDetailContentBottomKey.self,
+                                value: geo.frame(in: .named(Self.agentDetailSpace)).maxY)
+                        })
                     }
+                    .coordinateSpace(name: Self.agentDetailSpace)
+                    .onPreferenceChange(AgentDetailContentBottomKey.self) { bottom in
+                        // Slack = how far the content's end sits BELOW the viewport's
+                        // bottom edge. A screenful of tolerance, so the animated
+                        // tail-follow's own intermediate frames never read as "the
+                        // user scrolled away".
+                        let atTail = bottom - agentDetailScrollViewport(hasComposer: hasComposer)
+                            <= Self.agentDetailTailSlack
+                        if atTail != agentDetailFollowsTail { agentDetailFollowsTail = atTail }
+                    }
+                    // The shared dissolve at BOTH edges: up behind the header, down
+                    // behind the floating composer. Each taper is exactly its own
+                    // runway, so the resting trail — which sits above the bottom one
+                    // — stays at full strength and only text that has travelled into
+                    // a runway is dimmed.
+                    .scrollEdgeFade(top: true, bottom: hasComposer,
+                                    topFade: ThreadScroll.runway,
+                                    bottomFade: agentDetailFollowUpReach)
+                    // Frost rests while the run streams (same discipline as the result
+                    // view's ConditionalTopBlur): the blurred copy re-rasterizes on
+                    // every content change, and a live trail changes constantly.
+                    // Bands kept 4pt shorter than their runways so each tapers to
+                    // clear before it reaches the nearest resting row.
+                    .modifier(ConditionalEdgeBlur(
+                        active: !task.isRunning,
+                        topHeight: ThreadScroll.band,
+                        bottomHeight: hasComposer
+                            ? max(agentDetailFollowUpReach - 4, 0) : 0,
+                        topRadius: ThreadScroll.blurRadius))
+                    // Follow the tail while entries stream in, like a terminal —
+                    // unless the reader has scrolled up, in which case the page
+                    // stays where they put it (`agentDetailFollowsTail`).
+                    .onChange(of: task.log.count) { _, _ in
+                        followAgentDetailTail(proxy)
+                    }
+                    // The trailing block GROWS token by token now, which moves the
+                    // tail without changing the row count.
+                    .onChange(of: task.log.last?.title) { _, _ in
+                        followAgentDetailTail(proxy)
+                    }
+                    .onAppear {
+                        agentDetailFollowsTail = true
+                        proxy.scrollTo(Self.agentDetailBottomID, anchor: .bottom)
+                    }
+                    // The way back down, offered only once the follow has released —
+                    // otherwise the page is already there and the chip is noise.
+                    .overlay(alignment: .bottom) {
+                        if !agentDetailFollowsTail {
+                            GlassIconButton(systemName: "arrow.down",
+                                            help: L("agent.trail.toBottom"),
+                                            size: 26, glyphSize: 11,
+                                            showsTooltip: false) {
+                                agentDetailFollowsTail = true
+                                withAnimation(.easeOut(duration: 0.2)) {
+                                    proxy.scrollTo(Self.agentDetailBottomID, anchor: .bottom)
+                                }
+                            }
+                            // Above the floating composer, not behind it.
+                            .padding(.bottom, hasComposer ? agentDetailFollowUpReach : 0)
+                            .transition(.scale(scale: 0.8).combined(with: .opacity))
+                        }
+                    }
+                    .animation(.spring(response: 0.3, dampingFraction: 0.85),
+                               value: agentDetailFollowsTail)
                 }
-                .animation(.spring(response: 0.3, dampingFraction: 0.85),
-                           value: agentDetailFollowsTail)
-            }
-            .frame(height: agentDetailScrollHeight)
+                .frame(height: agentDetailScrollViewport(hasComposer: hasComposer))
 
-            // A live follow-up box, same as the detached agent window carries. The
-            // run is mid-reply, so Enter can't interrupt it — the line queues and
-            // the manager dispatches it as the next round on settle (its "› "
-            // marker joins the trail above the moment it lands). The box stays after
-            // send, so several instructions can be lined up. Hidden only when the
-            // run settled without ever reporting a session id (nothing to resume,
-            // ever); a still-running or resumable task keeps it live.
-            if task.isRunning || task.sessionID != nil {
-                agentDetailFollowUpRow(task)
+                // A live follow-up box, same as the detached agent window carries. The
+                // run is mid-reply, so Enter can't interrupt it — the line queues and
+                // the manager dispatches it as the next round on settle (its "› "
+                // marker joins the trail above the moment it lands). The box stays after
+                // send, so several instructions can be lined up. Hidden only when the
+                // run settled without ever reporting a session id (nothing to resume,
+                // ever); a still-running or resumable task keeps it live.
+                //
+                // It FLOATS over the scroll's bottom rather than sitting under it —
+                // the same one design the result view's follow-up wears, so the trail
+                // dissolves behind the box instead of hard-cutting above a sibling row.
+                // The scroll's frame absorbed the gap + row it used to occupy, so the
+                // page is exactly as tall as it was.
+                if hasComposer {
+                    agentDetailFollowUpRow(task)
+                }
             }
         }
     }

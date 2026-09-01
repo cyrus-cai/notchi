@@ -2542,6 +2542,59 @@ final class NotchModel: ObservableObject {
         taskStyle(for: question)?.word
     }
 
+    /// A search request is already knowable from the user's own words before the
+    /// provider emits its first stream event. Pull out a short topic locally so
+    /// the opening wait can say what is about to happen instead of showing a
+    /// random mood word for several seconds.
+    private static func initialSearchTopic(for question: String) -> String? {
+        var candidate = question.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Strip conversational lead-ins first, then require an imperative search
+        // prefix. Anchoring the intent keeps questions *about* search from being
+        // mislabeled as an imminent web search.
+        let politePrefixes = [
+            "麻烦帮我", "麻煩幫我", "请帮我", "請幫我", "帮我", "幫我", "请", "請",
+            "please ", "por favor ", "s’il vous plaît ", "s'il vous plaît ",
+        ]
+        var removedLeadIn = true
+        while removedLeadIn {
+            removedLeadIn = false
+            for prefix in politePrefixes where candidate.lowercased().hasPrefix(prefix.lowercased()) {
+                candidate.removeFirst(prefix.count)
+                candidate = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+                removedLeadIn = true
+                break
+            }
+        }
+
+        let searchPrefixes = [
+            "联网搜索一下", "聯網搜尋一下", "上网查一下", "上網查一下",
+            "搜索一下", "搜尋一下", "搜一下", "查一下", "查下", "查询", "查詢", "搜索", "搜尋",
+            "search for ", "search ", "look up ", "find the latest ", "find latest ",
+            "検索して", "調べて", "검색해 줘", "검색해줘", "검색해", "찾아봐",
+            "rechercher ", "recherche ", "chercher ", "cherche ", "buscar ", "busca ",
+        ]
+        guard let prefix = searchPrefixes.first(where: {
+            candidate.lowercased().hasPrefix($0.lowercased())
+        }) else { return nil }
+
+        candidate.removeFirst(prefix.count)
+        candidate = candidate.trimmingCharacters(in:
+            CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: ":：,，")))
+        // A trailing instruction ("只列三条", "summarize it") is not part of the
+        // search topic. The first clause is the most legible truthful label.
+        if let cut = candidate.firstIndex(where: { ",，;；\n".contains($0) }) {
+            candidate = String(candidate[..<cut])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard !candidate.isEmpty else { return nil }
+        let limit = 24
+        if candidate.count > limit {
+            candidate = String(candidate.prefix(limit)).trimmingCharacters(in: .whitespaces) + "…"
+        }
+        return candidate
+    }
+
     /// Non-nil while this round's wait word is pinned to a task word (see
     /// `taskWords`) — the reroll returns it unchanged and the rotation timer
     /// never starts. Cleared when the round ends.
@@ -6738,6 +6791,15 @@ final class NotchModel: ObservableObject {
         thinking = true
         thinkingAnswerID = answerID
         startThinkingWordRotation(for: q, answerID: answerID)
+        // Do not wait for the model to tell us what the user already made
+        // explicit. This immediately replaces the opening mood word for search
+        // requests; the real tool-call/search/read events take over afterward.
+        let initialActivity = Self.initialSearchTopic(for: q).map {
+            (label: L("agent.activity.planningSearchQuery", $0), orb: OrbState.searching)
+        }
+        if let initialActivity {
+            setThinkingActivity(initialActivity.label, orb: initialActivity.orb)
+        }
         mode = .load
 
         // The task owns a value-type snapshot of the thread it's answering, plus
@@ -7039,6 +7101,17 @@ final class NotchModel: ObservableObject {
                         onText: appendChunk,
                         onActivity: { [weak self] label, orb in
                             guard let self else { return }
+                            // Raw reasoning can arrive before the model finishes
+                            // opening its search tool. The locally known search
+                            // topic is more useful, so keep it until a concrete
+                            // tool label, visible text, or terminal state replaces
+                            // it; never regress to generic "Thinking…" first.
+                            if label == L("agent.activity.thinking"),
+                               let initialLabel = initialActivity?.label,
+                               let i = thread.firstIndex(where: { $0.id == answerID }),
+                               thread[i].toolActivity == initialLabel {
+                                return
+                            }
                             // Every round feeds the background slot, on screen
                             // or detached — the collapsed notch's busy ear shows
                             // the same live line the panel would ("Searching the

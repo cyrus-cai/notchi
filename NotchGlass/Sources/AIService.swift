@@ -154,6 +154,11 @@ enum StreamRetry {
                 return status == 429 || (500..<600).contains(status)
             case .malformedResponse:
                 return true   // no/!HTTPURLResponse — treat as a transient blip
+            case .cutOff:
+                // A dropped connection IS the transient class. Retrying is still
+                // gated on nothing having reached the UI yet, so a cut that
+                // happened mid-answer is surfaced rather than replayed.
+                return true
             }
         }
         if let urlError = error as? URLError {
@@ -1059,6 +1064,15 @@ struct OpenAICompatAIService: AIService {
     enum ServiceError: LocalizedError {
         case http(provider: String, status: Int, body: String)
         case malformedResponse(provider: String)
+        /// The response body ended without any terminal signal — no `[DONE]`, no
+        /// `finish_reason`, no `message_stop`. The connection was cut mid-answer.
+        ///
+        /// This needs its own case because an SSE body that stops early is NOT an
+        /// error at the transport level: `bytes.lines` simply ends, exactly as it
+        /// does on a clean finish. Without naming that difference, a cut stream
+        /// reached the UI as a *complete* reply that happened to stop mid-sentence —
+        /// no marker, no retry, nothing telling the user the answer wasn't finished.
+        case cutOff(provider: String)
 
         var errorDescription: String? {
             switch self {
@@ -1066,6 +1080,8 @@ struct OpenAICompatAIService: AIService {
                 return L("service.error.http", provider, status)
             case .malformedResponse(let provider):
                 return L("service.error.malformed", provider)
+            case .cutOff(let provider):
+                return L("service.error.cutOff", provider)
             }
         }
 
@@ -1153,15 +1169,19 @@ struct OpenAICompatAIService: AIService {
                         // think-aloud) so the notch shows the answer, not the
                         // scratchpad.
                         let decoder = JSONDecoder()
+                        // Whether the stream ever announced its own end. See
+                        // `ServiceError.cutOff`.
+                        var terminated = false
                         for try await line in bytes.lines {
                             if Task.isCancelled { break }
                             guard line.hasPrefix("data:") else { continue }
                             let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
                             if payload.isEmpty { continue }
-                            if payload == "[DONE]" { break }
+                            if payload == "[DONE]" { terminated = true; break }
                             guard let data = payload.data(using: .utf8),
                                   let chunk = try? decoder.decode(StreamChunk.self, from: data)
                             else { continue }
+                            if chunk.choices.first?.finishReason != nil { terminated = true }
                             // The usage trailer rides its own chunk (empty
                             // `choices`), so it is read before the text guard
                             // below drops everything that isn't a delta.
@@ -1186,6 +1206,12 @@ struct OpenAICompatAIService: AIService {
                         }
                         if !yieldedAny {
                             throw ServiceError.malformedResponse(provider: provider.displayName)
+                        }
+                        // Text arrived but the stream never said it was done: the
+                        // body was cut. Surfaced as an error so the partial answer
+                        // is kept AND marked, instead of passing for a finished one.
+                        if !terminated {
+                            throw ServiceError.cutOff(provider: provider.displayName)
                         }
                         continuation.finish()
                         return
@@ -1302,7 +1328,16 @@ struct OpenAICompatAIService: AIService {
         /// Present on exactly one chunk of a `include_usage` stream — the last
         /// one, whose `choices` is empty.
         var usage: StreamUsage.Block? = nil
-        struct Choice: Decodable { let delta: Delta }
+        struct Choice: Decodable {
+            let delta: Delta
+            /// Set on the last chunk of a well-formed stream ("stop", "length",
+            /// "tool_calls"). Its ABSENCE at EOF is how a cut body is detected.
+            var finishReason: String? = nil
+            enum CodingKeys: String, CodingKey {
+                case delta
+                case finishReason = "finish_reason"
+            }
+        }
         struct Delta: Decodable { let content: String? }
     }
 }
@@ -1440,6 +1475,9 @@ struct AnthropicAIService: AIService {
                         // appending `delta.text`. Everything else (message_start,
                         // ping, content_block_stop, message_stop, …) is skipped.
                         let decoder = JSONDecoder()
+                        // Whether the stream ever announced its own end (Anthropic
+                        // closes with `message_stop`). See `ServiceError.cutOff`.
+                        var terminated = false
                         for try await line in bytes.lines {
                             if Task.isCancelled { break }
                             guard line.hasPrefix("data:") else { continue }
@@ -1448,6 +1486,7 @@ struct AnthropicAIService: AIService {
                             guard let data = payload.data(using: .utf8),
                                   let event = try? decoder.decode(StreamEvent.self, from: data)
                             else { continue }
+                            if event.type == "message_stop" { terminated = true }
                             // Real token counts for Stats: the input side lands on
                             // `message_start`, the output side on the closing
                             // `message_delta`. Nothing extra is asked for on the
@@ -1472,6 +1511,9 @@ struct AnthropicAIService: AIService {
                         }
                         if !yieldedAny {
                             throw OpenAICompatAIService.ServiceError.malformedResponse(provider: provider.displayName)
+                        }
+                        if !terminated {
+                            throw OpenAICompatAIService.ServiceError.cutOff(provider: provider.displayName)
                         }
                         continuation.finish()
                         return
@@ -3560,13 +3602,18 @@ extension OpenAICompatAIService: AgentCapableService {
                         var finishReason: String? = nil
                         var yieldedText = false
                         var reportedModel = false
+                        var reportedReasoning = false
+                        var reportedCitationURLs = Set<String>()
+                        // Whether the stream ever announced its own end. See
+                        // `ServiceError.cutOff`.
+                        var terminated = false
 
                         for try await line in bytes.lines {
                             if Task.isCancelled { break }
                             guard line.hasPrefix("data:") else { continue }
                             let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
                             if payload.isEmpty { continue }
-                            if payload == "[DONE]" { break }
+                            if payload == "[DONE]" { terminated = true; break }
                             guard let data = payload.data(using: .utf8),
                                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
                             else { continue }
@@ -3576,6 +3623,17 @@ extension OpenAICompatAIService: AgentCapableService {
                                 TokenMeter.shared.record(
                                     input: usage["prompt_tokens"] as? Int ?? 0,
                                     output: usage["completion_tokens"] as? Int ?? 0)
+                            }
+                            // Search-grounded chat models such as Perplexity Sonar
+                            // carry the source map beside the ordinary OpenAI
+                            // `choices` envelope. Read it before the choices guard:
+                            // metadata-only/final chunks are allowed to have no
+                            // choice at all. Only newly seen URLs are emitted, since
+                            // some providers repeat the full array on every chunk.
+                            let citationSources = Self.responseCitationSources(from: obj)
+                                .filter { reportedCitationURLs.insert($0.url).inserted }
+                            if !citationSources.isEmpty {
+                                continuation.yield(.sources(citationSources))
                             }
                             guard let choices = obj["choices"] as? [[String: Any]],
                                   let choice = choices.first
@@ -3591,8 +3649,41 @@ extension OpenAICompatAIService: AgentCapableService {
                                 continuation.yield(.model(ran))
                             }
 
-                            if let fr = choice["finish_reason"] as? String { finishReason = fr }
+                            if let fr = choice["finish_reason"] as? String {
+                                finishReason = fr
+                                terminated = true
+                            }
                             guard let delta = choice["delta"] as? [String: Any] else { continue }
+
+                            // Several OpenAI-compatible providers stream raw
+                            // private reasoning before the visible answer. Treat
+                            // its presence as a real progress signal, but never
+                            // forward the raw text. OpenRouter may additionally
+                            // send an explicitly display-safe reasoning summary;
+                            // that one can label the phase more precisely.
+                            let rawReasoning = (delta["reasoning_content"] as? String)
+                                ?? (delta["reasoning"] as? String)
+                            if let rawReasoning, !rawReasoning.isEmpty, !reportedReasoning {
+                                reportedReasoning = true
+                                continuation.yield(.reasoningStarted)
+                            }
+                            if let details = delta["reasoning_details"] as? [[String: Any]] {
+                                for detail in details {
+                                    guard let type = detail["type"] as? String,
+                                          type.hasPrefix("reasoning")
+                                    else { continue }
+                                    if !reportedReasoning {
+                                        reportedReasoning = true
+                                        continuation.yield(.reasoningStarted)
+                                    }
+                                    if type == "reasoning.summary",
+                                       let summary = (detail["summary"] as? String)
+                                        ?? (detail["text"] as? String),
+                                       !summary.isEmpty {
+                                        continuation.yield(.reasoningSummary(summary))
+                                    }
+                                }
+                            }
 
                             if let content = delta["content"] as? String, !content.isEmpty {
                                 yieldedText = true
@@ -3643,6 +3734,14 @@ extension OpenAICompatAIService: AgentCapableService {
                             throw ServiceError.malformedResponse(provider: provider.displayName)
                         }
 
+                        // The turn produced something but the stream never said it
+                        // was done — a cut body. Never pass it off as a finished
+                        // turn: the harness would read the missing stop reason as a
+                        // clean stop and close the round on a half-written answer.
+                        if !terminated {
+                            throw ServiceError.cutOff(provider: provider.displayName)
+                        }
+
                         // Emit the assembled tool calls in index order.
                         for c in namedCalls {
                             continuation.yield(.toolCall(id: c.id, name: c.name,
@@ -3669,6 +3768,81 @@ extension OpenAICompatAIService: AgentCapableService {
             }
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+
+    /// Normalize the citation metadata used by OpenAI-compatible search models.
+    /// Perplexity returns `search_results` (rich rows) plus `citations` (the URL
+    /// order that `[1]`, `[2]`, … refer to). A few gateways nest the same fields
+    /// under the first choice/message/provider metadata, so those containers are
+    /// accepted too. Nothing is inferred from generated URLs in the prose.
+    private static func responseCitationSources(from object: [String: Any]) -> [WebSource] {
+        var containers: [[String: Any]] = [object]
+        if let choice = (object["choices"] as? [[String: Any]])?.first {
+            containers.append(choice)
+            if let message = choice["message"] as? [String: Any] { containers.append(message) }
+            if let delta = choice["delta"] as? [String: Any] { containers.append(delta) }
+        }
+        if let metadata = object["provider_metadata"] as? [String: Any] {
+            containers.append(metadata)
+            if let perplexity = metadata["perplexity"] as? [String: Any] {
+                containers.append(perplexity)
+            }
+        }
+
+        let citationURLs = containers.lazy.compactMap { container -> [String]? in
+            guard let raw = container["citations"] as? [Any] else { return nil }
+            let urls = raw.compactMap { item -> String? in
+                if let url = item as? String { return validCitationURL(url) }
+                if let row = item as? [String: Any], let url = row["url"] as? String {
+                    return validCitationURL(url)
+                }
+                return nil
+            }
+            return urls.isEmpty ? nil : urls
+        }.first ?? []
+        let results = containers.lazy.compactMap {
+            ($0["search_results"] as? [[String: Any]])?.isEmpty == false
+                ? $0["search_results"] as? [[String: Any]]
+                : nil
+        }.first ?? []
+
+        var citationIndexByURL: [String: Int] = [:]
+        for (offset, url) in citationURLs.enumerated() where citationIndexByURL[url] == nil {
+            citationIndexByURL[url] = offset + 1
+        }
+
+        var seen = Set<String>()
+        var sources: [WebSource] = []
+        for (offset, row) in results.enumerated() {
+            guard let rawURL = row["url"] as? String,
+                  let url = validCitationURL(rawURL),
+                  seen.insert(url).inserted
+            else { continue }
+            let title = (row["title"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                ?? URL(string: url)?.host ?? url
+            let date = ((row["date"] as? String) ?? (row["last_updated"] as? String))
+                .flatMap { $0.isEmpty ? nil : $0 }
+            let index = citationIndexByURL[url] ?? (citationURLs.isEmpty ? offset + 1 : nil)
+            sources.append(WebSource(title: title, url: url, date: date,
+                                     citationIndex: index))
+        }
+
+        // Some compatibility layers preserve only the URL array. It is still an
+        // exact citation map; use the host as the honest display fallback rather
+        // than dropping the sources or inventing titles.
+        for (offset, url) in citationURLs.enumerated() where seen.insert(url).inserted {
+            sources.append(WebSource(title: URL(string: url)?.host ?? url,
+                                     url: url, date: nil, citationIndex: offset + 1))
+        }
+        return sources
+    }
+
+    private static func validCitationURL(_ raw: String) -> String? {
+        guard let url = URL(string: raw),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https"
+        else { return nil }
+        return raw
     }
 
     /// OpenAI tool list: `[{type:"function", function:{name, description,
@@ -3800,6 +3974,10 @@ extension AnthropicAIService: AgentCapableService {
                         // `text_delta`. The final `message_delta` carries `stop_reason`.
                         var blocks: [Int: (id: String, name: String, partialJSON: String)] = [:]
                         var stopReason: String? = nil
+                        var reportedReasoning = false
+                        // Whether the stream ever announced its own end. See
+                        // `ServiceError.cutOff`.
+                        var terminated = false
 
                         for try await line in bytes.lines {
                             if Task.isCancelled { break }
@@ -3838,6 +4016,15 @@ extension AnthropicAIService: AgentCapableService {
                                 let idx = obj["index"] as? Int ?? 0
                                 guard let delta = obj["delta"] as? [String: Any] else { break }
                                 switch delta["type"] as? String {
+                                case "thinking_delta":
+                                    // Extended thinking is raw chain of thought.
+                                    // Its arrival is useful progress information;
+                                    // the text itself is intentionally not shown.
+                                    if let thinking = delta["thinking"] as? String,
+                                       !thinking.isEmpty, !reportedReasoning {
+                                        reportedReasoning = true
+                                        continuation.yield(.reasoningStarted)
+                                    }
                                 case "text_delta":
                                     if let t = delta["text"] as? String, !t.isEmpty {
                                         emittedAny = true
@@ -3869,7 +4056,7 @@ extension AnthropicAIService: AgentCapableService {
                                     AnthropicUsage.recordOutput(usage)
                                 }
                             case "message_stop":
-                                break
+                                terminated = true
                             default:
                                 break
                             }
@@ -3886,6 +4073,9 @@ extension AnthropicAIService: AgentCapableService {
                                 continue
                             }
                             throw OpenAICompatAIService.ServiceError.malformedResponse(provider: provider.displayName)
+                        }
+                        if !terminated {
+                            throw OpenAICompatAIService.ServiceError.cutOff(provider: provider.displayName)
                         }
                         continuation.yield(.finished(stopReason: stopReason))
                         continuation.finish()
