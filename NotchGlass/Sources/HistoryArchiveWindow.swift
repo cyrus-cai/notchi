@@ -1,8 +1,9 @@
 import AppKit
 import SwiftUI
 
-/// Which compose bucket opened the archive. The menu-bar History command uses
-/// `.all`; See All from the notch keeps Chat and Agent strictly separated.
+/// Which history surface opened the archive. The menu-bar History command and
+/// the unified split browser use `.all`; the legacy bucketed list keeps Chat and
+/// Agent separated.
 enum HistoryArchiveScope: String {
     case all, chat, agent
 }

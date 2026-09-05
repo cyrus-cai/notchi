@@ -138,6 +138,19 @@ enum Tokens {
     static let openWidthWhatsNew: CGFloat = 600   // release-notes reading column
 }
 
+/// Experiments that must never leak into a release build. Each flag is false by
+/// default and can only be enabled from a Debug executable, so an ordinary local
+/// reinstall and every shipped build keep the established UI unchanged.
+enum DebugFeatureFlags {
+    static let historySplitView: Bool = {
+        #if DEBUG
+        UserDefaults.standard.bool(forKey: "NotchiHistorySplitView")
+        #else
+        false
+        #endif
+    }()
+}
+
 /// The panel's **recessed** control surface: a faint white floor plus a hairline
 /// rim, both lifting together when `lit` (hovered, focused, or open). The flat
 /// counterpart to `glassCapsule` — that one is for chips floating ON the glass,
@@ -209,11 +222,17 @@ extension View {
     /// Four surfaces used to spell this out by hand and had drifted to 10/0.8 in
     /// three of them and 9.5/0.7 in the fourth — a difference nobody chose and
     /// nobody can see, which is exactly how a register stops being a register.
-    func captionLabel() -> some View {
+    ///
+    /// `color` exists for the one caller whose captions are also a CONTROL — the
+    /// template picker's category tabs, where the selected group has to read as
+    /// selected. It is the register's ink that varies there, never its size,
+    /// weight, tracking, or case; anything wanting a different shape of caption
+    /// wants a different register, not an argument here.
+    func captionLabel(color: Color = Tokens.text4) -> some View {
         font(.sf(10, weight: .semibold))
             .tracking(0.8)
             .textCase(.uppercase)
-            .foregroundStyle(Tokens.text4)
+            .foregroundStyle(color)
     }
 }
 
@@ -683,12 +702,14 @@ struct ConditionalTopBlur: ViewModifier {
 /// off-screen children — so we observe the real clip view's bounds instead, which
 /// is exact and immune to how SwiftUI composes (e.g. the blur overlay's content
 /// copies). Drop this as a zero-size `background` on the scroll *content*; it finds
-/// its enclosing scroll view at runtime and calls `onChange` with `bounds.origin.y`
-/// (0 at the top, growing as the user scrolls down).
+/// its enclosing scroll view at runtime and calls `onChange` with the clip view's
+/// origin along `axis` — `bounds.origin.y` (0 at the top, growing as the user
+/// scrolls down) or, for a horizontal rail, `bounds.origin.x`.
 struct ScrollOffsetObserver: NSViewRepresentable {
+    var axis: ScrollEdgeFade.Axis = .vertical
     var onChange: (CGFloat) -> Void
 
-    func makeCoordinator() -> Coordinator { Coordinator(onChange: onChange) }
+    func makeCoordinator() -> Coordinator { Coordinator(axis: axis, onChange: onChange) }
 
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
@@ -711,10 +732,14 @@ struct ScrollOffsetObserver: NSViewRepresentable {
     }
 
     final class Coordinator {
+        let axis: ScrollEdgeFade.Axis
         var onChange: (CGFloat) -> Void
         weak var clipView: NSClipView?
 
-        init(onChange: @escaping (CGFloat) -> Void) { self.onChange = onChange }
+        init(axis: ScrollEdgeFade.Axis, onChange: @escaping (CGFloat) -> Void) {
+            self.axis = axis
+            self.onChange = onChange
+        }
 
         func attach(from view: NSView) {
             guard let scrollView = view.enclosingScrollView else { return }
@@ -743,15 +768,20 @@ struct ScrollOffsetObserver: NSViewRepresentable {
         }
 
         private func report(_ clip: NSClipView) {
-            onChange(clip.bounds.origin.y)
+            onChange(axis == .vertical ? clip.bounds.origin.y : clip.bounds.origin.x)
         }
     }
 }
 
 extension View {
-    /// Observe the enclosing scroll view's vertical offset (see `ScrollOffsetObserver`).
-    func onScrollOffsetChange(_ action: @escaping (CGFloat) -> Void) -> some View {
-        background(ScrollOffsetObserver(onChange: action))
+    /// Observe the enclosing scroll view's offset along `axis` (see
+    /// `ScrollOffsetObserver`). Vertical by default; pass `.horizontal` for a rail,
+    /// where the reported value is `bounds.origin.x` (0 at the leading edge).
+    func onScrollOffsetChange(
+        axis: ScrollEdgeFade.Axis = .vertical,
+        _ action: @escaping (CGFloat) -> Void
+    ) -> some View {
+        background(ScrollOffsetObserver(axis: axis, onChange: action))
     }
 }
 

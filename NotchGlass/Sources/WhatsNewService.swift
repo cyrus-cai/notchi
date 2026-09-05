@@ -94,6 +94,21 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.7.7",
+            date: "2026-09-05",
+            heroAssetName: "WhatsNew077Promo",
+            features: [
+                "Add a ready-made Prompt Shortcut for selected text — summarize, rewrite, reply, or translate — or write your own.",
+            ],
+            improvements: [
+                "Follow-up in a torn-off window is glass, so the page shows through the field.",
+                "After you open a finished Agent run, its new-result bead in Recent clears.",
+            ],
+            fixes: [
+                "A manual proxy no longer intercepts localhost.",
+            ]
+        ),
+        Entry(
             version: "0.7.6",
             date: "2026-09-01",
             improvements: [

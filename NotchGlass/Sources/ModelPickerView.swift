@@ -222,7 +222,8 @@ private struct ModelMenuPresenter: NSViewRepresentable {
         /// A provider's models: every model with a useful cost-efficiency score,
         /// plus exceptionally intelligent 5/5 models even when their score is low.
         /// Each family contributes at most five rows; unscored, low-scoring, and
-        /// overflow siblings live under "More models".
+        /// overflow siblings live under "More models". If nothing meets that
+        /// bar, the remaining rows sit on this menu instead of behind a door.
         private func fill(_ menu: NSMenu, with models: [PickerModel]) {
             guard !models.isEmpty else {
                 let empty = NSMenuItem(title: L("model.picker.empty"), action: nil,
@@ -246,7 +247,13 @@ private struct ModelMenuPresenter: NSViewRepresentable {
             }
             for m in primary { menu.addItem(modelItem(m)) }
             guard !moreModels.isEmpty else { return }
-            if !primary.isEmpty { menu.addItem(.separator()) }
+            // Nothing earned the main list — don't add a "More models" door
+            // that opens onto the whole catalog. Put those rows here.
+            if primary.isEmpty {
+                for m in moreModels { menu.addItem(modelItem(m)) }
+                return
+            }
+            menu.addItem(.separator())
             let more = NSMenuItem(title: L("model.picker.moreModels"), action: nil,
                                   keyEquivalent: "")
             let sub = newMenu()
@@ -1669,12 +1676,16 @@ enum AskModelMRU {
     private static let defaultsKey = "ask_model_mru"
 
     /// Newest first. Entries whose provider no longer decodes (a removed enum case
-    /// after an update) are dropped rather than crashing the menu.
+    /// after an update) are dropped rather than crashing the menu, and so are
+    /// entries for a provider the app no longer offers (`Provider.offered`) — a
+    /// recents row is a shortcut back into a backend, so it has to be gated the
+    /// same way the menus are.
     static var entries: [Entry] {
         let raw = UserDefaults.standard.stringArray(forKey: defaultsKey) ?? []
         return raw.compactMap { line in
             guard let bar = line.firstIndex(of: "|"),
-                  let provider = Provider(rawValue: String(line[..<bar]))
+                  let provider = Provider(rawValue: String(line[..<bar])),
+                  Provider.offered.contains(provider)
             else { return nil }
             let model = String(line[line.index(after: bar)...])
             return model.isEmpty ? nil : Entry(provider: provider, model: model)

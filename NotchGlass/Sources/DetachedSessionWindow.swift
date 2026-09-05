@@ -1376,7 +1376,7 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
     /// summoned at the pointer wants to be, 330 is tight for prose, and the
     /// widening was a moving edge under the line the user had just typed. This
     /// sits between them.
-    static let compactWidth: CGFloat = 370
+    static let compactWidth: CGFloat = 350
     /// The composer is that same box before it has anything to say.
     static let composerWidth: CGFloat = compactWidth
     /// The waiting card — what an answer window is before a word has landed: the
@@ -3529,6 +3529,7 @@ private struct CompactShortcutPromptView: View {
                                                 height: Self.pickRowHeight,
                                                 selected: false,
                                                 promptShortcutID: pick.id,
+                                                promptShortcutPaletteKey: pick.paletteSeed,
                                                 action: { onSubmit(pick.prompt, pick.pin) })
                                         .frame(width: itemWidth)
                                 }
@@ -4561,12 +4562,10 @@ struct DetachedThreadView: View {
     /// handle, so a mid-stream line couldn't supersede it.
     private var followUpRow: some View {
         // THE panel's composer, not a copy of it: `ComposerBox` is the same box
-        // the notch's own follow-up line is, down to the growing silhouette, the
-        // focus-lit recess and the glass `SendButton` — a torn-off session is
-        // the same conversation in a bigger frame, so its input can't be a
-        // different control. (It used to be a single-line SwiftUI `TextField` on
-        // a flat, never-lit `Capsule`: it couldn't grow with a wrapped line and
-        // its placeholder sat under composing pinyin.)
+        // the notch's own follow-up line is, down to the growing silhouette and
+        // the glass `SendButton`. On this window it wears Liquid Glass instead
+        // of the painted recess, so the field stays a chip over the page
+        // rather than a dark pill.
         VStack(alignment: .leading, spacing: 8) {
             if !followUpImages.isEmpty {
                 ComposeImagesAttachedLine(images: followUpImages) { index in
@@ -4579,6 +4578,7 @@ struct DetachedThreadView: View {
             HStack(alignment: .bottom, spacing: 6) {
                 ComposerBox(
                     text: $followUp,
+                    glass: true,
                     onSubmit: sendFollowUp,
                     onPasteImage: pasteFollowUpImage,
                     placeholder: { Text(L("result.followUp")) },
@@ -4981,6 +4981,7 @@ struct DetachedAgentTaskView: View {
         // page reads identically on both sides of a tear.
         return ComposerBox(
             text: $followUp,
+            glass: true,
             onSubmit: { sendFollowUp(task) },
             onPasteImage: { pasteFollowUpImage(task) },
             onCommandSubmit: {

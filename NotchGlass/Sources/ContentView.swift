@@ -137,7 +137,9 @@ struct ContentView: View {
             // the field has somewhere to land; if the filter's already up, ⌘F is a
             // no-op rather than a toggle (Esc clears/closes it — see below).
             if AppShortcutStore.matches(.filter, event: event),
-               !model.showSettings, model.recentScopeHistoryCount > 6 {
+               !model.showSettings,
+               (DebugFeatureFlags.historySplitView
+                    ? model.unifiedHistoryCount : model.recentScopeHistoryCount) > 6 {
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                     if !model.showHistory { model.showHistory = true }
                     model.showHistoryFilter = true

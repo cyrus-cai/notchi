@@ -265,6 +265,16 @@ final class NotchModel: ObservableObject {
         /// runs filed before this field existed.
         var agentOutcome: String? = nil
 
+        /// True once the user has actually looked at this `.agent` row's record.
+        /// The settled outcome bead in Recent is NEWS, not a permanent label — it
+        /// says "this run finished while you weren't looking". Reading the row is
+        /// what consumes that news, so a successful run's blue bead clears the
+        /// moment its transcript is on screen and never comes back. A failed or
+        /// cancelled run keeps its bead either way: that one is state, not news.
+        /// `false` for rows filed before this field existed — their bead clears on
+        /// the next read like any other.
+        var agentSeen: Bool = false
+
         /// The CLI session an `.agent` run left behind, and where it was working.
         /// Present on every settled row whose run reported a session id — it's
         /// what lets the reopened thread's follow-up resume the run in place
@@ -340,7 +350,7 @@ final class NotchModel: ObservableObject {
         // item has always had them.
         enum CodingKeys: String, CodingKey {
             case id, q, a, t, turns, title, source, origin, link, agentOutcome, agentResume,
-                 agentInterrupted, failed
+                 agentInterrupted, agentSeen, failed
         }
 
         init(from decoder: Decoder) throws {
@@ -362,6 +372,7 @@ final class NotchModel: ObservableObject {
             // resume button.
             agentInterrupted = try c.decodeIfPresent(Bool.self, forKey: .agentInterrupted)
                 ?? (agentResume != nil)
+            agentSeen = try c.decodeIfPresent(Bool.self, forKey: .agentSeen) ?? false
             // Rows saved before failed rows were kept at all are, by definition,
             // rows that succeeded.
             failed = try c.decodeIfPresent(Bool.self, forKey: .failed) ?? false
@@ -4507,6 +4518,41 @@ final class NotchModel: ObservableObject {
             .prefix(NotchModel.notchRecentCap))
     }
 
+    /// The Debug split browser is one combined Chat + Agent ledger. Keep its data
+    /// contract here so rendering, keyboard navigation, search and destructive
+    /// actions all address the same ordered ids instead of quietly falling back to
+    /// the compose bucket's `recentVisible` slice.
+    var unifiedRecentAgentTasks: [AgentTaskManager.AgentTask] {
+        let query = historySearchQuery
+        return AgentTaskManager.shared.tasks.reversed().filter { task in
+            guard !query.isEmpty else { return true }
+            if task.prompt.localizedCaseInsensitiveContains(query) { return true }
+            return history.first(where: { $0.id == task.id })?
+                .displayTitle.localizedCaseInsensitiveContains(query) == true
+        }
+    }
+
+    var unifiedRecentVisible: [HistoryItem] {
+        let trayIDs = Set(AgentTaskManager.shared.tasks.map(\.id))
+        let query = historySearchQuery
+        return Array(history.lazy.filter { item in
+            !trayIDs.contains(item.id)
+                && (query.isEmpty
+                    || item.displayTitle.localizedCaseInsensitiveContains(query))
+        }.prefix(Self.notchRecentCap))
+    }
+
+    var unifiedRecentIDs: [UUID] {
+        unifiedRecentAgentTasks.map(\.id) + unifiedRecentVisible.map(\.id)
+    }
+
+    /// Unique rows before the 100-item notch cap. A settled task and its filed
+    /// history item share an id and count once.
+    var unifiedHistoryCount: Int {
+        let trayIDs = Set(AgentTaskManager.shared.tasks.map(\.id))
+        return trayIDs.count + history.lazy.filter { !trayIDs.contains($0.id) }.count
+    }
+
     /// The FULL filtered history, newest-first — every retained item, uncapped.
     /// Backs the standalone History window so nothing captured is ever out of reach.
     var archiveVisible: [HistoryItem] { filteredHistory }
@@ -7985,6 +8031,9 @@ final class NotchModel: ObservableObject {
             item.link = existing.link
             item.agentOutcome = existing.agentOutcome
             item.agentResume = existing.agentResume
+            // A follow-up is typed from inside the thread — the run's result was
+            // already read, so re-filing the row must not relight its bead.
+            item.agentSeen = existing.agentSeen
         }
         if let i = history.firstIndex(where: { $0.id == threadID }) {
             history.remove(at: i)
@@ -8172,6 +8221,22 @@ final class NotchModel: ObservableObject {
         openHistory(item)
     }
 
+    /// Consume the "finished while you weren't looking" bead on an agent row.
+    /// Called from every surface that puts a record's transcript on screen — the
+    /// split list's selection (including the row it lands on by itself), a
+    /// reopened thread, and the transient status row a tap retires. Only a
+    /// successful run's bead is news; failure and cancellation stay marked, so
+    /// nothing else about the row changes here.
+    func markAgentSeen(id: UUID?) {
+        guard let id,
+              let i = history.firstIndex(where: { $0.id == id }),
+              history[i].source == .agent,
+              history[i].agentOutcome == "success",
+              !history[i].agentSeen else { return }
+        history[i].agentSeen = true
+        saveHistory()
+    }
+
     func openHistory(_ item: HistoryItem) {
         // Opening a saved thread replaces the idle draft; its unsent attachments
         // must not hide off-screen and ride the next follow-up by surprise.
@@ -8201,6 +8266,7 @@ final class NotchModel: ObservableObject {
 
         showHistory = false
         highlightedHistoryIndex = nil
+        markAgentSeen(id: item.id)
 
         text = ""
         // Restore the whole thread, and adopt this item's id so a follow-up on the
@@ -8215,6 +8281,19 @@ final class NotchModel: ObservableObject {
         // duty now reads images at all — a text-only model gets the thread's text.
         threadImages = activeModelSupportsVision ? Self.parkedImages(for: item) : nil
         mode = .result
+    }
+
+    /// Whether a follow-up composed directly from the split history detail can
+    /// carry an image. Agent records follow their resumable CLI engine; ordinary
+    /// Ask records follow the active chat model.
+    func historyThreadSupportsImages(_ item: HistoryItem) -> Bool {
+        if item.source == .agent,
+           let raw = item.agentResume?.engine,
+           let engine = AgentEngine(rawValue: raw),
+           engine.isAvailable {
+            return engine.supportsImageInput
+        }
+        return activeModelSupportsVision
     }
 
     /// Images a saved thread carries, rebuilt from the history image store.
@@ -8379,11 +8458,12 @@ final class NotchModel: ObservableObject {
     /// let the keystroke fall through to its default behaviour.
     @discardableResult
     func historyNavigateDown() -> Bool {
-        let items = recentVisible
-        guard !items.isEmpty else { return false }
+        let count = DebugFeatureFlags.historySplitView
+            ? unifiedRecentIDs.count : recentVisible.count
+        guard count > 0 else { return false }
         if !showHistory { showHistory = true }
         let next = (highlightedHistoryIndex ?? -1) + 1
-        highlightedHistoryIndex = min(next, items.count - 1)
+        highlightedHistoryIndex = min(next, count - 1)
         return true
     }
 
@@ -8412,6 +8492,12 @@ final class NotchModel: ObservableObject {
     @discardableResult
     func historyConfirmHighlighted() -> Bool {
         guard !hasText, showHistory, let i = highlightedHistoryIndex else { return false }
+        // In the split browser the arrow key has already selected the row and
+        // exposed its detail on the right. Consume Enter without routing through
+        // the old bucket-scoped open path.
+        if DebugFeatureFlags.historySplitView {
+            return unifiedRecentIDs.indices.contains(i)
+        }
         let items = recentVisible
         guard items.indices.contains(i) else { return false }
         let item = items[i]
@@ -8578,12 +8664,29 @@ final class NotchModel: ObservableObject {
     /// recompute it against the shortened visible slice — clamping to the last row,
     /// or releasing the highlight (and folding the list) once it's empty.
     func deleteHistory(id: UUID) {
-        guard let removedVisibleIndex = recentVisible.firstIndex(where: { $0.id == id }) else { return }
-        Self.deleteHistoryImages(history.first(where: { $0.id == id })?.imageFiles ?? [])
+        guard let item = history.first(where: { $0.id == id }) else { return }
+        let removedVisibleIndex = recentVisible.firstIndex(where: { $0.id == id })
+        Self.deleteHistoryImages(item.imageFiles)
         history.removeAll { $0.id == id }
         saveHistory()
 
-        guard let current = highlightedHistoryIndex else { return }
+        guard let current = highlightedHistoryIndex else {
+            if DebugFeatureFlags.historySplitView, unifiedHistoryCount == 0 {
+                showHistory = false
+            }
+            return
+        }
+        if DebugFeatureFlags.historySplitView {
+            let remaining = unifiedRecentIDs.count
+            if remaining == 0 {
+                highlightedHistoryIndex = nil
+                showHistory = false
+            } else {
+                highlightedHistoryIndex = min(current, remaining - 1)
+            }
+            return
+        }
+        guard let removedVisibleIndex else { return }
         let remaining = recentVisible.count
         if remaining == 0 {
             highlightedHistoryIndex = nil

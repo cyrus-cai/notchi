@@ -1071,6 +1071,22 @@ struct PromptShortcut: Codable, Equatable, Identifiable {
     /// means no pin, since a model id only means anything under its provider.
     var providerID: String?
     var model: String?
+    /// The id of the template this shortcut was added from, kept only to choose
+    /// its colour (`PromptShortcutCardSurface`). Without it the card is re-rolled
+    /// against its fresh UUID and changes hue the instant it is saved — the same
+    /// action, a different colour on either side of one tap. `nil` for hand-written
+    /// rows and for everything saved before templates existed, which keeps their
+    /// established colours exactly where they are.
+    var paletteKey: String?
+
+    /// The key that actually chooses this shortcut's colour. Rows saved before
+    /// `paletteKey` existed carry none, so the instruction itself is matched back
+    /// against the template library — otherwise two identical actions, one added
+    /// last week and one added today, would sit side by side in different colours.
+    var paletteSeed: String? {
+        if let paletteKey, !paletteKey.isEmpty { return paletteKey }
+        return RemoteModelManifest.templateCategory(forPrompt: prompt)
+    }
 
     /// Snapshot the app's current backend into a concrete shortcut pin. Prompt
     /// shortcuts are saved actions, so their model must not drift when the app's
@@ -1084,7 +1100,8 @@ struct PromptShortcut: Codable, Equatable, Identifiable {
     init(id: UUID = UUID(), shortcut: ShortcutChord? = nil, prompt: String = "",
          name: String? = nil, opensBesidePointer: Bool? = true,
          showsInForceTouch: Bool? = nil,
-         pin: ModelPin? = PromptShortcut.currentModelPin) {
+         pin: ModelPin? = PromptShortcut.currentModelPin,
+         paletteKey: String? = nil) {
         self.id = id
         self.shortcut = shortcut
         self.prompt = prompt
@@ -1093,13 +1110,18 @@ struct PromptShortcut: Codable, Equatable, Identifiable {
         self.showsInForceTouch = showsInForceTouch
         self.providerID = pin?.provider.rawValue
         self.model = pin?.model
+        self.paletteKey = paletteKey
     }
 
     /// The pinned backend as one value — the form every caller wants, since the
     /// provider and the model are only meaningful together.
     var pin: ModelPin? {
         get {
+            // A pin to a backend the app no longer offers (`Provider.offered`)
+            // reads as no pin, so the shortcut runs on the current provider
+            // instead of a backend nothing in the UI can reach.
             guard let providerID, let provider = Provider(rawValue: providerID),
+                  Provider.offered.contains(provider),
                   let model, !model.isEmpty
             else { return nil }
             return ModelPin(provider: provider, model: model)

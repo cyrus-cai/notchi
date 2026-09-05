@@ -159,6 +159,13 @@ enum ProxyConfig {
             proxies[kCFNetworkProxiesHTTPSProxy as String] = host
             proxies[kCFNetworkProxiesHTTPSPort as String] = port
         }
+        // The same loopback exemption `apply(to:)` writes for child processes.
+        // Without it a manual proxy also swallows requests to a local endpoint —
+        // a custom provider on `127.0.0.1`, the nono gateway override, an OAuth
+        // callback — and the proxy answers for the host it could not reach, so a
+        // local server that is simply down reports "HTTP 502" instead of a
+        // connection error.
+        proxies[kCFNetworkProxiesExceptionsList as String] = ["localhost", "127.0.0.1", "::1", "*.local"]
         config.connectionProxyDictionary = proxies
         return config
     }

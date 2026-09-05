@@ -1086,6 +1086,11 @@ struct AgentRecordBody: View {
     /// below it would park the newest line at the viewport bottom — behind the
     /// box — which is exactly what the sibling layout used to do.
     var tailRunway: CGFloat = 0
+    /// Reading sizes for the record's two voices. The main panel and detached
+    /// window keep their established scale; the split history detail passes its
+    /// compact 13pt scale so Agent records match chat records in the same column.
+    var questionFont: CGFloat = 14.5
+    var answerFont: CGFloat = 15
 
     var body: some View {
         // The flat trail (`task.log`) spans every round; the settled rounds each
@@ -1101,7 +1106,7 @@ struct AgentRecordBody: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 14) {
                 ForEach(Array(task.exchanges.enumerated()), id: \.offset) { _, exchange in
-                    UserQuestionBubble(text: exchange.prompt)
+                    UserQuestionBubble(text: exchange.prompt, baseFont: questionFont)
                     // The trail's last narration entry IS this round's report (the
                     // parser records it in both places) — drop it so it isn't
                     // printed again by the answer just below. See
@@ -1110,10 +1115,11 @@ struct AgentRecordBody: View {
                     if !trail.isEmpty {
                         // Lazy: a long run's trail is hundreds of rows and this page
                         // pins to the tail — see `isLazy`'s doc.
-                        AgentWorkTrailView(entries: trail, isLazy: true)
+                        AgentWorkTrailView(entries: trail, isLazy: true,
+                                           baseFont: answerFont)
                     }
                     if !exchange.answer.isEmpty {
-                        MarkdownBlocks(source: exchange.answer, baseFont: 15)
+                        MarkdownBlocks(source: exchange.answer, baseFont: answerFont)
                     }
                 }
                 // The round still in flight has no settled exchange yet. Round one
@@ -1122,12 +1128,13 @@ struct AgentRecordBody: View {
                 // leading "› " marker.
                 if task.isRunning {
                     if task.exchanges.isEmpty {
-                        UserQuestionBubble(text: task.prompt)
+                        UserQuestionBubble(text: task.prompt, baseFont: questionFont)
                     }
                     if !liveTail.isEmpty {
                         // `live`: the trailing block is still being written, so it
                         // must not fold under the reader.
-                        AgentWorkTrailView(entries: liveTail, isLazy: true, live: true)
+                        AgentWorkTrailView(entries: liveTail, isLazy: true, live: true,
+                                           baseFont: answerFont)
                     }
                     // The collapsed row's ticker, following the trail — what the run
                     // is doing right now. Same 14pt/text3 face the status row wears.
@@ -1143,7 +1150,7 @@ struct AgentRecordBody: View {
                     if !NotchBody.trailTailIsStreamingProse(task.log),
                        !trailAlreadyShowsActivity {
                         CrossfadeText(text: activity,
-                                      font: 14, color: Tokens.text3)
+                                      font: min(14, answerFont), color: Tokens.text3)
                             .tracking(-0.1)
                             .lineLimit(1)
                             .padding(.vertical, 2)
@@ -1182,6 +1189,10 @@ struct ComposerBox<Placeholder: View, Trailing: View>: View {
     var focusTrigger: Bool = false
     /// Whether the box currently holds the caret — floor and rim lift together.
     var focused: Bool = false
+    /// Wear Liquid Glass instead of the painted recess. Detached follow-ups sit
+    /// over another app, so the recess floor reads as a solid dark pill; glass
+    /// samples through the window and stays a chip of the same material.
+    var glass: Bool = false
     /// A whisper of the destination's colour washed over the box while it holds
     /// text — the panel chat field's routing tell, so the input leans toward
     /// where Enter will send the line. `nil` on the surfaces that don't route.
@@ -1190,6 +1201,11 @@ struct ComposerBox<Placeholder: View, Trailing: View>: View {
     /// of the destination pill's word swap. `nil` = no pulse.
     var pulse: AnyHashable? = nil
     var pulseTint: Color = .white
+    /// The field's slot floor — the height the box holds while the text is one
+    /// line, before it grows. 27 (+12 of padding = a 39pt box) is the standalone
+    /// default; the split view's bottom rail passes 22 so the box comes out 34pt,
+    /// the same height as the round chips it sits between.
+    var slotFloor: CGFloat = 27
     var onSubmit: () -> Void
     /// Let the owning compose attach a clipboard image before the editor falls
     /// back to its ordinary text paste. Follow-up surfaces opt in only when the
@@ -1216,7 +1232,7 @@ struct ComposerBox<Placeholder: View, Trailing: View>: View {
     /// The box's own outline: the field's slot (27pt at rest, taller once the
     /// text wraps) plus 6pt of padding top and bottom.
     private var shape: RoundedRectangle {
-        NotchBody.composerShape(height: max(27, fieldHeight) + 12)
+        NotchBody.composerShape(height: max(slotFloor, fieldHeight) + 12)
     }
     private var isEmpty: Bool {
         text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -1262,9 +1278,9 @@ struct ComposerBox<Placeholder: View, Trailing: View>: View {
                 }
             }
             // One line at rest is 18pt but the row is pinned to the trailing
-            // control's 27pt — so a resting field centres in that slot and only
+            // control's slot — so a resting field centres in that slot and only
             // a wrapped follow-up pushes the row taller.
-            .frame(height: max(27, fieldHeight))
+            .frame(height: max(slotFloor, fieldHeight))
             // Drives the placeholder's fade during IME pre-composition: pinyin
             // in the editor flips `caretWidth` while `text` is still empty, and
             // without this key the label would hard-pop instead of fading.
@@ -1276,17 +1292,8 @@ struct ComposerBox<Placeholder: View, Trailing: View>: View {
         .padding(.leading, 13)
         .padding(.trailing, 6)
         .padding(.vertical, 6)
-        .background(
-            shape.fill(focused ? Tokens.recessFillLit : Tokens.recessFill)
-                .overlay(
-                    shape.fill((tint ?? .clear).opacity(!isEmpty ? 0.045 : 0))
-                )
-        )
-        .clipShape(shape)
-        .overlay(
-            shape.strokeBorder(focused ? Tokens.recessRimLit : Tokens.recessRim,
-                               lineWidth: 0.5)
-        )
+        .modifier(ComposerBoxChrome(shape: shape, glass: glass, focused: focused,
+                                    tint: tint, isEmpty: isEmpty))
         .animation(.smooth(duration: 0.25), value: tint)
         .animation(.easeOut(duration: 0.2), value: focused)
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isEmpty)
@@ -1296,6 +1303,43 @@ struct ComposerBox<Placeholder: View, Trailing: View>: View {
             box.intentChangePulse(on: pulse, shape: shape, tint: pulseTint)
         } else {
             box
+        }
+    }
+}
+
+/// The composer's floor and rim. Recess is the panel recipe (a painted wash
+/// sunk into the island). Glass is the detached recipe: a Liquid Glass chip
+/// that samples whatever sits behind the window, so the field stays more
+/// open than a dark painted pill.
+private struct ComposerBoxChrome<S: InsettableShape>: ViewModifier {
+    var shape: S
+    var glass: Bool
+    var focused: Bool
+    var tint: Color?
+    var isEmpty: Bool
+
+    func body(content: Content) -> some View {
+        if glass {
+            content
+                .clipShape(shape)
+                .glassCapsule(in: shape, brighter: focused)
+                .overlay(
+                    shape.fill((tint ?? .clear).opacity(!isEmpty ? 0.045 : 0))
+                        .allowsHitTesting(false)
+                )
+        } else {
+            content
+                .background(
+                    shape.fill(focused ? Tokens.recessFillLit : Tokens.recessFill)
+                        .overlay(
+                            shape.fill((tint ?? .clear).opacity(!isEmpty ? 0.045 : 0))
+                        )
+                )
+                .clipShape(shape)
+                .overlay(
+                    shape.strokeBorder(focused ? Tokens.recessRimLit : Tokens.recessRim,
+                                       lineWidth: 0.5)
+                )
         }
     }
 }
@@ -1956,6 +2000,7 @@ struct FlowLayout: Layout {
 struct ConfirmationDialogOverlay<Content: View>: View {
     var onDismiss: () -> Void
     var outerPadding: CGFloat = 24
+    var cornerRadius: CGFloat = 22
     /// Light caught in the slab's rim, in colour (see `ConfirmationDialogGlass`).
     /// Off for the destructive confirmations — a card asking whether to throw work
     /// away should not be the prettiest thing on screen.
@@ -1964,10 +2009,12 @@ struct ConfirmationDialogOverlay<Content: View>: View {
 
     init(onDismiss: @escaping () -> Void,
          outerPadding: CGFloat = 24,
+         cornerRadius: CGFloat = 22,
          edgeGlow: Bool = false,
          @ViewBuilder content: () -> Content) {
         self.onDismiss = onDismiss
         self.outerPadding = outerPadding
+        self.cornerRadius = cornerRadius
         self.edgeGlow = edgeGlow
         self.content = content()
     }
@@ -1979,13 +2026,17 @@ struct ConfirmationDialogOverlay<Content: View>: View {
                 .onTapGesture(perform: onDismiss)
 
             content
-                .background { ConfirmationDialogGlass(edgeGlow: edgeGlow) }
+                .background {
+                    ConfirmationDialogGlass(cornerRadius: cornerRadius,
+                                            edgeGlow: edgeGlow)
+                }
                 .padding(outerPadding)
         }
     }
 }
 
 private struct ConfirmationDialogGlass: View {
+    var cornerRadius: CGFloat = 22
     var edgeGlow: Bool = false
 
     /// The hues the rim refracts, in the order they run around it. Deliberately
@@ -2000,7 +2051,7 @@ private struct ConfirmationDialogGlass: View {
     ]
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 22, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         ZStack {
             shape.fill(.clear)
                 .nativeGlass(in: shape)
@@ -3717,6 +3768,7 @@ struct AssistantTurnView: View {
                             .font(.sf(waitFont - 4, weight: .semibold))
                             .foregroundStyle(Tokens.text4)
                             .rotationEffect(.degrees(expanded ? 0 : -90))
+                            .centeredOnTextGlyphs(fontSize: waitFont)
                         // Ticking while the round waits, frozen at the first token
                         // (`stopped` wins) — the same slot either way, so the
                         // digits simply stop instead of the label being replaced.
@@ -7352,6 +7404,9 @@ struct AgentWorkTrailView: View {
     /// block is exempt from the long-paragraph fold: a block that is still
     /// being written must not collapse under the reader mid-sentence.
     var live: Bool = false
+    /// Prose scale for the host surface. Agent records normally read at 15pt;
+    /// the split history detail uses the same compact scale as its chat turns.
+    var baseFont: CGFloat = 15
 
     /// One display unit of the trail: a prose paragraph, a fold of reasoning, a
     /// plan, a follow-up prompt marker, or a run of consecutive tool calls
@@ -7433,7 +7488,8 @@ struct AgentWorkTrailView: View {
                 // in-flight round look unlike the settled ones above it and
                 // made the bubble visibly jump the moment the round settled
                 // and re-rendered as a real turn.
-                UserQuestionBubble(text: String(entry.title.dropFirst(2)))
+                UserQuestionBubble(text: String(entry.title.dropFirst(2)),
+                                   baseFont: min(14.5, baseFont))
                     .padding(.vertical, 3)
             case .thinking(let entry):
                 AgentTrailThinkingRow(text: entry.title)
@@ -7445,7 +7501,8 @@ struct AgentWorkTrailView: View {
                 // quieter so the final report still leads. The block still being
                 // written (the live trail's last) never folds.
                 AgentTrailProse(text: entry.title,
-                                foldable: !(live && i == all.count - 1))
+                                foldable: !(live && i == all.count - 1),
+                                baseFont: baseFont)
             }
         }
     }
@@ -7460,6 +7517,7 @@ private struct AgentTrailProse: View {
     /// False for the block still streaming: folding it would collapse the
     /// paragraph under the reader as it grows.
     var foldable: Bool = true
+    var baseFont: CGFloat = 15
 
     @State private var expanded = false
 
@@ -7472,7 +7530,7 @@ private struct AgentTrailProse: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            MarkdownBlocks(source: text, baseFont: 15, color: Tokens.text2)
+            MarkdownBlocks(source: text, baseFont: baseFont, color: Tokens.text2)
                 .frame(maxHeight: folded ? Self.foldedHeight : nil, alignment: .top)
                 .clipped()
                 // The cut edge tapers instead of guillotining a line in half, so
@@ -7842,7 +7900,17 @@ enum ManageMenuMetrics {
 /// Its UUID, rather than list position or process-seeded `hashValue`, chooses the
 /// hue, so Settings and the compact picker always show the
 /// same shortcut with the same light across launches and reordering.
-private enum PromptShortcutCardPalette {
+///
+/// A shortcut ADDED FROM A TEMPLATE carries its template's CATEGORY as that key
+/// instead (`PromptShortcut.paletteKey`), so the card keeps the exact colour it
+/// wore in the picker rather than being re-rolled against its new UUID the moment
+/// it is saved — and every translation shortcut is the same colour as every other
+/// one. One rule, one hue, from the rail you picked it off to every surface it
+/// appears on afterwards.
+///
+/// Not private: surfaces outside a card echo the same hue (the template
+/// picker's haze pools the focused card's light under its rail).
+enum PromptShortcutCardPalette {
     /// Saturated, not tinted: the card washes these at a strength where a muted
     /// hue would only read as grey. The smoke below them (`.black`) is what
     /// keeps the surface dark, so the pigment itself stays pure.
@@ -7859,26 +7927,130 @@ private enum PromptShortcutCardPalette {
         let sum = bytes.reduce(0) { $0 &+ Int($1) }
         return hues[sum % hues.count]
     }
+
+    /// The template CATEGORIES are a small fixed set, so their hues are assigned
+    /// rather than hashed: byte-summing the strings happens to drop `understand`
+    /// and `rewrite` on the same blue, and two groups the eye can't tell apart is
+    /// a worse outcome than a hand-written table is inelegant. Position in the
+    /// manifest would be the other option and is not stable — a group empties as
+    /// its templates are added, and every group after it would shift hue.
+    private static let categoryHueIndex: [String: Int] = [
+        "understand": 0,    // cool blue
+        "rewrite": 1,       // violet
+        "respond": 3,       // amber
+        "translation": 4,   // teal
+    ]
+
+    /// Templates and their groups have stable string keys rather than UUIDs. Known
+    /// categories take their assigned hue; anything else the remote library ships
+    /// falls back to the UTF-8 bytes, which choose from the exact same palette
+    /// consistently across launches and manifest reordering.
+    static func light(_ stableKey: String) -> Color {
+        if let index = categoryHueIndex[stableKey] { return hues[index] }
+        let sum = stableKey.utf8.reduce(0) { $0 &+ Int($1) }
+        return hues[sum % hues.count]
+    }
 }
 
 struct PromptShortcutCardSurface<S: InsettableShape>: View {
-    let id: UUID
+    private let light: Color
+    private let gradientContrast: Double
+    /// System glass samples what is behind it in a backdrop layer the window
+    /// server animates on its own clock. A card that stays put never shows that,
+    /// but one that MOVES — the template picker's Cover Flow, where cards also
+    /// carry a 3D rotation the material cannot sample through — blurs out and
+    /// re-resolves a beat behind the card itself. Those cards paint the same
+    /// smoked pane instead, drawn in SwiftUI's own frame, so the surface travels
+    /// with the card.
+    private let liveGlass: Bool
     let hovering: Bool
     let shape: S
 
+    /// `paletteKey` is the template a saved shortcut came from, when it came from
+    /// one; the UUID is the fallback for rows written by hand (and by every build
+    /// before templates existed, whose colours must not shift under them).
+    init(id: UUID, paletteKey: String? = nil, hovering: Bool,
+         gradientContrast: Double = 1, liveGlass: Bool = true, shape: S) {
+        if let paletteKey, !paletteKey.isEmpty {
+            light = PromptShortcutCardPalette.light(paletteKey)
+        } else {
+            light = PromptShortcutCardPalette.light(id)
+        }
+        self.gradientContrast = gradientContrast
+        self.liveGlass = liveGlass
+        self.hovering = hovering
+        self.shape = shape
+    }
+
+    init(stableKey: String, hovering: Bool, gradientContrast: Double = 1,
+         liveGlass: Bool = true, shape: S) {
+        light = PromptShortcutCardPalette.light(stableKey)
+        self.gradientContrast = gradientContrast
+        self.liveGlass = liveGlass
+        self.hovering = hovering
+        self.shape = shape
+    }
+
+    /// A painted stand-in for the system material, for the panes that MOVE.
+    /// Glass is read from three things — a smoked body you can still see
+    /// through, an edge lit from above, and the bounce of that light along the
+    /// inside of the bottom face — and all three can be drawn. What this cannot
+    /// do is refract what is behind it; on a card floating over a panel that is
+    /// already blurring the desktop there is little left to refract, and the
+    /// trade buys a surface that turns and flies in SwiftUI's own frame instead
+    /// of snapshotting and re-resolving a beat late.
+    private var staticGlassPane: some View {
+        ZStack {
+            // Thin enough that the panel's own blur still carries through it.
+            shape.fill(.black.opacity(0.38))
+
+            // The body: bright where the light enters at the top, clearing
+            // through the middle, picking up again off the bottom face.
+            shape.fill(
+                LinearGradient(
+                    stops: [
+                        .init(color: .white.opacity(0.11), location: 0),
+                        .init(color: .white.opacity(0.035), location: 0.38),
+                        .init(color: .clear, location: 0.62),
+                        .init(color: .white.opacity(0.055), location: 1),
+                    ],
+                    startPoint: .top, endPoint: .bottom))
+
+            // The lit rim. A hard bright line along the top edge and a softer
+            // bounce along the bottom is the whole trick — the sides stay dark,
+            // which is what keeps it reading as a pane with thickness rather
+            // than a stroked rectangle.
+            shape.strokeBorder(
+                LinearGradient(
+                    stops: [
+                        .init(color: .white.opacity(0.4), location: 0),
+                        .init(color: .white.opacity(0.07), location: 0.3),
+                        .init(color: .white.opacity(0.03), location: 0.68),
+                        .init(color: .white.opacity(0.2), location: 1),
+                    ],
+                    startPoint: .top, endPoint: .bottom),
+                lineWidth: 1)
+                .blur(radius: 0.5)
+        }
+    }
+
     var body: some View {
-        let light = PromptShortcutCardPalette.light(id)
         ZStack {
             // Smoke first, pigment on top of it. The colour is laid at a strength
             // that would be garish on bare glass; sitting over this much black it
             // reads as smoked coloured glass instead of a tint.
-            shape.fill(.clear)
-                .nativeGlass(in: shape, tintOpacity: 0.16)
-                .overlay(shape.fill(.black.opacity(0.36)))
+            if liveGlass {
+                shape.fill(.clear)
+                    .nativeGlass(in: shape, tintOpacity: 0.16)
+                    .overlay(shape.fill(.black.opacity(0.36)))
+            } else {
+                staticGlassPane
+            }
 
             // The body of the glass: the whole pane is coloured, not just its lit
             // corner.
-            shape.fill(light.opacity(hovering ? 0.13 : 0.08))
+            shape.fill(light.opacity((hovering ? 0.13 : 0.08)
+                / max(1, gradientContrast)))
 
             // Real glass is deepest where the light has travelled furthest
             // through it, so the pigment gathers toward the bottom edge rather
@@ -7887,7 +8059,8 @@ struct PromptShortcutCardSurface<S: InsettableShape>: View {
                 LinearGradient(
                     stops: [
                         .init(color: .clear, location: 0.3),
-                        .init(color: light.opacity(hovering ? 0.12 : 0.075), location: 1),
+                        .init(color: light.opacity((hovering ? 0.12 : 0.075)
+                            * gradientContrast), location: 1),
                     ],
                     startPoint: .top,
                     endPoint: .bottom
@@ -7898,8 +8071,10 @@ struct PromptShortcutCardSurface<S: InsettableShape>: View {
             shape.fill(
                 LinearGradient(
                     stops: [
-                        .init(color: light.opacity(hovering ? 0.19 : 0.13), location: 0),
-                        .init(color: .white.opacity(hovering ? 0.07 : 0.05), location: 0.34),
+                        .init(color: light.opacity((hovering ? 0.19 : 0.13)
+                            * gradientContrast), location: 0),
+                        .init(color: .white.opacity((hovering ? 0.07 : 0.05)
+                            * gradientContrast), location: 0.34),
                         .init(color: .clear, location: 0.84),
                     ],
                     startPoint: .topLeading,
@@ -7951,6 +8126,9 @@ struct MenuCardRow: View {
     /// Prompt Shortcut rows reuse the exact stable colour surface from Settings.
     /// Nil leaves every ordinary menu row on its existing neutral wash.
     var promptShortcutID: UUID? = nil
+    /// The template key that shortcut was added from, when it was — see
+    /// `PromptShortcutCardSurface`. Nil re-rolls the hue off the UUID.
+    var promptShortcutPaletteKey: String? = nil
     /// For menus whose highlight follows the pointer: called as the row catches
     /// the cursor, so hover and the keyboard drive the SAME highlight instead of
     /// painting a second one.
@@ -7984,6 +8162,7 @@ struct MenuCardRow: View {
             .background {
                 if let promptShortcutID {
                     PromptShortcutCardSurface(id: promptShortcutID,
+                                              paletteKey: promptShortcutPaletteKey,
                                               hovering: hovering,
                                               shape: shape)
                 } else if wash, selected {

@@ -343,8 +343,8 @@ Given a conversation, produce a title that:
 - Leads with the most distinguishing detail — the specific name, number, \
 place, product, or action involved — rather than a broad category word. \
 Prefer "小米 SU7 售价" over "小米"; prefer "Redis 连接池泄漏" over "Redis 问题".
-- Fits in roughly 16 characters or 10 Chinese characters. Use the space to be \
-specific; don't pad, but don't truncate away the distinguishing detail either.
+- Fits in roughly 12 characters or 8 Chinese characters. Keep it to one compact \
+phrase; don't pad, but retain the most distinguishing detail.
 - Is in the same language as the conversation.
 
 Output only the title text — no quotes, numbering, or explanation.
@@ -403,6 +403,15 @@ struct ProviderSpec {
 /// properties below `spec` are behavioral, grouped by *how the client behaves*
 /// rather than by vendor, so they stay as small switches.
 enum Provider: String, CaseIterable, Identifiable, Sendable {
+    // Notchi's own hosted backend, and the only first-party one: nono spends
+    // *our* credit, not the user's, so there is no third-party account behind
+    // it and nothing to sign up for elsewhere. It serves two named tiers rather
+    // than a model list — see `spec` — because which model runs behind a tier is
+    // the gateway's business, not a choice to hand the user.
+    //
+    // Gated out of the menu by `offered` until the gateway is live; see
+    // `nonoIsLive`.
+    case nono
     /// First in the menu deliberately: the only backend that works without
     /// pasting a key (one-click OAuth connect, free models) — the default for
     /// fresh installs.
@@ -458,18 +467,74 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
 
     var id: String { rawValue }
 
+    /// A local nono gateway to use instead of the production one, for working on
+    /// the gateway itself:
+    ///
+    ///     defaults write com.notchglass.app NoNoBaseURL http://127.0.0.1:8787
+    ///
+    /// `UserDefaults` rather than an environment variable because an app opened
+    /// from Finder inherits no shell environment; the env var is still read for
+    /// runs launched from a terminal. Empty when unset, which is every real
+    /// install.
+    static var nonoBaseURLOverride: String {
+        let stored = UserDefaults.standard.string(forKey: "NoNoBaseURL") ?? ""
+        if !stored.isEmpty { return stored.trimmingCharacters(in: .whitespaces) }
+        return (ProcessInfo.processInfo.environment["NONO_BASE_URL"] ?? "")
+            .trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Whether nono is deployed and serving.
+    ///
+    /// `false` keeps it out of every menu while `api.notch.website` is not yet
+    /// answering — a provider a user can select but that cannot possibly work is
+    /// worse than one that isn't there. Flip the constant in the same change that
+    /// puts the Worker live; a local override counts as live so the gateway can
+    /// be worked on before then.
+    static let nonoShipsLive = false
+    static var nonoIsLive: Bool { nonoShipsLive || !nonoBaseURLOverride.isEmpty }
+
     /// The providers the app actually OFFERS — every case except the retired
-    /// `.commandCode` (see `CommandCodeCLIService.isRetired`). Every list the user
-    /// sees walks this, not `allCases`: the case itself has to stay so a pick saved
-    /// before the retirement still decodes and can repoint itself, but it must
-    /// never appear in a menu again.
-    static let offered: [Provider] = allCases.filter { $0 != .commandCode }
+    /// `.commandCode` (see `CommandCodeCLIService.isRetired`) and, until it is
+    /// deployed, `.nono`. Every list the user sees walks this, not `allCases`:
+    /// the case itself has to stay so a pick saved before the retirement still
+    /// decodes and can repoint itself, but it must never appear in a menu again.
+    static let offered: [Provider] = allCases.filter {
+        $0 != .commandCode && ($0 != .nono || nonoIsLive)
+    }
+
+    /// nono's chat endpoint: the production host, or the local gateway when one
+    /// is configured. Normalized the same way a custom endpoint is, so the
+    /// override can be written as a bare origin.
+    static var nonoEndpoint: String {
+        let override = nonoBaseURLOverride
+        guard !override.isEmpty else { return "https://api.notch.website/v1/chat/completions" }
+        return CustomProvider.normalized(override)?.absoluteString
+            ?? "https://api.notch.website/v1/chat/completions"
+    }
 
     /// The single source of truth for this provider's configuration. Everything
     /// that's pure per-vendor data is defined here, one self-contained block per
     /// provider — read the block and you know the whole provider.
     var spec: ProviderSpec {
         switch self {
+        case .nono:
+            return ProviderSpec(
+                displayName: "nono",
+                // Notchi's own gateway. The host is ours and public — an address,
+                // not a secret, so it belongs compiled in like every other
+                // endpoint here. What must never be compiled in is the key: a
+                // constant credential in a distributed app is public the moment
+                // the app is, so nono's key is issued per user by the gateway and
+                // lives only in the Keychain.
+                endpoint: Provider.nonoEndpoint,
+                // Two named tiers, not a model list. Which Workers AI model runs
+                // behind each is decided in the gateway's own catalog and can be
+                // swapped without an app release — that indirection is the point,
+                // so these two ids are the whole public surface.
+                models: ["nono", "nono-flash"],
+                signupHost: "notch.website",
+                signupURL: "https://notch.website",
+                envVarName: "NONO_API_KEY")
         case .openrouter:
             return ProviderSpec(
                 displayName: "OpenRouter",
@@ -749,6 +814,9 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // fourth, and the widest: its ids are `<pi-provider>/<model>`, and the model
         // half names the real lab (see `PiCLIService.vendor(forID:)`).
         case .openrouter, .vercel, .custom, .commandCode, .piCode: return nil
+        // nono's ids name no vendor on purpose — that is the product. The mark
+        // the picker draws is nono's own, never the model actually running.
+        case .nono:                   return "nono"
         case .openai, .codex:         return "OpenAI"
         case .anthropic, .claudeCode: return "Anthropic"
         case .grokCode:               return "xAI"
@@ -1665,7 +1733,10 @@ struct AnthropicUsage: Decodable {
 ///
 ///     { "version": 1,
 ///       "providers": { "openai": ["gpt-5.5", …], … },
-///       "efforts": { "commandCode": { "claude-sonnet-5": ["low", …], … }, … } }
+///       "efforts": { "commandCode": { "claude-sonnet-5": ["low", …], … }, … },
+///       "promptTemplates": [{ "id": "summarize", "category": "understand",
+///                             "name": "Summarize", "description": "…",
+///                             "prompt": "…" }] }
 ///
 /// `efforts` is the agent CLIs' reasoning-effort table — which `--effort` levels
 /// each engine's models actually accept (see `AgentEffortCatalog`). It rides this
@@ -1703,7 +1774,133 @@ enum RemoteModelManifest {
         /// Published benchmark figures, keyed by `Provider.normalizedModelID`.
         /// Absent for most of any vendor's catalog — see `ModelStats`.
         let stats: [String: ModelStats]
+        /// Ready-made instructions for Prompt Shortcuts. The website ships these
+        /// on the manifest's existing request so the library can change without
+        /// an app release; a bundled starter set remains available offline.
+        let promptTemplates: [PromptTemplate]
     }
+
+    /// One remotely distributed Prompt Shortcut starter. These are deliberately
+    /// instruction-only: `startPromptShortcutRound` already appends the selected
+    /// text, so templates must not bring a second `{selection}` placeholder.
+    struct PromptTemplate: Decodable, Equatable, Identifiable, Sendable {
+        let id: String
+        let category: String
+        let name: String
+        let description: String
+        let prompt: String
+
+        init(id: String, category: String, name: String,
+             description: String, prompt: String) {
+            self.id = id
+            self.category = category
+            self.name = name
+            self.description = description
+            self.prompt = prompt
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case id, category, name, description, prompt
+        }
+
+        /// A malformed template is discarded by `decode`, but must never make
+        /// the provider/model portion of the shared manifest fail with it.
+        init(from decoder: Decoder) throws {
+            guard let values = try? decoder.container(keyedBy: CodingKeys.self) else {
+                self.init(id: "", category: "", name: "", description: "", prompt: "")
+                return
+            }
+            self.init(
+                id: (try? values.decode(String.self, forKey: .id)) ?? "",
+                category: (try? values.decode(String.self, forKey: .category)) ?? "",
+                name: (try? values.decode(String.self, forKey: .name)) ?? "",
+                description: (try? values.decode(String.self, forKey: .description)) ?? "",
+                prompt: (try? values.decode(String.self, forKey: .prompt)) ?? ""
+            )
+        }
+    }
+
+    /// The remote library can be edited independently of the app. This small set
+    /// keeps the picker useful on a fresh offline install and when an old cached
+    /// manifest predates `promptTemplates`.
+    /// Grouped by the state the user is in when they reach for a shortcut — I
+    /// can't read this, I want this rewritten, I have to answer this, I need it
+    /// in another language — rather than by which of the model's abilities the
+    /// instruction exercises. A capability taxonomy invents groups that exist for
+    /// the tool and not for the person (a "Code" tab whose refactor and
+    /// write-tests entries return code the user would have to paste back into the
+    /// editor they were already sitting in).
+    /// A translation card is named in the language it produces — "翻译成中文",
+    /// "日本語に翻訳" — the way an input source is named. The card the user is
+    /// looking for is the one written in the script they are looking for, and a
+    /// column of "Translate to …" in one language makes them all read the same.
+    /// English keeps its English name for the same reason. The prompts stay in
+    /// English: those are instructions to the model, not labels.
+    private static let bundledPromptTemplates: [PromptTemplate] = [
+        .init(id: "summarize", category: "understand", name: "Summarize",
+              description: "Condense the selection into a few useful bullets.",
+              prompt: "Summarize the selected text in 3 to 5 concise bullet points. Preserve key facts, numbers, decisions, and caveats."),
+        .init(id: "key-points", category: "understand", name: "Key points",
+              description: "List the claims, facts, and figures that matter.",
+              prompt: "List the key claims, facts, and figures in the selected text as short bullet points. Keep every number and name exact, and add nothing that is not stated."),
+        .init(id: "explain-simply", category: "understand", name: "Explain simply",
+              description: "Explain difficult ideas in plain language.",
+              prompt: "Explain the selected text in plain language. Define important jargon and include one concrete example when helpful."),
+        .init(id: "define-terms", category: "understand", name: "Define terms",
+              description: "Build a glossary of the jargon in the text.",
+              prompt: "Identify the technical terms, acronyms, and jargon in the selected text and define each one in a single clear sentence, using the meaning it carries in this context."),
+        .init(id: "explain-code", category: "understand", name: "Explain code",
+              description: "Describe what the selected code does and how it works.",
+              prompt: "Explain what the selected code does, how its main parts work together, and any important assumptions. Be concise but technically precise."),
+        .init(id: "explain-error", category: "understand", name: "Explain error",
+              description: "Read the trace and name the likely cause.",
+              prompt: "Explain the selected error message or stack trace: what failed, the most likely causes in order of probability, and the concrete steps to diagnose and fix it."),
+        .init(id: "improve-writing", category: "rewrite", name: "Improve writing",
+              description: "Polish clarity and flow without changing the meaning.",
+              prompt: "Improve the selected text for clarity, flow, and readability while preserving its meaning and tone. Return only the revised text."),
+        .init(id: "fix-grammar", category: "rewrite", name: "Fix grammar",
+              description: "Correct spelling, grammar, and punctuation.",
+              prompt: "Correct spelling, grammar, and punctuation in the selected text without changing its meaning or voice. Return only the corrected text."),
+        .init(id: "make-concise", category: "rewrite", name: "Make concise",
+              description: "Shorten the text while keeping every key point.",
+              prompt: "Make the selected text concise and direct while preserving all important information. Return only the revised text."),
+        .init(id: "professional-tone", category: "rewrite", name: "Professional tone",
+              description: "Rewrite the text in a clear professional voice.",
+              prompt: "Rewrite the selected text in a clear, natural, professional tone. Preserve its meaning and return only the revised text."),
+        .init(id: "expand-writing", category: "rewrite", name: "Expand",
+              description: "Develop the text with detail and supporting points.",
+              prompt: "Expand the selected text with relevant detail, examples, and supporting points. Keep the original voice and do not invent facts. Return only the expanded text."),
+        .init(id: "draft-reply", category: "respond", name: "Draft reply",
+              description: "Write a concise response to the selected message.",
+              prompt: "Draft a concise, natural reply to the selected message. Address its requests directly and do not invent facts or commitments."),
+        .init(id: "write-email", category: "respond", name: "Write as email",
+              description: "Turn the text into a ready-to-send email.",
+              prompt: "Rewrite the selected text as a clear, professional email with a subject line, a direct opening, and a specific ask or next step. Return only the email."),
+        .init(id: "action-items", category: "respond", name: "Extract action items",
+              description: "Turn decisions and requests into a checklist.",
+              prompt: "Extract every concrete action item from the selected text. Return a concise Markdown checklist, including owners and deadlines only when stated."),
+        .init(id: "meeting-notes", category: "respond", name: "Meeting notes",
+              description: "Structure raw notes into decisions and next steps.",
+              prompt: "Turn the selected notes into structured meeting minutes with three sections: Discussion, Decisions, and Next steps. Keep it factual and add nothing that was not said."),
+        .init(id: "translate-english", category: "translation", name: "Translate to English",
+              description: "Produce natural English and preserve the formatting.",
+              prompt: "Translate the selected text into natural English. Preserve its meaning, tone, names, numbers, and formatting. Return only the translation."),
+        .init(id: "translate-chinese", category: "translation", name: "翻译成中文",
+              description: "译成自然的中文，保留原有格式。",
+              prompt: "Translate the selected text into natural Simplified Chinese. Preserve its meaning, tone, names, numbers, and formatting. Return only the translation."),
+        .init(id: "translate-japanese", category: "translation", name: "日本語に翻訳",
+              description: "自然な日本語に訳し、書式はそのまま残します。",
+              prompt: "Translate the selected text into natural Japanese, using the register the source implies. Preserve its meaning, names, numbers, and formatting. Return only the translation."),
+        .init(id: "translate-korean", category: "translation", name: "한국어로 번역",
+              description: "자연스러운 한국어로 옮기고 서식을 그대로 둡니다.",
+              prompt: "Translate the selected text into natural Korean, using the register the source implies. Preserve its meaning, names, numbers, and formatting. Return only the translation."),
+        .init(id: "translate-spanish", category: "translation", name: "Traducir al español",
+              description: "Produce un español natural y conserva el formato.",
+              prompt: "Translate the selected text into natural Spanish. Preserve its meaning, tone, names, numbers, and formatting. Return only the translation."),
+        .init(id: "translate-bilingual", category: "translation", name: "Bilingual translation",
+              description: "Show the translation paragraph by paragraph beside the source.",
+              prompt: "Translate the selected text paragraph by paragraph. For each paragraph, output the original line first and its translation directly beneath it. Translate into English if the source is not English, and into Simplified Chinese if it is.")
+    ]
 
     /// What Artificial Analysis publishes about one model, as ridden out by the
     /// website's daily pull (`docs/api/model-stats.js`). Every field is optional
@@ -1804,6 +2001,30 @@ enum RemoteModelManifest {
     /// the beaten path, and for every install that has not fetched yet.
     static func stats(normalizedID: String) -> ModelStats? {
         withLock { cached?.stats[normalizedID] }
+    }
+
+    /// The current remotely maintained template library, falling back to the
+    /// shipped starter set when the request is unavailable or its cached payload
+    /// comes from a version before templates existed.
+    static var promptTemplates: [PromptTemplate] {
+        withLock {
+            guard let remote = cached?.promptTemplates, !remote.isEmpty else {
+                return bundledPromptTemplates
+            }
+            return remote
+        }
+    }
+
+    /// The group a saved shortcut's instruction came from, matched on the
+    /// instruction itself — the colour lookup for rows that predate
+    /// `PromptShortcut.paletteKey`. Nil for a hand-written prompt, which keeps
+    /// its own UUID-derived hue.
+    static func templateCategory(forPrompt prompt: String) -> String? {
+        let key = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return nil }
+        return promptTemplates.first {
+            $0.prompt.trimmingCharacters(in: .whitespacesAndNewlines) == key
+        }?.category
     }
 
     /// Fetch the manifest when the cached copy is older than `ttl` (or absent).
@@ -1914,6 +2135,7 @@ enum RemoteModelManifest {
             var efforts: [String: [String: [String]]]? = nil
             var effortsOverride: [String]? = nil
             var textOnly: [String]? = nil
+            var promptTemplates: [PromptTemplate]? = nil
             /// `[intelligence, timeToAnswer, value, intelligenceBar, speedBar]`,
             /// any slot nullable. An array rather than an object
             /// because this table covers the whole catalog and key names would be
@@ -1921,6 +2143,23 @@ enum RemoteModelManifest {
             /// absent — a manifest written before the bars existed decodes as a
             /// row with none, and the card falls back to the curated table.
             var stats: [String: [Double?]]? = nil
+
+            private enum CodingKeys: String, CodingKey {
+                case providers, efforts, effortsOverride, textOnly, promptTemplates, stats
+            }
+
+            init(from decoder: Decoder) throws {
+                let values = try decoder.container(keyedBy: CodingKeys.self)
+                providers = try values.decode([String: [String]].self, forKey: .providers)
+                efforts = try? values.decode([String: [String: [String]]].self,
+                                             forKey: .efforts)
+                effortsOverride = try? values.decode([String].self,
+                                                      forKey: .effortsOverride)
+                textOnly = try? values.decode([String].self, forKey: .textOnly)
+                promptTemplates = try? values.decode([PromptTemplate].self,
+                                                      forKey: .promptTemplates)
+                stats = try? values.decode([String: [Double?]].self, forKey: .stats)
+            }
         }
         guard let manifest = try? JSONDecoder().decode(Manifest.self, from: data)
         else { return nil }
@@ -1963,8 +2202,30 @@ enum RemoteModelManifest {
             else { continue }
             stats[Provider.normalizedModelID(id)] = entry
         }
+        // Treat every field as untrusted display/input data. A bad manifest must
+        // not grow the Settings card without bound, inject an empty action, or
+        // create several visually identical entries with the same id.
+        let cleaned = { (value: String, limit: Int) -> String in
+            let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return value.count > limit ? String(value.prefix(limit)) : value
+        }
+        var seenTemplateIDs = Set<String>()
+        let decodedPromptTemplates: [PromptTemplate] =
+            (manifest.promptTemplates ?? []).compactMap { row -> PromptTemplate? in
+                let id = cleaned(row.id, 64)
+                let category = cleaned(row.category, 32)
+                let name = cleaned(row.name, 48)
+                let description = cleaned(row.description, 160)
+                let prompt = cleaned(row.prompt, 4_000)
+                guard !id.isEmpty, !category.isEmpty, !name.isEmpty, !prompt.isEmpty,
+                      seenTemplateIDs.insert(id).inserted else { return nil }
+                return PromptTemplate(id: id, category: category, name: name,
+                                      description: description, prompt: prompt)
+            }
+        let promptTemplates = Array(decodedPromptTemplates.prefix(90))
         return Payload(providers: providers, efforts: efforts, effortsOverride: override,
-                       textOnly: textOnly, stats: stats)
+                       textOnly: textOnly, stats: stats,
+                       promptTemplates: promptTemplates)
     }
 }
 

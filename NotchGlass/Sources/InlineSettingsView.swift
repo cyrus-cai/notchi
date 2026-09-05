@@ -395,6 +395,24 @@ struct InlineSettingsView: View {
     /// User-authored global bindings are intentionally only a shortcut and one
     /// prompt. Their UUID exists solely so SwiftUI and AppDelegate can track rows.
     @State private var promptShortcuts: [PromptShortcut] = PromptShortcutStore.current
+    /// The add flow begins with the remotely maintained starter library. It is
+    /// seeded synchronously from the last manifest (or its bundled fallback),
+    /// then refreshed through the manifest's existing request while visible.
+    @State private var promptTemplatePickerOpen = false
+    @State private var promptTemplates = RemoteModelManifest.promptTemplates
+    @State private var selectedPromptTemplateCategory = ""
+    @State private var hoveredPromptTemplateID: String?
+    @State private var promptTemplateCoverflowHovering = false
+    @State private var promptTemplateCoverflowOffset: CGFloat = 0
+    @State private var promptTemplateCoverflowDragOrigin: CGFloat?
+    @State private var promptTemplateCoverflowTapLocked = false
+    /// Only the newest snap's unlock may fire — an earlier one landing mid-run
+    /// would reopen the detail tap to the click that is still arriving.
+    @State private var promptTemplateCoverflowTapUnlockToken = 0
+    /// The template whose detail page the picker is standing on, if any. A card
+    /// is read before it is added: tapping the focused card opens this, and the
+    /// card's `+` remains the shortcut past it.
+    @State private var promptTemplateDetailID: String?
     /// The shortcut whose independent editor popover is open. The list itself
     /// never expands or changes height; one id also guarantees only one editor is
     /// presented at a time.
@@ -484,11 +502,29 @@ struct InlineSettingsView: View {
                 .padding(.top, 12)
             }
         }
+        // Only soften the Settings content behind the template picker. A small
+        // radius breaks the legibility of the old cards without erasing their
+        // shapes or colours, and the modal overlay mounted below stays crisp.
+        .blur(radius: promptTemplatePickerOpen ? 2.5 : 0)
         .overlay {
-            if let id = presentedPromptShortcutID,
+            if promptTemplatePickerOpen {
+                ConfirmationDialogOverlay(
+                    onDismiss: { closePromptTemplatePicker() },
+                    cornerRadius: 28,
+                    edgeGlow: true
+                ) {
+                    promptTemplatePicker
+                        .frame(width: 420)
+                }
+                .padding(.horizontal, -NotchBody.panelPadding)
+                .padding(.top, -NotchBody.panelPadding)
+                .padding(.bottom, -NotchBody.panelPadding)
+                .transition(.opacity.combined(with: .scale(scale: 0.96)))
+            } else if let id = presentedPromptShortcutID,
                let shortcut = promptShortcuts.first(where: { $0.id == id }) {
                 ConfirmationDialogOverlay(
-                    onDismiss: { closePromptShortcutEditor(id) }
+                    onDismiss: { closePromptShortcutEditor(id) },
+                    cornerRadius: 28
                 ) {
                     promptShortcutCard(shortcut)
                         .frame(width: 372)
@@ -502,6 +538,7 @@ struct InlineSettingsView: View {
                 .transition(.opacity.combined(with: .scale(scale: 0.96)))
             }
         }
+        .animation(.easeOut(duration: 0.16), value: promptTemplatePickerOpen)
         .animation(.easeOut(duration: 0.16), value: presentedPromptShortcutID)
         // The Force Click gate is NOT mounted here: its scrim has to cover the
         // whole glass panel, and the settings body stops short of the island's
@@ -611,6 +648,12 @@ struct InlineSettingsView: View {
     /// Starts `true` so a pane that does overflow never shows an un-tapered first
     /// frame; the measurement corrects it on the same layout pass.
     @State private var paneOverflows = true
+
+    /// Whether the Prompt shortcuts rail is scrolled off its leading edge — the
+    /// same gate `paneScrolledOffTop` is for the vertical pane, and for the same
+    /// reason: at rest the first card sits flush at 0, so a permanent leading
+    /// taper would thin a card nothing is scrolling past.
+    @State private var promptShortcutRailScrolled = false
 
     /// The open section's pane. Lives apart from `body` because it is drawn in
     /// two different frames — in the right-hand column beside the sidebar for a
@@ -3316,6 +3359,11 @@ struct InlineSettingsView: View {
         .onDisappear {
             recordingShortcut = nil
             presentedPromptShortcutID = nil
+            promptTemplatePickerOpen = false
+            hoveredPromptTemplateID = nil
+            promptTemplateCoverflowHovering = false
+            promptTemplateCoverflowDragOrigin = nil
+            promptTemplateCoverflowTapLocked = false
             hoveredPromptShortcutID = nil
             dropBlankPromptShortcuts()
         }
@@ -3356,17 +3404,7 @@ struct InlineSettingsView: View {
                        alignment: .topLeading)
                 .overlay(alignment: .trailing) {
                     Button {
-                        // Added to the list, NOT to disk: an untouched row is
-                        // discarded when the editor closes (`dropBlankPromptShortcuts`),
-                        // and the first real edit is what persists it — every field
-                        // binding saves as it writes.
-                        let shortcut = PromptShortcut()
-                        withAnimation(Tokens.stackSpring) {
-                            promptShortcuts.append(shortcut)
-                        }
-                        DispatchQueue.main.async {
-                            presentedPromptShortcutID = shortcut.id
-                        }
+                        openPromptTemplatePicker()
                     } label: {
                         Image(systemName: "plus")
                             .font(.sf(10.5, weight: .semibold))
@@ -3408,13 +3446,22 @@ struct InlineSettingsView: View {
                         // so it can scroll fully into view instead of remaining
                         // dimmed when the list reaches its end.
                         .padding(.trailing, 24)
+                        .onScrollOffsetChange(axis: .horizontal) { offset in
+                            let off = offset > 0.5
+                            if off != promptShortcutRailScrolled {
+                                promptShortcutRailScrolled = off
+                            }
+                        }
                     }
                     .scrollIndicators(.never)
                     // Match the panel's other overflowing lists: content
-                    // dissolves into the boundary instead of being sliced by the
-                    // scroll viewport. The resting leading edge stays crisp.
-                    .scrollEdgeFade(leading: false, trailing: true,
-                                    leadingFade: 0, trailingFade: 24)
+                    // dissolves into BOTH boundaries instead of being sliced by
+                    // the scroll viewport — a card leaving to the left thinned out
+                    // the same way one arriving from the right does. The leading
+                    // taper is gated on the rail actually being scrolled, so at
+                    // rest the first card stays crisp against the section's edge.
+                    .scrollEdgeFade(leading: promptShortcutRailScrolled, trailing: true,
+                                    leadingFade: 24, trailingFade: 24)
                     .padding(.horizontal, -3)
                 }
             }
@@ -3422,9 +3469,642 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// The card's fields and chips share a control height, so the two-column row
-    /// reads as one grid rather than a pile of unrelated controls.
-    private static let promptControlHeight: CGFloat = 30
+    private struct PromptTemplateGroup: Identifiable {
+        let category: String
+        let templates: [RemoteModelManifest.PromptTemplate]
+        var id: String { category }
+    }
+
+    /// A template the user already saved is not offered a second time — the
+    /// picker is what's left to add, not a catalogue of everything that exists.
+    /// Identity is the instruction itself: a saved shortcut persists its prompt,
+    /// not the id of the template it came from, and the prompt is what would
+    /// actually be duplicated.
+    private var availablePromptTemplates: [RemoteModelManifest.PromptTemplate] {
+        let added = Set(promptShortcuts
+            .map { $0.prompt.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty })
+        guard !added.isEmpty else { return promptTemplates }
+        return promptTemplates.filter {
+            !added.contains($0.prompt.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+    }
+
+    /// Category order follows the manifest rather than an app-side enum, so the
+    /// remotely maintained library can add or rearrange a group without an app
+    /// release. Cover Flow is scoped to the selected group instead of flattening
+    /// the library and throwing that organization away.
+    private var promptTemplateGroups: [PromptTemplateGroup] {
+        var order: [String] = []
+        var grouped: [String: [RemoteModelManifest.PromptTemplate]] = [:]
+        for template in availablePromptTemplates {
+            if grouped[template.category] == nil { order.append(template.category) }
+            grouped[template.category, default: []].append(template)
+        }
+        return order.map { PromptTemplateGroup(category: $0,
+                                                templates: grouped[$0] ?? []) }
+    }
+
+    private var visiblePromptTemplates: [RemoteModelManifest.PromptTemplate] {
+        promptTemplateGroups.first(where: { $0.category == selectedPromptTemplateCategory })?
+            .templates ?? promptTemplateGroups.first?.templates ?? []
+    }
+
+    /// The reference component's classic Cover Flow, scaled to this compact
+    /// dialog: square cards, 70-degree inward side faces, symmetric depth order,
+    /// direct dragging, tap-to-focus, an index, and a second draggable track.
+    /// The template the picker is currently showing in full, resolved from the
+    /// live library rather than held as a copy, so a manifest refresh under an
+    /// open detail page updates it instead of stranding stale text.
+    private var promptTemplateDetail: RemoteModelManifest.PromptTemplate? {
+        guard let id = promptTemplateDetailID else { return nil }
+        return promptTemplates.first { $0.id == id }
+    }
+
+    private var promptTemplatePicker: some View {
+        let detail = promptTemplateDetail
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                if detail != nil {
+                    Button {
+                        closePromptTemplateDetail()
+                    } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.sf(10.5, weight: .semibold))
+                            .foregroundStyle(Tokens.text2)
+                            .frame(width: 24, height: 24)
+                    }
+                    .buttonStyle(PromptTemplateChipStyle(shape: Circle()))
+                    .accessibilityLabel(L("shortcuts.promptAction.templates.back"))
+                }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(detail?.name ?? L("shortcuts.promptAction.templates.title"))
+                        .font(.sf(16, weight: .semibold))
+                        .foregroundStyle(Tokens.text1)
+                        .tracking(-0.3)
+                        .lineLimit(1)
+                    Text(detail?.description ?? L("shortcuts.promptAction.templates.subtitle"))
+                        .font(.sf(11.5))
+                        .foregroundStyle(Tokens.text4)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+                Button {
+                    closePromptTemplatePicker()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.sf(9.5, weight: .semibold))
+                        .foregroundStyle(Tokens.text2)
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(PromptTemplateChipStyle(shape: Circle()))
+                .accessibilityLabel(L("detached.close"))
+            }
+            .padding(.bottom, 14)
+
+            if let detail {
+                promptTemplateDetailBody(detail)
+            } else {
+                promptTemplateCategoryTabs
+                    .padding(.bottom, 8)
+
+                promptTemplateCoverflow
+
+                Button {
+                    addBlankPromptShortcut()
+                } label: {
+                    Text(L("shortcuts.promptAction.templates.custom"))
+                        .font(.sf(12, weight: .medium))
+                        .foregroundStyle(Tokens.text2)
+                        .frame(maxWidth: .infinity, minHeight: 34)
+                }
+                .buttonStyle(PromptTemplateChipStyle(shape: Capsule()))
+                .padding(.top, 14)
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 16)
+    }
+
+    /// A template's own page: the instruction it will actually run, in full,
+    /// over the group's colour, with adding it as the page's one action.
+    private func promptTemplateDetailBody(
+        _ template: RemoteModelManifest.PromptTemplate
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(promptTemplateCategoryTitle(template.category))
+                .captionLabel(color: Tokens.text3)
+                .padding(.bottom, 8)
+
+            ScrollView {
+                Text(template.prompt)
+                    .font(.sf(12.5))
+                    .foregroundStyle(Tokens.text1)
+                    .lineSpacing(3)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .scrollIndicators(.never)
+            .frame(height: 128)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .recessedSurface(in: RoundedRectangle(cornerRadius: 16, style: .continuous),
+                             lit: false)
+
+            HStack(spacing: 8) {
+                Spacer(minLength: 0)
+                Button {
+                    addPromptShortcut(from: template)
+                    closePromptTemplateDetail()
+                } label: {
+                    Text(L("shortcuts.promptAction.templates.detail.add"))
+                        .font(.sf(12.5, weight: .semibold))
+                        .foregroundStyle(Tokens.text1)
+                        .padding(.horizontal, 20)
+                        .frame(minHeight: 32)
+                }
+                .buttonStyle(PromptCardActionStyle(kind: .primary))
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding(.top, 14)
+        }
+    }
+
+    private var promptTemplateCategoryTabs: some View {
+        HStack(spacing: 4) {
+            ForEach(promptTemplateGroups) { group in
+                let active = group.category == selectedPromptTemplateCategory
+                Button {
+                    selectPromptTemplateCategory(group.category)
+                } label: {
+                    // A tab IS the heading of the rail below it, so it takes the
+                    // panel's small-caps caption register rather than a second
+                    // size of body text. Tracked-out capitals also give the row
+                    // some texture of its own against the plain sentence case
+                    // the cards and the footer are set in.
+                    Text(promptTemplateCategoryTitle(group.category))
+                        .captionLabel(color: active ? Tokens.text1 : Tokens.text3)
+                        .lineLimit(1)
+                        .padding(.horizontal, 11)
+                        .frame(height: 26)
+                }
+                // The selected tab wears its own group's hue — the same light its
+                // cards are cut from — so the row reads as the colour the picker
+                // is currently standing in rather than a lit white pill.
+                .buttonStyle(PromptTemplateChipStyle(
+                    shape: Capsule(), active: active,
+                    tint: active
+                        ? PromptShortcutCardPalette.light(group.category)
+                        : nil))
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .animation(.easeOut(duration: 0.2), value: selectedPromptTemplateCategory)
+    }
+
+    /// The picker's chips in the island's own Liquid Glass rather than the
+    /// Settings pane's flat white wash (`ShortcutChipStyle`). This dialog floats
+    /// over blurred content, where a painted-on capsule reads as a sticker laid
+    /// on the glass; a real glass chip refracts what is behind it like every
+    /// other control on the island.
+    private struct PromptTemplateChipStyle<S: InsettableShape>: ButtonStyle {
+        var shape: S
+        var active: Bool = false
+        /// Washes the chip in a hue instead of plain white — see the tabs.
+        var tint: Color? = nil
+
+        @State private var hovering = false
+
+        func makeBody(configuration: Configuration) -> some View {
+            configuration.label
+                .glassCapsule(in: shape,
+                              brighter: active || hovering,
+                              tint: tint,
+                              rim: active ? 1 : (hovering ? 0.85 : 0.5))
+                .contentShape(shape)
+                .scaleEffect(configuration.isPressed ? 0.97 : 1)
+                .opacity(configuration.isPressed ? 0.82 : 1)
+                .onHover { hovering = $0 }
+                .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+        }
+    }
+
+    private static let promptTemplateCoverflowCardSize: CGFloat = 148
+    private static let promptTemplateCoverflowHeight: CGFloat = 160
+    private static let promptTemplateCoverflowSpacing: CGFloat = -87
+    private static let promptTemplateCoverflowRotation: Double = 20
+    private static let promptTemplateCoverflowNearScale: CGFloat = 0.88
+    private static let promptTemplateCoverflowFarScale: CGFloat = 0.72
+    private static let promptTemplateCoverflowPerspective: CGFloat = 1 / 500
+    private static let promptTemplateCoverflowSpring =
+        Animation.interpolatingSpring(mass: 1, stiffness: 180, damping: 22,
+                                      initialVelocity: 0)
+
+    private var promptTemplateCoverflowVirtualIndex: Int {
+        Int(promptTemplateCoverflowOffset.rounded())
+    }
+
+    private var promptTemplateCoverflowIndex: Int {
+        guard !visiblePromptTemplates.isEmpty else { return 0 }
+        return wrappedPromptTemplateIndex(promptTemplateCoverflowVirtualIndex)
+    }
+
+    private var promptTemplateCoverflow: some View {
+        VStack(spacing: 0) {
+            GeometryReader { proxy in
+                ZStack {
+                    promptTemplateCoverflowHaze
+
+                    if visiblePromptTemplates.isEmpty {
+                        Text(L("shortcuts.promptAction.templates.allAdded"))
+                            .font(.sf(12))
+                            .foregroundStyle(Tokens.text3)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 44)
+                    }
+
+                    ForEach(Array(visiblePromptTemplates.enumerated()), id: \.element.id) { index, template in
+                        promptTemplateCoverflowCard(template, at: index)
+                    }
+                }
+                .frame(width: proxy.size.width, height: proxy.size.height)
+                .overlay(promptTemplateCoverflowSmoke)
+                .contentShape(Rectangle())
+                // A card owns a tap, while the rail owns horizontal movement.
+                // Priority keeps the child tap recognizers from starving the
+                // parent's mouse-drag gesture after its 4pt threshold is crossed.
+                .highPriorityGesture(promptTemplateCoverflowDragGesture)
+            }
+            .frame(height: Self.promptTemplateCoverflowHeight)
+        }
+        .background(
+            PromptTemplateCoverflowScrollMonitor(
+                active: promptTemplateCoverflowHovering,
+                onDelta: { delta in
+                    promptTemplateCoverflowTapLocked = false
+                    let next = promptTemplateCoverflowOffset - delta
+                        / (Self.promptTemplateCoverflowCardSize * 0.65)
+                    setPromptTemplateCoverflowOffset(next, haptic: true)
+                },
+                onEnd: {
+                    snapPromptTemplateCoverflow(to: promptTemplateCoverflowVirtualIndex)
+                },
+                onStep: { direction in
+                    snapPromptTemplateCoverflow(to: promptTemplateCoverflowVirtualIndex + direction)
+                }
+            )
+        )
+        .onHover { promptTemplateCoverflowHovering = $0 }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(L("shortcuts.promptAction.templates.title"))
+    }
+
+    /// The focused group's hue, pooled into a soft light under the rail. The
+    /// colour lives in the smoke rather than on a second painted surface, so the
+    /// dialog takes on the category it is showing without gaining a panel.
+    private var promptTemplateCoverflowHaze: some View {
+        let light = PromptShortcutCardPalette.light(selectedPromptTemplateCategory)
+        return Ellipse()
+            .fill(RadialGradient(colors: [light.opacity(0.28), .clear],
+                                 center: .center, startRadius: 0, endRadius: 130))
+            .frame(width: 300, height: 140)
+            .blur(radius: 30)
+            .allowsHitTesting(false)
+            .animation(.easeInOut(duration: 0.3), value: selectedPromptTemplateCategory)
+    }
+
+    /// The far cards run out into smoke instead of stopping at a hard edge — the
+    /// rail's own `scrollEdgeFade`, drawn over the cards rather than masking
+    /// them, since a mask would flatten their 3D transforms.
+    private var promptTemplateCoverflowSmoke: some View {
+        HStack(spacing: 0) {
+            LinearGradient(colors: [.black.opacity(0.3), .clear],
+                           startPoint: .leading, endPoint: .trailing)
+                .frame(width: 44)
+            Spacer(minLength: 0)
+            LinearGradient(colors: [.clear, .black.opacity(0.3)],
+                           startPoint: .leading, endPoint: .trailing)
+                .frame(width: 44)
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func promptTemplateCoverflowCard(
+        _ template: RemoteModelManifest.PromptTemplate,
+        at index: Int
+    ) -> some View {
+        let difference = promptTemplateCoverflowDifference(for: index)
+        let distance = abs(difference)
+        let direction: CGFloat = difference == 0 ? 0 : (difference > 0 ? 1 : -1)
+        let rotationProgress = min(distance, 1)
+        let easedRotation = 1 - pow(1 - rotationProgress, 3)
+        let rotation = -Double(direction * easedRotation) * Self.promptTemplateCoverflowRotation
+        let scale: CGFloat
+        if distance < 1 {
+            scale = 1 - distance * (1 - Self.promptTemplateCoverflowNearScale)
+        } else if distance < 2 {
+            scale = Self.promptTemplateCoverflowNearScale
+                - (distance - 1) * (Self.promptTemplateCoverflowNearScale
+                    - Self.promptTemplateCoverflowFarScale)
+        } else {
+            scale = Self.promptTemplateCoverflowFarScale
+        }
+
+        let nearSpacing = max(20, Self.promptTemplateCoverflowCardSize
+                              + Self.promptTemplateCoverflowSpacing)
+        let farSpacing = nearSpacing * 0.56
+        let translation = direction * (distance <= 1
+            ? distance * nearSpacing
+            : nearSpacing + (distance - 1) * farSpacing)
+        let opacity: Double = distance <= 4 ? 1 : max(0, 1 - Double(distance - 4))
+        let active = promptTemplateCoverflowIndex == index
+        let hovered = hoveredPromptTemplateID == template.id
+        let shape = RoundedRectangle(cornerRadius: 24, style: .continuous)
+        let textOpacity = active ? 1 : Double(max(0.16, 0.52 - distance * 0.14))
+
+        return ZStack {
+            VStack(alignment: .leading, spacing: 0) {
+                Spacer(minLength: 0)
+
+                // 16.5 over 11 — a 1.5x step, where the old 15/11.5 pair sat close
+                // enough that the card read as one grey block of text. The name is
+                // the card's headline and is set like one: bigger, tighter, and
+                // carrying the ink, over a gloss that stays deliberately quiet.
+                Text(template.name)
+                    .font(.sf(16.5, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.97))
+                    .tracking(-0.35)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text(template.description)
+                    .font(.sf(11))
+                    .foregroundStyle(Color.white.opacity(0.62))
+                    .lineSpacing(2)
+                    .lineLimit(4)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 8)
+
+                Spacer(minLength: 0)
+            }
+            .padding(15)
+            .opacity(textOpacity)
+        }
+        .frame(width: Self.promptTemplateCoverflowCardSize,
+               height: Self.promptTemplateCoverflowCardSize,
+               alignment: .topLeading)
+        .overlay(alignment: .bottomTrailing) {
+            if active {
+                Button {
+                    addPromptShortcut(from: template)
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.sf(14, weight: .semibold))
+                        .foregroundStyle(Tokens.text1)
+                        .frame(width: 34, height: 34)
+                }
+                .buttonStyle(PromptTemplateChipStyle(shape: Circle(), active: true))
+                .accessibilityLabel(L("shortcuts.promptAction.add"))
+                .padding(10)
+            }
+        }
+        .background(
+            PromptShortcutCardSurface(stableKey: template.category,
+                                      hovering: hovered,
+                                      gradientContrast: 1.9,
+                                      liveGlass: false,
+                                      shape: shape)
+        )
+        .contentShape(shape)
+        .shadow(color: .black.opacity(active ? 0.3 : 0.14), radius: 14, y: 8)
+        .scaleEffect(scale)
+        .rotation3DEffect(.degrees(rotation), axis: (x: 0, y: 1, z: 0),
+                          perspective: Self.promptTemplateCoverflowPerspective)
+        .offset(x: translation)
+        .blur(radius: active ? 0 : min(Double(distance) * 0.55, 1.4))
+        .opacity(opacity)
+        .zIndex(active ? 999 : -Double(distance))
+        .allowsHitTesting(distance <= 4)
+        .onTapGesture { promptTemplateCoverflowTapped(template, at: index) }
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: Tokens.hoverFade)) {
+                if hovering {
+                    hoveredPromptTemplateID = template.id
+                } else if hoveredPromptTemplateID == template.id {
+                    hoveredPromptTemplateID = nil
+                }
+            }
+        }
+        .accessibilityLabel("\(template.name). \(template.description)")
+        .accessibilityAddTraits(active ? .isSelected : [])
+    }
+
+    private var promptTemplateCoverflowDragGesture: some Gesture {
+        DragGesture(minimumDistance: 4)
+            .onChanged { value in
+                guard !visiblePromptTemplates.isEmpty else { return }
+                if promptTemplateCoverflowDragOrigin == nil {
+                    promptTemplateCoverflowDragOrigin = promptTemplateCoverflowOffset
+                    promptTemplateCoverflowTapLocked = false
+                }
+                let origin = promptTemplateCoverflowDragOrigin ?? promptTemplateCoverflowOffset
+                let next = origin - value.translation.width
+                    / (Self.promptTemplateCoverflowCardSize * 0.65)
+                setPromptTemplateCoverflowOffset(next, haptic: true)
+            }
+            .onEnded { value in
+                promptTemplateCoverflowDragOrigin = nil
+                let velocity = value.velocity.width
+                let target: Int
+                if abs(velocity) > 300 {
+                    target = Int((promptTemplateCoverflowOffset - velocity / 800).rounded())
+                } else {
+                    target = promptTemplateCoverflowVirtualIndex
+                }
+                snapPromptTemplateCoverflow(to: target)
+            }
+    }
+
+    private func promptTemplateCoverflowTapped(
+        _ template: RemoteModelManifest.PromptTemplate,
+        at index: Int
+    ) {
+        guard promptTemplateCoverflowIndex != index else {
+            // The focused card is already legible; a click on it asks to read the
+            // whole thing, not to save it unseen. Adding stays on the card's `+`.
+            //
+            // The lock guards only THIS branch: a card that just travelled to the
+            // centre slides under a pointer that is still clicking, and the second
+            // click of a double belongs to the rail, not to the detail page.
+            // Turning a card away, by contrast, is never blocked — gating it made
+            // rapid clicks through the rail stall for the length of the window.
+            guard !promptTemplateCoverflowTapLocked else { return }
+            openPromptTemplateDetail(template)
+            return
+        }
+        let target = Int((promptTemplateCoverflowOffset
+                          + promptTemplateCoverflowDifference(for: index)).rounded())
+        snapPromptTemplateCoverflow(to: target, lockTaps: true)
+    }
+
+    private func openPromptTemplateDetail(_ template: RemoteModelManifest.PromptTemplate) {
+        hoveredPromptTemplateID = nil
+        promptTemplateCoverflowHovering = false
+        withAnimation(.easeOut(duration: 0.18)) {
+            promptTemplateDetailID = template.id
+        }
+    }
+
+    private func closePromptTemplateDetail() {
+        withAnimation(.easeOut(duration: 0.18)) {
+            promptTemplateDetailID = nil
+        }
+    }
+
+    private func wrappedPromptTemplateIndex(_ virtualIndex: Int) -> Int {
+        guard !visiblePromptTemplates.isEmpty else { return 0 }
+        let count = visiblePromptTemplates.count
+        return ((virtualIndex % count) + count) % count
+    }
+
+    /// Each real template is rendered exactly once. Infinite cycling comes from
+    /// choosing that card's nearest equivalent position around the current
+    /// virtual page, never from duplicating template views on both sides.
+    private func promptTemplateCoverflowDifference(for index: Int) -> CGFloat {
+        guard !visiblePromptTemplates.isEmpty else { return 0 }
+        let count = CGFloat(visiblePromptTemplates.count)
+        let wrappedOffset = promptTemplateCoverflowOffset
+            .truncatingRemainder(dividingBy: count)
+        var difference = CGFloat(index) - wrappedOffset
+        let half = count / 2
+        while difference > half { difference -= count }
+        while difference < -half { difference += count }
+        return difference
+    }
+
+    private func setPromptTemplateCoverflowOffset(_ value: CGFloat, haptic: Bool) {
+        guard !visiblePromptTemplates.isEmpty else {
+            promptTemplateCoverflowOffset = 0
+            return
+        }
+        let prior = promptTemplateCoverflowIndex
+        promptTemplateCoverflowOffset = value
+        if haptic, promptTemplateCoverflowIndex != prior {
+            Haptics.alignment()
+        }
+    }
+
+    private func snapPromptTemplateCoverflow(to index: Int, lockTaps: Bool = false) {
+        guard !visiblePromptTemplates.isEmpty else { return }
+        promptTemplateCoverflowTapLocked = lockTaps
+        withAnimation(Self.promptTemplateCoverflowSpring) {
+            setPromptTemplateCoverflowOffset(CGFloat(index), haptic: true)
+        }
+        guard lockTaps else { return }
+        promptTemplateCoverflowTapUnlockToken += 1
+        let token = promptTemplateCoverflowTapUnlockToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.32) {
+            guard token == promptTemplateCoverflowTapUnlockToken else { return }
+            promptTemplateCoverflowTapLocked = false
+        }
+    }
+
+    private func promptTemplateCategoryTitle(_ category: String) -> String {
+        switch category {
+        case "understand": return L("shortcuts.promptAction.templates.category.understand")
+        case "rewrite": return L("shortcuts.promptAction.templates.category.rewrite")
+        case "respond": return L("shortcuts.promptAction.templates.category.respond")
+        case "translation": return L("shortcuts.promptAction.templates.category.translation")
+        default: return category.replacingOccurrences(of: "-", with: " ").capitalized
+        }
+    }
+
+    private func selectPromptTemplateCategory(_ category: String) {
+        guard category != selectedPromptTemplateCategory else { return }
+        selectedPromptTemplateCategory = category
+        promptTemplateCoverflowTapLocked = false
+        promptTemplateCoverflowDragOrigin = nil
+        withAnimation(Self.promptTemplateCoverflowSpring) {
+            promptTemplateCoverflowOffset = 0
+        }
+        Haptics.alignment()
+    }
+
+    private func openPromptTemplatePicker() {
+        promptTemplates = RemoteModelManifest.promptTemplates
+        selectedPromptTemplateCategory = promptTemplateGroups.first?.category ?? ""
+        promptTemplateCoverflowOffset = 0
+        promptTemplateCoverflowHovering = false
+        promptTemplateCoverflowDragOrigin = nil
+        promptTemplateCoverflowTapLocked = false
+        promptTemplateDetailID = nil
+        promptTemplatePickerOpen = true
+        Task {
+            await RemoteModelManifest.refreshIfDue()
+            guard promptTemplatePickerOpen else { return }
+            promptTemplates = RemoteModelManifest.promptTemplates
+            if !promptTemplateGroups.contains(where: {
+                $0.category == selectedPromptTemplateCategory
+            }) {
+                selectedPromptTemplateCategory = promptTemplateGroups.first?.category ?? ""
+            }
+            setPromptTemplateCoverflowOffset(promptTemplateCoverflowOffset, haptic: false)
+        }
+    }
+
+    private func closePromptTemplatePicker() {
+        promptTemplatePickerOpen = false
+        promptTemplateDetailID = nil
+        hoveredPromptTemplateID = nil
+        promptTemplateCoverflowHovering = false
+        promptTemplateCoverflowDragOrigin = nil
+        promptTemplateCoverflowTapLocked = false
+    }
+
+    /// A template's `+` saves it immediately and deliberately leaves this picker
+    /// open, so several ready-made actions can be added in one pass. Editing the
+    /// name, prompt, model, or chord remains available from the saved cards.
+    private func addPromptShortcut(from template: RemoteModelManifest.PromptTemplate) {
+        let shortcut = PromptShortcut(prompt: template.prompt, name: template.name,
+                                      paletteKey: template.category)
+        withAnimation(Tokens.stackSpring) {
+            promptShortcuts.append(shortcut)
+        }
+        PromptShortcutStore.save(promptShortcuts)
+        NotificationCenter.default.post(name: .promptShortcutsChanged, object: nil)
+        Haptics.confirm()
+
+        // The card it was added from leaves the rail immediately, so the picker's
+        // position has to be re-seated: this category may now be empty (its tab is
+        // gone with it), and the offset may point past the end of a shorter group.
+        withAnimation(Self.promptTemplateCoverflowSpring) {
+            if !promptTemplateGroups.contains(where: {
+                $0.category == selectedPromptTemplateCategory
+            }) {
+                selectedPromptTemplateCategory = promptTemplateGroups.first?.category ?? ""
+            }
+            promptTemplateCoverflowOffset = CGFloat(promptTemplateCoverflowIndex)
+        }
+    }
+
+    /// The former `+` behavior remains available as the last picker action. A
+    /// blank row is kept only in memory until the user actually edits a field.
+    private func addBlankPromptShortcut() {
+        let shortcut = PromptShortcut()
+        withAnimation(Tokens.stackSpring) {
+            promptShortcuts.append(shortcut)
+        }
+        closePromptTemplatePicker()
+        DispatchQueue.main.async {
+            presentedPromptShortcutID = shortcut.id
+        }
+    }
+
+    /// A prompt is usually a real instruction, so give it room for several lines
+    /// instead of treating it like another compact setting.
+    private static let promptEditorHeight: CGFloat = 120
 
     /// The header's add chip — smaller than a row's chips, and the height the
     /// title row reserves so the pane's top edge never shaves it.
@@ -3475,12 +4155,26 @@ struct InlineSettingsView: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 9)
             .background(PromptShortcutCardSurface(id: binding.id,
+                                                 paletteKey: binding.paletteSeed,
                                                   hovering: hovered,
                                                   shape: shape))
             .contentShape(shape)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(L("shortcuts.promptAction.edit"))
+        // The rail is ordered, scrolls, and has no drag handles: reordering is
+        // one move — put this one first — and deleting no longer means opening
+        // the card to reach the button inside it.
+        .contextMenu {
+            if promptShortcuts.first?.id != binding.id {
+                Button(L("shortcuts.promptAction.moveToFront")) {
+                    movePromptShortcutToFront(binding.id)
+                }
+            }
+            Button(L("shortcuts.promptAction.delete"), role: .destructive) {
+                deletePromptShortcut(binding.id)
+            }
+        }
         .onHover { hovering in
             withAnimation(.easeOut(duration: Tokens.hoverFade)) {
                 if hovering {
@@ -3490,6 +4184,21 @@ struct InlineSettingsView: View {
                 }
             }
         }
+    }
+
+    /// Order is the rail's order, and it is what the Force Click menu and the
+    /// composer read too — so this writes through the same store as every other
+    /// edit rather than sorting a view-local copy.
+    private func movePromptShortcutToFront(_ id: UUID) {
+        guard let index = promptShortcuts.firstIndex(where: { $0.id == id }),
+              index != 0 else { return }
+        withAnimation(Tokens.stackSpring) {
+            let moved = promptShortcuts.remove(at: index)
+            promptShortcuts.insert(moved, at: 0)
+        }
+        PromptShortcutStore.save(promptShortcuts)
+        NotificationCenter.default.post(name: .promptShortcutsChanged, object: nil)
+        Haptics.alignment()
     }
 
     /// The card's text column — two of them plus their gap fit the pane's width.
@@ -3533,17 +4242,11 @@ struct InlineSettingsView: View {
         NotificationCenter.default.post(name: .promptShortcutsChanged, object: nil)
     }
 
-    /// The editor: one subject (the prompt, full width under its own label) over a
-    /// short settings list whose controls all land on the same right edge.
-    ///
-    /// The list used to run through `settingRow`, whose label column sizes itself
-    /// per row — so "Prompt", "Model" and "Show in force click" each pushed their
-    /// control to a different x and the card read as a pile of unrelated widgets.
-    /// Here the label takes the leading edge, a `Spacer` takes the slack, and the
-    /// control takes the trailing edge; the two menus, the chord cap and the
-    /// switch stack into one column.
+    /// The editor: the full-width prompt is the subject, with its three compact
+    /// settings arranged as a plain-text toolbar on its bottom edge.
     private func promptShortcutCard(_ binding: PromptShortcut) -> some View {
         let target = EditableShortcut.prompt(binding.id)
+        let forceClick = promptForceTouchBinding(for: binding.id)
         return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
                 // Read-only: the name is the AI's, not a field. It used to be a
@@ -3553,7 +4256,7 @@ struct InlineSettingsView: View {
                      ?? (binding.prompt.isEmpty
                          ? L("shortcuts.promptAction")
                          : binding.prompt))
-                    .font(.sf(13.5, weight: .semibold))
+                    .font(.sf(13.5))
                     .foregroundStyle(Tokens.text1)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -3571,37 +4274,26 @@ struct InlineSettingsView: View {
             }
             .padding(.bottom, 14)
 
-            // The prompt is what this card is about, not one field among five: it
-            // gets the full width, under its own label, so a real instruction is
-            // readable while it's being written.
-            Text(L("shortcuts.group.prompt"))
-                .font(.sf(11.5, weight: .medium))
-                .foregroundStyle(Tokens.text3)
-                .padding(.bottom, 6)
-
-            ZStack(alignment: .leading) {
-                if binding.prompt.isEmpty {
-                    Text(L("shortcuts.promptAction.placeholder"))
+            VStack(alignment: .leading, spacing: 0) {
+                ZStack(alignment: .topLeading) {
+                    if binding.prompt.isEmpty {
+                        Text(L("shortcuts.promptAction.placeholder"))
+                            .font(.sf(12.5))
+                            .foregroundStyle(Tokens.text4)
+                            .lineLimit(1)
+                            .padding(.top, 1)
+                            .allowsHitTesting(false)
+                    }
+                    TextField("", text: promptBinding(for: binding.id), axis: .vertical)
+                        .textFieldStyle(.plain)
+                        .lineLimit(4, reservesSpace: true)
                         .font(.sf(12.5))
-                        .foregroundStyle(Tokens.text4)
-                        .lineLimit(1)
-                        .allowsHitTesting(false)
+                        .foregroundStyle(Tokens.text1)
                 }
-                TextField("", text: promptBinding(for: binding.id))
-                    .textFieldStyle(.plain)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .font(.sf(12.5))
-                    .foregroundStyle(Tokens.text1)
-            }
-            .padding(.horizontal, 10)
-            .frame(height: Self.promptControlHeight)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .recessedSurface(in: RoundedRectangle(cornerRadius: 8), lit: false)
-            .padding(.bottom, 14)
+                .frame(maxWidth: .infinity, maxHeight: .infinity,
+                       alignment: .topLeading)
 
-            VStack(spacing: 8) {
-                promptCardRow(L("general.shortcut")) {
+                HStack(spacing: 16) {
                     Button {
                         shortcutHints[target] = nil
                         recordingShortcut = recordingShortcut == target ? nil : target
@@ -3610,31 +4302,39 @@ struct InlineSettingsView: View {
                              ? L("general.shortcut.recording")
                              : (binding.shortcut?.displayString
                                 ?? L("shortcuts.promptAction.set")))
-                            .font(.sf(11.5, weight: recordingShortcut == target
-                                ? .semibold : .medium))
+                            .font(.sf(11))
                             .foregroundStyle(recordingShortcut == target
-                                ? Tokens.text1 : Tokens.text2)
-                            .padding(.horizontal, 10)
-                            .frame(minWidth: 72, minHeight: Self.promptControlHeight)
+                                ? Tokens.text1 : Tokens.text3)
                     }
-                    .buttonStyle(ShortcutChipStyle(active: recordingShortcut == target))
-                }
+                    .buttonStyle(.plain)
+                    .help(L("general.shortcut"))
 
-                promptCardRow(L("shortcuts.promptAction.model")) {
                     promptModelPicker(for: binding.id)
-                }
 
-                if ForceClickFeature.isEnabled {
-                    promptCardRow(L("shortcuts.promptAction.forceTouch")) {
-                        Toggle("", isOn: promptForceTouchBinding(for: binding.id))
-                            .labelsHidden()
-                            .toggleStyle(.switch)
-                            .controlSize(.mini)
-                            .tint(Tokens.text2)
-                            .frame(height: Self.promptControlHeight)
+                    Spacer(minLength: 8)
+
+                    if ForceClickFeature.isEnabled {
+                        Toggle(isOn: forceClick) {
+                            Text(L("shortcuts.promptAction.forceTouch"))
+                                .font(.sf(11))
+                                .foregroundStyle(Tokens.text2)
+                                .lineLimit(1)
+                        }
+                        .toggleStyle(.switch)
+                        .controlSize(.mini)
+                        .tint(Tokens.text2)
+                        .fixedSize()
                     }
                 }
+                .frame(height: 30)
             }
+            .padding(.horizontal, 10)
+            .padding(.top, 9)
+            .padding(.bottom, 4)
+            .frame(maxWidth: .infinity)
+            .frame(height: Self.promptEditorHeight, alignment: .topLeading)
+            .recessedSurface(in: RoundedRectangle(cornerRadius: 8), lit: false)
+            .padding(.bottom, 6)
 
             if let hint = shortcutHints[target] {
                 Text(hint)
@@ -3647,17 +4347,25 @@ struct InlineSettingsView: View {
             // Every field here writes through the moment it changes, but a card with
             // no way to say "that's it" leaves the user guessing whether anything
             // took — so the edit ends the way the app's other dialogs end: one
-            // primary capsule that closes it. Delete sits under it in the quiet
-            // register, on air alone (a rule across the card drew a second,
-            // competing edge inside a slab that already has one).
-            HStack(spacing: 10) {
+            // primary capsule that closes it, with Delete beside it in the quiet
+            // register (a rule across the card drew a second, competing edge inside
+            // a slab that already has one).
+            //
+            // Both are sized to their own words and parked at the bottom right, the
+            // corner every dialog's actions live in. Split full-width, a two-word
+            // Delete wore half the card — the weight of a primary action for the one
+            // thing here that throws work away.
+            HStack(spacing: 8) {
+                Spacer(minLength: 0)
+
                 Button {
                     deletePromptShortcut(binding.id)
                 } label: {
                     Text(L("shortcuts.promptAction.delete"))
-                        .font(.sf(12, weight: .medium))
+                        .font(.sf(12))
                         .foregroundStyle(Tokens.danger)
-                        .frame(maxWidth: .infinity, minHeight: 32)
+                        .padding(.horizontal, 14)
+                        .frame(minHeight: 30)
                 }
                 .buttonStyle(PromptCardActionStyle(kind: .destructive))
 
@@ -3665,34 +4373,18 @@ struct InlineSettingsView: View {
                     closePromptShortcutEditor(binding.id)
                 } label: {
                     Text(L("shortcuts.promptAction.done"))
-                        .font(.sf(12.5, weight: .semibold))
+                        .font(.sf(12.5))
                         .foregroundStyle(Tokens.text1)
-                        .frame(maxWidth: .infinity, minHeight: 32)
+                        .padding(.horizontal, 20)
+                        .frame(minHeight: 30)
                 }
                 .buttonStyle(PromptCardActionStyle(kind: .primary))
                 .keyboardShortcut(.defaultAction)
             }
-            .padding(.top, 16)
+            .padding(.top, 12)
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 16)
-    }
-
-    /// One line of the editor's settings list: label on the leading edge, control
-    /// on the trailing one, every control the same height.
-    private func promptCardRow<Content: View>(
-        _ label: String,
-        @ViewBuilder _ content: () -> Content
-    ) -> some View {
-        HStack(spacing: 12) {
-            Text(label)
-                .font(.sf(12.5))
-                .foregroundStyle(Tokens.text2)
-                .lineLimit(1)
-            Spacer(minLength: 8)
-            content()
-        }
-        .frame(minHeight: Self.promptControlHeight)
     }
 
     private func promptBinding(for id: UUID) -> Binding<String> {
@@ -3717,20 +4409,23 @@ struct InlineSettingsView: View {
         )
     }
 
-    /// Prompt Shortcuts use the same cross-provider menu as the main model picker:
-    /// the same family fold, score badges, hover detail card, and provider hierarchy.
-    /// Only callable providers are included because a shortcut pin must be runnable
-    /// immediately; key setup still belongs to the main Model settings pane.
+    /// Prompt Shortcuts use the full cross-provider menu, but its closed state is
+    /// deliberately just the model name inside the prompt's bottom toolbar.
     private func promptModelPicker(for id: UUID) -> some View {
         let selection = promptModelBinding(for: id)
         let pin = selection.wrappedValue
         return Button {
             promptModelPickerOpen = true
         } label: {
-            modelPickerLabel(provider: pin.provider, modelID: pin.model)
+            Text(ModelRatings.prettyName(for: pin.model, provider: pin.provider))
+                .font(.sf(11))
+                .foregroundStyle(Tokens.text3)
+                .lineLimit(1)
+                .truncationMode(.tail)
         }
         .buttonStyle(.plain)
-        .fixedSize()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .help(L("shortcuts.promptAction.model"))
         .modelMenu(isPresented: $promptModelPickerOpen,
                    models: catalog.rows(selected: pin.provider).filter { $0.hasKey },
                    selectedProvider: pin.provider,
@@ -5524,6 +6219,120 @@ private struct MiniDisplay: View {
                     .frame(width: 12, height: 2)
             }
         }
+    }
+}
+
+/// SwiftUI's `DragGesture` covers click-and-drag, but a two-finger horizontal
+/// trackpad swipe reaches AppKit as scroll-wheel events. Keep that second native
+/// path local to the hovered Cover Flow so the modal's other controls and the
+/// rest of Settings retain their normal scrolling behavior.
+private struct PromptTemplateCoverflowScrollMonitor: NSViewRepresentable {
+    var active: Bool
+    var onDelta: (CGFloat) -> Void
+    var onEnd: () -> Void
+    var onStep: (Int) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        context.coordinator.active = active
+        context.coordinator.onDelta = onDelta
+        context.coordinator.onEnd = onEnd
+        context.coordinator.onStep = onStep
+        context.coordinator.install()
+        return NSView(frame: .zero)
+    }
+
+    func updateNSView(_: NSView, context: Context) {
+        context.coordinator.active = active
+        context.coordinator.onDelta = onDelta
+        context.coordinator.onEnd = onEnd
+        context.coordinator.onStep = onStep
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    static func dismantleNSView(_: NSView, coordinator: Coordinator) {
+        coordinator.remove()
+    }
+
+    final class Coordinator {
+        var active = false {
+            didSet {
+                guard !active else { return }
+                trackingHorizontal = false
+                swallowingMomentum = false
+            }
+        }
+        var onDelta: ((CGFloat) -> Void)?
+        var onEnd: (() -> Void)?
+        var onStep: ((Int) -> Void)?
+
+        private var monitor: Any?
+        private var trackingHorizontal = false
+        private var swallowingMomentum = false
+
+        func install() {
+            guard monitor == nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                self?.handle(event) ?? event
+            }
+        }
+
+        private func handle(_ event: NSEvent) -> NSEvent? {
+            guard active else { return event }
+
+            let deltaX = event.scrollingDeltaX
+            let horizontal = abs(deltaX) > abs(event.scrollingDeltaY)
+
+            // Mouse wheels have no gesture phases. A horizontal wheel nudge is
+            // one discrete page, matching the reference component's side-card
+            // navigation rather than accumulating an invisible fractional drag.
+            if event.phase == [], event.momentumPhase == [] {
+                guard horizontal, abs(deltaX) > 1 else { return event }
+                onStep?(deltaX < 0 ? 1 : -1)
+                return nil
+            }
+
+            // The fingers' real travel already determines the snap. Swallow the
+            // inertial tail so it cannot page again after the rail has settled.
+            if event.momentumPhase != [] {
+                guard swallowingMomentum || trackingHorizontal else { return event }
+                if event.momentumPhase == .ended || event.momentumPhase == .cancelled {
+                    swallowingMomentum = false
+                }
+                return nil
+            }
+
+            switch event.phase {
+            case .began:
+                guard horizontal else { return event }
+                trackingHorizontal = true
+                swallowingMomentum = false
+                if deltaX != 0 { onDelta?(deltaX) }
+                return nil
+
+            case .ended, .cancelled:
+                guard trackingHorizontal else { return event }
+                trackingHorizontal = false
+                swallowingMomentum = true
+                onEnd?()
+                return nil
+
+            default:
+                guard trackingHorizontal || horizontal else { return event }
+                trackingHorizontal = true
+                if horizontal, deltaX != 0 { onDelta?(deltaX) }
+                return nil
+            }
+        }
+
+        func remove() {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            monitor = nil
+            trackingHorizontal = false
+            swallowingMomentum = false
+        }
+
+        deinit { remove() }
     }
 }
 

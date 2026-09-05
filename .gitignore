@@ -32,6 +32,9 @@ Icon
 AGENTS.md
 CLAUDE.md
 
+# Local hosted-model gateway — contains nono's private upstream routing.
+backend/
+
 # Landing page / front-end — kept local only, deployed via Vercel, never
 # published to this repo. Includes ROADMAP/reviews docs that lived here too.
 docs/

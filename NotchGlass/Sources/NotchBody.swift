@@ -93,6 +93,9 @@ struct NotchBody: View {
     /// Images pasted into the live agent detail's follow-up box. They belong to
     /// that one queued/resumed round and clear as soon as it is handed off.
     @State private var agentDetailFollowUpImages: [NSImage] = []
+    /// Tail ownership for the split browser's live Agent detail. Separate from the
+    /// full-page detail because the two scroll views have different viewports.
+    @State private var splitAgentFollowsTail = true
     /// The detail page's own ⌘ metadata menu (engine / folder / completion) —
     /// the same chip a reopened record's follow-up row carries. Local state, not
     /// `model.isResultMetadataMenuOpen`: the two surfaces never coexist, but the
@@ -137,6 +140,31 @@ struct NotchBody: View {
     /// The first level is a single ⋯ chip; tapping it unfurls the two actions to its
     /// right. Local presentational state — collapses on selection or a second tap.
     @State private var manageExpanded = false
+    /// Selection owned by the Debug-only split Recent experiment. Kept separate
+    /// from `highlightedHistoryIndex`: that value is the input field's temporary
+    /// keyboard cursor, while this one is the conversation whose detail stays open
+    /// in the right column. It is normalized to the first visible row whenever the
+    /// experiment mounts or its filtered/bucketed list changes.
+    @State private var splitHistorySelection: UUID? = nil
+    /// Whether the selected record's transcript is parked at its end. The floating
+    /// follow-up composer rides this: reading is the default posture, so the box
+    /// stays folded away over the tail runway until you actually arrive at the end
+    /// of the record — scroll down to the last line and it rises into place. A
+    /// record too short to scroll is already at its end, so it opens with the box
+    /// up and never traps the reply behind a scroll that can't happen.
+    @State private var splitRecordAtTail = false
+    /// Set by tapping the folded composer's Ask chip: the box opens (and takes the
+    /// caret) even though the transcript isn't at its end, so a reply is always one
+    /// click away instead of a scroll away. Cleared whenever the tail state
+    /// actually changes or another record is selected — never mid-typing.
+    @State private var splitComposerForced = false
+    /// The split experiment's own follow-up draft. It cannot share `model.text`
+    /// with the prompt floating above it — one string behind two visible fields
+    /// would type into both — so the record's continuation gets its own buffer,
+    /// handed to the model only at submit.
+    @State private var splitFollowUp: String = ""
+    @State private var splitFollowUpImages: [NSImage] = []
+    @State private var splitAgentMetadataOpen = false
 
     /// Seed `measuredAnswerHeight` from the model's parked measurement, so a
     /// hover-reopen into a long answer mounts DIRECTLY in the clipped layout.
@@ -396,6 +424,9 @@ struct NotchBody: View {
                 // (and Esc) carries the way home.
                 WhatsNewView(model: model)
                     .transition(moduleTransition)
+            } else if DebugFeatureFlags.historySplitView, recentListShown {
+                splitHistoryView
+                    .transition(moduleTransition)
             } else if useImmersiveHistory {
                 // Immersive recent list: the input floats as a translucent header
                 // over a tall scroll surface that reaches UP behind it. Rows scroll
@@ -588,7 +619,13 @@ struct NotchBody: View {
     /// Whether the active bucket has anything to disclose. Agent tasks belong only
     /// to Agent's Recent surface; Chat is Ask / Notes / Reminders history alone.
     private var recentHasContent: Bool {
-        model.recentScopeHistoryCount > 0
+        // The split experiment is one conversation browser, not a compose-bucket
+        // page. Keep its disclosure available for every saved conversation and for
+        // live Agent tasks that do not have a history row yet.
+        if DebugFeatureFlags.historySplitView {
+            return model.unifiedHistoryCount > 0
+        }
+        return model.recentScopeHistoryCount > 0
             || (model.agentComposeActive && !agentManager.tasks.isEmpty)
     }
 
@@ -926,7 +963,9 @@ struct NotchBody: View {
             pinned: model.isAnswerPinned,
             recentOpen: model.showHistory,
             showsRecent: recentHasContent,
-            runningCount: model.agentComposeActive ? agentManager.runningTasks.count : 0,
+            runningCount: DebugFeatureFlags.historySplitView
+                ? agentManager.runningTasks.count
+                : (model.agentComposeActive ? agentManager.runningTasks.count : 0),
             chipSize: chipSize,
             togglePin: {
                 withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
@@ -1631,7 +1670,15 @@ struct NotchBody: View {
     /// here rather than earned: a live run always has an engine and a folder to
     /// name, and a chip that appeared only at settle would move the send button
     /// mid-run.
-    private func agentDetailFollowUpRow(_ task: AgentTaskManager.AgentTask) -> some View {
+    /// `chipSize` is the ⌘ chip's diameter. It matches the composer's own 39pt box
+    /// on the standalone page, where the pair stands alone; the split view passes
+    /// the manage bar's 34 instead, because there the chip sits on the same bottom
+    /// rail as the ⋯ and the collapse chevron and has to read as one of them.
+    private func agentDetailFollowUpRow(
+        _ task: AgentTaskManager.AgentTask,
+        requestsFocus: Bool = true,
+        chipSize: CGFloat = 39
+    ) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             if !agentDetailFollowUpImages.isEmpty {
                 ComposeImagesAttachedLine(images: agentDetailFollowUpImages) { index in
@@ -1642,13 +1689,18 @@ struct NotchBody: View {
                 }
             }
             HStack(alignment: .bottom, spacing: 6) {
-                agentDetailComposer(task)
+                // The box is exactly as tall as the chip beside it (the chip's
+                // diameter less the box's own 12pt of padding), so the rail reads
+                // as one line of controls rather than a tall box with small
+                // buttons parked against it.
+                agentDetailComposer(task, requestsFocus: requestsFocus,
+                                    slotFloor: chipSize - 12)
                     .frame(maxWidth: .infinity)
 
                 GlassIconButton(systemName: "command",
                                 help: L("agent.detail"),
-                                size: 39,
-                                glyphSize: 13,
+                                size: chipSize,
+                                glyphSize: chipSize * (11.5 / 30),
                                 showsTooltip: false) {
                     agentDetailMetadataOpen.toggle()
                 }
@@ -1671,13 +1723,18 @@ struct NotchBody: View {
         }
     }
 
-    private func agentDetailComposer(_ task: AgentTaskManager.AgentTask) -> some View {
+    private func agentDetailComposer(
+        _ task: AgentTaskManager.AgentTask,
+        requestsFocus: Bool = true,
+        slotFloor: CGFloat = 27
+    ) -> some View {
         // The shared box (`ComposerBox`) — the same control the chat follow-up
         // is, and the same one this page's torn-off window carries.
         ComposerBox(
             text: $agentDetailFollowUp,
-            focusTrigger: focused,
-            focused: focused,
+            focusTrigger: requestsFocus && focused,
+            focused: requestsFocus && focused,
+            slotFloor: slotFloor,
             onSubmit: { submitAgentDetailFollowUp(task) },
             onPasteImage: { pasteAgentDetailFollowUpImage(task) },
             // ⌘⏎ is the accelerator for the chip below: stop the round in
@@ -2117,20 +2174,36 @@ struct NotchBody: View {
     /// Agent mode drops Clear entirely — an agent row is a run's only record
     /// (its folder, its log, its resume handle), so a one-tap wipe at the end of
     /// the task list isn't an action that belongs there.
+    ///
+    /// `ruled` draws the faint gradient rule above the pills. The split experiment
+    /// passes false: that layout carries no rules anywhere, and its footer is
+    /// already set apart by the end of the rows above it. `compact` shrinks the
+    /// pair to fit that layout's narrow master column on one row.
     @ViewBuilder
-    private var historyFooterActions: some View {
-        let showsSeeAll = model.recentScopeHistoryCount > NotchModel.notchRecentCap
-        let showsClear = !model.agentComposeActive
+    private func historyFooterActions(
+        ruled: Bool = true,
+        compact: Bool = false,
+        unified: Bool = false
+    ) -> some View {
+        let showsSeeAll = (unified ? model.unifiedHistoryCount
+                                  : model.recentScopeHistoryCount)
+            > NotchModel.notchRecentCap
+        // The combined browser contains durable Agent records alongside Chat,
+        // Notes and Reminders. Keep its footer non-destructive rather than showing
+        // a bucket-scoped Clear button under a list that no longer has buckets.
+        let showsClear = !unified && !model.agentComposeActive
         if showsSeeAll || showsClear {
         VStack(alignment: .leading, spacing: 10) {
-            Rectangle()
-                .fill(
-                    LinearGradient(
-                        colors: [.white.opacity(0), .white.opacity(0.12), .white.opacity(0)],
-                        startPoint: .leading, endPoint: .trailing
+            if ruled {
+                Rectangle()
+                    .fill(
+                        LinearGradient(
+                            colors: [.white.opacity(0), .white.opacity(0.12), .white.opacity(0)],
+                            startPoint: .leading, endPoint: .trailing
+                        )
                     )
-                )
-                .frame(height: 0.5)
+                    .frame(height: 0.5)
+            }
 
             HStack(spacing: 8) {
                 // "See all history" earns its place only once the archive holds MORE
@@ -2141,7 +2214,8 @@ struct NotchBody: View {
                 if showsSeeAll {
                     HistoryFooterButton(
                         icon: "clock.arrow.circlepath",
-                        title: L("recent.menu.seeAll")
+                        title: L("recent.menu.seeAll"),
+                        compact: compact
                     ) {
                         // Fold the expanded recent list back to the compact prompt as
                         // the standalone archive takes over. Otherwise the still-open
@@ -2155,9 +2229,11 @@ struct NotchBody: View {
                             name: .openHistoryArchiveRequested,
                             object: nil,
                             userInfo: [
-                                "scope": model.agentComposeActive
-                                    ? HistoryArchiveScope.agent.rawValue
-                                    : HistoryArchiveScope.chat.rawValue
+                                "scope": unified
+                                    ? HistoryArchiveScope.all.rawValue
+                                    : (model.agentComposeActive
+                                        ? HistoryArchiveScope.agent.rawValue
+                                        : HistoryArchiveScope.chat.rawValue)
                             ]
                         )
                     }
@@ -2168,7 +2244,8 @@ struct NotchBody: View {
                 if showsClear {
                     HistoryFooterButton(
                         icon: "trash",
-                        title: L("recent.clear")
+                        title: L("recent.clear"),
+                        compact: compact
                     ) {
                         withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
                             model.confirmingClear = true
@@ -2179,7 +2256,7 @@ struct NotchBody: View {
             .frame(maxWidth: .infinity)
         }
         .padding(.top, 10)
-        .padding(.horizontal, 8)
+        .padding(.horizontal, ruled ? 8 : 0)
         }
     }
 
@@ -2241,6 +2318,735 @@ struct NotchBody: View {
                 // Keep the popped-up manage menu (an overlay reaching UP over the
                 // rows) drawing above the ScrollView sibling during transitions.
                 .zIndex(1)
+        }
+    }
+
+    // MARK: - Debug split history experiment
+
+    /// Debug-only alternative to the Recent ledger: a narrow master list on the
+    /// left and the selected record's saved thread on the right, both reaching UP
+    /// behind the same floating prompt the immersive list uses. The outer geometry
+    /// is deliberately identical to `immersiveHistoryView` — one
+    /// `immersiveListHeight` band with the header and the manage bar overlaid — so
+    /// switching the experiment on never changes the island's height.
+    ///
+    /// No rules anywhere: the two columns are separated by empty space and the detail
+    /// pane carries no title bar of its own. The master row already names the
+    /// conversation, so repeating it above the transcript would be the loudest
+    /// thing on screen for no information.
+    private var splitHistoryView: some View {
+        let tasks = model.unifiedRecentAgentTasks
+        let items = model.unifiedRecentVisible
+        let visibleIDs = tasks.map(\.id) + items.map(\.id)
+        let selectedID = splitHistorySelection.flatMap { selection in
+            visibleIDs.contains(selection) ? selection : nil
+        } ?? visibleIDs.first
+        let selectedTask = selectedID.flatMap { id in tasks.first { $0.id == id } }
+        let selected = selectedID.flatMap { id in items.first { $0.id == id } }
+
+        return HStack(alignment: .top, spacing: 12) {
+            splitHistoryMaster(tasks: tasks, items: items, selectedID: selectedID)
+                .frame(width: Self.splitMasterWidth)
+
+            if let selectedTask {
+                splitAgentTaskDetail(selectedTask)
+            } else {
+                splitHistoryDetail(selected)
+            }
+        }
+        .frame(height: Self.immersiveListHeight)
+        // Front: the same bare floating prompt the immersive list carries — no
+        // background of its own, so the glass reads identically either way. Its
+        // height matches `immersiveHeaderBaseline`, which is what both columns
+        // reserve as their top runway.
+        .overlay(alignment: .top) {
+            idleInputRow
+                .padding(.bottom, 6)
+        }
+        .overlay(alignment: .bottom) {
+            manageBar
+                .padding(.horizontal, -5)
+                .padding(.bottom, -5)
+        }
+        .onAppear {
+            normalizeSplitHistorySelection()
+            model.markAgentSeen(id: selectedID)
+        }
+        .onChange(of: visibleIDs) { _, ids in
+            normalizeSplitHistorySelection(visibleIDs: ids)
+        }
+        // The detail pane, not the click, is what reads a record: the list opens
+        // with a row already selected, and arrow keys move that selection without
+        // any tap at all.
+        .onChange(of: selectedID) { _, id in
+            model.markAgentSeen(id: id)
+        }
+        .onChange(of: model.highlightedHistoryIndex) { _, index in
+            guard let index, model.unifiedRecentIDs.indices.contains(index) else { return }
+            splitHistorySelection = model.unifiedRecentIDs[index]
+        }
+        .onChange(of: splitHistorySelection) { oldID, newID in
+            guard oldID != newID else { return }
+            // Drafts belong to the conversation they were written under. Dropping
+            // them on selection change is safer than carrying a hidden instruction
+            // or image into another task.
+            splitFollowUp = ""
+            splitFollowUpImages = []
+            agentDetailFollowUp = ""
+            agentDetailFollowUpImages = []
+            agentDetailMetadataOpen = false
+            splitAgentMetadataOpen = false
+            splitAgentFollowsTail = true
+            // Another record opens at its top: back to reading posture.
+            splitRecordAtTail = false
+            splitComposerForced = false
+            sourceCloseWork?.cancel()
+            sourceCloseWork = nil
+            hoveredSourceID = nil
+        }
+        .sourcePopoverOverlay(hoveredID: $hoveredSourceID, closeWork: $sourceCloseWork)
+    }
+
+    /// The master column deliberately carries only enough chrome to identify and
+    /// choose a conversation: the title, nothing else. The per-row timestamp that
+    /// the single-column ledger shows in its trailing slot is dropped here — a
+    /// narrow column of stacked "29m ago" reads as a time ruler running down the
+    /// panel's edge, which is noise next to the thread you're actually reading.
+    private func splitHistoryMaster(
+        tasks: [AgentTaskManager.AgentTask],
+        items: [NotchModel.HistoryItem],
+        selectedID: UUID?
+    ) -> some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 2) {
+                if model.unifiedHistoryCount > 6, model.showHistoryFilter {
+                    HistorySearchField(
+                        text: $model.historySearchQuery,
+                        placeholder: L("recent.filter"),
+                        fontSize: 12,
+                        focusTrigger: filterFocused
+                    )
+                    .frame(height: 18)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(Color.white.opacity(0.04))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .strokeBorder(Tokens.hairline, lineWidth: 0.5)
+                            )
+                    )
+                    .padding(.bottom, 4)
+                    .onAppear {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                            filterFocused = true
+                        }
+                    }
+                    .onChange(of: model.showHistoryFilter) { _, showing in
+                        if !showing { filterFocused = false }
+                    }
+                }
+
+                ForEach(tasks) { task in
+                    Button {
+                        splitHistorySelection = task.id
+                        collapseManageMenu()
+                        // A finished task already has a filed Recent record with
+                        // the same id. Once it has been opened, retire the transient
+                        // status row so it becomes that ordinary history row and
+                        // the settled outcome bead does not stay beside it.
+                        if !task.isRunning {
+                            agentManager.dismissFinished(taskID: task.id)
+                            model.markAgentSeen(id: task.id)
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Text(task.prompt)
+                                .font(.sf(13))
+                                .foregroundStyle(selectedID == task.id ? Tokens.text1 : Tokens.text2)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            // Trailing, like every other row's bead — the titles
+                            // in this column all start at the same x.
+                            AgentStatusDot(running: task.isRunning, outcome: task.outcome)
+                                .frame(width: Self.splitBeadSlot)
+                        }
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 8)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(HistoryRowStyle(selected: selectedID == task.id, capsule: true))
+                }
+
+                ForEach(items) { item in
+                    Button {
+                        collapseManageMenu()
+                        if item.pending {
+                            // Pending Ask rows own a live detached stream. Reattach
+                            // that stream instead of showing a stale saved snapshot.
+                            model.openHistory(item)
+                        } else {
+                            splitHistorySelection = item.id
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            // Selection changes the row's WASH, never its type: a
+                            // weight or size that shifts under the pointer makes
+                            // the whole column twitch as you move down it.
+                            Text(item.displayTitle)
+                                .font(.sf(13))
+                                .foregroundStyle(selectedID == item.id ? Tokens.text1 : Tokens.text2)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            // The only tags that survive the trim: a round that
+                            // produced no answer, and a capture that lives in
+                            // another app. Both change what the row IS; the clock
+                            // does not.
+                            if item.pending {
+                                RecentPendingDots()
+                            } else if item.failed {
+                                Text(L("recent.badge.failed"))
+                                    .font(.sf(10, weight: .medium))
+                                    .foregroundStyle(Tokens.danger.opacity(0.9))
+                            } else if !item.source.isThread {
+                                Text(item.source == .note
+                                     ? L("recent.badge.notes")
+                                     : L("recent.badge.reminders"))
+                                    .font(.sf(10, weight: .medium))
+                                    .foregroundStyle(Tokens.text4)
+                            }
+                            // The bead rides the row's TRAILING edge. On the
+                            // leading edge it was a gutter: every title had to
+                            // either clear it or not, so the column's left edge
+                            // stepped in and out by row type and the narrow master
+                            // column paid 13pt for a mark most rows don't carry.
+                            // Trailing, the titles all start flush at the same x
+                            // and only a row that actually has a bead gives up any
+                            // width for it.
+                            //
+                            // The fade waits a beat first (so it reads as the row
+                            // settling rather than as a click side-effect), then
+                            // dims and shrinks away over half a second, handing the
+                            // width back to the title.
+                            if item.source == .agent,
+                               let outcome = splitAgentOutcome(item.agentOutcome) {
+                                // A read success drops its bead (see
+                                // `markAgentSeen`); a failed or cancelled run keeps
+                                // its mark for good — that one is state, not news.
+                                let consumed = outcome == .success && item.agentSeen
+                                AgentStatusDot(running: false, outcome: outcome)
+                                    .scaleEffect(consumed ? 0.5 : 1)
+                                    .opacity(consumed ? 0 : 1)
+                                    .frame(width: consumed ? 0 : Self.splitBeadSlot)
+                                    .padding(.leading, consumed ? -6 : 0)
+                                    .animation(reduceMotion ? nil
+                                               : .easeInOut(duration: 0.55).delay(0.35),
+                                               value: consumed)
+                            }
+                        }
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 8)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(HistoryRowStyle(selected: selectedID == item.id, capsule: true))
+                    .contextMenu {
+                        Button(L("recent.delete"), role: .destructive) {
+                            withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
+                                model.deleteHistory(id: item.id)
+                            }
+                        }
+                    }
+                }
+
+                if !tasks.isEmpty || !items.isEmpty {
+                    historyFooterActions(ruled: false, compact: true, unified: true)
+                }
+            }
+            .padding(.bottom, immersiveBottomReach)
+            .onScrollOffsetChange { _ in collapseManageMenu() }
+        }
+        // Same runway discipline as `historyListPage`: an inset, not padding, so
+        // the scroll view can't steal it and park the first row under the prompt.
+        .safeAreaInset(edge: .top, spacing: 0) {
+            Color.clear.frame(height: immersiveTopReach)
+        }
+        .scrollIndicators(.never)
+        .scrollEdgeFade(
+            top: true,
+            bottom: true,
+            topFade: immersiveTopReach,
+            bottomFade: immersiveBottomReach
+        )
+        // Nothing in the column may reach into the thread beside it: a long title
+        // and the footer pills both size from their own content, and without this
+        // they spill across the gap onto the transcript.
+        .clipped()
+    }
+
+    /// The split page's live Agent detail. A running task has no `HistoryItem` yet,
+    /// so its task snapshot is rendered directly; when it settles the same id moves
+    /// into the filed-history path without changing the selected conversation.
+    private func splitAgentTaskDetail(_ task: AgentTaskManager.AgentTask) -> some View {
+        let hasComposer = task.isRunning || task.sessionID != nil
+        let bottomID = "split-agent-detail-bottom-\(task.id.uuidString)"
+        let attachmentReach: CGFloat = agentDetailFollowUpImages.isEmpty ? 0 : 40
+        let bottomReach = hasComposer
+            ? splitDetailBottomReach + attachmentReach : immersiveBottomReach
+        return ScrollViewReader { proxy in
+            ScrollView {
+                AgentRecordBody(
+                    task: task,
+                    bottomID: bottomID,
+                    tailRunway: bottomReach,
+                    questionFont: Self.splitDetailFont,
+                    answerFont: Self.splitDetailFont
+                )
+                .padding(.trailing, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(GeometryReader { geo in
+                    Color.clear.preference(
+                        key: AgentDetailContentBottomKey.self,
+                        value: geo.frame(in: .named("split-agent-detail-scroll")).maxY
+                    )
+                })
+            }
+            .coordinateSpace(name: "split-agent-detail-scroll")
+            .safeAreaInset(edge: .top, spacing: 0) {
+                Color.clear.frame(height: immersiveTopReach)
+            }
+            .scrollIndicators(.never)
+            .scrollEdgeFade(
+                top: true,
+                bottom: true,
+                topFade: immersiveTopReach,
+                bottomFade: bottomReach
+            )
+            .onPreferenceChange(AgentDetailContentBottomKey.self) { bottom in
+                let atTail = bottom - Self.immersiveListHeight
+                    <= Self.agentDetailTailSlack
+                if atTail != splitAgentFollowsTail {
+                    splitAgentFollowsTail = atTail
+                    splitComposerForced = false
+                }
+            }
+            .onChange(of: task.log.count) { _, _ in
+                followSplitAgentTail(proxy, bottomID: bottomID)
+            }
+            .onChange(of: task.log.last?.title) { _, _ in
+                followSplitAgentTail(proxy, bottomID: bottomID)
+            }
+            .onChange(of: task.exchanges.count) { _, _ in
+                followSplitAgentTail(proxy, bottomID: bottomID)
+            }
+            .onAppear {
+                splitAgentFollowsTail = true
+                proxy.scrollTo(bottomID, anchor: .bottom)
+            }
+            .overlay(alignment: .bottom) {
+                VStack(spacing: 8) {
+                    if !splitAgentFollowsTail {
+                        GlassIconButton(systemName: "arrow.down",
+                                        help: L("agent.trail.toBottom"),
+                                        size: 26, glyphSize: 11,
+                                        showsTooltip: false) {
+                            splitAgentFollowsTail = true
+                            withAnimation(.easeOut(duration: 0.2)) {
+                                proxy.scrollTo(bottomID, anchor: .bottom)
+                            }
+                        }
+                    }
+                    // Reading posture here too: scrolled back into the trail the
+                    // box folds down to its Ask chip, and the ↓ above returns to
+                    // the tail. Tapping the chip opens the box on the spot.
+                    if hasComposer {
+                        if splitAgentFollowsTail || splitComposerForced {
+                            agentDetailFollowUpRow(
+                                task,
+                                requestsFocus: splitComposerForced,
+                                chipSize: Self.splitRailChip)
+                                .transition(Self.followUpRise)
+                        } else {
+                            HStack(spacing: 0) {
+                                Spacer(minLength: 0)
+                                splitAskChip()
+                                    .transition(Self.followUpRise)
+                            }
+                        }
+                    }
+                }
+                .padding(.trailing, Self.splitRailTrailing)
+                .padding(.bottom, Self.splitRailDrop)
+                .animation(reduceMotion ? nil : Self.followUpRiseSpring,
+                           value: splitAgentFollowsTail)
+                .animation(reduceMotion ? nil : Self.followUpRiseSpring,
+                           value: splitComposerForced)
+            }
+        }
+        .id(task.id)
+    }
+
+    private func followSplitAgentTail(_ proxy: ScrollViewProxy, bottomID: String) {
+        guard splitAgentFollowsTail else { return }
+        withAnimation(.easeOut(duration: 0.2)) {
+            proxy.scrollTo(bottomID, anchor: .bottom)
+        }
+    }
+
+    /// The detail column reads in the PANEL's own answer language — the same
+    /// `UserQuestionBubble` / `AssistantTurnView` pair the result view uses — not
+    /// the standalone archive window's labelled transcript. This surface is a
+    /// detail page inside the island, so it should be indistinguishable from one.
+    @ViewBuilder
+    private func splitHistoryDetail(_ item: NotchModel.HistoryItem?) -> some View {
+        if let item {
+            if item.pending {
+                VStack(alignment: .leading, spacing: 14) {
+                    UserQuestionBubble(text: item.q, baseFont: Self.splitDetailFont)
+                    HStack(spacing: 8) {
+                        RecentPendingDots()
+                        Text(L("recent.answering"))
+                            .font(.sf(Self.splitDetailFont))
+                            .foregroundStyle(Tokens.text3)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.top, immersiveTopReach)
+                .padding(.trailing, 8)
+                .padding(.bottom, immersiveBottomReach)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .id(item.id)
+            } else if item.source.isThread {
+                let showsResume = item.agentInterrupted && item.agentResume != nil
+                let detailBottomReach = splitDetailBottomReach
+                    + (splitFollowUpImages.isEmpty ? 0 : 40)
+                    + (showsResume ? 47 : 0)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        ForEach(item.conversation.filter { !$0.hidesUserBubble }) { turn in
+                            savedTurnView(turn, item: item)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                    .padding(.trailing, 8)
+                    .padding(.bottom, detailBottomReach)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(GeometryReader { geo in
+                        Color.clear.preference(
+                            key: AgentDetailContentBottomKey.self,
+                            value: geo.frame(in: .named("split-record-scroll")).maxY
+                        )
+                    })
+                }
+                .coordinateSpace(name: "split-record-scroll")
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    Color.clear.frame(height: immersiveTopReach)
+                }
+                // Same tail test the agent record uses: how far the content's end
+                // sits below the viewport, with a little slack so a settling scroll
+                // never flickers the composer.
+                .onPreferenceChange(AgentDetailContentBottomKey.self) { bottom in
+                    let atTail = bottom - Self.immersiveListHeight
+                        <= Self.agentDetailTailSlack
+                    if atTail != splitRecordAtTail {
+                        splitRecordAtTail = atTail
+                        splitComposerForced = false
+                    }
+                }
+                .scrollIndicators(.never)
+                .scrollEdgeFade(
+                    top: true,
+                    bottom: true,
+                    topFade: immersiveTopReach,
+                    bottomFade: detailBottomReach
+                )
+                // The record's continuation, floating over the transcript's tail
+                // the way the result view's own follow-up floats over a clipped
+                // answer. Inset past the collapse chevron in the manage bar, which
+                // shares this bottom edge.
+                .overlay(alignment: .bottom) {
+                    HStack(spacing: 0) {
+                        Spacer(minLength: 0)
+                        if splitRecordAtTail || splitComposerForced {
+                            splitFollowUpRow(item)
+                                .transition(Self.followUpRise)
+                        } else {
+                            splitAskChip()
+                                .transition(Self.followUpRise)
+                        }
+                    }
+                    .padding(.trailing, Self.splitRailTrailing)
+                    .padding(.bottom, Self.splitRailDrop)
+                    .animation(reduceMotion ? nil : Self.followUpRiseSpring,
+                               value: splitRecordAtTail)
+                    .animation(reduceMotion ? nil : Self.followUpRiseSpring,
+                               value: splitComposerForced)
+                }
+                .id(item.id)
+            } else {
+                // A Note/Reminder capture has no thread — the saved text and the
+                // jump to the app that owns it are the whole record.
+                VStack(alignment: .leading, spacing: 14) {
+                    Text(item.q)
+                        .font(.sf(Self.splitDetailFont))
+                        .foregroundStyle(Tokens.text1)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    CaptureJumpButton(
+                        title: item.source == .note
+                            ? L("recent.badge.notes")
+                            : L("recent.badge.reminders"),
+                        tint: item.source.tint
+                    ) { model.openCaptureInApp(item) }
+                    Spacer(minLength: 0)
+                }
+                .padding(.top, immersiveTopReach)
+                .padding(.bottom, immersiveBottomReach)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .id(item.id)
+            }
+        } else {
+            Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    /// One saved turn, rendered exactly the way the live result view renders its
+    /// own (`turnView`) — minus everything that only makes sense on a thread you
+    /// can still talk to: no regenerate, no pending question, no streaming state.
+    @ViewBuilder
+    private func savedTurnView(
+        _ turn: NotchModel.Turn,
+        item: NotchModel.HistoryItem
+    ) -> some View {
+        if turn.role == "user" {
+            VStack(alignment: .leading, spacing: 8) {
+                if !turn.imageFiles.isEmpty {
+                    SavedTurnImages(files: turn.imageFiles)
+                        .padding(.leading, 12)
+                } else if turn.usedClipboard {
+                    Text(L("result.basedOnCopied"))
+                        .font(.sf(11))
+                        .tracking(0.2)
+                        .foregroundStyle(Tokens.text4)
+                        .padding(.leading, 12)
+                }
+                UserQuestionBubble(text: turn.text, baseFont: Self.splitDetailFont)
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 14) {
+                if turn.isAgent,
+                   let trail = turn.agentLog?.droppingTrailingAnswer(turn.text),
+                   !trail.isEmpty {
+                    AgentWorkTrailView(entries: trail, baseFont: Self.splitDetailFont)
+                }
+                AssistantTurnView(
+                    text: turn.text,
+                    sources: turn.sources,
+                    hoveredSourceID: $hoveredSourceID,
+                    sourceCloseWork: $sourceCloseWork,
+                    baseFont: Self.splitDetailFont,
+                    isAgent: turn.isAgent,
+                    completedAt: turn.isAgent && item.conversation.last?.id == turn.id
+                        ? item.t : nil,
+                    onInAppCopy: { model.rebaselineClipboardAfterInAppWrite() },
+                    answerModel: turn.answerModel
+                )
+            }
+        }
+    }
+
+    /// The record's follow-up field. Submitting it adopts the record as the live
+    /// thread and sends the line into it — the same continuation the Recent row
+    /// used to give when tapping it loaded the thread into the result view. The
+    /// split layout hands off there, which is where a conversation you're still
+    /// talking to belongs.
+    private func splitFollowUpRow(_ item: NotchModel.HistoryItem) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if item.agentInterrupted,
+               let raw = item.agentResume?.engine,
+               let engine = AgentEngine(rawValue: raw) {
+                Button {
+                    model.openHistory(item)
+                    model.resumeAgentThread()
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.sf(12, weight: .medium))
+                        Text(L("agent.resume", engine.displayName))
+                            .font(.sf(13, weight: .medium))
+                        Spacer(minLength: 0)
+                    }
+                    .foregroundStyle(Tokens.text1)
+                    .padding(.horizontal, 12)
+                    .frame(height: 39)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(SetupModelButtonStyle())
+                .disabled(!engine.isAvailable)
+            }
+            if !splitFollowUpImages.isEmpty {
+                ComposeImagesAttachedLine(images: splitFollowUpImages) { index in
+                    guard splitFollowUpImages.indices.contains(index) else { return }
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                        _ = splitFollowUpImages.remove(at: index)
+                    }
+                }
+            }
+            HStack(alignment: .bottom, spacing: 6) {
+                ComposerBox(
+                    text: $splitFollowUp,
+                    focusTrigger: splitComposerForced,
+                    slotFloor: Self.splitRailChip - 12,
+                    onSubmit: { submitSplitFollowUp(item) },
+                    onPasteImage: { pasteSplitFollowUpImage(item) },
+                    placeholder: { Text(L("result.followUp")) },
+                    trailing: {
+                        if !splitFollowUp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || !splitFollowUpImages.isEmpty {
+                            SendButton(compact: true) { submitSplitFollowUp(item) }
+                                .transition(.scale(scale: 0.6).combined(with: .opacity))
+                        }
+                    })
+                    .frame(maxWidth: .infinity)
+
+                if item.source == .agent {
+                    GlassIconButton(systemName: "command",
+                                    help: L("agent.detail"),
+                                    size: Self.splitRailChip,
+                                    glyphSize: Self.splitRailChip * (11.5 / 30),
+                                    showsTooltip: false) {
+                        splitAgentMetadataOpen.toggle()
+                    }
+                    .modifier(MenuCardWindow(
+                        open: splitAgentMetadataOpen,
+                        upperLeading: true,
+                        onDismiss: { _ in splitAgentMetadataOpen = false },
+                        card: {
+                            AnyView(AgentRunMetadataMenu(
+                                engine: item.agentResume
+                                    .flatMap { AgentEngine(rawValue: $0.engine)?.displayName },
+                                folderPath: item.link,
+                                completedAt: item.t,
+                                onOpenFolder: {
+                                    splitAgentMetadataOpen = false
+                                    if let path = item.link {
+                                        NSWorkspace.shared.open(URL(fileURLWithPath: path))
+                                    }
+                                })
+                                .manageMenuCardBackground())
+                        }))
+                }
+            }
+        }
+    }
+
+    /// The folded composer. Reading a record shouldn't carry a text box across the
+    /// whole foot of the panel, but it must never hide the reply either — so the
+    /// box folds down to one chip on the same rail as the ⋯ and the chevron, and a
+    /// click unfolds it (with the caret already in it). Same glass, same 34pt, same
+    /// line: the rail keeps its shape whichever state it's in.
+    private func splitAskChip() -> some View {
+        GlassIconButton(systemName: "bubble.left",
+                        help: L("result.followUp"),
+                        size: Self.splitRailChip,
+                        glyphSize: Self.splitRailChip * (11.5 / 30),
+                        showsTooltip: false) {
+            splitComposerForced = true
+        }
+    }
+
+    private func submitSplitFollowUp(_ item: NotchModel.HistoryItem) {
+        var line = splitFollowUp.trimmingCharacters(in: .whitespacesAndNewlines)
+        let images = splitFollowUpImages
+        if line.isEmpty {
+            guard !images.isEmpty else { return }
+            line = NotchModel.agentImageOnlyPrompt(count: images.count)
+        }
+        splitFollowUp = ""
+        splitFollowUpImages = []
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
+            model.openHistory(item)
+        }
+        model.text = line
+        model.askComposeImages = images
+        model.submitCurrent()
+    }
+
+    private func pasteSplitFollowUpImage(_ item: NotchModel.HistoryItem) -> Bool {
+        guard model.historyThreadSupportsImages(item),
+              let image = NotchModel.pasteboardImage() else { return false }
+        guard splitFollowUpImages.count < NotchModel.composeImageLimit else { return true }
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+            splitFollowUpImages.append(image)
+        }
+        return true
+    }
+
+    /// How far the detail column's transcript reaches DOWN behind its floating
+    /// follow-up field — the composer's own height plus the runway the rest of the
+    /// panel uses, so the last bubble dissolves behind the field instead of
+    /// stopping on top of it.
+    private var splitDetailBottomReach: CGFloat {
+        immersiveBottomReach + NotchBody.followUpRowHeight
+    }
+
+    /// Reading size for the split experiment's detail column — one step under the
+    /// result view's 14.5, so question, answer and the list beside them all read
+    /// at the same scale instead of the transcript shouting over the column.
+    private static let splitDetailFont: CGFloat = 13
+
+    /// Width of the split experiment's master column. Narrow on purpose: the
+    /// column only has to carry a one-line title, and every point it gives up
+    /// goes to the thread being read beside it. The end-of-list footer stays on
+    /// ONE row at this width because both pills drop to their glyphs there
+    /// (see `HistoryFooterButton.compact`).
+    private static let splitMasterWidth: CGFloat = 96
+
+    /// The split view's bottom rail: the ⋯ chip, the follow-up composer with its ⌘
+    /// chip, and the collapse chevron all sit on ONE line across the island's foot.
+    /// The manage bar hangs 5pt below the layout's bottom edge (`manageBar`'s own
+    /// -5), so the floating follow-up row drops the same 5 to land on that line
+    /// instead of floating a chip's-worth above it. `splitRailChip` is the bar's
+    /// own chip diameter — the ⌘ has to be the chevron's twin, not a size of its
+    /// own — and `splitRailTrailing` clears the chevron by the bar's 6pt spacing
+    /// (chevron: 34 wide, sitting 5 past the edge → 34 - 5 + 6).
+    private static let splitRailChip: CGFloat = 34
+    private static let splitRailDrop: CGFloat = -5
+    private static let splitRailTrailing: CGFloat = 35
+
+    /// How the follow-up box arrives and leaves: it rises out of the bottom rail
+    /// and settles, rather than blinking on. Kept as an offset + scale + fade
+    /// instead of a `.move(edge:)` slide because this overlay isn't clipped — a
+    /// real slide would show the box outside the island on its way in.
+    private static let followUpRise: AnyTransition = .offset(y: 10)
+        .combined(with: .scale(scale: 0.94, anchor: .bottom))
+        .combined(with: .opacity)
+    private static let followUpRiseSpring: Animation = .spring(response: 0.42,
+                                                               dampingFraction: 0.86)
+
+    /// The outcome bead's own width, as the master column's rows lay it out on
+    /// their trailing edge.
+    private static let splitBeadSlot: CGFloat = 7
+
+    private func normalizeSplitHistorySelection(visibleIDs: [UUID]? = nil) {
+        let ids = visibleIDs ?? model.unifiedRecentIDs
+        if let selection = splitHistorySelection,
+           ids.contains(selection) {
+            return
+        }
+        splitHistorySelection = ids.first
+    }
+
+    private func splitAgentOutcome(
+        _ raw: String?
+    ) -> AgentTaskManager.Outcome? {
+        switch raw {
+        case "success":   return .success
+        case "failure":   return .failure
+        case "cancelled": return .cancelled
+        default:           return nil
         }
     }
 
@@ -2479,7 +3285,7 @@ struct NotchBody: View {
                 // are what's left to do. A short list that doesn't scroll shows them
                 // right away, since it's already at its bottom.
                 if !model.recentVisible.isEmpty {
-                    historyFooterActions
+                    historyFooterActions()
                 }
             }
             // The immersive TOP runway is NOT padding — it's a safe-area inset on the
@@ -2940,7 +3746,7 @@ struct NotchBody: View {
     /// `AgentEngine.resumeCommand`. One tap hands the round the app died in the
     /// middle of straight back to the CLI session it left behind; the run picks up
     /// as a live task and re-files this same Recent row when it settles. Styled as
-    /// the same full-width capsule the failed-Ask footer uses.
+    /// a full-width capsule matching `setupModelRow`.
     ///
     /// The engine can be gone by now (uninstalled since the run), and then there's
     /// nothing to press — so the row degrades to naming the terminal command, which
@@ -2983,10 +3789,9 @@ struct NotchBody: View {
         }
     }
 
-    /// The actionable error footer for a failed Ask (XII-85): a full-width capsule —
-    /// "Open Settings" when no key is configured (retrying can't help), else
-    /// "Try again", which re-runs the same question. Styled like `setupModelRow` so
-    /// the result view's footprint doesn't jump between the two.
+    /// The actionable error footer for a failed Ask (XII-85): a content-sized
+    /// capsule — "Open Settings" when no key is configured (retrying can't help),
+    /// else "Try again", which re-runs the same question.
     private func errorActionRow(_ askError: NotchModel.AskError) -> some View {
         Button {
             withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
@@ -3002,7 +3807,6 @@ struct NotchBody: View {
                     .font(.sf(13, weight: .medium))
                 Text(askError.needsSetup ? L("error.openSettings") : L("error.retry"))
                     .font(.sf(14.5, weight: .medium))
-                Spacer(minLength: 0)
                 Image(systemName: askError.needsSetup ? "arrow.up.right" : "chevron.right")
                     .font(.sf(11, weight: .semibold))
                     .foregroundStyle(Tokens.text3)
@@ -3011,8 +3815,8 @@ struct NotchBody: View {
             .padding(.leading, 13)
             .padding(.trailing, 12)
             .frame(height: 39)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
+            .fixedSize(horizontal: true, vertical: false)
+            .contentShape(Capsule())
         }
         .buttonStyle(SetupModelButtonStyle())
     }
@@ -4248,20 +5052,31 @@ private struct HoverMarqueeText: View {
 /// firmer than a passing hover; a hovered-selected row firmer still.
 struct HistoryRowStyle: ButtonStyle {
     var selected: Bool = false
+    /// Fully-rounded wash instead of the 10pt rounded rectangle. For a short,
+    /// single-line row in a narrow column, where a capsule matches the panel's
+    /// other small controls better than a squarish plate.
+    var capsule: Bool = false
     @State private var hovering = false
+
+    /// One shape either way — a radius past half the row's height clamps to a
+    /// capsule, so the capsule case needs no second, type-erased shape.
+    private var shape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: capsule ? 100 : 10, style: .continuous)
+    }
+
     func makeBody(configuration: Configuration) -> some View {
         // 0 → nothing, up to 1 → most present. Even "most" is gentle.
         let presence: Double = selected ? (hovering ? 1.0 : 0.72) : (hovering ? 0.5 : 0)
         return configuration.label
             .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                shape
                     // Faint white floor so the row reads even where the material has
                     // nothing dark behind it to refract.
                     .fill(.white.opacity(0.03 * presence))
                     // A whisper of real glass on top — thin material, held to a low
                     // opacity so it shimmers rather than slabs.
                     .overlay(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        shape
                             .fill(.thinMaterial)
                             .opacity(0.22 * presence)
                     )
@@ -4389,6 +5204,11 @@ extension NotchModel.Panel {
 private struct HistoryFooterButton: View {
     var icon: String
     var title: String
+    /// Glyph-only, for the split experiment's narrow master column: the pair has
+    /// to stay one row there, and "See all history" spelled out is wider than the
+    /// whole column. The label survives as the tooltip and the VoiceOver name, and
+    /// the bare glyph pill is the same species as the manage bar's ⋯ chip.
+    var compact: Bool = false
     var action: () -> Void
 
     @State private var hovering = false
@@ -4405,12 +5225,16 @@ private struct HistoryFooterButton: View {
         Button(action: action) {
             HStack(spacing: 5) {
                 Image(systemName: icon)
-                    .font(.sf(10, weight: .medium))
-                Text(title)
-                    .font(.sf(11, weight: .medium))
+                    .font(.sf(compact ? 11 : 10, weight: .medium))
+                if !compact {
+                    Text(title)
+                        .font(.sf(11, weight: .medium))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                }
             }
             .foregroundStyle(tint)
-            .padding(.horizontal, 10)
+            .padding(.horizontal, compact ? 9 : 10)
             .padding(.vertical, 6)
             .glassCapsule(in: Capsule(), brighter: hovering)
             .contentShape(Capsule())
@@ -4418,6 +5242,8 @@ private struct HistoryFooterButton: View {
         .buttonStyle(GlassPressStyle())
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+        .help(compact ? title : "")
+        .accessibilityLabel(title)
     }
 }
 
@@ -4703,7 +5529,7 @@ struct IdleTrailingCluster: View {
             // surfaces here as the state's own affordance: it shows the panel is held
             // open, and clicking it lets go.
             if pinned {
-                segment(.pin, engaged: true, action: togglePin,
+                segment(.pin, action: togglePin,
                         tooltip: shortcutHelp("result.unpin", action: .pin)) {
                     PinStateGlyph(pinned: true, size: glyphSize, weight: .semibold)
                 }
@@ -4719,7 +5545,7 @@ struct IdleTrailingCluster: View {
                 runningRecentChip
                     .transition(.scale(scale: 0.7).combined(with: .opacity))
             } else if showsRecent || recentOpen {
-                segment(.recent, engaged: recentOpen, action: toggleRecent,
+                segment(.recent, action: toggleRecent,
                         tooltip: L("recent.recent"), showsTooltip: false) {
                     // A downward chevron reads as "pull the recent list down"; it flips
                     // to point up once the list is open, so the same control says
@@ -4774,17 +5600,23 @@ struct IdleTrailingCluster: View {
         .animation(.snappy(duration: 0.3), value: runningCount)
     }
 
-    /// One round glass chip — the ⋯ entry's `GlassIconButton` body, with an extra
-    /// `engaged` ink step (pinned / Recent open) the shared component doesn't carry.
+    /// One round glass chip — the ⋯ entry's `GlassIconButton` body.
+    ///
+    /// Engaged (pinned / Recent open) reads through the GLYPH — the filled upright
+    /// tack, the flipped chevron — and never through a brighter ink. It used to
+    /// step from `text3` to `text2`, which broke the moment the chevron sat beside
+    /// another chip in a permanently-open state (the split rail, where Recent is
+    /// the layout rather than a toggle): the chevron burned at 0.74 next to a
+    /// 0.55 neighbour. Every chip on a rail rests at the same ink now.
     private func segment<Glyph: View>(
-        _ segment: Segment, engaged: Bool, action: @escaping () -> Void,
+        _ segment: Segment, action: @escaping () -> Void,
         tooltip: String, showsTooltip: Bool = true, @ViewBuilder glyph: () -> Glyph
     ) -> some View {
         let hovering = hovered == segment
         return Button(action: action) {
             glyph()
                 .font(.sf(glyphSize, weight: .semibold))
-                .foregroundStyle(hovering ? Tokens.text1 : (engaged ? Tokens.text2 : Tokens.text3))
+                .foregroundStyle(hovering ? Tokens.text1 : Tokens.text3)
                 .frame(width: chipSize, height: chipSize)
                 .glassCapsule(in: Circle(), brighter: hovering)
                 .contentShape(Circle())
@@ -4898,6 +5730,10 @@ struct RecentEntryStyle: ButtonStyle {
 /// `style: .continuous` matches the panel's other rounded shapes.
 struct UserQuestionBubble: View {
     let text: String
+    /// The question's type size. The result view reads at the panel's own 14.5;
+    /// the split history experiment sets it smaller so its narrow reading column
+    /// runs at one size with the list beside it.
+    var baseFont: CGFloat = 14.5
 
     /// Prompt shortcuts keep the captured text inside an explicit wire envelope so
     /// the model cannot mistake it for the instruction. That envelope is transport
@@ -4988,7 +5824,7 @@ struct UserQuestionBubble: View {
             VStack(alignment: .leading, spacing: 8) {
                 if !quote.instruction.isEmpty {
                     Text(quote.instruction)
-                        .font(.sf(14.5, weight: .medium))
+                        .font(.sf(baseFont, weight: .medium))
                         .tracking(-0.1)
                         .foregroundStyle(Tokens.text2)
                         // Reserve at least one collapsed line for the quote itself.
@@ -4997,7 +5833,7 @@ struct UserQuestionBubble: View {
                 }
 
                 Text(quote.selection)
-                    .font(.sf(14.5, weight: .medium))
+                    .font(.sf(baseFont, weight: .medium))
                     .tracking(-0.1)
                     .foregroundStyle(Tokens.text3)
                     .lineLimit(expanded ? nil : max(
@@ -5021,7 +5857,7 @@ struct UserQuestionBubble: View {
             .textSelection(.enabled)
         } else {
             Text(text)
-                .font(.sf(14.5, weight: .medium))
+                .font(.sf(baseFont, weight: .medium))
                 .tracking(-0.1)
                 .foregroundStyle(Tokens.text2)
                 // Collapsed to a fixed cap until the user expands; nil = unlimited.
