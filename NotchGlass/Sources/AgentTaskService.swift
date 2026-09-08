@@ -8,6 +8,7 @@ enum AgentEngine: String, CaseIterable {
     case codex
     case claude
     case grok
+    case cursor
     case commandCode
     case pi
 
@@ -16,6 +17,7 @@ enum AgentEngine: String, CaseIterable {
         case .codex:  return "Codex"
         case .claude: return "Claude"
         case .grok:   return "Grok"
+        case .cursor: return "Cursor"
         case .commandCode: return "Command Code"
         case .pi:     return "PI"
         }
@@ -27,6 +29,7 @@ enum AgentEngine: String, CaseIterable {
         case .codex:  return CodexCLIService.isAvailable
         case .claude: return ClaudeCLIService.isAvailable
         case .grok:   return GrokCLIService.isAvailable
+        case .cursor: return CursorCLIService.isAvailable
         case .commandCode: return CommandCodeCLIService.isAvailable
         case .pi:     return PiCLIService.isAvailable
         }
@@ -42,6 +45,7 @@ enum AgentEngine: String, CaseIterable {
         case .codex:  return CodexCLIService.isAvailabilityResolved
         case .claude: return ClaudeCLIService.isAvailabilityResolved
         case .grok:   return GrokCLIService.isAvailabilityResolved
+        case .cursor: return CursorCLIService.isAvailabilityResolved
         case .commandCode: return CommandCodeCLIService.isAvailabilityResolved
         case .pi:     return PiCLIService.isAvailabilityResolved
         }
@@ -71,6 +75,9 @@ enum AgentEngine: String, CaseIterable {
         case .codex:  return "codex resume \(session)"
         case .claude: return "claude --resume \(session)"
         case .grok:   return "grok --resume \(session)"
+        // Cursor resumes a chat by id from anywhere; the id is the one the
+        // `system`/`init` event named.
+        case .cursor: return "cursor-agent --resume \(session)"
         // A headless Command Code session is hidden from the interactive picker but
         // opens fine when its id is named outright.
         case .commandCode: return "cmd --resume \(session)"
@@ -145,6 +152,19 @@ enum AgentEngine: String, CaseIterable {
             // flag-less default entry (an available engine must never have an
             // empty section, since the menu is the only way to arm it).
             let listed = GrokCLIService.listedModels
+            if listed.isEmpty {
+                return [AgentModelChoice(engine: self, id: nil, label: displayName)]
+            }
+            return listed.map {
+                AgentModelChoice(engine: self, id: $0.id, label: $0.displayName)
+            }
+        case .cursor:
+            // Cursor's catalog is its account's own lineup — a couple of hundred
+            // rows across every major lab plus its house models — read from the CLI
+            // itself (see `CursorCLIService`), labelled with the names the catalog
+            // prints. Same empty-catalog fallback as the others: an available
+            // engine must never have an empty section.
+            let listed = CursorCLIService.listedModels
             if listed.isEmpty {
                 return [AgentModelChoice(engine: self, id: nil, label: displayName)]
             }
@@ -293,6 +313,14 @@ enum AgentEffortCatalog {
             if let curated = manifest(engine: engine, model: id) { return curated }
             guard PiCLIService.supportsThinking(modelID) else { return [] }
             return [.low, .medium, .high, .xhigh, .max]
+        case .cursor:
+            // No effort ladder at all: Cursor has no `--effort` (or equivalent)
+            // flag, and it encodes reasoning level in the model id instead —
+            // `gpt-5.3-codex-low` / `-high` / `-xhigh` are separate catalog rows.
+            // So the choice is already made in the model chip, and an effort chip
+            // here would send a flag the CLI would reject. Still routed through the
+            // manifest first, so if that ever changes it is a website edit.
+            return manifest(engine: engine, model: modelID ?? "") ?? []
         case .claude, .grok:
             // Single-vendor CLIs with a documented, stable ladder (claude's
             // `--effort`, grok's `--reasoning-effort`). Left as the documented set,
@@ -472,6 +500,20 @@ enum AgentDiff {
     /// Several replacements in one call (claude's `MultiEdit`), blank-separated.
     static func combined(_ patches: [String]) -> String {
         patches.filter { !$0.isEmpty }.joined(separator: "\n\n")
+    }
+
+    /// A unified diff the CLI produced itself (Cursor's `diffString`), trimmed to
+    /// fit a trail row. The `---` / `+++` file headers come off: they are not
+    /// changed lines, and `counts` below reads a leading `-` or `+` as exactly
+    /// that, so leaving them in reports every edit as one line more added and one
+    /// more removed than it made.
+    static func unified(_ diff: String) -> String {
+        let body = diff.components(separatedBy: "\n").drop {
+            $0.hasPrefix("--- ") || $0.hasPrefix("+++ ")
+        }
+        guard body.count > lineCap else { return body.joined(separator: "\n") }
+        return (body.prefix(lineCap) + ["… \(body.count - lineCap) more lines"])
+            .joined(separator: "\n")
     }
 
     private static func lines(_ text: String, _ sign: String) -> String {
@@ -937,6 +979,12 @@ final class AgentTaskManager: ObservableObject {
         case .codex:  return CodexCLIService.authExists() ? CodexCLIService.resolveBinary() : nil
         case .claude: return ClaudeCLIService.authExists() ? ClaudeCLIService.resolveBinary() : nil
         case .grok:   return GrokCLIService.authExists() ? GrokCLIService.resolveBinary() : nil
+        case .cursor:
+            // Resolve first, then ask about the sign-in — the pi ordering, and
+            // for the same reason: `CursorCLIService.authExists` reads the model
+            // catalog, and nothing fills that catalog until the binary resolves.
+            guard let binary = CursorCLIService.resolveBinary() else { return nil }
+            return CursorCLIService.authExists() ? binary : nil
         case .commandCode:
             return CommandCodeCLIService.authExists() ? CommandCodeCLIService.resolveBinary() : nil
         case .pi:
@@ -956,6 +1004,7 @@ final class AgentTaskManager: ObservableObject {
         case .codex:  return CodexAgentStreamState()
         case .claude: return ClaudeAgentStreamState()
         case .grok:   return GrokAgentStreamState()
+        case .cursor: return CursorAgentStreamState()
         case .commandCode: return CommandCodeAgentStreamState()
         case .pi:     return PiAgentStreamState()
         }
@@ -967,6 +1016,7 @@ final class AgentTaskManager: ObservableObject {
         case .codex:  return CodexError.spawnFailed(detail).errorDescription
         case .claude: return ClaudeCodeError.spawnFailed(detail).errorDescription
         case .grok:   return GrokError.spawnFailed(detail).errorDescription
+        case .cursor: return CursorError.spawnFailed(detail).errorDescription
         case .commandCode: return CommandCodeError.spawnFailed(detail).errorDescription
         case .pi:     return PiError.spawnFailed(detail).errorDescription
         }
@@ -1099,6 +1149,25 @@ final class AgentTaskManager: ObservableObject {
             if let resumeSession { args += ["--resume", resumeSession] }
             if let model { args += ["-m", model] }
             if let effort { args += ["--effort", effort.rawValue] }
+        case .cursor:
+            // `--force` is what lets file writes and shell commands run unattended
+            // (the twin of codex's workspace-write, claude's acceptEdits, grok's
+            // --always-approve and cmd's --yolo); with no TTY there is nobody to
+            // approve them. `--trust` skips the workspace-trust prompt, which would
+            // otherwise block a headless run on a folder Cursor hasn't seen before,
+            // and `--workspace` pins the project explicitly rather than leaning on
+            // the inherited cwd. The session persists, so a follow-up rides
+            // `--resume <id>`, the id parsed from the `system`/`init` event.
+            //
+            // The prompt is the trailing positional argument: Cursor reads no
+            // prompt from stdin and has no `--prompt-file`, so argv is the only
+            // channel there is. It must stay last — everything after it would be
+            // read as more prompt.
+            args = ["-p", "--output-format", "stream-json",
+                    "--force", "--trust", "--workspace", folder.path]
+            if let resumeSession { args += ["--resume", resumeSession] }
+            if let model { args += ["--model", model] }
+            args.append(prompt)
         case .pi:
             // pi needs no unattended-approval flag at all: headless `-p` runs its
             // tools (read/write/edit/bash/ls/grep/find) without ever prompting —
@@ -1663,6 +1732,9 @@ final class AgentTaskManager: ObservableObject {
         }
         if engine == .pi, PiError.isAuthFailure(reason) {
             return L("pi.error.authExpired")
+        }
+        if engine == .cursor, CursorError.isAuthFailure(reason) {
+            return L("cursor.error.authExpired")
         }
         return reason
     }
@@ -2860,6 +2932,355 @@ private final class GrokAgentStreamState: AgentEventParser {
         lock.lock(); defer { lock.unlock() }
         // A last line the stream never newline-terminated (the `end` event, if
         // the process was killed mid-flush) still gets one parse.
+        if !buffer.isEmpty {
+            buffer.append(0x0A)
+            var residue = AgentProgress()
+            _ = drainLines(into: &residue)
+        }
+        let tail = stderrTail
+            .split(separator: "\n")
+            .map(String.init)
+            .last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })
+            ?? ""
+        return AgentSnapshot(finalMessage: finalMessage, failure: failure,
+                             stderrTail: tail, sawTerminal: sawTerminal)
+    }
+}
+
+/// The **Cursor** dialect (`cursor-agent -p --output-format stream-json`).
+///
+/// Envelope-compatible with Claude Code's — `system`/`init` opens with the session
+/// id and model, `assistant` events carry narration, `result` closes with the
+/// report and the run's token usage — but the tool half is Cursor's own: one
+/// `tool_call` event on `started` and another on `completed`, each carrying a
+/// protobuf `tool_call` object keyed by the tool's case name (`shellToolCall`,
+/// `editToolCall`, `readToolCall`, `grepToolCall`, …). Reasoning arrives as
+/// `thinking` deltas.
+///
+/// Cursor gives the trail one thing none of its siblings do: an edit reports its
+/// own **unified diff** (`result.success.diffString`), so a file change lands as a
+/// real patch row rather than a reconstruction from the call's arguments.
+///
+/// Verified against live runs of CLI 2026.09.02 — every field read below came off
+/// a captured stream, except the tool cases marked as generic, which are handled
+/// by shape rather than by name precisely because they weren't.
+private final class CursorAgentStreamState: AgentEventParser {
+    private let lock = NSLock()
+    private var buffer = Data()
+    private var stderrTail = ""
+    private var finalMessage = ""
+    private var failure: String?
+    private var sawTerminal = false
+    /// call_id → the log entry `started` opened, so `completed` can attach the
+    /// tool's output to it.
+    private var openEntries: [String: UUID] = [:]
+    /// The narration and the reasoning as they stream.
+    private var stream = StreamingBlocks()
+    /// The single plan row, rewritten in place whenever the todo list moves.
+    private var planEntry: UUID?
+
+    func ingest(_ data: Data) -> AgentProgress? {
+        lock.lock(); defer { lock.unlock() }
+        buffer.append(data)
+        var progress = AgentProgress()
+        return drainLines(into: &progress) ? progress : nil
+    }
+
+    private func drainLines(into progress: inout AgentProgress) -> Bool {
+        var any = false
+        while let nl = buffer.firstIndex(of: 0x0A) {
+            let line = buffer.subdata(in: buffer.startIndex..<nl)
+            buffer.removeSubrange(buffer.startIndex...nl)
+            guard !line.isEmpty,
+                  let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+                  let type = obj["type"] as? String
+            else { continue }
+            switch type {
+            case "system":
+                guard obj["subtype"] as? String == "init" else { break }
+                // The model here is a display name ("Auto", "Composer 2.5") rather
+                // than an id — which is what the detail's info line wants anyway.
+                if let model = obj["model"] as? String, !model.isEmpty {
+                    progress.model = model
+                    any = true
+                }
+                if let session = obj["session_id"] as? String, !session.isEmpty {
+                    progress.sessionID = session
+                    any = true
+                }
+            case "thinking":
+                guard obj["subtype"] as? String == "delta",
+                      let text = obj["text"] as? String, !text.isEmpty else {
+                    if obj["subtype"] as? String == "completed" {
+                        stream.close(StreamingBlocks.thinking)
+                    }
+                    break
+                }
+                stream.append(text, slot: StreamingBlocks.thinking,
+                              kind: .thinking, into: &progress)
+                progress.activity = stream.ticker(StreamingBlocks.thinking)
+                any = true
+            case "assistant":
+                guard let message = obj["message"] as? [String: Any],
+                      let content = message["content"] as? [[String: Any]] else { continue }
+                for block in content where block["type"] as? String == "text" {
+                    guard let text = block["text"] as? String, !text.isEmpty else { continue }
+                    // Each event is a completed narration block, not a delta, so it
+                    // opens its own entry rather than growing the previous one.
+                    finalMessage = text
+                    stream.close(StreamingBlocks.narration)
+                    stream.replace(text, slot: StreamingBlocks.narration,
+                                   kind: .plain, into: &progress)
+                    stream.close(StreamingBlocks.narration)
+                    any = true
+                }
+            case "tool_call":
+                guard let call = obj["tool_call"] as? [String: Any],
+                      let id = obj["call_id"] as? String else { continue }
+                if obj["subtype"] as? String == "started" {
+                    if toolStarted(id: id, call: call, into: &progress) { any = true }
+                } else if toolCompleted(id: id, call: call, into: &progress) {
+                    any = true
+                }
+            case "result":
+                sawTerminal = true
+                if (obj["is_error"] as? Bool) == true {
+                    failure = (obj["result"] as? String)
+                        ?? (obj["subtype"] as? String)
+                        ?? "unknown error"
+                } else if let text = obj["result"] as? String, !text.isEmpty {
+                    finalMessage = text
+                }
+                if let usage = obj["usage"] as? [String: Any] {
+                    // `inputTokens` already excludes the cache columns (the CLI
+                    // subtracts them before printing), so the window occupancy is
+                    // the sum of all three.
+                    let input = usage["inputTokens"] as? Int ?? 0
+                    let cacheRead = usage["cacheReadTokens"] as? Int ?? 0
+                    let cacheWrite = usage["cacheWriteTokens"] as? Int ?? 0
+                    let used = input + cacheRead + cacheWrite
+                    if used > 0 {
+                        progress.contextUsed = used
+                        any = true
+                    }
+                    TokenMeter.shared.record(input: input,
+                                             output: usage["outputTokens"] as? Int ?? 0)
+                }
+            default:
+                break   // user echo, retry, task_notification, …
+            }
+        }
+        return any
+    }
+
+    /// A tool call opening: one trail row, plus the ticker line and the
+    /// changed-files summary for the calls that earn them.
+    private func toolStarted(id: String, call: [String: Any],
+                             into progress: inout AgentProgress) -> Bool {
+        // The oneof is serialized as a single key naming the case.
+        guard let (kind, body) = Self.toolCase(call) else { return false }
+        let args = body["args"] as? [String: Any] ?? [:]
+        var title = Self.label(for: kind)
+        var entryKind = AgentLogEntry.Kind.plain
+        var detail: String?
+
+        switch kind {
+        case "shellToolCall":
+            guard let cmd = args["command"] as? String, !cmd.isEmpty else { break }
+            progress.activity = "$ " + String(cmd.prefix(80))
+            title = "$ " + String(cmd.prefix(200))
+        case "editToolCall":
+            guard let path = args["path"] as? String, !path.isEmpty else { break }
+            let file = (path as NSString).lastPathComponent
+            progress.changedFiles.append(file)
+            // Only the after-text is known at this point; the completion below
+            // replaces this row with the CLI's own unified diff.
+            progress.activity = "Editing " + file
+            title = "Editing " + file
+            if let content = args["streamContent"] as? String, !content.isEmpty {
+                entryKind = .diff
+                detail = AgentDiff.addition(content)
+            }
+        case "deleteToolCall":
+            if let path = args["path"] as? String, !path.isEmpty {
+                let file = (path as NSString).lastPathComponent
+                progress.changedFiles.append(file)
+                progress.activity = "Deleting " + file
+                title = "Deleting " + file
+            }
+        case "readToolCall", "readLintsToolCall":
+            // Quieter reads — not on the ticker, but part of the trail. The bare
+            // file name, because the row sits beside a dozen others from the same
+            // project and the absolute path is the same 80 characters every time.
+            if let path = args["path"] as? String, !path.isEmpty {
+                title += " " + (path as NSString).lastPathComponent
+            }
+        case "grepToolCall", "globToolCall":
+            // The pattern leads: it is what the call is *for*, and the path it
+            // searched is almost always the project root.
+            if let pattern = Self.firstString(args, ["pattern", "query"]) {
+                title += " " + String(pattern.prefix(120))
+            } else if let path = args["path"] as? String, !path.isEmpty {
+                title += " " + (path as NSString).lastPathComponent
+            }
+        case "webSearchToolCall", "semSearchToolCall":
+            if let query = Self.firstString(args, ["query", "search_term", "pattern"]) {
+                progress.activity = "Searching " + String(query.prefix(60))
+                title = "Searching " + String(query.prefix(200))
+            }
+        case "webFetchToolCall", "fetchToolCall":
+            if let url = Self.firstString(args, ["url", "uri"]) {
+                progress.activity = "Reading " + String(url.prefix(60))
+                title = "Reading " + String(url.prefix(200))
+            }
+        case "updateTodosToolCall":
+            let items = Self.todos(args["todos"])
+            guard !items.isEmpty else { break }
+            let encoded = AgentTodo.encode(items)
+            if let planEntry {
+                progress.rewrites.append((planEntry, AgentTodo.title(items), encoded))
+            } else {
+                let entry = AgentLogEntry(id: UUID(), title: AgentTodo.title(items),
+                                          mono: false, detail: encoded, kind: .todo)
+                planEntry = entry.id
+                progress.entries.append(entry)
+            }
+            // Deliberately not registered in `openEntries` — its completion would
+            // overwrite the checklist just encoded.
+            return true
+        default:
+            // Every other tool still gets a row: its label plus whichever of the
+            // usual argument names it carries. Reading by shape rather than by name
+            // is what keeps a tool this app has never seen from vanishing from the
+            // trail.
+            if let arg = Self.firstString(args, ["pattern", "query", "path", "url",
+                                                 "target_file", "description"]) {
+                // A path collapses to its file name for the same reason the read
+                // row's does; anything else is already short enough to read.
+                let shown = arg.hasPrefix("/") ? (arg as NSString).lastPathComponent : arg
+                title += " " + String(shown.prefix(120))
+            }
+        }
+
+        let entry = AgentLogEntry(id: UUID(), title: title, mono: true,
+                                  detail: detail, kind: entryKind)
+        openEntries[id] = entry.id
+        progress.entries.append(entry)
+        return true
+    }
+
+    /// A tool call closing: attach its output to the row the opening created, and
+    /// upgrade an edit's row to the real patch the CLI reports.
+    private func toolCompleted(id: String, call: [String: Any],
+                               into progress: inout AgentProgress) -> Bool {
+        guard let entryID = openEntries.removeValue(forKey: id),
+              let (kind, body) = Self.toolCase(call),
+              let result = body["result"] as? [String: Any] else { return false }
+
+        if let error = Self.errorText(result) {
+            progress.details.append((entryID, String(error.prefix(2000)), true))
+            return true
+        }
+        guard let success = result["success"] as? [String: Any] else { return false }
+
+        if kind == "editToolCall", let diff = success["diffString"] as? String,
+           !diff.isEmpty {
+            // Cursor's own unified diff — better than anything reconstructed from
+            // the arguments, so the row is rewritten around it.
+            let path = (success["path"] as? String) ?? ""
+            let file = path.isEmpty ? "" : (path as NSString).lastPathComponent
+            let base = file.isEmpty ? "Edited" : "Editing " + file
+            let patch = AgentDiff.unified(diff)
+            progress.rewrites.append((entryID, AgentDiff.title(base, patch: patch), patch))
+            return true
+        }
+
+        let text = Self.outputText(kind: kind, success: success)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return false }
+        progress.details.append((entryID, String(text.prefix(2000)), false))
+        return true
+    }
+
+    /// The oneof's case name and its body — the single non-bookkeeping key of the
+    /// serialized `tool_call`.
+    private static func toolCase(_ call: [String: Any]) -> (String, [String: Any])? {
+        for (key, value) in call where key.hasSuffix("ToolCall") {
+            if let body = value as? [String: Any] { return (key, body) }
+        }
+        return nil
+    }
+
+    /// "editToolCall" → "Edit". The fallback row title for a tool with no
+    /// hand-written case, so an unrecognized tool still reads as a name.
+    private static func label(for kind: String) -> String {
+        let bare = kind.hasSuffix("ToolCall")
+            ? String(kind.dropLast("ToolCall".count)) : kind
+        return bare.prefix(1).uppercased() + bare.dropFirst()
+    }
+
+    private static func firstString(_ args: [String: Any], _ keys: [String]) -> String? {
+        for key in keys {
+            if let value = args[key] as? String, !value.isEmpty { return value }
+        }
+        return nil
+    }
+
+    /// The human-readable half of a tool's success payload. Shell reports its
+    /// output, a read reports the file, everything else reports whatever message
+    /// it carries.
+    private static func outputText(kind: String, success: [String: Any]) -> String {
+        switch kind {
+        case "shellToolCall":
+            let out = (success["stdout"] as? String) ?? ""
+            let err = (success["stderr"] as? String) ?? ""
+            let joined = [out, err].filter { !$0.isEmpty }.joined(separator: "\n")
+            return joined
+        case "readToolCall":
+            return (success["content"] as? String) ?? ""
+        default:
+            return firstString(success, ["message", "content", "output", "text"]) ?? ""
+        }
+    }
+
+    /// A failing result's reason. Cursor reports failures as their own oneof case
+    /// (`error`, `fileNotFound`, …) rather than a flag, so anything that isn't
+    /// `success` is one — and the case name is the reason when it carries no text.
+    private static func errorText(_ result: [String: Any]) -> String? {
+        for (key, value) in result where key != "success" && key != "isBackground" {
+            guard let body = value as? [String: Any] else { continue }
+            if let text = firstString(body, ["error", "message", "path"]) {
+                return "\(label(for: key)): \(text)"
+            }
+            return label(for: key)
+        }
+        return nil
+    }
+
+    /// The todo list's items, read by shape — the field names are the ones every
+    /// other CLI in this file uses, and an unrecognized shape simply yields no
+    /// plan row rather than a wrong one.
+    private static func todos(_ raw: Any?) -> [(text: String, status: AgentTodo.Status)] {
+        (raw as? [[String: Any]] ?? []).compactMap { item in
+            guard let text = firstString(item, ["content", "text", "title"])
+            else { return nil }
+            switch (item["status"] as? String)?.lowercased() {
+            case "completed", "done":       return (text, .done)
+            case "in_progress", "active":   return (text, .active)
+            default:                        return (text, .pending)
+            }
+        }
+    }
+
+    func appendStderr(_ data: Data) {
+        guard let s = String(data: data, encoding: .utf8) else { return }
+        lock.lock(); defer { lock.unlock() }
+        stderrTail += s
+        if stderrTail.count > 2000 { stderrTail = String(stderrTail.suffix(2000)) }
+    }
+
+    func finish() -> AgentSnapshot {
+        lock.lock(); defer { lock.unlock() }
         if !buffer.isEmpty {
             buffer.append(0x0A)
             var residue = AgentProgress()

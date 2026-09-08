@@ -2039,17 +2039,6 @@ private struct ConfirmationDialogGlass: View {
     var cornerRadius: CGFloat = 22
     var edgeGlow: Bool = false
 
-    /// The hues the rim refracts, in the order they run around it. Deliberately
-    /// desaturated and few: real glass splits light into a narrow band, and four
-    /// pale hues at low alpha read as that, where a full spectrum reads as a toy.
-    private static let rimHues: [Color] = [
-        Color(red: 0.52, green: 0.80, blue: 1.00),   // cool blue
-        Color(red: 0.72, green: 0.58, blue: 1.00),   // violet
-        Color(red: 1.00, green: 0.62, blue: 0.78),   // rose
-        Color(red: 1.00, green: 0.84, blue: 0.60),   // warm amber
-        Color(red: 0.52, green: 0.80, blue: 1.00),   // back to the start
-    ]
-
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         ZStack {
@@ -2067,7 +2056,7 @@ private struct ConfirmationDialogGlass: View {
                 // (plusLighter) so it brightens the glass instead of painting a
                 // border on it. Two passes — a tight one that lives in the hairline
                 // and a wide, fainter one that bleeds a few points inward.
-                let sweep = AngularGradient(colors: Self.rimHues,
+                let sweep = AngularGradient(colors: Tokens.prismHues,
                                             center: .center, angle: .degrees(-45))
                 shape.strokeBorder(sweep, lineWidth: 1.4)
                     .blur(radius: 2.5)
@@ -6889,13 +6878,18 @@ private struct AnswerFooterRegenerateControl<Items: View>: View {
     /// dropped the glass, only for the pointer to relight it: a visible flicker
     /// every time you slid across the seam.
     @State private var hovering = false
+    /// The regenerate menu is its own window. Moving onto a row is a hover-leave
+    /// of this control, which would collapse the chevron (the menu's anchor)
+    /// under the open menu. Hold the tail out for as long as tracking lasts.
+    @State private var menuHeld = false
 
     /// The capsule's width. Narrower than the glyph's square: the chevron is a
     /// tail, not a second icon.
     private static var chevronWidth: CGFloat { 16 }
 
-    /// The pointer is on the control — either half, or the padding between them.
-    private var lit: Bool { hovering }
+    /// The pointer is on the control — either half, or the padding between them —
+    /// or the menu this chevron opened is still tracking.
+    private var lit: Bool { hovering || menuHeld }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -6948,6 +6942,12 @@ private struct AnswerFooterRegenerateControl<Items: View>: View {
         // and its tail isn't a gap the pointer can fall through.
         .contentShape(Capsule())
         .onHover { hovering = $0 }
+        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in
+            if hovering { menuHeld = true }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)) { _ in
+            menuHeld = false
+        }
         .background {
             // A whisper of a chip, not a button plate: the resting fill and rim
             // (`brighter: false`, rim pulled back) rather than the lit ones, and
@@ -7137,6 +7137,11 @@ extension View {
             }
             .allowsHitTesting(request != nil)
             .animation(.easeInOut(duration: 0.16), value: request)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .notchOverlayChromePresented)) { _ in
+            closeWork.wrappedValue?.cancel()
+            closeWork.wrappedValue = nil
+            hoveredID.wrappedValue = nil
         }
     }
 }
@@ -8101,9 +8106,8 @@ struct PromptShortcutCardSurface<S: InsettableShape>: View {
 /// size and nests concentrically inside the card's own radius. Two states, never
 /// competing: `selected` is the card's real highlight (the `/` menu's shared
 /// keyboard+pointer cursor, the Ask menu's armed model), and a plain hover wears
-/// a fainter wash under it. Each row catching the cursor taps the trackpad — the
-/// alignment tap, so running down a menu feels like detents — but only when the
-/// cursor actually changes what's highlighted, and only on the way in.
+/// a fainter wash under it. Menus that want a detent on each unselected row fire
+/// the alignment tap on pointer enter; the model pickers leave that off.
 struct MenuCardRow: View {
     let title: String
     /// The row's one bit of trailing furniture: a shortcut chord, a `CLI` tag.
@@ -8123,6 +8127,9 @@ struct MenuCardRow: View {
     /// its rows (the agent picker's springy glide) — the row still takes the
     /// selected ink, it just doesn't paint a second highlight under it.
     var wash: Bool = true
+    /// Trackpad tap when the pointer enters an unselected row. Off for the
+    /// model pickers: sweeping the list is navigation, not a detent.
+    var haptic: Bool = true
     /// Prompt Shortcut rows reuse the exact stable colour surface from Settings.
     /// Nil leaves every ordinary menu row on its existing neutral wash.
     var promptShortcutID: UUID? = nil
@@ -8177,7 +8184,7 @@ struct MenuCardRow: View {
         .onHover { inside in
             hovering = inside
             guard inside else { return }
-            if !selected { Haptics.alignment() }
+            if haptic, !selected { Haptics.alignment() }
             onHoverIn?()
         }
         .animation(.easeOut(duration: Tokens.rowFade), value: selected)

@@ -190,6 +190,12 @@ struct NotchBody: View {
     /// 30pt bottom corner radius.
     static let panelPadding: CGFloat = 15
 
+    /// Extra side inset for the ANSWER panel only. Its prose column is the widest
+    /// thing the app draws, and at the bare 15 the text ran close to the glass
+    /// edge. Applied inside `resultView`, so idle, settings and every other page
+    /// keeps the uniform 15.
+    static let resultSideInset: CGFloat = 4
+
     /// Runway under the panel's tail row: the uniform inset, except for the bare
     /// first-question wait line, which gets extra room so the lone thinking state
     /// doesn't crowd the rounded bottom edge.
@@ -386,6 +392,9 @@ struct NotchBody: View {
             return p.defaultModel
         }
         if p == .piCode, id.isEmpty || id == PiCLIService.defaultSentinel {
+            return p.defaultModel
+        }
+        if p == .cursorCode, id.isEmpty || id == CursorCLIService.defaultSentinel {
             return p.defaultModel
         }
         return id.isEmpty ? p.defaultModel : id
@@ -1088,6 +1097,7 @@ struct NotchBody: View {
         if ClaudeCLIService.isAvailable { out.append(.claudeCode) }
         if CodexCLIService.isAvailable { out.append(.codex) }
         if GrokCLIService.isAvailable { out.append(.grokCode) }
+        if CursorCLIService.isAvailable { out.append(.cursorCode) }
         if PiCLIService.isAvailable { out.append(.piCode) }
         return out
     }
@@ -1259,7 +1269,9 @@ struct NotchBody: View {
         // and the vendor is exactly what tells its models apart. PI reaches this
         // fallback only for labels without a concrete catalog id; concrete PI ids
         // use `shortDisplayName` above so the provider stays in the picker only.
-        case .commandCode, .pi: return label
+        // Cursor is the third of that kind: its rows are Codex, Claude, Gemini,
+        // Composer — no single family word to drop.
+        case .commandCode, .pi, .cursor: return label
         }
         for sep in ["-", " "] {
             let p = family + sep
@@ -3516,7 +3528,7 @@ struct NotchBody: View {
                                                _ ceiling: CGFloat) -> Bool {
         // The thread's text column: the result panel less its padding and the
         // turn stack's own trailing inset.
-        let column = Tokens.openWidthResult - panelPadding * 2 - 8
+        let column = Tokens.openWidthResult - (panelPadding + resultSideInset) * 2 - 8
         // Wrapped height of one run of text. A CJK glyph takes about a full em,
         // latin about half — precise enough to tell a two-line question from a
         // forty-line report.
@@ -3710,6 +3722,9 @@ struct NotchBody: View {
         // (which was chopping the popup's top off, XII-118). Shared with every
         // other surface that shows a source badge (see `sourcePopoverOverlay`).
         .sourcePopoverOverlay(hoveredID: $hoveredSourceID, closeWork: $sourceCloseWork)
+        // Only the answer panel takes the wider side inset (see `resultSideInset`);
+        // it rides on top of the body's uniform 15.
+        .padding(.horizontal, NotchBody.resultSideInset)
     }
 
     /// Stand-in for the follow-up field while on the offline stub: a full-width
@@ -3791,34 +3806,30 @@ struct NotchBody: View {
 
     /// The actionable error footer for a failed Ask (XII-85): a content-sized
     /// capsule — "Open Settings" when no key is configured (retrying can't help),
-    /// else "Try again", which re-runs the same question.
+    /// else "Try again", which re-runs the same question. When the failure can be
+    /// retried, the capsule's trailing chevron opens the model list, so the retry
+    /// can pick a different model — the answer footer's regenerate control is
+    /// hidden while this row is up (a failed answer has nothing to regenerate),
+    /// and its "Regenerate with…" menu lives here instead.
     private func errorActionRow(_ askError: NotchModel.AskError) -> some View {
-        Button {
-            withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
-                if askError.needsSetup {
-                    model.openSettings()
-                } else {
-                    model.retryLastAsk()
+        ErrorActionRow(
+            needsSetup: askError.needsSetup,
+            models: askError.needsSetup ? [] : model.regenerateModelOptions,
+            primary: {
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                    if askError.needsSetup {
+                        model.openSettings()
+                    } else {
+                        model.retryLastAsk()
+                    }
+                }
+            },
+            retryWith: { pick in
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                    model.retryLastAsk(model: pick)
                 }
             }
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: askError.needsSetup ? "slider.horizontal.3" : "arrow.clockwise")
-                    .font(.sf(13, weight: .medium))
-                Text(askError.needsSetup ? L("error.openSettings") : L("error.retry"))
-                    .font(.sf(14.5, weight: .medium))
-                Image(systemName: askError.needsSetup ? "arrow.up.right" : "chevron.right")
-                    .font(.sf(11, weight: .semibold))
-                    .foregroundStyle(Tokens.text3)
-            }
-            .foregroundStyle(Tokens.text1)
-            .padding(.leading, 13)
-            .padding(.trailing, 12)
-            .frame(height: 39)
-            .fixedSize(horizontal: true, vertical: false)
-            .contentShape(Capsule())
-        }
-        .buttonStyle(SetupModelButtonStyle())
+        )
     }
 
     /// The whole conversation, scrolling: every user/assistant turn stacked, the
@@ -4133,7 +4144,12 @@ struct NotchBody: View {
             // re-run the task in its folder, so "regenerating" it would only
             // hallucinate a fresh report over the real one. (Chat follow-ups on
             // the same reopened thread aren't agent turns, so they keep it.)
-            let canRegenerate = isLastTurn && !turn.isAgent
+            //
+            // A failed round drops it too: the error row under the answer already
+            // owns the re-run — its label retries, its chevron retries on another
+            // model — so a second regenerate control in the footer would be the
+            // same action twice.
+            let canRegenerate = isLastTurn && !turn.isAgent && model.visibleAskError == nil
             VStack(alignment: .leading, spacing: 14) {
                 // An agent answer carries its round's work trail above the report —
                 // the record's copy of the live detail page, so a reopened run
@@ -5463,6 +5479,101 @@ private struct ImmersiveHeaderHeightKey: PreferenceKey {
 /// offline stub. Mirrors the follow-up box's chrome — full capsule, faint fill,
 /// hairline border — and brightens on hover / gives slightly on press so it reads
 /// as the same kind of affordance, just leading somewhere instead of accepting text.
+/// The capsule under a failed Ask: "Open Settings" when there's no key to retry
+/// with, else "Try again". On the retryable side it's a split control — the label
+/// re-runs the question as it was, and the trailing chevron opens the model list
+/// so the retry can run on a different model. That menu is the same
+/// "Regenerate with…" list the answer footer carries; while this row is up the
+/// footer's regenerate control is hidden, so the two never sit on screen at once.
+struct ErrorActionRow: View {
+    let needsSetup: Bool
+    /// The models the chevron menu offers, each flagged if it's the one already in
+    /// effect (greyed — plain "Try again" is exactly that retry). Empty ⇒ no menu.
+    let models: [(model: String, isCurrent: Bool)]
+    let primary: () -> Void
+    let retryWith: (String) -> Void
+
+    /// One hover flag for the whole capsule, so the seam between the label and the
+    /// chevron isn't a gap the surface drops out of.
+    @State private var hovering = false
+
+    private var hasMenu: Bool { !needsSetup && !models.isEmpty }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Button(action: primary) {
+                HStack(spacing: 8) {
+                    Image(systemName: needsSetup ? "slider.horizontal.3" : "arrow.clockwise")
+                        .font(.sf(13, weight: .medium))
+                    Text(needsSetup ? L("error.openSettings") : L("error.retry"))
+                        .font(.sf(14.5, weight: .medium))
+                    // Without a menu the row keeps its plain affordance glyph; with
+                    // one, that trailing slot IS the menu (below), so it isn't
+                    // drawn twice.
+                    if !hasMenu {
+                        Image(systemName: needsSetup ? "arrow.up.right" : "chevron.right")
+                            .font(.sf(11, weight: .semibold))
+                            .foregroundStyle(Tokens.text3)
+                    }
+                }
+                .foregroundStyle(Tokens.text1)
+                .padding(.leading, 13)
+                .padding(.trailing, hasMenu ? 6 : 12)
+                .frame(height: 39)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(ErrorActionPressStyle())
+
+            if hasMenu {
+                Menu {
+                    Text(L("result.regenerate.with"))
+                    ForEach(models, id: \.model) { option in
+                        Button {
+                            retryWith(option.model)
+                        } label: {
+                            if option.isCurrent {
+                                Text(L("result.regenerate.current", option.model))
+                            } else {
+                                Text(option.model)
+                            }
+                        }
+                        .disabled(option.isCurrent)
+                    }
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.sf(11, weight: .semibold))
+                        .foregroundStyle(Tokens.text3)
+                        .frame(width: 26, height: 39)
+                        .contentShape(Rectangle())
+                }
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .padding(.trailing, 4)
+                .notchTooltip(L("result.regenerate.with"))
+            }
+        }
+        .fixedSize(horizontal: true, vertical: false)
+        .contentShape(Capsule())
+        .recessedSurface(in: Capsule(), lit: hovering)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+    }
+}
+
+/// Press feedback for `ErrorActionRow`'s label half — the same give as
+/// `SetupModelButtonStyle`, minus the surface (the capsule is drawn once around
+/// the whole control, so the label must not draw a second one).
+private struct ErrorActionPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.985 : 1)
+            .opacity(configuration.isPressed ? 0.85 : 1)
+            .animation(.spring(response: 0.25, dampingFraction: 0.7), value: configuration.isPressed)
+    }
+}
+
 struct SetupModelButtonStyle: ButtonStyle {
     @State private var hovering = false
     func makeBody(configuration: Configuration) -> some View {
@@ -6188,6 +6299,7 @@ private final class MenuCardAnchorView: NSView {
         self.panel = panel
         self.hosting = hosting
         self.isOpen = true
+        TooltipOverlayGate.enter()
         installDismissMonitors()
         installFrameObservers(on: host)
         NSAnimationContext.runAnimationGroup { ctx in
@@ -6200,6 +6312,7 @@ private final class MenuCardAnchorView: NSView {
         removeDismissMonitors()
         removeFrameObservers()
         guard let panel else { return }
+        TooltipOverlayGate.exit()
         self.panel = nil
         self.hosting = nil
         self.isOpen = false

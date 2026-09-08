@@ -245,31 +245,80 @@ private struct ModelMenuPresenter: NSViewRepresentable {
                     moreModels.append(model)
                 }
             }
-            for m in primary { menu.addItem(modelItem(m)) }
+            addRows(primary, to: menu)
             guard !moreModels.isEmpty else { return }
             // Nothing earned the main list — don't add a "More models" door
             // that opens onto the whole catalog. Put those rows here.
             if primary.isEmpty {
-                for m in moreModels { menu.addItem(modelItem(m)) }
+                addRows(moreModels, to: menu)
                 return
             }
             menu.addItem(.separator())
             let more = NSMenuItem(title: L("model.picker.moreModels"), action: nil,
                                   keyEquivalent: "")
             let sub = newMenu()
-            for m in moreModels { sub.addItem(modelItem(m)) }
+            addRows(moreModels, to: sub)
             more.submenu = sub
             menu.addItem(more)
+        }
+
+        /// An aggregator CLI's menu runs its own models first and everything it
+        /// resells after. Label the two runs so the boundary is visible instead of
+        /// implied by ordering. A menu that is all one kind — every single-vendor
+        /// CLI, every keyed vendor — gets no headings.
+        private func addRows(_ models: [PickerModel], to menu: NSMenu) {
+            let house = models.filter(isHouseModel)
+            let rest = models.filter { !isHouseModel($0) }
+            guard !house.isEmpty, !rest.isEmpty,
+                  let vendor = house.first?.info.vendor, !vendor.isEmpty else {
+                for m in models { menu.addItem(modelItem(m)) }
+                return
+            }
+            menu.addItem(.sectionHeader(title: L("model.picker.houseModels", vendor)))
+            for m in house { menu.addItem(modelItem(m)) }
+            menu.addItem(.sectionHeader(title: L("model.picker.otherModels")))
+            for m in rest { menu.addItem(modelItem(m)) }
         }
 
         /// The main list keeps every scored model at 60 or above. Below that floor,
         /// only a model whose displayed Intelligence meter is the full 5/5 remains;
         /// the meter uses the measured bar first and the existing curated fallback.
+        ///
+        /// A provider's own models are exempt. The floor is a benchmark score, and
+        /// nobody publishes one for a house model — Cursor's `auto` router and its
+        /// Composer builds, xAI's own lineup behind the Grok CLI — so the rule that
+        /// keeps a hundred resold models honest was burying the ones the provider
+        /// actually makes, which for a single-vendor CLI backend is all of them.
         private func showsOutsideMoreModels(_ model: PickerModel) -> Bool {
+            if isHouseModel(model) { return true }
             guard let stats = Provider.modelStats(model.info.id),
                   let value = stats.value else { return false }
             let intelligence = stats.intelligenceBar ?? model.info.intelligence
             return value >= 60 || intelligence == 5
+        }
+
+        /// Whether this row is a model its provider stands behind itself, rather
+        /// than one it resells.
+        ///
+        /// Only the keyless CLI backends are asked. A keyed vendor endpoint serves
+        /// a catalog full of things that aren't chat models at all (embeddings,
+        /// TTS, image), which is exactly what the score floor is for — and the
+        /// gateways resell everything, so they have no house model to find.
+        private func isHouseModel(_ model: PickerModel) -> Bool {
+            switch model.provider {
+            // Single-vendor CLI backends: the whole catalog IS that vendor's own
+            // lineup — the Grok CLI serves xAI's models, Codex OpenAI's, Claude
+            // Code Anthropic's. There is no resold tail to fold away, and a
+            // three-row menu behind a "More models" door is absurd.
+            case .codex, .claudeCode, .grokCode:
+                return true
+            // The aggregator CLIs front other people's models too, so only the
+            // ones their own company makes count.
+            case .cursorCode:
+                return CursorCLIService.vendor(forID: model.info.id) == "Cursor"
+            default:
+                return false
+            }
         }
 
         /// Preserve the catalog's family order, but rank siblings by the same
@@ -284,7 +333,17 @@ private struct ModelMenuPresenter: NSViewRepresentable {
                 if families[family] == nil { familyOrder.append(family) }
                 families[family, default: []].append((offset, model))
             }
-            return familyOrder.flatMap { family in
+            // A provider's own models lead its menu. Ordering here is otherwise the
+            // catalog's, which for an aggregator puts the house models wherever the
+            // API happened to list them — below a dozen resold families, for the
+            // providers whose own models are the point. A single-vendor CLI has
+            // nothing but house models, so this leaves its order untouched.
+            let house = Set(families.filter { _, rows in
+                rows.contains { isHouseModel($0.model) }
+            }.keys)
+            let order = familyOrder.filter(house.contains)
+                + familyOrder.filter { !house.contains($0) }
+            return order.flatMap { family in
                 (families[family] ?? []).sorted { a, b in
                     let av = Provider.modelStats(a.model.info.id)?.value
                     let bv = Provider.modelStats(b.model.info.id)?.value
@@ -462,7 +521,9 @@ struct ModelDetailCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
             HStack(alignment: .center, spacing: 8) {
-                VStack(alignment: .leading, spacing: 5) {
+                VStack(alignment: .leading, spacing: 6) {
+                    VendorLogo(vendor: model.info.vendor, fallback: model.info.id)
+                        .frame(width: 20, height: 20)
                     Text(title.name)
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(Tokens.text1)
@@ -554,6 +615,10 @@ struct ModelDetailCard: View {
                     lineWidth: 0.75)
             }
             .compositingGroup()
+            // The card is the fullest view of a model there is — where a user
+            // decides what to run. Ours is lit here too.
+            .brandAura(in: Self.shape, active: model.provider.isFirstParty,
+                       lineWidth: 1.2)
         }
         .environment(\.colorScheme, .dark)
     }
@@ -1215,6 +1280,7 @@ final class ModelCatalogStore: ObservableObject {
         case .grokCode:   return GrokCLIService.isAvailable
         case .commandCode: return CommandCodeCLIService.isAvailable
         case .piCode:     return PiCLIService.isAvailable
+        case .cursorCode: return CursorCLIService.isAvailable
         // The user's own endpoint needs a URL and a model, not necessarily a key.
         case .custom:     return CustomProvider.isConfigured
         default:          return APIKeyStore.current(for: p) != nil
@@ -1348,6 +1414,24 @@ final class ModelCatalogStore: ObservableObject {
                 }
             }
         }
+        // Cursor is keyless too, and an aggregator like pi: its catalog is whatever
+        // the account may run (`cursor-agent --list-models`), and the ids are bare —
+        // so the rows carry the catalog's own display names and
+        // `CursorCLIService.vendor(forID:)` fills in the labs Cursor's naming drops
+        // ("sonnet-4.5" is Anthropic's). Never publish the bare sentinel.
+        if force || liveByProvider[.cursorCode] == nil {
+            let listed = await Task.detached(priority: .userInitiated) {
+                () -> [(id: String, displayName: String)] in
+                CursorCLIService.refreshModels(force: force)
+                return CursorCLIService.listedModels
+            }.value
+            if !listed.isEmpty {
+                liveByProvider[.cursorCode] = listed.map {
+                    ModelInfo(id: $0.id, vendor: CursorCLIService.vendor(forID: $0.id),
+                              name: $0.displayName)
+                }
+            }
+        }
         // Command Code's catalog rides its installed CLI build, so nothing in the
         // normal path re-reads it within a launch. A manual refresh re-probes it and
         // republishes the store, since its rows come from `Provider.availableModels`
@@ -1469,6 +1553,9 @@ final class ModelCatalogStore: ObservableObject {
     /// and "Default" names nothing you can point at.
     private func title(for info: ModelInfo, provider p: Provider) -> String {
         if info.id.isEmpty { return L("model.picker.default") }
+        // nono's tier names are written here, not read off the gateway's catalog,
+        // so the menu row and the chip beside it say the same thing.
+        if p == .nono { return ModelRatings.nonoName(for: info.id) }
         guard p == .claudeCode, let resolved = claudeResolved[info.id]
         else { return info.name }
         return ClaudeCLIService.displayName(forResolved: resolved)
@@ -1793,7 +1880,8 @@ struct AskRecentModelPickerView: View {
                                 // store; the `/` menu's follow-the-pointer highlight would
                                 // switch models just by sweeping past a row).
                                 emphasized: true,
-                                selected: r == current) {
+                                selected: r == current,
+                                haptic: false) {
                                     // Menu semantics: one click picks and dismisses. Clicking
                                     // the already-armed row just dismisses.
                                     if r != current { arm(r) }
@@ -1847,7 +1935,7 @@ struct AskRecentModelPickerView: View {
                 .frame(height: 0.5)
                 .padding(.horizontal, MenuCard.rowPad)
                 .padding(.vertical, 3)
-            MenuCardRow(title: L("model.picker.more"), selected: false) {
+            MenuCardRow(title: L("model.picker.more"), selected: false, haptic: false) {
                 onDone()
                 onMoreModels()
             }
@@ -2045,6 +2133,12 @@ struct AgentEngineMark: View {
                     .fill(tint, style: FillStyle(eoFill: true))
                     .frame(width: size, height: size)
             }
+        case .cursor:
+            if let mark = VendorLogos.mark(for: "Cursor") {
+                SVGPathShape(pathData: mark.path, viewBox: mark.viewBox)
+                    .fill(tint, style: FillStyle(eoFill: true))
+                    .frame(width: size, height: size)
+            }
         case .pi:
             if let mark = VendorLogos.mark(for: "PI") {
                 SVGPathShape(pathData: mark.path, viewBox: mark.viewBox)
@@ -2208,6 +2302,9 @@ struct AgentModelPickerView: View {
         // No family to name — the rows under it are Claude, GPT, Qwen, Kimi …, so
         // the caption is the account they all run through.
         case .commandCode: return "Command Code"
+        // Same again: Cursor's rows are Codex, Claude, Gemini and its own
+        // Composer, so the caption is the account they run through.
+        case .cursor: return "Cursor"
         // Same, one level out: pi's rows span several accounts as well as several
         // labs, so the caption is the CLI itself.
         case .pi:     return "PI"
@@ -2221,9 +2318,10 @@ struct AgentModelPickerView: View {
     /// just "4.5" says nothing — "Grok 4.5" stays whole.
     private func shortLabel(_ c: AgentModelChoice) -> String {
         // Grok's models are bare version numbers ("4.5" alone says nothing), and
-        // Command Code's span a dozen families the caption can't stand in for —
-        // both keep their labels whole.
-        if c.engine == .grok || c.engine == .commandCode || c.engine == .pi {
+        // Command Code's, pi's and Cursor's span a dozen families the caption
+        // can't stand in for — all of them keep their labels whole.
+        if c.engine == .grok || c.engine == .commandCode || c.engine == .pi
+            || c.engine == .cursor {
             return c.label
         }
         let family = groupTitle(for: c.engine).lowercased()
@@ -2246,11 +2344,15 @@ struct AgentModelPickerView: View {
         c.engine == selectedEngine && c.id == selectedModelID
     }
 
-    /// The list window is a FIXED four rows for every engine. Sizing it to content
-    /// made the card jump on every engine flip — Grok (1 row) → Claude (3) → the
-    /// Command Code fleet (20) resized the popover under the pointer each time,
-    /// and the rows the pointer was aimed at moved out from under it. Four rows is
-    /// the window; anything shorter leaves air, anything longer scrolls.
+    /// The list window is AT MOST four rows: the fleet's own height while it is
+    /// shorter, four rows and a scroll once it is longer — the same rule the Ask
+    /// recents card uses. It was four rows flat for every engine, to stop the card
+    /// resizing on an engine flip, but that made Grok's single model sit on three
+    /// rows of air, and it never bought what it claimed: the card already changes
+    /// height on a flip, because the effort ladder is drawn only for models that
+    /// have rungs. What keeps a flip from throwing the rows around is the anchor,
+    /// not a frozen height — the card hangs from its top edge, so the list stays
+    /// where it is and only the ladder and the engine row below it move.
     private static let listRows = 4
     /// How deep the list dissolves at whichever edge is actually mid-scroll. At
     /// the old 6pt (the card's own padding) the taper was a sliver — rows ended
@@ -2261,14 +2363,21 @@ struct AgentModelPickerView: View {
     /// last proposed and clips.
     private static let edgeFade: CGFloat = 18
 
-    private var listHeight: CGFloat {
+    /// The window the rows are drawn in: the four-row cap, or the content when it
+    /// is shorter.
+    private var listHeight: CGFloat { min(windowHeight, contentHeight) }
+
+    /// The cap — four rows, whatever the fleet's length.
+    private var windowHeight: CGFloat {
         CGFloat(Self.listRows) * MenuCard.rowStride - MenuCard.rowSpacing
     }
 
-    /// What the rows actually add up to — the other half of the bottom-edge test
-    /// (the observer reports the offset, not the remaining travel).
+    /// What the rows actually add up to — the list's height while it is short, and
+    /// the other half of the bottom-edge test (the observer reports the offset,
+    /// not the remaining travel). Floored at one row so an engine whose fleet has
+    /// not landed yet leaves a row of space rather than a negative frame.
     private var contentHeight: CGFloat {
-        CGFloat(engineChoices.count) * MenuCard.rowStride - MenuCard.rowSpacing
+        CGFloat(max(1, engineChoices.count)) * MenuCard.rowStride - MenuCard.rowSpacing
             + (showsDivider ? Self.dividerStride : 0)
     }
 
@@ -2336,6 +2445,13 @@ struct AgentModelPickerView: View {
                 .scrollEdgeFade(top: scrolledOffTop, bottom: scrolledOffBottom,
                                 fade: Self.edgeFade)
                 .frame(height: listHeight)
+                // The height is the one thing here that must NOT animate. A flip
+                // to a shorter fleet resizes the card's window in the same pass,
+                // and that resize is a snap — a list easing down to its new height
+                // inside an already-shrunk window is just a clipped card for the
+                // length of the ease. Model picks ride `selectionSpring`, so
+                // without this the frame would be swept into it.
+                .animation(nil, value: listHeight)
                 // Open centered on the current pick — with the fleet of models the
                 // armed one can sit below the fold, and a picker that opens blind to
                 // its own selection makes the user hunt for their bearings.
@@ -2409,7 +2525,7 @@ struct AgentModelPickerView: View {
     @ViewBuilder
     private func modelRow(_ c: AgentModelChoice) -> some View {
         MenuCardRow(title: shortLabel(c), emphasized: true,
-                    selected: isSelected(c), wash: false) {
+                    selected: isSelected(c), wash: false, haptic: false) {
             // Menu semantics, same as the Ask recents menu: one click picks the
             // model AND closes — no lingering card after the choice is made. The
             // effort dial below is what keeps the card open.
@@ -2441,6 +2557,7 @@ struct AgentModelPickerView: View {
         case .codex:       provider = .codex
         case .claude:      provider = .claudeCode
         case .grok:        provider = .grokCode
+        case .cursor:      provider = .cursorCode
         case .commandCode: provider = .commandCode
         case .pi:          provider = .piCode
         }

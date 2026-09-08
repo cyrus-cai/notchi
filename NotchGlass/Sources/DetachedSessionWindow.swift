@@ -1542,8 +1542,10 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
             })
             .environmentObject(Localization.shared)
             // This window's own edges are the wall its hover tooltips clamp to —
-            // the island's coordinate space doesn't reach here.
-            .notchTooltipClipBox()
+            // the island's layer doesn't reach here. The card is drawn inside the
+            // window's transparent shadow margin, so that margin is the inset:
+            // clamping to the window frame would let a hint hang off the glass.
+            .notchTooltipClipBox(inset: CompactShortcutMetrics.inset)
         let hosting = NSHostingView(rootView: root)
         // This window's size is OURS, not SwiftUI's. Every height here is
         // computed by the controller (`resizeComposer`, `resizeCompactThread`,

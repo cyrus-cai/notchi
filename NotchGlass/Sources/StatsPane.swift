@@ -1074,9 +1074,10 @@ enum StatsSnapshot {
                                  sinceVersion: "0.5.9")
             : TokenMeter.shared.reading
 
-        // The pane's real width in the panel: the settings body's own insets, the
-        // category column, and the divider taken off `openWidthSettings`.
-        let width = Tokens.openWidthSettings - 16 - 104 - 12 - 0.5 - 14
+        // The pane's real width in the panel: the category column and the divider
+        // taken off `openWidthSettings`. The settings body no longer adds a side
+        // inset of its own — it sits on the panel's gutter.
+        let width = Tokens.openWidthSettings - 104 - 12 - 0.5 - 14
         // NOTCH_STATS_SNAPSHOT_FIT=1 clips to the settings pane's real viewport
         // (`NotchBody.immersiveListHeight` less the back-pill chrome, plus the
         // pane's top runway) — the way to see what is above the fold on open,

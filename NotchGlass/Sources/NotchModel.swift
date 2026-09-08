@@ -3893,6 +3893,7 @@ final class NotchModel: ObservableObject {
         case "claudecode", "claude_code": return .claudeCode
         case "grokcode", "grok_code": return .grokCode
         case "pi", "picode", "pi_code": return .piCode
+        case "cursor", "cursorcode", "cursor_code": return .cursorCode
         case "anthropic", "claude": return .anthropic
         case "gemini", "google": return .gemini
         case "deepseek", "deep_seek": return .deepseek
@@ -3911,6 +3912,7 @@ final class NotchModel: ObservableObject {
         case .claudeCode: return "claude_code"
         case .grokCode:   return "grok_code"
         case .piCode:     return "pi_code"
+        case .cursorCode: return "cursor_code"
         case .commandCode: return "command_code"
         default:          return provider.rawValue
         }
@@ -6575,7 +6577,7 @@ final class NotchModel: ObservableObject {
         let provider = APIKeyStore.selectedProvider
         let model = APIKeyStore.effectiveModel(for: provider) ?? provider.defaultModel
         guard provider != .codex, provider != .claudeCode, provider != .grokCode,
-              provider != .piCode else { return false }
+              provider != .piCode, provider != .cursorCode else { return false }
         return Provider.modelSupportsVision(model)
     }
 
@@ -7423,13 +7425,16 @@ final class NotchModel: ObservableObject {
     /// half and the question turn, lift the question back into the input, and re-run
     /// `submit()` so it streams a fresh answer into a clean pair. No-op when there's
     /// nothing to retry.
-    func retryLastAsk() {
+    /// A non-nil `model` runs this one retry on that model only (same one-shot
+    /// override as "regenerate with…"), which is what the error row's chevron menu
+    /// picks — a failed round is often exactly where the user wants another model.
+    func retryLastAsk(model: String? = nil) {
         // Gated on the *visible* error: a retry may only ever re-run the round that
         // actually failed on this screen, never the last question of whatever
         // conversation the user has since opened.
         guard visibleAskError != nil else { return }
         askError = nil
-        resubmitLastQuestion()
+        resubmitLastQuestion(model: model)
     }
 
     /// The newest SETTLED assistant answer's text, trimmed — the target of the

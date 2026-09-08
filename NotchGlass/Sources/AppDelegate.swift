@@ -55,6 +55,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if provider == .grokCode {
             return GrokCLIService(model: APIKeyStore.effectiveModel(for: .grokCode))
         }
+        // Cursor CLI is the same keyless pattern — the user's own
+        // `cursor-agent login` (browser OAuth) or `CURSOR_API_KEY`, no key of ours.
+        // See `CursorCLIService`.
+        if provider == .cursorCode {
+            return CursorCLIService(model: APIKeyStore.effectiveModel(for: .cursorCode))
+        }
         // Command Code is the same keyless pattern — the user's own `cmd login`
         // account, no key of ours. See `CommandCodeCLIService`.
         if provider == .commandCode {
@@ -100,6 +106,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if provider == .grokCode {
             return GrokCLIService(model: model)
         }
+        if provider == .cursorCode {
+            return CursorCLIService(model: model)
+        }
         if provider == .commandCode {
             return CommandCodeCLIService(model: model)
         }
@@ -123,6 +132,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if provider == .codex { return CodexCLIService.isAvailable }
         if provider == .claudeCode { return ClaudeCLIService.isAvailable }
         if provider == .grokCode { return GrokCLIService.isAvailable }
+        if provider == .cursorCode { return CursorCLIService.isAvailable }
         if provider == .commandCode { return CommandCodeCLIService.isAvailable }
         if provider == .piCode { return PiCLIService.isAvailable }
         // The custom endpoint is "configured" when it has a URL and a model id —
@@ -310,14 +320,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // it costs an interactive login shell, so it must not land on the main
         // thread mid-render.
         ShellEnvironment.warmUp()
-        // Resolve the `codex` / `claude` / `grok` / `pi` binaries off-main now, so
-        // the first time Settings asks `isAvailable` (a SwiftUI render) it reads a
-        // warm cache instead of paying the smoke-test spawn on the main thread.
+        // Resolve the `codex` / `claude` / `grok` / `cursor-agent` / `pi` binaries
+        // off-main now, so the first time Settings asks `isAvailable` (a SwiftUI
+        // render) it reads a warm cache instead of paying the smoke-test spawn on
+        // the main thread.
         // Command Code is not among them any more — it is retired, so `cmd` is never
         // spawned at all (see `CommandCodeCLIService.isRetired`).
         CodexCLIService.warmUp()
         ClaudeCLIService.warmUp()
         GrokCLIService.warmUp()
+        CursorCLIService.warmUp()
         PiCLIService.warmUp()
         // Same reason: resolving the proxy may spawn a login shell, and the first
         // agent run must not wait on it.
@@ -2083,3 +2095,4 @@ private extension CGRect {
         return dx * dx + dy * dy
     }
 }
+

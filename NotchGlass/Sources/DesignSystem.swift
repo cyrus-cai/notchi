@@ -107,6 +107,24 @@ enum Tokens {
     static let agentTint    = Color(red: 0.64, green: 0.44, blue: 1.00)
     static let agentInk     = Color(red: 0.82, green: 0.72, blue: 1.00)
 
+    // MARK: Prism
+    //
+    // The hues glass refracts, in the order they run around a rim. Deliberately
+    // desaturated and few: real glass splits light into a narrow band, and four
+    // pale hues at low alpha read as that, where a full spectrum reads as a toy.
+    // The list closes on its first colour so an angular sweep of it has no seam.
+    //
+    // Two surfaces read this — the confirmation slab's edge glow and the
+    // first-party aura (`BrandAura`). Both are the same idea, light caught in a
+    // rim; keeping one list is what stops them drifting into two palettes.
+    static let prismHues: [Color] = [
+        Color(red: 0.52, green: 0.80, blue: 1.00),   // cool blue
+        Color(red: 0.72, green: 0.58, blue: 1.00),   // violet
+        Color(red: 1.00, green: 0.62, blue: 0.78),   // rose
+        Color(red: 1.00, green: 0.84, blue: 0.60),   // warm amber
+        Color(red: 0.52, green: 0.80, blue: 1.00),   // back to the start
+    ]
+
     /// Placeholder text for the prompt — a soft, faint hint, clearly LIGHTER than
     /// real typed text so it reads as a transient suggestion rather than content.
     /// Kept low on the scale so "Ask anything" whispers instead of shouting.
@@ -188,6 +206,58 @@ extension View {
     /// The prominent rung of the same surface — a screen's ONE primary action.
     func prominentSurface<S: InsettableShape>(in shape: S, lit: Bool) -> some View {
         modifier(RecessedSurface(shape: shape, lit: lit, prominent: true))
+    }
+
+    /// Wear the first-party aura (see `BrandAura`) when `active`. Off, it costs
+    /// nothing — no layer, no animation.
+    func brandAura<S: InsettableShape>(in shape: S, active: Bool = true,
+                                       lineWidth: CGFloat = 1) -> some View {
+        overlay {
+            if active { BrandAura(shape: shape, lineWidth: lineWidth) }
+        }
+    }
+}
+
+/// The mark of a **first-party** surface: prism light caught in the rim. Worn
+/// only by nono — the one backend Notchi hosts itself — so that in a list of a
+/// dozen third-party vendors, ours is the one that is visibly lit.
+///
+/// This is the confirmation slab's edge glow (see `ConfirmationDialogGlass`) at
+/// control scale, and nothing more: the same `Tokens.prismHues` sweep, stroked
+/// into the shape's own border in two passes and added with `plusLighter` so it
+/// brightens the surface instead of painting a coloured line on it. The blur
+/// radii scale off `lineWidth` so a 30pt capsule and a 22pt-radius card each get
+/// a rim proportional to themselves.
+///
+/// It does not move. An earlier version rotated the sweep, which read as a stripe
+/// travelling across the panel rather than as light in an edge.
+struct BrandAura<S: InsettableShape>: View {
+    var shape: S
+    var lineWidth: CGFloat = 1
+
+    var body: some View {
+        let sweep = AngularGradient(colors: Tokens.prismHues,
+                                    center: .center, angle: .degrees(-45))
+        ZStack {
+            // The hairline itself, softened just enough to lose its drawn edge.
+            shape.strokeBorder(sweep, lineWidth: lineWidth)
+                .blur(radius: lineWidth * 1.2)
+            // A wider, fainter pass that bleeds a point or two inward — the part
+            // that reads as glow rather than as border. Kept tight: spread past
+            // that and the chip stops looking lit and starts looking hazy.
+            shape.strokeBorder(sweep, lineWidth: lineWidth * 2.4)
+                .blur(radius: lineWidth * 2.6)
+                .opacity(0.3)
+        }
+        // Clipped to the shape, so the glow lives INSIDE the surface. A blurred
+        // stroke otherwise spreads past the border, and what escapes gets cut by
+        // the view's rectangular bounds — which are tangent to the straight edges
+        // but stand well clear of the corners. The result was a halo that
+        // vanished along the sides and squared off at every corner.
+        .clipShape(shape)
+        .blendMode(.plusLighter)
+        .opacity(0.55)
+        .allowsHitTesting(false)
     }
 }
 
@@ -787,65 +857,208 @@ extension View {
 
 // MARK: - Tooltip
 
-/// Name of the **clip box** a tooltip keeps itself inside — published by each
-/// surface that actually clips its content: the island (`ContentView`, right on
-/// the `.frame(width:)` the `NotchShape` clip follows), the detached session
-/// window, and the archive window. A tooltip clamps its horizontal position to
-/// this box so the capsule never runs off the edge and gets chopped.
+/// Hover hints are drawn ONCE PER WINDOW, by a layer that sits above the whole
+/// surface — not by an overlay hanging off each control. `notchTooltipClipBox()`
+/// installs that layer (the island, the detached window, the archive window);
+/// `notchTooltip(_:)` on a control only publishes "here is my rectangle, here is
+/// my text".
 ///
-/// It must be registered on the CLIPPING view, not on the hosting canvas. It used
-/// to sit on `AppDelegate.makePanel`'s root frame — but that frame is the full
-/// *screen-wide* canvas the island floats in, so clamping to it never moved
-/// anything: a capsule spilling off the 600pt island was still comfortably inside
-/// the 1512pt canvas. Same trap as `.scrollView` below; see `resolvedBounds`.
-enum TooltipCoordinateSpace {
-    static let clipBox = "notchTooltipClipBox"
+/// That split is the fix for the capsule that kept getting sliced at the panel's
+/// left and right edge. Earlier versions drew the capsule inside the control's
+/// own subtree and tried to work out, from down there, how much room was left:
+/// they recovered an ancestor's bounds through a named coordinate space or an
+/// environment value (either can arrive a frame late, or not at all), guessed
+/// whether an enclosing ScrollView was the thing really clipping it, and
+/// pre-measured the capsule in a hidden twin so the first frame landed clamped.
+/// Any one of those going wrong drew the capsule outside the clip and the glass
+/// cut it in half — which is why the bug came back each time from a new
+/// direction.
+///
+/// Three things keep this version honest:
+///
+/// - the control publishes a SwiftUI **`Anchor`**, not a rectangle. An anchor is
+///   resolved BY the layer, in the layer's own space (`geo[request.anchor]`), so
+///   there is no global-frame arithmetic to get wrong and no copy of the
+///   control's position to keep in sync — scroll it, resize the window, and the
+///   next layout pass simply resolves somewhere else;
+/// - the layer is a SIBLING of the clipped content, not a descendant, so neither
+///   the island's shape nor any ScrollView can chop it. A clamp that is off by a
+///   few points now reads as slightly off-centre instead of losing half the text;
+/// - the capsule is placed with `alignmentGuide`, which hands the layer the
+///   capsule's real laid-out size DURING the same pass that positions it — no
+///   measure-then-place round trip, so the first frame is already in place.
+///
+/// The one number the layer can't derive is how far inside its own layout frame
+/// the DRAWN wall sits — the island's frame carries the two shoulder flares its
+/// glass body doesn't (`ContentView.topFlare`), the detached window keeps a
+/// transparent margin for its shadow. Each surface passes that as `inset`.
+
+/// What a hovered control publishes: the text, the side it wants, and its own
+/// bounds as an anchor for the layer to resolve.
+private struct TooltipRequest {
+    let text: String
+    let edge: VerticalEdge
+    let anchor: Anchor<CGRect>
 }
 
-/// The clip box's frame in the hosting view's global coordinate space. Passing
-/// the frame explicitly is more reliable than asking each deeply nested anchor
-/// to recover an ancestor's named-space bounds: on macOS that lookup can return
-/// `nil` inside a header/scroll-view composition, which used to leave the tip
-/// effectively unbounded and let right-edge hints run out of the window.
-private struct TooltipClipFrameEnvironmentKey: EnvironmentKey {
-    static let defaultValue: CGRect? = nil
-}
-
-private extension EnvironmentValues {
-    var tooltipClipFrame: CGRect? {
-        get { self[TooltipClipFrameEnvironmentKey.self] }
-        set { self[TooltipClipFrameEnvironmentKey.self] = newValue }
-    }
-}
-
-private struct TooltipClipFramePreferenceKey: PreferenceKey {
-    static let defaultValue: CGRect? = nil
-
-    static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) {
+/// Carries the request up to the window's layer. Only a hovered control
+/// publishes one, so the reduce is simply "the last non-nil wins".
+private struct TooltipRequestKey: PreferenceKey {
+    static let defaultValue: TooltipRequest? = nil
+    static func reduce(value: inout TooltipRequest?, nextValue: () -> TooltipRequest?) {
         if let next = nextValue() { value = next }
     }
 }
 
-/// Publishes the real clipping surface once, then supplies that frame to every
-/// tooltip below it. Keep this modifier on the view whose visible pixels form
-/// the wall (the island/window), not on a screen-wide hosting canvas.
-private struct TooltipClipBoxModifier: ViewModifier {
-    @State private var frame: CGRect?
+/// Draws the capsule for whichever control currently owns the tip, clamped
+/// inside this layer's own box.
+private struct TooltipLayerView: View {
+    let request: TooltipRequest
+    /// How far inside this view's frame the drawn wall sits (see the note above).
+    let inset: CGFloat
 
-    func body(content: Content) -> some View {
-        content
-            // Retain the named space as a compatibility fallback for any frame
-            // before the explicit environment value has arrived.
-            .coordinateSpace(.named(TooltipCoordinateSpace.clipBox))
-            .background(
-                GeometryReader { geometry in
-                    Color.clear.preference(
-                        key: TooltipClipFramePreferenceKey.self,
-                        value: geometry.frame(in: .global))
-                }
-            )
-            .onPreferenceChange(TooltipClipFramePreferenceKey.self) { frame = $0 }
-            .environment(\.tooltipClipFrame, frame)
+    /// Space between the capsule and the control it describes.
+    private static let gap: CGFloat = 6
+    /// Space between the capsule and the wall.
+    private static let margin: CGFloat = 6
+
+    var body: some View {
+        GeometryReader { geo in
+            // The control's rectangle, resolved in THIS view's coordinates.
+            let anchor = geo[request.anchor]
+            let wall = inset + Self.margin
+            let available = max(geo.size.width - wall * 2, 80)
+            let wraps = TooltipTextMetrics.oneLineWidth(request.text) > available
+            ZStack(alignment: .topLeading) {
+                // Fills the layer, so the guides below measure against the whole
+                // surface rather than against the capsule itself.
+                Color.clear
+                TooltipLabel(text: request.text, width: wraps ? available : nil)
+                    // Size to the text (or to the wrap width), never to the
+                    // layer it is drawn in.
+                    .fixedSize()
+                    // `alignmentGuide` is what makes this exact: `d.width` /
+                    // `d.height` ARE the capsule's laid-out size, in the same
+                    // pass that places it. Returning `-x` puts its origin at x.
+                    .alignmentGuide(HorizontalAlignment.leading) { d in
+                        -Self.originX(width: d.width, anchor: anchor,
+                                      wall: wall, host: geo.size)
+                    }
+                    .alignmentGuide(VerticalAlignment.top) { d in
+                        -Self.originY(height: d.height, anchor: anchor,
+                                      edge: request.edge, wall: wall, host: geo.size)
+                    }
+                    // A hint handed to another control is a new capsule, not one
+                    // sliding across the panel.
+                    .id(request.text)
+                    .transition(.opacity)
+            }
+        }
+        // Purely a readout: it never takes the click meant for the control.
+        .allowsHitTesting(false)
+    }
+
+    /// Centred on the control, then pushed off whichever wall it would cross.
+    private static func originX(width: CGFloat, anchor: CGRect,
+                                wall: CGFloat, host: CGSize) -> CGFloat {
+        let lower = wall
+        let upper = host.width - wall - width
+        // Wider than the room even after wrapping: centre it, both ends as far
+        // in as they can be.
+        guard upper > lower else { return (host.width - width) / 2 }
+        return min(max(anchor.midX - width / 2, lower), upper)
+    }
+
+    /// The requested side when it fits, the other side when it doesn't — a
+    /// control near the top edge gets its hint below rather than half off the
+    /// panel.
+    private static func originY(height: CGFloat, anchor: CGRect, edge: VerticalEdge,
+                                wall: CGFloat, host: CGSize) -> CGFloat {
+        let above = anchor.minY - gap - height
+        let below = anchor.maxY + gap
+        let fitsAbove = above >= wall
+        let fitsBelow = below + height <= host.height - wall
+        let y: CGFloat
+        switch edge {
+        case .top:    y = (fitsAbove || !fitsBelow) ? above : below
+        case .bottom: y = (fitsBelow || !fitsAbove) ? below : above
+        }
+        return min(max(y, wall), max(host.height - wall - height, wall))
+    }
+}
+
+/// One-line width of a tip, measured through AppKit with the same font the
+/// capsule draws in.
+///
+/// It answers ONE question — does this text still fit on a single line between
+/// the walls — so a fraction of a point of disagreement with SwiftUI's own
+/// layout is harmless: either answer looks right, and the capsule is placed from
+/// its real size regardless. That is the whole reason the old hidden measuring
+/// twins are gone: they existed to feed the POSITION, and a stale measurement
+/// there put the capsule off the edge.
+@MainActor
+private enum TooltipTextMetrics {
+    private static var cache: [String: CGFloat] = [:]
+
+    static func oneLineWidth(_ text: String) -> CGFloat {
+        if let hit = cache[text] { return hit }
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+            .kern: 0.1,
+        ]
+        let width = (text as NSString).size(withAttributes: attrs).width.rounded(.up)
+            + TooltipLabel.hPadding * 2
+        if cache.count > 400 { cache.removeAll(keepingCapacity: true) }
+        cache[text] = width
+        return width
+    }
+}
+
+/// Posted when a menu, popover, or menu card becomes the front chrome — hover
+/// hints (tooltips, the source popup) should get out of its way. Depth is tracked
+/// by `TooltipOverlayGate`; this fires only on the 0→1 edge.
+extension Notification.Name {
+    static let notchOverlayChromePresented = Notification.Name("notchOverlayChromePresented")
+}
+
+/// Counts live overlay chrome (NSMenu, NSPopover, the island's menu cards) so a
+/// hover hint can refuse to show — and can hide — while one of those is up.
+/// Hover stays true on the control that opened the overlay, and a brief
+/// mouse-exited/entered flicker as the overlay window appears would otherwise
+/// reschedule the tip on top of it.
+@MainActor
+enum TooltipOverlayGate {
+    private(set) static var depth = 0
+    static var blocked: Bool { depth > 0 }
+    private static var installed = false
+
+    static func installIfNeeded() {
+        guard !installed else { return }
+        installed = true
+        let nc = NotificationCenter.default
+        nc.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main) { _ in
+            Task { @MainActor in enter() }
+        }
+        nc.addObserver(forName: NSMenu.didEndTrackingNotification, object: nil, queue: .main) { _ in
+            Task { @MainActor in exit() }
+        }
+        nc.addObserver(forName: NSPopover.willShowNotification, object: nil, queue: .main) { _ in
+            Task { @MainActor in enter() }
+        }
+        nc.addObserver(forName: NSPopover.didCloseNotification, object: nil, queue: .main) { _ in
+            Task { @MainActor in exit() }
+        }
+    }
+
+    static func enter() {
+        depth += 1
+        if depth == 1 {
+            NotificationCenter.default.post(name: .notchOverlayChromePresented, object: nil)
+        }
+    }
+
+    static func exit() {
+        depth = max(0, depth - 1)
     }
 }
 
@@ -857,267 +1070,125 @@ private struct TooltipClipBoxModifier: ViewModifier {
 /// hint over the answer's action icons feels like part of the surface.
 ///
 /// Behaviour matches a real tooltip: it waits a beat (`delay`) after the cursor
-/// settles before fading in — so brushing past an icon doesn't flash it — and
-/// dismisses the instant the cursor leaves. It floats ABOVE the anchor (the
-/// action icons live at the panel's bottom edge, so up is where the room is),
-/// centred on it, as a zero-footprint overlay that never disturbs layout and
-/// never intercepts the click underneath.
+/// settles before appearing — so brushing past an icon doesn't flash it — and
+/// dismisses the instant the cursor leaves, the instant the user clicks, or the
+/// instant overlay chrome (a menu, a popover, a menu card) presents. Hover stays
+/// true while a menu is open under the pointer, so leave alone would leave the
+/// capsule sitting on top of its own menu; a click also suppresses the tip until
+/// the pointer actually leaves, so a hover flicker as the menu appears cannot
+/// bring it back.
+///
+/// This modifier draws nothing: while the pointer rests here it publishes a
+/// request, and the window's layer (see `notchTooltipClipBox`) does the drawing
+/// and the clamping.
 private struct NotchTooltip: ViewModifier {
-    @Environment(\.tooltipClipFrame) private var clipFrame
-
     let text: String
     /// Which side of the control the tip floats on. Footer icons live at the
     /// panel's bottom, so `.top` (up, into the answer) is the default; controls
-    /// pinned near the top edge pass `.bottom` so the tip drops down instead of
-    /// running off the panel.
+    /// pinned near the top edge pass `.bottom`. Either way the layer flips it
+    /// when the chosen side has no room.
     var edge: VerticalEdge = .top
     /// Seconds the cursor must rest on the control before the tip appears.
     var delay: TimeInterval = 0.45
 
     @State private var hovering = false
     @State private var shown = false
-    /// Measured height of the capsule, so the offset clears the control exactly.
-    @State private var tipHeight: CGFloat = 24
-    /// Measured width of the capsule laid out on ONE line, with no wall in the
-    /// way. Compared against `availableWidth` to decide whether this tip has to
-    /// wrap at all; when it doesn't, this is the capsule's drawn width.
-    @State private var naturalWidth: CGFloat = 0
-    /// The anchor's own width, and the horizontal bounds of its clip container
-    /// (see `resolvedBounds`) — both in the anchor's local space, so
-    /// `horizontalNudge` can keep the centred capsule inside the walls.
-    @State private var anchorWidth: CGFloat = 0
-    @State private var boundMinX: CGFloat = -.greatestFiniteMagnitude
-    @State private var boundMaxX: CGFloat = .greatestFiniteMagnitude
+    /// True after a click or overlay presentation, until the pointer leaves.
+    @State private var suppressed = false
     /// Cancels a pending show if the cursor leaves before `delay` elapses.
     @State private var showTask: Task<Void, Never>?
 
-    /// Wall-to-wall room the capsule may occupy, minus the same 6pt margin
-    /// `horizontalNudge` clamps to. `.infinity` when no clip box answered — the
-    /// tip then sizes to its text on one line, as it always has.
-    private var availableWidth: CGFloat {
-        guard boundMinX > -.greatestFiniteMagnitude,
-              boundMaxX < .greatestFiniteMagnitude,
-              boundMaxX > boundMinX else { return .infinity }
-        return max(boundMaxX - boundMinX - 12, 80)
-    }
-
-    /// A tip whose one-line form is wider than the room between the walls has to
-    /// wrap: sliding it sideways can clear one wall, but nothing fits a capsule
-    /// wider than the box inside the box. The intro row's CC BY credit is a full
-    /// sentence and lands here; every short hint keeps its one-line capsule.
-    private var wraps: Bool { naturalWidth > 0 && naturalWidth > availableWidth }
-
-    /// The capsule's drawn width — its natural one-line width, or exactly the
-    /// available room when it has to wrap.
-    private var tipWidth: CGFloat { wraps ? availableWidth : naturalWidth }
-
-    /// How far to shift the capsule horizontally so it never spills past its clip
-    /// container. Zero when the naturally-centred capsule already fits; positive =
-    /// nudge right (off the left wall), negative = nudge left (off the right wall).
-    /// This is what stops the left-most footer icon's tip from being cut off at the
-    /// panel edge — it slides right until it clears.
-    private var horizontalNudge: CGFloat {
-        guard tipWidth > 0, boundMaxX > boundMinX else { return 0 }
-        let margin: CGFloat = 6
-        let center = anchorWidth / 2            // the capsule is centred on the anchor
-        let tipMinX = center - tipWidth / 2
-        let tipMaxX = center + tipWidth / 2
-        let availMin = boundMinX + margin
-        let availMax = boundMaxX - margin
-        // Wider than the container even when clamped: centre it in what's available.
-        guard availMax - availMin >= tipWidth else { return (availMin + availMax) / 2 - center }
-        if tipMinX < availMin { return availMin - tipMinX }   // push right, off the left wall
-        if tipMaxX > availMax { return availMax - tipMaxX }   // push left, off the right wall
-        return 0
-    }
-
-    /// The horizontal walls the capsule must stay inside, in the anchor's own
-    /// space. The `clipBox` (island / detached window / archive window) is the
-    /// authority — that's the view whose clip actually chops the capsule.
-    ///
-    /// A ScrollView around the anchor can clip *tighter* than that, so it narrows
-    /// the box further — but only when the scroll box is actually the anchor's own.
-    /// That guard is the whole point: `bounds(of: .scrollView)` answers for the
-    /// nearest scroll view in the ANCESTRY, and returns a box even when the anchor
-    /// sits outside its visible rect. The header cluster (which lives above the
-    /// conversation scroll, not in it) was getting back a box lying entirely to
-    /// its left — `maxX` negative — and dutifully shoving its tip ~180pt off
-    /// target. Reading the scroll view alone, as this used to, also silently
-    /// dropped the island wall on the footer icons: the scroll box measured wider
-    /// than the 600pt island, so the left-most tip "fit" and was never nudged —
-    /// which is exactly how it ended up sliced off at the island's edge.
-    ///
-    /// The test is OVERLAP, not containment. Containment (`minX <= 0 && maxX >=
-    /// width`) looks stricter and safer, but it dropped the scroll wall on exactly
-    /// the icon that needs it: the answer footer's left-most button carries a -5pt
-    /// lead inset (it optically aligns its 11pt glyph in a 22pt hit-frame with the
-    /// text above), so the icon starts 5pt LEFT of the scroll's own left edge. The
-    /// scroll box then failed "straddles it on both sides", the capsule clamped to
-    /// the island instead — 14pt outside the scroll viewport — and the long-answer
-    /// (scrolling) layout chopped its left cap off against the scroll's clip. An
-    /// overlap test keeps rejecting the header case (a box entirely to one side)
-    /// while still claiming a scroll the anchor merely straddles by a few points.
-    private static func resolvedBounds(_ g: GeometryProxy,
-                                       clipFrame: CGRect?) -> (minX: CGFloat, maxX: CGFloat) {
-        let explicitBounds: (minX: CGFloat, maxX: CGFloat)? = clipFrame.map { clip in
-            let anchor = g.frame(in: .global)
-            return (clip.minX - anchor.minX, clip.maxX - anchor.minX)
-        }
-        let namedBounds = g.bounds(of: .named(TooltipCoordinateSpace.clipBox)).map {
-            (minX: $0.minX, maxX: $0.maxX)
-        }
-        guard let clip = explicitBounds ?? namedBounds else {
-            return (-.greatestFiniteMagnitude, .greatestFiniteMagnitude)
-        }
-        var minX = clip.minX, maxX = clip.maxX
-        // `0..<g.size.width` × `0..<g.size.height` IS the anchor in this space, so
-        // "this scroll is the one clipping me" is: its box overlaps the anchor on
-        // both axes. A box lying off to one side (the header cluster's) doesn't.
-        if let scroll = g.bounds(of: .scrollView),
-           scroll.maxX > 0, scroll.minX < g.size.width,
-           scroll.maxY > 0, scroll.minY < g.size.height {
-            minX = max(minX, scroll.minX)
-            maxX = min(maxX, scroll.maxX)
-        }
-        return (minX, maxX)
-    }
-
     func body(content: Content) -> some View {
         content
+            // The whole contribution from down here: this control's own bounds,
+            // as an anchor the layer resolves into its own space, and only while
+            // the tip is actually up.
+            .anchorPreference(key: TooltipRequestKey.self, value: .bounds) { anchor in
+                shown ? TooltipRequest(text: text, edge: edge, anchor: anchor) : nil
+            }
             .onHover { inside in
                 hovering = inside
                 showTask?.cancel()
                 if inside {
-                    let d = delay
-                    showTask = Task {
-                        try? await Task.sleep(for: .seconds(d))
-                        if !Task.isCancelled, hovering {
-                            if ProcessInfo.processInfo.environment["NOTCH_TIP_DEBUG"] == "1" {
-                                FileHandle.standardError.write(Data("[tip] box=\(boundMinX)…\(boundMaxX) anchor=\(anchorWidth) natural=\(naturalWidth) avail=\(availableWidth) wraps=\(wraps) h=\(tipHeight) nudge=\(horizontalNudge)\n".utf8))
-                            }
-                            withAnimation(.easeOut(duration: 0.14)) { shown = true }
-                        }
-                    }
+                    scheduleShow()
                 } else {
+                    suppressed = false
                     withAnimation(.easeOut(duration: 0.10)) { shown = false }
                 }
             }
-            // Track the clip container the capsule must stay inside (see
-            // `resolvedBounds`) in the anchor's own coordinate space, so
-            // `horizontalNudge` can measure how close the anchor sits to each
-            // wall. Zero-footprint (a clear backdrop).
-            .background(
-                GeometryReader { g in
-                    let box = Self.resolvedBounds(g, clipFrame: clipFrame)
-                    Color.clear.preference(
-                        key: TooltipBoundsKey.self,
-                        value: TooltipBounds(minX: box.minX,
-                                             maxX: box.maxX,
-                                             anchorWidth: g.size.width))
-                }
-            )
-            .onPreferenceChange(TooltipBoundsKey.self) { b in
-                boundMinX = b.minX; boundMaxX = b.maxX; anchorWidth = b.anchorWidth
+            // A control can leave while its hint is up (a row scrolls away, the
+            // panel folds under the pointer): take the capsule with it.
+            .onDisappear {
+                showTask?.cancel()
+                hovering = false
+                suppressed = false
+                shown = false
             }
-            // Measure the capsule BEFORE it is ever shown — a hidden, zero-footprint
-            // copy that only exists to report its size. The measurement used to live
-            // on the visible capsule inside the overlay, which meant `tipWidth` was
-            // still 0 on the frame the tip appeared: `horizontalNudge` had nothing to
-            // clamp with, so the capsule was drawn CENTRED on its icon and only
-            // slid clear on a later pass. On the left-most footer icon that first
-            // frame hangs ~50pt off the island's edge and gets chopped — the
-            // "left side is cut off" bug. Measuring up front means the very first
-            // frame is already in its clamped place. (`.hidden()` still lays out,
-            // and a background never affects the anchor's own layout.)
-            //
-            // Two twins, because "does this even fit?" and "how tall is it once
-            // it doesn't" are different measurements. The first lays the text out
-            // on one line with no wall in the way (`.fixedSize()`, so it reports
-            // the size it WANTS rather than the 11pt icon it hangs off) — that
-            // width decides `wraps`. The second is the capsule as it will
-            // actually be drawn, and reports the height the offset must clear.
-            .background(
-                TooltipLabel.sizedText(text)
-                    .fixedSize()
-                    .background(
-                        GeometryReader { g in
-                            Color.clear.preference(key: TooltipWidthKey.self,
-                                                   value: g.size.width)
-                        }
-                    )
-                    .hidden()
-                    .allowsHitTesting(false)
-            )
-            .background(
-                TooltipLabel.sizedText(text, width: wraps ? availableWidth : nil)
-                    .fixedSize()
-                    .background(
-                        GeometryReader { g in
-                            Color.clear.preference(key: TooltipHeightKey.self,
-                                                   value: g.size.height)
-                        }
-                    )
-                    .hidden()
-                    .allowsHitTesting(false)
-            )
-            .onPreferenceChange(TooltipHeightKey.self) { if $0 > 0 { tipHeight = $0 } }
-            .onPreferenceChange(TooltipWidthKey.self) { if $0 > 0 { naturalWidth = $0 } }
-            // Anchor the tip's near edge to the control's matching edge, then push
-            // it fully CLEAR of the control by its own measured height plus a gap —
-            // so the capsule sits above (or below) the icon, never on top of it.
-            // `.top` alignment pins their top edges together; the negative offset
-            // then lifts the whole capsule up past the icon. (Mirror for `.bottom`.)
-            .overlay(alignment: edge == .top ? .top : .bottom) {
-                if shown {
-                    TooltipLabel(text: text, width: wraps ? availableWidth : nil)
-                        // Let it size to its text without being clipped to the
-                        // anchor's width; the hidden twin above already reported
-                        // that size, so the offsets below are right from frame one.
-                        .fixedSize()
-                        // Clear the control entirely (height + a 6pt gap), and slide
-                        // sideways by `horizontalNudge` so a capsule centred on a
-                        // near-the-edge icon doesn't spill off the panel.
-                        .offset(x: horizontalNudge,
-                                y: edge == .top ? -(tipHeight + 6) : (tipHeight + 6))
-                        .transition(.opacity)
-                        .allowsHitTesting(false)
-                        // Sit above sibling chrome so a neighbouring icon never
-                        // paints over the tip.
-                        .zIndex(1000)
-                }
+            .onReceive(NotificationCenter.default.publisher(for: .notchOverlayChromePresented)) { _ in
+                hide()
+            }
+            .background {
+                TooltipClickDismiss(enabled: hovering, hide: hide)
             }
     }
-}
 
-/// Carries the measured tooltip capsule height up so the offset can clear the
-/// control by its exact height rather than a guessed constant.
-private struct TooltipHeightKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
+    private func scheduleShow() {
+        guard !suppressed, !TooltipOverlayGate.blocked else { return }
+        let d = delay
+        showTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(d))
+            guard !Task.isCancelled, hovering, !suppressed, !TooltipOverlayGate.blocked else { return }
+            withAnimation(.easeOut(duration: 0.14)) { shown = true }
+        }
+    }
+
+    private func hide() {
+        showTask?.cancel()
+        suppressed = true
+        guard shown else { return }
+        withAnimation(.easeOut(duration: 0.10)) { shown = false }
     }
 }
 
-/// Carries the measured capsule width up so it can be nudged clear of a wall.
-private struct TooltipWidthKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
+/// Drops the tip on mouse-down without eating the click, so the Menu / Button
+/// still receives it. Installed only while the pointer is on this control.
+private struct TooltipClickDismiss: NSViewRepresentable {
+    var enabled: Bool
+    var hide: () -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        NSView(frame: .zero)
     }
-}
 
-/// The anchor's width plus its clip-container walls (in the anchor's own space),
-/// carried up together so the horizontal clamp has everything it needs at once.
-private struct TooltipBounds: Equatable {
-    var minX: CGFloat = -.greatestFiniteMagnitude
-    var maxX: CGFloat = .greatestFiniteMagnitude
-    var anchorWidth: CGFloat = 0
-}
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
-private struct TooltipBoundsKey: PreferenceKey {
-    static let defaultValue = TooltipBounds()
-    static func reduce(value: inout TooltipBounds, nextValue: () -> TooltipBounds) {
-        value = nextValue()
+    func updateNSView(_ view: NSView, context: Context) {
+        context.coordinator.hide = hide
+        context.coordinator.setEnabled(enabled)
+    }
+
+    static func dismantleNSView(_ view: NSView, coordinator: Coordinator) {
+        coordinator.setEnabled(false)
+    }
+
+    final class Coordinator {
+        var hide: () -> Void = {}
+        private var monitor: Any?
+
+        func setEnabled(_ enabled: Bool) {
+            if enabled {
+                guard monitor == nil else { return }
+                monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+                    self?.hide()
+                    return event
+                }
+            } else if let monitor {
+                NSEvent.removeMonitor(monitor)
+                self.monitor = nil
+            }
+        }
+
+        deinit { setEnabled(false) }
     }
 }
 
@@ -1149,17 +1220,14 @@ private struct TooltipLabel: View {
     static let hPadding: CGFloat = 9
 
     /// The capsule's content at its exact final size, without the glass behind it.
-    /// Split out so `NotchTooltip` can pre-measure a tip it isn't showing yet
-    /// (see its hidden measuring backdrops) without building a whole glass wafer —
-    /// and so the measured size can never drift from the drawn one.
     ///
-    /// With no `width`, the old behaviour exactly: one line, sized to the text.
-    /// With one, an EXACT frame — not `maxWidth`, which is the trap here: a
-    /// flexible frame under `.fixedSize()` gets a nil proposal, hands the Text a
-    /// nil proposal too, and the Text answers with its full one-line width; the
-    /// frame then reports the clamped width while the text inside it stays laid
-    /// out long and spills out both ends. A fixed frame proposes its own width
-    /// down no matter what the parent proposed, so the text actually wraps.
+    /// With no `width`, one line, sized to the text. With one, an EXACT frame —
+    /// not `maxWidth`, which is the trap here: a flexible frame under
+    /// `.fixedSize()` gets a nil proposal, hands the Text a nil proposal too, and
+    /// the Text answers with its full one-line width; the frame then reports the
+    /// clamped width while the text inside it stays laid out long and spills out
+    /// both ends. A fixed frame proposes its own width down no matter what the
+    /// parent proposed, so the text actually wraps.
     @ViewBuilder
     static func sizedText(_ text: String, width: CGFloat? = nil) -> some View {
         let base = Text(text)
@@ -1209,10 +1277,21 @@ private struct TooltipLabel: View {
 }
 
 extension View {
-    /// Marks the visible wall all descendant `notchTooltip`s must remain inside.
-    /// Apply once per independently clipped island/window surface.
-    func notchTooltipClipBox() -> some View {
-        modifier(TooltipClipBoxModifier())
+    /// Installs the window's tooltip layer. Apply once per independently drawn
+    /// surface (island, detached window, archive window), as far OUT as it goes —
+    /// past the surface's own `clipShape`, so the capsule it draws can't be cut.
+    ///
+    /// `inset` is how far inside this view's layout frame the drawn wall sits:
+    /// the island's frame carries the shoulder flares its glass body doesn't, the
+    /// compact detached window keeps a transparent margin for its shadow. Pass
+    /// that and every hint below stops at the glass, not at the frame.
+    func notchTooltipClipBox(inset: CGFloat = 0) -> some View {
+        overlayPreferenceValue(TooltipRequestKey.self) { request in
+            if let request {
+                TooltipLayerView(request: request, inset: inset)
+            }
+        }
+        .onAppear { TooltipOverlayGate.installIfNeeded() }
     }
 
     /// Attach a `NotchTooltip` — the in-house replacement for `.help()`. Use it on

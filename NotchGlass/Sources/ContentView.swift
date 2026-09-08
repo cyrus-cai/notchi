@@ -222,12 +222,12 @@ struct ContentView: View {
                 }
             }
             // ⌘P (and ⌘D) pins/unpins the panel — the keyboard twin of the pin
-            // button, which the result header and the idle prompt both carry. Pinned
-            // → the panel stays open when the pointer leaves (see
-            // NotchModel.collapseOnLeave). Not over settings / what's new (those own
-            // no pin), so both fall through to the system there. keyCode 35 is P, 2 is D.
+            // button, which the result header, the idle prompt and the Settings
+            // header all carry. Pinned → the panel stays open when the pointer
+            // leaves (see NotchModel.collapseOnLeave). Not over What's New (it owns
+            // no pin), so that one falls through to the system. keyCode 35 is P, 2 is D.
             if AppShortcutStore.matches(.pin, event: event),
-               model.mode != .load, !model.showSettings, !model.showWhatsNew {
+               model.mode != .load, !model.showWhatsNew {
                 withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
                     model.toggleAnswerPin()
                 }
@@ -966,12 +966,6 @@ struct NotchIsland: View {
             }
         }
         .frame(width: width)
-        // The box every hover tooltip clamps itself inside. It belongs HERE, on
-        // the island's own width — the `NotchShape` clip below follows this exact
-        // frame, so this is the wall a capsule actually gets chopped against. (It
-        // used to be published on the screen-wide hosting canvas in
-        // `AppDelegate.makePanel`, which never clamped anything.)
-        .notchTooltipClipBox()
         .padding(.top, -topBleed)   // pull the form up so it bleeds off the top
         .background(GlassMaterial(bottomRadius: bottomRadius,
                                   topRadius: topFlare,
@@ -1075,6 +1069,13 @@ struct NotchIsland: View {
         // sides, brightest at the rounded corners. Stamped on top of the composited
         // island so the highlight traces the edge crisply instead of being clipped.
         .overlay(IslandRim(shape: islandShape))
+        // The island's hover hints, drawn here — OUTSIDE the clip above, so the
+        // `NotchShape` can never slice a capsule, and after the rim so nothing
+        // paints over one. `inset` is the shoulder flare: the frame carries it,
+        // the drawn body doesn't, so the glass wall runs `topFlare` inside this
+        // box on both sides. Clamping to the frame instead is what used to leave
+        // a right-edge hint hanging over the shoulder and chopped.
+        .notchTooltipClipBox(inset: topFlare)
         // A settled detached window dragged over the notch: the island swells a
         // touch to say it'll take the session back on release.
         .scaleEffect(model.detachMergeHint ? 1.02 : 1, anchor: .top)

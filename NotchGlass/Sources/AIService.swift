@@ -439,6 +439,12 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     // `XAI_API_KEY`), billed to their xAI / SuperGrok plan. Not an HTTP endpoint —
     // it shells out to the local `grok` binary (see `GrokCLIService`).
     case grokCode
+    // Cursor's CLI, the same keyless pattern again — and, like Command Code and pi,
+    // an *aggregator*: the user's own `cursor-agent login` account fronts OpenAI,
+    // Anthropic, Google and xAI models beside Cursor's own Composer, billed to their
+    // Cursor plan. Not an HTTP endpoint — it shells out to the local `cursor-agent`
+    // binary (see `CursorCLIService`).
+    case cursorCode
     // Command Code (commandcode.ai), the same keyless pattern again — but an
     // *aggregator* rather than one vendor's CLI: the user's own `cmd login`
     // account fronts ~50 models across Anthropic / OpenAI / Google / xAI / Qwen /
@@ -519,7 +525,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .nono:
             return ProviderSpec(
-                displayName: "nono",
+                displayName: "Nono",
                 // Notchi's own gateway. The host is ours and public — an address,
                 // not a secret, so it belongs compiled in like every other
                 // endpoint here. What must never be compiled in is the key: a
@@ -527,11 +533,17 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
                 // the app is, so nono's key is issued per user by the gateway and
                 // lives only in the Keychain.
                 endpoint: Provider.nonoEndpoint,
-                // Two named tiers, not a model list. Which Workers AI model runs
-                // behind each is decided in the gateway's own catalog and can be
-                // swapped without an app release — that indirection is the point,
-                // so these two ids are the whole public surface.
-                models: ["nono", "nono-flash"],
+                // One named tier, not a model list. Which model runs behind it is
+                // decided in the gateway's own catalog and can be swapped without
+                // an app release — that indirection is the point, so this id is
+                // the whole public surface.
+                //
+                // There was a second tier, `nono`, and it was the head of this
+                // list, which made it every install's `defaultModel`. The gateway
+                // still answers to that name as an alias precisely because copies
+                // in the field still send it; see `ALIASES` in the gateway's
+                // `catalog.ts` for when that can be dropped.
+                models: ["nono-flash"],
                 signupHost: "notch.website",
                 signupURL: "https://notch.website",
                 envVarName: "NONO_API_KEY")
@@ -628,6 +640,21 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
                 signupHost: "docs.x.ai",
                 signupURL: "https://docs.x.ai/docs/cli",
                 envVarName: "GROK_CLI_UNUSED")
+        case .cursorCode:
+            // Not an HTTP backend — `CursorCLIService` shells out to the local
+            // `cursor-agent` binary; `endpoint` is a never-used placeholder. The
+            // single "cursor" model id is a sentinel meaning "the CLI's own default
+            // model" (no `--model` flag); the real list is the catalog
+            // `cursor-agent --list-models` prints. The `signupURL` points at the
+            // install docs — there's no key to create; sign-in is
+            // `cursor-agent login` (browser OAuth) or the `CURSOR_API_KEY` env var.
+            return ProviderSpec(
+                displayName: "Cursor CLI",
+                endpoint: "https://cursor.com/unused",
+                models: [CursorCLIService.defaultSentinel],
+                signupHost: "cursor.com",
+                signupURL: "https://cursor.com/docs/cli/overview",
+                envVarName: "CURSOR_CLI_UNUSED")
         case .commandCode:
             // Not an HTTP backend — `CommandCodeCLIService` shells out to the local
             // `cmd` binary; `endpoint` is a never-used placeholder. The single
@@ -735,7 +762,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     /// and logged in (see each service's `isAvailable`).
     var isCLI: Bool {
         switch self {
-        case .codex, .claudeCode, .grokCode, .commandCode, .piCode: return true
+        case .codex, .claudeCode, .grokCode, .cursorCode, .commandCode, .piCode: return true
         default: return false
         }
     }
@@ -754,6 +781,9 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // pi's default is the provider+model pair its own settings.json names, out of
         // the catalog its CLI prints — never a curated shortlist of ours.
         if self == .piCode { return PiCLIService.defaultModel }
+        // Cursor's default is likewise the row its own catalog marks
+        // (`cursor-agent --list-models`), never a curated shortlist of ours.
+        if self == .cursorCode { return CursorCLIService.defaultModel }
         // The custom endpoint's model is the user's own typed id — a remote
         // manifest has no business overriding someone's private server.
         if self == .custom { return spec.defaultModel }
@@ -777,6 +807,10 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // pi's list is every model the user's signed-in providers expose, from
         // `pi --list-models` (see `PiCLIService`), falling back to the sentinel.
         if self == .piCode { return PiCLIService.availableModelIDs }
+        // Cursor's list is the account's real catalog from
+        // `cursor-agent --list-models` (see `CursorCLIService`), falling back to the
+        // single sentinel.
+        if self == .cursorCode { return CursorCLIService.availableModelIDs }
         if self == .custom { return spec.availableModels }
         // Claude Code no longer offers the "claude" account-default sentinel (see
         // the spec above); a remote manifest written before that still lists it,
@@ -813,10 +847,10 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // models from a dozen labs, so its ids name their own vendor. pi is the
         // fourth, and the widest: its ids are `<pi-provider>/<model>`, and the model
         // half names the real lab (see `PiCLIService.vendor(forID:)`).
-        case .openrouter, .vercel, .custom, .commandCode, .piCode: return nil
+        case .openrouter, .vercel, .custom, .cursorCode, .commandCode, .piCode: return nil
         // nono's ids name no vendor on purpose — that is the product. The mark
         // the picker draws is nono's own, never the model actually running.
-        case .nono:                   return "nono"
+        case .nono:                   return "Nono"
         case .openai, .codex:         return "OpenAI"
         case .anthropic, .claudeCode: return "Anthropic"
         case .grokCode:               return "xAI"
@@ -830,6 +864,40 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
+    /// The provider's **own** brand mark — the logo for the backend itself, keyed
+    /// into `VendorLogos.table`. Distinct from `vendorName`, which names the lab
+    /// behind its *models*: the two diverge at the aggregators, where an
+    /// OpenRouter row wears OpenRouter's mark while a model served through
+    /// OpenRouter keeps its real lab's.
+    ///
+    /// Empty for the custom endpoint, which is whatever the user pointed it at —
+    /// `brandSymbol` covers that one instead of a borrowed logo.
+    var brandVendor: String {
+        switch self {
+        case .openrouter:  return "OpenRouter"
+        case .vercel:      return "Vercel"
+        case .cursorCode:  return "Cursor"
+        case .commandCode: return "Command Code"
+        case .piCode:      return "PI"
+        case .custom:      return ""
+        default:           return vendorName ?? ""
+        }
+    }
+
+    /// Whether Notchi hosts this backend itself. True for nono alone: it spends
+    /// our credit rather than the user's, and it is the thing a subscription buys.
+    /// Every surface that draws a provider asks this to decide whether to wear the
+    /// first-party aura (`BrandAura`), so ours is never one more row in a list of
+    /// vendors.
+    var isFirstParty: Bool { self == .nono }
+
+    /// The SF Symbol to draw where `brandVendor` names no mark. Only the custom
+    /// endpoint qualifies — it has no brand to wear, so it gets the app's own
+    /// settings glyph, the same one the panel's settings button uses.
+    var brandSymbol: String? {
+        self == .custom ? "slider.horizontal.3" : nil
+    }
+
     // MARK: Behavioral traits (grouped by client behavior, not by vendor)
 
     /// Whether this provider speaks the OpenAI-compatible `/v1/chat/completions`
@@ -840,7 +908,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // Anthropic speaks its native protocol; Codex and Claude Code aren't HTTP
         // at all (subprocesses). All are routed to their own client, never the
         // shared one.
-        case .anthropic, .codex, .claudeCode, .grokCode, .commandCode, .piCode:
+        case .anthropic, .codex, .claudeCode, .grokCode, .cursorCode, .commandCode, .piCode:
             return false
         default:
             return true
@@ -873,8 +941,8 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // way — the turn dispatcher takes the plain `stream` path for them. Every
         // other provider exposes a function-calling API the harness can drive.
         switch self {
-        case .codex, .claudeCode, .grokCode, .commandCode, .piCode: return false
-        default:                                                   return true
+        case .codex, .claudeCode, .grokCode, .cursorCode, .commandCode, .piCode: return false
+        default:                                                                return true
         }
     }
 
@@ -935,8 +1003,43 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     /// OpenRouter normalizes to one key and reads the same figures, which is what
     /// makes the picker's numbers comparable down a list that mixes both.
     static func modelStats(_ model: String) -> RemoteModelManifest.ModelStats? {
-        RemoteModelManifest.stats(normalizedID: normalizedModelID(model))
+        for id in statsLookupIDs(model) {
+            if let stats = RemoteModelManifest.stats(normalizedID: id) { return stats }
+        }
+        return nil
     }
+
+    /// The ids to try against the manifest, most specific first.
+    ///
+    /// An aggregator wraps a lab's model in its own id, and the manifest is keyed
+    /// by the lab's. Cursor's `cursor-grok-4.6-medium` is xAI's `grok-4-6-medium`
+    /// served on Cursor's capacity, and its `-fast` suffix is a serving tier, not
+    /// a different model — both read the lab's own figures. The exact id is still
+    /// tried first, so a model whose real name ends in `-fast` (`grok-4-fast`)
+    /// matches itself and never reaches the fallback.
+    private static func statsLookupIDs(_ model: String) -> [String] {
+        let base = normalizedModelID(model)
+        let tiers = base.hasSuffix("-fast") ? [base, String(base.dropLast(5))] : [base]
+        let unwrapped = tiers.flatMap { id -> [String] in
+            id.hasPrefix("cursor-") ? [id, String(id.dropFirst(7))] : [id]
+        }
+        // Last resort: the same model without its reasoning-effort suffix. Some
+        // efforts are benchmarked in their own right (`grok-4-6-medium`), while
+        // the vendor's default one carries no suffix at all in the figures
+        // (`grok-4-6-high` is published as `grok-4-6`).
+        let stems = unwrapped.compactMap { id -> String? in
+            guard let suffix = effortSuffixes.first(where: { id.hasSuffix($0) })
+            else { return nil }
+            return String(id.dropLast(suffix.count))
+        }
+        var seen = Set<String>()
+        return (unwrapped + stems).filter { seen.insert($0).inserted }
+    }
+
+    /// Reasoning-effort suffixes the CLI backends append to a model id. `-max` is
+    /// deliberately absent: it also names real models (`qwen3-max`), where the
+    /// stem is a different model rather than the same one thinking less.
+    private static let effortSuffixes = ["-low", "-medium", "-high", "-xhigh"]
 
     // MARK: Server-side web search (XII-118)
 
@@ -1019,7 +1122,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     /// data, with no way to reach current information. The Settings provider menu
     /// uses this to demote the no-search vendors into a "not recommended" submenu.
     var supportsWebSearch: Bool {
-        // The CLI backends (Codex, Claude Code, Grok, Command Code) search the web
+        // The CLI backends (Codex, Claude Code, Grok, Cursor, Command Code) search the web
         // themselves as part of their agent loops, so they earn the "Web search" chip
         // even though Notch injects nothing (`serverSearch == nil`).
         //
@@ -1029,7 +1132,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // directory). Claiming the chip would be the dishonest no-search behavior
         // XII-116 fought, so a pi chat answers from training data and says so.
         serverSearch != nil || self == .glm || self == .codex || self == .claudeCode
-            || self == .grokCode || self == .commandCode
+            || self == .grokCode || self == .cursorCode || self == .commandCode
     }
 }
 
@@ -1144,7 +1247,16 @@ struct OpenAICompatAIService: AIService {
 
         var errorDescription: String? {
             switch self {
-            case .http(let provider, let status, _):
+            case .http(let provider, let status, let body):
+                // 402 is the gateway saying the caller is out of money, and it
+                // names which kind: a failed payment is fixed in the billing
+                // portal, an exhausted allowance only by waiting for the period
+                // to roll over. Collapsing both into "provider returned 402"
+                // would throw away the one thing the user needs to know.
+                if status == 402 {
+                    if body.contains("payment_required") { return L("service.error.paymentRequired") }
+                    if body.contains("insufficient_balance") { return L("service.error.outOfCredit") }
+                }
                 return L("service.error.http", provider, status)
             case .malformedResponse(let provider):
                 return L("service.error.malformed", provider)
@@ -2425,7 +2537,7 @@ enum ModelCatalog {
         // local subprocesses, not HTTP), so there's nothing to fetch — their model
         // lists come from the CLIs themselves.
         if provider == .codex || provider == .grokCode || provider == .commandCode
-            || provider == .piCode { return nil }
+            || provider == .piCode || provider == .cursorCode { return nil }
         if !force, let hit = withCacheLock({ cache[provider] }),
            hit.apiKey == apiKey, Date().timeIntervalSince(hit.fetchedAt) < ttl {
             return hit.result
@@ -2701,9 +2813,10 @@ struct ModelInfo: Identifiable, Equatable, Sendable {
     /// Build from a bare id (providers whose `/v1/models` gives no metadata, or the
     /// bundled shortlist). Capabilities are inferred from the id; the meters come
     /// wholly from `ModelRatings`.
-    /// `name` overrides the id-derived title, for the one catalog that needs it: pi
+    /// `name` overrides the id-derived title, for the two catalogs that need it: pi
     /// serves the same model through several accounts, so a colliding name has to
-    /// carry its provider (see `PiCLIService.displayName(forID:)`).
+    /// carry its provider (see `PiCLIService.displayName(forID:)`), and Cursor's ids
+    /// are bare enough that only its printed names say which model a row is.
     init(id: String, vendor: String, name: String? = nil) {
         let rating = ModelRatings.rating(id: id, reasoning: ModelRatings.looksReasoning(id),
                                          promptPrice: nil)
@@ -3118,6 +3231,13 @@ enum ModelRatings {
         if provider == .piCode {
             return id == PiCLIService.defaultSentinel ? "PI" : PiCLIService.vendor(forID: id)
         }
+        // Cursor is an aggregator too, and its ids are bare (`sonnet-4.5`,
+        // `composer-1`) — read plainly, the Anthropic families name no vendor at
+        // all. `CursorCLIService.vendor(forID:)` fills those in and leaves every
+        // self-naming id alone.
+        if provider == .cursorCode {
+            return CursorCLIService.vendor(forID: id)
+        }
         let v = vendor(for: id)
         guard let own = provider.vendorName, !knownVendors.contains(v) else { return v }
         return own
@@ -3136,6 +3256,16 @@ enum ModelRatings {
         return s.prefix(1).uppercased() + s.dropFirst()
     }
 
+    /// nono's tier name from its id: each hyphen-separated word capitalized and
+    /// joined with spaces (`nono-flash` → "Nono Flash"). The gateway sends a name
+    /// of its own, but the app draws this one so a tier reads identically on the
+    /// chip, in the menu, and before any catalog fetch has landed.
+    static func nonoName(for id: String) -> String {
+        id.split(separator: "-")
+            .map { $0.prefix(1).uppercased() + $0.dropFirst() }
+            .joined(separator: " ")
+    }
+
     /// `prettyName`, but for an id read **as `provider` serves it**. The one
     /// provider that differs is Claude Code, whose ids are the CLI's rolling
     /// aliases: a chip reading "Opus" names a shelf, not a model, so the alias is
@@ -3144,12 +3274,17 @@ enum ModelRatings {
     /// because every one of these labels already sits beside the Anthropic mark.
     /// Until a probe has ever landed, the bare alias stands in.
     static func prettyName(for id: String, provider: Provider) -> String {
+        // nono's two tier names are the product's own, so the app writes them
+        // rather than passing the id through: "nono-flash" is one name, "Nono
+        // Flash", not a hyphenated slug, and it reads the same everywhere.
+        if provider == .nono { return nonoName(for: id) }
         // pi's ids are `<pi-provider>/<model>`. The account rides the picker's rows
         // (`PiCLIService.displayName(forID:)`); a chip is short by the same rule
         // that drops "Claude" from a Claude Code alias.
         if provider == .piCode, id != PiCLIService.defaultSentinel {
             return PiCLIService.shortDisplayName(forID: id)
         }
+
         guard provider == .claudeCode,
               let resolved = ClaudeCLIService.resolvedModels[id]
         else { return prettyName(for: id) }
@@ -3987,6 +4122,26 @@ extension OpenAICompatAIService: AgentCapableService {
                         // empty response — retry it like a transient failure while we
                         // still can, otherwise surface it as an error.
                         if !yieldedText && namedCalls.isEmpty && !emittedAny {
+                            // Unless the model spent the whole turn in its reasoning
+                            // channel and never said anything out loud. That is a
+                            // model behavior, not a wire failure: nono's model does it
+                            // on a turn it finds hard, and always when the output
+                            // ceiling lands inside the thinking (`finish_reason:
+                            // length` with an empty content channel). Replaying the
+                            // identical request three times reproduces the same
+                            // silence — minutes of it on a slow model — and then
+                            // reports a transport error the user can't act on. Close
+                            // the turn instead: the harness re-asks once with no tools
+                            // and a note about the silence, which does produce an
+                            // answer, and says "no answer came back" if it doesn't.
+                            // A stream that was cut before it said anything is still
+                            // worth one more try — that one IS transient. Silence on
+                            // an intact stream is not.
+                            if reportedReasoning, terminated || attempt >= StreamRetry.maxRetries {
+                                continuation.yield(.finished(stopReason: finishReason))
+                                continuation.finish()
+                                return
+                            }
                             if attempt < StreamRetry.maxRetries {
                                 attempt += 1
                                 try await StreamRetry.waitBeforeRetry(attempt)

@@ -143,6 +143,9 @@ struct InlineSettingsView: View {
     /// setup (keyless active provider, or a pending model) forces it open
     /// regardless — see `keySection`.
     @State private var keySectionOpen = false
+    /// nono's subscription state. Observed rather than read once: checkout
+    /// finishes in a browser, so the answer arrives from outside this view.
+    @ObservedObject private var nono = NoNoAccount.shared
     /// Whether the custom-instructions field is unfolded. Collapsed at rest like
     /// the key section above it — it opens by itself only when there is already an
     /// instruction stored, so an existing preference is never hidden.
@@ -247,6 +250,12 @@ struct InlineSettingsView: View {
     /// OpenRouter normally connects via the one-click OAuth row; this flips to the
     /// standard paste field for users who'd rather supply a key by hand.
     @State private var manualKeyEntry = false
+
+    /// Bumped on every `.cliAvailabilityResolved` post, so a CLI account row that
+    /// reads its state from a service's statics (rather than from `@State`) redraws
+    /// when that state moves off a background queue — the Cursor sign-in, which
+    /// finishes minutes after the click, is the case that needs it.
+    @State private var cliTick = 0
 
     /// The custom endpoint's three fields (see `CustomProvider`), edited together
     /// and committed by one Save — unlike a key, an endpoint that's half-typed is
@@ -480,7 +489,8 @@ struct InlineSettingsView: View {
                 // pane's own exact height (content, capped at Recent's) is the
                 // whole page height.
                 paneContent
-                    .padding(.horizontal, 8)
+                    // No extra side inset: the pane lines up with the header
+                    // above it, both on the panel's own 15pt gutter.
                     .padding(.top, 12)
             } else {
                 HStack(alignment: .top, spacing: 0) {
@@ -498,7 +508,8 @@ struct InlineSettingsView: View {
                 // no longer unfolds the scroll — it only stops the scroll behind
                 // it from stretching the island.
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 8)
+                // Columns sit on the panel's own gutter, so the selected
+                // category capsule shares its left edge with the back pill.
                 .padding(.top, 12)
             }
         }
@@ -628,6 +639,10 @@ struct InlineSettingsView: View {
     /// push its own fields past the pane's height cap.
     private static let keySectionAnchor = "settings.keySection"
 
+    /// The Model group's card. Same radius as the pane's other recessed slab
+    /// (the template detail's prompt box), so the two read as one material.
+    private static let modelCardShape = RoundedRectangle(cornerRadius: 16, style: .continuous)
+
     /// The empty inset above the pane's first row, and the length of the top
     /// taper that dissolves into it. The taper is the longer of the two: a 12pt
     /// fade that stopped at the runway's edge read as a hard cut, so it now
@@ -676,13 +691,38 @@ struct InlineSettingsView: View {
                 // then pick one of *its* models. The API key stays supporting
                 // cast — folded into `keySection`, which only unfolds when the
                 // choice actually needs a key (or the user opens it by hand).
-                // Both groups carry a caption: leaving the first one bare (the
-                // sidebar does name it) read as a caption that had gone missing.
-                Text(L("sidebar.model"))
-                    .captionLabel()
-                providerRow
-                modelRow
-                keySection
+                // No "MODEL" caption over the card: the sidebar entry beside it
+                // already names the pane, and the card is its own boundary now.
+                // What is left of the month leads the pane when nono is the
+                // backend. It is the one row here that reports rather than
+                // configures, and it is what the user opens this pane to check;
+                // sitting under Provider and Model it read as a footnote to
+                // them.
+                // One card holds the whole backend decision, for EVERY provider
+                // — the frame never changes when you switch. What changes is what
+                // is inside it and whether its rim is lit: on nono the group
+                // carries the plan meter and wears the first-party rim light (see
+                // `BrandAura`), on a third-party backend it carries that vendor's
+                // key section and the rim goes dark. Making the card itself
+                // appear and disappear with the provider was the wrong read — the
+                // pane restyled itself mid-choice.
+                VStack(alignment: .leading, spacing: 12) {
+                    if keyScope == .nono {
+                        nonoAccountRow
+                    }
+                    providerRow
+                    modelRow
+                    keySection
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .recessedSurface(in: Self.modelCardShape, lit: false)
+                // The mark is said ONCE, by the group. The provider menu and the
+                // model chip inside it used to each wear their own aura, which on
+                // nono lit three rims stacked inside one another.
+                .brandAura(in: Self.modelCardShape,
+                           active: provider.isFirstParty, lineWidth: 1.2)
                 customInstructionsRow
                 // Web search used to be a category of its own — a whole sidebar
                 // entry for two rows. It is the same question this pane already
@@ -945,11 +985,31 @@ struct InlineSettingsView: View {
             // no layout anywhere — and at this height it is clear of the pane's
             // own tapers.
             statsReadout
+
+            // The pin, on the idle prompt's terms — the same `IdleTrailingCluster`
+            // chip, in the same glass: no button at rest (⌘P is the way in), and
+            // the tack appears only once the panel IS pinned, showing the hold and
+            // offering the click that releases it. Recent isn't reachable from
+            // Settings, so the cluster carries the pin alone. 26pt to sit at the
+            // back pill's height — the header's row height feeds `headerChrome`.
+            IdleTrailingCluster(
+                pinned: model.isAnswerPinned,
+                recentOpen: false,
+                showsRecent: false,
+                chipSize: 26,
+                togglePin: {
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                        model.toggleAnswerPin()
+                    }
+                },
+                toggleRecent: {}
+            )
         }
         .padding(.horizontal, 8)
         .padding(.top, 12)
         .padding(.bottom, 4)
         .animation(.easeOut(duration: Tokens.rowFade), value: statsHover)
+        .animation(.spring(response: 0.34, dampingFraction: 0.82), value: model.isAnswerPinned)
     }
 
     /// "Aug 5 · 21 chats · 2 agent runs" — the date, and what actually went
@@ -1002,6 +1062,18 @@ struct InlineSettingsView: View {
     /// provider upstairs triggers.
     @ViewBuilder
     private var keySection: some View {
+        // nono has no key to paste, so there is nothing here to fold away — and
+        // folding it anyway, behind a chip labelled "API key", hid the Subscribe
+        // button that is the only thing making the provider usable. Its row
+        // leads the pane instead, and carries the anchor, so the scroll-into-view
+        // on a required setup still lands.
+        if keyScope != .nono {
+            foldedKeySection
+        }
+    }
+
+    @ViewBuilder
+    private var foldedKeySection: some View {
         let expanded = keySectionOpen || setupRequired
         VStack(alignment: .leading, spacing: 12) {
             Button {
@@ -1093,8 +1165,12 @@ struct InlineSettingsView: View {
                     grokAccountRow
                 } else if keyScope == .commandCode {
                     commandCodeAccountRow
+                } else if keyScope == .cursorCode {
+                    cursorAccountRow
                 } else if keyScope == .piCode {
                     piAccountRow
+                } else if keyScope == .nono && !manualKeyEntry && !envOverride {
+                    nonoAccountRow
                 } else if keyScope == .openrouter && !manualKeyEntry && !envOverride {
                     openRouterAccountRow
                 } else {
@@ -1103,8 +1179,10 @@ struct InlineSettingsView: View {
 
                 // The CLI backends have no key to fetch — their own rows carry the
                 // sign-in copy, so the generic "get a key at …" footer is wrong for
-                // them and suppressed.
-                if !keyScope.isCLI {
+                // them and suppressed. nono is the same case for a different
+                // reason: its token is issued by the gateway and never seen, so
+                // there is no key for the user to go and get.
+                if !keyScope.isCLI && keyScope != .nono {
                     footer
                 }
             }
@@ -1244,11 +1322,23 @@ struct InlineSettingsView: View {
     /// aims elsewhere is a pending model (picker "Add key"), which retargets it itself.
     private func selectProvider(_ newValue: Provider) {
         guard newValue != provider else { return }
-        provider = newValue
-        APIKeyStore.selectedProvider = newValue
-        modelID = APIKeyStore.storedModel(for: newValue)
-        NotificationCenter.default.post(name: .aiBackendChanged, object: nil)
-        setKeyScope(newValue)
+        // The Provider menu is a SwiftUI `Toggle` inside `Menu`. Selecting a
+        // row arrives already wrapped in the menu's implicit animation, which
+        // then interpolates every identity change in this pane — the chip, the
+        // key block, the first-party rim blur — and the glass behind them
+        // redraws for the whole duration. That is the stutter. The swap has
+        // no motion worth keeping, so the transaction is silenced here; the
+        // key section's own disclosure (the chevron tap) is a different write
+        // and is left alone.
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            provider = newValue
+            APIKeyStore.selectedProvider = newValue
+            modelID = APIKeyStore.storedModel(for: newValue)
+            NotificationCenter.default.post(name: .aiBackendChanged, object: nil)
+            setKeyScope(newValue)
+        }
         Task { await refreshModels() }
     }
 
@@ -1691,6 +1781,213 @@ struct InlineSettingsView: View {
         }
     }
 
+    // MARK: - nono subscription
+
+    /// nono is the only first-party backend, so instead of a key to paste it
+    /// shows what the plan costs and what is left of the month. The token is
+    /// fetched on first appearance and kept like any other provider's key; the
+    /// user never sees it, because it is not something they chose or can
+    /// usefully copy.
+    ///
+    /// Built on `openRouterAccountRow`'s shape — a 64pt label, the field, then
+    /// actions, with any status on its own line indented past the label — so it
+    /// sits in the same column as every other row in this pane.
+    @ViewBuilder
+    private var nonoAccountRow: some View {
+        let snapshot = nono.snapshot
+        // Two different questions. `active` decides whether the meter can show
+        // a spendable allowance; `hasPlan` decides whether we are allowed to
+        // offer a purchase at all. Conflating them put a Subscribe button in
+        // front of anyone whose card had just failed.
+        let active = snapshot?.subscription.active == true
+        let hasPlan = snapshot?.hasPlan == true
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 12) {
+                Text(L("model.usage"))
+                    .font(.sf(13, weight: .medium))
+                    .foregroundStyle(Tokens.text2)
+                    .frame(width: 64, alignment: .leading)
+
+                if case .working(let work) = nono.phase, work != .refreshing {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text(L(work == .checkout ? "nono.opening" : "nono.preparing"))
+                            .font(.sf(12.5))
+                            .foregroundStyle(Tokens.text2)
+                    }
+                    .frame(height: 30)
+                } else if snapshot == nil {
+                    // The account has not answered yet — the first appearance
+                    // after a launch, where `/me` is still in flight. Draw a
+                    // spinner, not a guess. Falling through to the no-plan
+                    // branch here showed Subscribe to paying subscribers for
+                    // the length of one request, which is an invitation to buy
+                    // a plan they already have. A failed request lands here too:
+                    // the error pill below says what happened, and offering
+                    // checkout against an unreachable gateway would only fail
+                    // again.
+                    if case .failed = nono.phase {
+                        Color.clear.frame(height: 30)
+                    } else {
+                        ProgressView().controlSize(.small).frame(height: 30)
+                    }
+                } else if hasPlan, let snapshot {
+                    if active {
+                        HStack(spacing: 16) {
+                            allowanceBar(snapshot)
+                            Text(allowanceText(snapshot))
+                                .font(.sf(12.5))
+                                .foregroundStyle(Tokens.text3)
+                                .lineLimit(1)
+                                .fixedSize()
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(height: 30)
+                    } else {
+                        // A plan Stripe still holds but that cannot spend right
+                        // now: a failed payment, or a period whose renewal has
+                        // not landed. The fix is in the portal either way.
+                        Text(L(snapshot.subscription.status == "past_due"
+                               ? "nono.plan.needsPayment" : "nono.plan.pending"))
+                            .font(.sf(13))
+                            .foregroundStyle(Tokens.text2)
+                            .lineLimit(1)
+                            .frame(height: 30)
+                    }
+                    if !active {
+                        Spacer(minLength: 8)
+                        SettingActionButton(title: L("nono.manage")) {
+                            Task { await nono.manageBilling() }
+                        }
+                    }
+                } else {
+                    // Subscribing is the action this row exists for, so it is the
+                    // button — the same prominent capsule the OpenRouter Connect
+                    // button uses, this pane's one rung for a primary action. The
+                    // price follows it as the detail it is. It used to lead, with
+                    // Subscribe trailing as 11pt text: the row read as a price tag
+                    // that happened to be clickable.
+                    subscribeButton
+                    Text(L("nono.plan.price"))
+                        .font(.sf(12.5))
+                        .foregroundStyle(Tokens.text3)
+                        .lineLimit(1)
+                        .frame(height: 30)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if case .failed(let why) = nono.phase {
+                statusPill(ok: false, message: why)
+                    .padding(.leading, 76)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            } else if let snapshot, hasPlan {
+                // Manage rides this line rather than the meter's, and follows
+                // the renewal date directly instead of being flung to the far
+                // rim — at this weight a button alone at the edge reads as the
+                // row's main event, which it isn't. Meta ink, same as the date.
+                HStack(spacing: 10) {
+                    Text(nonoPlanFootnote(snapshot))
+                        .font(.sf(11.5))
+                        .foregroundStyle(Tokens.text4)
+                    if active {
+                        SettingActionButton(title: L("nono.manage"), tone: Tokens.text4) {
+                            Task { await nono.manageBilling() }
+                        }
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.leading, 76)
+            }
+        }
+        .task { await nono.load() }
+    }
+
+    @State private var subscribeHovering = false
+
+    /// The pane's primary action while there is no plan.
+    private var subscribeButton: some View {
+        Button {
+            Task {
+                await nono.subscribe()
+                // Stripe redirects the browser as soon as the card clears, but
+                // the webhook that grants the allowance is a separate delivery.
+                // Without this the user comes back to a pane that still says
+                // "no plan" having just paid.
+                await nono.awaitActivation()
+            }
+        } label: {
+            Text(L("nono.subscribe"))
+                .font(.sf(13, weight: .medium))
+                .foregroundStyle(Tokens.text1)
+                .padding(.horizontal, 14)
+                .frame(height: 30)
+                .prominentSurface(in: Capsule(), lit: subscribeHovering)
+                .contentShape(Capsule())
+        }
+        .buttonStyle(GlassPressStyle())
+        .onHover { subscribeHovering = $0 }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: subscribeHovering)
+    }
+
+    /// What is left of the month: the figure on the row, the bar under it.
+    ///
+    /// Two elements rather than a filling field. A field whose background
+    /// creeps rightward reads as a rendering artifact until you already know
+    /// what it means; a rail under the number is the shape everyone already
+    /// reads as progress. Cursor's usage panel is the reference — percentage on
+    /// the line, thin full-width track below.
+    ///
+    /// One register, secondary ink: the rail already says how much is gone, and
+    /// this only names the figure. Setting the number larger or brighter than
+    /// the words around it made the row shout a status nobody needs shouted.
+    private func allowanceText(_ snapshot: NoNoAccount.Snapshot) -> String {
+        // A percentage, not dollars. The underlying figure is what a request
+        // cost us upstream — thousandths of a cent — which is both meaningless
+        // to the person reading it and more of our cost structure than they
+        // asked for.
+        // Rounded up, not to nearest: spending that lands under half a percent
+        // still moved the meter, and "0% used" after a real request reads as a
+        // bug. Ceiling also retires the "<1%" special case the row used to
+        // carry — one shape of figure, always a whole percent.
+        let whole = Int((snapshot.usedFraction * 100).rounded(.up))
+        return L("nono.usage", "\(min(100, max(0, whole)))%")
+    }
+
+    /// The rail. Capsule track, capsule fill, no text inside it.
+    ///
+    /// The track is the pane's recessed floor at rail scale, the fill the same
+    /// ink as the text beside it — no accent, no glow. A meter that is mostly
+    /// empty is good news, and colouring it turns a glance into an alarm.
+    /// It takes the remaining row: label on the left, the figure on the right,
+    /// the rail between them.
+    private static let allowanceBarHeight: CGFloat = 6
+
+    private func allowanceBar(_ snapshot: NoNoAccount.Snapshot) -> some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Tokens.recessFill)
+                Capsule()
+                    .fill(Tokens.ink.opacity(0.42))
+                    // A used allowance that rounds to nothing still deserves a
+                    // visible mark: a bar that reads empty after real spending
+                    // is telling the wrong story.
+                    .frame(width: max(snapshot.usedFraction > 0 ? Self.allowanceBarHeight : 0,
+                                      geo.size.width * snapshot.usedFraction))
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: Self.allowanceBarHeight)
+        .animation(.easeOut(duration: 0.25), value: snapshot.usedFraction)
+    }
+
+    /// One line under the meter: when it renews, or that it will not.
+    private func nonoPlanFootnote(_ snapshot: NoNoAccount.Snapshot) -> String {
+        guard let renews = snapshot.renewsAt else { return L("nono.plan.active") }
+        let when = DateFormatter.localizedString(from: renews, dateStyle: .medium, timeStyle: .none)
+        return snapshot.subscription.cancelAtPeriodEnd ? L("nono.plan.ends", when) : L("nono.plan.renews", when)
+    }
+
     // MARK: - OpenRouter one-click connect
 
     /// Whether OpenRouter has a stored key. Read straight from the store on each
@@ -1983,6 +2280,119 @@ struct InlineSettingsView: View {
         }
     }
 
+    // MARK: - Cursor CLI sign-in status
+
+    /// Cursor is keyless like the rest, and — like Grok, unlike Claude — offers an
+    /// in-app sign-in: `cursor-agent login` is a first-class subcommand, so the row
+    /// can drive it directly. Install link only when the CLI is missing.
+    ///
+    /// Unlike Grok's, this row *follows* the sign-in rather than firing it and
+    /// forgetting: the browser half happens outside the app, so while it is in
+    /// flight the row says so, and if it ends without credentials the row says that
+    /// too. `CursorCLIService.reauthorize` posts `.cliAvailabilityResolved` at both
+    /// edges, which `cliTick` below turns into a redraw.
+    ///
+    /// Re-check appears in exactly the two states whose fix happens outside the
+    /// app — no CLI, and a CLI too old. The binary resolution is cached for the
+    /// process lifetime, so without it the row keeps reporting launch-time state
+    /// after the user has installed or updated exactly what it asked for, and the
+    /// only cure is quitting Notch. Every other state resolves from inside this
+    /// row, so a re-check button there would be a button with nothing to find.
+    @ViewBuilder
+    private var cursorAccountRow: some View {
+        let installed = CursorCLIService.resolvedBinaryIfReady() != nil
+        let outdated = CursorCLIService.isOutdated
+        let signedIn = CursorCLIService.authExists()
+        let signingIn = CursorCLIService.isSigningIn
+        let rechecking = CursorCLIService.isRechecking
+        let failure = CursorCLIService.lastSignInFailure
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Text(L("model.account"))
+                    .font(.sf(13, weight: .medium))
+                    .foregroundStyle(Tokens.text2)
+                    .frame(width: 64, alignment: .leading)
+
+                if !installed {
+                    // No CLI yet → link to install docs (there's nothing to sign into).
+                    codexPillButton(L("cursor.status.get")) {
+                        NSWorkspace.shared.open(Provider.cursorCode.signupURL)
+                    }
+                    cursorRecheckButton(rechecking)
+                } else if outdated {
+                    // Installed, but a build Notch can't drive. Signing in here
+                    // would work and still leave every turn failing, so the row
+                    // offers the only thing that helps.
+                    statusPill(ok: false, message: L("cursor.status.outdated"))
+                    Spacer(minLength: 8)
+                    codexPillButton(L("cursor.action.update")) {
+                        NSWorkspace.shared.open(Provider.cursorCode.signupURL)
+                    }
+                    cursorRecheckButton(rechecking)
+                } else if signingIn {
+                    ProgressView().controlSize(.small)
+                } else if signedIn {
+                    // Signed in → status + Re-authorize (re-run `cursor-agent login`).
+                    statusPill(ok: true, message: L("cursor.status.connected"))
+                    Spacer(minLength: 8)
+                    codexPillButton(L("cursor.action.reauthorize")) {
+                        CursorCLIService.reauthorize()
+                    }
+                } else {
+                    // Installed but not signed in → same `cursor-agent login` flow.
+                    // No Re-check here: signing in is done from this row, not in a
+                    // terminal, so there is nothing outside the app to go and
+                    // notice.
+                    codexPillButton(L("cursor.action.signIn")) {
+                        CursorCLIService.reauthorize()
+                    }
+                }
+            }
+
+            Text(hint(installed: installed, outdated: outdated, signedIn: signedIn,
+                      signingIn: signingIn, failure: failure))
+                .font(.sf(12))
+                .foregroundStyle(outdated || (failure != nil && !signedIn)
+                                 ? Tokens.danger : Tokens.text3)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.leading, 76)
+        }
+        // The sign-in lands from a background queue minutes after the click, so the
+        // row has to be told; `cliTick` is the redraw.
+        .onReceive(NotificationCenter.default.publisher(for: .cliAvailabilityResolved)) { _ in
+            cliTick &+= 1
+        }
+        .id(cliTick)
+    }
+
+    /// Probe the install again. A spinner while it runs: the probe spawns the CLI,
+    /// so a click with no feedback reads as a dead button.
+    @ViewBuilder
+    private func cursorRecheckButton(_ rechecking: Bool) -> some View {
+        if rechecking {
+            ProgressView().controlSize(.small)
+        } else {
+            codexPillButton(L("cursor.action.recheck")) { CursorCLIService.recheck() }
+        }
+    }
+
+    /// The line under the Cursor account row: what is happening, or what went wrong.
+    private func hint(installed: Bool, outdated: Bool, signedIn: Bool,
+                      signingIn: Bool, failure: String?) -> String {
+        if !installed { return L("cursor.status.hint.install") }
+        if outdated {
+            // Naming the installed version is what makes the line checkable — the
+            // user can compare it against what cursor.com is serving.
+            let version = CursorCLIService.installedVersion
+            return version.isEmpty
+                ? L("cursor.status.hint.outdated")
+                : L("cursor.status.hint.outdatedVersion", version)
+        }
+        if signingIn { return L("cursor.status.hint.waiting") }
+        if let failure, !signedIn { return failure }
+        return signedIn ? L("cursor.status.hint.ready") : L("cursor.status.hint.login")
+    }
+
     /// A quiet pill button in the account row's register (Get Codex / Sign in /
     /// Re-authorize) — same chrome as the OpenRouter Connect button.
     private func codexPillButton(_ title: String, action: @escaping () -> Void) -> some View {
@@ -2137,6 +2547,12 @@ struct InlineSettingsView: View {
         if provider == .claudeCode, modelID.isEmpty || modelID == "claude" {
             return provider.defaultModel
         }
+        // Cursor's "cursor" sentinel likewise names no model — it is the row the
+        // picker offers until the CLI's catalog lands.
+        if provider == .cursorCode,
+           modelID.isEmpty || modelID == CursorCLIService.defaultSentinel {
+            return provider.defaultModel
+        }
         return modelID.isEmpty ? provider.defaultModel : modelID
     }
 
@@ -2160,26 +2576,45 @@ struct InlineSettingsView: View {
     /// itself on the spot because `setupRequired` now holds.
     private var providerRow: some View {
         settingRow(label: L("model.provider")) {
-            GlassMenu(title: provider.displayName) {
+            GlassMenu(title: provider.displayName,
+                      logoVendor: provider.brandVendor,
+                      logoFallback: provider.displayName,
+                      logoSymbol: provider.brandSymbol) {
                 let ready = Provider.offered.filter(providerReady)
                 let unready = Provider.offered.filter { !providerReady($0) }
                 if !ready.isEmpty {
                     SwiftUI.Section(L("model.picker.configured")) {
-                        ForEach(ready) { p in
-                            Button { selectProvider(p) } label: {
-                                menuOption(p.displayName, selected: p == provider)
-                            }
-                        }
+                        ForEach(ready) { p in providerOption(p) }
                     }
                 }
                 if !unready.isEmpty {
                     SwiftUI.Section(L("model.picker.unconfigured")) {
-                        ForEach(unready) { p in
-                            Button { selectProvider(p) } label: {
-                                menuOption(p.displayName, selected: p == provider)
-                            }
-                        }
+                        ForEach(unready) { p in providerOption(p) }
                     }
+                }
+            }
+        }
+    }
+
+    /// One provider row in that menu: its brand mark, its name, and a native
+    /// checkmark on the backend in effect.
+    ///
+    /// A `Toggle` rather than the `Button` + `menuOption` pair the other menus
+    /// use, because a menu item has one image slot: the checkmark hack spends it
+    /// on the tick, leaving nowhere for the logo. A toggle puts the tick in the
+    /// state column where AppKit draws it, and the mark takes the image slot.
+    /// Switching off the current provider is meaningless, so only the on edge acts.
+    @ViewBuilder
+    private func providerOption(_ p: Provider) -> some View {
+        Toggle(isOn: Binding(get: { p == provider },
+                             set: { if $0 { selectProvider(p) } })) {
+            Label {
+                Text(p.displayName)
+            } icon: {
+                if let mark = VendorLogos.menuImage(vendor: p.brandVendor,
+                                                    fallback: p.displayName,
+                                                    symbol: p.brandSymbol) {
+                    Image(nsImage: mark).renderingMode(.template)
                 }
             }
         }
@@ -2538,9 +2973,10 @@ struct InlineSettingsView: View {
     /// `NotchModel.customInstructionsLimit` chars (the binding truncates), empty by
     /// default. Deliberately understated: the hint says it refines, never that it
     /// overrides the core rules.
-    /// Folded away at rest behind the same glass disclosure chip the API key uses:
-    /// it is a once-in-a-while preference, not something the Model pane should
-    /// spend a whole field on every time it opens.
+    /// Always folded away at rest behind the same glass disclosure chip the API
+    /// key uses — including when an instruction is already on file: it is a
+    /// once-in-a-while preference, not something the pane should spend a whole
+    /// field on every time it opens.
     private var customInstructionsRow: some View {
         VStack(alignment: .leading, spacing: 12) {
             Button {
@@ -2606,11 +3042,6 @@ struct InlineSettingsView: View {
                         .fill(.white.opacity(0.06))
                 )
             }
-        }
-        // An instruction already on file shouldn't hide behind a fold the user
-        // never opened — start unfolded in that case, still foldable by hand.
-        .onAppear {
-            if !model.customInstructions.isEmpty { instructionsSectionOpen = true }
         }
     }
 
@@ -5935,19 +6366,31 @@ struct GlassMenu<Content: View>: View {
     /// Tighter fitting for dense rows — the agent card's 25pt bottom bar. The
     /// default is the settings pane's size, where these chips live in 34pt rows.
     var compact: Bool = false
+    /// A brand mark drawn ahead of the title, for a chip whose value *is* a
+    /// vendor — the Provider row, which then reads as the same kind of control as
+    /// the Model chip one row below it. Nil (the default) leaves a text-only chip.
+    var logoVendor: String? = nil
+    /// Monogram source when `logoVendor` names no bundled mark — the displayed
+    /// value, so the tile is never blank.
+    var logoFallback: String = ""
+    /// An SF Symbol drawn instead of that monogram (the custom endpoint's).
+    var logoSymbol: String? = nil
+    /// Wear the first-party aura — nono's chip, and nothing else's.
+    var aura: Bool = false
     @ViewBuilder var content: () -> Content
 
     @State private var hovering = false
 
     private typealias Metrics = (font: CGFloat, chevron: CGFloat, gap: CGFloat,
-                                 height: CGFloat, lead: CGFloat, trail: CGFloat)
+                                 height: CGFloat, lead: CGFloat, trail: CGFloat,
+                                 logo: CGFloat)
 
     /// The compact fitting, one place: a 20pt pill that sits inside a 25pt bar.
     /// Its corner is always height/2 — fully round, the same capsule the effort
     /// slider's thumb and the compose row's chips use.
     // Computed, not stored: a generic type can't hold static storage.
-    private static var compactMetrics: Metrics { (11.5, 8, 5, 20, 10, 8) }
-    private static var regularMetrics: Metrics { (13, 10, 7, 30, 11, 9) }
+    private static var compactMetrics: Metrics { (11.5, 8, 5, 20, 10, 8, 12) }
+    private static var regularMetrics: Metrics { (13, 10, 7, 30, 11, 9, 15) }
 
     private var metrics: Metrics { compact ? Self.compactMetrics : Self.regularMetrics }
     /// The width a compact chip needs for `title`, measured in the face SwiftUI
@@ -5967,6 +6410,11 @@ struct GlassMenu<Content: View>: View {
             content()
         } label: {
             HStack(spacing: m.gap) {
+                if let logoVendor {
+                    VendorLogo(vendor: logoVendor, fallback: logoFallback,
+                               symbol: logoSymbol)
+                        .frame(width: m.logo, height: m.logo)
+                }
                 if !title.isEmpty {
                     Text(title)
                         .font(.sf(m.font, weight: compact ? .medium : .regular))
@@ -5979,11 +6427,14 @@ struct GlassMenu<Content: View>: View {
                     .foregroundStyle(Tokens.text3)
             }
             // Icon-only (empty title) pills get symmetric padding so the chevron
-            // sits centered; labelled pills keep the tighter trailing inset.
-            .padding(.leading, title.isEmpty ? m.trail : m.lead)
+            // sits centered; labelled pills keep the tighter trailing inset. A
+            // logo leads with the same 10pt inset the model chip uses, so the two
+            // stacked chips share one left edge.
+            .padding(.leading, logoVendor != nil ? 10 : (title.isEmpty ? m.trail : m.lead))
             .padding(.trailing, m.trail)
             .frame(height: m.height)
             .recessedSurface(in: Capsule(), lit: hovering)
+            .brandAura(in: Capsule(), active: aura)
             .contentShape(Capsule())
         }
         .menuStyle(.button)

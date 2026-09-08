@@ -325,6 +325,13 @@ enum APIKeyStore {
         if provider == .piCode, stored.isEmpty || stored == PiCLIService.defaultSentinel {
             return provider.defaultModel
         }
+        // Cursor: same shape again — an empty override or the "cursor" sentinel both
+        // mean "whatever the CLI itself is configured to run" (the row its own
+        // catalog marks as default).
+        if provider == .cursorCode,
+           stored.isEmpty || stored == CursorCLIService.defaultSentinel {
+            return provider.defaultModel
+        }
         // Claude Code: same shape again. "claude" is the retired account-default
         // sentinel a pre-0.3.1 selection may still hold; it no longer appears in
         // the picker, so resolve it (and an empty override) to the provider's own

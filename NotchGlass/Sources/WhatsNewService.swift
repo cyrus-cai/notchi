@@ -94,6 +94,22 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.7.8",
+            date: "2026-09-08",
+            features: [
+                "Cursor CLI joins the model list — Ask and agent tasks run on your own Cursor plan.",
+            ],
+            improvements: [
+                "A failed answer can be retried on a different model, picked from the error row itself.",
+                "Cursor's model list groups Cursor's own models apart from the ones it resells.",
+                "Settings honours the ⌘P pin.",
+                "Sweeping the model list no longer taps the trackpad on every row.",
+            ],
+            fixes: [
+                "Hover hints are no longer clipped at the notch edge.",
+            ]
+        ),
+        Entry(
             version: "0.7.7",
             date: "2026-09-05",
             heroAssetName: "WhatsNew077Promo",

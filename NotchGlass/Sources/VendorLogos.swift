@@ -15,6 +15,11 @@ struct VendorLogo: View {
     /// Fallback initial source when `vendor` is empty (an id no family matched) —
     /// pass the model name so the monogram is never a blank tile.
     var fallback: String = ""
+    /// An SF Symbol to draw in place of the monogram, for the one slot that names
+    /// no vendor by design: the custom endpoint, which is whatever server the user
+    /// pointed it at. A monogram there invents a brand out of the word "Custom";
+    /// the app's own settings glyph says "you configured this" instead.
+    var symbol: String? = nil
 
     var body: some View {
         if let mark = VendorLogos.mark(for: vendor) {
@@ -23,6 +28,14 @@ struct VendorLogo: View {
                 // holes disappear under the default non-zero winding.
                 .fill(Tokens.text1, style: FillStyle(eoFill: true))
                 .aspectRatio(1, contentMode: .fit)
+        } else if let symbol {
+            Image(systemName: symbol)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .foregroundStyle(Tokens.text1)
+                // SF Symbols carry their own optical padding, so a resized glyph
+                // lands smaller than a brand mark filling the same box.
+                .scaleEffect(1.12)
         } else {
             Monogram(text: vendor.isEmpty ? fallback : vendor)
         }
@@ -165,6 +178,25 @@ enum VendorLogos {
         "OpenRouter": Mark(
             path: "M16.804 1.957l7.22 4.105v.087L16.73 10.21l.017-2.117-.821-.03c-1.059-.028-1.611.002-2.268.11-1.064.175-2.038.577-3.147 1.352L8.345 11.03c-.284.195-.495.336-.68.455l-.515.322-.397.234.385.23.53.338c.476.314 1.17.796 2.701 1.866 1.11.775 2.083 1.177 3.147 1.352l.3.045c.694.091 1.375.094 2.825.033l.022-2.159 7.22 4.105v.087L16.589 22l.014-1.862-.635.022c-1.386.042-2.137.002-3.138-.162-1.694-.28-3.26-.926-4.881-2.059l-2.158-1.5a21.997 21.997 0 00-.755-.498l-.467-.28a55.927 55.927 0 00-.76-.43C2.908 14.73.563 14.116 0 14.116V9.888l.14.004c.564-.007 2.91-.622 3.809-1.124l1.016-.58.438-.274c.428-.28 1.072-.726 2.686-1.853 1.621-1.133 3.186-1.78 4.881-2.059 1.152-.19 1.974-.213 3.814-.138l.02-1.907z",
             viewBox: CGSize(width: 24, height: 24)),
+        // nono — Notchi's own gateway, so it wears Notchi's own app mark rather
+        // than the model actually running behind the tier. Traced off the app icon
+        // (`AppIcon.appiconset`), whose glyph sits on an exact 3×3 grid: the notch
+        // block is the 2×2 top square plus the cell below its left half, and the
+        // dot is the circle inscribed in the bottom-right cell. Written on that
+        // grid at 8 units a cell.
+        //
+        // Set in a 30-box with a 3-unit margin, not flush to 24 like the line-art
+        // marks: this one is a solid block, and a solid shape filling the same box
+        // as a knot or a burst outweighs them badly. 80% of the slot is where it
+        // stops reading as the biggest thing in the menu.
+        "Nono": Mark(
+            path: "M3 3H19V19H11V27H3ZM27 23A4 4 0 0 1 19 23A4 4 0 0 1 27 23Z",
+            viewBox: CGSize(width: 30, height: 30)),
+        // Vercel — the triangle. The AI Gateway ships under the Vercel brand, so
+        // the gateway provider wears it (its *models* keep their own vendors').
+        "Vercel": Mark(
+            path: "M24 22.525H0l12-21.05 12 21.05z",
+            viewBox: CGSize(width: 24, height: 24)),
         // Command Code — the CLI backend's own mark (the agent engine bar draws it;
         // its *models* wear their real vendors' marks, since the ids name them).
         // Neither icon set carries it, so this is the glyph from their own site,
@@ -173,13 +205,19 @@ enum VendorLogos {
             path: "M3.36462 2.05768C4.07064 2.05768 4.64496 2.63201 4.64496 3.33802L4.64496 3.88674L6.1082 3.88674L6.1082 3.33802C6.1082 2.63201 6.68253 2.05768 7.38854 2.05768C8.09456 2.05768 8.66888 2.63201 8.66888 3.33802C8.66888 4.04404 8.09455 4.61836 7.38854 4.61836L6.83982 4.61836L6.83982 6.0816L7.38854 6.0816C8.09455 6.0816 8.66888 6.65592 8.66888 7.36194C8.66888 8.06795 8.09455 8.64228 7.38854 8.64228C6.68253 8.64228 6.1082 8.06795 6.1082 7.36194L6.1082 6.81322L4.64496 6.81322L4.64496 7.36194C4.64496 8.06795 4.07064 8.64228 3.36462 8.64228C2.65861 8.64228 2.08429 8.06795 2.08429 7.36194C2.08429 6.65592 2.65861 6.0816 3.36462 6.0816L3.91334 6.0816L3.91334 4.61836L3.36462 4.61836C2.65861 4.61836 2.08429 4.04404 2.08429 3.33802C2.08429 2.63201 2.65861 2.05768 3.36462 2.05768ZM3.91334 3.88674L3.91334 3.33802C3.91334 3.0344 3.66825 2.78931 3.36462 2.78931C3.061 2.78931 2.81591 3.0344 2.81591 3.33802C2.81591 3.64164 3.061 3.88674 3.36462 3.88674L3.91334 3.88674ZM7.38854 3.88674C7.69216 3.88674 7.93726 3.64164 7.93726 3.33802C7.93726 3.0344 7.69216 2.78931 7.38854 2.78931C7.08492 2.78931 6.83982 3.0344 6.83982 3.33802L6.83982 3.88674L7.38854 3.88674ZM6.1082 6.0816L6.1082 4.61836L4.64496 4.61836L4.64496 6.0816L6.1082 6.0816ZM3.36462 7.91065C3.66825 7.91065 3.91334 7.66556 3.91334 7.36194L3.91334 6.81322L3.36462 6.81322C3.061 6.81322 2.81591 7.05832 2.81591 7.36194C2.81591 7.66556 3.061 7.91065 3.36462 7.91065ZM7.38854 7.91065C7.69216 7.91065 7.93726 7.66556 7.93726 7.36194C7.93726 7.05832 7.69216 6.81322 7.38854 6.81322L6.83982 6.81322L6.83982 7.36194C6.83982 7.66556 7.08492 7.91065 7.38854 7.91065Z",
             viewBox: CGSize(width: 11, height: 11)),
         // PI — the CLI backend's own mark (the agent engine bar draws it; its
-        // *models* wear their real vendors' marks, since the ids name them). pi
-        // ships no logo of any kind — its identity is literally the letter — so
-        // rather than invent one this is the real π glyph outline, lifted from the
-        // system UI font (SF Pro Semibold) via CoreText and normalized to a 24-box
-        // like the rest. A single closed contour, so evenodd is a no-op on it.
+        // *models* wear their real vendors' marks, since the ids name them).
+        // Neither icon set carries it, so this is pi's own logo from pi.dev
+        // (`logo-auto.svg`): a blocked-out "Pi" — the P with its counter, plus the
+        // i's dot. Authored evenodd like the rest, and it lands on an exact 4×4
+        // grid of 6-unit cells once the source's 800-box padding is trimmed, so
+        // the coordinates are written on that grid rather than carried at their
+        // original scale.
         "PI": Mark(
-            path: "M20.443 22.306Q17.653 22.306 16.387 21.1Q15.122 19.895 15.122 16.997L15.122 5.575L8.74 5.575L8.74 22.113L3.95 22.113L3.95 5.575L0 5.575L0 1.694L24 1.694L24 5.575L19.912 5.575L19.912 16.334Q19.912 17.529 20.342 18.029Q20.772 18.529 21.699 18.529Q21.93 18.529 22.249 18.487Q22.569 18.446 22.81 18.357L22.871 22.008Q22.523 22.121 21.885 22.213Q21.248 22.306 20.443 22.306Z",
+            path: "M0 0H18V12H12V18H6V24H0ZM6 6V12H12V6ZM18 12H24V24H18Z",
+            viewBox: CGSize(width: 24, height: 24)),
+
+        "Cursor": Mark(
+            path: "M22.106 5.68L12.5.135a.998.998 0 00-.998 0L1.893 5.68a.84.84 0 00-.419.726v11.186c0 .3.16.577.42.727l9.607 5.547a.999.999 0 00.998 0l9.608-5.547a.84.84 0 00.42-.727V6.407a.84.84 0 00-.42-.726zm-.603 1.176L12.228 22.92c-.063.108-.228.064-.228-.061V12.34a.59.59 0 00-.295-.51l-9.11-5.26c-.107-.062-.063-.228.062-.228h18.55c.264 0 .428.286.296.514z",
             viewBox: CGSize(width: 24, height: 24)),
 
         // Reachable through the OpenRouter / Vercel gateways.
@@ -496,4 +534,46 @@ private struct Scanner {
         if c == "1" { i += 1; return true }
         return nil
     }
+}
+
+// MARK: - Menu images
+
+import AppKit
+
+extension VendorLogos {
+    /// The same mark `VendorLogo` draws, rasterized as a **template** `NSImage` for
+    /// an `NSMenuItem`.
+    ///
+    /// A menu item takes an image, not a view: SwiftUI's `Menu` and AppKit's
+    /// `NSMenu` both hand their rows to AppKit, which draws `NSMenuItem.image` and
+    /// nothing else — a `Shape` in a `Label` renders as an empty slot. Rendering the
+    /// existing view keeps one definition of every mark (the monogram fallback
+    /// included) instead of a second, drifting AppKit path.
+    ///
+    /// `isTemplate` is what makes the row behave: AppKit then reads only the alpha
+    /// channel and tints it with the menu's own label color, so the mark inverts
+    /// with the highlight and dims with a disabled row like a system glyph.
+    /// Rendered at 3× so it stays crisp on Retina and at the accessibility menu
+    /// sizes, and cached — a menu rebuilds its whole item list on every open.
+    @MainActor
+    static func menuImage(vendor: String, fallback: String = "",
+                          symbol: String? = nil, side: CGFloat = 14) -> NSImage? {
+        let key = "\(vendor)|\(fallback)|\(symbol ?? "")|\(side)" as NSString
+        if let hit = menuImageCache.object(forKey: key) { return hit }
+        let renderer = ImageRenderer(content:
+            VendorLogo(vendor: vendor, fallback: fallback, symbol: symbol)
+                .frame(width: side, height: side))
+        renderer.scale = 3
+        guard let cg = renderer.cgImage else { return nil }
+        let image = NSImage(cgImage: cg, size: NSSize(width: side, height: side))
+        image.isTemplate = true
+        menuImageCache.setObject(image, forKey: key)
+        return image
+    }
+
+    private static let menuImageCache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 128
+        return cache
+    }()
 }
