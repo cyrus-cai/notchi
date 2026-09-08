@@ -101,7 +101,6 @@ final class WhatsNewService: ObservableObject {
             ],
             improvements: [
                 "A failed answer can be retried on a different model, picked from the error row itself.",
-                "Cursor's model list groups Cursor's own models apart from the ones it resells.",
                 "Settings honours the ⌘P pin.",
                 "Sweeping the model list no longer taps the trackpad on every row.",
             ],
