@@ -98,9 +98,8 @@ final class WhatsNewService: ObservableObject {
             date: "2026-09-14",
             heroAssetName: "WhatsNew080Promo",
             features: [
-                "Blend1 is Notchi's own model. Ask without pasting an API key.",
+                "Introducing Blend1, Notchi's own model. Ask without pasting an API key.",
                 "It spends Notchi Balance, which you can top up when it runs out.",
-                "This version includes $1 of credit, good for 30 days.",
             ],
             improvements: [
                 "Settings keeps Notchi Balance apart from keys you bring yourself.",
