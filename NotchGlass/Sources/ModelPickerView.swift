@@ -133,8 +133,12 @@ private struct ModelMenuPresenter: NSViewRepresentable {
                 let x = self.parent.centered
                     ? max(0, (view.bounds.width - menu.size.width) / 2)
                     : 0
+                // A click on the companion card must not end tracking — swallow
+                // those events for the length of this nested loop.
+                self.detail.retainParentMenu(menu)
                 // Blocks in a nested event loop until the menu closes.
                 menu.popUp(positioning: nil, at: NSPoint(x: x, y: bottom), in: view)
+                self.detail.releaseParentMenu()
                 self.finish()
             }
         }
@@ -187,14 +191,37 @@ private struct ModelMenuPresenter: NSViewRepresentable {
                 if byProvider[m.provider] == nil { order.append(m.provider) }
                 byProvider[m.provider, default: []].append(m)
             }
-            let keyed = order.filter { byProvider[$0]?.first?.hasKey == true }
-            let keyless = order.filter { byProvider[$0]?.first?.hasKey != true }
-            for p in keyed { menu.addItem(providerItem(p, byProvider[p] ?? [])) }
+            // Two blocks, not one list. Notchi ships with the app and spends the
+            // balance in the card above; every other row is an account you hold
+            // with someone else. Filing it as one more vendor between OpenRouter
+            // and OpenAI — same submenu, same shape — said it was an alternative
+            // to them, which is the one thing it isn't. Its tiers ride the top
+            // level flat: there are two of them, and a submenu holding two rows
+            // is a door in front of a doorway.
+            let house = order.filter(\.isFirstParty)
+            let houseModels = house.flatMap { byProvider[$0] ?? [] }
+            if let name = house.first?.displayName, !houseModels.isEmpty {
+                menu.addItem(.sectionHeader(title: name))
+                addRows(houseModels, to: menu)
+            }
+            let theirs = order.filter { !$0.isFirstParty }
+            let keyed = theirs.filter { byProvider[$0]?.first?.hasKey == true }
+            let keyless = theirs.filter { byProvider[$0]?.first?.hasKey != true }
+            // The backends you brought. Headed only when Notchi is above them —
+            // on its own the run needs no label, and "Configured" over the whole
+            // menu would be naming the only thing there is.
+            if !keyed.isEmpty {
+                if !houseModels.isEmpty {
+                    menu.addItem(.separator())
+                    menu.addItem(.sectionHeader(title: L("model.picker.configured")))
+                }
+                for p in keyed { menu.addItem(providerItem(p, byProvider[p] ?? [])) }
+            }
             // Providers you'd have to set up first, under their own heading and
             // below everything callable — the same "what a key would unlock" shelf
             // the old card kept at the bottom of its list.
             if !keyless.isEmpty {
-                if !keyed.isEmpty { menu.addItem(.separator()) }
+                if !menu.items.isEmpty { menu.addItem(.separator()) }
                 menu.addItem(.sectionHeader(title: L("model.picker.unconfigured")))
                 for p in keyless { menu.addItem(providerItem(p, byProvider[p] ?? [])) }
             }
@@ -383,14 +410,44 @@ private struct ModelMenuPresenter: NSViewRepresentable {
             // to that provider's key setup instead of switching the backend, and says
             // so rather than sitting there greyed with no explanation. Pre-14.4 has no
             // subtitle to say it in, so the title carries it.
+            // Ours wears the wallet: NO CREDIT when the balance is empty, or
+            // today's cap.
+            let wallet = m.provider.isFirstParty
+                ? MainActor.assumeIsolated { ModelDetailCard.Wallet.current }
+                : nil
+            var note: String?
             if !m.hasKey {
+                note = L("model.picker.addKey")
+            } else if wallet?.state == .cappedForToday {
+                note = L("nono.dailyCap")
+            } else if wallet?.state == .empty,
+                      let tagged = titleWithLowTag(m.displayName) {
+                item.attributedTitle = tagged
+            }
+            if let note {
                 if #available(macOS 14.4, *) {
-                    item.subtitle = L("model.picker.addKey")
+                    item.subtitle = note
                 } else {
-                    item.title = "\(m.displayName)  ·  \(L("model.picker.addKey"))"
+                    item.title = "\(m.displayName)  ·  \(note)"
                 }
             }
             return item
+        }
+
+        /// The row's title with `LowBalanceTag` after it, centred on the menu
+        /// font's cap height.
+        private func titleWithLowTag(_ title: String) -> NSAttributedString? {
+            guard let image = MainActor.assumeIsolated({ LowBalanceTag.menuImage }) else {
+                return nil
+            }
+            let font = NSFont.menuFont(ofSize: 0)
+            let s = NSMutableAttributedString(string: title + "  ", attributes: [.font: font])
+            let chip = NSTextAttachment()
+            chip.image = image
+            chip.bounds = NSRect(x: 0, y: (font.capHeight - image.size.height) / 2,
+                                 width: image.size.width, height: image.size.height)
+            s.append(NSAttributedString(attachment: chip))
+            return s
         }
 
         // MARK: Detail card
@@ -453,11 +510,53 @@ struct ModelDetailCard: View {
     /// Whether the pointer is over the scoring link. Pushed in rather than sensed:
     /// see `scoringLinkFrame(in:)`.
     let scoringHovered: Bool
+    /// Whether the pointer is over the first-party provider pill. Pushed in for
+    /// the same reason as `scoringHovered`.
+    let pillHovered: Bool
+    /// Whether the pointer is over the add-credit row. Pushed in for the same
+    /// reason as `scoringHovered`.
+    let addCreditHovered: Bool
+    /// Whether the pointer is over Learn more, next to the balance.
+    let learnMoreHovered: Bool
+    /// What the wallet behind the first-party backend holds, or `nil`
+    /// when the gateway has not answered yet — and on every other card, which
+    /// has no wallet to report.
+    ///
+    /// A plain value rather than `NoNoAccount` itself: this card is rebuilt from
+    /// a timer sixty times a second beside a tracking menu (see
+    /// `ModelDetailPanel.render`), where an observable object would be both the
+    /// wrong lifetime and a redraw nobody is there to service.
+    let wallet: Wallet?
     let onOpenScoringDetails: () -> Void
+    /// Opens this model's provider in Settings. Only wired on the first-party
+    /// pill — the qualifier tag on everyone else is a name, not a door.
+    let onOpenProvider: () -> Void
+    /// Screen frame of the first-party pill, so a native menu's click swallow
+    /// can hit-test it. Empty when the pill is not on this card.
+    let onPillFrame: (NSRect) -> Void
+    /// Dollars the stepper is holding. Lives on the panel, not here: this
+    /// view is rebuilt from a timer, and `@State` would reset every frame.
+    let topUpUSD: Double
+    /// Whether the amount stepper is out. Same unfold as Settings: Add credit
+    /// first, the amount after a click.
+    let showingAmount: Bool
+    /// Whether the pointer is over the amount stepper. Pushed in for the same
+    /// reason as `scoringHovered`.
+    let stepperHovered: Bool
+    let onTopUpChange: (Double) -> Void
+    /// Screen frame of the stepper, so a native menu's click swallow can
+    /// hit-test minus and plus.
+    let onStepperFrame: (NSRect) -> Void
+    /// Collapsed: unfolds the stepper. Unfolded: opens Stripe for `topUpUSD`.
+    let onAddCredit: () -> Void
+    /// Screen frame of the Add button, for the same hit test as the pill.
+    let onAddCreditFrame: (NSRect) -> Void
+    /// Screen frame of Learn more, for the same hit test as the pill.
+    let onLearnMoreFrame: (NSRect) -> Void
 
     /// Menu-adjacent, so it takes the corner radius of the things macOS pops up
     /// next to a menu rather than the tighter one a panel body uses.
-    private static let shape = RoundedRectangle(cornerRadius: 22, style: .continuous)
+    private static let shape = RoundedRectangle.modal
 
     private var stats: RemoteModelManifest.ModelStats? { Provider.modelStats(model.info.id) }
 
@@ -518,56 +617,72 @@ struct ModelDetailCard: View {
         }
     }
 
+    /// What the card reports about the wallet, read off `NoNoAccount` once per
+    /// render on the main actor and handed over as a value.
+    struct Wallet: Equatable {
+        enum State: Equatable {
+            /// There is credit to spend. The figure is the fact.
+            case funded
+            /// Nothing left to spend. The figure says so on its own.
+            case empty
+            /// Blocked by today's ceiling with money still in the account. Not
+            /// `empty`: telling someone with $18 left to buy more would send
+            /// them to pay for something they already have.
+            case cappedForToday
+        }
+
+        var state: State
+        /// Under `Tokens.lowBalanceUSD`. Read off the settled balance, not the
+        /// figure counting up on the card, so the add-credit row does not
+        /// appear and vanish while the number travels.
+        var low: Bool
+        /// The settled balance is above zero and under a cent. Read off the
+        /// settled balance for the same reason as `low`: the figure counting up
+        /// from zero passes through sub-cent values on every open, and would
+        /// flash "<" on its way to the real number.
+        var subCent: Bool = false
+        /// Dollars left in the wallet, printed as is.
+        var balanceUSD: Double = 0
+
+        @MainActor
+        static var current: Wallet? {
+            guard let snapshot = NoNoAccount.shared.snapshot else { return nil }
+            let remaining = snapshot.credit.remainingUSD
+            let low = remaining < Tokens.lowBalanceUSD
+            let subCent = InlineSettingsView.isSubCent(remaining)
+            if snapshot.isEmpty { return Wallet(state: .empty, low: true, balanceUSD: remaining) }
+            if snapshot.cappedForToday {
+                return Wallet(state: .cappedForToday, low: low, subCent: subCent,
+                              balanceUSD: remaining)
+            }
+            return Wallet(state: .funded, low: low, subCent: subCent, balanceUSD: remaining)
+        }
+
+        /// Whether the card offers more credit. Not when capped for today —
+        /// see `cappedForToday`.
+        var offersCredit: Bool { state != .cappedForToday && low }
+    }
+
+    /// Ours, or someone else's. The card answers different questions for the
+    /// two — see `walletWell`.
+    private var isFirstParty: Bool { model.provider.isFirstParty }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
-            HStack(alignment: .center, spacing: 8) {
-                VStack(alignment: .leading, spacing: 6) {
-                    VendorLogo(vendor: model.info.vendor, fallback: model.info.id)
-                        .frame(width: 20, height: 20)
-                    Text(title.name)
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(Tokens.text1)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if let qualifier = title.qualifier {
-                        Text(qualifier)
-                            .font(.system(size: 9.5, weight: .medium))
-                            .foregroundStyle(Tokens.text3)
-                            .lineLimit(1)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(
-                                Capsule(style: .continuous)
-                                    .fill(Tokens.ink.opacity(0.14))
-                                    .overlay(
-                                        Capsule(style: .continuous)
-                                            .strokeBorder(Color.white.opacity(0.10), lineWidth: 0.5)
-                                    )
-                            )
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                if Self.hasValue(model) { ValueRing(score: figures.value) }
-            }
+            header
 
-            Meter(title: L("model.detail.speed"), level: figures.speed)
-            Meter(title: L("model.detail.intelligence"), level: figures.intelligence)
-
-            if let context = model.info.contextLabel {
-                HStack(spacing: 8) {
-                    Text(L("model.detail.context"))
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(Tokens.text3)
-                    Spacer(minLength: 8)
-                    if let words = model.info.contextWordsLabel {
-                        Text(L("model.detail.words", words))
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(Tokens.text4)
-                    }
-                    Text(context)
-                        .font(.system(size: 11.5, weight: .semibold))
-                        .foregroundStyle(Tokens.text1)
-                }
+            // Meters for a model we rate; the wallet for the one we run.
+            //
+            // Speed and Intelligence are `ModelRatings`' read of an id, and on
+            // `nono-flash` that read is the word "flash" in a name we chose
+            // ourselves — a 5/5 speed bar sourced from our own marketing, and a
+            // 3/5 intelligence bar sourced from nothing. What is true of this
+            // one and of no other card is the remaining credit, so the two
+            // invented bars give way to the wallet, which sits at the bottom of
+            // the card, under the capability rows.
+            if !isFirstParty {
+                Meter(title: L("model.detail.speed"), level: figures.speed)
+                Meter(title: L("model.detail.intelligence"), level: figures.intelligence)
             }
 
             VStack(alignment: .leading, spacing: 7) {
@@ -594,11 +709,18 @@ struct ModelDetailCard: View {
                     Capability(symbol: "brain", title: L("model.detail.reasoning"),
                                supported: true)
                 }
+                if isFirstParty {
+                    Note(symbol: "globe.americas", title: L("model.detail.nono.host"))
+                }
                 if stats != nil { scoringDetailsLink }
             }
+
+            if isFirstParty { walletWell }
         }
-        .padding(12)
-        .frame(width: ModelDetailPanel.width, alignment: .leading)
+        .padding(ModelDetailPanel.inset)
+        .frame(width: ModelDetailPanel.width(showingPurchase: wallet?.offersCredit == true
+                                               && showingAmount),
+               alignment: .leading)
         .background {
             // Keep the companion genuinely transparent. A semantic `.menu`
             // `NSVisualEffectView` inside this detached panel resolves to a dense,
@@ -623,6 +745,163 @@ struct ModelDetailCard: View {
         .environment(\.colorScheme, .dark)
     }
 
+    /// The mark, the name, and — on a card whose name deliberately gives away no
+    /// vendor — whose model it is.
+    private var header: some View {
+        HStack(alignment: .center, spacing: 8) {
+            VStack(alignment: .leading, spacing: 6) {
+                VendorLogo(vendor: model.info.vendor, fallback: model.info.id)
+                    .frame(width: 20, height: 20)
+                Text(title.name)
+                    .font(.sf(Tokens.TypeSize.form, weight: .medium))
+                    .foregroundStyle(Tokens.text1)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let qualifier = title.qualifier {
+                    pill(qualifier)
+                } else if model.provider.isFirstParty {
+                    // The name says nothing about who makes it, and this card
+                    // wears our own mark rather than a lab's — so the maker is
+                    // written out, in the slot the engine qualifier uses.
+                    // Tappable: it is the door into that provider's Settings pane.
+                    pill(model.provider.spec.displayName, tappable: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if Self.hasValue(model) { ValueRing(score: figures.value) }
+        }
+    }
+
+    /// An outlined tag, not a filled chip: a small radius and a hairline, so the
+    /// word sits on the card rather than in a lozenge of its own. The first-party
+    /// pill is a control — hover brightens it, a click opens that provider in
+    /// Settings — and reports its screen frame so a native menu can hit-test it
+    /// while tracking (SwiftUI buttons do not receive the click then).
+    private func pill(_ text: String, tappable: Bool = false) -> some View {
+        let label = Tag(text: text, hovered: tappable && pillHovered)
+        return Group {
+            if tappable {
+                Button(action: onOpenProvider) { label }
+                    .buttonStyle(.plain)
+                    .contentShape(Tag.shape)
+                    .background(ScreenFrameProbe(onChange: onPillFrame))
+            } else {
+                label
+            }
+        }
+    }
+
+    /// The pill's face. Also drawn on Settings → Pricing, so a model reads the
+    /// same there as on this card.
+    struct Tag: View {
+        let text: String
+        var hovered = false
+
+        static let shape = RoundedRectangle(cornerRadius: 5, style: .continuous)
+
+        var body: some View {
+            Text(text)
+                .font(.sf(Tokens.TypeSize.caption, weight: .medium))
+                .foregroundStyle(hovered ? Tokens.text1 : Tokens.text2)
+                .lineLimit(1)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .overlay(Self.shape.strokeBorder(Color.white.opacity(hovered ? 0.42 : 0.24),
+                                                 lineWidth: 0.75))
+        }
+    }
+
+    /// What the wallet holds, in the space the two meters take on every other
+    /// card. Unit cost stays off this surface — it is not a customer-facing
+    /// figure.
+    ///
+    /// Same register as Speed / Intelligence: label, figure, no well. Nothing
+    /// draws until the gateway has answered — a card that says "no credit" for
+    /// the length of one request is telling a paying user they have not paid.
+    ///
+    /// There is no rail here any more. The rail measured a month's allowance
+    /// against its own ceiling; prepaid credit has no denominator, and a bar
+    /// with nothing to fill is a shape borrowed from a meaning that is gone.
+    @ViewBuilder
+    private var walletWell: some View {
+        if let wallet {
+            // Settings' wallet card, one size down: the figure, then Add
+            // credit. The amount stepper stays folded until that click.
+            VStack(alignment: .leading, spacing: 6) {
+                // Same label register as the Speed / Intelligence meters.
+                Text(L("model.detail.nono.balance"))
+                    .font(.sf(Tokens.TypeSize.meta))
+                    .foregroundStyle(Tokens.text3)
+                HStack(alignment: .center, spacing: 8) {
+                    balanceFigure
+                    Spacer(minLength: 4)
+                    learnMoreLink
+                }
+                if wallet.offersCredit { purchaseRow }
+                if wallet.state == .cappedForToday {
+                    Text(L("nono.dailyCap"))
+                        .font(.sf(Tokens.TypeSize.meta))
+                        .foregroundStyle(Tokens.text4)
+                }
+            }
+            .padding(.top, 2)
+        }
+    }
+
+    /// Settings' Add-credit row: one button at rest, the stepper unfolding
+    /// beside it so the next click is the purchase.
+    private var purchaseRow: some View {
+        HStack(spacing: 8) {
+            if showingAmount {
+                AmountStepper(
+                    value: Binding(get: { topUpUSD }, set: onTopUpChange),
+                    range: NoNoAccount.minimumTopUpUSD...NoNoAccount.maximumTopUpUSD,
+                    lit: stepperHovered)
+                .background(ScreenFrameProbe(onChange: onStepperFrame))
+                .transition(.scale(scale: 0.86, anchor: .trailing).combined(with: .opacity))
+            }
+
+            Button(action: onAddCredit) {
+                AddCreditButtonFace(title: showingAmount ? L("nono.addShort") : L("nono.add"),
+                                    lit: addCreditHovered, compact: true)
+            }
+            .buttonStyle(GlassPressStyle())
+            .background(ScreenFrameProbe(onChange: onAddCreditFrame))
+        }
+        .animation(.spring(response: 0.34, dampingFraction: 0.82), value: showingAmount)
+    }
+
+    /// The balance, printed as the settings wallet prints it — the two are the
+    /// same number in two places and must not disagree.
+    private var balanceFigure: some View {
+        Group {
+            if wallet?.subCent == true {
+                Text("<").font(.brand(15)) + Text("$0.01").font(.brand(22))
+            } else {
+                Text(String(format: "$%.2f", wallet?.balanceUSD ?? 0)).font(.brand(22))
+            }
+        }
+        .foregroundStyle(Tokens.text1)
+        .lineLimit(1)
+        .fixedSize()
+    }
+
+    /// Opens this model's provider in Settings. Same door as the Notchi pill;
+    /// it sits on the balance row so the figure has somewhere to send a
+    /// question about credit.
+    private var learnMoreLink: some View {
+        Button(action: onOpenProvider) {
+            Image(systemName: "arrow.up.right")
+                .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                .foregroundStyle(learnMoreHovered ? Tokens.text1 : Tokens.text4)
+                .padding(4)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(L("model.detail.learnMore"))
+        .background(ScreenFrameProbe(onChange: onLearnMoreFrame))
+    }
+
     /// The full methodology belongs on a durable, linkable page rather than in a
     /// translucent menu card. Only measured cards offer the link; a card running
     /// entirely on the curated fallback has no AA figures to explain.
@@ -634,12 +913,12 @@ struct ModelDetailCard: View {
         Button(action: onOpenScoringDetails) {
             HStack(spacing: 7) {
                 Text(L("model.detail.scoringDetails"))
-                    .font(.system(size: 11.5, weight: .medium))
+                    .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                 Spacer(minLength: 4)
                 // Held in the layout at rest rather than removed, so arriving on
                 // the row reveals the arrow instead of shuffling the text.
                 Image(systemName: "arrow.up.right")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                     .opacity(scoringHovered ? 1 : 0)
             }
             .foregroundStyle(scoringHovered ? Tokens.text1 : Tokens.text4)
@@ -660,10 +939,11 @@ struct ModelDetailCard: View {
     /// in as `scoringHovered`. Screen coordinates, so measured up from the card's
     /// bottom edge, which is where the link sits.
     static func scoringLinkFrame(in panelFrame: NSRect) -> NSRect {
-        let font = NSFont.systemFont(ofSize: 11.5, weight: .medium)
+        let font = NSFont.systemFont(ofSize: Tokens.TypeSize.meta, weight: .medium)
         let height = ceil(font.ascender - font.descender)
-        return NSRect(x: panelFrame.minX + 12, y: panelFrame.minY + 12,
-                      width: panelFrame.width - 24, height: height)
+        let inset = ModelDetailPanel.inset
+        return NSRect(x: panelFrame.minX + inset, y: panelFrame.minY + inset,
+                      width: panelFrame.width - inset * 2, height: height)
     }
 
     /// Cost efficiency, in the corner rather than as a third meter.
@@ -693,7 +973,7 @@ struct ModelDetailCard: View {
         /// `Arc` starts at 3 o'clock and runs clockwise, so it is rotated to begin
         /// at 7:30 for its ends to land either side of the gap.
         private static let start: Double = 135
-        private static let labelFont = NSFont.systemFont(ofSize: 7.5, weight: .semibold)
+        private static let labelFont = NSFont.systemFont(ofSize: Tokens.TypeSize.badge, weight: .semibold)
         /// Clear of the stroke's outer edge.
         private static let labelRadius: CGFloat = size / 2 + stroke / 2 + 5.5
 
@@ -711,7 +991,7 @@ struct ModelDetailCard: View {
                 .frame(width: Self.size, height: Self.size)
 
                 Text("\(Int(score.rounded()))")
-                    .font(.brand(14))
+                    .font(.brand(Tokens.TypeSize.reading))
                     // Counting through 8 → 9 → 10 must not shove the digits
                     // sideways on every frame.
                     .monospacedDigit()
@@ -806,9 +1086,8 @@ struct ModelDetailCard: View {
         }
     }
 
-    /// One labelled 1–5 meter, in the card's own Liquid Glass language: a lozenge
-    /// of lit glass sliding along a groove cut into the panel, with ticks at the
-    /// segment joins so the level is countable and not just a length.
+    /// The card's bar, without a scale on it: a lozenge of lit glass sliding
+    /// along a groove cut into the panel.
     ///
     /// The glass here is *painted*, not sampled. A real `.glassEffect` at 7pt tall
     /// samples the same backdrop the card it sits on already samples, so it comes
@@ -817,52 +1096,37 @@ struct ModelDetailCard: View {
     /// the lighting: a top edge in shadow and a bottom edge catching light for the
     /// groove, and for the run a vertical falloff plus one specular sliver and a
     /// little spill onto the track around it.
-    private struct Meter: View {
-        let title: String
-        /// 0–5, continuous while it travels between two models' whole levels.
-        let level: Double
+    ///
+    /// `Meter` is this with ticks and a title on it, and this
+    /// bare. They share the material deliberately: a percentage drawn in a
+    /// different glass to the meters it replaces would read as a different kind
+    /// of figure.
+    private struct GlassBar: View {
+        /// 0–1 of the track.
+        let fraction: Double
 
-        private static let height: CGFloat = 7
+        static let height: CGFloat = 7
 
         var body: some View {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(title)
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(Tokens.text3)
-                GeometryReader { geo in
-                    let w = geo.size.width
-                    let filled = w * CGFloat(min(5, max(0, level)) / 5)
-                    ZStack(alignment: .leading) {
-                        groove
-                        // Below its own height the capsule is a squashed disc, not
-                        // a lozenge, and the specular sliver inside it collapses to
-                        // a dot — an empty meter shows the groove and nothing else.
-                        if filled >= Self.height * 0.5 {
-                            lozenge.frame(width: filled)
-                        }
-                        ForEach(1..<5, id: \.self) { i in
-                            let x = w * CGFloat(i) / 5
-                            Circle()
-                                // A tick inside the filled run has to knock out of
-                                // it, not sit on top in the same white. Both sides
-                                // are pitched to be findable rather than read: the
-                                // bar's length is the figure, and ticks loud enough
-                                // to count first turn it into a row of dots.
-                                .fill(x <= filled ? Color.black.opacity(0.20)
-                                                  : Tokens.ink.opacity(0.18))
-                                .frame(width: 2, height: 2)
-                                .offset(x: x - 1)
-                        }
-                    }
+            GeometryReader { geo in
+                let raw = geo.size.width * CGFloat(min(1, max(0, fraction)))
+                // A month that has been spent from, however little, still shows a
+                // mark — a rail reading empty after real requests tells the wrong
+                // story. Below its own height the lozenge is a squashed disc, so
+                // that height is the floor.
+                let filled = fraction > 0 ? max(Self.height, raw) : 0
+                ZStack(alignment: .leading) {
+                    Self.groove
+                    if filled > 0 { Self.lozenge.frame(width: filled) }
                 }
-                .frame(height: Self.height)
             }
+            .frame(height: Self.height)
         }
 
         /// The track, carved rather than drawn: dark inside, its top edge holding
         /// the shadow of the lip above it and its bottom edge catching the light
         /// that made it — which is the whole of what tells an eye "recessed".
-        private var groove: some View {
+        static var groove: some View {
             Capsule()
                 .fill(Color.black.opacity(0.40))
                 .overlay(
@@ -878,7 +1142,7 @@ struct ModelDetailCard: View {
         /// where the light lands, falling off toward the bottom, one soft specular
         /// band just inside the top edge, and a faint spill onto the groove so the
         /// run sits *in* the track instead of on it.
-        private var lozenge: some View {
+        static var lozenge: some View {
             Capsule()
                 .fill(LinearGradient(colors: [.white.opacity(0.36),
                                               .white.opacity(0.24),
@@ -907,10 +1171,55 @@ struct ModelDetailCard: View {
         }
     }
 
+    /// One labelled 1–5 meter: `GlassBar` with ticks at the segment joins, so the
+    /// level is countable and not just a length.
+    private struct Meter: View {
+        let title: String
+        /// 0–5, continuous while it travels between two models' whole levels.
+        let level: Double
+
+        private static let height: CGFloat = GlassBar.height
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(title)
+                    .font(.sf(Tokens.TypeSize.meta))
+                    .foregroundStyle(Tokens.text3)
+                GeometryReader { geo in
+                    let w = geo.size.width
+                    let filled = w * CGFloat(min(5, max(0, level)) / 5)
+                    ZStack(alignment: .leading) {
+                        GlassBar.groove
+                        // Below its own height the capsule is a squashed disc, not
+                        // a lozenge, and the specular sliver inside it collapses to
+                        // a dot — an empty meter shows the groove and nothing else.
+                        if filled >= Self.height * 0.5 {
+                            GlassBar.lozenge.frame(width: filled)
+                        }
+                        ForEach(1..<5, id: \.self) { i in
+                            let x = w * CGFloat(i) / 5
+                            Circle()
+                                // A tick inside the filled run has to knock out of
+                                // it, not sit on top in the same white. Both sides
+                                // are pitched to be findable rather than read: the
+                                // bar's length is the figure, and ticks loud enough
+                                // to count first turn it into a row of dots.
+                                .fill(x <= filled ? Color.black.opacity(0.20)
+                                                  : Tokens.ink.opacity(0.18))
+                                .frame(width: 2, height: 2)
+                                .offset(x: x - 1)
+                        }
+                    }
+                }
+                .frame(height: Self.height)
+            }
+        }
+    }
+
     /// A capability, present or pointedly absent. An unsupported one still gets a
     /// row — "this model cannot do it" is the answer someone is looking for, and
     /// an omitted row reads as "unknown".
-    private struct Capability: View {
+    struct Capability: View {
         let symbol: String
         let title: String
         let supported: Bool
@@ -924,10 +1233,10 @@ struct ModelDetailCard: View {
                 // Dimming and the word carry the answer.
                 Image(systemName: symbol)
                     .symbolRenderingMode(.monochrome)
-                    .font(.system(size: 11, weight: supported ? .medium : .regular))
+                    .font(.sf(Tokens.TypeSize.meta, weight: supported ? .medium : .regular))
                     .frame(width: 14)
                 Text(supported ? title : L("model.detail.unsupported", title))
-                    .font(.system(size: 11.5, weight: supported ? .medium : .regular))
+                    .font(.sf(Tokens.TypeSize.meta, weight: supported ? .medium : .regular))
             }
             // Full contrast against a quarter of it. The first pass ran these at
             // 0.74 and 0.40, which is a legible difference in isolation and not one
@@ -935,6 +1244,58 @@ struct ModelDetailCard: View {
             // of this block is to be answerable without comparing rows to
             // each other.
             .foregroundStyle(supported ? Tokens.text1 : Tokens.ink.opacity(0.26))
+        }
+    }
+
+    struct Note: View {
+        let symbol: String
+        let title: String
+
+        var body: some View {
+            HStack(alignment: .firstTextBaseline, spacing: 7) {
+                Image(systemName: symbol)
+                    .symbolRenderingMode(.monochrome)
+                    .font(.sf(Tokens.TypeSize.meta))
+                    .frame(width: 14)
+                Text(title)
+                    .font(.sf(Tokens.TypeSize.meta))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .foregroundStyle(Tokens.text3)
+        }
+    }
+}
+
+/// Reports a SwiftUI view's screen frame. Used by the first-party pill so a
+/// native menu's swallowed click can hit-test a control that never receives the
+/// event itself.
+private struct ScreenFrameProbe: NSViewRepresentable {
+    var onChange: (NSRect) -> Void
+
+    func makeNSView(context: Context) -> ProbeView {
+        let v = ProbeView()
+        v.onChange = onChange
+        return v
+    }
+
+    func updateNSView(_ view: ProbeView, context: Context) {
+        view.onChange = onChange
+        view.report()
+    }
+
+    final class ProbeView: NSView {
+        var onChange: ((NSRect) -> Void)?
+
+        override func layout() {
+            super.layout()
+            report()
+        }
+
+        override func viewDidMoveToWindow() { report() }
+
+        func report() {
+            guard let window, !bounds.isEmpty else { return }
+            onChange?(window.convertToScreen(convert(bounds, to: nil)))
         }
     }
 }
@@ -958,7 +1319,15 @@ final class ModelDetailPanel {
 
     /// Wide enough for a two-word model name beside the gauge, and no wider — the
     /// card hangs off a menu and is read at a glance, not settled into.
-    static let width: CGFloat = 208
+    static let width: CGFloat = 192
+    /// Extra room for the amount stepper + Add, which is the Settings row
+    /// sitting under the balance. 192 clips that HStack.
+    static let purchaseWidth: CGFloat = 220
+    static func width(showingPurchase: Bool) -> CGFloat {
+        showingPurchase ? purchaseWidth : width
+    }
+    /// Same inset on all four sides of the glass.
+    static let inset: CGFloat = 16
     /// Clear of the menu's shadow without reading as a separate thing.
     private static let gap: CGFloat = 6
 
@@ -966,8 +1335,22 @@ final class ModelDetailPanel {
     private var host: NSHostingView<ModelDetailCard>?
     private var model: PickerModel?
     private var anchorFrame: NSRect?
-    private var hideWork: DispatchWorkItem?
     private var hoverTimer: Timer?
+    /// Recent pointer positions, oldest first, for reading which way it is moving.
+    private var trail: [(time: CFTimeInterval, point: NSPoint)] = []
+    /// Where the pointer last was over the menu. The corridor to the card is
+    /// measured from here.
+    private var lastMenuPoint: NSPoint?
+    /// When the row that put this card up was left with no other row taking
+    /// over; nil while a row holds the card.
+    private var orphanedAt: CFTimeInterval?
+    /// When the pointer went somewhere that is neither the menu, the card, nor
+    /// the corridor between them.
+    private var strayedAt: CFTimeInterval?
+    /// A row the pointer crossed on its way to the card. It replaces the card's
+    /// model only if the pointer stops on it.
+    private var pending: (model: PickerModel, anchor: NSRect?)?
+    private var clickMonitor: Any?
 
     /// What the card is drawing, and the travel it is on. See `tick()`.
     private var figures = ModelDetailCard.Figures()
@@ -977,16 +1360,65 @@ final class ModelDetailPanel {
     /// The pointer poll's verdict on the scoring link, pushed into the card. See
     /// `ModelDetailCard.scoringLinkFrame(in:)`.
     private var scoringHovered = false
+    /// Same poll, for the first-party provider pill.
+    private var pillHovered = false
+    /// Screen frame of that pill, written by `ScreenFrameProbe` after layout.
+    private var pillFrame: NSRect = .zero
+    /// Same pair for the add-credit row under a low balance.
+    private var addCreditHovered = false
+    private var addCreditFrame: NSRect = .zero
+    /// Same pair for Learn more, next to the balance.
+    private var learnMoreHovered = false
+    private var learnMoreFrame: NSRect = .zero
+    /// The amount stepper beside Add. Hover lights the capsule; the frame is
+    /// split into minus / plus for a swallowed native-menu click.
+    private var stepperHovered = false
+    private var stepperFrame: NSRect = .zero
+    /// Held across hover so nudging $10 then leaving the row does not snap back.
+    private var topUpUSD: Double = 5
+    /// The amount stepper stays folded until Add credit is clicked.
+    private var showingAmount = false
+    /// The native `NSMenu` currently tracking, if any. Clicks on this panel are
+    /// swallowed for its lifetime so they don't end tracking; `nil` for the
+    /// custom SwiftUI menus, which receive the click themselves.
+    private weak var trackedMenu: NSMenu?
     private var ticker: Timer?
     /// Long enough to read as movement, short enough that a fast scan down the
     /// menu never waits on it — a new row retargets mid-flight anyway.
     private static let travel: CFTimeInterval = 0.34
+    /// How far back the pointer's direction is read. A slow drag moves one point
+    /// every few frames, so a shorter window would read it as standing still.
+    private static let trailWindow: CFTimeInterval = 0.25
+    /// How long a left row can go without a successor before the card goes. The
+    /// gap between two rows is crossed within this.
+    private static let orphanDelay: CFTimeInterval = 0.12
+    /// How long the pointer can be off the menu, the card, and the corridor
+    /// between them before the card goes.
+    private static let strayDelay: CFTimeInterval = 0.2
+    /// Height added above and below the card when judging whether the pointer
+    /// is moving toward it.
+    private static let aimSlack: CGFloat = 24
 
     /// `beside` is supplied by custom SwiftUI menus, whose window is not an
     /// `NSMenu` window and therefore cannot be discovered by `menuFrame`. Native
     /// model menus leave it nil and keep using the window scan below.
     func show(_ model: PickerModel, beside explicitAnchor: NSRect? = nil) {
-        hideWork?.cancel()
+        let location = NSEvent.mouseLocation
+        note(location)
+        orphanedAt = nil
+        // A row entered while the pointer is moving toward the card is being
+        // crossed, not chosen. The card keeps the row it came from; the poll
+        // switches to this one if the pointer stops here.
+        if panel?.isVisible == true, let shown = self.model, shown.id != model.id,
+           isHeadingToCard(location) {
+            pending = (model, explicitAnchor)
+            return
+        }
+        pending = nil
+        present(model, beside: explicitAnchor)
+    }
+
+    private func present(_ model: PickerModel, beside explicitAnchor: NSRect?) {
         hoverTimer?.invalidate()
         hoverTimer = nil
         // A card coming back from hidden starts from nothing — the gauge sweeps up
@@ -997,13 +1429,42 @@ final class ModelDetailPanel {
             retarget(to: ModelDetailCard.targetFigures(for: model), fromZero: appearing)
         }
         self.model = model
+        if !model.provider.isFirstParty {
+            pillFrame = .zero
+            addCreditFrame = .zero
+            stepperFrame = .zero
+            learnMoreFrame = .zero
+        }
         if let explicitAnchor {
             anchorFrame = explicitAnchor
         } else if let menu = menuFrame(excluding: panel) {
             anchorFrame = menu
         }
+        let location = NSEvent.mouseLocation
+        if anchorFrame?.contains(location) == true { lastMenuPoint = location }
         render()
         scheduleHoverCheck()
+        installClickMonitor()
+        fetchPlanIfNeeded(for: model)
+    }
+
+    /// Ask the gateway what the wallet holds, the first time a card for
+    /// our own backend opens.
+    ///
+    /// The settings pane fetches this on appearance, but the picker is reachable
+    /// without ever opening settings — and until the account has answered, the
+    /// card deliberately draws no wallet block at all rather than guessing.
+    /// The answer lands on the main actor and re-renders whatever card is up,
+    /// which is the same card unless the pointer has already moved on.
+    private func fetchPlanIfNeeded(for model: PickerModel) {
+        guard model.provider.isFirstParty else { return }
+        guard MainActor.assumeIsolated({ ModelDetailCard.Wallet.current == nil }) else { return }
+        Task { @MainActor in
+            await NoNoAccount.shared.load()
+            guard self.model?.provider.isFirstParty == true else { return }
+            self.retarget(to: ModelDetailCard.targetFigures(for: model), fromZero: true)
+            self.render()
+        }
     }
 
     /// Aim the figures somewhere new. Mid-flight the reading currently *drawn* is
@@ -1053,12 +1514,39 @@ final class ModelDetailPanel {
 
     private func render(reposition: Bool = true) {
         guard let model else { return }
-        let card = ModelDetailCard(model: model, figures: figures,
-                                   scoringHovered: scoringHovered) { [weak self] in
-            guard let url = URL(string: "https://notch.website/scoring") else { return }
-            self?.hide()
-            NSWorkspace.shared.open(url)
+        // Read once per frame on the main actor, where every caller of `render`
+        // already is (the menu delegate, and a timer scheduled on the main run
+        // loop).
+        let wallet = MainActor.assumeIsolated { ModelDetailCard.Wallet.current }
+        // A row that isn't drawn leaves no probe to clear its frame.
+        if !(model.provider.isFirstParty && wallet?.offersCredit == true && showingAmount) {
+            stepperFrame = .zero
+            stepperHovered = false
         }
+        if !(model.provider.isFirstParty && wallet?.offersCredit == true) {
+            addCreditFrame = .zero
+            addCreditHovered = false
+        }
+        if !(model.provider.isFirstParty && wallet != nil) {
+            learnMoreFrame = .zero
+            learnMoreHovered = false
+        }
+        let card = ModelDetailCard(
+            model: model, figures: figures,
+            scoringHovered: scoringHovered, pillHovered: pillHovered,
+            addCreditHovered: addCreditHovered, learnMoreHovered: learnMoreHovered,
+            wallet: wallet,
+            onOpenScoringDetails: { [weak self] in self?.openScoringDetails() },
+            onOpenProvider: { [weak self] in self?.openProviderSettings() },
+            onPillFrame: { [weak self] in self?.pillFrame = $0 },
+            topUpUSD: topUpUSD, showingAmount: showingAmount,
+            stepperHovered: stepperHovered,
+            onTopUpChange: { [weak self] in self?.setTopUpUSD($0) },
+            onStepperFrame: { [weak self] in self?.stepperFrame = $0 },
+            onAddCredit: { [weak self] in self?.addCreditTapped() },
+            onAddCreditFrame: { [weak self] in self?.addCreditFrame = $0 },
+            onLearnMoreFrame: { [weak self] in self?.learnMoreFrame = $0 }
+        )
         let host = self.host ?? {
             let h = NSHostingView(rootView: card)
             self.host = h
@@ -1089,23 +1577,47 @@ final class ModelDetailPanel {
     }
 
     func hide() {
-        hideWork?.cancel()
-        hideWork = nil
         hoverTimer?.invalidate()
         hoverTimer = nil
+        trail.removeAll()
+        lastMenuPoint = nil
+        orphanedAt = nil
+        strayedAt = nil
+        pending = nil
+        removeClickMonitor()
         stopTicker()
         figures = ModelDetailCard.Figures()
         scoringHovered = false
+        pillHovered = false
+        pillFrame = .zero
+        addCreditHovered = false
+        addCreditFrame = .zero
+        learnMoreHovered = false
+        learnMoreFrame = .zero
+        stepperHovered = false
+        stepperFrame = .zero
+        showingAmount = false
         panel?.orderOut(nil)
         model = nil
         anchorFrame = nil
     }
 
+    /// True when `window` is this card — the custom recents menu treats a click
+    /// here as still using the menu, not as click-away.
+    func owns(_ window: NSWindow?) -> Bool {
+        window != nil && window === panel
+    }
+
+    /// Swallow clicks on this card while `menu` is tracking, so they don't end
+    /// the nested event loop. Custom SwiftUI menus leave this unset.
+    func retainParentMenu(_ menu: NSMenu) { trackedMenu = menu }
+    func releaseParentMenu() { trackedMenu = nil }
+
     /// Menu delegate callbacks cover row-to-row movement. The pointer can also leave
     /// the entire native menu while its last item remains highlighted, so keep a
     /// lightweight location watch running for the lifetime of the visible card.
-    /// The card is now interactive, so the valid hover region is the menu OR the
-    /// card; leaving both still closes it immediately.
+    /// The valid region is the menu, the card, and the corridor between them;
+    /// see `poll()`.
     private func scheduleHoverCheck() {
         hoverTimer?.invalidate()
         let timer = Timer(timeInterval: 0.04, repeats: true) { [weak self] timer in
@@ -1113,11 +1625,7 @@ final class ModelDetailPanel {
                 timer.invalidate()
                 return
             }
-            guard self.containsPointer else {
-                self.hide()
-                return
-            }
-            self.refreshScoringHover()
+            self.poll()
         }
         // `NSMenu` owns a nested event-tracking loop while it is open. A main-queue
         // delayed block can wait until that loop ends, which made the card appear to
@@ -1126,45 +1634,234 @@ final class ModelDetailPanel {
         hoverTimer = timer
     }
 
-    private func refreshScoringHover() {
+    /// One pointer check.
+    /// - Over the card: the card stays, and a row crossed on the way is dropped.
+    /// - Over the menu: a crossed row takes over once the pointer stops moving
+    ///   toward the card; with no row under it, the card goes after
+    ///   `orphanDelay` unless the pointer is moving toward the card.
+    /// - In the corridor between the two: the card stays.
+    /// - Anywhere else: the card goes after `strayDelay`.
+    private func poll() {
+        let now = CACurrentMediaTime()
+        let location = NSEvent.mouseLocation
+        note(location, at: now)
+        if panel?.frame.contains(location) == true {
+            strayedAt = nil
+            pending = nil
+        } else if anchorFrame?.contains(location) == true {
+            strayedAt = nil
+            lastMenuPoint = location
+            let heading = isHeadingToCard(location)
+            if let next = pending, !heading {
+                pending = nil
+                present(next.model, beside: next.anchor)
+                return
+            }
+            if let orphanedAt, now - orphanedAt >= Self.orphanDelay, !heading {
+                hide()
+                return
+            }
+        } else if isInCorridor(location) {
+            strayedAt = nil
+        } else {
+            let since = strayedAt ?? now
+            strayedAt = since
+            if now - since >= Self.strayDelay {
+                hide()
+                return
+            }
+        }
+        refreshHover()
+    }
+
+    private func note(_ point: NSPoint, at now: CFTimeInterval = CACurrentMediaTime()) {
+        trail.append((now, point))
+        trail.removeAll { now - $0.time > Self.trailWindow }
+    }
+
+    /// The card's edge that faces the menu.
+    private func nearEdge(of card: NSRect, from menu: NSRect) -> CGFloat {
+        card.midX >= menu.midX ? card.minX : card.maxX
+    }
+
+    /// Whether the pointer has moved within the trail window and now lies inside
+    /// the triangle from where it was to the card's near corners.
+    private func isHeadingToCard(_ p: NSPoint) -> Bool {
+        guard let panel, panel.isVisible, let menu = anchorFrame,
+              let from = trail.first?.point,
+              hypot(p.x - from.x, p.y - from.y) >= 1 else { return false }
+        let card = panel.frame
+        let x = nearEdge(of: card, from: menu)
+        return Self.triangle(from,
+                             NSPoint(x: x, y: card.maxY + Self.aimSlack),
+                             NSPoint(x: x, y: card.minY - Self.aimSlack),
+                             contains: p)
+    }
+
+    /// The way from the menu to the card: the strip between their facing edges,
+    /// and the triangle from where the pointer left the menu to the card's near
+    /// corners, which covers leaving the menu below its bottom edge toward a
+    /// card that hangs lower.
+    private func isInCorridor(_ p: NSPoint) -> Bool {
+        guard let menu = anchorFrame, let card = panel?.frame else { return false }
+        let near = nearEdge(of: card, from: menu)
+        let facing = card.midX >= menu.midX ? menu.maxX : menu.minX
+        let bottom = max(menu.minY, card.minY)
+        let top = min(menu.maxY, card.maxY)
+        let strip = NSRect(x: min(near, facing), y: bottom,
+                           width: abs(near - facing), height: max(0, top - bottom))
+        if strip.contains(p) { return true }
+        guard let origin = lastMenuPoint else { return false }
+        return Self.triangle(origin,
+                             NSPoint(x: near, y: card.maxY),
+                             NSPoint(x: near, y: card.minY),
+                             contains: p)
+    }
+
+    private static func triangle(_ a: NSPoint, _ b: NSPoint, _ c: NSPoint,
+                                 contains p: NSPoint) -> Bool {
+        func side(_ p1: NSPoint, _ p2: NSPoint, _ p3: NSPoint) -> CGFloat {
+            (p1.x - p3.x) * (p2.y - p3.y) - (p2.x - p3.x) * (p1.y - p3.y)
+        }
+        let d1 = side(p, a, b), d2 = side(p, b, c), d3 = side(p, c, a)
+        let negative = d1 < 0 || d2 < 0 || d3 < 0
+        let positive = d1 > 0 || d2 > 0 || d3 > 0
+        return !(negative && positive)
+    }
+
+    private func refreshHover() {
         guard let panel, panel.isVisible else { return }
         let location = NSEvent.mouseLocation
         // During native menu tracking the window server can keep reporting the menu
         // as the window under the pointer even though this higher-level panel is
         // visibly in front. The panel owns its whole frame, so use its geometry as
         // the source of truth and keep hover live before the menu closes.
-        let hovered = ModelDetailCard.scoringLinkFrame(in: panel.frame).contains(location)
-        guard hovered != scoringHovered else { return }
-        scoringHovered = hovered
+        let scoring = ModelDetailCard.scoringLinkFrame(in: panel.frame).contains(location)
+        let pill = pillFrame.contains(location)
+        let addCredit = addCreditFrame.contains(location)
+        let learnMore = learnMoreFrame.contains(location)
+        let stepper = stepperFrame.contains(location)
+        guard scoring != scoringHovered || pill != pillHovered
+                || addCredit != addCreditHovered || learnMore != learnMoreHovered
+                || stepper != stepperHovered else { return }
+        scoringHovered = scoring
+        pillHovered = pill
+        addCreditHovered = addCredit
+        learnMoreHovered = learnMore
+        stepperHovered = stepper
         render(reposition: false)
     }
 
-    /// A short delay lets a new model highlight cancel an outgoing row's hide.
-    func scheduleHide() {
-        scheduleHide(after: 0.12)
-    }
-
-    private func scheduleHide(after delay: TimeInterval) {
-        hideWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            // Crossing the small gap from the native menu into the card closes
-            // the menu first. Keep the card only when the pointer actually made
-            // that crossing; otherwise the old highlighted card must disappear.
-            if self.panel?.frame.contains(NSEvent.mouseLocation) == true {
-                self.scheduleHoverCheck()
-            } else {
-                self.hide()
-            }
+    private func installClickMonitor() {
+        guard clickMonitor == nil else { return }
+        let clicks: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown]
+        clickMonitor = NSEvent.addLocalMonitorForEvents(matching: clicks) { [weak self] event in
+            guard let self, self.owns(event.window) else { return event }
+            // A native menu's tracking loop treats any outside mouse-down as
+            // "done". Swallow those events so the menu stays up; handle the
+            // actual controls ourselves because SwiftUI never sees the click.
+            guard self.trackedMenu != nil else { return event }
+            if event.type == .leftMouseDown { self.handleClick(at: NSEvent.mouseLocation) }
+            return nil
         }
-        hideWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
-    private var containsPointer: Bool {
-        let location = NSEvent.mouseLocation
-        return anchorFrame?.contains(location) == true
-            || panel?.frame.contains(location) == true
+    private func removeClickMonitor() {
+        if let clickMonitor { NSEvent.removeMonitor(clickMonitor) }
+        clickMonitor = nil
+    }
+
+    private func handleClick(at location: NSPoint) {
+        if pillFrame.contains(location) || learnMoreFrame.contains(location) {
+            openProviderSettings()
+            return
+        }
+        if stepperFrame.contains(location) {
+            let button = AmountStepper.buttonWidth
+            if location.x < stepperFrame.minX + button {
+                nudgeTopUp(-1)
+            } else if location.x > stepperFrame.maxX - button {
+                nudgeTopUp(1)
+            }
+            return
+        }
+        if addCreditFrame.contains(location) {
+            addCreditTapped()
+            return
+        }
+        guard let panel, panel.isVisible else { return }
+        if ModelDetailCard.scoringLinkFrame(in: panel.frame).contains(location) {
+            openScoringDetails()
+        }
+    }
+
+    private func openScoringDetails() {
+        guard let url = URL(string: "https://notch.website/scoring") else { return }
+        hide()
+        trackedMenu?.cancelTracking()
+        NSWorkspace.shared.open(url)
+    }
+
+    private func openProviderSettings() {
+        guard let provider = model?.provider, provider.isFirstParty else { return }
+        hide()
+        trackedMenu?.cancelTracking()
+        NotificationCenter.default.post(
+            name: .openProviderSettingsRequested,
+            object: nil,
+            userInfo: ["provider": provider.rawValue]
+        )
+    }
+
+    private func setTopUpUSD(_ value: Double) {
+        let range = NoNoAccount.minimumTopUpUSD...NoNoAccount.maximumTopUpUSD
+        let next = min(range.upperBound, max(range.lowerBound, value))
+        guard next != topUpUSD else { return }
+        topUpUSD = next
+        render(reposition: false)
+    }
+
+    private func nudgeTopUp(_ direction: Double) {
+        setTopUpUSD(AmountStepper.nudged(
+            topUpUSD, by: direction,
+            range: NoNoAccount.minimumTopUpUSD...NoNoAccount.maximumTopUpUSD))
+    }
+
+    /// Collapsed: unfold the stepper. Unfolded: checkout.
+    private func addCreditTapped() {
+        if showingAmount {
+            purchaseCredit()
+        } else {
+            showingAmount = true
+            render()
+        }
+    }
+
+    /// Stripe checkout for the stepper's amount. The picker closes; the
+    /// browser opens. Credit lands when the webhook does, same as Settings.
+    private func purchaseCredit() {
+        let amount = topUpUSD
+        let previous = MainActor.assumeIsolated {
+            NoNoAccount.shared.snapshot?.credit.grantedUSD ?? 0
+        }
+        hide()
+        trackedMenu?.cancelTracking()
+        // The recents card is a child window. Waiting on the binding leaves
+        // it on top until that animation ends. Drop it on this click.
+        MenuCardWindow.dismissOpen()
+        Task { @MainActor in
+            await NoNoAccount.shared.buyCredit(amountUSD: amount)
+            await NoNoAccount.shared.awaitCredit(boughtAbove: previous)
+        }
+    }
+
+    /// The row that put the card up was left. `poll()` decides when the card
+    /// goes: a new row taking over cancels this, and a pointer moving toward
+    /// the card or already on it keeps it.
+    func scheduleHide() {
+        guard model != nil else { return }
+        pending = nil
+        if orphanedAt == nil { orphanedAt = CACurrentMediaTime() }
     }
 
     private func makePanel(hosting host: NSHostingView<ModelDetailCard>) -> NSPanel {
@@ -1615,10 +2312,22 @@ final class ModelCatalogStore: ObservableObject {
             }
             rows.append(contentsOf: block)
         }
-        // Usable models first (the current provider's leading), greyed ones after — the
-        // list reads as "what you can pick now" above "what a key would unlock". A stable
-        // secondary sort keeps rows from reshuffling as live lists load.
+        // Ours first, then usable models (the current provider's leading), then
+        // greyed ones — the list reads as "the plan you can buy here", then
+        // "what you can pick now", then "what a key would unlock".
+        //
+        // Notchi Balance leads even when it is not the selected provider and
+        // even before a key exists, because its rows are the only ones nobody
+        // has to arrange anything elsewhere to use. Every other row is a lab or
+        // an aggregator the user pays somewhere else; sorting ours in among them
+        // by the same rules would file a plan under the vendors it is an
+        // alternative to.
+        //
+        // A stable secondary sort keeps rows from reshuffling as live lists load.
         return rows.enumerated().sorted { a, b in
+            let aOurs = a.element.provider.isFirstParty
+            let bOurs = b.element.provider.isFirstParty
+            if aOurs != bOurs { return aOurs }
             if a.element.hasKey != b.element.hasKey { return a.element.hasKey }
             let aCur = a.element.provider == selected
             let bCur = b.element.provider == selected
@@ -1806,6 +2515,12 @@ struct AskRecentModelPickerView: View {
     }
 
     let rows: [Row]
+    /// Models pinned under the recents, outside the scroller: the first-party
+    /// lineup, listed for a subscriber whether or not they have asked through it
+    /// lately. A plan is bought so those models are there — leaving them to age
+    /// out of a ten-slot history would hide what the user is paying for. Empty
+    /// for everyone else.
+    let pinned: [Row]
     let onSelect: (Row) -> Void
     /// The way out of the recents: open Settings' Model pane, where the full
     /// cross-provider catalog lives. The menu closes on its own first.
@@ -1824,25 +2539,29 @@ struct AskRecentModelPickerView: View {
     /// windows. This probe retains the SwiftUI card's exact screen rect and lets
     /// each hovered row hang the existing detail card off its right edge.
     @StateObject private var detailAnchor = ModelDetailAnchor()
+    /// Observed so the first-party rows' wallet note follows the balance.
+    @ObservedObject private var nono = NoNoAccount.shared
 
-    init(rows: [Row], selectedProvider: Provider, selectedModelID: String,
+    init(rows: [Row], pinned: [Row] = [],
+         selectedProvider: Provider, selectedModelID: String,
          onSelect: @escaping (Row) -> Void, onMoreModels: @escaping () -> Void,
          onDone: @escaping () -> Void) {
         self.rows = rows
+        self.pinned = pinned
         self.onSelect = onSelect
         self.onMoreModels = onMoreModels
         self.onDone = onDone
         _current = State(initialValue: Row(provider: selectedProvider, id: selectedModelID))
     }
 
-    /// The list window is a FIXED five rows. The recents run to ten, but a card
-    /// that grew a row per remembered model would stand taller than the compose it
-    /// hangs off — so five rows is the window and the rest scrolls, and the card's
-    /// height stops depending on how many models the user has been through.
+    /// The list window, in rows — the Agent card's four, because the two menus
+    /// hang off the same compose row and are read as one control in two modes.
+    /// The recents run to ten; the rest scrolls, so the card's height stops
+    /// depending on how many models the user has been through.
     /// Rows are a fixed height at a fixed spacing, so the height is arithmetic —
     /// demanded explicitly rather than `.frame(maxHeight:)`, which inside a
     /// floating card just takes whatever height was last proposed and clips.
-    private static let listRows = 5
+    private static let listRows = MenuCard.pickerListRows
     /// How deep the list dissolves at whichever edge is mid-scroll — two thirds of
     /// a row, enough to see a row go instead of reading as a hard cut.
     private static let edgeFade: CGFloat = 18
@@ -1863,39 +2582,12 @@ struct AskRecentModelPickerView: View {
     private var overflowing: Bool { rows.count > Self.listRows }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 1) {
+        VStack(alignment: .leading, spacing: 0) {
             ScrollViewReader { proxy in
                 ScrollView(showsIndicators: false) {
                     VStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
                         ForEach(rows, id: \.self) { r in
-                            MenuCardRow(
-                                title: ModelRatings.prettyName(for: r.id, provider: r.provider),
-                                // Backends driven by the user's own signed-in CLI wear the tag:
-                                // in a list that otherwise means "a key we hold", it says where
-                                // this one actually runs and why it needed no setup.
-                                accessory: r.provider.isCLI ? "CLI" : nil,
-                                // The highlight here means "the model in effect", not "where the
-                                // cursor is" — so it carries the emphasized weight, and hover
-                                // does NOT move it (arming commits the pick straight to the
-                                // store; the `/` menu's follow-the-pointer highlight would
-                                // switch models just by sweeping past a row).
-                                emphasized: true,
-                                selected: r == current,
-                                haptic: false) {
-                                    // Menu semantics: one click picks and dismisses. Clicking
-                                    // the already-armed row just dismisses.
-                                    if r != current { arm(r) }
-                                    onDone()
-                                }
-                                .id(r)
-                                .onHover { inside in
-                                    if inside, let frame = detailAnchor.frame {
-                                        ModelDetailPanel.shared.show(detailModel(for: r),
-                                                                     beside: frame)
-                                    } else if !inside {
-                                        ModelDetailPanel.shared.scheduleHide()
-                                    }
-                                }
+                            modelRow(r).id(r)
                         }
                     }
                     // Zero-size probe on the scroll CONTENT reads the clip view's
@@ -1917,25 +2609,40 @@ struct AskRecentModelPickerView: View {
                 .frame(height: listHeight)
                 // Open on the model in effect — with ten recents it can sit below
                 // the fold, and a menu that opens blind to its own selection makes
-                // the user hunt for their bearings.
-                .onAppear { proxy.scrollTo(current, anchor: .center) }
+                // the user hunt for their bearings. A pinned model is already in
+                // view, so it is nothing to scroll to.
+                .onAppear {
+                    guard rows.contains(current) else { return }
+                    proxy.scrollTo(current, anchor: .center)
+                }
                 // ↑/↓ re-arms live, so follow the armed row. A click picks and
                 // dismisses, so this only ever runs for keyboard moves.
                 .onChange(of: current) {
+                    guard rows.contains(current) else { return }
                     withAnimation(.easeOut(duration: 0.12)) {
                         proxy.scrollTo(current, anchor: .center)
                     }
+                }
+            }
+
+            // Notchi's own models, held outside the scroller so they
+            // sit in the same place every time the menu opens instead of riding
+            // a history that moves under them.
+            if !pinned.isEmpty {
+                hairline
+                VStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
+                    ForEach(pinned, id: \.self) { modelRow($0) }
                 }
             }
             // The tail row out of the recents and into the whole catalog. It sits
             // OUTSIDE the scroller — a door you can always reach, not a row that
             // can scroll away. A hairline sets it apart from the models above: it
             // isn't a model to arm, and the ↑/↓ cursor deliberately skips it.
-            Rectangle().fill(.white.opacity(0.07))
-                .frame(height: 0.5)
-                .padding(.horizontal, MenuCard.rowPad)
-                .padding(.vertical, 3)
-            MenuCardRow(title: L("model.picker.more"), selected: false, haptic: false) {
+            hairline
+            MenuCardRow(title: L("model.picker.more"),
+                        hoverSymbol: "arrow.up.right",
+                        selected: false,
+                        haptic: false) {
                 onDone()
                 onMoreModels()
             }
@@ -1952,14 +2659,89 @@ struct AskRecentModelPickerView: View {
         }
     }
 
+    /// One model row, in the recents or pinned under them — the two run the same
+    /// row so a pinned model can't drift from the list above it.
+    private func modelRow(_ r: Row) -> some View {
+        MenuCardRow(
+            title: ModelRatings.prettyName(for: r.id, provider: r.provider),
+            accessory: accessory(for: r),
+            lowBalance: lowBalance(r),
+            // The highlight here means "the model in effect", not "where the
+            // cursor is" — so it carries the emphasized weight, and hover
+            // does NOT move it (arming commits the pick straight to the
+            // store; the `/` menu's follow-the-pointer highlight would
+            // switch models just by sweeping past a row).
+            emphasized: true,
+            selected: r == current,
+            haptic: false) {
+                // Menu semantics: one click picks and dismisses. Clicking
+                // the already-armed row just dismisses.
+                if r != current { arm(r) }
+                // The card goes with the menu, in the same click. Left to the
+                // list's `onDisappear` it hides a beat late, so the detail card
+                // hangs in the air after the menu it belonged to is gone.
+                ModelDetailPanel.shared.hide()
+                onDone()
+            }
+            .onHover { inside in
+                if inside, let frame = detailAnchor.frame {
+                    ModelDetailPanel.shared.show(detailModel(for: r), beside: frame)
+                } else if !inside {
+                    ModelDetailPanel.shared.scheduleHide()
+                }
+            }
+    }
+
+    /// The rule between two runs of rows — recents from pinned, pinned from the
+    /// door out of the card.
+    private var hairline: some View {
+        Rectangle().fill(.white.opacity(0.07))
+            .frame(height: 0.5)
+            .padding(.horizontal, MenuCard.rowPad)
+            // The Agent card's section rule: 7pt each side, because these
+            // separate sections of the card rather than rows inside one list.
+            .padding(.vertical, 7)
+    }
+
+    /// Every row the ↑/↓ cursor can land on, in the order they are drawn: the
+    /// recents, then the pinned models. The door out is deliberately not one.
+    private var armable: [Row] { rows + pinned }
+
+    /// The row's trailing word. Backends driven by the user's own signed-in
+    /// CLI wear the tag: in a list that otherwise means "a key we hold", it
+    /// says where this one actually runs and why it needed no setup. Ours
+    /// names today's cap when that is what stops it.
+    private func accessory(for r: Row) -> String? {
+        if r.provider.isCLI { return "CLI" }
+        guard r.provider.isFirstParty, nono.snapshot != nil,
+              ModelDetailCard.Wallet.current?.state == .cappedForToday else { return nil }
+        return L("nono.dailyCap")
+    }
+
+    /// Ours, with nothing left: the row wears `LowBalanceTag`.
+    private func lowBalance(_ r: Row) -> Bool {
+        r.provider.isFirstParty && nono.snapshot != nil
+            && ModelDetailCard.Wallet.current?.state == .empty
+    }
+
     /// Wide enough for every row whole — the models with their CLI tags, and the
     /// "More models…" door under them.
     private var cardWidth: CGFloat {
-        let models = rows.map {
-            (ModelRatings.prettyName(for: $0.id, provider: $0.provider),
-             $0.provider.isCLI ? "CLI" : nil)
+        let models = armable.map {
+            (ModelRatings.prettyName(for: $0.id, provider: $0.provider), accessory(for: $0))
         }
-        return MenuCard.width(titles: models + [(L("model.picker.more"), nil)], max: 260)
+        // The door's arrow only shows under the pointer, but it is held in the
+        // layout at rest — so the card is sized as if it were always there.
+        // The cap is the Agent card's own width, so the two menus are the same
+        // card at the same size; a long aggregator id truncating is the cheaper
+        // trade than one list standing wider than the other.
+        let base = MenuCard.width(titles: models + [(L("model.picker.more"), "\u{2197}")])
+        // The NO CREDIT chip is a view, not a string `MenuCard.width` can measure.
+        let tagged = armable.filter { lowBalance($0) }.map {
+            MenuCard.width(titles: [(ModelRatings.prettyName(for: $0.id, provider: $0.provider), nil)])
+                + MenuCard.accessoryGap + LowBalanceTag.width
+        }
+        return min(max(base, tagged.max() ?? 0), MenuCard.pickerCardWidth)
     }
 
     private func arm(_ r: Row) {
@@ -2006,9 +2788,10 @@ struct AskRecentModelPickerView: View {
     }
 
     private func step(_ delta: Int) {
-        guard !rows.isEmpty else { return }
-        let cur = rows.firstIndex(of: current) ?? -1
-        arm(rows[min(max(cur + delta, 0), rows.count - 1)])
+        let all = armable
+        guard !all.isEmpty else { return }
+        let cur = all.firstIndex(of: current) ?? -1
+        arm(all[min(max(cur + delta, 0), all.count - 1)])
     }
 }
 
@@ -2235,8 +3018,9 @@ struct AgentModelPickerView: View {
 
     /// The one width every engine draws at — the old design's floor. It fits the
     /// engine caption ("Command Code") and the model names that exist; anything
-    /// past it was only ever a vendor id spending width it hadn't earned.
-    private static let fixedWidth: CGFloat = 174
+    /// past it was only ever a vendor id spending width it hadn't earned. Shared
+    /// with the Ask menu, which caps itself here.
+    private static let fixedWidth: CGFloat = MenuCard.pickerWidth
 
     /// The armed engine's whole fleet. The other engine's sits behind its mark in
     /// the bottom bar — half the content of the old mixed list, and the rows can
@@ -2353,7 +3137,7 @@ struct AgentModelPickerView: View {
     /// have rungs. What keeps a flip from throwing the rows around is the anchor,
     /// not a frozen height — the card hangs from its top edge, so the list stays
     /// where it is and only the ladder and the engine row below it move.
-    private static let listRows = 4
+    private static let listRows = MenuCard.pickerListRows
     /// How deep the list dissolves at whichever edge is actually mid-scroll. At
     /// the old 6pt (the card's own padding) the taper was a sliver — rows ended
     /// on what read as a hard cut. Two thirds of a row is enough to see a row go.
@@ -2530,6 +3314,8 @@ struct AgentModelPickerView: View {
             // model AND closes — no lingering card after the choice is made. The
             // effort dial below is what keeps the card open.
             if !isSelected(c) { arm(c) }
+            // Detail card in the same click — see the Ask menu's row.
+            ModelDetailPanel.shared.hide()
             onDone()
         }
         .id(c)
@@ -2640,7 +3426,7 @@ struct AgentModelPickerView: View {
                     .truncationMode(.tail)
                 Spacer(minLength: 0)
                 Image(systemName: "chevron.up.chevron.down")
-                    .font(.sf(8, weight: .semibold))
+                    .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                     .foregroundStyle(Tokens.text3)
                     .opacity(engineHovering ? 1 : 0)
             }
@@ -2687,7 +3473,7 @@ struct AgentModelPickerView: View {
                 .animation(reduceMotion ? nil : .snappy(duration: 0.3),
                            value: currentEffortIndex)
             }
-            .font(.sf(10.5, weight: .regular))
+            .font(.sf(Tokens.TypeSize.meta, weight: .regular))
             .foregroundStyle(Tokens.text3)
             .lineLimit(1)
             NativeDetentSlider(value: effortPosition, ticks: positionCount)

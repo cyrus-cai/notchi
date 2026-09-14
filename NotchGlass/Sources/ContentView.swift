@@ -481,7 +481,7 @@ private struct ClipboardSenseEars: View {
     /// (hidden by the island's clip) instead of drawing half a line.
     private func earText(_ text: String, color: Color) -> some View {
         Text(text)
-            .font(.sf(11.5, weight: .regular))
+            .font(.sf(Tokens.TypeSize.meta, weight: .regular))
             .tracking(0.3)
             .foregroundStyle(color)
             .lineLimit(1)
@@ -556,7 +556,7 @@ private struct BackgroundWorkEars: View {
                         // digits that actually changed move.
                         let seconds = max(0, Int(context.date.timeIntervalSince(since)))
                         Text(NotchModel.formatAgentElapsed(TimeInterval(seconds)))
-                            .font(.sf(11))
+                            .font(.sf(Tokens.TypeSize.meta))
                             .monospacedDigit()
                             .contentTransition(.numericText(value: Double(seconds)))
                             .animation(reduceMotion ? nil : .snappy(duration: 0.3),
@@ -589,7 +589,7 @@ private struct BackgroundWorkEars: View {
                 // while its slot is still settling it overflows (hidden by the
                 // island's clip) instead of drawing half a line.
                 Text(verb)
-                    .font(.sf(11.5, weight: .regular))
+                    .font(.sf(Tokens.TypeSize.meta, weight: .regular))
                     .tracking(0.3)
                     .foregroundStyle(Tokens.text3)
                     .lineLimit(1)
@@ -832,7 +832,7 @@ struct NotchIsland: View {
     /// pre-shrunk by the mean of the two axes — the *rendered* corner then holds
     /// at `notchRestRadius` through the flex instead of fattening a point.
     private var bottomRadius: CGFloat {
-        if isOpen { return 30 }
+        if isOpen { return Tokens.Radius.shell }
         return Tokens.notchRestRadius / ((peekScaleX + peekScaleY) / 2)
     }
 

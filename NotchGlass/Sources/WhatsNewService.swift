@@ -94,6 +94,19 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.8.0",
+            date: "2026-09-14",
+            heroAssetName: "WhatsNew080Promo",
+            features: [
+                "Blend1 is Notchi's own model. Ask without pasting an API key.",
+                "It spends Notchi Balance, which you can top up when it runs out.",
+                "This version includes $1 of credit, good for 30 days.",
+            ],
+            improvements: [
+                "Settings keeps Notchi Balance apart from keys you bring yourself.",
+            ]
+        ),
+        Entry(
             version: "0.7.8",
             date: "2026-09-08",
             features: [

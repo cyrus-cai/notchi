@@ -160,6 +160,10 @@ final class NotchModel: ObservableObject {
         /// like the live detail page did. `nil` on chat turns and on agent
         /// records filed before the trail was persisted.
         var agentLog: [AgentLogEntry]? = nil
+        /// Reasoning-model scratchpad for a chat answer, folded behind a
+        /// "Thinking" line. `nil` when the model didn't emit a thinking channel.
+        /// Persisted so a reopened thread still has the fold.
+        var reasoning: String? = nil
 
         init(id: UUID = UUID(), role: String, text: String,
              streaming: Bool = false, usedClipboard: Bool = false,
@@ -176,7 +180,7 @@ final class NotchModel: ObservableObject {
         // it. `decodeIfPresent` + defaults is what keeps old saved conversations
         // loadable. `role`/`text` are required — every saved turn has them.
         // `toolActivity` is deliberately absent: it's runtime-only UI state.
-        enum CodingKeys: String, CodingKey { case id, role, text, streaming, hidesUserBubble, usedClipboard, sources, isError, regenModel, answerModel, imageFiles, isAgent, agentLog }
+        enum CodingKeys: String, CodingKey { case id, role, text, streaming, hidesUserBubble, usedClipboard, sources, isError, regenModel, answerModel, imageFiles, isAgent, agentLog, reasoning }
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -193,6 +197,7 @@ final class NotchModel: ObservableObject {
             imageFiles   = try c.decodeIfPresent([String].self, forKey: .imageFiles) ?? []
             isAgent      = try c.decodeIfPresent(Bool.self, forKey: .isAgent) ?? false
             agentLog     = try c.decodeIfPresent([AgentLogEntry].self, forKey: .agentLog)
+            reasoning    = try c.decodeIfPresent(String.self, forKey: .reasoning)
         }
     }
 
@@ -313,6 +318,10 @@ final class NotchModel: ObservableObject {
         /// reason. Persisted, so the marker survives a relaunch.
         var failed: Bool = false
 
+        /// A failed row whose cause was an empty Notchi balance. The Recent row
+        /// names that cause instead of the generic failed badge. Persisted.
+        var outOfCredit: Bool = false
+
         /// The turns to restore on reopen: the saved thread when present, else a
         /// two-turn thread rebuilt from the legacy `q`/`a` fields. A note/reminder
         /// capture has no conversation at all — never synthesize a ghost assistant
@@ -350,7 +359,7 @@ final class NotchModel: ObservableObject {
         // item has always had them.
         enum CodingKeys: String, CodingKey {
             case id, q, a, t, turns, title, source, origin, link, agentOutcome, agentResume,
-                 agentInterrupted, agentSeen, failed
+                 agentInterrupted, agentSeen, failed, outOfCredit
         }
 
         init(from decoder: Decoder) throws {
@@ -376,6 +385,7 @@ final class NotchModel: ObservableObject {
             // Rows saved before failed rows were kept at all are, by definition,
             // rows that succeeded.
             failed = try c.decodeIfPresent(Bool.self, forKey: .failed) ?? false
+            outOfCredit = try c.decodeIfPresent(Bool.self, forKey: .outOfCredit) ?? false
         }
 
         /// Content search for the `search_history` tool — every place the user's own
@@ -500,6 +510,10 @@ final class NotchModel: ObservableObject {
     /// wherever the page changes underneath it (`newChat`, `fullClose`, a fresh
     /// typed `submit`), so it never leaks onto the next conversation.
     @Published var fromPromptShortcut = false
+    /// The surface the next `submit()` reports to nono, set by the detached
+    /// entry points just before they call it (`NoNoRequestContext`). `submit()`
+    /// consumes it on entry.
+    private var nextSubmitSurface: String?
 
     /// Selection captured by an empty prompt shortcut whose destination is the
     /// notch. It stays invisible model context while the ordinary idle field asks
@@ -602,6 +616,13 @@ final class NotchModel: ObservableObject {
         let id: String
     }
 
+    /// Settings should open on this provider's Model pane. Set by the detail
+    /// card's first-party pill; `InlineSettingsView` consumes it on appear.
+    @Published var pendingSettingsProvider: Provider?
+    /// Set with `pendingSettingsProvider` by the pickers' add-credit doors:
+    /// the Notchi card opens with the amount stepper already out.
+    @Published var pendingAddCredit = false
+
     /// Agent compose state (XII: agent-to-Codex): ON while the idle input
     /// is composing an agent task — Enter starts a `AgentTaskManager` run
     /// instead of asking the chat model. Entered by the bucket pill's Agent half
@@ -664,13 +685,16 @@ final class NotchModel: ObservableObject {
     /// a design mock, a before/after pair. Each ⌘V appends, so a task can carry
     /// several. They ride the run to the agent alongside the task text (codex
     /// attaches them with one `exec -i` each; claude gets them as vision blocks
-    /// via `--input-format stream-json`). Session-only, cleared when the compose
-    /// exits — an attachment belongs to the task being written, not the mode.
+    /// via `--input-format stream-json`). Switching Chat ↔ Agent carries them
+    /// across when the destination also accepts images; submit still clears
+    /// only the round that was sent.
     @Published var agentComposeImages: [NSImage] = []
 
     /// Images explicitly ⌘V-pasted into an ordinary Ask. Kept separate from the
     /// system clipboard: copying an image never changes the UI or silently sends
     /// pixels. Each paste appends, and submit clears exactly this round's set.
+    /// A bucket switch into Agent moves them onto `agentComposeImages` (and
+    /// back) so the same paste isn't dropped just because the destination changed.
     @Published var askComposeImages: [NSImage] = []
 
     /// How many images one agent round may carry. Both CLIs take far more —
@@ -1685,6 +1709,7 @@ final class NotchModel: ObservableObject {
         if threadHistoryID == threadID, !turns.isEmpty {
             text = q
             askComposeImages = images
+            nextSubmitSurface = NoNoRequestContext.window
             submit()
             return
         }
@@ -1756,6 +1781,9 @@ final class NotchModel: ObservableObject {
                      composeImages: askComposeImages,
                      regenModel: regenOverrideModel,
                      regenProvider: regenOverrideProvider)
+        nextSubmitSurface = origin == .forceTouch ? NoNoRequestContext.forceTouch
+            : trackCompactTask ? NoNoRequestContext.shortcut
+            : NoNoRequestContext.window
         armModelPin(pin)
         askComposeImages = images
         task = nil                                    // detach, never cancel
@@ -2162,11 +2190,15 @@ final class NotchModel: ObservableObject {
             guard let self else { return }
             let name: String
             do {
-                name = try await self.ai.complete(prompt: """
-                Give this prompt shortcut a short, single-phrase display name for a \
-                command menu. Reply with ONLY the name — no quotes, no prefix, no \
-                explanation, under 4 words. Prompt: \(instruction)
-                """)
+                name = try await NoNoRequestContext.$current.withValue(
+                    NoNoRequestContext(surface: NoNoRequestContext.naming)
+                ) {
+                    try await self.ai.complete(prompt: """
+                    Give this prompt shortcut a short, single-phrase display name for a \
+                    command menu. Reply with ONLY the name — no quotes, no prefix, no \
+                    explanation, under 4 words. Prompt: \(instruction)
+                    """)
+                }
             } catch { return }
             let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
                 .trimmingCharacters(in: CharacterSet(charactersIn: "\"“”'‘’"))
@@ -3343,6 +3375,7 @@ final class NotchModel: ObservableObject {
             "custom_provider_model=\(CustomProvider.model.isEmpty ? "(empty)" : CustomProvider.model)",
         ].joined(separator: "\n")
         + "\n" + (actionShortcuts + promptShortcuts).joined(separator: "\n")
+        + "\n\n" + appSettingsCatalog
     }
 
     /// A localized, live reference for shortcut questions asked in chat. It is
@@ -4252,6 +4285,12 @@ final class NotchModel: ObservableObject {
         /// True when no model/key is configured — the action should be "open
         /// Settings" rather than "retry" (retrying without a key can't succeed).
         let needsSetup: Bool
+        /// True when the Notchi balance cannot pay for the request — the action
+        /// is "Add credit", since a retry fails the same way until there is some.
+        let needsCredit: Bool
+        /// True when the web-search service failed and the model gave no answer —
+        /// the action opens Settings where the search service is picked.
+        let needsSearchSwitch: Bool
         /// The assistant turn this failure belongs to — the round's own error
         /// bubble. What binds the error state to ONE conversation: the capsule only
         /// renders while that exact turn is the on-screen thread's (see
@@ -5204,6 +5243,10 @@ final class NotchModel: ObservableObject {
             // fire without the cursor on the island.
             Haptics.alignment()
             pasteboardChangeCountAtOpen = pasteboardChangeCountAtRest
+            // A grant sent while the app runs reaches the prompt's chip on this
+            // open, not the next launch. Here rather than in NotchBody: the body
+            // mounts already open and never sees this edge.
+            Task { await NoNoAccount.shared.refreshIfStale() }
             if mode == .idle, turns.isEmpty, let round = inFlightRounds.last {
                 // A round is still streaming in the background — the busy
                 // extension is out, and hovering the working notch should land
@@ -5306,6 +5349,36 @@ final class NotchModel: ObservableObject {
         showWhatsNew = false
         showHistory = false
         highlightedHistoryIndex = nil
+    }
+
+    /// Open Settings on a provider's Model pane — the path the detail card's
+    /// first-party pill takes. Closes any open model menu first so the island
+    /// is not sitting under a picker that no longer has a job.
+    func openProviderSettings(_ provider: Provider, on display: CGDirectDisplayID? = nil,
+                              addCredit: Bool = false) {
+        // Before the provider: its `onChange` reads this flag.
+        pendingAddCredit = addCredit
+        pendingSettingsProvider = provider
+        settingsSection = "Model"
+        // The recents card is a child window and does not fade with the
+        // settings spring. Take the binding down without that animation so
+        // SwiftUI does not keep the card alive until the spring ends.
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            showAskModelPicker = false
+            showModelPicker = false
+            showAgentPicker = false
+            isModelPickerOpen = false
+        }
+        openSettings(on: display)
+    }
+
+    /// Open Settings on the Model pane, where the search-service picker lives —
+    /// the action a failed web search offers.
+    func openSearchSettings() {
+        settingsSection = InlineSettingsView.Section.model.rawValue
+        openSettings()
     }
 
     /// Leave settings and return to the idle prompt (panel stays open).
@@ -5605,7 +5678,10 @@ final class NotchModel: ObservableObject {
         // mirror when the body isn't mounted to see that change.
         lastMeasuredAnswerHeight = 0
         mode = .idle
-        isAnswerPinned = false
+        // The pin is a property of the open panel, not of the thread on it:
+        // backing out of a result or a detail page keeps the panel pinned, so
+        // the panel doesn't collapse the moment the pointer leaves the idle
+        // prompt. `fullClose` still clears it — a closed panel is never pinned.
         fromPromptShortcut = false
         promptShortcutContext = nil
         clearSelectionContext()
@@ -5936,6 +6012,7 @@ final class NotchModel: ObservableObject {
             }
             agentComposeActive = true
             manualPanelOverride = nil
+            carryComposeImages(toAgent: true)
         }
         // The remembered engine may have been uninstalled / signed out since it
         // was last used — fall back to whichever is live, and drop the model
@@ -5981,13 +6058,34 @@ final class NotchModel: ObservableObject {
 
     /// Exit the compose (Shift-Tab, Tab, or the pill's Ask half — NOT a submit; the
     /// bucket outlives the task it sent). Keeps the folder memory — re-entering
-    /// lands on the same project; the attached images don't (they belonged to the
-    /// task that was being written).
+    /// lands on the same project. Pasted images move onto the Ask compose when
+    /// the chat model can take them, so Chat ↔ Agent doesn't drop a screenshot.
     func exitAgentCompose() {
         withAnimation(.smooth(duration: 0.3)) {
             agentComposeActive = false
-            agentComposeImages = []
+            carryComposeImages(toAgent: false)
         }
+    }
+
+    /// Move the idle prompt's pasted images with the Chat ↔ Agent bucket switch
+    /// when the destination also accepts them. The other side's set is left
+    /// alone if it can't — switching back still has the paste.
+    private func carryComposeImages(toAgent: Bool) {
+        if toAgent {
+            guard agentArmedEngine.supportsImageInput else { return }
+            moveComposeImages(from: &askComposeImages, to: &agentComposeImages)
+        } else {
+            guard activeModelSupportsVision else { return }
+            moveComposeImages(from: &agentComposeImages, to: &askComposeImages)
+        }
+    }
+
+    private func moveComposeImages(from: inout [NSImage], to: inout [NSImage]) {
+        guard !from.isEmpty else { return }
+        let room = Self.composeImageLimit - to.count
+        guard room > 0 else { return }
+        to.append(contentsOf: from.prefix(room))
+        from = Array(from.dropFirst(room))
     }
 
     /// ⌘V in the prompt attaches a clipboard image to the active compose. Ask and
@@ -6720,6 +6818,14 @@ final class NotchModel: ObservableObject {
         // from here the thread is an ordinary conversation, so the follow-up input
         // goes back to being a full field instead of a collapsed button.
         if !hideUserBubble { fromPromptShortcut = false }
+        // Which part of the app this round came from, for nono's usage rows. A
+        // detached round names itself; otherwise it is a shortcut still in its
+        // one-shot form, or a typed question. Taken here, before any early
+        // return, so a value set for this submit can never leak into the next.
+        let nonoContext = NoNoRequestContext(
+            surface: nextSubmitSurface
+                ?? (fromPromptShortcut ? NoNoRequestContext.shortcut : NoNoRequestContext.ask))
+        nextSubmitSurface = nil
         var q = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let pastedImages = askComposeImages
         if q.isEmpty {
@@ -6815,8 +6921,6 @@ final class NotchModel: ObservableObject {
         // round's still-empty assistant turn and an error card's reason text, both
         // of which providers either reject outright or misread as model speech.
         var context: [ChatMessage] = Self.wireContext(from: turns, excluding: answerID)
-
-        let system = notchSystemPromptDated(customInstructions: customInstructions)
 
         // Explicitly pasted images attach to the newest wire message. The encoded
         // set is also parked on the thread so follow-ups still see every image.
@@ -7089,7 +7193,7 @@ final class NotchModel: ObservableObject {
                 // that can't do tools, or a turn with an empty registry, falls
                 // straight back to the existing behavior: nothing about plain Q&A
                 // changes.
-                // The standard tool set, plus the two tools that can't live in
+                // The standard tool set, plus the tools that can't live in
                 // `ToolRegistry.standard(for:)` because they need the live model:
                 //  · `ask_user` — its suspension is owned by the model
                 //    (`awaitUserChoice`), keyed to THIS round's answer turn so the
@@ -7102,18 +7206,24 @@ final class NotchModel: ObservableObject {
                 //  · `create_note` / `create_reminder` — the second write surface,
                 //    gated on the same in-answer confirmation card and filing their
                 //    Recent row through the model that owns `history`.
+                // Blend1 then drops the extras whose words are not in this
+                // question — a 26B thinking model spends the first seconds of
+                // every turn walking the tool list, and most Ask rounds never
+                // need settings / notes / history / ask_user. See `AskToolIntent`.
                 var agentTools = ToolRegistry.standard(for: runProvider).tools
                 agentTools.append(ManageAppSettingsTool { [weak self] request in
                     guard let self else { throw CancellationError() }
                     return try await self.handleAppSettingsRequest(answerID: answerID,
                                                                    request: request)
                 })
-                agentTools.append(AskUserTool { [weak self] question, options in
-                    guard let self else { throw CancellationError() }
-                    return try await self.awaitUserChoice(answerID: answerID,
-                                                          question: question,
-                                                          options: options)
-                })
+                if runProvider != .nono {
+                    agentTools.append(AskUserTool { [weak self] question, options in
+                        guard let self else { throw CancellationError() }
+                        return try await self.awaitUserChoice(answerID: answerID,
+                                                              question: question,
+                                                              options: options)
+                    })
+                }
                 agentTools.append(CreateNoteTool { [weak self] request in
                     guard let self else { throw CancellationError() }
                     return try await self.handleCaptureRequest(answerID: answerID,
@@ -7130,7 +7240,19 @@ final class NotchModel: ObservableObject {
                     guard let self else { return .empty }
                     return await MainActor.run { self.searchArchive(query) }
                 })
+                if runProvider == .nono {
+                    agentTools = AskToolIntent.filter(agentTools, for: q)
+                }
                 let registry = ToolRegistry(agentTools)
+                // Prompt stances match the tools on the wire this turn, so a
+                // slim Blend1 round does not describe tools it cannot call.
+                // Image / non-tool backends advertise none.
+                let advertised: Set<String> =
+                    (!imageAttached && runProvider.supportsTools && !registry.isEmpty)
+                    ? Set(registry.tools.map(\.name)) : []
+                let system = notchSystemPromptDated(customInstructions: customInstructions,
+                                                    provider: runProvider,
+                                                    advertisedTools: advertised)
                 // The service for THIS turn: a one-shot regenerate override (XII-135)
                 // wins, else the main service. An upgraded model still gets the tool
                 // harness below (search etc.), so the override rides both paths.
@@ -7139,7 +7261,10 @@ final class NotchModel: ObservableObject {
                    let agent = askService as? AgentCapableService,
                    runProvider.supportsTools,
                    !registry.isEmpty {
-                    let harness = AgentHarness(service: agent, registry: registry)
+                    // `forceSearchOnChangingFacts` stays off for Nono: its upstream
+                    // (Darkbloom) cannot serve a forced `tool_choice`. See the flag.
+                    var harness = AgentHarness(service: agent, registry: registry)
+                    harness.requestContext = nonoContext
                     let agentMessages = context.map {
                         AgentMessage(kind: .text(role: $0.role, text: $0.content))
                     }
@@ -7212,6 +7337,18 @@ final class NotchModel: ObservableObject {
                                let i = self.turns.firstIndex(where: { $0.id == answerID }) {
                                 self.turns[i].answerModel = ran
                             }
+                        },
+                        onReasoning: { [weak self] full in
+                            guard let self else { return }
+                            let clipped = full.count > 12_000 ? String(full.prefix(12_000)) : full
+                            if let i = thread.firstIndex(where: { $0.id == answerID }) {
+                                thread[i].reasoning = clipped
+                                self.syncInFlight(answerID, thread)
+                            }
+                            if self.isOnScreen(answerID: answerID),
+                               let i = self.turns.firstIndex(where: { $0.id == answerID }) {
+                                self.turns[i].reasoning = clipped
+                            }
                         })
                 } else {
                     // A regenerate override (XII-135) streams from its pinned
@@ -7231,9 +7368,43 @@ final class NotchModel: ObservableObject {
                        let i = self.turns.firstIndex(where: { $0.id == answerID }) {
                         self.turns[i].answerModel = ranModel
                     }
-                    for try await chunk in service.stream(system: system, messages: context) {
+                    let events = await NoNoRequestContext.$current.withValue(nonoContext) {
+                        service.streamEvents(system: system, messages: context)
+                    }
+                    for try await event in events {
                         if Task.isCancelled { return }
-                        appendChunk(chunk)
+                        switch event {
+                        case .text(let chunk):
+                            appendChunk(chunk)
+                        case .reasoning(let piece):
+                            guard !piece.isEmpty else { continue }
+                            let prior = thread.first(where: { $0.id == answerID })?.reasoning ?? ""
+                            let acc = prior + piece
+                            let clipped = acc.count > 12_000 ? String(acc.prefix(12_000)) : acc
+                            if let i = thread.firstIndex(where: { $0.id == answerID }) {
+                                thread[i].reasoning = clipped
+                                self.syncInFlight(answerID, thread)
+                            }
+                            if self.isOnScreen(answerID: answerID) {
+                                if let i = self.turns.firstIndex(where: { $0.id == answerID }) {
+                                    self.turns[i].reasoning = clipped
+                                }
+                                if self.mode == .load { self.mode = .result }
+                            }
+                        }
+                    }
+                    if runProvider == .grokCode,
+                       let salvaged = GrokCLIService.consumeSalvagedAnswer(),
+                       salvaged != acc {
+                        acc = salvaged
+                        released = salvaged.count
+                        if let i = thread.firstIndex(where: { $0.id == answerID }) {
+                            thread[i].text = salvaged
+                        }
+                        if self.isOnScreen(answerID: answerID),
+                           let i = self.turns.firstIndex(where: { $0.id == answerID }) {
+                            self.turns[i].text = salvaged
+                        }
                     }
                 }
                 if Task.isCancelled { return }
@@ -7332,7 +7503,9 @@ final class NotchModel: ObservableObject {
                         thread[i].isError = true
                         thread[i].streaming = false
                     }
-                    self.persistThread(thread, threadID: threadID, answer: "")
+                    self.persistThread(thread, threadID: threadID, answer: "",
+                                       outOfCredit: (error as? OpenAICompatAIService.ServiceError)?
+                                           .isOutOfCredit == true)
                     if self.isOnScreen(answerID: answerID) {
                         // Surface the REAL reason (XII-85) — `ServiceError` already
                         // localizes to e.g. "Anthropic · HTTP 401" — and raise an
@@ -7351,6 +7524,9 @@ final class NotchModel: ObservableObject {
                         self.markFinished(id: answerID)
                         self.askError = AskError(message: reason,
                                                  needsSetup: !self.isConfigured,
+                                                 needsCredit: (error as? OpenAICompatAIService.ServiceError)?
+                                                     .isOutOfCredit == true,
+                                                 needsSearchSwitch: error is SearchServiceError,
                                                  answerID: answerID)
                         self.mode = .result
                     }
@@ -7984,7 +8160,8 @@ final class NotchModel: ObservableObject {
     /// thread's row. Skips empty results (e.g. a stream that errored before any
     /// text). The recent row shows the first question + latest answer; reopening
     /// it restores every turn.
-    private func persistThread(_ thread: [Turn], threadID: UUID, answer ans: String) {
+    private func persistThread(_ thread: [Turn], threadID: UUID, answer ans: String,
+                               outOfCredit: Bool = false) {
         var thread = thread
         let trimmed = ans.trimmingCharacters(in: .whitespacesAndNewlines)
         // No answer came back — the model returned nothing (a leaked tool call the
@@ -8027,6 +8204,7 @@ final class NotchModel: ObservableObject {
         var item = HistoryItem(id: threadID, q: firstQ, a: body, t: Date(), turns: thread)
         item.title = existingTitle
         item.failed = failed
+        item.outOfCredit = failed && outOfCredit
         // A chat follow-up on a reopened agent thread updates the SAME row — it
         // must keep the row's agent identity (source, folder link, outcome,
         // resume handle) rather than silently demoting it to a plain `.ask`.

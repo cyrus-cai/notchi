@@ -427,9 +427,15 @@ struct GrokCLIService: AIService {
                 watchdog.cancel()
                 outPipe.fileHandleForReading.readabilityHandler = nil
                 errPipe.fileHandleForReading.readabilityHandler = nil
-                cleanup()
 
                 let snapshot = state.finish()
+                if snapshot.yieldedAny, !snapshot.fullText.isEmpty {
+                    let salvaged = Self.salvageGeneratedImages(in: snapshot.fullText,
+                                                               workDir: workDir)
+                    Self.publishSalvagedAnswer(salvaged)
+                }
+                cleanup()
+
                 if let msg = snapshot.failure {
                     continuation.finish(throwing: GrokError.classify(msg))
                 } else if !snapshot.yieldedAny {
@@ -454,6 +460,49 @@ struct GrokCLIService: AIService {
                 continuation.finish(throwing: GrokError.spawnFailed(error.localizedDescription))
             }
         }
+    }
+
+    /// Copy Grok Imagine files out of a (possibly ephemeral) working directory
+    /// and rewrite the answer so `images/1.jpg` points at the durable history
+    /// store. Chat Grok deletes its temp cwd on settle; without this the picture
+    /// that just rendered vanishes with the folder.
+    static func consumeSalvagedAnswer() -> String? {
+        salvageLock.lock(); defer { salvageLock.unlock() }
+        let text = lastSalvagedAnswer
+        lastSalvagedAnswer = nil
+        return text
+    }
+
+    private static let salvageLock = NSLock()
+    private static var lastSalvagedAnswer: String?
+
+    private static func publishSalvagedAnswer(_ text: String) {
+        salvageLock.lock(); lastSalvagedAnswer = text; salvageLock.unlock()
+    }
+
+    static func salvageGeneratedImages(in text: String, workDir: URL) -> String {
+        let imagesDir = workDir.appendingPathComponent("images", isDirectory: true)
+        guard let files = try? FileManager.default.contentsOfDirectory(
+                at: imagesDir, includingPropertiesForKeys: nil)
+        else { return text }
+        let imageExt: Set<String> = ["jpg", "jpeg", "png", "gif", "webp", "heic", "heif"]
+        var out = text
+        for file in files.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            guard imageExt.contains(file.pathExtension.lowercased()),
+                  let data = try? Data(contentsOf: file), !data.isEmpty,
+                  let name = NotchModel.storeHistoryImage(data)
+            else { continue }
+            let dest = NotchModel.historyImageURL(name).absoluteString
+            let absolute = file.standardizedFileURL.path
+            if out.contains(absolute) {
+                out = out.replacingOccurrences(of: absolute, with: dest)
+            }
+            let relative = "images/" + file.lastPathComponent
+            if out.contains(relative) {
+                out = out.replacingOccurrences(of: relative, with: dest)
+            }
+        }
+        return out
     }
 }
 
@@ -617,6 +666,9 @@ enum GrokSearchMCPServer {
                     box.text = "Error: no search backend is configured; tell the user "
                              + "to pick one in Notch's settings."
                 }
+            } catch let failure as SearchServiceError {
+                box.text = failure.modelText + " Tell the user they can switch the "
+                         + "search service in Notch's settings."
             } catch {
                 box.text = "Search failed: \(error.localizedDescription)"
             }
@@ -639,8 +691,14 @@ private final class GrokStreamState {
     private var stderrTail = ""
     private var yieldedAny = false
     private var failure: String?
+    private var fullText = ""
 
-    struct Snapshot { let yieldedAny: Bool; let failure: String?; let stderrTail: String }
+    struct Snapshot {
+        let yieldedAny: Bool
+        let failure: String?
+        let stderrTail: String
+        let fullText: String
+    }
 
     /// Append `data` and return the answer-text deltas in newly-completed lines.
     func ingest(_ data: Data) -> [String] {
@@ -658,6 +716,7 @@ private final class GrokStreamState {
             case "text":
                 if let text = obj["data"] as? String, !text.isEmpty {
                     yieldedAny = true
+                    fullText += text
                     out.append(text)
                 }
             case "error":
@@ -701,7 +760,8 @@ private final class GrokStreamState {
             .map(String.init)
             .last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })
             ?? ""
-        return Snapshot(yieldedAny: yieldedAny, failure: failure, stderrTail: tail)
+        return Snapshot(yieldedAny: yieldedAny, failure: failure,
+                        stderrTail: tail, fullText: fullText)
     }
 }
 

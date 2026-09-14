@@ -22,6 +22,10 @@ struct NotchBody: View {
     /// The model catalog behind the ⌘⇧I picker — the same store Settings' chip reads,
     /// so a list fetched on one surface is already warm on the other.
     @ObservedObject private var catalog = ModelCatalogStore.shared
+    /// The nono account — read here for one thing: whether the wallet can spend
+    /// right now, which is what pins our own models into the Ask chip's quick menu. Observed
+    /// so the answer landing while the menu is open fills the section in.
+    @ObservedObject private var nono = NoNoAccount.shared
     /// Two-step cancel for an agent status row: the ✕ arms this with its task's
     /// id, and only the armed "cancel?" chip actually terminates that run.
     /// Auto-disarms after a beat. One slot on purpose — arming a second row
@@ -77,6 +81,8 @@ struct NotchBody: View {
     /// row, the recent list's manage bar); they're never on screen together, but
     /// separate flags keep the hover honest either way (see `updateCue`).
     @State private var updateCueIdleHovered = false
+    /// Cursor over the bucket row's grant chip (see `giftCue`).
+    @State private var giftCueHovered = false
     @State private var updateCueBarHovered = false
     /// A thread opened by a prompt shortcut keeps its follow-up input folded into a
     /// small floating button (see `followUpButton`) until this flips — the run is a
@@ -468,7 +474,7 @@ struct NotchBody: View {
                 }
                 if model.usingPromptShortcutContext {
                     Text(L("shortcuts.promptAction.window.context"))
-                        .font(.sf(12, weight: .medium))
+                        .font(.sf(Tokens.TypeSize.label, weight: .medium))
                         .foregroundStyle(Tokens.text4)
                         .lineLimit(1)
                         .padding(.bottom, 8)
@@ -781,7 +787,7 @@ struct NotchBody: View {
         if let err = model.noteError {
             return AnyView(
                 Text(err)
-                    .font(.sf(12))
+                    .font(.sf(Tokens.TypeSize.label))
                     .foregroundStyle(Tokens.text2)
                     .lineLimit(4)
                     .fixedSize(horizontal: false, vertical: true)
@@ -804,7 +810,7 @@ struct NotchBody: View {
     /// the same whisper as the RECENT label.
     private func feedbackLine(_ text: String) -> some View {
         Text(text)
-            .font(.sf(12))
+            .font(.sf(Tokens.TypeSize.label))
             .tracking(0.2)
             .foregroundStyle(Tokens.text4)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -817,7 +823,7 @@ struct NotchBody: View {
     private func selectionContextLine(_ selection: String) -> some View {
         SelectionContextChip(source: model.selectionContextSource,
                              selection: selection) {
-            withAnimation(.easeOut(duration: 0.18)) { model.dropSelectionContext() }
+            withAnimation(.easeOut(duration: Tokens.hoverFade)) { model.dropSelectionContext() }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -838,9 +844,9 @@ struct NotchBody: View {
             HStack(spacing: 4) {
                 Text(L("selection.context.hint.off"))
                 Image(systemName: "arrow.up.right")
-                    .font(.sf(9, weight: .semibold))
+                    .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
             }
-            .font(.sf(12))
+            .font(.sf(Tokens.TypeSize.label))
             .tracking(0.2)
             .foregroundStyle(hoveringSelectionHint ? Tokens.text2 : Tokens.text4)
             .contentShape(Rectangle())
@@ -857,11 +863,11 @@ struct NotchBody: View {
     private func recallCounterLine(_ recall: (pos: Int, total: Int)) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 5) {
             Image(systemName: "clock.arrow.circlepath")
-                .font(.sf(10, weight: .semibold))
+                .font(.sf(Tokens.TypeSize.caption, weight: .semibold))
                 .foregroundStyle(Tokens.text4)
                 .baselineOffset(-1)
             Text("\(recall.pos) / \(recall.total)")
-                .font(.sf(11, weight: .medium))
+                .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                 .monospacedDigit()
                 .tracking(0.3)
                 .foregroundStyle(Tokens.text4)
@@ -921,14 +927,21 @@ struct NotchBody: View {
                 // run with no history and no pin).
                 // A waiting build says so in words right here, on the home page —
                 // not as a dot behind the ⋯ menu (see `updateCue`).
-                let pending = model.hasText ? nil : updateChipFace
+                // A grant that landed this launch outranks both the update chip
+                // and "What's New": it holds the edge alone until it is tapped.
+                let showsGift = !model.hasText && nono.justGrantedUSD > 0.0000005
+                let pending = model.hasText || showsGift ? nil : updateChipFace
                 // One chip on that edge, never two: an update waiting outranks the
                 // notes for the build already running, so "What's New" stands down
                 // until the update is taken.
                 let showsCue = !model.hasText && whatsNew.unseenVersion != nil
-                                && pending == nil
-                if !cluster.isEmpty || showsCue || pending != nil {
+                                && pending == nil && !showsGift
+                if !cluster.isEmpty || showsGift || showsCue || pending != nil {
                     Spacer(minLength: 8)
+                    if showsGift {
+                        giftCue
+                            .transition(.scale(scale: 0.7).combined(with: .opacity))
+                    }
                     if let pending {
                         updateCue(face: pending, height: 30,
                                   hovered: $updateCueIdleHovered)
@@ -948,6 +961,8 @@ struct NotchBody: View {
         // chip simply blinks out of existence the moment the update is taken —
         // which is precisely when the user is looking for a sign it worked.
         .animation(.spring(response: 0.38, dampingFraction: 0.86), value: updateChipFace)
+        .animation(.spring(response: 0.38, dampingFraction: 0.86),
+                   value: nono.justGrantedUSD > 0.0000005)
         .padding(.top, 10)
         // The second grip on the idle page (see `detachGrip`): the bucket row's
         // free strip between the pill and the Recent cluster pulls the whole
@@ -1023,6 +1038,12 @@ struct NotchBody: View {
                          tint: model.isConfigured ? nil : Tokens.danger.opacity(0.62),
                          action: {
             if model.isConfigured || !availableCLIProviders.isEmpty {
+                // The menu pins our own models for a subscriber, and nothing else
+                // on this surface ever asks the gateway — so ask on open. A no-op
+                // once a token exists and a snapshot has landed.
+                if NoNoAccount.shared.snapshot == nil {
+                    Task { await NoNoAccount.shared.load() }
+                }
                 model.showAskModelPicker.toggle()
             } else {
                 model.settingsSection = "Model"
@@ -1041,6 +1062,7 @@ struct NotchBody: View {
             card: {
                 AnyView(AskRecentModelPickerView(
                     rows: askRecentModelRows,
+                    pinned: askPinnedModelRows,
                     selectedProvider: selectedProvider,
                     selectedModelID: selectedModelID,
                     onSelect: { row in
@@ -1079,13 +1101,32 @@ struct NotchBody: View {
                                                  ?? $0.defaultModel)
             }
         }
+        let pinned = askPinnedModelRows
         var rows = [AskRecentModelPickerView.Row(provider: selectedProvider, id: selectedModelID)]
         for e in AskModelMRU.entries {
             let row = AskRecentModelPickerView.Row(provider: e.provider, id: e.model)
             guard !rows.contains(row), ModelCatalogStore.ready(e.provider) else { continue }
             rows.append(row)
         }
-        return Array(rows.prefix(AskModelMRU.capacity))
+        // A pinned model has its own row below; listing it twice would make the
+        // menu look like two different models with one name.
+        return Array(rows.filter { !pinned.contains($0) }.prefix(AskModelMRU.capacity))
+    }
+
+    /// The models pinned under the recents: our own, and only while the wallet
+    /// can actually pay for a turn. An empty balance cannot serve a request, so
+    /// it pins nothing — a row that answers with a billing error is worse than
+    /// no row.
+    ///
+    /// The lineup is whatever the gateway last published (`liveByProvider`),
+    /// falling back to the bundled tier so the section is never empty for
+    /// someone who has credit and has not opened the full picker yet.
+    private var askPinnedModelRows: [AskRecentModelPickerView.Row] {
+        guard let snapshot = nono.snapshot, !snapshot.isEmpty, !snapshot.cappedForToday,
+              ModelCatalogStore.ready(.nono) else { return [] }
+        let live = catalog.liveByProvider[.nono]?.map(\.id) ?? []
+        let ids = live.isEmpty ? Provider.nono.availableModels : live
+        return ids.map { AskRecentModelPickerView.Row(provider: .nono, id: $0) }
     }
 
     /// The agent CLIs that are installed *and* signed in right now — real backends
@@ -1336,7 +1377,7 @@ struct NotchBody: View {
                         confirmingAgentCancelID = nil
                     } label: {
                         Text(L("agent.cancelConfirm"))
-                            .font(.sf(11, weight: .medium))
+                            .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                             .foregroundStyle(Color(red: 1.0, green: 0.45, blue: 0.40))
                             .padding(.horizontal, 8)
                             .padding(.vertical, 3)
@@ -1372,7 +1413,7 @@ struct NotchBody: View {
                 // target that opens it; the ✕ throws the row away without opening
                 // (the record stays in Recent either way).
                 Text(task.prompt)
-                    .font(.sf(14))
+                    .font(.sf(Tokens.TypeSize.reading))
                     .tracking(-0.1)
                     .foregroundStyle(task.outcome == .failure
                         ? Tokens.danger.opacity(0.9)
@@ -1400,15 +1441,15 @@ struct NotchBody: View {
         // presence (0.5), so an agent line highlights exactly like the rows below
         // it instead of being the one row that stays flat under the cursor.
         .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle.control
                 .fill(.white.opacity(hoveredAgentRowID == task.id ? 0.015 : 0))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    RoundedRectangle.control
                         .fill(.thinMaterial)
                         .opacity(hoveredAgentRowID == task.id ? 0.11 : 0)
                 )
         )
-        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .contentShape(RoundedRectangle.control)
         .onHover { inside in
             withAnimation(.easeOut(duration: 0.16)) {
                 if inside { hoveredAgentRowID = task.id }
@@ -1464,7 +1505,7 @@ struct NotchBody: View {
     private func agentElapsedLabel(_ elapsed: TimeInterval) -> some View {
         let seconds = max(0, Int(elapsed))
         return Text(NotchModel.formatAgentElapsed(TimeInterval(seconds)))
-            .font(.sf(11))
+            .font(.sf(Tokens.TypeSize.meta))
             .monospacedDigit()
             .contentTransition(.numericText(value: Double(seconds)))
             .animation(reduceMotion ? nil : .snappy(duration: 0.3), value: seconds)
@@ -1854,7 +1895,7 @@ struct NotchBody: View {
                 .init(tooltip: shortcutHelp("detached.open", action: .detach),
                       action: { model.openDetachedWindow() }) {
                     Image(systemName: "macwindow.on.rectangle")
-                        .font(.sf(12, weight: .semibold))
+                        .font(.sf(Tokens.TypeSize.label, weight: .semibold))
                 },
             ])
         }
@@ -1874,7 +1915,7 @@ struct NotchBody: View {
                                     action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.sf(9.5, weight: .semibold))
+                .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                 .foregroundStyle(Tokens.text4)
                 .frame(width: 18, height: 18)
                 .contentShape(Rectangle())
@@ -2295,10 +2336,10 @@ struct NotchBody: View {
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
                 .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    RoundedRectangle.inset
                         .fill(Color.white.opacity(0.04))
                         .overlay(
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            RoundedRectangle.inset
                                 .strokeBorder(Tokens.hairline, lineWidth: 0.5)
                         )
                 )
@@ -2442,10 +2483,10 @@ struct NotchBody: View {
                     .padding(.horizontal, 7)
                     .padding(.vertical, 5)
                     .background(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        RoundedRectangle.inset
                             .fill(Color.white.opacity(0.04))
                             .overlay(
-                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                RoundedRectangle.inset
                                     .strokeBorder(Tokens.hairline, lineWidth: 0.5)
                             )
                     )
@@ -2475,7 +2516,7 @@ struct NotchBody: View {
                     } label: {
                         HStack(spacing: 6) {
                             Text(task.prompt)
-                                .font(.sf(13))
+                                .font(.sf(Tokens.TypeSize.form))
                                 .foregroundStyle(selectedID == task.id ? Tokens.text1 : Tokens.text2)
                                 .lineLimit(1)
                                 .truncationMode(.tail)
@@ -2508,7 +2549,7 @@ struct NotchBody: View {
                             // weight or size that shifts under the pointer makes
                             // the whole column twitch as you move down it.
                             Text(item.displayTitle)
-                                .font(.sf(13))
+                                .font(.sf(Tokens.TypeSize.form))
                                 .foregroundStyle(selectedID == item.id ? Tokens.text1 : Tokens.text2)
                                 .lineLimit(1)
                                 .truncationMode(.tail)
@@ -2520,14 +2561,14 @@ struct NotchBody: View {
                             if item.pending {
                                 RecentPendingDots()
                             } else if item.failed {
-                                Text(L("recent.badge.failed"))
-                                    .font(.sf(10, weight: .medium))
+                                Text(L(item.outOfCredit ? "recent.badge.outOfCredit" : "recent.badge.failed"))
+                                    .font(.sf(Tokens.TypeSize.caption, weight: .medium))
                                     .foregroundStyle(Tokens.danger.opacity(0.9))
                             } else if !item.source.isThread {
                                 Text(item.source == .note
                                      ? L("recent.badge.notes")
                                      : L("recent.badge.reminders"))
-                                    .font(.sf(10, weight: .medium))
+                                    .font(.sf(Tokens.TypeSize.caption, weight: .medium))
                                     .foregroundStyle(Tokens.text4)
                             }
                             // The bead rides the row's TRAILING edge. On the
@@ -2742,6 +2783,9 @@ struct NotchBody: View {
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }
+                    .environment(\.answerMediaBaseDirectory,
+                                 item.source == .agent
+                                 ? item.link.map { URL(fileURLWithPath: $0) } : nil)
                     .padding(.trailing, 8)
                     .padding(.bottom, detailBottomReach)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -2839,7 +2883,7 @@ struct NotchBody: View {
                         .padding(.leading, 12)
                 } else if turn.usedClipboard {
                     Text(L("result.basedOnCopied"))
-                        .font(.sf(11))
+                        .font(.sf(Tokens.TypeSize.meta))
                         .tracking(0.2)
                         .foregroundStyle(Tokens.text4)
                         .padding(.leading, 12)
@@ -2863,7 +2907,8 @@ struct NotchBody: View {
                     completedAt: turn.isAgent && item.conversation.last?.id == turn.id
                         ? item.t : nil,
                     onInAppCopy: { model.rebaselineClipboardAfterInAppWrite() },
-                    answerModel: turn.answerModel
+                    answerModel: turn.answerModel,
+                    reasoning: turn.reasoning
                 )
             }
         }
@@ -2885,9 +2930,9 @@ struct NotchBody: View {
                 } label: {
                     HStack(spacing: 8) {
                         Image(systemName: "arrow.clockwise")
-                            .font(.sf(12, weight: .medium))
+                            .font(.sf(Tokens.TypeSize.label, weight: .medium))
                         Text(L("agent.resume", engine.displayName))
-                            .font(.sf(13, weight: .medium))
+                            .font(.sf(Tokens.TypeSize.form, weight: .medium))
                         Spacer(minLength: 0)
                     }
                     .foregroundStyle(Tokens.text1)
@@ -3192,7 +3237,7 @@ struct NotchBody: View {
                     Button { model.openHistory(item) } label: {
                         HStack(alignment: .firstTextBaseline, spacing: 12) {
                             Text(item.displayTitle)
-                                .font(.sf(14))
+                                .font(.sf(Tokens.TypeSize.reading))
                                 .tracking(-0.1)
                                 .foregroundStyle(Tokens.text2)
                                 .lineLimit(1)
@@ -3218,12 +3263,12 @@ struct NotchBody: View {
                                     // say so — otherwise it reads as an ordinary
                                     // answer until you open it.
                                     if item.failed {
-                                        Text(L("recent.badge.failed"))
-                                            .font(.sf(11, weight: .medium))
+                                        Text(L(item.outOfCredit ? "recent.badge.outOfCredit" : "recent.badge.failed"))
+                                            .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                                             .foregroundStyle(Tokens.danger.opacity(0.9))
                                     }
                                     Text(relativeTime(item.t))
-                                        .font(.sf(11).monospacedDigit())
+                                        .font(.sf(Tokens.TypeSize.meta).monospacedDigit())
                                         .tracking(0.2)
                                         .foregroundStyle(Tokens.text4)
                                 }
@@ -3446,6 +3491,12 @@ struct NotchBody: View {
 
     // MARK: - Result
 
+    /// Folder Grok (and other agents) write generated images into — relative
+    /// markdown paths like `images/1.jpg` resolve against this.
+    private var answerMediaBase: URL? {
+        model.currentThreadAgentFolder.map { URL(fileURLWithPath: $0) }
+    }
+
     /// The tallest the answer area is ever allowed to grow. Short answers size to
     /// their own content (below this); only long ones clip + scroll at the ceiling.
     /// This value is ALSO the threshold that flips `isAnswerClipped` — do NOT change
@@ -3545,7 +3596,7 @@ struct NotchBody: View {
         var total: CGFloat = 0
         for turn in turns where !turn.hidesUserBubble {
             if turn.role == "user" {
-                total += height(turn.text, 14.5) + 26        // bubble padding
+                total += height(turn.text, Tokens.TypeSize.reading) + 26        // bubble padding
                 if !turn.imageFiles.isEmpty { total += 30 }  // the image strip
             } else {
                 // An agent turn stacks its work trail above the report. Folded
@@ -3566,6 +3617,7 @@ struct NotchBody: View {
                     }
                 }
                 total += height(turn.text, 15) + 16
+                if let r = turn.reasoning, !r.isEmpty { total += 22 }
             }
             total += 16                                      // the stack's turn spacing
             if total > ceiling { return true }
@@ -3582,6 +3634,7 @@ struct NotchBody: View {
     /// (`NotchModel.submit` clears `fromPromptShortcut`).
     private var followUpIsFolded: Bool {
         model.fromPromptShortcut && !followUpExpanded && !model.hasText
+            && !model.isStreaming
             && model.visibleAskError == nil && model.isConfigured
     }
 
@@ -3739,12 +3792,12 @@ struct NotchBody: View {
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "slider.horizontal.3")
-                    .font(.sf(13, weight: .medium))
+                    .font(.sf(Tokens.TypeSize.form, weight: .medium))
                 Text(L("result.setUpModel"))
-                    .font(.sf(14.5, weight: .medium))
+                    .font(.sf(Tokens.TypeSize.reading, weight: .medium))
                 Spacer(minLength: 0)
                 Image(systemName: "arrow.up.right")
-                    .font(.sf(11, weight: .semibold))
+                    .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
                     .foregroundStyle(Tokens.text3)
             }
             .foregroundStyle(Tokens.text1)
@@ -3777,12 +3830,12 @@ struct NotchBody: View {
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "arrow.clockwise")
-                        .font(.sf(13, weight: .medium))
+                        .font(.sf(Tokens.TypeSize.form, weight: .medium))
                     Text(L("agent.resume", engine.displayName))
-                        .font(.sf(14.5, weight: .medium))
+                        .font(.sf(Tokens.TypeSize.reading, weight: .medium))
                     Spacer(minLength: 0)
                     Image(systemName: "chevron.right")
-                        .font(.sf(11, weight: .semibold))
+                        .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
                         .foregroundStyle(Tokens.text3)
                 }
                 .foregroundStyle(Tokens.text1)
@@ -3796,7 +3849,7 @@ struct NotchBody: View {
         } else {
             Text(L("agent.interrupted.resume",
                    engine.resumeCommand(session: resume.session)))
-                .font(.sf(11.5))
+                .font(.sf(Tokens.TypeSize.meta))
                 .monospaced()
                 .foregroundStyle(Tokens.text4)
                 .textSelection(.enabled)
@@ -3806,21 +3859,32 @@ struct NotchBody: View {
 
     /// The actionable error footer for a failed Ask (XII-85): a content-sized
     /// capsule — "Open Settings" when no key is configured (retrying can't help),
-    /// else "Try again", which re-runs the same question. When the failure can be
-    /// retried, the capsule's trailing chevron opens the model list, so the retry
-    /// can pick a different model — the answer footer's regenerate control is
-    /// hidden while this row is up (a failed answer has nothing to regenerate),
-    /// and its "Regenerate with…" menu lives here instead.
+    /// "Add credit" when the Notchi balance is empty (opens Notchi's pane, where
+    /// the balance and its Add button are), else "Try again", which re-runs the
+    /// same question. When the failure can be retried, the capsule's trailing
+    /// chevron opens the model list, so the retry can pick a different model — the
+    /// answer footer's regenerate control is hidden while this row is up (a failed
+    /// answer has nothing to regenerate), and its "Regenerate with…" menu lives
+    /// here instead.
     private func errorActionRow(_ askError: NotchModel.AskError) -> some View {
-        ErrorActionRow(
-            needsSetup: askError.needsSetup,
-            models: askError.needsSetup ? [] : model.regenerateModelOptions,
+        let action: ErrorActionRow.Action = askError.needsSetup || askError.needsSearchSwitch
+            ? .openSettings
+            : askError.needsCredit ? .addCredit
+            : .retry
+        return ErrorActionRow(
+            action: action,
+            models: action == .retry ? model.regenerateModelOptions : [],
             primary: {
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
-                    if askError.needsSetup {
-                        model.openSettings()
-                    } else {
-                        model.retryLastAsk()
+                    switch action {
+                    case .openSettings:
+                        if askError.needsSearchSwitch {
+                            model.openSearchSettings()
+                        } else {
+                            model.openSettings()
+                        }
+                    case .addCredit: model.openProviderSettings(.nono)
+                    case .retry: model.retryLastAsk()
                     }
                 }
             },
@@ -3900,6 +3964,7 @@ struct NotchBody: View {
                     .id(turn.id)
             }
         }
+        .environment(\.answerMediaBaseDirectory, answerMediaBase)
         .padding(.trailing, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -3935,6 +4000,7 @@ struct NotchBody: View {
                                 .id(turn.id)
                         }
                     }
+                    .environment(\.answerMediaBaseDirectory, answerMediaBase)
                     // The thread's intrinsic height, read off the live scroll
                     // content — a ScrollView proposes an unbounded height to its
                     // content, so this stack is already laid out at its full size
@@ -4114,7 +4180,7 @@ struct NotchBody: View {
                         .padding(.leading, 12)   // matches the bubble's horizontal inset
                 } else if turn.usedClipboard {
                     Text(L("result.basedOnCopied"))
-                        .font(.sf(11))
+                        .font(.sf(Tokens.TypeSize.meta))
                         .tracking(0.2)
                         .foregroundStyle(Tokens.text4)
                         .padding(.leading, 12)   // matches the bubble's horizontal inset
@@ -4191,6 +4257,7 @@ struct NotchBody: View {
                     onRegenerateWith: canRegenerate ? { model.regenerateLastAnswer(model: $0) } : nil,
                     regenModel: turn.regenModel,
                     answerModel: turn.answerModel,
+                    reasoning: turn.reasoning,
                     // The `ask_user` question card, when the model has paused this
                     // still-streaming answer on a choice only the user can make.
                     pendingQuestion: turn.streaming
@@ -4275,7 +4342,7 @@ struct NotchBody: View {
                 refocusInput()
             }) {
                 Image(systemName: "bubble.left")
-                    .font(.sf(10.5, weight: .medium))
+                    .font(.sf(Tokens.TypeSize.meta, weight: .medium))
             }
         ], glass: false)
     }
@@ -4311,8 +4378,8 @@ struct NotchBody: View {
 
     /// The prompt's type size, and the follow-up field's — shared by the field, its
     /// inline hint and the row metrics, so a one-line box and its row agree.
-    static let idleFontSize: CGFloat = 16.5
-    static let followUpFontSize: CGFloat = 14.5
+    static let idleFontSize: CGFloat = Tokens.TypeSize.prompt
+    static let followUpFontSize: CGFloat = Tokens.TypeSize.reading
     /// How far a prompt grows before it stops growing and scrolls inside itself. A
     /// pasted paragraph unfolds the box downward — five lines of it — rather than
     /// scrolling off to the right where all but the tail is invisible.
@@ -4620,6 +4687,32 @@ struct NotchBody: View {
             card: { AnyView(SlashCommandMenu(model: model).menuCardBackground()) }))
     }
 
+    /// This launch's grant, on the bucket row's trailing edge. Same glass capsule
+    /// and ink as `updateCue`. Tapping it opens the wallet card, where the
+    /// balance rolls up to include the grant.
+    private var giftCue: some View {
+        Button {
+            nono.claimGrant()
+            withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                model.openProviderSettings(.nono)
+            }
+        } label: {
+            (Text(L("nono.gift.got.pre"))
+                + Text(InlineSettingsView.moneyCharged(nono.justGrantedUSD))
+                + Text(L("nono.gift.got.post")))
+                .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                .lineLimit(1)
+                .foregroundStyle(giftCueHovered ? Tokens.text1 : Tokens.text2)
+                .padding(.horizontal, 10)
+                .frame(height: 30)
+                .glassCapsule(in: Capsule(), brighter: giftCueHovered)
+                .contentShape(Capsule())
+        }
+        .buttonStyle(GlassPressStyle())
+        .onHover { giftCueHovered = $0 }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: giftCueHovered)
+    }
+
     /// The first-launch-after-update cue: normally "What's New" on the bucket row's
     /// trailing edge, immediately left of the Recent chevron. Same glass language as
     /// the chevron cluster's "N running" capsule (`glassCapsule` + `GlassPressStyle`),
@@ -4632,7 +4725,7 @@ struct NotchBody: View {
             }
         } label: {
             Text(L("whatsnew.cue"))
-                .font(.sf(11.5, weight: .semibold))
+                .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                 .lineLimit(1)
             .foregroundStyle(whatsNewHovered ? Tokens.text1 : Tokens.text2)
             .padding(.horizontal, 10)
@@ -4644,7 +4737,7 @@ struct NotchBody: View {
         }
         .buttonStyle(GlassPressStyle())
         .onHover { whatsNewHovered = $0 }
-        .animation(.easeOut(duration: 0.18), value: whatsNewHovered)
+        .animation(.easeOut(duration: Tokens.hoverFade), value: whatsNewHovered)
     }
 
     /// The waiting-update chip: the action promoted OUT of the ⋯
@@ -4696,7 +4789,7 @@ struct NotchBody: View {
                 // something to decode.
                 LucideIcon(mark: LucideIcons.circleFadingArrowUp, size: 12)
                 Text(updateCueLabel(face))
-                    .font(.sf(11.5, weight: .semibold))
+                    .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                     .lineLimit(1)
             }
             .foregroundStyle(failed ? Tokens.danger.opacity(0.92)
@@ -4724,7 +4817,7 @@ struct NotchBody: View {
         .buttonStyle(GlassPressStyle())
         .allowsHitTesting(!working)
         .onHover { hovered.wrappedValue = $0 }
-        .animation(.easeOut(duration: 0.18), value: hovered.wrappedValue)
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovered.wrappedValue)
         // The label and the fill are the only things that move between faces:
         // the capsule itself stays put and re-sizes around the new word, so the
         // chip morphs in place instead of one chip leaving and another arriving.
@@ -4859,16 +4952,24 @@ struct NotchBody: View {
                 return true
             },
             placeholder: { followUpPlaceholderLabel },
-            // The send button appears the moment the user starts typing a
-            // follow-up. (The "continue in ChatGPT/Claude" handoff used to rest
-            // here while the field was empty; it now lives in the answer footer
-            // with the other per-answer actions — see `AssistantTurnView`.)
+            // Send appears the moment the user starts typing a follow-up. While
+            // the round is still streaming, the same slot is Stop (Esc also
+            // lands on `stopStreaming`) so generation isn't keyboard-only.
             trailing: {
-                if model.hasText || !model.askComposeImages.isEmpty {
+                if model.isStreaming {
+                    StopButton(compact: true) {
+                        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                            model.stopStreaming()
+                        }
+                    }
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+                } else if model.hasText || !model.askComposeImages.isEmpty {
                     SendButton(compact: true) { model.submitCurrent() }
                         .transition(.scale(scale: 0.6).combined(with: .opacity))
                 }
             })
+        .animation(.spring(response: 0.3, dampingFraction: 0.78),
+                   value: model.isStreaming)
     }
 
     /// The follow-up field's placeholder, drawn as a SwiftUI label in the slot the
@@ -5042,7 +5143,7 @@ private struct HoverMarqueeText: View {
     private func updateOffset(viewport: CGFloat) {
         let overflow = max(0, textWidth - viewport)
         guard hovering, overflow > 1 else {
-            withAnimation(.easeOut(duration: 0.18)) { offset = 0 }
+            withAnimation(.easeOut(duration: Tokens.hoverFade)) { offset = 0 }
             return
         }
         // About 28pt/sec: calm enough to read dates and paths, but a full pass of
@@ -5077,7 +5178,7 @@ struct HistoryRowStyle: ButtonStyle {
     /// One shape either way — a radius past half the row's height clamps to a
     /// capsule, so the capsule case needs no second, type-erased shape.
     private var shape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: capsule ? 100 : 10, style: .continuous)
+        RoundedRectangle(cornerRadius: capsule ? 100 : Tokens.Radius.control, style: .continuous)
     }
 
     func makeBody(configuration: Configuration) -> some View {
@@ -5098,9 +5199,11 @@ struct HistoryRowStyle: ButtonStyle {
                     )
             )
             .contentShape(Rectangle())
+            .scaleEffect(configuration.isPressed ? Tokens.platePressScale : 1)
             .onHover { hovering = $0 }
             .animation(.easeOut(duration: Tokens.rowFade), value: selected)
             .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
+            .animation(Tokens.platePressSpring, value: configuration.isPressed)
     }
 }
 
@@ -5121,8 +5224,10 @@ struct ManageMenuRowStyle: ButtonStyle {
                     .fill(.white.opacity(wash))
             )
             .contentShape(Rectangle())
+            .scaleEffect(configuration.isPressed ? Tokens.platePressScale : 1)
             .onHover { hovering = $0 }
             .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
+            .animation(Tokens.platePressSpring, value: configuration.isPressed)
     }
 }
 
@@ -5244,7 +5349,7 @@ private struct HistoryFooterButton: View {
                     .font(.sf(compact ? 11 : 10, weight: .medium))
                 if !compact {
                     Text(title)
-                        .font(.sf(11, weight: .medium))
+                        .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
                 }
@@ -5297,10 +5402,10 @@ private struct ActiveFilterChip: View {
         } label: {
             HStack(spacing: 5) {
                 Text(source.filterTitle)
-                    .font(.sf(11, weight: .medium))
+                    .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                     .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
                 Image(systemName: "xmark")
-                    .font(.sf(8, weight: .semibold))
+                    .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                     .foregroundStyle(hovering ? Tokens.text2 : Tokens.text4)
             }
             .padding(.horizontal, 12)
@@ -5340,15 +5445,15 @@ private struct SelectionContextChip: View {
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: "text.quote")
-                .font(.sf(9.5, weight: .semibold))
+                .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                 .foregroundStyle(Tokens.text4)
             Text(source.map { L("selection.context.from", $0) } ?? L("selection.context"))
-                .font(.sf(11.5, weight: .medium))
+                .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                 .foregroundStyle(hovering ? Tokens.text2 : Tokens.text3)
                 .lineLimit(1)
             Button(action: drop) {
                 Image(systemName: "xmark")
-                    .font(.sf(8.5, weight: .bold))
+                    .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                     .foregroundStyle(hoveringDrop ? Tokens.text1 : Tokens.text4)
                     .frame(width: 14, height: 14)
                     .background(Circle().fill(.white.opacity(hoveringDrop ? 0.14 : 0)))
@@ -5480,13 +5585,16 @@ private struct ImmersiveHeaderHeightKey: PreferenceKey {
 /// hairline border — and brightens on hover / gives slightly on press so it reads
 /// as the same kind of affordance, just leading somewhere instead of accepting text.
 /// The capsule under a failed Ask: "Open Settings" when there's no key to retry
-/// with, else "Try again". On the retryable side it's a split control — the label
-/// re-runs the question as it was, and the trailing chevron opens the model list
-/// so the retry can run on a different model. That menu is the same
-/// "Regenerate with…" list the answer footer carries; while this row is up the
-/// footer's regenerate control is hidden, so the two never sit on screen at once.
+/// with, "Add credit" when the Notchi balance is empty, else "Try again". On the
+/// retryable side it's a split control — the label re-runs the question as it
+/// was, and the trailing chevron opens the model list so the retry can run on a
+/// different model. That menu is the same "Regenerate with…" list the answer
+/// footer carries; while this row is up the footer's regenerate control is
+/// hidden, so the two never sit on screen at once.
 struct ErrorActionRow: View {
-    let needsSetup: Bool
+    enum Action { case retry, openSettings, addCredit }
+
+    let action: Action
     /// The models the chevron menu offers, each flagged if it's the one already in
     /// effect (greyed — plain "Try again" is exactly that retry). Empty ⇒ no menu.
     let models: [(model: String, isCurrent: Bool)]
@@ -5497,22 +5605,39 @@ struct ErrorActionRow: View {
     /// chevron isn't a gap the surface drops out of.
     @State private var hovering = false
 
-    private var hasMenu: Bool { !needsSetup && !models.isEmpty }
+    private var hasMenu: Bool { action == .retry && !models.isEmpty }
+
+    private var symbol: String {
+        switch action {
+        case .retry: return "arrow.clockwise"
+        case .openSettings: return "slider.horizontal.3"
+        case .addCredit: return "creditcard"
+        }
+    }
+
+    private var title: String {
+        switch action {
+        case .retry: return L("error.retry")
+        case .openSettings: return L("error.openSettings")
+        case .addCredit: return L("nono.add")
+        }
+    }
 
     var body: some View {
         HStack(spacing: 0) {
             Button(action: primary) {
                 HStack(spacing: 8) {
-                    Image(systemName: needsSetup ? "slider.horizontal.3" : "arrow.clockwise")
-                        .font(.sf(13, weight: .medium))
-                    Text(needsSetup ? L("error.openSettings") : L("error.retry"))
-                        .font(.sf(14.5, weight: .medium))
+                    Image(systemName: symbol)
+                        .font(.sf(Tokens.TypeSize.form, weight: .medium))
+                    Text(title)
+                        .font(.sf(Tokens.TypeSize.reading, weight: .medium))
                     // Without a menu the row keeps its plain affordance glyph; with
                     // one, that trailing slot IS the menu (below), so it isn't
-                    // drawn twice.
+                    // drawn twice. Actions that lead to Settings point out of the
+                    // thread; a retry stays in it.
                     if !hasMenu {
-                        Image(systemName: needsSetup ? "arrow.up.right" : "chevron.right")
-                            .font(.sf(11, weight: .semibold))
+                        Image(systemName: action == .retry ? "chevron.right" : "arrow.up.right")
+                            .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
                             .foregroundStyle(Tokens.text3)
                     }
                 }
@@ -5541,7 +5666,7 @@ struct ErrorActionRow: View {
                     }
                 } label: {
                     Image(systemName: "chevron.down")
-                        .font(.sf(11, weight: .semibold))
+                        .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
                         .foregroundStyle(Tokens.text3)
                         .frame(width: 26, height: 39)
                         .contentShape(Rectangle())
@@ -5568,9 +5693,8 @@ struct ErrorActionRow: View {
 private struct ErrorActionPressStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .scaleEffect(configuration.isPressed ? 0.985 : 1)
-            .opacity(configuration.isPressed ? 0.85 : 1)
-            .animation(.spring(response: 0.25, dampingFraction: 0.7), value: configuration.isPressed)
+            .scaleEffect(configuration.isPressed ? Tokens.platePressScale : 1)
+            .animation(Tokens.platePressSpring, value: configuration.isPressed)
     }
 }
 
@@ -5580,11 +5704,10 @@ struct SetupModelButtonStyle: ButtonStyle {
         let pressed = configuration.isPressed
         return configuration.label
             .recessedSurface(in: Capsule(), lit: hovering)
-            .scaleEffect(pressed ? 0.985 : 1)
-            .opacity(pressed ? 0.85 : 1)
+            .scaleEffect(pressed ? Tokens.platePressScale : 1)
             .onHover { hovering = $0 }
             .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
-            .animation(.spring(response: 0.25, dampingFraction: 0.7), value: pressed)
+            .animation(Tokens.platePressSpring, value: pressed)
     }
 }
 
@@ -5707,7 +5830,7 @@ struct IdleTrailingCluster: View {
             if inside { hovered = .recent }
             else if hovered == .recent { hovered = nil }
         }
-        .animation(.easeOut(duration: 0.18), value: hovered)
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovered)
         .animation(.snappy(duration: 0.3), value: runningCount)
     }
 
@@ -5737,17 +5860,17 @@ struct IdleTrailingCluster: View {
             if inside { hovered = segment }
             else if hovered == segment { hovered = nil }
         }
-        .animation(.easeOut(duration: 0.18), value: hovered)
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovered)
         .notchTooltip(tooltip, shows: showsTooltip)
         .accessibilityLabel(tooltip)
     }
 }
 
-/// The result header's trailing control — the pin — held in a Liquid Glass capsule
-/// (`glassCapsule` = native `.glassEffect` on macOS 26+, blur fallback below). The
-/// capsule is a circle around the lone pin. A bare glyph would read as an unrelated
-/// control in a different material; the system's own grouped-glass shape gives it a
-/// proper pane, the way a Safari toolbar button sits.
+/// The result header's trailing control — detach + pin — held in ONE Liquid Glass
+/// capsule (`glassCapsule` = native `.glassEffect` on macOS 26+, blur fallback
+/// below). Two marks, one continuous pill: bare glyphs read as loose chrome
+/// floating over the answer, while the grouped-glass shape makes them a single
+/// control, matching the back button's glass circle opposite them.
 ///
 /// The glass lives on the capsule and only there: a hovered segment marks itself
 /// with ink and a soft circle of light, never a second pane of glass nested inside
@@ -5771,22 +5894,17 @@ struct ResultTrailingCluster: View {
                 segs.append(.init(tooltip: shortcutHelp("detached.open", action: .detach),
                                   action: detach) {
                     Image(systemName: "macwindow.on.rectangle")
-                        .font(.sf(10.5, weight: .medium))
+                        .font(.sf(Tokens.TypeSize.label, weight: .light))
                 })
             }
             segs.append(.init(engaged: pinned,
                               tooltip: shortcutHelp(pinned ? "result.unpin" : "result.pin",
                                                     action: .pin),
                               action: togglePin) {
-                PinStateGlyph(pinned: pinned, size: 11, weight: .medium)
+                PinStateGlyph(pinned: pinned, size: 12, weight: .light)
             })
             return segs
-        }(), glass: false)
-        // Hover-only chrome sitting right beside the answer: it should be
-        // findable, not loud. This drops the bare cluster's own levels onto the
-        // history footer's meta pair — text4 at rest, text2 under the pointer —
-        // without giving this one caller a private tint API.
-        .opacity(0.72)
+        }())
     }
 }
 
@@ -5802,7 +5920,7 @@ private struct GlassBackButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: "chevron.left")
-                .font(.sf(13, weight: .semibold))
+                .font(.sf(Tokens.TypeSize.form, weight: .semibold))
                 .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
                 .frame(width: 26, height: 26)
                 .glassCapsule(in: Circle(), brighter: hovering)
@@ -5826,9 +5944,11 @@ struct RecentEntryStyle: ButtonStyle {
             .background(
                 Capsule().fill(.white.opacity(hovering ? 0.08 : 0))
             )
-            .opacity(configuration.isPressed ? 0.5 : (hovering ? 1 : 0.85))
+            .opacity(hovering ? 1 : 0.85)
+            .scaleEffect(configuration.isPressed ? Tokens.platePressScale : 1)
             .onHover { hovering = $0 }
             .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
+            .animation(Tokens.platePressSpring, value: configuration.isPressed)
     }
 }
 
@@ -5844,7 +5964,7 @@ struct UserQuestionBubble: View {
     /// The question's type size. The result view reads at the panel's own 14.5;
     /// the split history experiment sets it smaller so its narrow reading column
     /// runs at one size with the list beside it.
-    var baseFont: CGFloat = 14.5
+    var baseFont: CGFloat = Tokens.TypeSize.reading
 
     /// Prompt shortcuts keep the captured text inside an explicit wire envelope so
     /// the model cannot mistake it for the instruction. That envelope is transport
@@ -5898,7 +6018,7 @@ struct UserQuestionBubble: View {
     /// Corner radius — a fixed modest card once the bubble is clearly multi-line, a
     /// pill when it's a short single/double line. Derived purely from the text (no
     /// geometry read), so there's no measurement feeding back into layout.
-    private let multiLineRadius: CGFloat = 16
+    private let multiLineRadius: CGFloat = Tokens.Radius.menu
     private let pillRadius: CGFloat = 16.5   // ~half a single-line bubble height
 
     /// Cheap, allocation-light estimate of whether the collapsed text is truncated —
@@ -6010,10 +6130,10 @@ struct UserQuestionBubble: View {
             // toggle in the same `text4` as the timestamps — never shouts.
             if isTruncated {
                 Button {
-                    withAnimation(.easeOut(duration: 0.18)) { expanded.toggle() }
+                    withAnimation(.easeOut(duration: Tokens.hoverFade)) { expanded.toggle() }
                 } label: {
                     Text(expanded ? L("bubble.showLess") : L("bubble.showMore"))
-                        .font(.sf(11, weight: .medium))
+                        .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                         .tracking(0.2)
                         .foregroundStyle(Tokens.text4)
                 }
@@ -6101,7 +6221,7 @@ private struct AgentChipFace<Icon: View>: View {
         HStack(spacing: 5) {
             icon
             Text(title)
-                .font(.sf(12, weight: .light))
+                .font(.sf(Tokens.TypeSize.label, weight: .light))
                 .foregroundStyle(tint ?? (hovering ? Tokens.text2 : Tokens.text4))
                 .lineLimit(1)
         }
@@ -6124,7 +6244,10 @@ struct AgentComposeChip<Icon: View>: View {
         Button(action: action) {
             AgentChipFace(icon: icon(), title: title, hovering: hovering, tint: tint)
         }
-        .buttonStyle(GlassPressStyle())
+        // No press scale. These chips open a menu card that hangs off the chip's
+        // own frame; a chip that shrinks and springs back under the click moves
+        // the card's anchor while the card is coming up.
+        .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
     }
@@ -6178,6 +6301,15 @@ struct AgentComposeMenuChip<Icon: View, Items: View>: View {
 /// the menu shuts, when the probe leaves the tree (panel folded, thread opened),
 /// and when its host window goes away.
 struct MenuCardWindow: ViewModifier {
+    /// Drop the open card's window now. The `open` binding still has to come down
+    /// so SwiftUI does not reopen it, but the card itself is a child window: it
+    /// does not fade with a settings transition, and waiting on that binding
+    /// leaves it sitting on top until the spring ends. Checkout from the model
+    /// detail card uses this.
+    static func dismissOpen() {
+        MenuCardAnchorView.dismissOpen()
+    }
+
     let open: Bool
     /// Hang the card from the anchor's leading edge (a prompt row, a chip) or
     /// centred on it (the 1pt probe the agent card hangs from).
@@ -6242,6 +6374,11 @@ private final class MenuCardAnchorView: NSView {
     private var isOpen = false
     private var centered = false
     private var upperLeading = false
+    /// Set by `dismissOpen` so a stale `apply(open: true)` — the binding has not
+    /// come down yet — cannot rebuild the window we just ordered out.
+    private var dismissed = false
+    /// The card currently on screen, if any. One menu at a time.
+    private static weak var current: MenuCardAnchorView?
     /// What a click outside the card reports to — see `installDismissMonitors`.
     private var onDismiss: ((Bool) -> Void)?
     private var clickMonitors: [Any] = []
@@ -6258,9 +6395,13 @@ private final class MenuCardAnchorView: NSView {
         self.centered = centered
         self.upperLeading = upperLeading
         guard open else {
+            dismissed = false
             closeMenu()
             return
         }
+        // A forced dismiss already ordered the window out; do not rebuild it
+        // from a layout pass that still sees `open == true`.
+        guard !dismissed else { return }
         let padded = AnyView(card.padding(Self.shadowMargin))
         if let hosting {
             hosting.rootView = padded
@@ -6268,6 +6409,17 @@ private final class MenuCardAnchorView: NSView {
             openMenu(with: padded)
         }
         reposition()
+    }
+
+    /// Order the open card out on this turn, then tell SwiftUI the binding is
+    /// false. Used when leaving the menu for Settings so the card is gone
+    /// before that spring starts.
+    static func dismissOpen() {
+        guard let current, current.isOpen else { return }
+        current.dismissed = true
+        let dismiss = current.onDismiss
+        current.closeMenu()
+        dismiss?(true)
     }
 
     private func openMenu(with card: AnyView) {
@@ -6299,6 +6451,7 @@ private final class MenuCardAnchorView: NSView {
         self.panel = panel
         self.hosting = hosting
         self.isOpen = true
+        Self.current = self
         TooltipOverlayGate.enter()
         installDismissMonitors()
         installFrameObservers(on: host)
@@ -6311,6 +6464,7 @@ private final class MenuCardAnchorView: NSView {
     func closeMenu() {
         removeDismissMonitors()
         removeFrameObservers()
+        if Self.current === self { Self.current = nil }
         guard let panel else { return }
         TooltipOverlayGate.exit()
         self.panel = nil
@@ -6393,6 +6547,9 @@ private final class MenuCardAnchorView: NSView {
             }
             if event.window === window,
                bounds.contains(convert(event.locationInWindow, from: nil)) { return }
+            // The model detail card rides beside this menu as a separate panel.
+            // A click there is still using the menu.
+            if ModelDetailPanel.shared.owns(event.window) { return }
         }
         onDismiss(insideApp)
     }
@@ -6768,7 +6925,7 @@ private struct BucketWord: View {
     static func labelWidth(_ title: String) -> CGFloat {
         ceil(NSAttributedString(
             string: title,
-            attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .medium)]
+            attributes: [.font: NSFont.systemFont(ofSize: Tokens.TypeSize.label, weight: .medium)]
         ).size().width) + 1
     }
 
@@ -6840,7 +6997,7 @@ private struct BucketWord: View {
             .frame(minWidth: BucketTogglePill.iconSlot)
             ZStack(alignment: .leading) {
                 Text(title)
-                    .font(.sf(12, weight: .medium))
+                    .font(.sf(Tokens.TypeSize.label, weight: .medium))
                     // Within ONE destination the word can still change — a
                     // recurrence suffix ("Remind · Daily"→"· Weekly"). Identity
                     // holds across that, so it cross-fades in place instead of

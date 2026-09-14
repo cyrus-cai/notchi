@@ -58,7 +58,7 @@ private struct PermissionStatusPill: View {
 
     private var pillLabel: some View {
         Text(status.pillLabel)
-            .font(.sf(11, weight: .semibold))
+            .font(.sf(Tokens.TypeSize.meta, weight: .medium))
             .foregroundStyle(missing
                              ? Color.red.opacity(hovering ? 0.88 : 0.72)
                              : (hovering ? Tokens.text1 : Tokens.text2))
@@ -93,6 +93,9 @@ private struct PermissionStatusPill: View {
 /// this; the back chevron returns to the idle prompt.
 struct InlineSettingsView: View {
     @ObservedObject var model: NotchModel
+    /// Respected wherever this pane animates a size or a position rather than a
+    /// colour — the balance block's stepper unfolding, chiefly.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Self-update state (shared app-wide — the gear badge reads the same object).
     /// Drives the Version row: a quiet number normally, an Update action when a
     /// newer release is known.
@@ -101,25 +104,32 @@ struct InlineSettingsView: View {
     /// its phases (waiting on the browser, exchanging, failed) live.
     @ObservedObject private var orAuth = OpenRouterAuth.shared
 
-    /// The provider whose model is in effect — the backend that answers. Changed
-    /// only by picking a model; key management never touches it.
-    @State private var provider: Provider = APIKeyStore.selectedProvider
+    /// The backend this pane configures — one the user brought (see
+    /// `APIKeyStore.broughtProvider`), never Notchi. Picking Notchi on the panel
+    /// does not touch it: Notchi has no key and no model choice, so these rows
+    /// keep naming the vendor they were set up for.
+    @State private var provider: Provider = APIKeyStore.broughtProvider
     /// The provider whose key the key section is viewing/editing. Follows
     /// `provider` while the section is closed; retargeted by the picker's
     /// "Add key" flow and by the section's own provider menu. All key-editor
     /// state below (apiKey / editingKey / saved / testResult) is scoped to this,
     /// so managing a key never hijacks the active backend.
-    @State private var keyScope: Provider = APIKeyStore.selectedProvider
-    @State private var apiKey: String = APIKeyStore.stored(for: APIKeyStore.selectedProvider)
+    @State private var keyScope: Provider = APIKeyStore.broughtProvider
+    @State private var apiKey: String = APIKeyStore.stored(for: APIKeyStore.broughtProvider)
     /// Empty string = "use the provider's default".
-    @State private var modelID: String = APIKeyStore.storedModel(for: APIKeyStore.selectedProvider)
+    @State private var modelID: String = APIKeyStore.storedModel(for: APIKeyStore.broughtProvider)
     @State private var saved = false
     /// False once a key is saved: the row shows a masked, read-only summary of
     /// the stored key (so screenshots never carry the full secret) until the
     /// user explicitly hits Change. Starts true only when nothing is stored.
     @State private var editingKey: Bool =
-        APIKeyStore.stored(for: APIKeyStore.selectedProvider).isEmpty
-            && !APIKeyStore.hasEnvOverride(for: APIKeyStore.selectedProvider)
+        APIKeyStore.stored(for: APIKeyStore.broughtProvider).isEmpty
+            && !APIKeyStore.hasEnvOverride(for: APIKeyStore.broughtProvider)
+    /// Whether Notchi is what actually answers right now. The one thing on this
+    /// pane that tracks the active backend rather than the configured one: it
+    /// lights the balance card's rim, and it is why a vendor with no key here is
+    /// not a broken setup (something else is answering).
+    @State private var notchiActive: Bool = APIKeyStore.selectedProvider.isFirstParty
 
     @State private var loadingModels = false
 
@@ -143,7 +153,7 @@ struct InlineSettingsView: View {
     /// setup (keyless active provider, or a pending model) forces it open
     /// regardless — see `keySection`.
     @State private var keySectionOpen = false
-    /// nono's subscription state. Observed rather than read once: checkout
+    /// nono's wallet. Observed rather than read once: checkout
     /// finishes in a browser, so the answer arrives from outside this view.
     @ObservedObject private var nono = NoNoAccount.shared
     /// Whether the custom-instructions field is unfolded. Collapsed at rest like
@@ -302,15 +312,24 @@ struct InlineSettingsView: View {
         case stats = "Stats"     // what the archive adds up to — read-only
         case about = "About"     // version + self-update
         case licenses = "Licenses" // third-party attribution and licences
+        case usage = "Usage"     // Blend1 request list — reached from the wallet ⋯
+        case pricing = "Pricing" // Blend1 per-model rates — reached from the wallet ⋯
+        case balances = "Balances" // Blend1 gifts and purchases — reached from the wallet ⋯
         var id: String { rawValue }
 
-        /// A sub-page rather than a category: reached from About, drawn across
-        /// the whole panel, and left through the header's back pill or Esc.
-        var isDetail: Bool { self == .licenses }
+        /// A sub-page rather than a category: reached from a parent pane, drawn
+        /// across the whole panel, and left through the header's back pill or Esc.
+        var isDetail: Bool { self == .licenses || self == .usage || self == .pricing || self == .balances }
 
         /// The section a sub-page sits under — where back (and ⎋) returns to.
         /// `nil` for the top-level categories, whose back leaves settings.
-        var parent: Section? { isDetail ? .about : nil }
+        var parent: Section? {
+            switch self {
+            case .licenses:        return .about
+            case .usage, .pricing, .balances: return .model
+            default:               return nil
+            }
+        }
 
         /// The sidebar's rows: every category, minus the sub-pages — in
         /// declaration order, which is the grouping. The column is 104pt wide and
@@ -333,6 +352,9 @@ struct InlineSettingsView: View {
             case .stats:      return L("sidebar.stats")
             case .about:      return L("sidebar.about")
             case .licenses:   return L("about.licenses")
+            case .usage:      return L("model.usage")
+            case .pricing:    return L("model.pricing")
+            case .balances:   return L("nono.balances")
             }
         }
     }
@@ -341,7 +363,10 @@ struct InlineSettingsView: View {
     /// root's `.id(loc.language)` — keeps the user on the pane they were on (e.g.
     /// General, where the language picker lives) instead of snapping back to Model.
     private var section: Section {
-        get { Section(rawValue: model.settingsSection) ?? .model }
+        get {
+            if model.settingsSection == "Gifts" { return .balances }
+            return Section(rawValue: model.settingsSection) ?? .model
+        }
         nonmutating set { model.settingsSection = newValue.rawValue }
     }
 
@@ -489,8 +514,9 @@ struct InlineSettingsView: View {
                 // pane's own exact height (content, capped at Recent's) is the
                 // whole page height.
                 paneContent
-                    // No extra side inset: the pane lines up with the header
-                    // above it, both on the panel's own 15pt gutter.
+                    // The header's own 8pt side inset, so the page starts
+                    // under the back pill's left edge and ends under the pin.
+                    .padding(.horizontal, 8)
                     .padding(.top, 12)
             } else {
                 HStack(alignment: .top, spacing: 0) {
@@ -521,7 +547,6 @@ struct InlineSettingsView: View {
             if promptTemplatePickerOpen {
                 ConfirmationDialogOverlay(
                     onDismiss: { closePromptTemplatePicker() },
-                    cornerRadius: 28,
                     edgeGlow: true
                 ) {
                     promptTemplatePicker
@@ -534,8 +559,7 @@ struct InlineSettingsView: View {
             } else if let id = presentedPromptShortcutID,
                let shortcut = promptShortcuts.first(where: { $0.id == id }) {
                 ConfirmationDialogOverlay(
-                    onDismiss: { closePromptShortcutEditor(id) },
-                    cornerRadius: 28
+                    onDismiss: { closePromptShortcutEditor(id) }
                 ) {
                     promptShortcutCard(shortcut)
                         .frame(width: 372)
@@ -568,6 +592,11 @@ struct InlineSettingsView: View {
                 setKeyScope(pending.provider)
                 keySectionOpen = true
             }
+            adoptPendingSettingsProvider()
+            // The backend can have changed on the panel since this view was last
+            // built — the balance card's rim reads the live answer, not the one
+            // that was true when the state was initialised.
+            notchiActive = APIKeyStore.selectedProvider.isFirstParty
             // Un-throttled freshness check while the user is actually looking at
             // the Version row (one tiny request; failures stay silent).
             updater.check()
@@ -579,6 +608,25 @@ struct InlineSettingsView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .appIconAppearanceChanged)) { _ in
             appIconAppearanceRevision &+= 1
+        }
+        // The panel's own model menu can switch the backend while this pane is
+        // open — to Notchi (the rim lights, the rows stay put) or back off it.
+        // A switch to one of theirs is a switch of the thing these rows DO name,
+        // so they follow it; the key section only re-aims when it isn't busy
+        // (a pending "Add key", or one the user opened by hand, keeps its target).
+        .onReceive(NotificationCenter.default.publisher(for: .aiBackendChanged)) { _ in
+            notchiActive = APIKeyStore.selectedProvider.isFirstParty
+            let brought = APIKeyStore.broughtProvider
+            if brought != provider {
+                provider = brought
+                modelID = APIKeyStore.storedModel(for: brought)
+                if pendingModel == nil, !keySectionOpen { setKeyScope(brought) }
+            } else {
+                modelID = APIKeyStore.storedModel(for: brought)
+            }
+        }
+        .onChange(of: model.pendingSettingsProvider) { _, _ in
+            adoptPendingSettingsProvider()
         }
         .onChange(of: orAuth.phase) {
             // The OAuth flow just wrote a key from outside this view — sync the
@@ -641,7 +689,7 @@ struct InlineSettingsView: View {
 
     /// The Model group's card. Same radius as the pane's other recessed slab
     /// (the template detail's prompt box), so the two read as one material.
-    private static let modelCardShape = RoundedRectangle(cornerRadius: 16, style: .continuous)
+    private static let modelCardShape = RoundedRectangle.menu
 
     /// The empty inset above the pane's first row, and the length of the top
     /// taper that dissolves into it. The taper is the longer of the two: a 12pt
@@ -706,13 +754,20 @@ struct InlineSettingsView: View {
                 // key section and the rim goes dark. Making the card itself
                 // appear and disappear with the provider was the wrong read — the
                 // pane restyled itself mid-choice.
+                // The card is the wallet, and only the wallet. It is there
+                // whichever backend is selected — a balance is not a property of
+                // the current choice, and hiding it behind the provider switch
+                // meant the one number worth checking was only visible to
+                // someone who had already chosen us.
+                //
+                // Nothing else is in it. Model and the key belong to whichever
+                // third-party backend is in effect; sitting inside this card
+                // they read as settings *of* Notchi Balance, which they are not.
+                // Notchi's own lineup sits under the figure: a list to look at,
+                // not a choice to make here — the panel's model menu is where
+                // those tiers are picked.
                 VStack(alignment: .leading, spacing: 12) {
-                    if keyScope == .nono {
-                        nonoAccountRow
-                    }
-                    providerRow
-                    modelRow
-                    keySection
+                    nonoAccountRow
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 12)
@@ -721,8 +776,22 @@ struct InlineSettingsView: View {
                 // The mark is said ONCE, by the group. The provider menu and the
                 // model chip inside it used to each wear their own aura, which on
                 // nono lit three rims stacked inside one another.
+                //
+                // Lit by what is ANSWERING, not by what the rows below name —
+                // those two are different questions now (see `provider`), and the
+                // rim is the card's own, so it follows the card's subject.
                 .brandAura(in: Self.modelCardShape,
-                           active: provider.isFirstParty, lineWidth: 1.2)
+                           active: notchiActive, lineWidth: 1.2)
+                // Everything you bring yourself, outside the card and unadorned,
+                // in the order you set it up: which backend answers, which of
+                // its models, and the key that lets it. The caption names this
+                // group as the alternative to the wallet above.
+                Text(L("model.byok"))
+                    .captionLabel()
+                    .padding(.top, 2)
+                providerRow
+                modelRow
+                keySection
                 customInstructionsRow
                 // Web search used to be a category of its own — a whole sidebar
                 // entry for two rows. It is the same question this pane already
@@ -807,6 +876,12 @@ struct InlineSettingsView: View {
                 aboutSection
             case .licenses:
                 licensesSection
+            case .usage:
+                usageSection
+            case .pricing:
+                pricingSection
+            case .balances:
+                balancesSection
             }
             }
             .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -932,7 +1007,7 @@ struct InlineSettingsView: View {
             Button(action: action) {
                 HStack(spacing: 6) {
                     Text(title)
-                        .font(.sf(12.5, weight: .medium))
+                        .font(.sf(Tokens.TypeSize.label, weight: .medium))
                         .lineLimit(1)
                         .foregroundStyle(selected ? Tokens.text1 : (hovering ? Tokens.text2 : Tokens.text3))
                     if badged {
@@ -1028,7 +1103,7 @@ struct InlineSettingsView: View {
                 // Meta weight, not label weight: this line is an annotation on
                 // the square under the pointer, and at `.text3`/11 it competed
                 // with the back pill across the header from it.
-                .font(.sf(10).monospacedDigit())
+                .font(.sf(Tokens.TypeSize.caption).monospacedDigit())
                 .foregroundStyle(Tokens.text4)
                 .lineLimit(1)
                 .fixedSize()
@@ -1042,10 +1117,14 @@ struct InlineSettingsView: View {
     // MARK: - Provider & API key (supporting cast)
 
     /// Whether the pane must surface key setup right now: a picked model is
-    /// waiting on a key, or the active provider itself has none (nothing can
-    /// answer). Only then does key UI appear unbidden.
+    /// waiting on a key, or the provider these rows name has none and nothing
+    /// else can answer. Only then does key UI appear unbidden.
+    ///
+    /// Notchi answering is exactly that "something else". A keyless vendor sitting
+    /// in the rows while the balance is what runs is a setup nobody started, and
+    /// unfolding a key field over it says the app is broken when it is working.
     private var setupRequired: Bool {
-        pendingModel != nil || !providerReady(provider)
+        pendingModel != nil || (!notchiActive && !providerReady(provider))
     }
 
     /// Whether `p` can answer right now: a stored/env key for a normal provider, or
@@ -1063,7 +1142,7 @@ struct InlineSettingsView: View {
     @ViewBuilder
     private var keySection: some View {
         // nono has no key to paste, so there is nothing here to fold away — and
-        // folding it anyway, behind a chip labelled "API key", hid the Subscribe
+        // folding it anyway, behind a chip labelled "API key", hid the Add credit
         // button that is the only thing making the provider usable. Its row
         // leads the pane instead, and carries the anchor, so the scroll-into-view
         // on a required setup still lands.
@@ -1089,10 +1168,10 @@ struct InlineSettingsView: View {
             } label: {
                 HStack(spacing: 5) {
                     Image(systemName: "chevron.right")
-                        .font(.sf(9, weight: .semibold))
+                        .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                         .rotationEffect(.degrees(expanded ? 90 : 0))
                     Text(L("model.keys.section"))
-                        .font(.sf(12, weight: .medium))
+                        .font(.sf(Tokens.TypeSize.label, weight: .medium))
                 }
                 .foregroundStyle(Tokens.text1)
                 .padding(.horizontal, 10)
@@ -1124,12 +1203,12 @@ struct InlineSettingsView: View {
                     Text(L("model.pending.hint", pending.provider.displayName,
                            ModelRatings.prettyName(for: pending.id,
                                                    provider: pending.provider)))
-                        .font(.sf(12))
+                        .font(.sf(Tokens.TypeSize.label))
                         .foregroundStyle(Tokens.text2)
                         .fixedSize(horizontal: false, vertical: true)
                 } else if !providerReady(provider) {
                     Text(L("model.setup.needed", provider.displayName))
-                        .font(.sf(12))
+                        .font(.sf(Tokens.TypeSize.label))
                         .foregroundStyle(Tokens.text2)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -1141,7 +1220,7 @@ struct InlineSettingsView: View {
                 if keyScope != provider {
                     settingRow(label: L("model.provider")) {
                         Text(keyScope.displayName)
-                            .font(.sf(13))
+                            .font(.sf(Tokens.TypeSize.form))
                             .foregroundStyle(Tokens.text1)
                             .lineLimit(1)
                             .frame(height: 30)
@@ -1211,7 +1290,7 @@ struct InlineSettingsView: View {
                     text: $customURL)
         if let resolved = CustomProvider.normalized(customURL) {
             Text(L("model.custom.resolved", resolved.absoluteString))
-                .font(.sf(11))
+                .font(.sf(Tokens.TypeSize.meta))
                 .foregroundStyle(Tokens.text3)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -1244,20 +1323,20 @@ struct InlineSettingsView: View {
                              text: Binding<String>) -> some View {
         HStack(spacing: 12) {
             Text(label)
-                .font(.sf(13, weight: .medium))
+                .font(.sf(Tokens.TypeSize.form, weight: .medium))
                 .foregroundStyle(Tokens.text2)
                 .frame(width: 64, alignment: .leading)
             ZStack(alignment: .leading) {
                 if text.wrappedValue.isEmpty {
                     Text(placeholder)
-                        .font(.sf(13))
+                        .font(.sf(Tokens.TypeSize.form))
                         .foregroundStyle(Tokens.text3)
                         .lineLimit(1)
                         .allowsHitTesting(false)
                 }
                 TextField("", text: text)
                     .textFieldStyle(.plain)
-                    .font(.sf(13))
+                    .font(.sf(Tokens.TypeSize.form))
                     .foregroundStyle(Tokens.text1)
                     .onSubmit { saveCustom() }
                     // Typing here counts as activity, so a pointer that drifted off
@@ -1267,9 +1346,7 @@ struct InlineSettingsView: View {
             .padding(.horizontal, 12)
             .frame(height: 34)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 10).fill(.white.opacity(0.06)))
-            .overlay(RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(.white.opacity(0.12), lineWidth: 0.5))
+            .recessedSurface(in: RoundedRectangle.control, lit: false)
         }
     }
 
@@ -1316,6 +1393,29 @@ struct InlineSettingsView: View {
         editingKey = apiKey.isEmpty && !APIKeyStore.hasEnvOverride(for: p)
     }
 
+    /// The detail card's first-party pill asked to land on this provider's Model
+    /// pane. Switch the displayed backend so its key section is the page in view;
+    /// a no-op if it's already there.
+    ///
+    /// Notchi is the exception, and the reason the pill exists: it comes here for
+    /// the balance card, which leads the pane whatever is selected. Nothing to
+    /// switch — aiming the provider rows at it is what this pane no longer does.
+    private func adoptPendingSettingsProvider() {
+        guard let focus = model.pendingSettingsProvider else { return }
+        model.pendingSettingsProvider = nil
+        let addCredit = model.pendingAddCredit
+        model.pendingAddCredit = false
+        section = .model
+        guard !focus.isFirstParty else {
+            // An add-credit door in the pickers: land with the amount out, so
+            // the next click is the purchase.
+            if addCredit { showingAmount = true }
+            return
+        }
+        selectProvider(focus)
+        setKeyScope(focus)
+    }
+
     /// Switch the active backend — the provider whose model answers. Driven by the
     /// Provider row (step one) and by a cross-provider pick arriving from the ⌘⇧I
     /// picker. The key section always follows the backend: the only state where it
@@ -1335,6 +1435,7 @@ struct InlineSettingsView: View {
         withTransaction(transaction) {
             provider = newValue
             APIKeyStore.selectedProvider = newValue
+            notchiActive = false
             modelID = APIKeyStore.storedModel(for: newValue)
             NotificationCenter.default.post(name: .aiBackendChanged, object: nil)
             setKeyScope(newValue)
@@ -1350,7 +1451,7 @@ struct InlineSettingsView: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 12) {
                 Text(L("model.apiKey"))
-                    .font(.sf(13, weight: .medium))
+                    .font(.sf(Tokens.TypeSize.form, weight: .medium))
                     .foregroundStyle(Tokens.text2)
                     .frame(width: 64, alignment: .leading)
 
@@ -1361,13 +1462,13 @@ struct InlineSettingsView: View {
                         // so we overlay a Text we fully control to get a clean bright hint.
                         if apiKey.isEmpty {
                             Text(L("model.pasteKey"))
-                                .font(.sf(13))
+                                .font(.sf(Tokens.TypeSize.form))
                                 .foregroundStyle(Tokens.text2)
                                 .allowsHitTesting(false)
                         }
                         TextField("", text: $apiKey)
                             .textFieldStyle(.plain)
-                            .font(.sf(13))
+                            .font(.sf(Tokens.TypeSize.form))
                             .foregroundStyle(Tokens.text1)
                             .disabled(envOverride)
                             // Return commits the paste — same as the Save button
@@ -1381,7 +1482,7 @@ struct InlineSettingsView: View {
                         // Saved state: a masked, read-only summary — the full key
                         // never sits on screen where a screenshot would catch it.
                         Text(maskedKey)
-                            .font(.sf(13))
+                            .font(.sf(Tokens.TypeSize.form))
                             .foregroundStyle(Tokens.text2)
                             .lineLimit(1)
                     }
@@ -1389,14 +1490,7 @@ struct InlineSettingsView: View {
                 .padding(.horizontal, 12)
                 .frame(height: 34)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(.white.opacity(editingKey ? 0.06 : 0.03))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .strokeBorder(.white.opacity(editingKey ? 0.12 : 0.07), lineWidth: 0.5)
-                )
+                .recessedSurface(in: RoundedRectangle.control, lit: editingKey)
                 .opacity(envOverride ? 0.5 : 1)
 
                 if editingKey {
@@ -1484,7 +1578,7 @@ struct InlineSettingsView: View {
             HStack(spacing: 8) {
                 HStack(spacing: 3) {
                     Text(L("model.keenableApiKey"))
-                        .font(.sf(13, weight: .medium))
+                        .font(.sf(Tokens.TypeSize.form, weight: .medium))
                         .foregroundStyle(Tokens.text2)
                         .lineLimit(1)
                     // "Where to get a key" note, folded into an ⓘ beside the title.
@@ -1498,13 +1592,13 @@ struct InlineSettingsView: View {
                     if editingKeenableKey {
                         if keenableKey.isEmpty {
                             Text(L("model.keenablePasteKey"))
-                                .font(.sf(13))
+                                .font(.sf(Tokens.TypeSize.form))
                                 .foregroundStyle(Tokens.text2)
                                 .allowsHitTesting(false)
                         }
                         TextField("", text: $keenableKey)
                             .textFieldStyle(.plain)
-                            .font(.sf(13))
+                            .font(.sf(Tokens.TypeSize.form))
                             .foregroundStyle(Tokens.text1)
                             .disabled(keenableEnvOverride)
                             .onSubmit { saveKeenableKey() }
@@ -1512,7 +1606,7 @@ struct InlineSettingsView: View {
                             .onChange(of: keenableKey) { model.noteUserTyping() }
                     } else {
                         Text(maskedKeenableKey)
-                            .font(.sf(13))
+                            .font(.sf(Tokens.TypeSize.form))
                             .foregroundStyle(Tokens.text2)
                             .lineLimit(1)
                     }
@@ -1520,14 +1614,7 @@ struct InlineSettingsView: View {
                 .padding(.horizontal, 12)
                 .frame(height: 34)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(.white.opacity(editingKeenableKey ? 0.06 : 0.03))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .strokeBorder(.white.opacity(editingKeenableKey ? 0.12 : 0.07), lineWidth: 0.5)
-                )
+                .recessedSurface(in: RoundedRectangle.control, lit: editingKeenableKey)
                 .opacity(keenableEnvOverride ? 0.5 : 1)
 
                 if editingKeenableKey {
@@ -1549,7 +1636,7 @@ struct InlineSettingsView: View {
             // field is locked); the how-to note moved into the ⓘ above.
             if keenableEnvOverride {
                 Text(L("model.footer.env", "KEENABLE_API_KEY"))
-                    .font(.sf(11))
+                    .font(.sf(Tokens.TypeSize.meta))
                     .foregroundStyle(Tokens.text4)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.leading, 88)
@@ -1576,7 +1663,7 @@ struct InlineSettingsView: View {
             HStack(spacing: 8) {
                 HStack(spacing: 3) {
                     Text(L("model.exaApiKey"))
-                        .font(.sf(13, weight: .medium))
+                        .font(.sf(Tokens.TypeSize.form, weight: .medium))
                         .foregroundStyle(Tokens.text2)
                         .lineLimit(1)
                     // "Where to get a key" note, folded into an ⓘ beside the title.
@@ -1590,13 +1677,13 @@ struct InlineSettingsView: View {
                     if editingExaKey {
                         if exaKey.isEmpty {
                             Text(L("model.exaPasteKey"))
-                                .font(.sf(13))
+                                .font(.sf(Tokens.TypeSize.form))
                                 .foregroundStyle(Tokens.text2)
                                 .allowsHitTesting(false)
                         }
                         TextField("", text: $exaKey)
                             .textFieldStyle(.plain)
-                            .font(.sf(13))
+                            .font(.sf(Tokens.TypeSize.form))
                             .foregroundStyle(Tokens.text1)
                             .disabled(exaEnvOverride)
                             .onSubmit { saveExaKey() }
@@ -1604,7 +1691,7 @@ struct InlineSettingsView: View {
                             .onChange(of: exaKey) { model.noteUserTyping() }
                     } else {
                         Text(maskedExaKey)
-                            .font(.sf(13))
+                            .font(.sf(Tokens.TypeSize.form))
                             .foregroundStyle(Tokens.text2)
                             .lineLimit(1)
                     }
@@ -1612,14 +1699,7 @@ struct InlineSettingsView: View {
                 .padding(.horizontal, 12)
                 .frame(height: 34)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(.white.opacity(editingExaKey ? 0.06 : 0.03))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .strokeBorder(.white.opacity(editingExaKey ? 0.12 : 0.07), lineWidth: 0.5)
-                )
+                .recessedSurface(in: RoundedRectangle.control, lit: editingExaKey)
                 .opacity(exaEnvOverride ? 0.5 : 1)
 
                 if editingExaKey {
@@ -1642,7 +1722,7 @@ struct InlineSettingsView: View {
             // moved into the ⓘ above.
             if exaEnvOverride {
                 Text(L("model.footer.env", "EXA_API_KEY"))
-                    .font(.sf(11))
+                    .font(.sf(Tokens.TypeSize.meta))
                     .foregroundStyle(Tokens.text4)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.leading, 88)
@@ -1669,7 +1749,7 @@ struct InlineSettingsView: View {
             HStack(spacing: 8) {
                 HStack(spacing: 3) {
                     Text(L("model.anysearchApiKey"))
-                        .font(.sf(13, weight: .medium))
+                        .font(.sf(Tokens.TypeSize.form, weight: .medium))
                         .foregroundStyle(Tokens.text2)
                         .lineLimit(1)
                     if !anySearchEnvOverride {
@@ -1682,20 +1762,20 @@ struct InlineSettingsView: View {
                     if editingAnySearchKey {
                         if anySearchKey.isEmpty {
                             Text(L("model.anysearchPasteKey"))
-                                .font(.sf(13))
+                                .font(.sf(Tokens.TypeSize.form))
                                 .foregroundStyle(Tokens.text2)
                                 .allowsHitTesting(false)
                         }
                         TextField("", text: $anySearchKey)
                             .textFieldStyle(.plain)
-                            .font(.sf(13))
+                            .font(.sf(Tokens.TypeSize.form))
                             .foregroundStyle(Tokens.text1)
                             .disabled(anySearchEnvOverride)
                             .onSubmit { saveAnySearchKey() }
                             .onChange(of: anySearchKey) { model.noteUserTyping() }
                     } else {
                         Text(maskedAnySearchKey)
-                            .font(.sf(13))
+                            .font(.sf(Tokens.TypeSize.form))
                             .foregroundStyle(Tokens.text2)
                             .lineLimit(1)
                     }
@@ -1703,14 +1783,7 @@ struct InlineSettingsView: View {
                 .padding(.horizontal, 12)
                 .frame(height: 34)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(.white.opacity(editingAnySearchKey ? 0.06 : 0.03))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .strokeBorder(.white.opacity(editingAnySearchKey ? 0.12 : 0.07), lineWidth: 0.5)
-                )
+                .recessedSurface(in: RoundedRectangle.control, lit: editingAnySearchKey)
                 .opacity(anySearchEnvOverride ? 0.5 : 1)
 
                 if editingAnySearchKey {
@@ -1733,7 +1806,7 @@ struct InlineSettingsView: View {
 
             if anySearchEnvOverride {
                 Text(L("model.footer.env", "ANYSEARCH_API_KEY"))
-                    .font(.sf(11))
+                    .font(.sf(Tokens.TypeSize.meta))
                     .foregroundStyle(Tokens.text4)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.leading, 88)
@@ -1768,224 +1841,515 @@ struct InlineSettingsView: View {
     private func statusPill(ok: Bool, message: String) -> some View {
         if ok {
             Text(message)
-                .font(.sf(11.5))
+                .font(.sf(Tokens.TypeSize.meta))
                 .foregroundStyle(Tokens.text3)
                 .padding(.top, 1)
         } else {
             // A failure stays a touch heavier so it reads as a problem, but in the
             // same neutral ink as the rest of the panel — no coloured dot, no pill.
             Text(message)
-                .font(.sf(11.5, weight: .medium))
+                .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                 .foregroundStyle(Tokens.text2)
                 .padding(.top, 1)
         }
     }
 
-    // MARK: - nono subscription
+    // MARK: - Notchi Balance
 
-    /// nono is the only first-party backend, so instead of a key to paste it
-    /// shows what the plan costs and what is left of the month. The token is
-    /// fetched on first appearance and kept like any other provider's key; the
-    /// user never sees it, because it is not something they chose or can
+    /// Notchi Balance is the only first-party backend, so instead of a key to
+    /// paste it shows what the wallet holds and offers to add to it. The token
+    /// is fetched on first appearance and kept like any other provider's key;
+    /// the user never sees it, because it is not something they chose or can
     /// usefully copy.
     ///
-    /// Built on `openRouterAccountRow`'s shape — a 64pt label, the field, then
-    /// actions, with any status on its own line indented past the label — so it
-    /// sits in the same column as every other row in this pane.
+    /// **This is not a settings row.** Every other line in this card is a
+    /// choice, laid out label-then-control on one line; this one reports a
+    /// number and offers one action, and forcing it into the form's shape put
+    /// the balance, a stepper and a button shoulder to shoulder at the same
+    /// weight, with nothing telling the eye which of the three it came for.
+    ///
+    /// So it is a block, in the shape every balance is written in — the label
+    /// small and quiet above, the figure large and alone, the actions under it.
+    /// Stripe, OpenAI and every bank statement put a balance this way for the
+    /// same reason: the number is the content, and a caption is a caption.
     @ViewBuilder
     private var nonoAccountRow: some View {
         let snapshot = nono.snapshot
-        // Two different questions. `active` decides whether the meter can show
-        // a spendable allowance; `hasPlan` decides whether we are allowed to
-        // offer a purchase at all. Conflating them put a Subscribe button in
-        // front of anyone whose card had just failed.
-        let active = snapshot?.subscription.active == true
-        let hasPlan = snapshot?.hasPlan == true
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 12) {
-                Text(L("model.usage"))
-                    .font(.sf(13, weight: .medium))
-                    .foregroundStyle(Tokens.text2)
-                    .frame(width: 64, alignment: .leading)
+        VStack(alignment: .leading, spacing: 0) {
+            // How this number is spent — prepaid, per token, no expiry — sits
+            // behind the ⓘ on the label rather than as a line under the figure.
+            HStack(spacing: 2) {
+                Text(L("nono.balance"))
+                    .captionLabel()
+                SettingInfo(
+                    L(snapshot?.hasGift == true ? "nono.lineup.billing.gift" : "nono.lineup.billing"),
+                    glyph: 10, hit: 13)
+            }
 
-                if case .working(let work) = nono.phase, work != .refreshing {
+            Group {
+                if case .working(.registering) = nono.phase {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
-                        Text(L(work == .checkout ? "nono.opening" : "nono.preparing"))
-                            .font(.sf(12.5))
+                        Text(L("nono.preparing"))
+                            .font(.sf(Tokens.TypeSize.label))
                             .foregroundStyle(Tokens.text2)
                     }
-                    .frame(height: 30)
-                } else if snapshot == nil {
-                    // The account has not answered yet — the first appearance
-                    // after a launch, where `/me` is still in flight. Draw a
-                    // spinner, not a guess. Falling through to the no-plan
-                    // branch here showed Subscribe to paying subscribers for
-                    // the length of one request, which is an invitation to buy
-                    // a plan they already have. A failed request lands here too:
-                    // the error pill below says what happened, and offering
-                    // checkout against an unreachable gateway would only fail
-                    // again.
-                    if case .failed = nono.phase {
-                        Color.clear.frame(height: 30)
-                    } else {
-                        ProgressView().controlSize(.small).frame(height: 30)
-                    }
-                } else if hasPlan, let snapshot {
-                    if active {
-                        HStack(spacing: 16) {
-                            allowanceBar(snapshot)
-                            Text(allowanceText(snapshot))
-                                .font(.sf(12.5))
-                                .foregroundStyle(Tokens.text3)
-                                .lineLimit(1)
-                                .fixedSize()
+                } else if let snapshot {
+                    // Prompt, the bundled wordmark face — the same one the Stats
+                    // pane sets its figures in, and for the same reason: this
+                    // number IS the content, not a label on it. Larger than
+                    // anything else in the card, because it is the thing the
+                    // pane is opened to check.
+                    HStack(alignment: .center, spacing: 8) {
+                        // Opened from the prompt's grant chip, the figure starts
+                        // at the balance before the grant and rolls up to the
+                        // current one (see `NoNoAccount.claimGrant`).
+                        let shownUSD = nono.rollFromUSD ?? snapshot.credit.remainingUSD
+                        Group {
+                            if Self.isSubCent(shownUSD) {
+                                Text("<").font(.brand(18)) + Text("$0.01").font(.brand(26))
+                            } else {
+                                // The animation has to ride the Text itself for
+                                // `numericText` to fire (see `StatsFigure`).
+                                Text(Self.money(shownUSD)).font(.brand(26))
+                                    .contentTransition(.numericText(value: shownUSD))
+                                    .animation(reduceMotion ? nil : .snappy(duration: 0.6),
+                                               value: shownUSD)
+                            }
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .frame(height: 30)
-                    } else {
-                        // A plan Stripe still holds but that cannot spend right
-                        // now: a failed payment, or a period whose renewal has
-                        // not landed. The fix is in the portal either way.
-                        Text(L(snapshot.subscription.status == "past_due"
-                               ? "nono.plan.needsPayment" : "nono.plan.pending"))
-                            .font(.sf(13))
-                            .foregroundStyle(Tokens.text2)
-                            .lineLimit(1)
-                            .frame(height: 30)
-                    }
-                    if !active {
-                        Spacer(minLength: 8)
-                        SettingActionButton(title: L("nono.manage")) {
-                            Task { await nono.manageBilling() }
-                        }
-                    }
-                } else {
-                    // Subscribing is the action this row exists for, so it is the
-                    // button — the same prominent capsule the OpenRouter Connect
-                    // button uses, this pane's one rung for a primary action. The
-                    // price follows it as the detail it is. It used to lead, with
-                    // Subscribe trailing as 11pt text: the row read as a price tag
-                    // that happened to be clickable.
-                    subscribeButton
-                    Text(L("nono.plan.price"))
-                        .font(.sf(12.5))
-                        .foregroundStyle(Tokens.text3)
+                        .foregroundStyle(Tokens.text1)
                         .lineLimit(1)
-                        .frame(height: 30)
+                        .fixedSize()
+                        if snapshot.isEmpty {
+                            LowBalanceTag()
+                        }
+                    }
+                    .task(id: nono.rollFromUSD != nil) {
+                        guard nono.rollFromUSD != nil else { return }
+                        // Let the settings pane finish opening so the roll is seen.
+                        try? await Task.sleep(for: .milliseconds(450))
+                        nono.finishGrantRoll()
+                    }
+                } else if case .failed = nono.phase {
+                    // The error pill below says what happened; a figure here
+                    // would be a number we do not have.
+                    Color.clear
+                } else {
+                    // `/me` is still in flight — the first appearance after a
+                    // launch. A spinner, not a guess: drawing $0.00 tells
+                    // someone who has credit that they have none.
+                    ProgressView().controlSize(.small)
+                }
+            }
+            .frame(height: 34, alignment: .leading)
+            .padding(.top, 4)
+
+            if case .failed(let why) = nono.phase {
+                statusPill(ok: false, message: why)
+                    .padding(.top, 6)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            } else if let snapshot {
+                // Pricing, Usage, receipts, and leftover gift all live behind
+                // the ⋯ beside Add — none of them belong on the face.
+                HStack(spacing: 10) {
+                    addCreditButton(bought: snapshot.credit.grantedUSD)
+                    nonoMoreMenu(showReceipts: snapshot.hasEverPaid)
+                    Spacer(minLength: 0)
+                }
+                .padding(.top, 10)
+
+                // The one state the figure cannot explain on its own: there is
+                // money in the account and it still will not spend. Nothing else
+                // earns a line here — "no credit yet" under a balance reading
+                // $0.00, beside a button offering to add some, is one fact
+                // written three times.
+                if snapshot.cappedForToday {
+                    Text(L("nono.dailyCap"))
+                        .font(.sf(Tokens.TypeSize.meta))
+                        .foregroundStyle(Tokens.text4)
+                        .padding(.top, 6)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // Rates are no longer on the face, so the card no longer fetches a
+        // catalog to draw itself. `pricingSection` asks for them when it opens.
+        .task { await nono.load() }
+    }
+
+    /// One row of the wallet's lineup: the name the picker already uses, and
+    /// the two rates the gateway charges against this balance. `pricing` is nil
+    /// until `/v1/models` has landed — a missing price is omitted rather than
+    /// guessed, because a stale figure here is a price the buyer was quoted.
+    private struct NonoLineupRow: Identifiable {
+        let id: String
+        let name: String
+        let info: ModelInfo
+        var pricing: ModelCatalog.ModelList.Entry.NotchiPricing? { info.notchiPricing }
+    }
+
+    /// Names and prices from the live catalog, falling back to the bundled
+    /// Blend1 id so the list is never empty for someone looking at a funded
+    /// wallet before the fetch has returned.
+    private var nonoLineupRows: [NonoLineupRow] {
+        if let live = catalog.liveByProvider[.nono], !live.isEmpty {
+            return live.map { info in
+                // Blend's product name is written here, same as the picker,
+                // so the two cannot drift. Named-shelf entries keep the
+                // catalog's own name — that is the reason they are named.
+                let name = (info.id == "nono-flash" || info.id == "nono")
+                    ? ModelRatings.nonoName(for: info.id)
+                    : info.name
+                return NonoLineupRow(id: info.id, name: name, info: info)
+            }
+        }
+        return Provider.nono.availableModels.map { id in
+            NonoLineupRow(id: id, name: ModelRatings.nonoName(for: id),
+                          info: ModelInfo(id: id, vendor: ModelRatings.vendor(for: id, provider: .nono)))
+        }
+    }
+
+    /// Teaser marks under the live lineup — labs people already know, not the
+    /// full catalog. Each name must match a `VendorLogos.table` key.
+    private static let upcomingVendors = [
+        "OpenAI", "Anthropic", "Google", "xAI", "Meta", "DeepSeek", "Qwen", "Mistral",
+    ]
+
+    /// What this balance pays for: every model the gateway serves, the
+    /// per-request floor, and the two rates it charges against the wallet. Not
+    /// a picker — picking happens on the panel. Ruled like `usageTable`; it
+    /// refetches the rates each time it opens.
+    private var pricingSection: some View {
+        VStack(spacing: 0) {
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 0) {
+                GridRow {
+                    Text(L("nono.usage.col.model")).captionLabel()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Text(L("nono.pricing.minCharge")).captionLabel()
+                        .gridColumnAlignment(.trailing)
+                    Text(L("nono.pricing.input")).captionLabel()
+                        .gridColumnAlignment(.trailing)
+                    Text(L("nono.pricing.output")).captionLabel()
+                        .gridColumnAlignment(.trailing)
+                    Color.clear
+                        .frame(maxWidth: .infinity)
+                        .gridColumnAlignment(.trailing)
+                }
+                .padding(.bottom, 8)
+
+                Divider().overlay(Tokens.hairline).gridCellColumns(5)
+
+                ForEach(nonoLineupRows) { row in
+                    pricingRow(row)
+                    Divider().overlay(Tokens.hairline.opacity(0.6)).gridCellColumns(5)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            if case .failed(let why) = nono.phase {
-                statusPill(ok: false, message: why)
-                    .padding(.leading, 76)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
-            } else if let snapshot, hasPlan {
-                // Manage rides this line rather than the meter's, and follows
-                // the renewal date directly instead of being flung to the far
-                // rim — at this weight a button alone at the edge reads as the
-                // row's main event, which it isn't. Meta ink, same as the date.
-                HStack(spacing: 10) {
-                    Text(nonoPlanFootnote(snapshot))
-                        .font(.sf(11.5))
-                        .foregroundStyle(Tokens.text4)
-                    if active {
-                        SettingActionButton(title: L("nono.manage"), tone: Tokens.text4) {
-                            Task { await nono.manageBilling() }
+            VStack(spacing: 10) {
+                HStack(spacing: 14) {
+                    ForEach(Self.upcomingVendors, id: \.self) { vendor in
+                        VendorLogo(vendor: vendor)
+                            .frame(width: 18, height: 18)
+                    }
+                }
+                .opacity(0.42)
+
+                Text(L("nono.pricing.moreComingSoon"))
+                    .font(.sf(Tokens.TypeSize.label))
+                    .foregroundStyle(Tokens.text3)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.top, 36)
+            .padding(.bottom, 12)
+        }
+        .task { await refreshNonoRates() }
+    }
+
+    private func pricingRow(_ row: NonoLineupRow) -> some View {
+        GridRow(alignment: .firstTextBaseline) {
+            HStack(spacing: 7) {
+                // Same mark and size as the model picker's closed label.
+                VendorLogo(vendor: ModelRatings.vendor(for: row.id, provider: .nono),
+                           fallback: row.id)
+                    .frame(width: 15, height: 15)
+                HStack(spacing: 4) {
+                    Text(row.name)
+                        .font(.sf(Tokens.TypeSize.label, weight: .medium))
+                        .foregroundStyle(Tokens.text1)
+                        .lineLimit(1)
+                    // Blend entries only: a named-shelf row is the vendor's model
+                    // under the vendor's name and needs no line from us.
+                    if row.id == "nono-flash" || row.id == "nono" {
+                        SettingInfo(L("nono.pricing.blendTagline"))
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            pricingMinCharge(row.pricing?.minChargeUSD)
+            pricingRate(row.pricing?.inputPerMTok)
+            pricingRate(row.pricing?.outputPerMTok)
+            HStack(spacing: 8) {
+                Text(L("nono.pricing.usBased"))
+                    .font(.sf(Tokens.TypeSize.meta))
+                    .foregroundStyle(Tokens.text3)
+                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    if Provider.modelSupportsVision(row.id) {
+                        pricingCap("eye", title: L("model.detail.vision"))
+                    }
+                    if row.info.toolUse || Provider.nono.supportsTools {
+                        pricingCap("wrench.and.screwdriver", title: L("model.detail.toolUse"))
+                    }
+                    if row.info.reasoning {
+                        pricingCap("brain", title: L("model.detail.reasoning"))
+                    }
+                }
+                .fixedSize()
+            }
+            .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .padding(.vertical, 9)
+    }
+
+    /// The per-request floor. Same loading rule as the rates: a spinner until
+    /// this page's fetch lands, not a guessed figure.
+    @ViewBuilder
+    private func pricingMinCharge(_ usd: Double?) -> some View {
+        if let usd {
+            Text(Self.moneyPerMillion(usd))
+                .font(.brand(Tokens.TypeSize.label))
+                .foregroundStyle(Tokens.text2)
+                .monospacedDigit()
+                .lineLimit(1)
+        } else if nonoRatesLoading {
+            ProgressView().controlSize(.mini)
+        } else {
+            usageCell("—", color: Tokens.text4)
+        }
+    }
+
+    /// A per-1M-token rate; "/M" is the unit. While the fetch this page started
+    /// has not landed, a spinner rather than the last figure seen: that may be
+    /// the price that just changed, which is why we asked.
+    @ViewBuilder
+    private func pricingRate(_ usd: Double?) -> some View {
+        if let usd {
+            HStack(alignment: .firstTextBaseline, spacing: 1) {
+                Text(Self.moneyPerMillion(usd))
+                    .font(.brand(Tokens.TypeSize.label))
+                    .foregroundStyle(Tokens.text1)
+                Text("/M")
+                    .font(.sf(Tokens.TypeSize.meta))
+                    .foregroundStyle(Tokens.text4)
+            }
+            .monospacedDigit()
+            .lineLimit(1)
+        } else if nonoRatesLoading {
+            ProgressView().controlSize(.mini)
+        } else {
+            usageCell("—", color: Tokens.text4)
+        }
+    }
+
+    private func pricingCap(_ symbol: String, title: String) -> some View {
+        Image(systemName: symbol)
+            .font(.sf(Tokens.TypeSize.meta))
+            .foregroundStyle(Tokens.text3)
+            .help(title)
+            .accessibilityLabel(title)
+    }
+
+    /// How much the next purchase is for. Not a set of fixed tiers: the amount
+    /// is the buyer's, and the gateway takes any figure between its own bounds.
+    /// $5 rather than the $1 minimum, because the minimum is the one purchase
+    /// where Stripe's flat fee costs the most per dollar and a default should
+    /// not steer people into it.
+    @State private var topUpUSD: Double = 5
+    @State private var addCreditHovering = false
+    @State private var receiptsMenuHovering = false
+    @State private var usageLines: [NoNoAccount.UsageLine] = []
+    @State private var usageLoading = false
+    @State private var usageFailed = false
+    @State private var balanceLines: [NoNoAccount.BalanceLine] = []
+    @State private var balancesLoading = false
+    @State private var balancesFailed = false
+    @State private var showingAmount = false
+    /// Whether the ⋯ menu card is up, and whether the rate fetch the Pricing
+    /// page started is still in flight.
+    @State private var showingMore = false
+    @State private var nonoRatesLoading = false
+
+    /// The block's action. Collapsed it is one button; opened, the stepper
+    /// unfolds to its left and the button becomes the commit.
+    ///
+    /// The stepper lives beside the button rather than beside the balance. Two
+    /// dollar figures on one line at one weight is the arrangement that made
+    /// this block unreadable: the eye cannot tell the money you have from the
+    /// money you are about to spend.
+    @ViewBuilder
+    private func addCreditButton(bought: Double) -> some View {
+        HStack(spacing: 8) {
+            if showingAmount {
+                AmountStepper(value: $topUpUSD,
+                              range: NoNoAccount.minimumTopUpUSD...NoNoAccount.maximumTopUpUSD)
+                    .transition(.scale(scale: 0.86, anchor: .trailing).combined(with: .opacity))
+            }
+
+            Button {
+                if showingAmount {
+                    Task {
+                        await nono.buyCredit(amountUSD: topUpUSD)
+                        // Stripe redirects the browser as soon as the card
+                        // clears, but the webhook that credits the wallet is a
+                        // separate delivery. Waiting on the bought total rising,
+                        // not on the balance being non-zero, is what makes this
+                        // work for a repeat purchase.
+                        await nono.awaitCredit(boughtAbove: bought)
+                    }
+                    showingAmount = false
+                } else {
+                    showingAmount = true
+                }
+            } label: {
+                AddCreditButtonFace(title: showingAmount ? L("nono.addShort") : L("nono.add"),
+                                    lit: addCreditHovering)
+            }
+            .buttonStyle(GlassPressStyle())
+            .onHover { addCreditHovering = $0 }
+            .animation(.easeOut(duration: Tokens.hoverFade), value: addCreditHovering)
+        }
+        .animation(reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 0.82),
+                   value: showingAmount)
+    }
+
+    /// The card's secondary menu: what the models charge, this wallet's
+    /// request list, balances, and the Stripe portal. None of those is the
+    /// action this row is for — Add is — so they live in a trailing ⋯ rather
+    /// than sitting as peers of the purchase. Pricing, Usage and Balances each
+    /// open a sub-page.
+    ///
+    /// Pricing, Usage and Gifts show whether or not the wallet has ever been
+    /// paid into: the rates are what someone deciding whether to pay is looking
+    /// for, Usage is the same list once they have spent, and Gifts is every
+    /// grant even when only one is live. Receipts is the part that needs a
+    /// purchase behind it.
+    @ViewBuilder
+    private func nonoMoreMenu(showReceipts: Bool) -> some View {
+        Button {
+            showingMore.toggle()
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.sf(Tokens.TypeSize.form, weight: .medium))
+                .foregroundStyle(receiptsMenuHovering ? Tokens.text1 : Tokens.text3)
+                .frame(width: 28, height: 30)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { receiptsMenuHovering = $0 }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: receiptsMenuHovering)
+        .accessibilityLabel(L("nono.more"))
+        // The same floating glass card as Recent's ⋯ menu — its own window, no
+        // popover arrow, same slab, row metrics and hover wash.
+        .modifier(MenuCardWindow(
+            open: showingMore,
+            onDismiss: { _ in showingMore = false },
+            card: {
+                AnyView(
+                    VStack(alignment: .leading, spacing: ManageMenuMetrics.rowSpacing) {
+                        nonoMoreRow(L("model.pricing")) {
+                            showingMore = false
+                            withAnimation(.easeOut(duration: 0.16)) { section = .pricing }
+                        }
+                        nonoMoreRow(L("model.usage")) {
+                            showingMore = false
+                            withAnimation(.easeOut(duration: 0.16)) { section = .usage }
+                        }
+                        nonoMoreRow(L("nono.balances")) {
+                            showingMore = false
+                            withAnimation(.easeOut(duration: 0.16)) { section = .balances }
+                        }
+                        if showReceipts {
+                            nonoMoreRow(L("nono.receipts")) {
+                                showingMore = false
+                                Task { await nono.manageBilling() }
+                            }
                         }
                     }
-                    Spacer(minLength: 0)
-                }
-                .padding(.leading, 76)
-            }
+                    .padding(ManageMenuMetrics.cardPadding)
+                    .frame(minWidth: 168, alignment: .leading)
+                    .fixedSize()
+                    .manageMenuCardBackground()
+                )
+            }))
+    }
+
+    /// One row of the ⋯ card, in Recent's manage-menu row style.
+    private func nonoMoreRow(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.sf(ManageMenuMetrics.fontSize, weight: .medium))
+                .foregroundStyle(Tokens.text2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, ManageMenuMetrics.rowHorizontalPadding)
+                .padding(.vertical, ManageMenuMetrics.rowVerticalPadding)
+                .contentShape(Rectangle())
         }
-        .task { await nono.load() }
-    }
-
-    @State private var subscribeHovering = false
-
-    /// The pane's primary action while there is no plan.
-    private var subscribeButton: some View {
-        Button {
-            Task {
-                await nono.subscribe()
-                // Stripe redirects the browser as soon as the card clears, but
-                // the webhook that grants the allowance is a separate delivery.
-                // Without this the user comes back to a pane that still says
-                // "no plan" having just paid.
-                await nono.awaitActivation()
-            }
-        } label: {
-            Text(L("nono.subscribe"))
-                .font(.sf(13, weight: .medium))
-                .foregroundStyle(Tokens.text1)
-                .padding(.horizontal, 14)
-                .frame(height: 30)
-                .prominentSurface(in: Capsule(), lit: subscribeHovering)
-                .contentShape(Capsule())
+        .buttonStyle(ManageMenuRowStyle())
+        .onHover { inside in
+            if inside { Haptics.alignment() }
         }
-        .buttonStyle(GlassPressStyle())
-        .onHover { subscribeHovering = $0 }
-        .animation(.easeOut(duration: Tokens.hoverFade), value: subscribeHovering)
     }
 
-    /// What is left of the month: the figure on the row, the bar under it.
+    /// Ask the gateway what it charges right now, bypassing every cache between
+    /// here and it — `ModelCatalog`'s hourly per-(provider, key) entry included.
     ///
-    /// Two elements rather than a filling field. A field whose background
-    /// creeps rightward reads as a rendering artifact until you already know
-    /// what it means; a rail under the number is the shape everyone already
-    /// reads as progress. Cursor's usage panel is the reference — percentage on
-    /// the line, thin full-width track below.
-    ///
-    /// One register, secondary ink: the rail already says how much is gone, and
-    /// this only names the figure. Setting the number larger or brighter than
-    /// the words around it made the row shout a status nobody needs shouted.
-    private func allowanceText(_ snapshot: NoNoAccount.Snapshot) -> String {
-        // A percentage, not dollars. The underlying figure is what a request
-        // cost us upstream — thousandths of a cent — which is both meaningless
-        // to the person reading it and more of our cost structure than they
-        // asked for.
-        // Rounded up, not to nearest: spending that lands under half a percent
-        // still moved the meter, and "0% used" after a real request reads as a
-        // bug. Ceiling also retires the "<1%" special case the row used to
-        // carry — one shape of figure, always a whole percent.
-        let whole = Int((snapshot.usedFraction * 100).rounded(.up))
-        return L("nono.usage", "\(min(100, max(0, whole)))%")
-    }
-
-    /// The rail. Capsule track, capsule fill, no text inside it.
-    ///
-    /// The track is the pane's recessed floor at rail scale, the fill the same
-    /// ink as the text beside it — no accent, no glow. A meter that is mostly
-    /// empty is good news, and colouring it turns a glance into an alarm.
-    /// It takes the remaining row: label on the left, the figure on the right,
-    /// the rail between them.
-    private static let allowanceBarHeight: CGFloat = 6
-
-    private func allowanceBar(_ snapshot: NoNoAccount.Snapshot) -> some View {
-        GeometryReader { geo in
-            ZStack(alignment: .leading) {
-                Capsule().fill(Tokens.recessFill)
-                Capsule()
-                    .fill(Tokens.ink.opacity(0.42))
-                    // A used allowance that rounds to nothing still deserves a
-                    // visible mark: a bar that reads empty after real spending
-                    // is telling the wrong story.
-                    .frame(width: max(snapshot.usedFraction > 0 ? Self.allowanceBarHeight : 0,
-                                      geo.size.width * snapshot.usedFraction))
-            }
+    /// A rate is the one figure in this card that must not be stale: it is a
+    /// price the buyer was quoted, and unlike the balance beside it, nothing
+    /// else in the app refetches it.
+    private func refreshNonoRates() async {
+        guard let key = APIKeyStore.current(for: .nono), !nonoRatesLoading else { return }
+        nonoRatesLoading = true
+        defer { nonoRatesLoading = false }
+        if let fresh = await ModelCatalog.fetch(for: .nono, apiKey: key, force: true) {
+            catalog.adopt(fresh, for: .nono)
         }
-        .frame(maxWidth: .infinity)
-        .frame(height: Self.allowanceBarHeight)
-        .animation(.easeOut(duration: 0.25), value: snapshot.usedFraction)
     }
 
-    /// One line under the meter: when it renews, or that it will not.
-    private func nonoPlanFootnote(_ snapshot: NoNoAccount.Snapshot) -> String {
-        guard let renews = snapshot.renewsAt else { return L("nono.plan.active") }
-        let when = DateFormatter.localizedString(from: renews, dateStyle: .medium, timeStyle: .none)
-        return snapshot.subscription.cancelAtPeriodEnd ? L("nono.plan.ends", when) : L("nono.plan.renews", when)
+    /// Dollars to the cent. Below a cent but above zero it reads "<$0.01":
+    /// "$0.00" would say the wallet is empty while it can still answer questions.
+    static func money(_ usd: Double) -> String {
+        if isSubCent(usd) { return "<$0.01" }
+        return String(format: "$%.2f", usd)
+    }
+
+    static func isSubCent(_ usd: Double) -> Bool { usd > 0 && usd < 0.01 }
+
+    /// A billed or granted amount. Always the actual dollars — a sub-cent
+    /// figure is "$0.003", not "<$0.01". That floor is only for the wallet.
+    static func moneyCharged(_ usd: Double) -> String {
+        if usd > 0 && usd < 0.01 {
+            var s = String(format: "$%.4f", usd)
+            while s.hasSuffix("0") { s.removeLast() }
+            if s.hasSuffix(".") { s.removeLast() }
+            return s
+        }
+        return String(format: "$%.2f", usd)
+    }
+
+    /// A per-million-token rate, the unit the lineup writes prices in. Cents
+    /// for ordinary figures; four places once a rate drops below a cent, with
+    /// trailing zeros stripped so "$0.0020" does not pretend at more precision
+    /// than the catalog sent.
+    static func moneyPerMillion(_ usd: Double) -> String {
+        if usd > 0 && usd < 0.01 {
+            var s = String(format: "$%.4f", usd)
+            while s.hasSuffix("0") { s.removeLast() }
+            if s.hasSuffix(".") { s.removeLast() }
+            return s
+        }
+        return String(format: "$%.2f", usd)
     }
 
     // MARK: - OpenRouter one-click connect
@@ -2005,27 +2369,20 @@ struct InlineSettingsView: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 12) {
                 Text(L("model.account"))
-                    .font(.sf(13, weight: .medium))
+                    .font(.sf(Tokens.TypeSize.form, weight: .medium))
                     .foregroundStyle(Tokens.text2)
                     .frame(width: 64, alignment: .leading)
 
                 if openRouterConnected {
                     // Same masked, read-only summary as the saved key row.
                     Text(maskedKey)
-                        .font(.sf(13))
+                        .font(.sf(Tokens.TypeSize.form))
                         .foregroundStyle(Tokens.text2)
                         .lineLimit(1)
                         .padding(.horizontal, 12)
                         .frame(height: 34)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(
-                            RoundedRectangle(cornerRadius: 10)
-                                .fill(.white.opacity(0.03))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10)
-                                .strokeBorder(.white.opacity(0.07), lineWidth: 0.5)
-                        )
+                        .recessedSurface(in: RoundedRectangle.control, lit: false)
 
                     if testing {
                         ProgressView().controlSize(.small)
@@ -2041,7 +2398,7 @@ struct InlineSettingsView: View {
                             Text(orAuth.phase == .exchanging
                                  ? L("model.connecting")
                                  : L("model.finishSignIn"))
-                                .font(.sf(12.5))
+                                .font(.sf(Tokens.TypeSize.label))
                                 .foregroundStyle(Tokens.text2)
                         }
                         .frame(height: 30)
@@ -2083,7 +2440,7 @@ struct InlineSettingsView: View {
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
                 Text(L("model.account"))
-                    .font(.sf(13, weight: .medium))
+                    .font(.sf(Tokens.TypeSize.form, weight: .medium))
                     .foregroundStyle(Tokens.text2)
                     .frame(width: 64, alignment: .leading)
 
@@ -2107,7 +2464,7 @@ struct InlineSettingsView: View {
             Text(installed
                  ? (signedIn ? L("codex.status.hint.ready") : L("codex.status.hint.login"))
                  : L("codex.status.hint.install"))
-                .font(.sf(12))
+                .font(.sf(Tokens.TypeSize.label))
                 .foregroundStyle(Tokens.text3)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.leading, 76)
@@ -2128,7 +2485,7 @@ struct InlineSettingsView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
                 Text(L("model.account"))
-                    .font(.sf(13, weight: .medium))
+                    .font(.sf(Tokens.TypeSize.form, weight: .medium))
                     .foregroundStyle(Tokens.text2)
                     .frame(width: 64, alignment: .leading)
 
@@ -2147,7 +2504,7 @@ struct InlineSettingsView: View {
             Text(installed
                  ? (signedIn ? L("claudecode.status.hint.ready") : L("claudecode.status.hint.login"))
                  : L("claudecode.status.hint.install"))
-                .font(.sf(12))
+                .font(.sf(Tokens.TypeSize.label))
                 .foregroundStyle(Tokens.text3)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.leading, 76)
@@ -2167,7 +2524,7 @@ struct InlineSettingsView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
                 Text(L("model.account"))
-                    .font(.sf(13, weight: .medium))
+                    .font(.sf(Tokens.TypeSize.form, weight: .medium))
                     .foregroundStyle(Tokens.text2)
                     .frame(width: 64, alignment: .leading)
 
@@ -2190,7 +2547,7 @@ struct InlineSettingsView: View {
             Text(installed
                  ? (signedIn ? L("grok.status.hint.ready") : L("grok.status.hint.login"))
                  : L("grok.status.hint.install"))
-                .font(.sf(12))
+                .font(.sf(Tokens.TypeSize.label))
                 .foregroundStyle(Tokens.text3)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.leading, 76)
@@ -2210,7 +2567,7 @@ struct InlineSettingsView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
                 Text(L("model.account"))
-                    .font(.sf(13, weight: .medium))
+                    .font(.sf(Tokens.TypeSize.form, weight: .medium))
                     .foregroundStyle(Tokens.text2)
                     .frame(width: 64, alignment: .leading)
 
@@ -2229,7 +2586,7 @@ struct InlineSettingsView: View {
             Text(installed
                  ? (signedIn ? L("commandcode.status.hint.ready") : L("commandcode.status.hint.login"))
                  : L("commandcode.status.hint.install"))
-                .font(.sf(12))
+                .font(.sf(Tokens.TypeSize.label))
                 .foregroundStyle(Tokens.text3)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.leading, 76)
@@ -2254,7 +2611,7 @@ struct InlineSettingsView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
                 Text(L("model.account"))
-                    .font(.sf(13, weight: .medium))
+                    .font(.sf(Tokens.TypeSize.form, weight: .medium))
                     .foregroundStyle(Tokens.text2)
                     .frame(width: 64, alignment: .leading)
 
@@ -2273,7 +2630,7 @@ struct InlineSettingsView: View {
             Text(installed
                  ? (signedIn ? L("pi.status.hint.ready") : L("pi.status.hint.login"))
                  : L("pi.status.hint.install"))
-                .font(.sf(12))
+                .font(.sf(Tokens.TypeSize.label))
                 .foregroundStyle(Tokens.text3)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.leading, 76)
@@ -2309,7 +2666,7 @@ struct InlineSettingsView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
                 Text(L("model.account"))
-                    .font(.sf(13, weight: .medium))
+                    .font(.sf(Tokens.TypeSize.form, weight: .medium))
                     .foregroundStyle(Tokens.text2)
                     .frame(width: 64, alignment: .leading)
 
@@ -2351,7 +2708,7 @@ struct InlineSettingsView: View {
 
             Text(hint(installed: installed, outdated: outdated, signedIn: signedIn,
                       signingIn: signingIn, failure: failure))
-                .font(.sf(12))
+                .font(.sf(Tokens.TypeSize.label))
                 .foregroundStyle(outdated || (failure != nil && !signedIn)
                                  ? Tokens.danger : Tokens.text3)
                 .fixedSize(horizontal: false, vertical: true)
@@ -2398,12 +2755,11 @@ struct InlineSettingsView: View {
     private func codexPillButton(_ title: String, action: @escaping () -> Void) -> some View {
         Button(title, action: action)
             .buttonStyle(.plain)
-            .font(.sf(13, weight: .medium))
+            .font(.sf(Tokens.TypeSize.form, weight: .medium))
             .foregroundStyle(Tokens.text1)
             .padding(.horizontal, 12)
             .frame(height: 30)
-            .background(Capsule().fill(.white.opacity(0.10)))
-            .overlay(Capsule().strokeBorder(.white.opacity(0.20), lineWidth: 0.5))
+            .prominentSurface(in: Capsule(), lit: false)
             .contentShape(Capsule())
     }
 
@@ -2419,9 +2775,9 @@ struct InlineSettingsView: View {
         } label: {
             HStack(spacing: 7) {
                 Image(systemName: "link")
-                    .font(.sf(11, weight: .semibold))
+                    .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
                 Text(L("model.connectOpenRouter"))
-                    .font(.sf(13, weight: .medium))
+                    .font(.sf(Tokens.TypeSize.form, weight: .medium))
             }
             .foregroundStyle(Tokens.text1)
             .padding(.horizontal, 12)
@@ -2567,21 +2923,33 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// Step one: **which backend answers.** A plain menu of every provider, split
-    /// into the ones that can answer right now and the ones that still need a key —
-    /// so the useful half is never buried among a dozen unconfigured vendors.
+    /// Step one: **which backend answers.** A menu of the backends you bring
+    /// yourself, split into the ones that can answer right now and the ones that
+    /// still need a key.
+    ///
+    /// Notchi is not in it. It is not one of these — every row here is a lab or
+    /// an aggregator you pay somewhere else, and Notchi Balance is a wallet you
+    /// fill here; listing it as the first of eighteen vendors filed a plan under
+    /// the things it is an alternative to. It lives in the card above, always
+    /// visible, and is picked by choosing one of its models.
     ///
     /// Picking an unconfigured provider is a legitimate move (it's how you get to a
     /// new vendor's key field): the switch goes through, and `keySection` unfolds
     /// itself on the spot because `setupRequired` now holds.
+    ///
+    /// Notchi never reaches this row — not in the menu, and not as the value it
+    /// displays. `provider` is `APIKeyStore.broughtProvider`, which cannot hold it:
+    /// switching to Notchi on the panel leaves this row naming the vendor it named
+    /// before, because that is still the vendor this pane configures.
     private var providerRow: some View {
         settingRow(label: L("model.provider")) {
             GlassMenu(title: provider.displayName,
                       logoVendor: provider.brandVendor,
                       logoFallback: provider.displayName,
                       logoSymbol: provider.brandSymbol) {
-                let ready = Provider.offered.filter(providerReady)
-                let unready = Provider.offered.filter { !providerReady($0) }
+                let theirs = Provider.offered.filter { !$0.isFirstParty }
+                let ready = theirs.filter(providerReady)
+                let unready = theirs.filter { !providerReady($0) }
                 if !ready.isEmpty {
                     SwiftUI.Section(L("model.picker.configured")) {
                         ForEach(ready) { p in providerOption(p) }
@@ -2623,6 +2991,10 @@ struct InlineSettingsView: View {
     /// Step two: **which of that provider's models.** The picker card is the same
     /// one the ⌘⇧I summon opens, locked to the chosen provider — its search and its
     /// fold both work over that provider's catalog alone.
+    ///
+    /// Which also means Notchi's tiers are not in it. They are not models of the
+    /// provider named above, and they are not chosen here — the panel's own model
+    /// menu is where Notchi is picked.
     private var modelRow: some View {
         settingRow(label: L("model.label")) {
             HStack(spacing: 6) {
@@ -2682,7 +3054,7 @@ struct InlineSettingsView: View {
                                 .scaleEffect(0.8)
                         } else {
                             Image(systemName: "arrow.clockwise")
-                                .font(.sf(11, weight: .semibold))
+                                .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
                                 .foregroundStyle(Tokens.text3)
                         }
                     }
@@ -2717,19 +3089,18 @@ struct InlineSettingsView: View {
                        fallback: modelID)
                 .frame(width: 15, height: 15)
             Text(ModelRatings.prettyName(for: modelID, provider: provider))
-                .font(.sf(13))
+                .font(.sf(Tokens.TypeSize.form))
                 .foregroundStyle(Tokens.text1)
                 .lineLimit(1)
                 .truncationMode(.tail)
             Image(systemName: "chevron.up.chevron.down")
-                .font(.sf(10, weight: .semibold))
+                .font(.sf(Tokens.TypeSize.caption, weight: .semibold))
                 .foregroundStyle(Tokens.text3)
         }
         .padding(.leading, 10)
         .padding(.trailing, 9)
         .frame(height: 30)
-        .background(Capsule().fill(.white.opacity(0.06)))
-        .overlay(Capsule().strokeBorder(.white.opacity(0.12), lineWidth: 0.5))
+        .recessedSurface(in: Capsule(), lit: false)
         .contentShape(Capsule())
     }
 
@@ -2794,7 +3165,7 @@ struct InlineSettingsView: View {
                 // read as "what you'd get", not as a second active choice.
                 .opacity(selected ? 1 : 0.55)
                 Text(p.label)
-                    .font(.sf(11, weight: selected ? .semibold : .regular))
+                    .font(.sf(Tokens.TypeSize.meta, weight: selected ? .medium : .regular))
                     .foregroundStyle(selected ? Tokens.text1 : Tokens.text3)
                     .lineLimit(1)
             }
@@ -2836,7 +3207,7 @@ struct InlineSettingsView: View {
                         .clipped()
                 }
                 Text(style.label)
-                    .font(.sf(10, weight: selected ? .semibold : .regular))
+                    .font(.sf(Tokens.TypeSize.caption, weight: selected ? .medium : .regular))
                     .foregroundStyle(selected ? Tokens.text1 : Tokens.text3)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
@@ -2930,7 +3301,7 @@ struct InlineSettingsView: View {
                 if noteDestination == .markdownFolder {
                     HStack(spacing: 10) {
                         Text(notesFolderDisplay)
-                            .font(.sf(12))
+                            .font(.sf(Tokens.TypeSize.label))
                             .foregroundStyle(Tokens.text3)
                             .lineLimit(1)
                             .truncationMode(.middle)
@@ -2984,10 +3355,10 @@ struct InlineSettingsView: View {
             } label: {
                 HStack(spacing: 5) {
                     Image(systemName: "chevron.right")
-                        .font(.sf(9, weight: .semibold))
+                        .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                         .rotationEffect(.degrees(instructionsSectionOpen ? 90 : 0))
                     Text(L("general.customInstructions"))
-                        .font(.sf(12, weight: .medium))
+                        .font(.sf(Tokens.TypeSize.label, weight: .medium))
                 }
                 .foregroundStyle(Tokens.text1)
                 .padding(.horizontal, 10)
@@ -3017,7 +3388,7 @@ struct InlineSettingsView: View {
                 ZStack(alignment: .topLeading) {
                     if model.customInstructions.isEmpty {
                         Text(L("general.customInstructions.placeholder"))
-                            .font(.sf(13))
+                            .font(.sf(Tokens.TypeSize.form))
                             .foregroundStyle(Tokens.text3)
                             .allowsHitTesting(false)
                             .padding(.horizontal, 12)
@@ -3029,7 +3400,7 @@ struct InlineSettingsView: View {
                     ), axis: .vertical)
                         .textFieldStyle(.plain)
                         .lineLimit(1...3)
-                        .font(.sf(13))
+                        .font(.sf(Tokens.TypeSize.form))
                         .foregroundStyle(Tokens.text1)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
@@ -3037,10 +3408,7 @@ struct InlineSettingsView: View {
                         // the panel mid-edit (same guard the API-key field uses).
                         .onChange(of: model.customInstructions) { model.noteUserTyping() }
                 }
-                .background(
-                    RoundedRectangle(cornerRadius: 9)
-                        .fill(.white.opacity(0.06))
-                )
+                .recessedSurface(in: RoundedRectangle.control, lit: false)
             }
         }
     }
@@ -3070,10 +3438,10 @@ struct InlineSettingsView: View {
             } label: {
                 HStack(spacing: 5) {
                     Image(systemName: "chevron.right")
-                        .font(.sf(9, weight: .semibold))
+                        .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                         .rotationEffect(.degrees(permissionsSectionOpen ? 90 : 0))
                     Text(L("permissions.title"))
-                        .font(.sf(12, weight: .medium))
+                        .font(.sf(Tokens.TypeSize.label, weight: .medium))
                 }
                 .foregroundStyle(Tokens.text1)
                 .padding(.horizontal, 10)
@@ -3129,7 +3497,7 @@ struct InlineSettingsView: View {
                                action: @escaping () -> Void) -> some View {
         HStack(spacing: 12) {
             Text(label)
-                .font(.sf(13, weight: .medium))
+                .font(.sf(Tokens.TypeSize.form, weight: .medium))
                 .foregroundStyle(Tokens.text2)
                 .lineLimit(1)
             Spacer(minLength: 12)
@@ -3406,10 +3774,10 @@ struct InlineSettingsView: View {
             } label: {
                 HStack(spacing: 5) {
                     Image(systemName: "chevron.right")
-                        .font(.sf(9, weight: .semibold))
+                        .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                         .rotationEffect(.degrees(advancedSectionOpen ? 90 : 0))
                     Text(L("general.advanced"))
-                        .font(.sf(12, weight: .medium))
+                        .font(.sf(Tokens.TypeSize.label, weight: .medium))
                 }
                 .foregroundStyle(Tokens.text1)
                 .padding(.horizontal, 10)
@@ -3456,14 +3824,14 @@ struct InlineSettingsView: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 3) {
                 Text(L("network.proxy"))
-                    .font(.sf(13))
+                    .font(.sf(Tokens.TypeSize.form))
                     .foregroundStyle(Tokens.text1)
                 SettingInfo(L("network.proxy.hint"))
             }
             ZStack(alignment: .topLeading) {
                 if model.proxyURL.isEmpty {
                     Text(L("network.proxy.placeholder"))
-                        .font(.sf(13))
+                        .font(.sf(Tokens.TypeSize.form))
                         .foregroundStyle(Tokens.text3)
                         .allowsHitTesting(false)
                         .padding(.horizontal, 12)
@@ -3474,7 +3842,7 @@ struct InlineSettingsView: View {
                     set: { model.proxyURL = $0 }
                 ))
                     .textFieldStyle(.plain)
-                    .font(.sf(13))
+                    .font(.sf(Tokens.TypeSize.form))
                     .foregroundStyle(Tokens.text1)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
@@ -3485,12 +3853,9 @@ struct InlineSettingsView: View {
                         refreshProxyStatus()
                     }
             }
-            .background(
-                RoundedRectangle(cornerRadius: 9)
-                    .fill(.white.opacity(0.06))
-            )
+            .recessedSurface(in: RoundedRectangle.control, lit: false)
             Text(proxyStatus)
-                .font(.sf(11))
+                .font(.sf(Tokens.TypeSize.meta))
                 .foregroundStyle(Tokens.text3)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -3547,7 +3912,7 @@ struct InlineSettingsView: View {
         HStack(spacing: 8) {
             Text(L("disable.settings.paused",
                    Self.pauseEndsAt(model.forceTouchDisabledUntil)))
-                .font(.sf(11))
+                .font(.sf(Tokens.TypeSize.meta))
                 .foregroundStyle(Tokens.text3)
                 .fixedSize(horizontal: false, vertical: true)
             SettingActionButton(title: L("disable.settings.resume")) {
@@ -3607,7 +3972,7 @@ struct InlineSettingsView: View {
     ) -> some View where Option.RawValue == String {
         let isSelected = option == selected
         return Text(optionLabel(option))
-            .font(.sf(10.5, weight: isSelected ? .semibold : .regular))
+            .font(.sf(Tokens.TypeSize.meta, weight: isSelected ? .medium : .regular))
             .foregroundStyle(isSelected ? Tokens.text1 : Tokens.text3)
             .lineLimit(1)
     }
@@ -3829,7 +4194,7 @@ struct InlineSettingsView: View {
             // 24pt chip centred on a ~15pt line overflowed ~5pt above the scroll
             // view's edge, which clipped the chip's upper arc clean off.
             Text(L("shortcuts.promptAction"))
-                .font(.sf(12.5, weight: .semibold))
+                .font(.sf(Tokens.TypeSize.label, weight: .medium))
                 .foregroundStyle(Tokens.text1)
                 .frame(maxWidth: .infinity, minHeight: Self.promptAddChipSize,
                        alignment: .topLeading)
@@ -3838,7 +4203,7 @@ struct InlineSettingsView: View {
                         openPromptTemplatePicker()
                     } label: {
                         Image(systemName: "plus")
-                            .font(.sf(10.5, weight: .semibold))
+                            .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
                             .foregroundStyle(Tokens.text2)
                             .frame(width: Self.promptAddChipSize,
                                    height: Self.promptAddChipSize)
@@ -3854,7 +4219,7 @@ struct InlineSettingsView: View {
             Group {
                 if promptShortcuts.isEmpty {
                     Text(L("shortcuts.promptAction.empty"))
-                        .font(.sf(12))
+                        .font(.sf(Tokens.TypeSize.label))
                         .foregroundStyle(Tokens.text3)
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(.horizontal, 2)
@@ -3961,7 +4326,7 @@ struct InlineSettingsView: View {
                         closePromptTemplateDetail()
                     } label: {
                         Image(systemName: "chevron.left")
-                            .font(.sf(10.5, weight: .semibold))
+                            .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
                             .foregroundStyle(Tokens.text2)
                             .frame(width: 24, height: 24)
                     }
@@ -3971,12 +4336,12 @@ struct InlineSettingsView: View {
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text(detail?.name ?? L("shortcuts.promptAction.templates.title"))
-                        .font(.sf(16, weight: .semibold))
+                        .font(.sf(Tokens.TypeSize.prompt, weight: .medium))
                         .foregroundStyle(Tokens.text1)
                         .tracking(-0.3)
                         .lineLimit(1)
                     Text(detail?.description ?? L("shortcuts.promptAction.templates.subtitle"))
-                        .font(.sf(11.5))
+                        .font(.sf(Tokens.TypeSize.meta))
                         .foregroundStyle(Tokens.text4)
                         .lineLimit(2)
                         .fixedSize(horizontal: false, vertical: true)
@@ -3986,7 +4351,7 @@ struct InlineSettingsView: View {
                     closePromptTemplatePicker()
                 } label: {
                     Image(systemName: "xmark")
-                        .font(.sf(9.5, weight: .semibold))
+                        .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                         .foregroundStyle(Tokens.text2)
                         .frame(width: 24, height: 24)
                 }
@@ -4007,7 +4372,7 @@ struct InlineSettingsView: View {
                     addBlankPromptShortcut()
                 } label: {
                     Text(L("shortcuts.promptAction.templates.custom"))
-                        .font(.sf(12, weight: .medium))
+                        .font(.sf(Tokens.TypeSize.label, weight: .medium))
                         .foregroundStyle(Tokens.text2)
                         .frame(maxWidth: .infinity, minHeight: 34)
                 }
@@ -4031,7 +4396,7 @@ struct InlineSettingsView: View {
 
             ScrollView {
                 Text(template.prompt)
-                    .font(.sf(12.5))
+                    .font(.sf(Tokens.TypeSize.label))
                     .foregroundStyle(Tokens.text1)
                     .lineSpacing(3)
                     .textSelection(.enabled)
@@ -4041,7 +4406,7 @@ struct InlineSettingsView: View {
             .frame(height: 128)
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
-            .recessedSurface(in: RoundedRectangle(cornerRadius: 16, style: .continuous),
+            .recessedSurface(in: RoundedRectangle.menu,
                              lit: false)
 
             HStack(spacing: 8) {
@@ -4051,7 +4416,7 @@ struct InlineSettingsView: View {
                     closePromptTemplateDetail()
                 } label: {
                     Text(L("shortcuts.promptAction.templates.detail.add"))
-                        .font(.sf(12.5, weight: .semibold))
+                        .font(.sf(Tokens.TypeSize.label, weight: .medium))
                         .foregroundStyle(Tokens.text1)
                         .padding(.horizontal, 20)
                         .frame(minHeight: 32)
@@ -4150,7 +4515,7 @@ struct InlineSettingsView: View {
 
                     if visiblePromptTemplates.isEmpty {
                         Text(L("shortcuts.promptAction.templates.allAdded"))
-                            .font(.sf(12))
+                            .font(.sf(Tokens.TypeSize.label))
                             .foregroundStyle(Tokens.text3)
                             .multilineTextAlignment(.center)
                             .padding(.horizontal, 44)
@@ -4252,7 +4617,7 @@ struct InlineSettingsView: View {
         let opacity: Double = distance <= 4 ? 1 : max(0, 1 - Double(distance - 4))
         let active = promptTemplateCoverflowIndex == index
         let hovered = hoveredPromptTemplateID == template.id
-        let shape = RoundedRectangle(cornerRadius: 24, style: .continuous)
+        let shape = RoundedRectangle.modal
         let textOpacity = active ? 1 : Double(max(0.16, 0.52 - distance * 0.14))
 
         return ZStack {
@@ -4264,14 +4629,14 @@ struct InlineSettingsView: View {
                 // the card's headline and is set like one: bigger, tighter, and
                 // carrying the ink, over a gloss that stays deliberately quiet.
                 Text(template.name)
-                    .font(.sf(16.5, weight: .semibold))
+                    .font(.sf(Tokens.TypeSize.prompt, weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.97))
                     .tracking(-0.35)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
 
                 Text(template.description)
-                    .font(.sf(11))
+                    .font(.sf(Tokens.TypeSize.meta))
                     .foregroundStyle(Color.white.opacity(0.62))
                     .lineSpacing(2)
                     .lineLimit(4)
@@ -4292,7 +4657,7 @@ struct InlineSettingsView: View {
                     addPromptShortcut(from: template)
                 } label: {
                     Image(systemName: "plus")
-                        .font(.sf(14, weight: .semibold))
+                        .font(.sf(Tokens.TypeSize.reading, weight: .semibold))
                         .foregroundStyle(Tokens.text1)
                         .frame(width: 34, height: 34)
                 }
@@ -4383,13 +4748,13 @@ struct InlineSettingsView: View {
     private func openPromptTemplateDetail(_ template: RemoteModelManifest.PromptTemplate) {
         hoveredPromptTemplateID = nil
         promptTemplateCoverflowHovering = false
-        withAnimation(.easeOut(duration: 0.18)) {
+        withAnimation(.easeOut(duration: Tokens.hoverFade)) {
             promptTemplateDetailID = template.id
         }
     }
 
     private func closePromptTemplateDetail() {
-        withAnimation(.easeOut(duration: 0.18)) {
+        withAnimation(.easeOut(duration: Tokens.hoverFade)) {
             promptTemplateDetailID = nil
         }
     }
@@ -4549,16 +4914,16 @@ struct InlineSettingsView: View {
     /// would otherwise set the width for the whole flow.
     private func promptShortcutCardChip(_ binding: PromptShortcut) -> some View {
         let hovered = hoveredPromptShortcutID == binding.id
-        let shape = RoundedRectangle(cornerRadius: 11, style: .continuous)
+        let shape = RoundedRectangle.menu
         return Button {
             presentedPromptShortcutID = binding.id
         } label: {
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 8) {
                 Text(promptShortcutName(binding)
                      ?? (binding.prompt.isEmpty
                          ? L("shortcuts.promptAction.placeholder")
                          : binding.prompt))
-                    .font(.sf(12, weight: .medium))
+                    .font(.sf(Tokens.TypeSize.label, weight: .medium))
                     .foregroundStyle(binding.prompt.isEmpty ? Tokens.text4 : Tokens.text1)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -4571,7 +4936,7 @@ struct InlineSettingsView: View {
                     }
                 } else {
                     Text(L("shortcuts.promptAction.set"))
-                        .font(.sf(11, weight: .medium))
+                        .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                         .foregroundStyle(Tokens.text4)
                         .padding(.horizontal, 8)
                         .frame(minHeight: 22)
@@ -4583,8 +4948,8 @@ struct InlineSettingsView: View {
                 }
             }
             .frame(width: Self.promptCardWidth, alignment: .leading)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 9)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
             .background(PromptShortcutCardSurface(id: binding.id,
                                                  paletteKey: binding.paletteSeed,
                                                   hovering: hovered,
@@ -4687,7 +5052,7 @@ struct InlineSettingsView: View {
                      ?? (binding.prompt.isEmpty
                          ? L("shortcuts.promptAction")
                          : binding.prompt))
-                    .font(.sf(13.5))
+                    .font(.sf(Tokens.TypeSize.form))
                     .foregroundStyle(Tokens.text1)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -4696,7 +5061,7 @@ struct InlineSettingsView: View {
                     closePromptShortcutEditor(binding.id)
                 } label: {
                     Image(systemName: "xmark")
-                        .font(.sf(9, weight: .semibold))
+                        .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                         .foregroundStyle(Tokens.text3)
                         .frame(width: 22, height: 22)
                 }
@@ -4709,7 +5074,7 @@ struct InlineSettingsView: View {
                 ZStack(alignment: .topLeading) {
                     if binding.prompt.isEmpty {
                         Text(L("shortcuts.promptAction.placeholder"))
-                            .font(.sf(12.5))
+                            .font(.sf(Tokens.TypeSize.label))
                             .foregroundStyle(Tokens.text4)
                             .lineLimit(1)
                             .padding(.top, 1)
@@ -4718,7 +5083,7 @@ struct InlineSettingsView: View {
                     TextField("", text: promptBinding(for: binding.id), axis: .vertical)
                         .textFieldStyle(.plain)
                         .lineLimit(4, reservesSpace: true)
-                        .font(.sf(12.5))
+                        .font(.sf(Tokens.TypeSize.label))
                         .foregroundStyle(Tokens.text1)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity,
@@ -4733,7 +5098,7 @@ struct InlineSettingsView: View {
                              ? L("general.shortcut.recording")
                              : (binding.shortcut?.displayString
                                 ?? L("shortcuts.promptAction.set")))
-                            .font(.sf(11))
+                            .font(.sf(Tokens.TypeSize.meta))
                             .foregroundStyle(recordingShortcut == target
                                 ? Tokens.text1 : Tokens.text3)
                     }
@@ -4747,7 +5112,7 @@ struct InlineSettingsView: View {
                     if ForceClickFeature.isEnabled {
                         Toggle(isOn: forceClick) {
                             Text(L("shortcuts.promptAction.forceTouch"))
-                                .font(.sf(11))
+                                .font(.sf(Tokens.TypeSize.meta))
                                 .foregroundStyle(Tokens.text2)
                                 .lineLimit(1)
                         }
@@ -4764,12 +5129,12 @@ struct InlineSettingsView: View {
             .padding(.bottom, 4)
             .frame(maxWidth: .infinity)
             .frame(height: Self.promptEditorHeight, alignment: .topLeading)
-            .recessedSurface(in: RoundedRectangle(cornerRadius: 8), lit: false)
+            .recessedSurface(in: RoundedRectangle.inset, lit: false)
             .padding(.bottom, 6)
 
             if let hint = shortcutHints[target] {
                 Text(hint)
-                    .font(.sf(11))
+                    .font(.sf(Tokens.TypeSize.meta))
                     .foregroundStyle(Tokens.text3)
                     .frame(maxWidth: .infinity, alignment: .trailing)
                     .padding(.top, 8)
@@ -4793,7 +5158,7 @@ struct InlineSettingsView: View {
                     deletePromptShortcut(binding.id)
                 } label: {
                     Text(L("shortcuts.promptAction.delete"))
-                        .font(.sf(12))
+                        .font(.sf(Tokens.TypeSize.label))
                         .foregroundStyle(Tokens.danger)
                         .padding(.horizontal, 14)
                         .frame(minHeight: 30)
@@ -4804,7 +5169,7 @@ struct InlineSettingsView: View {
                     closePromptShortcutEditor(binding.id)
                 } label: {
                     Text(L("shortcuts.promptAction.done"))
-                        .font(.sf(12.5))
+                        .font(.sf(Tokens.TypeSize.label))
                         .foregroundStyle(Tokens.text1)
                         .padding(.horizontal, 20)
                         .frame(minHeight: 30)
@@ -4849,7 +5214,7 @@ struct InlineSettingsView: View {
             promptModelPickerOpen = true
         } label: {
             Text(ModelRatings.prettyName(for: pin.model, provider: pin.provider))
-                .font(.sf(11))
+                .font(.sf(Tokens.TypeSize.meta))
                 .foregroundStyle(Tokens.text3)
                 .lineLimit(1)
                 .truncationMode(.tail)
@@ -4925,14 +5290,14 @@ struct InlineSettingsView: View {
     private func shortcutGroup(_ title: String, _ rows: [AppShortcutReference.Entry]) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             Text(title)
-                .font(.sf(12.5, weight: .semibold))
+                .font(.sf(Tokens.TypeSize.label, weight: .medium))
                 .foregroundStyle(Tokens.text1)
                 .padding(.bottom, 3)
             ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 12) {
                         Text(row.label)
-                            .font(.sf(12.5))
+                            .font(.sf(Tokens.TypeSize.label))
                             .foregroundStyle(row.editable == nil ? Tokens.text3 : Tokens.text2)
                             .fixedSize(horizontal: false, vertical: true)
                         Spacer(minLength: 12)
@@ -4940,14 +5305,14 @@ struct InlineSettingsView: View {
                             editableShortcutControl(editable, row: row)
                         } else if let note = row.note {
                             Text(note)
-                                .font(.sf(12))
+                                .font(.sf(Tokens.TypeSize.label))
                                 .foregroundStyle(Tokens.text4)
                         } else {
                             HStack(spacing: 6) {
                                 ForEach(Array(row.chords.enumerated()), id: \.offset) { i, chord in
                                     if i > 0 {
                                         Text(L("shortcuts.or"))
-                                            .font(.sf(11))
+                                            .font(.sf(Tokens.TypeSize.meta))
                                             .foregroundStyle(Tokens.text4)
                                     }
                                     HStack(spacing: 3) {
@@ -4961,7 +5326,7 @@ struct InlineSettingsView: View {
                     }
                     if let editable = row.editable, let hint = shortcutHints[editable] {
                         Text(hint)
-                            .font(.sf(11))
+                            .font(.sf(Tokens.TypeSize.meta))
                             .foregroundStyle(Tokens.text3)
                             .frame(maxWidth: .infinity, alignment: .trailing)
                     }
@@ -5002,7 +5367,7 @@ struct InlineSettingsView: View {
                     }
                 } label: {
                     Text(L("general.shortcut.resetTo"))
-                        .font(.sf(10.5, weight: .medium))
+                        .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                         .foregroundStyle(Tokens.text3)
                         .padding(.horizontal, 9)
                         .frame(minHeight: 24)
@@ -5017,7 +5382,7 @@ struct InlineSettingsView: View {
                     resetShortcut(target)
                 } label: {
                     Image(systemName: "arrow.counterclockwise")
-                        .font(.sf(10.5, weight: .semibold))
+                        .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
                         .foregroundStyle(Tokens.text3)
                         .frame(width: 24, height: 24)
                 }
@@ -5035,7 +5400,7 @@ struct InlineSettingsView: View {
                 Text(recordingShortcut == target
                      ? L("general.shortcut.recording")
                      : (row.note ?? row.chords.first ?? L("general.shortcut.off")))
-                    .font(.sf(11.5, weight: recordingShortcut == target ? .semibold : .medium))
+                    .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                     .foregroundStyle(recordingShortcut == target ? Tokens.text1 : Tokens.text2)
                     .padding(.horizontal, 10)
                     .frame(minWidth: 48, minHeight: 24)
@@ -5243,7 +5608,7 @@ struct InlineSettingsView: View {
     /// and the editable one read as the same object at two sizes.
     private func keyCap(_ text: String, readOnly: Bool = false) -> some View {
         Text(text)
-            .font(.sf(11, weight: .medium))
+            .font(.sf(Tokens.TypeSize.meta, weight: .medium))
             .foregroundStyle(readOnly ? Tokens.text4 : Tokens.text2)
             .padding(.horizontal, 7)
             .frame(minWidth: 24, minHeight: 22)
@@ -5341,7 +5706,7 @@ struct InlineSettingsView: View {
 
                     HStack(spacing: 8) {
                         Text(UpdaterService.currentVersion)
-                            .font(.sf(12, weight: .medium))
+                            .font(.sf(Tokens.TypeSize.label, weight: .medium))
                             .foregroundStyle(Tokens.text4)
                         // Hairline between the version and its update action, so
                         // the two sit as one row without running together.
@@ -5420,7 +5785,7 @@ struct InlineSettingsView: View {
     private var updateContent: some View {
         switch updateSlot {
         case .available(let v):
-            aboutLink(L("about.update.to", v), weight: .semibold) {
+            aboutLink(L("about.update.to", v)) {
                 updater.update()
             }
         case .updating:
@@ -5431,11 +5796,11 @@ struct InlineSettingsView: View {
             HStack(spacing: 7) {
                 ProgressView().controlSize(.small)
                 Text(updater.stage == .installing ? L("about.installing") : L("about.updating"))
-                    .font(.sf(12, weight: .semibold))
+                    .font(.sf(Tokens.TypeSize.label, weight: .medium))
                     .foregroundStyle(Tokens.text2)
                 if case .downloading(let f) = updater.stage {
                     Text("\(Int(f * 100))%")
-                        .font(.sf(11.5, weight: .medium))
+                        .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                         .monospacedDigit()
                         .foregroundStyle(Tokens.text4)
                 }
@@ -5445,7 +5810,7 @@ struct InlineSettingsView: View {
             // web page — the update simply didn't take, and trying later is the
             // whole of what there is to do. (The chip on the panel retries.)
             Text(L("about.updateFailed"))
-                .font(.sf(11.5, weight: .medium))
+                .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                 .foregroundStyle(Tokens.danger.opacity(0.92))
         case .checking:
             HStack(spacing: 7) {
@@ -5453,12 +5818,12 @@ struct InlineSettingsView: View {
                     .progressViewStyle(.circular)
                     .controlSize(.small)
                 Text(L("about.checking"))
-                    .font(.sf(11.5, weight: .medium))
+                    .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                     .foregroundStyle(Tokens.text3)
             }
         case .upToDate:
             Text(L("about.upToDate"))
-                .font(.sf(11.5, weight: .medium))
+                .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                 .foregroundStyle(Tokens.text2)
                 .task {
                     // Let the confirmation linger, then recede to the link.
@@ -5521,16 +5886,8 @@ struct InlineSettingsView: View {
                     NSWorkspace.shared.open(URL(string: "https://github.com/\(UpdaterService.repo)/issues")!)
                 }
             }
-            .background(
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .fill(.white.opacity(0.035))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .strokeBorder(.white.opacity(0.07), lineWidth: 0.5)
-                    .allowsHitTesting(false)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+            .recessedSurface(in: RoundedRectangle.control, lit: false)
+            .clipShape(RoundedRectangle.control)
             .padding(.top, 12)
         }
     }
@@ -5542,13 +5899,199 @@ struct InlineSettingsView: View {
             .padding(.leading, 11)
     }
 
+    /// Blend1 requests against this wallet: when, which model, tokens, and
+    /// what the balance was charged. Reached from the wallet ⋯, not the
+    /// sidebar — it is a receipt pad for one account, not a settings category.
+    private var usageSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let used = nono.snapshot?.credit.usedUSD, used > 0 {
+                Text(L("nono.usage.spent", Self.moneyCharged(used)))
+                    .font(.sf(Tokens.TypeSize.meta))
+                    .foregroundStyle(Tokens.text4)
+                    .monospacedDigit()
+            }
+
+            if usageLoading && usageLines.isEmpty {
+                ProgressView().controlSize(.small)
+                    .padding(.top, 8)
+            } else if usageFailed && usageLines.isEmpty {
+                Text(L("nono.error.unreachable"))
+                    .font(.sf(Tokens.TypeSize.label))
+                    .foregroundStyle(Tokens.text3)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if usageLines.isEmpty {
+                Text(L("nono.usage.empty"))
+                    .font(.sf(Tokens.TypeSize.label))
+                    .foregroundStyle(Tokens.text3)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                usageTable
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .task { await refreshUsage() }
+    }
+
+    /// Ruled like `MarkdownTableView`: a caption-register header, a hairline
+    /// under it, fainter hairlines between rows. Model takes the spare width;
+    /// the figures are right-aligned so their digits line up.
+    private var usageTable: some View {
+        Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 0) {
+            GridRow {
+                Text(L("nono.usage.col.time")).captionLabel()
+                Text(L("nono.usage.col.model")).captionLabel()
+                Text(L("nono.pricing.input")).captionLabel()
+                    .gridColumnAlignment(.trailing)
+                Text(L("nono.pricing.output")).captionLabel()
+                    .gridColumnAlignment(.trailing)
+                Text(L("nono.usage.col.cost")).captionLabel()
+                    .gridColumnAlignment(.trailing)
+            }
+            .padding(.bottom, 8)
+
+            Divider().overlay(Tokens.hairline).gridCellColumns(5)
+
+            ForEach(Array(usageLines.enumerated()), id: \.element.id) { index, line in
+                usageRow(line)
+                if index < usageLines.count - 1 {
+                    Divider().overlay(Tokens.hairline.opacity(0.6)).gridCellColumns(5)
+                }
+            }
+        }
+    }
+
+    private func usageRow(_ line: NoNoAccount.UsageLine) -> some View {
+        GridRow {
+            usageCell(line.date.formatted(.dateTime.month(.abbreviated).day().hour().minute()),
+                      color: Tokens.text2)
+            usageCell(usageModelName(line.model), color: Tokens.text1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            usageCell(line.promptTokens.map(StatsFormat.count) ?? "—", color: Tokens.text2)
+            usageCell(line.completionTokens.map(StatsFormat.count) ?? "—", color: Tokens.text2)
+            usageCell(line.billedUSD.map(Self.moneyCharged) ?? "—", color: Tokens.text1)
+        }
+        .padding(.vertical, 9)
+    }
+
+    private func usageCell(_ text: String, color: Color) -> some View {
+        Text(text)
+            .font(.sf(Tokens.TypeSize.label))
+            .foregroundStyle(color)
+            .monospacedDigit()
+            .lineLimit(1)
+    }
+
+    private func usageModelName(_ id: String) -> String {
+        if id == "nono-flash" || id == "nono" { return ModelRatings.nonoName(for: id) }
+        return id
+    }
+
+    private func refreshUsage() async {
+        usageFailed = false
+        usageLoading = true
+        defer { usageLoading = false }
+        do {
+            usageLines = try await nono.loadUsage()
+        } catch {
+            usageFailed = true
+        }
+    }
+
+    /// Each gift and purchase against this wallet: original dollars, a kind
+    /// tag, and when a gift lapses. Reached from the wallet ⋯, same as Usage.
+    private var balancesSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if balancesLoading && balanceLines.isEmpty {
+                ProgressView().controlSize(.small)
+                    .padding(.top, 8)
+            } else if balancesFailed && balanceLines.isEmpty {
+                Text(L("nono.error.unreachable"))
+                    .font(.sf(Tokens.TypeSize.label))
+                    .foregroundStyle(Tokens.text3)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if balanceLines.isEmpty {
+                Text(L("nono.balances.empty"))
+                    .font(.sf(Tokens.TypeSize.label))
+                    .foregroundStyle(Tokens.text3)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                balancesTable
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .task { await refreshBalances() }
+    }
+
+    private var balancesTable: some View {
+        Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 0) {
+            GridRow {
+                Text(L("nono.balances.col.date")).captionLabel()
+                Text(L("nono.balances.col.amount")).captionLabel()
+                    .gridColumnAlignment(.trailing)
+                Text(L("nono.balances.col.kind")).captionLabel()
+                Text(L("nono.balances.col.expires")).captionLabel()
+                    .gridColumnAlignment(.trailing)
+            }
+            .padding(.bottom, 8)
+
+            Divider().overlay(Tokens.hairline).gridCellColumns(4)
+
+            ForEach(Array(balanceLines.enumerated()), id: \.element.id) { index, line in
+                balanceRow(line)
+                if index < balanceLines.count - 1 {
+                    Divider().overlay(Tokens.hairline.opacity(0.6)).gridCellColumns(4)
+                }
+            }
+        }
+    }
+
+    private func balanceRow(_ line: NoNoAccount.BalanceLine) -> some View {
+        GridRow {
+            usageCell(line.date.formatted(.dateTime.month(.abbreviated).day()),
+                      color: Tokens.text2)
+            usageCell(Self.moneyCharged(line.amountUSD), color: Tokens.text1)
+            balanceKindTag(line.kind)
+            usageCell(line.expiresDate.map {
+                $0.formatted(.dateTime.month(.abbreviated).day().year())
+            } ?? "—", color: Tokens.text2)
+        }
+        .padding(.vertical, 9)
+    }
+
+    /// Gift is a smoked rose chip; a purchase is the same chip without the tint.
+    private func balanceKindTag(_ kind: NoNoAccount.BalanceLine.Kind) -> some View {
+        let gift = kind == .gift
+        return Text(L(gift ? "nono.balances.tag.gift" : "nono.balances.tag.purchase"))
+            .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+            .foregroundStyle(gift
+                             ? Color(red: 0.86, green: 0.64, blue: 0.66)
+                             : Tokens.text3)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .background(
+                Capsule().fill(gift
+                               ? Color(red: 0.42, green: 0.22, blue: 0.24).opacity(0.55)
+                               : Color.white.opacity(0.06)))
+    }
+
+    private func refreshBalances() async {
+        balancesFailed = false
+        balancesLoading = true
+        defer { balancesLoading = false }
+        do {
+            balanceLines = try await nono.loadBalances()
+        } catch {
+            balancesFailed = true
+        }
+    }
+
     /// Attribution stays on its own level instead of hiding behind the replay
     /// button's hover help. This makes the bundled recording's author, source,
     /// licence, and the fact that it was edited continuously visible.
     private var licensesSection: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text(L("about.music"))
-                .font(.sf(13, weight: .medium))
+                .font(.sf(Tokens.TypeSize.form, weight: .medium))
                 .foregroundStyle(Tokens.text1)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -5562,7 +6105,7 @@ struct InlineSettingsView: View {
             }
 
             Text(L("about.thinkingOrbs"))
-                .font(.sf(13, weight: .medium))
+                .font(.sf(Tokens.TypeSize.form, weight: .medium))
                 .foregroundStyle(Tokens.text1)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -5579,7 +6122,7 @@ struct InlineSettingsView: View {
             // the image modal it opens into) are ports of Interaction Kit's web
             // components — the geometry, springs and thresholds are theirs.
             Text(L("about.interactionKit"))
-                .font(.sf(13, weight: .medium))
+                .font(.sf(Tokens.TypeSize.form, weight: .medium))
                 .foregroundStyle(Tokens.text1)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -5596,7 +6139,7 @@ struct InlineSettingsView: View {
             // "Handwritten answers"). The OFL asks that the licence travel with
             // the software that ships the font.
             Text(L("about.handwritingFont"))
-                .font(.sf(13, weight: .medium))
+                .font(.sf(Tokens.TypeSize.form, weight: .medium))
                 .foregroundStyle(Tokens.text1)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -5656,7 +6199,7 @@ struct InlineSettingsView: View {
                     .frame(width: 17, height: 17)
 
                     Text(title)
-                        .font(.sf(12, weight: .medium))
+                        .font(.sf(Tokens.TypeSize.label, weight: .medium))
                         .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
                         .lineLimit(1)
                         // The row is narrower than three full titles. Coffee's
@@ -5729,13 +6272,13 @@ struct InlineSettingsView: View {
             switch kind {
             case .github:
                 Image(systemName: "star.fill")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.sf(Tokens.TypeSize.form, weight: .semibold))
                     .foregroundStyle(accent)
             case .x:
                 // heart.fill sits smaller in its box than star.fill at the same
                 // point size, so it takes a notch more to read equal.
                 Image(systemName: "heart.fill")
-                    .font(.system(size: 14.5, weight: .semibold))
+                    .font(.sf(Tokens.TypeSize.reading, weight: .semibold))
                     .foregroundStyle(accent)
             case .coffee:
                 // Deliberately larger than the 17pt mark slot — at slot size the
@@ -5852,12 +6395,12 @@ struct InlineSettingsView: View {
             Button(action: action) {
                 HStack(spacing: 8) {
                     Text(title)
-                        .font(.sf(11.5, weight: .medium))
+                        .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                         .foregroundStyle(hovering ? Tokens.text1 : Tokens.text3)
                         .lineLimit(1)
                     Spacer(minLength: 4)
                     Image(systemName: leaves ? "arrow.up.right" : "chevron.right")
-                        .font(.system(size: leaves ? 8.5 : 9, weight: .semibold))
+                        .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                         .foregroundStyle(Tokens.text4)
                         .opacity(hovering ? 1 : 0.6)
                 }
@@ -5884,7 +6427,7 @@ struct InlineSettingsView: View {
         var body: some View {
             Button(action: action) {
                 Text(title)
-                    .font(.sf(11, weight: .medium))
+                    .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                     .foregroundStyle(hovering ? Tokens.text1 : Tokens.text4)
                     .lineLimit(1)
                     .contentShape(Rectangle())
@@ -5930,7 +6473,7 @@ struct InlineSettingsView: View {
         var body: some View {
             Button(title, action: action)
                 .buttonStyle(.plain)
-                .font(.sf(12, weight: weight))
+                .font(.sf(Tokens.TypeSize.label, weight: weight))
                 .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
                 .contentShape(Rectangle())
                 .onHover { hovering = $0 }
@@ -5946,7 +6489,7 @@ struct InlineSettingsView: View {
                 Text(footerText)
             }
         }
-        .font(.sf(11))
+        .font(.sf(Tokens.TypeSize.meta))
         .foregroundStyle(Tokens.text3)
         .fixedSize(horizontal: false, vertical: true)
         .padding(.top, 2)
@@ -6022,7 +6565,7 @@ struct InlineSettingsView: View {
     ) -> some View {
         HStack(spacing: 3) {
             Text(label)
-                .font(.sf(13, weight: .medium))
+                .font(.sf(Tokens.TypeSize.form, weight: .medium))
                 .foregroundStyle(Tokens.text2)
                 .lineLimit(1)
                 .fixedSize()
@@ -6136,7 +6679,7 @@ struct InlineSettingsView: View {
         APIKeyStore.save(apiKey, for: keyScope)
         apiKey = APIKeyStore.stored(for: keyScope)
         withAnimation(.easeOut(duration: 0.16)) { editingKey = false }
-        withAnimation(.easeOut(duration: 0.18)) { saved = true }
+        withAnimation(.easeOut(duration: Tokens.hoverFade)) { saved = true }
         if let pending = pendingModel, pending.provider == keyScope {
             selectAcrossProviders(provider: pending.provider, model: pending.id)
         } else {
@@ -6220,8 +6763,8 @@ private struct ShortcutChipStyle: ButtonStyle {
 /// behind the content as a graceful fallback.
 struct GlassPopoverBackground: ViewModifier {
     /// Corner radius of the glass slab — matches the content it wraps (small list
-    /// popovers use 10; the larger model-picker card uses 14).
-    var cornerRadius: CGFloat = 10
+    /// popovers use the in-panel control radius).
+    var cornerRadius: CGFloat = Tokens.Radius.control
     /// The smoked veil painted over the bare glass. The default (0.42) composites
     /// with the 0.34 baked tint to the panel's dark register (~0.62), so an occluding
     /// popover reads as solid material. A lower value lets far more of the liquid-glass
@@ -6301,10 +6844,91 @@ struct SettingActionButton: View {
     var body: some View {
         Button(title, action: action)
             .buttonStyle(.plain)
-            .font(.sf(11, weight: .semibold))
+            .font(.sf(Tokens.TypeSize.meta, weight: .medium))
             .foregroundStyle(hovering ? Tokens.text1 : tone)
             .onHover { hovering = $0 }
             .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+    }
+}
+
+/// A dollar amount, set by two buttons around the figure.
+///
+/// Modelled on the pill controls this pane already uses — a recessed capsule at
+/// the same 30pt height as the action buttons beside it — rather than AppKit's
+/// `Stepper`, whose two stacked arrows are half the height of everything around
+/// them and carry the system's own chrome into a pane that has none.
+///
+/// The increment is not fixed. A flat $1 step makes $200 forty clicks away, and
+/// a flat $10 step cannot express the $1 minimum; so it widens with the figure,
+/// which is how anyone would count money out loud.
+struct AmountStepper: View {
+    @Binding var value: Double
+    var range: ClosedRange<Double>
+    /// When set, the recessed wash follows this instead of the view's own hover.
+    /// The model detail card pushes it in: `onHover` is dead beside a tracking menu.
+    var lit: Bool? = nil
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var hovering = false
+
+    /// The minus/plus hit strip. The model detail card splits its probed frame
+    /// with this so a swallowed native-menu click can still nudge.
+    static let buttonWidth: CGFloat = 30
+
+    /// The step at a given figure — and, going down, the step that got you
+    /// there. Without the second reading, $10 steps up by $5 and back down by
+    /// $1, and the control cannot return to where it just was.
+    private static func step(at amount: Double, down: Bool) -> Double {
+        let reference = down ? amount - 0.01 : amount
+        if reference < 10 { return 1 }
+        if reference < 50 { return 5 }
+        return 10
+    }
+
+    /// Same nudge the buttons run, for a click that never reaches the buttons.
+    static func nudged(_ value: Double, by direction: Double,
+                       range: ClosedRange<Double>) -> Double {
+        let delta = step(at: value, down: direction < 0) * direction
+        return min(range.upperBound, max(range.lowerBound, (value + delta).rounded()))
+    }
+
+    private func nudge(_ direction: Double) {
+        value = Self.nudged(value, by: direction, range: range)
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            button("minus", enabled: value > range.lowerBound) { nudge(-1) }
+            Text(InlineSettingsView.money(value))
+                .font(.brand(13))
+                .foregroundStyle(Tokens.text1)
+                .frame(width: 54, alignment: .center)
+                // The same digit roll the Stats figures and the island's running
+                // chip use. The animation has to ride the Text for
+                // `numericText` to fire; on the enclosing stack it only moves
+                // the layout, which is what a stepped figure did before — one
+                // string cutting to another.
+                .contentTransition(.numericText(value: value))
+                .animation(reduceMotion ? nil : .snappy(duration: 0.22), value: value)
+            button("plus", enabled: value < range.upperBound) { nudge(1) }
+        }
+        .frame(height: 30)
+        .recessedSurface(in: Capsule(), lit: lit ?? hovering)
+        .contentShape(Capsule())
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: lit ?? hovering)
+    }
+
+    private func button(_ symbol: String, enabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.sf(Tokens.TypeSize.label, weight: .semibold))
+                .foregroundStyle(enabled ? Tokens.text2 : Tokens.text4)
+                .frame(width: Self.buttonWidth, height: 30)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
     }
 }
 
@@ -6322,10 +6946,10 @@ struct SettingInfo: View {
     @State private var showing = false
     @State private var hovering = false
 
-    init(_ text: String, glyph: CGFloat = 12, hit: CGFloat = 20) {
+    init(_ text: String, glyph: CGFloat = Tokens.TypeSize.label, hit: CGFloat = 20) {
         plain = text; rich = nil; self.glyph = glyph; self.hit = hit
     }
-    init(_ text: AttributedString, glyph: CGFloat = 12, hit: CGFloat = 20) {
+    init(_ text: AttributedString, glyph: CGFloat = Tokens.TypeSize.label, hit: CGFloat = 20) {
         plain = nil; rich = text; self.glyph = glyph; self.hit = hit
     }
 
@@ -6344,7 +6968,7 @@ struct SettingInfo: View {
             Group {
                 if let rich { Text(rich) } else { Text(plain ?? "") }
             }
-            .font(.sf(12))
+            .font(.sf(Tokens.TypeSize.label))
             .foregroundStyle(Tokens.text2)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: 240, alignment: .leading)
@@ -6389,8 +7013,8 @@ struct GlassMenu<Content: View>: View {
     /// Its corner is always height/2 — fully round, the same capsule the effort
     /// slider's thumb and the compose row's chips use.
     // Computed, not stored: a generic type can't hold static storage.
-    private static var compactMetrics: Metrics { (11.5, 8, 5, 20, 10, 8, 12) }
-    private static var regularMetrics: Metrics { (13, 10, 7, 30, 11, 9, 15) }
+    private static var compactMetrics: Metrics { (Tokens.TypeSize.meta, Tokens.TypeSize.badge, 5, 20, 10, 8, 12) }
+    private static var regularMetrics: Metrics { (Tokens.TypeSize.form, Tokens.TypeSize.caption, 7, 30, 11, 9, 15) }
 
     private var metrics: Metrics { compact ? Self.compactMetrics : Self.regularMetrics }
     /// The width a compact chip needs for `title`, measured in the face SwiftUI
@@ -6472,17 +7096,17 @@ private struct PickerCard<Content: View>: View {
                 .padding(.vertical, 8)
                 .frame(width: width)
                 .background(
-                    RoundedRectangle(cornerRadius: 9)
+                    RoundedRectangle.control
                         .fill(.white.opacity((selected ? 0.10 : 0.04) + (hovering ? 0.05 : 0)))
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 9)
+                    RoundedRectangle.control
                         .strokeBorder(.white.opacity((selected ? 0.40 : 0.10) + (hovering ? 0.10 : 0)),
                                       lineWidth: selected ? 1 : 0.5)
                 )
-                .contentShape(RoundedRectangle(cornerRadius: 9))
+                .contentShape(RoundedRectangle.control)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PlatePressStyle())
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
     }

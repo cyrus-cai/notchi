@@ -513,7 +513,7 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
               c.state.compactSourceText.isEmpty
         else { return }
         guard case .shortcutComposer = c.state.session else { return }
-        withAnimation(.easeOut(duration: 0.18)) { c.state.compactSourceText = text }
+        withAnimation(.easeOut(duration: Tokens.hoverFade)) { c.state.compactSourceText = text }
     }
 
     // MARK: - The force click, before it is a composer
@@ -2405,7 +2405,7 @@ struct DetachedSessionRootView: View {
     /// sizes, so they cannot round differently. (It used to be 16 here, which
     /// read as a second, squarer species of window beside the 30 of the
     /// shortcut card.)
-    static let cornerRadius: CGFloat = 30
+    static let cornerRadius: CGFloat = Tokens.Radius.shell
 
     /// The empty-prompt shortcut face paints NO window slab: its context badge
     /// floats free above a capsule input, and those two pieces *are* the window
@@ -2432,7 +2432,7 @@ struct DetachedSessionRootView: View {
         }
         .rotationEffect(.degrees(state.tilt), anchor: .top)
         .animation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.62), value: state.tilt)
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: state.phase)
+        .animation(reduceMotion ? nil : .easeOut(duration: Tokens.hoverFade), value: state.phase)
     }
 
     /// The prompt-shortcut window's two faces. The **composer** is a band, a
@@ -2521,7 +2521,7 @@ struct DetachedSessionRootView: View {
             .opacity(compactHovering && state.pressDepth == nil ? 1 : 0)
             .allowsHitTesting(compactHovering && state.pressDepth == nil)
             .animation(
-                reduceMotion ? nil : .easeOut(duration: compactHovering ? 0.22 : 0.12),
+                reduceMotion ? nil : .easeOut(duration: Tokens.hoverFade),
                 value: compactHovering
             )
             .transition(Self.cornerMarkTransition(arriving: false))
@@ -2565,7 +2565,7 @@ struct DetachedSessionRootView: View {
         var segments: [GlassSegmentCluster.Segment] = [
             .init(id: "compact-close", tooltip: L("detached.close"), action: onClose) {
                 Image(systemName: "xmark")
-                    .font(.sf(11, weight: .semibold))
+                    .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
             }
         ]
         // A Force Touch card carries its own composer and ledger — the answer is
@@ -2575,7 +2575,7 @@ struct DetachedSessionRootView: View {
                                   tooltip: L("recent.collapse"),
                                   action: onToggleForceTouchHistory) {
                 Image(systemName: "chevron.left")
-                    .font(.sf(11, weight: .semibold))
+                    .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
             })
         }
         // An unpinned answer stays quiet: the pin appears only after the keyboard
@@ -2596,7 +2596,7 @@ struct DetachedSessionRootView: View {
         // While a force click is still being decided the window is drawn as a
         // bare cap — the same gate the card's own content is behind.
         .opacity(state.pressDepth == nil ? 1 : 0)
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: pinned)
+        .animation(reduceMotion ? nil : .easeOut(duration: Tokens.hoverFade), value: pinned)
     }
 
     /// What is drawn ON the sheet: only the content crosses over, never the glass
@@ -2959,7 +2959,7 @@ private struct WindowTrailingCluster: View {
             },
             .init(tooltip: L("detached.close"), action: close) {
                 Image(systemName: "xmark")
-                    .font(.sf(11, weight: .semibold))
+                    .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
             },
         ], showsTooltips: false)
     }
@@ -3134,7 +3134,7 @@ private struct CompactHistoryDisclosure: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: "chevron.down")
-                .font(.sf(11.5, weight: .semibold))
+                .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
                 .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
                 .rotationEffect(.degrees(expanded ? 180 : 0))
                 .frame(width: Self.size, height: Self.size)
@@ -3162,7 +3162,7 @@ private struct CompactNotificationCloseButton: View {
         let shape = Circle()
         return Button(action: action) {
             Image(systemName: "xmark")
-                .font(.sf(7.5, weight: .semibold))
+                .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                 .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
                 .frame(width: Self.size, height: Self.size)
                 .background {
@@ -3176,9 +3176,8 @@ private struct CompactNotificationCloseButton: View {
                 .contentShape(Circle())
         }
         .buttonStyle(GlassPressStyle())
-        .scaleEffect(hovering ? 1.08 : 1)
         .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.12), value: hovering)
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
         .accessibilityLabel(L("detached.close"))
     }
 }
@@ -3332,7 +3331,7 @@ private struct CompactShortcutPromptView: View {
     /// prompt. That size is scaled to the island — dropped into this small card
     /// it towers over the shortcut titles right below it, and the box reads as
     /// two type scales stacked.
-    private static let fontSize: CGFloat = 14.5
+    private static let fontSize: CGFloat = Tokens.TypeSize.reading
     static var restingRowHeight: CGFloat {
         max(34, max(27, PromptField.lineHeight(for: fontSize))
             + inputVerticalPadding * 2)
@@ -3345,7 +3344,7 @@ private struct CompactShortcutPromptView: View {
     /// are the surface's primary buttons. Held a notch under the input above
     /// them: the line the caret sits on leads the card, and matching it exactly
     /// made the coloured chips read as a second prompt rather than as its answers.
-    static let pickFontSize: CGFloat = 13.5
+    static let pickFontSize: CGFloat = Tokens.TypeSize.label
     static let pickRowHeight: CGFloat = 32
     static let historyRowHeight: CGFloat = 34
     /// Match the main flow: let the Recent content extend naturally until it
@@ -3642,7 +3641,7 @@ private struct CompactShortcutPromptView: View {
         Group {
             if historyItems.isEmpty {
                 Text("No Force Touch history yet")
-                    .font(.sf(13))
+                    .font(.sf(Tokens.TypeSize.form))
                     .foregroundStyle(Tokens.text4)
                     .frame(maxWidth: .infinity, minHeight: Self.historyRowHeight,
                            alignment: .center)
@@ -3661,8 +3660,8 @@ private struct CompactShortcutPromptView: View {
                             MenuCardRow(
                                 title: item.displayTitle,
                                 accessory: relativeTime(item.t),
-                                fontSize: 13.5,
-                                accessoryFontSize: 11.5,
+                                fontSize: Self.pickFontSize,
+                                accessoryFontSize: Tokens.TypeSize.meta,
                                 height: Self.historyRowHeight,
                                 selected: false,
                                 action: { onOpenHistory(item.id) })
@@ -3896,7 +3895,7 @@ struct DetachedComposeView: View {
                 .padding(.top, 10)
             if let feedback = feedbackText {
                 Text(feedback)
-                    .font(.sf(12))
+                    .font(.sf(Tokens.TypeSize.label))
                     .tracking(0.2)
                     .foregroundStyle(model.noteError == nil ? Tokens.text4 : Tokens.text2)
                     .lineLimit(3)
@@ -4341,6 +4340,8 @@ struct DetachedThreadView: View {
                                 }
                                 Color.clear.frame(height: 1)
                             }
+                            .environment(\.answerMediaBaseDirectory,
+                                         store.agentFolderPath.map { URL(fileURLWithPath: $0) })
                             .frame(maxWidth: .infinity, alignment: .leading)
                             // A ScrollView otherwise accepts the viewport's finite height
                             // proposal and the probe below only reports that clipped box.
@@ -4534,7 +4535,7 @@ struct DetachedThreadView: View {
                          height: CGFloat.greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             attributes: [
-                .font: NSFont.systemFont(ofSize: 15),
+                .font: NSFont.systemFont(ofSize: Tokens.TypeSize.reading),
                 .paragraphStyle: paragraph,
             ])
         // Same arithmetic the real measurement goes through (chrome, card
@@ -4696,7 +4697,7 @@ struct DetachedThreadView: View {
                         .padding(.leading, 12)
                 } else if turn.usedClipboard {
                     Text(L("result.basedOnCopied"))
-                        .font(.sf(11))
+                        .font(.sf(Tokens.TypeSize.meta))
                         .tracking(0.2)
                         .foregroundStyle(Tokens.text4)
                         .padding(.leading, 12)
@@ -4745,6 +4746,7 @@ struct DetachedThreadView: View {
             onRegenerateWith: canRegenerate ? onRegenerateWith : nil,
             regenModel: turn.regenModel,
             answerModel: turn.answerModel,
+            reasoning: turn.reasoning,
             pendingQuestion: turn.streaming ? turn.pendingQuestion : nil,
             onChooseOption: onChooseOption
         )
@@ -4802,7 +4804,7 @@ struct DetachedAgentTaskView: View {
                     .onAppear { lastKnown = manager.tasks.first { $0.id == taskID } }
             } else {
                 Text(L("detached.task.gone"))
-                    .font(.sf(13))
+                    .font(.sf(Tokens.TypeSize.form))
                     .foregroundStyle(Tokens.text3)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -4921,7 +4923,7 @@ struct DetachedAgentTaskView: View {
         HStack(spacing: 10) {
             AgentStatusDot(running: task.isRunning, outcome: task.outcome)
             Text("\(task.engine.displayName) · \(task.folder.lastPathComponent)")
-                .font(.sf(14, weight: .medium))
+                .font(.sf(Tokens.TypeSize.reading, weight: .medium))
                 .foregroundStyle(Tokens.text2)
                 .lineLimit(1)
             Color.clear
@@ -4932,7 +4934,7 @@ struct DetachedAgentTaskView: View {
                 }
                 Button(action: { manager.cancel(taskID: task.id) }) {
                     Image(systemName: "stop.circle")
-                        .font(.sf(13, weight: .semibold))
+                        .font(.sf(Tokens.TypeSize.form, weight: .semibold))
                         .foregroundStyle(Tokens.text3)
                         .frame(width: 24, height: 24)
                         .contentShape(Rectangle())
@@ -4949,7 +4951,7 @@ struct DetachedAgentTaskView: View {
     private func elapsedLabel(_ elapsed: TimeInterval) -> some View {
         let seconds = max(0, Int(elapsed))
         return Text(NotchModel.formatAgentElapsed(TimeInterval(seconds)))
-            .font(.sf(11))
+            .font(.sf(Tokens.TypeSize.meta))
             .monospacedDigit()
             .foregroundStyle(Tokens.text4)
             .lineLimit(1)

@@ -224,7 +224,7 @@ extension Font {
     /// numerals give the sheet a face without inventing one.
     ///
     /// Everything else on the pane sits on three rungs and no more: figures here,
-    /// `.sf(11)` for the label under a figure, `.sf(9)` for the grid's rails.
+    /// `.sf(Tokens.TypeSize.meta)` for the label under a figure, `.sf(Tokens.TypeSize.badge)` for the grid's rails.
     /// 18 — the same size the About masthead sets the wordmark at, which is not a
     /// coincidence worth breaking: Prompt sets noticeably taller than San
     /// Francisco at equal point size, and every step above this pushed the
@@ -279,7 +279,7 @@ struct StatsPane: View {
     private var privacyLine: some View {
         HStack(spacing: 2) {
             Text(L("stats.privacy"))
-                .font(.sf(11))
+                .font(.sf(Tokens.TypeSize.meta))
                 .foregroundStyle(Tokens.text4)
                 .lineLimit(1)
                 .fixedSize()
@@ -316,7 +316,7 @@ struct StatsPane: View {
             }
         }
         .padding(10)
-        .recessedSurface(in: RoundedRectangle(cornerRadius: 10, style: .continuous),
+        .recessedSurface(in: RoundedRectangle.control,
                          lit: false)
     }
 
@@ -325,10 +325,10 @@ struct StatsPane: View {
     private var emptyState: some View {
         VStack(spacing: 8) {
             Image(systemName: "chart.bar")
-                .font(.sf(26, weight: .light))
+                .font(.sf(Tokens.TypeSize.figure, weight: .light))
                 .foregroundStyle(Tokens.text4)
             Text(L("stats.empty"))
-                .font(.sf(13))
+                .font(.sf(Tokens.TypeSize.form))
                 .foregroundStyle(Tokens.text3)
         }
         .frame(maxWidth: .infinity)
@@ -417,13 +417,13 @@ private struct StatsTotal: View {
             // a quarter of the panel; it shrinks rather than truncating, because a
             // clipped label on a four-column sheet reads as a layout bug.
             // The label row is pinned to the height the label alone would take
-            // (13 at `.sf(11)`) so the ⓘ can't set it. Left to size itself, the
+            // (13 at `.sf(Tokens.TypeSize.meta)`) so the ⓘ can't set it. Left to size itself, the
             // button's own metrics made this one column's label sit a point and a
             // half below the three beside it — on a row of four tiles that reads
             // as a misprint.
             HStack(spacing: 2) {
                 Text(label)
-                    .font(.sf(11))
+                    .font(.sf(Tokens.TypeSize.meta))
                     .foregroundStyle(Tokens.text3)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
@@ -510,7 +510,7 @@ private struct StatsActivityCard: View {
             }
         }
         .padding(10)
-        .recessedSurface(in: RoundedRectangle(cornerRadius: 10, style: .continuous),
+        .recessedSurface(in: RoundedRectangle.control,
                          lit: false)
     }
 
@@ -564,7 +564,7 @@ private struct StatsStreak: View {
             // label; the longest of them ("Longest streak", "Hora punta") shrinks
             // rather than truncating, the same way the totals row's labels do.
             Text(label)
-                .font(.sf(11))
+                .font(.sf(Tokens.TypeSize.meta))
                 .foregroundStyle(Tokens.text3)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
@@ -589,7 +589,7 @@ private struct StatsPagerButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.sf(10.5, weight: .semibold))
+                .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
                 .foregroundStyle(tint)
                 .frame(width: 22, height: 22)
                 .contentShape(Rectangle())
@@ -744,7 +744,7 @@ private struct StatsHeatmap: View {
                 Group {
                     if row % 2 == 1 {
                         Text(weekdaySymbol(row))
-                            .font(.sf(9))
+                            .font(.sf(Tokens.TypeSize.badge))
                             .foregroundStyle(Tokens.text4)
                     } else {
                         Color.clear
@@ -760,7 +760,7 @@ private struct StatsHeatmap: View {
         ZStack(alignment: .topLeading) {
             ForEach(monthMarks(from: start, weeks: grid.weeks), id: \.column) { mark in
                 Text(mark.title)
-                    .font(.sf(9))
+                    .font(.sf(Tokens.TypeSize.badge))
                     .foregroundStyle(Tokens.text4)
                     .fixedSize()
                     .offset(x: CGFloat(mark.column) * grid.stride)

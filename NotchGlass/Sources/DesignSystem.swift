@@ -64,6 +64,45 @@ enum Tokens {
     /// physical, damped enough that it never wobbles.
     static let stackSpring = Animation.spring(response: 0.34, dampingFraction: 0.86)
 
+    /// Glass chips squash to this on press.
+    static let chipPressScale: CGFloat = 0.92
+    /// Rows, plates, and recessed CTAs squash to this on press.
+    static let platePressScale: CGFloat = 0.97
+    static let platePressSpring = Animation.spring(response: 0.22, dampingFraction: 0.72)
+
+    // MARK: Radius
+    //
+    // Five chrome radii. The resting notch (`notchRestRadius`, 9) is hardware
+    // and stays off this ladder. Decorative ticks (≤3) stay off it too.
+    enum Radius {
+        /// Code blocks, inner wells, tiny chips.
+        static let inset: CGFloat = 8
+        /// In-panel fields, list rows, stats cards.
+        static let control: CGFloat = 10
+        /// Detached-window cards, archive rows, tooltips, image tiles.
+        static let window: CGFloat = 12
+        /// Floating menus and in-pane cards of the same family.
+        static let menu: CGFloat = 18
+        /// Modal glass slabs: confirmations, pickers, overlays.
+        static let modal: CGFloat = 22
+        /// Island and detached-window shells.
+        static let shell: CGFloat = 30
+    }
+
+    // MARK: Type
+    //
+    // Eight sizes. Half-point neighbors (11.5 / 12, 14 / 14.5 / 15) were drift.
+    enum TypeSize {
+        static let badge: CGFloat = 8
+        static let caption: CGFloat = 10
+        static let meta: CGFloat = 11
+        static let label: CGFloat = 12.5
+        static let form: CGFloat = 13
+        static let reading: CGFloat = 14.5
+        static let prompt: CGFloat = 16.5
+        static let figure: CGFloat = 26
+    }
+
     // Danger accent — used sparingly for genuine errors and destructive actions
     // (update failure, a destructive menu item). Success/confirmation states stay
     // neutral ink instead: no coloured dots, no green pills.
@@ -76,6 +115,9 @@ enum Tokens {
     // Success — the brief checkmark when a connection lands. Muted to match the
     // glass; shown only for the ~0.6s confirmation beat, never as a standing pill.
     static let success = Color(red: 0.40, green: 0.82, blue: 0.55)
+
+    /// Prepaid credit below this offers a top-up. The dollars themselves stay ink.
+    static let lowBalanceUSD: Double = 0.1
 
     // MARK: Source / intent palette
     //
@@ -154,6 +196,67 @@ enum Tokens {
     static let openWidthResult: CGFloat = 600
     static let openWidthSettings: CGFloat = 580   // inline settings form
     static let openWidthWhatsNew: CGFloat = 600   // release-notes reading column
+}
+
+/// Dusty rose chip when a Notchi Balance is empty. Same face on the model
+/// card and the settings wallet: fill and hairline at one muted hue, never
+/// danger ink.
+struct LowBalanceTag: View {
+    static let shape = RoundedRectangle(cornerRadius: 4, style: .continuous)
+    private static let smoke = Color(red: 0.86, green: 0.62, blue: 0.62)
+
+    private static var label: String { L("model.detail.nono.empty") }
+
+    var body: some View {
+        Text(Self.label)
+            .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+            .tracking(0.8)
+            .foregroundStyle(Self.smoke.opacity(0.78))
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(Self.smoke.opacity(0.10), in: Self.shape)
+            .overlay(Self.shape.strokeBorder(Self.smoke.opacity(0.22), lineWidth: 0.6))
+    }
+
+    /// The chip's width, for a card sized by arithmetic (the recents menu).
+    static var width: CGFloat {
+        let font = NSFont.systemFont(ofSize: Tokens.TypeSize.badge, weight: .semibold)
+        let text = NSAttributedString(string: label,
+                                      attributes: [.font: font, .kern: 0.8])
+        return ceil(text.size().width) + 10
+    }
+
+    /// The chip as an image, for a native `NSMenu` row, which draws images and
+    /// not views — rendered from this view, as `VendorLogo.menuImage` does. Not
+    /// a template: the rose is the point.
+    @MainActor static let menuImage: NSImage? = render(LowBalanceTag())
+
+    @MainActor private static func render(_ tag: LowBalanceTag) -> NSImage? {
+        let renderer = ImageRenderer(content: tag)
+        renderer.scale = 3
+        guard let cg = renderer.cgImage else { return nil }
+        return NSImage(cgImage: cg, size: NSSize(width: CGFloat(cg.width) / 3,
+                                                 height: CGFloat(cg.height) / 3))
+    }
+}
+
+/// The Add credit button's face. Settings' wallet card and the model detail
+/// card draw this one view; the card draws it `compact`, one size down.
+struct AddCreditButtonFace: View {
+    let title: String
+    let lit: Bool
+    var compact = false
+
+    var body: some View {
+        Text(title)
+            .font(.sf(compact ? Tokens.TypeSize.label : Tokens.TypeSize.form, weight: .medium))
+            .foregroundStyle(Tokens.text1)
+            .fixedSize()
+            .padding(.horizontal, compact ? 12 : 14)
+            .frame(height: compact ? 26 : 30)
+            .prominentSurface(in: Capsule(), lit: lit)
+            .contentShape(Capsule())
+    }
 }
 
 /// Experiments that must never leak into a release build. Each flag is false by
@@ -285,8 +388,8 @@ enum Haptics {
 extension View {
     /// The panel's ONE small-caps caption register: the title over a full-panel
     /// module (SETTINGS / WHAT'S NEW) and the section headings inside one
-    /// (FEATURES / FIXES, the model picker's provider groups). 10pt semibold,
-    /// tracked out, at meta weight — quiet enough to label without competing with
+    /// (FEATURES / FIXES, the model picker's provider groups). Caption size,
+    /// semibold, tracked out — quiet enough to label without competing with
     /// the content it sits over.
     ///
     /// Four surfaces used to spell this out by hand and had drifted to 10/0.8 in
@@ -299,7 +402,7 @@ extension View {
     /// weight, tracking, or case; anything wanting a different shape of caption
     /// wants a different register, not an argument here.
     func captionLabel(color: Color = Tokens.text4) -> some View {
-        font(.sf(10, weight: .semibold))
+        font(.sf(Tokens.TypeSize.caption, weight: .semibold))
             .tracking(0.8)
             .textCase(.uppercase)
             .foregroundStyle(color)
@@ -318,6 +421,27 @@ extension Font {
     /// landing page (its `--brand` family). Used only for the name of the thing.
     static func brand(_ size: CGFloat) -> Font {
         .custom("Prompt-Medium", fixedSize: size)
+    }
+}
+
+extension RoundedRectangle {
+    static var inset: RoundedRectangle {
+        RoundedRectangle(cornerRadius: Tokens.Radius.inset, style: .continuous)
+    }
+    static var control: RoundedRectangle {
+        RoundedRectangle(cornerRadius: Tokens.Radius.control, style: .continuous)
+    }
+    static var window: RoundedRectangle {
+        RoundedRectangle(cornerRadius: Tokens.Radius.window, style: .continuous)
+    }
+    static var menu: RoundedRectangle {
+        RoundedRectangle(cornerRadius: Tokens.Radius.menu, style: .continuous)
+    }
+    static var modal: RoundedRectangle {
+        RoundedRectangle(cornerRadius: Tokens.Radius.modal, style: .continuous)
+    }
+    static var shell: RoundedRectangle {
+        RoundedRectangle(cornerRadius: Tokens.Radius.shell, style: .continuous)
     }
 }
 
@@ -1003,7 +1127,7 @@ private enum TooltipTextMetrics {
     static func oneLineWidth(_ text: String) -> CGFloat {
         if let hit = cache[text] { return hit }
         let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+            .font: NSFont.systemFont(ofSize: Tokens.TypeSize.meta, weight: .medium),
             .kern: 0.1,
         ]
         let width = (text as NSString).size(withAttributes: attrs).width.rounded(.up)
@@ -1231,7 +1355,7 @@ private struct TooltipLabel: View {
     @ViewBuilder
     static func sizedText(_ text: String, width: CGFloat? = nil) -> some View {
         let base = Text(text)
-            .font(.sf(11, weight: .medium))
+            .font(.sf(Tokens.TypeSize.meta, weight: .medium))
             .tracking(0.1)
             .foregroundStyle(Tokens.text2)
         if let width {
@@ -1255,7 +1379,7 @@ private struct TooltipLabel: View {
         // `Capsule` for a single line, but a two-line tip keeps square-ish ends
         // instead of blowing its corners out into half-circles that eat into the
         // text.
-        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        let shape = RoundedRectangle.window
         Self.sizedText(text, width: width)
             .background(
                 ZStack {

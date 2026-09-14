@@ -95,7 +95,7 @@ Notchi is drawn in macOS Liquid Glass — including the edge glow and physical m
 ## Privacy
 
 - No account or sign-in is required.
-- Prompts, chats, notes, reminders, agent sessions, clipboard, and history stay on your Mac, or go directly to the AI provider you configured. Notchi does not relay any request content.
+- Prompts, chats, notes, reminders, agent sessions, clipboard, and history stay on your Mac, or go directly to the AI provider you configured. The exception is Notchi's own model (Blend1): its requests pass through Notchi's gateway, which records token counts and charges, not message content.
 
 ## Questions
 
@@ -121,7 +121,7 @@ Yes. Agent mode runs the official CLI you already installed and signed in to, in
 
 **Where does my data go?**
 
-Notchi does not operate a user-data backend. AI prompts and deliberately added context go to the provider or CLI you selected; web-search requests go to the configured search service. Notes, reminders, local history, clipboard contents, and local files otherwise remain on your Mac.
+With a provider or CLI you brought yourself, AI prompts and deliberately added context go directly to it. With Notchi's own model (Blend1), they go through Notchi's gateway to the model host; the gateway records token counts and charges, not message content. Web-search requests go to the configured search service. Notes, reminders, local history, clipboard contents, and local files otherwise remain on your Mac.
 
 **Why does Notchi ask for system permissions?**
 

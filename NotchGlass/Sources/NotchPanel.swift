@@ -45,6 +45,27 @@ final class NotchPanel: NSPanel {
     /// `editingLevel`.
     private var composing = false
 
+    /// Climb-back from `editingLevel` is delayed so a CJK syllable commit does
+    /// not briefly uncover the menu bar before the next pinyin letter marks text
+    /// again. Without this the bar strobes in and out of the notch cap between
+    /// every character. Dropping under a live candidate is still immediate.
+    private var restAfterComposition: DispatchWorkItem?
+    private static let compositionRestDelay: TimeInterval = 0.55
+
+    /// A mouse-down landed inside the panel. The AppDelegate answers it by
+    /// giving this panel the keyboard (and activating the app) when it doesn't
+    /// already hold it.
+    ///
+    /// The panel is `.nonactivatingPanel` and its canvas takes first mouse, so a
+    /// click on the open island is DELIVERED without the app ever coming
+    /// forward: buttons work, but every keyboard chord the panel owns stays
+    /// dead, because key events go to whatever app is actually active. That is
+    /// what "the pin shortcut does nothing" looked like on a pinned panel the
+    /// user had clicked away from — its pin *button* still worked, ⌘P did not.
+    /// Clicking the open island is deliberate engagement, so it claims the
+    /// keyboard the way clicking any window does.
+    var onClickInside: (() -> Void)?
+
     init(contentRect: NSRect) {
         super.init(
             contentRect: contentRect,
@@ -110,12 +131,36 @@ final class NotchPanel: NSPanel {
     /// The composition gate: `true` while the focused field holds marked text (the
     /// candidate window is up, or about to be), `false` the moment it commits. Called
     /// on every storage edit, so it must stay cheap and idempotent — it only touches
-    /// `level` when the state actually flips.
+    /// `level` when the state actually flips. A `false` is held for
+    /// `compositionRestDelay` so consecutive IME syllables do not bounce the island
+    /// above the menu bar between commits.
     func setComposing(_ isComposing: Bool) {
-        guard composing != isComposing else { return }
-        composing = isComposing
-        let want = isComposing ? Self.editingLevel : Self.restingLevel
-        if level != want { level = want }
+        if isComposing {
+            restAfterComposition?.cancel()
+            restAfterComposition = nil
+            applyComposing(true)
+            return
+        }
+        guard composing || restAfterComposition != nil else { return }
+        restAfterComposition?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.restAfterComposition = nil
+            self.applyComposing(false)
+        }
+        restAfterComposition = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.compositionRestDelay,
+                                      execute: work)
+    }
+
+    override func sendEvent(_ event: NSEvent) {
+        switch event.type {
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+            onClickInside?()
+        default:
+            break
+        }
+        super.sendEvent(event)
     }
 
     /// Force the island back to its resting level and clear the editing ref-count.
@@ -123,8 +168,17 @@ final class NotchPanel: NSPanel {
     /// e.g. the panel closing mid-composition — can never strand it at `editingLevel`,
     /// where it would sit below the menu bar and other windows at rest.
     func restRestingLevel() {
+        restAfterComposition?.cancel()
+        restAfterComposition = nil
         activeEditors = 0
         composing = false
         if level != Self.restingLevel { level = Self.restingLevel }
+    }
+
+    private func applyComposing(_ isComposing: Bool) {
+        guard composing != isComposing else { return }
+        composing = isComposing
+        let want = isComposing ? Self.editingLevel : Self.restingLevel
+        if level != want { level = want }
     }
 }

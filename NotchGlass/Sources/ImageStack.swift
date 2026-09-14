@@ -31,13 +31,14 @@ struct AnswerImageRef: Equatable, Identifiable {
     var id: String { urlString }
 }
 
-/// Open a media reference in the default app — http/https only, matching the
-/// answer renderer's link policy (answer text comes from an LLM).
+/// Open a media reference in the default app. http(s) goes to the browser;
+/// a local file (Grok's `images/1.jpg`, a salvaged history JPEG) opens in Preview.
 private func openImageURL(_ urlString: String) {
-    guard let url = URL(string: urlString),
-          let scheme = url.scheme?.lowercased(),
-          scheme == "http" || scheme == "https" else { return }
-    NSWorkspace.shared.open(url)
+    guard let url = AnswerMediaLoader.resolve(urlString, base: nil) else { return }
+    let scheme = url.scheme?.lowercased()
+    if scheme == "http" || scheme == "https" || url.isFileURL {
+        NSWorkspace.shared.open(url)
+    }
 }
 
 // MARK: - The stack
@@ -219,9 +220,10 @@ private struct ImageStackCard: View {
     /// The border the web component draws outside the picture (3px), and the
     /// radius it rounds to (rounded-xl).
     private static let border: CGFloat = 3
-    private static let radius: CGFloat = 12
+    private static let radius: CGFloat = Tokens.Radius.window
 
     @Environment(\.imageLightboxHostID) private var hostID
+    @Environment(\.answerMediaBaseDirectory) private var mediaBase
 
     @State private var outcome: AnswerMediaLoader.Outcome?
     @State private var hovering = false
@@ -247,7 +249,7 @@ private struct ImageStackCard: View {
                         .aspectRatio(contentMode: .fill)
                 case .pdf, .failed:
                     Image(systemName: "photo")
-                        .font(.sf(15, weight: .medium))
+                        .font(.sf(Tokens.TypeSize.reading, weight: .medium))
                         .foregroundStyle(Tokens.text4)
                 case nil:
                     ProgressView().controlSize(.small).tint(.white.opacity(0.4))
@@ -272,8 +274,9 @@ private struct ImageStackCard: View {
             }
         }
         .accessibilityLabel(image.alt.isEmpty ? "image" : image.alt)
-        .task(id: image.urlString) {
-            outcome = await AnswerMediaLoader.shared.image(for: image.urlString)
+        .task(id: image.urlString + (mediaBase?.path ?? "")) {
+            outcome = await AnswerMediaLoader.shared.image(for: image.urlString,
+                                                           base: mediaBase)
         }
     }
 }
@@ -369,6 +372,15 @@ final class ImageLightboxCenter: ObservableObject {
     }
 }
 
+/// Directory relative markdown image paths resolve against — Grok's `image_gen`
+/// writes `images/1.jpg` into the agent project (or the chat turn's working
+/// directory) and tells the model to cite that short path. Without a base those
+/// references never load (http-only) and the picture collapses after the
+/// placeholder.
+private struct AnswerMediaBaseKey: EnvironmentKey {
+    static let defaultValue: URL? = nil
+}
+
 /// The surface an image tapped inside this subtree opens into. Nil means nothing
 /// hosts a lightbox here (settings copy, previews) — those fall back to opening
 /// the source in the browser.
@@ -377,6 +389,11 @@ private struct ImageLightboxHostKey: EnvironmentKey {
 }
 
 extension EnvironmentValues {
+    var answerMediaBaseDirectory: URL? {
+        get { self[AnswerMediaBaseKey.self] }
+        set { self[AnswerMediaBaseKey.self] = newValue }
+    }
+
     var imageLightboxHostID: UUID? {
         get { self[ImageLightboxHostKey.self] }
         set { self[ImageLightboxHostKey.self] = newValue }
@@ -479,8 +496,16 @@ private struct ImageLightbox: View {
     private var current: AnswerImageRef? { item.current }
     private var multiple: Bool { item.images.count > 1 }
 
+    /// Only a web image has a source chip. `file://` and in-memory compose keys
+    /// have no host worth showing (and a memory URL's fake host would be noise).
     private var host: String? {
-        current.flatMap { URL(string: $0.urlString)?.host }
+        guard let current,
+              let url = URL(string: current.urlString),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = url.host, !host.isEmpty
+        else { return nil }
+        return host
     }
 
     /// The three pages on the rail: what was, what is, what's next. With exactly
@@ -534,7 +559,7 @@ private struct ImageLightbox: View {
                     HStack(spacing: 8) {
                         if multiple {
                             Text("\(item.index + 1) / \(item.images.count)")
-                                .font(.sf(12))
+                                .font(.sf(Tokens.TypeSize.label))
                                 .monospacedDigit()
                                 .foregroundStyle(Tokens.text4)
                         }
@@ -631,9 +656,9 @@ private struct ImageLightbox: View {
                 .resizable()
                 .aspectRatio(contentMode: .fit)
                 .frame(maxWidth: maxWidth, maxHeight: maxHeight)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .clipShape(RoundedRectangle.inset)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    RoundedRectangle.inset
                         .strokeBorder(Tokens.hairline, lineWidth: 0.5)
                 )
                 .shadow(color: .black.opacity(0.45), radius: 24, y: 10)

@@ -10,11 +10,14 @@ import Carbon.HIToolbox
 // this app's own preferences, and file a note or a reminder. Those last three are
 // the only write surfaces, and each one has a mandatory in-app confirmation gate
 // — the model may decide to call them, but the user decides whether they commit;
-// there are still no shell or computer-use tools. The harness advertises
-// exactly this set; growing it is a matter of adding a `NotchTool` and
-// registering it (see `ToolRegistry.standard(for:)`, or — for a tool that needs
-// the live model, like `search_history` / `ask_user` / `manage_app_settings` —
-// the per-round append in `NotchModel.submit`).
+// there are still no shell or computer-use tools.
+//
+// Most providers advertise the full set every turn. Blend1 does not: it keeps
+// the four Ask tools on every round and adds the rest only when the question
+// points at them (`AskToolIntent`). Growing the surface is a matter of adding a
+// `NotchTool` and registering it (see `ToolRegistry.standard(for:)`, or — for a
+// tool that needs the live model, like `search_history` / `ask_user` /
+// `manage_app_settings` — the per-round append in `NotchModel.submit`).
 
 /// Current local date and time. The notch assistant has no clock of its own
 /// (the model's knowledge has a cutoff), so any "what day is it / how long until
@@ -22,10 +25,9 @@ import Carbon.HIToolbox
 struct DateTimeTool: NotchTool {
     let name = "current_datetime"
     let description = """
-    Returns the user's current local date, time, and timezone. Call this whenever \
-    the answer depends on the current moment — "what day is it", "what time is \
-    it", scheduling, "how long until X", or any relative-date reasoning. Do not \
-    guess the date from training data; call this instead.
+    Returns the user's current local date, time, and timezone. Call for the clock \
+    or a relative time ("how long until X"). Today's date is already in the system \
+    prompt — do not call this just to learn the date.
     """
     let schema: [String: Any] = ["type": "object", "properties": [:]]
 
@@ -57,9 +59,8 @@ struct DateTimeTool: NotchTool {
 struct ReadClipboardTool: NotchTool {
     let name = "read_clipboard"
     let description = """
-    Returns the current text contents of the user's clipboard. Call this when the \
-    user refers to "this", "what I copied", "the text above", or otherwise points \
-    at content they've put on the clipboard that isn't already in the conversation.
+    Returns the current clipboard text. Call when the user refers to "this", \
+    "what I copied", or content that is not already in the conversation.
     """
     let schema: [String: Any] = ["type": "object", "properties": [:]]
 
@@ -93,15 +94,9 @@ struct ReadClipboardTool: NotchTool {
 struct OpenURLTool: NotchTool {
     let name = "open_url"
     let description = """
-    Opens a web URL in the user's default browser, taking over their screen. Call \
-    this ONLY when the user explicitly asked you to open, visit, launch, or go to \
-    a page in this very message — the words have to be theirs. NEVER call it to \
-    look something up, check a page, verify a fact, gather information, or show \
-    the user a source you found: reading a page is read_page's job and searching \
-    is the search tool's job, and neither ever justifies opening a browser. If you \
-    merely think a link would be useful, write it in your answer as a Markdown \
-    link and let the user decide. When in doubt, do not call this tool. Use the \
-    full https URL the user meant.
+    Opens a http(s) URL in the user's browser. Call ONLY when this message \
+    explicitly asks to open, visit, launch, or go to a page. Never for research \
+    or to show a source — write a Markdown link instead.
     """
     let schema: [String: Any] = [
         "type": "object",
@@ -136,13 +131,9 @@ struct OpenURLTool: NotchTool {
 struct CalculateTool: NotchTool {
     let name = "calculate"
     let description = """
-    Evaluates an arithmetic expression exactly and returns the numeric result. \
-    Call this for ANY calculation — arithmetic, percentages, tips, unit math, \
-    multi-step sums — instead of computing in your head; models make silent \
-    mistakes on large or chained numbers. Supports + - * / ^ (power), parentheses, \
-    unary minus, a trailing or inline % (e.g. "18% of 240" → "0.18 * 240"), and \
-    the functions sqrt, abs, ln, log, exp, sin, cos, tan, round, floor, ceil. \
-    Pass the expression as a plain math string in `expression`.
+    Evaluates an arithmetic expression exactly. Call for any calculation instead \
+    of doing it in your head. Supports + - * / ^, parentheses, %, and sqrt, abs, \
+    ln, log, exp, sin, cos, tan, round, floor, ceil.
     """
     let schema: [String: Any] = [
         "type": "object",
@@ -368,14 +359,9 @@ struct ArithmeticParser {
 struct AskUserTool: NotchTool {
     let name = "ask_user"
     let description = """
-    Shows the user one multiple-choice question in the UI and returns the option \
-    they pick. Call this ONLY when you are blocked on a decision that is genuinely \
-    the user's to make and that materially changes the answer — an ambiguous \
-    request with several plausible readings, or a choice between real alternatives \
-    you cannot infer from context. Never use it for anything you can figure out \
-    yourself or with your other tools, and ask at most one question per answer. \
-    Give 2-4 short, distinct options covering the likely answers. The user may not \
-    respond; in that case proceed with your best judgment and say what you assumed.
+    Shows one multiple-choice question and returns the option they pick. Call \
+    only when a choice the user must make changes the answer; at most once per \
+    reply. 2-4 short options. If they do not pick, proceed with your best judgment.
     """
     let schema: [String: Any] = [
         "type": "object",
@@ -449,6 +435,29 @@ struct AppSettingsRequest: Sendable {
     let section: String?
 }
 
+/// Supported ids and values, returned by `action=list` rather than stuffed into
+/// the tool description — the catalog is only needed once the model is actually
+/// changing a setting, not on every first turn.
+let appSettingsCatalog = """
+Supported setting ids and values:
+- app_language: system, english, chinese_simplified, chinese_traditional, japanese, korean, french, spanish
+- dock_icon / menu_bar_icon: shown or hidden
+- launch_at_login / hide_in_fullscreen / live_activity / copy_sense: true or false
+- display_placement: all or built_in
+- hover_sensitivity: low, balanced, or instant
+- note_destination: apple_notes or markdown_folder; notes_folder: absolute path
+- summon_shortcut: disabled, default, double_option, double_command, double_control, double_shift, or a chord such as command+shift+k
+- action_shortcut: a chord such as command+shift+c, or default to restore the shipped one. scope is required: copy_answer, regenerate, pin, new_chat, filter, picker, or detach
+- prompt_shortcut: a global chord, or remove to delete, or keep to edit only its text. prompt is required when creating one. scope picks an existing binding by chord or prompt text; omit scope to create.
+- custom_instructions: text (empty clears it); proxy: URL/host, or auto to clear
+- ai_provider: openrouter, vercel, openai, codex, claude_code, grok_code, pi_code, anthropic, gemini, deepseek, qwen, glm, kimi, minimax, mimo, custom
+- ai_model: model id or default; optional scope is a provider
+- api_key: key text or empty to remove; scope is the provider. Never read keys back.
+- search_backend: native, keenable, exa, or anysearch
+- search_api_key: key text or empty; scope must be keenable, exa, or anysearch. Never read keys back.
+- custom_provider_name / custom_provider_url / custom_provider_model: text (empty clears it)
+"""
+
 /// Read or change Notch's own preferences from the chat composer. Reads are
 /// immediate; writes are deliberately routed through `NotchModel`, which shows
 /// one in-answer Confirm/Cancel card and only commits after Confirm is tapped.
@@ -457,49 +466,12 @@ struct AppSettingsRequest: Sendable {
 struct ManageAppSettingsTool: NotchTool {
     let name = "manage_app_settings"
     let description = """
-    Reads, opens, or changes this Notch app's settings. Use this whenever the user asks in \
-    natural language to view, enable, disable, or change a Notch preference. For \
-    an explicit change, call action=update directly: the tool itself always shows \
-    exactly one Confirm/Cancel card before writing, so NEVER ask for a separate \
-    confirmation with ask_user and never claim success before reading the result. \
-    Put multiple requested changes in one call so they share one confirmation.
-
-    Supported setting ids and values:
-    - app_language: system, english, chinese_simplified, chinese_traditional, japanese, korean, french, spanish
-    - dock_icon / menu_bar_icon: shown or hidden
-    - launch_at_login / hide_in_fullscreen / live_activity / copy_sense: true or false
-    - display_placement: all or built_in
-    - hover_sensitivity: low, balanced, or instant
-    - note_destination: apple_notes or markdown_folder; notes_folder: absolute path
-    - summon_shortcut: disabled, default, double_option, double_command, double_control, double_shift, or a chord such as command+shift+k
-    - action_shortcut: a chord such as command+shift+c, or default to restore the shipped one. \
-    scope is required: copy_answer, regenerate, pin, new_chat, filter, picker, or detach
-    - prompt_shortcut: a global chord such as option+s that runs one saved instruction on \
-    whatever text is selected in any app. Value is the chord, or remove to delete a binding, \
-    or keep to edit only its text. `prompt` carries the instruction and is required when \
-    creating one. `scope` picks an existing binding by its current chord (option+s) or by a \
-    distinctive part of its prompt; omit scope to create a new binding.
-    - custom_instructions: text (empty clears it); proxy: URL/host, or auto to clear the manual proxy
-    - ai_provider: openrouter, vercel, openai, codex, claude_code, grok_code, pi_code, anthropic, gemini, deepseek, qwen, glm, kimi, minimax, mimo, custom
-    - ai_model: model id or default; optional scope is a provider (defaults to the active provider)
-    - api_key: key text or empty to remove; scope is the provider (defaults to active). Never read keys back.
-    - search_backend: native, keenable, exa, or anysearch
-    - search_api_key: key text or empty to remove; scope must be keenable, exa, or anysearch. Never read keys back.
-    - custom_provider_name / custom_provider_url / custom_provider_model: text (empty clears it)
-
-    action=list returns every current value (keys only report configured/not configured). \
-    action=shortcuts returns the complete localized keyboard-shortcut reference, including \
-    the user's current summon shortcut, every editable action with its scope id, and the \
-    user's prompt shortcuts. Use it whenever the user asks what shortcuts, hotkeys, or key \
-    commands the app supports, and ALWAYS read it before changing action_shortcut or \
-    prompt_shortcut so the scope you send points at a binding that really exists. \
-    action=open opens the relevant in-app Settings page without changing anything; \
-    section must be model, capture, general, appearance, shortcuts, stats, or about. Use open \
-    when the user asks for an unsupported value (for example an interface language \
-    the app does not offer), so they land on the real available choices instead of \
-    receiving only a textual refusal. Opening a page needs no confirmation. \
-    For action=update, `changes` is required. Each change has setting, value, and \
-    optional scope. Use canonical values above even when the user speaks another language.
+    Reads, opens, or changes this Notch app's settings. action=list returns current \
+    values and supported ids; action=shortcuts returns the live hotkey reference; \
+    action=open opens a Settings page (section: model, capture, general, appearance, \
+    shortcuts, stats, about); action=update applies changes[] after one Confirm card. \
+    For a change, list first (shortcuts first when editing a hotkey) then update. \
+    If a value is not supported, open that section instead of listing alternatives.
     """
     let schema: [String: Any] = [
         "type": "object",
@@ -625,15 +597,10 @@ struct CaptureRequest: Sendable {
 struct CreateNoteTool: NotchTool {
     let name = "create_note"
     let description = """
-    Saves a note for the user — into Apple Notes, or the Markdown folder they \
-    chose. Call this when the user asks you to note, save, jot, remember, or \
-    write down something with no time attached, and also when they clearly want \
-    to keep something you just produced (a summary, a list, a draft). The tool \
-    itself always shows exactly one Confirm/Cancel card before writing, so NEVER \
-    ask for a separate confirmation with ask_user, and never claim it was saved \
-    before you read this tool's result. Write the note's full final text — it is \
-    filed verbatim, and its first line becomes the title. Use create_reminder \
-    instead whenever the request names a time.
+    Saves a note (Apple Notes or their Markdown folder). Call to note, save, jot, \
+    or keep something with no time attached. The tool shows its own Confirm card; \
+    never claim it was saved until the result says so. First line becomes the title. \
+    Use create_reminder when the request names a time.
     """
     let schema: [String: Any] = [
         "type": "object",
@@ -663,16 +630,11 @@ struct CreateNoteTool: NotchTool {
 struct CreateReminderTool: NotchTool {
     let name = "create_reminder"
     let description = """
-    Creates a reminder in the user's Reminders app, with an alarm at the time you \
-    give. Call this whenever the user asks to be reminded, or asks to save \
-    something that names a moment in time ("tomorrow 3pm", "next Monday", "in two \
-    hours"). The tool itself always shows exactly one Confirm/Cancel card before \
-    writing, so NEVER ask for a separate confirmation with ask_user, and never \
-    claim it was created before you read this tool's result. Resolve relative \
-    times yourself — call current_datetime first if you are unsure what "now" is — \
-    and pass an absolute local `due`. For a repeating reminder, keep the repeat \
-    phrase in `title` ("every day", "每周一", "monthly"): the repeat rule is read \
-    from that text. Use create_note when no time is involved.
+    Creates a Reminders alarm. Call when the user asks to be reminded or to save \
+    something that names a time. Pass an absolute local `due` (YYYY-MM-DDTHH:MM); \
+    call current_datetime first if "now" is unclear. Keep a repeat phrase in title. \
+    The tool shows its own Confirm card; never claim it was created until the result \
+    says so. Use create_note when no time is involved.
     """
     let schema: [String: Any] = [
         "type": "object",
@@ -780,17 +742,11 @@ struct HistoryDigest: Sendable {
 struct SearchHistoryTool: NotchTool {
     let name = "search_history"
     let description = """
-    Searches the user's own history inside this app — every question they asked \
-    it, every note and reminder they captured through it, and every agent task \
-    they ran — each with its timestamp. Call this whenever the user asks about \
-    THEIR OWN past activity rather than about the world: "what did I work on \
-    today", "what have I recorded", "what did I ask you yesterday", "summarize \
-    my week", "did I ever note anything about X". Prefer a date window (`since` \
-    / `until`, or `days`) for "today / yesterday / this week" questions and a \
-    `query` keyword for "did I ever mention X". The CURRENT conversation is \
-    already visible to you — only call this for things outside it. If it returns \
-    nothing, say you found nothing recorded for that period; never invent \
-    entries.
+    Searches the user's own history in this app (questions, notes, reminders, \
+    agent tasks). Call for their past activity, not the world. Use since/until \
+    or days for "today / this week"; query for "did I ever mention X". The current \
+    conversation is already visible — only call this for things outside it. \
+    If it returns nothing, say so; never invent entries.
     """
     let schema: [String: Any] = [
         "type": "object",
@@ -1002,17 +958,11 @@ struct SearchHistoryTool: NotchTool {
 /// and when snippets are close-but-not-quite, `read_page` the best result
 /// instead of rewording the same query again.
 let webSearchToolDescription = """
-Searches the web for current, real-time information and returns the top \
-results with sources and dates. Call this whenever the answer depends on \
-information that may have changed or is past your knowledge cutoff — news, \
-current events, today's prices or rates, the latest version of something, or \
-anything time-sensitive. Prefer a focused query. When you need several \
-independent facts, issue multiple search calls with different queries in the \
-SAME turn — they run in parallel and save a round-trip. If the results look \
-relevant but the snippets don't contain the specific fact you need, call \
-read_page on the most promising result instead of searching again with a \
-reworded query. If the results don't contain the answer, say so rather than \
-guessing.
+Searches the web for current information, with sources and dates. Call when \
+the answer may have changed since training. Prefer a focused query. Independent \
+facts: multiple search calls in the SAME turn (they run in parallel). If a \
+snippet is close but thin, read_page that URL instead of searching again. If \
+the results don't contain the answer, say so.
 """
 
 /// Backend seam for web search. Providers own authentication, transport, and
@@ -1021,6 +971,59 @@ guessing.
 /// this protocol plus one case in `SearchBackend.searchProvider`.
 protocol SearchProvider: Sendable {
     func search(_ input: [String: Any]) async throws -> (text: String, sources: [WebSource])
+}
+
+/// A search service failed: transport error, non-2xx status, or a reply it
+/// flagged as an error. Providers throw this instead of returning failure text,
+/// so the harness can tell a search-service failure from a model failure and
+/// tell the user which one happened.
+struct SearchServiceError: LocalizedError, Sendable {
+    /// The service's display name ("Exa", "Keenable", "AnySearch", "GLM").
+    let service: String
+    /// What failed, e.g. "HTTP 401" or the transport error's description.
+    let detail: String
+
+    /// The user-facing reason, shown when the round ends without an answer.
+    var errorDescription: String? { L("search.error.failed", service, detail) }
+
+    /// The tool result the model reads in place of search results.
+    var modelText: String {
+        "Error: the \(service) web search service failed (\(detail)). No results "
+        + "were retrieved. Answer from what you know and say the web search failed; "
+        + "do not present anything as a search result."
+    }
+
+    /// Send a search request, mapping a transport failure or a non-2xx status to
+    /// a `SearchServiceError` for `service`.
+    static func fetch(_ request: URLRequest, service: String) async throws -> Data {
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await ProxyConfig.urlSession.data(for: request)
+        } catch {
+            throw SearchServiceError(service: service, detail: error.localizedDescription)
+        }
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(status) else {
+            throw SearchServiceError(service: service, detail: "HTTP \(status)")
+        }
+        return data
+    }
+}
+
+/// The service answered, but with no hits. Distinct from `SearchServiceError`
+/// (the service itself failed). The harness reports this to the user instead of
+/// spending another model round on it — that follow-up is what used to sit for
+/// tens of seconds and then surface as a model 429.
+enum SearchMiss {
+    static func modelText(query: String) -> String {
+        "The search returned no results for \"\(query)\". Do not fabricate "
+        + "an answer — tell the user the search found nothing on this."
+    }
+
+    static func isMiss(_ text: String) -> Bool {
+        text.hasPrefix("The search returned no results for")
+    }
 }
 
 /// The one web-search capability exposed to models and consumed by the harness.
@@ -1113,16 +1116,8 @@ struct GLMSearchProvider: SearchProvider {
             "search_query": query,
         ])
 
-        do {
-            let (data, response) = try await ProxyConfig.urlSession.data(for: req)
-            guard let http = response as? HTTPURLResponse,
-                  (200..<300).contains(http.statusCode) else {
-                return ("Search failed (HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)).", [])
-            }
-            return Self.parse(data, query: query)
-        } catch {
-            return ("Search failed: \(error.localizedDescription)", [])
-        }
+        let data = try await SearchServiceError.fetch(req, service: "GLM")
+        return Self.parse(data, query: query)
     }
 
     /// Parse the standalone API's `{ search_result: [{title, content, link,
@@ -1134,9 +1129,7 @@ struct GLMSearchProvider: SearchProvider {
     private static func parse(_ data: Data, query: String) -> (text: String, sources: [WebSource]) {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let results = obj["search_result"] as? [[String: Any]], !results.isEmpty else {
-            let miss = "The search returned no results for \"\(query)\". Do not fabricate "
-                     + "an answer — tell the user the search found nothing on this."
-            return (miss, [])
+            return (SearchMiss.modelText(query: query), [])
         }
         let top = results.prefix(maxResults)
         let blocks = top.enumerated().map { (i, r) -> String in
@@ -1207,16 +1200,8 @@ struct ExaSearchProvider: SearchProvider {
             "contents": ["highlights": true],
         ])
 
-        do {
-            let (data, response) = try await ProxyConfig.urlSession.data(for: req)
-            guard let http = response as? HTTPURLResponse,
-                  (200..<300).contains(http.statusCode) else {
-                return ("Search failed (HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)).", [])
-            }
-            return Self.parse(data, query: query)
-        } catch {
-            return ("Search failed: \(error.localizedDescription)", [])
-        }
+        let data = try await SearchServiceError.fetch(req, service: "Exa")
+        return Self.parse(data, query: query)
     }
 
     /// Parse Exa's `{ results: [{title, url, publishedDate, highlights:[...],
@@ -1227,9 +1212,7 @@ struct ExaSearchProvider: SearchProvider {
     private static func parse(_ data: Data, query: String) -> (text: String, sources: [WebSource]) {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let results = obj["results"] as? [[String: Any]], !results.isEmpty else {
-            let miss = "The search returned no results for \"\(query)\". Do not fabricate "
-                     + "an answer — tell the user the search found nothing on this."
-            return (miss, [])
+            return (SearchMiss.modelText(query: query), [])
         }
         let top = results.prefix(maxResults)
         let blocks = top.enumerated().map { (i, r) -> String in
@@ -1313,16 +1296,8 @@ struct KeenableSearchProvider: SearchProvider {
         req.setValue(key, forHTTPHeaderField: "X-API-Key")
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["query": query])
 
-        do {
-            let (data, response) = try await ProxyConfig.urlSession.data(for: req)
-            guard let http = response as? HTTPURLResponse,
-                  (200..<300).contains(http.statusCode) else {
-                return ("Search failed (HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)).", [])
-            }
-            return Self.parse(data, query: query)
-        } catch {
-            return ("Search failed: \(error.localizedDescription)", [])
-        }
+        let data = try await SearchServiceError.fetch(req, service: "Keenable")
+        return Self.parse(data, query: query)
     }
 
     /// Parse Keenable's `{ results: [{title, url, snippet, description,
@@ -1333,18 +1308,14 @@ struct KeenableSearchProvider: SearchProvider {
     private static func parse(_ data: Data, query: String) -> (text: String, sources: [WebSource]) {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let results = obj["results"] as? [[String: Any]] else {
-            let miss = "The search returned no results for \"\(query)\". Do not fabricate "
-                     + "an answer — tell the user the search found nothing on this."
-            return (miss, [])
+            return (SearchMiss.modelText(query: query), [])
         }
         // Drop empty-shell results (no usable excerpt — Keenable's tail padding is
         // often a bare title with no snippet/description, e.g. "- YouTube"), THEN
         // take the top few. Filtering before the cap keeps the kept count honest.
         let usable = results.filter { !snippetText(from: $0).isEmpty }
         guard !usable.isEmpty else {
-            let miss = "The search returned no results for \"\(query)\". Do not fabricate "
-                     + "an answer — tell the user the search found nothing on this."
-            return (miss, [])
+            return (SearchMiss.modelText(query: query), [])
         }
         let top = usable.prefix(maxResults)
         let blocks = top.enumerated().map { (i, r) -> String in
@@ -1428,33 +1399,23 @@ struct AnySearchProvider: SearchProvider {
             "format": "json",
         ])
 
-        do {
-            let (data, response) = try await ProxyConfig.urlSession.data(for: req)
-            guard let http = response as? HTTPURLResponse,
-                  (200..<300).contains(http.statusCode) else {
-                return ("Search failed (HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)).", [])
-            }
-            return Self.parse(data, query: query)
-        } catch {
-            return ("Search failed: \(error.localizedDescription)", [])
-        }
+        let data = try await SearchServiceError.fetch(req, service: "AnySearch")
+        return try Self.parse(data, query: query)
     }
 
     /// Parse `{ code, message, data: { results: [{title,url,snippet,content}] } }`
     /// into the same model text + source badges used by the other searchers.
-    private static func parse(_ data: Data, query: String) -> (text: String, sources: [WebSource]) {
+    private static func parse(_ data: Data, query: String) throws -> (text: String, sources: [WebSource]) {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return ("Search failed: AnySearch returned an unreadable response.", [])
+            throw SearchServiceError(service: "AnySearch", detail: "unreadable response")
         }
         if let code = obj["code"] as? NSNumber, code.intValue != 0 {
-            let message = (obj["message"] as? String) ?? "unknown API error"
-            return ("Search failed: \(message)", [])
+            let message = (obj["message"] as? String) ?? "API error \(code.intValue)"
+            throw SearchServiceError(service: "AnySearch", detail: message)
         }
         guard let payload = obj["data"] as? [String: Any],
               let results = payload["results"] as? [[String: Any]], !results.isEmpty else {
-            let miss = "The search returned no results for \"\(query)\". Do not fabricate "
-                     + "an answer — tell the user the search found nothing on this."
-            return (miss, [])
+            return (SearchMiss.modelText(query: query), [])
         }
 
         let top = results.prefix(maxResults)
@@ -1518,12 +1479,8 @@ extension APIKeyStore.SearchBackend {
 struct ReadPageTool: NotchTool {
     let name = "read_page"
     let description = """
-    Fetches a web page and returns its readable text. Use this after a web search \
-    when a result looks like it has the answer but its snippet is too short to be \
-    sure — call read_page on that result's URL to read the actual page instead of \
-    searching again with a different query. Input is the page URL (typically one \
-    from a search result). Returns the page's main text, trimmed; if the page \
-    can't be fetched, say so rather than guessing.
+    Fetches a page and returns its readable text. Use after a search when a \
+    snippet is too short. Pass the http(s) URL. If it can't be fetched, say so.
     """
     let schema: [String: Any] = [
         "type": "object",
@@ -1671,6 +1628,97 @@ struct ReadPageTool: NotchTool {
         out += rest
         return out
     }
+}
+
+// MARK: - Blend1 first-turn tool surface
+
+/// Which extra tools Blend1 advertises on this question. The core four
+/// (`read_clipboard`, `calculate`, `read_page`, `web_search`) are always on;
+/// everything else is added only when the user's words point at it. Lexical
+/// on purpose — a second model call to classify would cost the latency this
+/// exists to save. Conservative: an extra tool on a rare question is fine; a
+/// missing write/settings/history tool answers incorrectly.
+enum AskToolIntent {
+    static let core: Set<String> = [
+        "read_clipboard", "calculate", "read_page", WebSearchTool.toolName,
+    ]
+
+    static func extras(for question: String) -> Set<String> {
+        let q = question.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !q.isEmpty else { return [] }
+        var extra = Set<String>()
+        if matches(q, capture) {
+            extra.formUnion(["create_note", "create_reminder", "current_datetime"])
+        }
+        if matches(q, settings) { extra.insert("manage_app_settings") }
+        if matches(q, history) { extra.insert("search_history") }
+        if matches(q, openURL) { extra.insert("open_url") }
+        if matches(q, clock) { extra.insert("current_datetime") }
+        return extra
+    }
+
+    /// Keep core tools plus any extras this question needs. `ask_user` is never
+    /// in the Blend1 set — a notch answer should just answer.
+    static func filter(_ tools: [NotchTool], for question: String) -> [NotchTool] {
+        let keep = core.union(extras(for: question))
+        return tools.filter { keep.contains($0.name) }
+    }
+
+    private static func matches(_ text: String, _ needles: [String]) -> Bool {
+        needles.contains { text.contains($0) }
+    }
+
+    /// Note / reminder filing. Broad on the capture verbs, not on "save" alone
+    /// (that fires on "save this python script to a file" how-tos).
+    private static let capture = [
+        "remind me", "reminder", "create a note", "create a reminder",
+        "note this", "remember that", "remember this",
+        "jot this", "jot that", "write this down", "write that down",
+        "提醒", "提醒我", "记一下", "記一下", "记下", "記下", "记下来", "記下來",
+        "写下来", "寫下來", "帮我记", "幫我記", "闹钟", "鬧鐘",
+    ]
+
+    /// This app's own preferences. Bare "设置" / "settings" is too broad
+    /// ("how to configure nginx"); these need to name the app, a preference,
+    /// or a hotkey.
+    private static let settings = [
+        "notch settings", "app settings", "in settings", "in preferences",
+        "notchi", "shortcut", "shortcuts", "hotkey", "hotkeys",
+        "app language", "launch at login", "dock icon", "menu bar",
+        "copy sense", "live activity", "custom instructions",
+        "hover sensitivity", "search backend", "api key",
+        "打开设置", "打開設置", "打开设定", "打開設定", "打开偏好", "打開偏好",
+        "偏好设置", "偏好設定", "快捷键", "快捷鍵", "界面语言", "界面語言",
+        "把语言", "把語言", "语言换成", "語言換成",
+        "开机启动", "開機啟動", "登录时启动", "登入時啟動",
+        "菜单栏图标", "選單列圖示", "召唤快捷", "召喚快捷",
+        "这个 app", "這個 app", "这个应用", "這個應用",
+    ]
+
+    private static let history = [
+        "what did i ask", "what did i work", "what have i recorded",
+        "what have i asked", "did i ever", "summarize my week",
+        "summarize my day", "what did i note",
+        "我问过", "我問過", "我做过", "我做過", "我记过", "我記過",
+        "问过你", "問過你", "记过什么", "記過什麼",
+        "今天做了什么", "今天做了什麼", "这周做了", "這周做了",
+        "本周做了", "本週做了",
+    ]
+
+    private static let openURL = [
+        "open this url", "open this link", "open the url", "open the link",
+        "visit this page", "launch this page",
+        "open http://", "open https://",
+        "打开这个链接", "打開這個連結", "打开这个网址", "打開這個網址",
+        "在浏览器打开", "在瀏覽器打開",
+    ]
+
+    private static let clock = [
+        "what time is it", "what's the time", "whats the time",
+        "current time", "current date", "what day is it", "what date is it",
+        "几点了", "幾點了", "现在几点", "現在幾點", "现在的时间", "現在的時間",
+        "星期几", "星期幾", "几号了", "幾號了",
+    ]
 }
 
 // MARK: - Default registry

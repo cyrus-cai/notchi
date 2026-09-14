@@ -1,5 +1,86 @@
 import Foundation
 
+enum ReasoningPreview {
+    /// Last non-empty line of a thinking block, clipped for the wait line / fold
+    /// preview. Markdown wrappers are presentation noise here.
+    static func line(from text: String, limit: Int = 88) -> String? {
+        guard let raw = text
+            .components(separatedBy: .newlines)
+            .map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) })
+            .last(where: { !$0.isEmpty })
+        else { return nil }
+        return display(raw, limit: limit)
+    }
+
+    /// Last *finished* thought — a completed line, or the last sentence that
+    /// already closed. The live fold header uses this so it does not twitch on
+    /// every token of the still-growing tail.
+    static func settledLine(from text: String, limit: Int = 88) -> String? {
+        let lines = text
+            .components(separatedBy: .newlines)
+            .map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) })
+            .filter { !$0.isEmpty }
+        let tailOpen = !(text.hasSuffix("\n") || text.hasSuffix("\r\n"))
+        let finished = tailOpen ? Array(lines.dropLast()) : lines
+        if let last = finished.last, let shown = display(last, limit: limit) {
+            return shown
+        }
+        return lastCompletedSentence(in: text).flatMap { display($0, limit: limit) }
+    }
+
+    private static func display(_ raw: String, limit: Int) -> String? {
+        var line = stripMarkdown(raw)
+        guard !line.isEmpty else { return nil }
+        if line.count > limit {
+            line = String(line.prefix(limit)).trimmingCharacters(in: .whitespaces) + "…"
+        }
+        return line
+    }
+
+    /// Reasoning arrives as markdown — bullets, headers, `**bold**` runs. The
+    /// preview is one plain line of prose, so those markers are noise: a line
+    /// like `* **Benefits:**` reads `Benefits:`.
+    private static func stripMarkdown(_ raw: String) -> String {
+        var line = raw.trimmingCharacters(in: .whitespaces)
+        // Inline emphasis and code spans. Underscores only at a word boundary,
+        // so `snake_case` survives.
+        line = line.replacingOccurrences(of: "\\*+", with: "", options: .regularExpression)
+        line = line.replacingOccurrences(of: "(?<![A-Za-z0-9])_+|_+(?![A-Za-z0-9])",
+                                         with: "", options: .regularExpression)
+        line = line.replacingOccurrences(of: "`", with: "")
+        // Leading block markers: headings, quotes, list bullets, ordered items.
+        while true {
+            let before = line
+            if line.hasPrefix("#") || line.hasPrefix(">") {
+                line.removeFirst()
+            } else if line.hasPrefix("- ") || line.hasPrefix("+ ") || line.hasPrefix("• ") {
+                line.removeFirst()
+            } else if let r = line.range(of: "^[0-9]{1,3}[.)]\\s", options: .regularExpression) {
+                line.removeSubrange(r)
+            }
+            line = line.trimmingCharacters(in: .whitespaces)
+            if line == before { break }
+        }
+        return line
+    }
+
+    private static let sentenceEnd = CharacterSet(charactersIn: ".!?。．！？…")
+
+    private static func lastCompletedSentence(in text: String) -> String? {
+        var sentences: [String] = []
+        var current = ""
+        for ch in text {
+            current.append(ch)
+            if ch.unicodeScalars.allSatisfy({ sentenceEnd.contains($0) }) {
+                let t = current.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !t.isEmpty { sentences.append(t) }
+                current = ""
+            }
+        }
+        return sentences.last
+    }
+}
+
 // MARK: - Agent turn protocol
 //
 // The single-shot `AIService.stream(system:messages:)` answers a question in one
@@ -25,6 +106,9 @@ enum TurnEvent: Sendable {
     /// `reasoning_content` / `thinking_delta`, this is safe to surface as a short
     /// progress line while the answer is still being prepared.
     case reasoningSummary(String)
+    /// A chunk of the model's thinking channel. Accumulated by the harness and
+    /// shown folded in chat; never mixed into the visible answer.
+    case reasoningDelta(String)
     /// A chunk of visible answer text to append (same semantics as the plain
     /// `stream`'s yielded String).
     case text(String)
@@ -169,6 +253,10 @@ struct ToolInvocation: Sendable {
     /// badge. Empty for non-search tools; the model never sees these (it gets
     /// `result`), they ride straight to the on-screen turn.
     var sources: [WebSource] = []
+    /// Set when a search call failed because the search service did (bad key,
+    /// quota, outage), so the harness can name the search service as the cause
+    /// instead of the model.
+    var searchFailure: SearchServiceError? = nil
 }
 
 /// The conversation as the harness threads it back to the provider. Beyond the
@@ -196,7 +284,8 @@ struct AgentMessage: Sendable {
 protocol AgentCapableService: AIService {
     func streamTurn(system: String,
                     messages: [AgentMessage],
-                    tools: [ToolSpec]) -> AsyncThrowingStream<TurnEvent, Error>
+                    tools: [ToolSpec],
+                    requiredTool: String?) -> AsyncThrowingStream<TurnEvent, Error>
 
     /// Translate a provider's wire-level tool alias into Notch's stable
     /// capability name. Most providers already use the canonical name.
@@ -205,6 +294,12 @@ protocol AgentCapableService: AIService {
 
 extension AgentCapableService {
     func canonicalToolName(_ name: String) -> String { name }
+
+    func streamTurn(system: String,
+                    messages: [AgentMessage],
+                    tools: [ToolSpec]) -> AsyncThrowingStream<TurnEvent, Error> {
+        streamTurn(system: system, messages: messages, tools: tools, requiredTool: nil)
+    }
 }
 
 /// A tool as advertised to the model: a name, a description the model reads to
@@ -292,6 +387,10 @@ struct ToolRegistry: Sendable {
             } else {
                 out.result = try await tool.execute(call.input)
             }
+        } catch let failure as SearchServiceError {
+            out.result = failure.modelText
+            out.isError = true
+            out.searchFailure = failure
         } catch {
             out.result = "Error: \(error.localizedDescription)"
             out.isError = true
@@ -366,6 +465,31 @@ struct AgentHarness {
     /// *rewording* of the same fruitless query would not.
     var maxSearchRounds: Int = 3
 
+    /// When true, the first turn of a question whose answer moves with time is
+    /// issued with `web_search` required — the model cannot skip it and reply
+    /// from memory. Nono's model over-applies the shared "answer stable knowledge
+    /// directly" rule to prices, versions, who currently holds a role, and other
+    /// facts that age; the prompt already forbids that, and this is the
+    /// enforcement. Other providers keep the measured prompt-only split.
+    ///
+    /// Only the opening turn is forced, and only while search is still advertised.
+    /// A clock-time, clipboard, settings, or capture question is left alone.
+    ///
+    /// Not enabled for Nono. Measured against production on 2026-09-11: with a
+    /// named `tool_choice`, Darkbloom sends no byte until the whole turn has been
+    /// generated, and the model's reasoning leaks into the tool arguments. With
+    /// the gateway's default output cap the turn outlasts Darkbloom's
+    /// first-response timeout and comes back as `429 all providers at capacity …
+    /// timeout waiting for first response` after ~12s, on every forced turn. The
+    /// same question with `tool_choice` left on auto streamed in 1.6s and the
+    /// model called `web_search` itself.
+    var forceSearchOnChangingFacts: Bool = false
+
+    /// What nono is told this run came from (`NoNoRequestContext`). Bound
+    /// around every round's request, so all the rounds of one answer carry the
+    /// same turn id. No other provider sends it.
+    var requestContext: NoNoRequestContext?
+
     /// Minimum on-screen time for the tool-activity line, so a fast tool (clipboard
     /// and time return in milliseconds) still shows a full, readable cue instead of
     /// a one-frame flicker. The tools run *during* this window — it delays only the
@@ -395,6 +519,9 @@ struct AgentHarness {
     /// `openrouter/free` auto-router). Fires once, on the first turn that reports
     /// a model. Main-actor.
     typealias ModelSink = @MainActor (String) -> Void
+    /// Growing thinking-channel text for the chat fold. Called with the
+    /// accumulated string so far, not a delta.
+    typealias ReasoningSink = @MainActor (String) -> Void
 
     /// Run the loop to completion. `onText` receives answer chunks; `onActivity`
     /// receives tool-progress labels; `onSources` receives any web sources a search
@@ -413,7 +540,8 @@ struct AgentHarness {
              onText: @escaping TextSink,
              onActivity: @escaping ActivitySink,
              onSources: @escaping SourcesSink,
-             onModel: ModelSink? = nil) async throws {
+             onModel: ModelSink? = nil,
+             onReasoning: ReasoningSink? = nil) async throws {
         var convo = messages
         var iteration = 0
         // True once the model has run at least one tool round. It changes what the
@@ -446,6 +574,13 @@ struct AgentHarness {
         // with no tools at all — regardless of where the iteration count stands, and
         // regardless of which ceilings would otherwise still allow one.
         var forceNoTools = false
+        var reasoningAcc = ""
+        // The last search-service failure this run, and whether any search call
+        // came back with results. A failure with no working search means the
+        // answer (or its absence) is down to the search service, and the user is
+        // told so instead of seeing it as a model failure.
+        var searchFailure: SearchServiceError? = nil
+        var searchWorked = false
 
         while true {
             try Task.checkCancellation()
@@ -463,6 +598,28 @@ struct AgentHarness {
                 toolsThisTurn = registry.specs
             }
 
+            // First turn only: if this question's answer moves with calendar time
+            // and search is still on the table, require it. Later turns (and
+            // questions that are clock / clipboard / settings / capture) stay
+            // auto. See `forceSearchOnChangingFacts`.
+            //
+            // No search label here. This turn is the model writing the query;
+            // the search has not started. `toolCallStarted` raises the label
+            // when the call actually arrives. Raising it now made a model
+            // failure on this turn (an upstream 429 after ~30s) read as a
+            // search that found nothing.
+            let requiredTool: String?
+            if forceSearchOnChangingFacts,
+               iteration == 0,
+               !forceNoTools,
+               toolsThisTurn.contains(where: { Self.isSearchTool($0.name) }),
+               let question = Self.latestUserText(in: convo),
+               ChangingFactSearch.needsLiveWeb(question) {
+                requiredTool = WebSearchTool.toolName
+            } else {
+                requiredTool = nil
+            }
+
             var assistantText = ""
             var pendingCalls: [ToolInvocation] = []
             var stopReason: String? = nil
@@ -475,12 +632,19 @@ struct AgentHarness {
             // an intermittent provider glitch. The filter swallows that markup so
             // the user never sees raw `<|DSML|invoke …>` soup in the answer.
             var markupFilter = ToolMarkupFilter()
+            var lastReasoningStatus: String? = nil
+            var lastReasoningStatusAt = Date.distantPast
 
-            for try await event in service.streamTurn(system: system,
-                                                      messages: convo,
-                                                      tools: toolsThisTurn) {
-                try Task.checkCancellation()
-                switch event {
+            let turnEvents = await NoNoRequestContext.$current.withValue(requestContext) {
+                service.streamTurn(system: system,
+                                   messages: convo,
+                                   tools: toolsThisTurn,
+                                   requiredTool: requiredTool)
+            }
+            do {
+                for try await event in turnEvents {
+                    try Task.checkCancellation()
+                    switch event {
                 case .reasoningStarted:
                     // A real provider event replaces the previously silent
                     // pre-tool wait without exposing the model's private notes.
@@ -489,11 +653,29 @@ struct AgentHarness {
                     }
                 case .reasoningSummary(let summary):
                     // Only provider-designated summaries reach this event. Keep
-                    // the one-line status compact enough for the result panel.
+                    // the one-line status compact enough for the result panel,
+                    // and only swap once a thought has settled — a growing
+                    // summary would otherwise melt the wait line on every token.
                     if !preserveFetchCue,
-                       let label = Self.reasoningStatusLabel(summary) {
-                        onActivity(label, .composing)
+                       let label = Self.reasoningStatusLabel(summary),
+                       label != lastReasoningStatus {
+                        let now = Date()
+                        if now.timeIntervalSince(lastReasoningStatusAt) >= 1.2 {
+                            lastReasoningStatus = label
+                            lastReasoningStatusAt = now
+                            onActivity(label, .composing)
+                        }
                     }
+                    if reasoningAcc.isEmpty {
+                        reasoningAcc = summary
+                        onReasoning?(reasoningAcc)
+                    }
+                case .reasoningDelta(let piece):
+                    reasoningAcc += piece
+                    if reasoningAcc.count > Self.reasoningCap {
+                        reasoningAcc = String(reasoningAcc.prefix(Self.reasoningCap))
+                    }
+                    onReasoning?(reasoningAcc)
                 case .text(let piece):
                     let visible = markupFilter.feed(piece)
                     guard !visible.isEmpty else { continue }
@@ -536,6 +718,12 @@ struct AgentHarness {
                 case .finished(let reason):
                     stopReason = reason
                 }
+                }
+            } catch {
+                if !(error is CancellationError), let searchFailure, !searchWorked {
+                    throw searchFailure
+                }
+                throw error
             }
             // Flush any character held back as a possible markup opener: if the
             // stream ended mid-`<` it was just a stray `<`, so let it through.
@@ -593,7 +781,14 @@ struct AgentHarness {
                 // model one more turn, stripped of tools and told plainly what we saw;
                 // if that comes back empty too, fail loudly instead of quietly.
                 if assistantText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    guard !emptyCloseRetried else { throw AgentHarnessError.noAnswer }
+                    if let searchFailure, !searchWorked { throw searchFailure }
+                    if searchRounds > 0, !searchWorked {
+                        onText(L("search.error.noResults"))
+                        return
+                    }
+                    if emptyCloseRetried {
+                        throw AgentHarnessError.noAnswer
+                    }
                     emptyCloseRetried = true
                     forceNoTools = true
                     // Why the turn was silent, when we can tell: a tool call written
@@ -622,6 +817,9 @@ struct AgentHarness {
                 // the silence above, which earns a real retry rather than a marker.)
                 if truncated {
                     onText(L("error.truncated"))
+                }
+                if let searchFailure, !searchWorked {
+                    onText(L("search.error.notice", searchFailure.service, searchFailure.detail))
                 }
                 return
             }
@@ -670,12 +868,42 @@ struct AgentHarness {
             onActivity(activityLabel(for: pendingCalls, isRepeatRound: didTool),
                        Self.orbState(for: pendingCalls, isRepeatRound: didTool))
             let completed = await runConcurrently(pendingCalls)
+            for call in completed where Self.isSearchTool(call.name) {
+                if let failure = call.searchFailure {
+                    searchFailure = failure
+                } else if !call.isError, !SearchMiss.isMiss(call.result) {
+                    searchWorked = true
+                }
+            }
             let elapsed = Date().timeIntervalSince(shownAt)
             if elapsed < Self.minActivityVisible {
                 let remaining = Self.minActivityVisible - elapsed
                 try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
             }
             try Task.checkCancellation()
+
+            // Empty or failed search: tell the user that, now. Feeding the miss
+            // back into another model round is what used to wait ~30s and then
+            // surface as a model 429 ("timeout waiting for first response").
+            let didSearchThisRound = pendingCalls.contains { Self.isSearchTool($0.name) }
+            if didSearchThisRound, !searchWorked {
+                onActivity(nil, .composing)
+                if let searchFailure {
+                    // No preamble → fail as a search error (Settings). Already-
+                    // streamed text must not go through the model-error catch,
+                    // which would rewrite it as a dropped connection.
+                    if assistantText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        throw searchFailure
+                    }
+                    onText(L("search.error.notice", searchFailure.service, searchFailure.detail))
+                    return
+                }
+                if !assistantText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    onText("\n\n")
+                }
+                onText(L("search.error.noResults"))
+                return
+            }
             // Hand any structured sources this round produced to the UI so they can
             // appear as a source badge under the answer. Deduped/accumulated on the
             // caller's side across rounds.
@@ -710,7 +938,6 @@ struct AgentHarness {
             // hardens each subsequent round until the cap. This is what stops a model
             // from re-wording the same fruitless query forever (the "南昌一月气温" loop).
             var resultsToSend = completed
-            let didSearchThisRound = pendingCalls.contains { Self.isSearchTool($0.name) }
             if didSearchThisRound,
                let nudge = Self.searchStopNudge(priorSearchRounds: searchRounds,
                                                 cap: maxSearchRounds) {
@@ -729,31 +956,29 @@ struct AgentHarness {
         }
     }
 
+    /// Hard cap on stored thinking text so a long CoT can't bloat the archive.
+    private static let reasoningCap = 12_000
+
     /// Collapse a provider's display-safe reasoning summary into the single
     /// progress line used by the result panel. Markdown wrappers are presentation
     /// noise here; long prose is clipped rather than turning the status into a
     /// second answer.
     private static func reasoningStatusLabel(_ summary: String) -> String? {
-        guard var line = summary
-            .components(separatedBy: .newlines)
-            .map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) })
-            .first(where: { !$0.isEmpty })
-        else { return nil }
+        ReasoningPreview.settledLine(from: summary)
+    }
 
-        while line.hasPrefix("#") {
-            line.removeFirst()
-            line = line.trimmingCharacters(in: .whitespaces)
+    /// The most recent user-authored text the model is answering — skipping
+    /// harness-injected `[System note]` lines so a retry/nudge is not classified
+    /// as the question.
+    private static func latestUserText(in messages: [AgentMessage]) -> String? {
+        for message in messages.reversed() {
+            if case .text(let role, let text) = message.kind, role == "user" {
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.hasPrefix("[System note]") { continue }
+                return trimmed
+            }
         }
-        if line.hasPrefix("**"), line.hasSuffix("**"), line.count > 4 {
-            line.removeFirst(2)
-            line.removeLast(2)
-        }
-        guard !line.isEmpty else { return nil }
-        let limit = 88
-        if line.count > limit {
-            line = String(line.prefix(limit)).trimmingCharacters(in: .whitespaces) + "…"
-        }
-        return line
+        return nil
     }
 
     /// Execute all of a turn's tool calls at once, preserving request order in the
@@ -965,6 +1190,67 @@ struct AgentHarness {
         }
         return L("agent.activity.working")
     }
+}
+
+/// Whether a question's answer is likely to have moved since training — the
+/// gate for `AgentHarness.forceSearchOnChangingFacts`. Conservative on purpose:
+/// a translation, a how-to, or "what is a monad" must stay a direct answer.
+/// Recency words ("目前", "latest") or a moving domain (price, version, who
+/// holds a role) trip it; clipboard / clock / settings / capture do not.
+enum ChangingFactSearch {
+    static func needsLiveWeb(_ question: String) -> Bool {
+        let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return false }
+        let folded = q.lowercased()
+        if matches(folded, Self.notWeb) { return false }
+        if matches(folded, Self.languageWork), !matches(folded, Self.domain) {
+            return false
+        }
+        if matches(folded, Self.strongRecency) { return true }
+        if matches(folded, Self.domain) { return true }
+        return false
+    }
+
+    private static func matches(_ text: String, _ needles: [String]) -> Bool {
+        needles.contains { text.contains($0) }
+    }
+
+    private static let notWeb = [
+        "clipboard", "copied", "paste", "剪贴板", "剪貼簿", "我复制", "我複製", "粘贴的", "貼上的",
+        "what time is it", "what's the time", "current time", "current date",
+        "what day is it", "what date is it",
+        "几点了", "幾點了", "现在几点", "現在幾點", "现在的时间", "現在的時間",
+        "星期几", "星期幾", "几号了", "幾號了",
+        "remind me", "提醒", "记一下", "記一下", "note this", "create a note",
+        "shortcut", "hotkey", "settings", "偏好", "设置里", "設定裡",
+        "open this url", "打开这个链接", "打開這個連結",
+    ]
+
+    private static let strongRecency = [
+        "latest", "newest", "currently", "right now", "as of",
+        "this year", "this week", "this month", "this quarter",
+        "today", "breaking",
+        "最新", "目前", "今年", "今天", "本周", "本週", "本月", "本季",
+        "此刻", "实时", "實時", "在售", "现任", "現任",
+    ]
+
+    private static let domain = [
+        "stock price", "share price", "exchange rate", "weather", "forecast",
+        "score", "ranking", "standings", "earnings", "revenue", "ceo of",
+        "president", "prime minister", "on sale", "release notes",
+        "股价", "股價", "汇率", "匯率", "金价", "金價", "油价", "油價",
+        "收盘", "收盤", "指数", "指數", "天气", "天氣", "气温", "氣溫",
+        "比分", "排名", "财报", "財報", "财季", "財季", "营收", "營收",
+        "发布会", "發布會", "新闻", "新聞", "售价", "售價", "定价", "定價",
+        "总统", "總統", "首相", "上证", "上證", "比特币", "比特幣",
+        "version of", "headline", "wwdc",
+    ]
+
+    private static let languageWork = [
+        "translate", "translating", "rewrite", "reword", "rephrase", "paraphrase",
+        "proofread", "翻译", "翻譯", "译成", "譯成", "改写", "改寫", "润色", "潤色",
+        "校对", "校對",
+    ]
 }
 
 /// Strips tool-call DSL markup that some models occasionally leak into their

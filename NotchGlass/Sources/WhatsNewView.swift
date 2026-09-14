@@ -216,7 +216,7 @@ struct WhatsNewView: View {
                             NSWorkspace.shared.open(UpdaterService.releaseNotesPage)
                         }
                         .buttonStyle(.plain)
-                        .font(.sf(11.5, weight: .medium))
+                        .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                         .foregroundStyle(Tokens.text2)
                         .frame(maxWidth: .infinity)
                         .padding(.top, 34)
@@ -272,12 +272,12 @@ struct WhatsNewView: View {
         VStack(alignment: .leading, spacing: 18) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(entry.version)
-                    .font(.sf(11, weight: .medium))
+                    .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                     .foregroundStyle(Tokens.text3)
                 Spacer(minLength: 0)
                 if let date = entry.date, !date.isEmpty {
                     Text(date)
-                        .font(.sf(11, weight: .medium))
+                        .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                         .foregroundStyle(Tokens.text4)
                 }
             }
@@ -287,9 +287,9 @@ struct WhatsNewView: View {
                     .resizable()
                     .aspectRatio(2, contentMode: .fit)
                     .frame(maxWidth: .infinity)
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .clipShape(RoundedRectangle.window)
                     .overlay(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        RoundedRectangle.window
                             .strokeBorder(Tokens.hairline, lineWidth: 1)
                     )
                     .accessibilityHidden(true)
@@ -332,7 +332,7 @@ struct WhatsNewView: View {
             }
         } label: {
             Text(action.title)
-                .font(.sf(12, weight: .medium))
+                .font(.sf(Tokens.TypeSize.label, weight: .medium))
                 .foregroundStyle(Tokens.text1)
                 .padding(.horizontal, 14)
                 .frame(height: 28)
@@ -360,16 +360,16 @@ struct WhatsNewView: View {
             switch action {
             case .forceClickPressure:
                 Text(L("whatsnew.forceClick.caption"))
-                    .font(.sf(12, weight: .medium))
+                    .font(.sf(Tokens.TypeSize.label, weight: .medium))
                     .foregroundStyle(Tokens.text2)
 
                 Image("TrackpadLookupHint")
                     .resizable()
                     .aspectRatio(1400 / 692, contentMode: .fit)
                     .frame(maxWidth: .infinity)
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .clipShape(RoundedRectangle.window)
                     .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        RoundedRectangle.window
                             .strokeBorder(Tokens.hairline, lineWidth: 0.75)
                     )
                     .accessibilityHidden(true)
@@ -425,7 +425,7 @@ struct WhatsNewView: View {
                 .frame(width: emphasized ? 5 : 3, height: emphasized ? 5 : 3)
                 .padding(.top, emphasized ? 6 : 7)   // nudge the dot onto the first line's x-height
             Text(text)
-                .font(.sf(12.5, weight: emphasized ? .medium : .regular))
+                .font(.sf(Tokens.TypeSize.label, weight: emphasized ? .medium : .regular))
                 .lineSpacing(4)     // let wrapped lines breathe
                 .foregroundStyle(emphasized ? Tokens.text1 : Tokens.text2)
                 .fixedSize(horizontal: false, vertical: true)
@@ -440,7 +440,7 @@ struct WhatsNewView: View {
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(L("whatsnew.empty"))
-                .font(.sf(12.5))
+                .font(.sf(Tokens.TypeSize.label))
                 .foregroundStyle(Tokens.text3)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -448,7 +448,7 @@ struct WhatsNewView: View {
                 NSWorkspace.shared.open(UpdaterService.releaseNotesPage)
             }
             .buttonStyle(.plain)
-            .font(.sf(11.5, weight: .medium))
+            .font(.sf(Tokens.TypeSize.meta, weight: .medium))
             .foregroundStyle(Tokens.text2)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -475,7 +475,7 @@ struct WhatsNewView: View {
             Button(action: action) {
                 HStack(spacing: 6) {
                     Text(version)
-                        .font(.sf(12.5, weight: .medium))
+                        .font(.sf(Tokens.TypeSize.label, weight: .medium))
                         .lineLimit(1)
                         .foregroundStyle(selected ? Tokens.text1 : (hovering ? Tokens.text2 : Tokens.text3))
                         .layoutPriority(1)
@@ -486,7 +486,7 @@ struct WhatsNewView: View {
                         // rather than a fill, so the badge doesn't fight the
                         // row's own wash when this release is the selected one.
                         Text(L("whatsnew.currentBadge"))
-                            .font(.sf(8.5, weight: .semibold))
+                            .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                             .tracking(0.5)
                             .lineLimit(1)
                             .minimumScaleFactor(0.75)
@@ -494,7 +494,7 @@ struct WhatsNewView: View {
                             .padding(.horizontal, 5)
                             .padding(.vertical, 2.5)
                             .overlay(
-                                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                RoundedRectangle.inset
                                     .strokeBorder(Tokens.hairline, lineWidth: 0.5)
                             )
                     }

@@ -223,6 +223,7 @@ private struct HistoryArchiveView: View {
                 .allowsHitTesting(false)
         )
         .ignoresSafeArea()
+        .imageLightboxHost()
     }
 
     // MARK: - Master (list)
@@ -246,16 +247,16 @@ private struct HistoryArchiveView: View {
         VStack(spacing: 10) {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
-                    .font(.sf(12, weight: .medium))
+                    .font(.sf(Tokens.TypeSize.label, weight: .medium))
                     .foregroundStyle(Tokens.text3)
                 TextField(L("history.window.search"), text: $query)
                     .textFieldStyle(.plain)
-                    .font(.sf(13))
+                    .font(.sf(Tokens.TypeSize.form))
                     .foregroundStyle(Tokens.text1)
                 if !query.isEmpty {
                     Button { query = "" } label: {
                         Image(systemName: "xmark.circle")
-                            .font(.sf(12))
+                            .font(.sf(Tokens.TypeSize.label))
                             .foregroundStyle(Tokens.text4)
                     }
                     .buttonStyle(.plain)
@@ -324,7 +325,7 @@ private struct HistoryArchiveView: View {
             }
             Spacer()
             Text(L("history.window.count", count))
-                .font(.sf(11, weight: .medium))
+                .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                 .foregroundStyle(Tokens.text4)
                 .monospacedDigit()
         }
@@ -374,14 +375,14 @@ private struct HistoryArchiveView: View {
     private var emptyList: some View {
         VStack(spacing: 8) {
             Image(systemName: "clock.arrow.circlepath")
-                .font(.sf(26, weight: .light))
+                .font(.sf(Tokens.TypeSize.figure, weight: .light))
                 .foregroundStyle(Tokens.text4)
             Text(query.isEmpty && sourceFilter == .agent
                  ? L("history.window.empty.agent")
                  : (query.isEmpty && sourceFilter == nil
                     ? L("history.window.empty")
                     : L("history.window.empty.filtered")))
-                .font(.sf(13))
+                .font(.sf(Tokens.TypeSize.form))
                 .foregroundStyle(Tokens.text3)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -397,10 +398,10 @@ private struct HistoryArchiveView: View {
         } else {
             VStack(spacing: 10) {
                 Image(systemName: "text.bubble")
-                    .font(.sf(26, weight: .light))
+                    .font(.sf(Tokens.TypeSize.figure, weight: .light))
                     .foregroundStyle(Tokens.text4)
                 Text(L("history.window.detail.empty"))
-                    .font(.sf(13))
+                    .font(.sf(Tokens.TypeSize.form))
                     .foregroundStyle(Tokens.text3)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -424,7 +425,7 @@ private struct HistoryFilterPill: View {
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.sf(11, weight: .medium))
+                .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                 .foregroundStyle(active ? Tokens.text1 : (hovering ? Tokens.text2 : Tokens.text3))
                 .padding(.horizontal, 11)
                 .padding(.vertical, 5)
@@ -454,12 +455,12 @@ private struct HistoryArchiveRow: View {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(item.displayTitle)
-                        .font(.sf(13))
+                        .font(.sf(Tokens.TypeSize.form))
                         .lineLimit(1)
                         .truncationMode(.tail)
                         .foregroundStyle(selected ? Tokens.text1 : Tokens.text2)
                     Text(item.t, style: .date)
-                        .font(.sf(11))
+                        .font(.sf(Tokens.TypeSize.meta))
                         .foregroundStyle(Tokens.text4)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -479,7 +480,7 @@ private struct HistoryArchiveRow: View {
     private var trailing: some View {
         if item.source.isThread {
             Text(relativeTime(item.t))
-                .font(.sf(11, weight: .medium).monospacedDigit())
+                .font(.sf(Tokens.TypeSize.meta, weight: .medium).monospacedDigit())
                 .foregroundStyle(Tokens.text4)
         } else {
             CaptureJumpButton(
@@ -516,19 +517,19 @@ private struct HistoryDetailView: View {
         HStack(alignment: .top, spacing: 10) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(item.displayTitle)
-                    .font(.sf(16, weight: .semibold))
+                    .font(.sf(Tokens.TypeSize.prompt, weight: .medium))
                     .foregroundStyle(Tokens.text1)
                     .lineLimit(2)
                 HStack(spacing: 6) {
                     Text(item.t.formatted(date: .abbreviated, time: .shortened))
-                        .font(.sf(11))
+                        .font(.sf(Tokens.TypeSize.meta))
                         .foregroundStyle(Tokens.text4)
                     // A failed run must read as failed here too — the transcript
                     // alone can look like an ordinary answer. (Cancelled was the
                     // user's own act; success is the default — neither needs a tag.)
                     if item.source == .agent, item.agentOutcome == "failure" {
                         Text(L("history.detail.agent.failed"))
-                            .font(.sf(11, weight: .medium))
+                            .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                             .foregroundStyle(Tokens.danger.opacity(0.9))
                     }
                 }
@@ -575,15 +576,15 @@ private struct HistoryDetailView: View {
     private var capture: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text(item.q)
-                .font(.sf(14))
+                .font(.sf(Tokens.TypeSize.reading))
                 .foregroundStyle(Tokens.text1)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
             Button(action: jump) {
                 HStack(spacing: 5) {
                     Text(item.source == .note ? L("recent.badge.notes") : L("recent.badge.reminders"))
-                        .font(.sf(12, weight: .medium))
-                    Image(systemName: "arrow.up.right").font(.sf(10, weight: .semibold))
+                        .font(.sf(Tokens.TypeSize.label, weight: .medium))
+                    Image(systemName: "arrow.up.right").font(.sf(Tokens.TypeSize.caption, weight: .semibold))
                 }
                 .foregroundStyle(Tokens.text2)
                 .padding(.horizontal, 14)
@@ -611,28 +612,27 @@ private struct TranscriptBubble: View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 6) {
                 Text(isUser ? L("history.detail.you") : L("history.detail.assistant"))
-                    .font(.sf(11, weight: .semibold))
+                    .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                     .foregroundStyle(isUser ? NotchModel.Panel.chat.intentInk : Tokens.text3)
                 if let model = turn.answerModel ?? turn.regenModel, !model.isEmpty {
                     Text(prettyModel(model))
-                        .font(.sf(10))
+                        .font(.sf(Tokens.TypeSize.caption))
                         .foregroundStyle(Tokens.text4)
                 }
             }
             // What this turn was asked WITH, above what it said — click to open the
-            // full-size shot in Preview. The archive is the roomy place to actually
-            // look at an attachment, so this is the one surface that shows them all.
+            // same in-window lightbox a chat image uses.
             if !turn.imageFiles.isEmpty {
                 SavedTurnImages(files: turn.imageFiles)
             }
             Text(turn.text)
-                .font(.sf(14))
+                .font(.sf(Tokens.TypeSize.reading))
                 .foregroundStyle(Tokens.text1)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(12)
                 .background(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    RoundedRectangle.window
                         // A whisper of glass on the bubble: a faint tinted floor, a
                         // thin real-material shimmer, and a hairline rim — the same
                         // "hint of glass, not a slab" recipe the notch rows use.
@@ -640,12 +640,12 @@ private struct TranscriptBubble: View {
                               ? NotchModel.Panel.chat.intentTint.opacity(0.06)
                               : Color.white.opacity(0.03))
                         .overlay(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            RoundedRectangle.window
                                 .fill(.thinMaterial)
                                 .opacity(0.14)
                         )
                         .overlay(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            RoundedRectangle.window
                                 .strokeBorder(Tokens.hairline, lineWidth: 0.5)
                         )
                 )

@@ -3,6 +3,7 @@ import AppKit
 import Combine
 import PDFKit
 import ImageIO
+import CryptoKit
 
 /// A single-line field that strips the field editor's completion / prediction
 /// magic the moment focus arrives by ANY route. The focusTrigger path in
@@ -118,7 +119,7 @@ final class PromptTextView: NSTextView {
         super.draw(dirtyRect)
         guard string.isEmpty, !hasMarkedText(), !placeholder.isEmpty else { return }
         let attrs: [NSAttributedString.Key: Any] = [
-            .font: font ?? NSFont.systemFont(ofSize: 14),
+            .font: font ?? NSFont.systemFont(ofSize: Tokens.TypeSize.reading),
             .foregroundColor: NSColor(Tokens.placeholder),
         ]
         (placeholder as NSString).draw(
@@ -1009,9 +1010,9 @@ struct SendButton: View {
     private func pill(_ label: String) -> some View {
         HStack(spacing: 6) {
             Text(label)
-                .font(.sf(13, weight: .semibold))
+                .font(.sf(Tokens.TypeSize.form, weight: .medium))
             Image(systemName: icon)
-                .font(.sf(12, weight: .semibold))
+                .font(.sf(Tokens.TypeSize.label, weight: .semibold))
         }
         .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
         .id(label)
@@ -1025,13 +1026,39 @@ struct SendButton: View {
     /// The bare form: just the send arrow in a glass circle (mid-thread follow-up).
     private var glyphCircle: some View {
         Image(systemName: icon)
-            .font(.sf(13, weight: .semibold))
+            .font(.sf(Tokens.TypeSize.form, weight: .semibold))
             .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
             .id(icon)
             .transition(.scale(scale: 0.55).combined(with: .opacity))
             .frame(width: size, height: size)
             .glassCapsule(in: Circle(), brighter: hovering)
             .contentShape(Circle())
+    }
+}
+
+/// Same glass circle as `SendButton`, shown while an ask is streaming. Esc
+/// already stops the round; this is the visible twin so the verb isn't keyboard-only.
+struct StopButton: View {
+    var compact: Bool = false
+    var action: () -> Void
+    @State private var hovering = false
+
+    private var size: CGFloat { compact ? 27 : 30 }
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "stop.fill")
+                .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
+                .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
+                .frame(width: size, height: size)
+                .glassCapsule(in: Circle(), brighter: hovering)
+                .contentShape(Circle())
+        }
+        .buttonStyle(GlassPressStyle())
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+        .notchTooltip(L("result.stop"), edge: .top)
+        .accessibilityLabel(L("result.stop"))
     }
 }
 
@@ -1046,7 +1073,7 @@ struct AgentFollowUpKeyHints: View {
         Text(showsInterrupt
              ? L("agent.followUp.send") + "  ·  " + L("agent.followUp.interrupt")
              : L("agent.followUp.send"))
-        .font(.sf(NotchBody.followUpFontSize))
+        .font(.sf(Tokens.TypeSize.meta, weight: .medium))
         .foregroundStyle(Tokens.text4.opacity(0.72))
         .lineLimit(1)
         .fixedSize()
@@ -1089,8 +1116,8 @@ struct AgentRecordBody: View {
     /// Reading sizes for the record's two voices. The main panel and detached
     /// window keep their established scale; the split history detail passes its
     /// compact 13pt scale so Agent records match chat records in the same column.
-    var questionFont: CGFloat = 14.5
-    var answerFont: CGFloat = 15
+    var questionFont: CGFloat = Tokens.TypeSize.reading
+    var answerFont: CGFloat = Tokens.TypeSize.reading
 
     var body: some View {
         // The flat trail (`task.log`) spans every round; the settled rounds each
@@ -1106,7 +1133,12 @@ struct AgentRecordBody: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 14) {
                 ForEach(Array(task.exchanges.enumerated()), id: \.offset) { _, exchange in
-                    UserQuestionBubble(text: exchange.prompt, baseFont: questionFont)
+                    VStack(alignment: .leading, spacing: 5) {
+                        if !exchange.imageFiles.isEmpty {
+                            SavedTurnImages(files: exchange.imageFiles)
+                        }
+                        UserQuestionBubble(text: exchange.prompt, baseFont: questionFont)
+                    }
                     // The trail's last narration entry IS this round's report (the
                     // parser records it in both places) — drop it so it isn't
                     // printed again by the answer just below. See
@@ -1128,7 +1160,20 @@ struct AgentRecordBody: View {
                 // leading "› " marker.
                 if task.isRunning {
                     if task.exchanges.isEmpty {
-                        UserQuestionBubble(text: task.prompt, baseFont: questionFont)
+                        // The images the round was handed echo above its prompt,
+                        // the same way a settled round's do — while it runs, this
+                        // is the only place the screenshot the task was built on
+                        // is visible.
+                        VStack(alignment: .leading, spacing: 5) {
+                            if !task.liveImageFiles.isEmpty {
+                                SavedTurnImages(files: task.liveImageFiles)
+                            }
+                            UserQuestionBubble(text: task.prompt, baseFont: questionFont)
+                        }
+                    } else if !task.liveImageFiles.isEmpty {
+                        // A follow-up round's prompt is the trail's leading "› "
+                        // marker, so its images sit directly above the trail.
+                        SavedTurnImages(files: task.liveImageFiles)
                     }
                     if !liveTail.isEmpty {
                         // `live`: the trailing block is still being written, so it
@@ -1137,11 +1182,11 @@ struct AgentRecordBody: View {
                                            baseFont: answerFont)
                     }
                     // The collapsed row's ticker, following the trail — what the run
-                    // is doing right now. Same 14pt/text3 face the status row wears.
-                    // Drop it when the trail already shows the same live activity:
-                    // tool parsers add the 12pt mono row as soon as a command starts,
-                    // so repeating it here in the ticker's larger prose face made two
-                    // adjacent commands look as though they used different styles.
+                    // is doing right now. Same step-under-the-answer face a chat wait
+                    // line wears (`baseFont − 2`). Drop it when the trail already
+                    // shows the same live activity: tool parsers add the mono row as
+                    // soon as a command starts, so repeating it here in a larger prose
+                    // face made two adjacent commands look unlike each other.
                     // Streaming prose is the same duplication in another form.
                     let activity = task.activity ?? L("agent.thinking")
                     let trailAlreadyShowsActivity = liveTail.last.map { entry in
@@ -1150,7 +1195,7 @@ struct AgentRecordBody: View {
                     if !NotchBody.trailTailIsStreamingProse(task.log),
                        !trailAlreadyShowsActivity {
                         CrossfadeText(text: activity,
-                                      font: min(14, answerFont), color: Tokens.text3)
+                                      font: max(Tokens.TypeSize.meta, answerFont - 2), color: Tokens.text3)
                             .tracking(-0.1)
                             .lineLimit(1)
                             .padding(.vertical, 2)
@@ -1160,6 +1205,7 @@ struct AgentRecordBody: View {
             Spacer(minLength: 0).frame(height: tailRunway)
             Color.clear.frame(height: 1).id(bottomID)
         }
+        .environment(\.answerMediaBaseDirectory, task.folder)
     }
 }
 
@@ -1351,6 +1397,7 @@ struct ComposeImagesAttachedLine: View {
     let images: [NSImage]
     let onRemove: (Int) -> Void
 
+    @Environment(\.imageLightboxHostID) private var lightboxHostID
     @State private var hoveredIndex: Int?
 
     /// A task can carry 20 images, far more than fits across the panel or a
@@ -1361,56 +1408,77 @@ struct ComposeImagesAttachedLine: View {
         HStack(spacing: 6) {
             ForEach(Array(images.prefix(Self.stripMax).enumerated()),
                     id: \.offset) { index, image in
-                Image(nsImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(width: 34, height: 24)
-                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
-                            .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
-                    )
-                    .overlay(alignment: .topTrailing) {
-                        Button { onRemove(index) } label: {
-                            Image(systemName: "xmark")
-                                .font(.sf(8, weight: .bold))
-                                .foregroundStyle(Tokens.text1)
-                                .frame(width: 15, height: 15)
-                                .background(Circle().fill(Color.black.opacity(0.66)))
-                                .contentShape(Circle())
-                        }
-                        .buttonStyle(.plain)
-                        .offset(x: 5, y: -5)
-                        .opacity(hoveredIndex == index ? 1 : 0)
-                        .allowsHitTesting(hoveredIndex == index)
+                Button { presentLightbox(at: index) } label: {
+                    Image(nsImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: 34, height: 24)
+                        .clipShape(RoundedRectangle.inset)
+                        .overlay(
+                            RoundedRectangle.inset
+                                .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+                .overlay(alignment: .topTrailing) {
+                    Button { onRemove(index) } label: {
+                        Image(systemName: "xmark")
+                            .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                            .foregroundStyle(Tokens.text1)
+                            .frame(width: 15, height: 15)
+                            .background(Circle().fill(Color.black.opacity(0.66)))
+                            .contentShape(Circle())
                     }
-                    .onHover { inside in
-                        withAnimation(.easeOut(duration: 0.12)) {
-                            hoveredIndex = inside
-                                ? index
-                                : (hoveredIndex == index ? nil : hoveredIndex)
-                        }
+                    .buttonStyle(.plain)
+                    .offset(x: 5, y: -5)
+                    .opacity(hoveredIndex == index ? 1 : 0)
+                    .allowsHitTesting(hoveredIndex == index)
+                }
+                .onHover { inside in
+                    withAnimation(.easeOut(duration: Tokens.rowFade)) {
+                        hoveredIndex = inside
+                            ? index
+                            : (hoveredIndex == index ? nil : hoveredIndex)
                     }
+                }
             }
             if images.count > Self.stripMax {
-                Text("+\(images.count - Self.stripMax)")
-                    .font(.sf(10, weight: .medium))
-                    .monospacedDigit()
-                    .foregroundStyle(Tokens.text4)
-                    .frame(width: 26, height: 24)
-                    .background(
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
-                            .fill(Color.white.opacity(0.06))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
-                            .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
-                    )
+                Button { presentLightbox(at: Self.stripMax) } label: {
+                    Text("+\(images.count - Self.stripMax)")
+                        .font(.sf(Tokens.TypeSize.caption, weight: .medium))
+                        .monospacedDigit()
+                        .foregroundStyle(Tokens.text4)
+                        .frame(width: 26, height: 24)
+                        .background(
+                            RoundedRectangle.inset
+                                .fill(Color.white.opacity(0.06))
+                        )
+                        .overlay(
+                            RoundedRectangle.inset
+                                .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
             }
         }
         // The x badges overhang their thumbnails; give the row that room back.
         .padding(.top, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Same overlay a chat image opens into. The bytes live in memory until
+    /// send, so they are seeded into the media cache under a synthetic URL the
+    /// lightbox already knows how to page.
+    private func presentLightbox(at index: Int) {
+        guard let hostID = lightboxHostID, images.indices.contains(index) else { return }
+        var refs: [AnswerImageRef] = []
+        refs.reserveCapacity(images.count)
+        for (i, image) in images.enumerated() {
+            let url = "notch-memory://compose/\(hostID.uuidString)/\(i)"
+            AnswerMediaLoader.shared.seedImage(image, for: url)
+            refs.append(AnswerImageRef(alt: "", urlString: url))
+        }
+        ImageLightboxCenter.shared.present(.init(images: refs, index: index, host: hostID))
     }
 }
 
@@ -1494,7 +1562,7 @@ struct PinStateGlyph: View {
             .font(.sf(alternateSize ?? size, weight: weight))
             .rotationEffect(.degrees(alternateSystemName == nil && !pinned ? 32 : 0))
             .contentTransition(.symbolEffect(.replace))
-            .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: systemName)
+            .animation(reduceMotion ? nil : .easeOut(duration: Tokens.hoverFade), value: systemName)
     }
 }
 
@@ -1639,9 +1707,9 @@ struct GlassSegmentCluster: View {
             // with the cluster rather than leaving one mark lit behind us.
             if !inside { hoveredSegmentID = nil }
         }
-        .animation(.easeOut(duration: 0.18), value: hoveredSegmentID)
-        .animation(.easeOut(duration: 0.18), value: clusterHovered)
-        .animation(.easeOut(duration: 0.18), value: segments.map(\.engaged))
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hoveredSegmentID)
+        .animation(.easeOut(duration: Tokens.hoverFade), value: clusterHovered)
+        .animation(.easeOut(duration: Tokens.hoverFade), value: segments.map(\.engaged))
     }
 
     private func segmentButton(id: SegmentIdentity, segment seg: Segment) -> some View {
@@ -1696,7 +1764,7 @@ struct GlassTextButton: View {
     var title: String
     /// Text size; the capsule's padding scales with it so the pill stays
     /// proportional. Defaults to the original 11pt.
-    var fontSize: CGFloat = 11
+    var fontSize: CGFloat = Tokens.TypeSize.meta
     var action: () -> Void
 
     @State private var hovering = false
@@ -1739,9 +1807,9 @@ struct PanelBackPill: View {
         Button(action: action) {
             HStack(spacing: 5) {
                 Image(systemName: "chevron.left")
-                    .font(.sf(10.5, weight: .semibold))
+                    .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
                 Text(title)
-                    .font(.sf(11, weight: .semibold))
+                    .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                     .tracking(0.4)
                     .lineLimit(1)
             }
@@ -1776,7 +1844,7 @@ struct PanelBackButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: "chevron.left")
-                .font(.sf(13, weight: .semibold))
+                .font(.sf(Tokens.TypeSize.form, weight: .semibold))
                 .foregroundStyle(Tokens.text2)
                 .frame(width: 26, height: 26)
                 .contentShape(Rectangle())
@@ -1791,8 +1859,17 @@ struct PanelBackButton: View {
 struct GlassPressStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .scaleEffect(configuration.isPressed ? 0.92 : 1)
+            .scaleEffect(configuration.isPressed ? Tokens.chipPressScale : 1)
             .animation(.spring(response: 0.25, dampingFraction: 0.6), value: configuration.isPressed)
+    }
+}
+
+/// Rows, plates, and recessed CTAs — a smaller give than a glass chip.
+struct PlatePressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? Tokens.platePressScale : 1)
+            .animation(Tokens.platePressSpring, value: configuration.isPressed)
     }
 }
 
@@ -1811,9 +1888,9 @@ struct CaptureJumpButton: View {
         Button(action: action) {
             HStack(spacing: 3) {
                 Text(title)
-                    .font(.sf(11, weight: .medium))
+                    .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                 Image(systemName: "arrow.up.right")
-                    .font(.sf(8, weight: .semibold))
+                    .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
             }
             .foregroundStyle(hovering ? Tokens.text2 : Tokens.text3)
             .padding(.vertical, 3)
@@ -2000,7 +2077,7 @@ struct FlowLayout: Layout {
 struct ConfirmationDialogOverlay<Content: View>: View {
     var onDismiss: () -> Void
     var outerPadding: CGFloat = 24
-    var cornerRadius: CGFloat = 22
+    var cornerRadius: CGFloat = Tokens.Radius.modal
     /// Light caught in the slab's rim, in colour (see `ConfirmationDialogGlass`).
     /// Off for the destructive confirmations — a card asking whether to throw work
     /// away should not be the prettiest thing on screen.
@@ -2009,7 +2086,7 @@ struct ConfirmationDialogOverlay<Content: View>: View {
 
     init(onDismiss: @escaping () -> Void,
          outerPadding: CGFloat = 24,
-         cornerRadius: CGFloat = 22,
+         cornerRadius: CGFloat = Tokens.Radius.modal,
          edgeGlow: Bool = false,
          @ViewBuilder content: () -> Content) {
         self.onDismiss = onDismiss
@@ -2036,7 +2113,7 @@ struct ConfirmationDialogOverlay<Content: View>: View {
 }
 
 private struct ConfirmationDialogGlass: View {
-    var cornerRadius: CGFloat = 22
+    var cornerRadius: CGFloat = Tokens.Radius.modal
     var edgeGlow: Bool = false
 
     var body: some View {
@@ -2104,12 +2181,12 @@ struct ClearHistoryConfirm: View {
             VStack(spacing: 14) {
                 VStack(spacing: 6) {
                     Text(L(agentOnly ? "clear.agent.title" : "clear.title"))
-                        .font(.sf(15, weight: .semibold))
+                        .font(.sf(Tokens.TypeSize.reading, weight: .medium))
                         .foregroundStyle(Tokens.text1)
                     Text(L(agentOnly
                            ? "clear.agent.body"
                            : (offersScopeChoice ? "clear.body.scope" : "clear.body")))
-                        .font(.sf(12))
+                        .font(.sf(Tokens.TypeSize.label))
                         .foregroundStyle(Tokens.text3)
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
@@ -2175,7 +2252,7 @@ struct ForceTouchDisableConfirm: View {
                 // does, and a paragraph explaining what stays working was answering
                 // a question nobody asks of a timer.
                 Text(L("disable.title"))
-                    .font(.sf(15, weight: .semibold))
+                    .font(.sf(Tokens.TypeSize.reading, weight: .medium))
                     .foregroundStyle(Tokens.text1)
 
                 VStack(spacing: 8) {
@@ -2224,10 +2301,10 @@ struct ForceClickLookupDialog: View {
             VStack(spacing: 12) {
                 VStack(spacing: 6) {
                     Text(L("forceClick.lookup.title"))
-                        .font(.sf(15, weight: .semibold))
+                        .font(.sf(Tokens.TypeSize.reading, weight: .medium))
                         .foregroundStyle(Tokens.text1)
                     Text(L("forceClick.lookup.body"))
-                        .font(.sf(12))
+                        .font(.sf(Tokens.TypeSize.label))
                         .foregroundStyle(Tokens.text3)
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
@@ -2239,9 +2316,9 @@ struct ForceClickLookupDialog: View {
                     .resizable()
                     .scaledToFit()
                     .frame(maxWidth: .infinity)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .clipShape(RoundedRectangle.control)
                     .overlay(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        RoundedRectangle.control
                             .strokeBorder(Tokens.hairline, lineWidth: 0.75)
                     )
                     .accessibilityHidden(true)
@@ -2255,7 +2332,7 @@ struct ForceClickLookupDialog: View {
             .frame(maxWidth: 320)
             .background {
                 // Same glass recipe as `ClearHistoryConfirm` — see the note there.
-                let shape = RoundedRectangle(cornerRadius: 22, style: .continuous)
+                let shape = RoundedRectangle.modal
                 ZStack {
                     shape.fill(.clear)
                         .nativeGlass(in: shape)
@@ -2303,7 +2380,7 @@ private struct ConfirmDialogButton: View {
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.sf(13, weight: .semibold))
+                .font(.sf(Tokens.TypeSize.form, weight: .medium))
                 .foregroundStyle(label)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 10)
@@ -2338,9 +2415,8 @@ private extension View {
 private struct ConfirmDialogPressStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .scaleEffect(configuration.isPressed ? 0.97 : 1)
-            .animation(.spring(response: 0.22, dampingFraction: 0.72),
-                       value: configuration.isPressed)
+            .scaleEffect(configuration.isPressed ? Tokens.platePressScale : 1)
+            .animation(Tokens.platePressSpring, value: configuration.isPressed)
     }
 }
 
@@ -2407,9 +2483,10 @@ struct ThinkingDots: View {
 ///   • a repeat search round ("digging deeper")      → `.solving`   (rubik)
 ///   • any other tool running                        → `.working`   (orbits)
 ///   • a pinned translation task                     → `.connecting` (web)
-/// A state change cross-dissolves on the house beat rather than the
-/// reference's hard remount — the one deliberate deviation, matching how
-/// `CrossfadeText` melts the wait words this orb sits beside.
+/// Two deliberate deviations, both for this 20pt wait mark: a state change
+/// cross-dissolves on the house beat rather than the reference's hard remount
+/// (matching `CrossfadeText`), and the composing ribbon runs slower than the
+/// demo's 3.12 clock so the undulation doesn't sparkle.
 ///
 /// Grayscale literals here are the reference's own ink values, not house
 /// tokens, deliberately: fidelity to the source is the point. Under Reduce
@@ -2428,7 +2505,9 @@ struct ThinkingOrb: View {
 
     var body: some View {
         let preset = OrbEngine.preset(for: state)
-        TimelineView(.animation(paused: reduceMotion)) { timeline in
+        // 24 fps is enough for a 20pt mark; the reference's uncapped
+        // `.animation` schedule sparkles at 120 Hz and reads as flicker.
+        TimelineView(.animation(minimumInterval: 1.0 / 24.0, paused: reduceMotion)) { timeline in
             // The reference clock: seconds × the preset's baked speed. Reduced
             // motion gets the reference's fixed frame (`frame(0.6)`).
             let t = reduceMotion
@@ -2704,7 +2783,7 @@ enum OrbEngine {
 
     /// `resolvePreset(state, 20)` for the states Notch wears, each built
     /// through the same machinery as the source and cached once:
-    ///   composing → ribbon 20 {speed 3.12,  count ×0.051, size ×1.073,
+    ///   composing → ribbon 20 {speed 1.35,  count ×0.051, size ×1.073,
     ///                          spin 0, bandMul 4.94, wobMul 1}
     ///   searching → globe  20 {speed 2.665, count ×0.105, size ×1.75,
     ///                          scanMul 4.335, dimBase 0.45}
@@ -2725,7 +2804,7 @@ enum OrbEngine {
         let connecting = scaleRadii(scaleCounts(webBase, 0.25), 1.52)
 
         return [
-            .composing: OrbPreset(speed: 3.12, opts: composing, draw: drawRibbon),
+            .composing: OrbPreset(speed: 1.35, opts: composing, draw: drawRibbon),
             .searching: OrbPreset(speed: 2.665, opts: searching, draw: drawGlobe),
             .solving: OrbPreset(speed: 1.95, opts: solving, draw: drawRubik),
             .working: OrbPreset(speed: 3.9, opts: working, draw: drawOrbits),
@@ -3142,7 +3221,7 @@ enum OrbEngine {
 /// Reduce Motion.
 struct CrossfadeText: View {
     let text: String
-    var font: CGFloat = 15
+    var font: CGFloat = Tokens.TypeSize.reading
     var color: Color = Tokens.text2
     /// The sweep is a live-work cue. Settled labels that reuse this component
     /// keep the text transition but must not continue advertising activity.
@@ -3269,7 +3348,7 @@ struct WaitShimmer: ViewModifier {
 struct WaitElapsedSuffix: View {
     /// When the round started thinking; nil hides the suffix entirely.
     let since: Date?
-    var font: CGFloat = 15
+    var font: CGFloat = Tokens.TypeSize.reading
     /// A FINISHED duration. Non-nil stops the clock: the value is printed as-is
     /// and never advances again. The process anchor above a written answer passes
     /// this — the wait it measures is over, and a stopwatch still running beside
@@ -3438,7 +3517,7 @@ struct AssistantTurnView: View {
     var sources: [WebSource] = []
     @Binding var hoveredSourceID: UUID?
     @Binding var sourceCloseWork: DispatchWorkItem?
-    var baseFont: CGFloat = 15
+    var baseFont: CGFloat = Tokens.TypeSize.reading
     var color: Color = Tokens.text1
     /// This turn is an agent run's report (reopened agent session). Its footer drops
     /// the "Copy as plain text" action — an agent report is copied as Markdown only.
@@ -3480,6 +3559,9 @@ struct AssistantTurnView: View {
     /// takes precedence over `regenModel` in the footer caption, shown as a bare
     /// model name (vendor prefix and `:free` suffix stripped).
     var answerModel: String? = nil
+    /// Thinking-channel text from a reasoning model, shown folded above the
+    /// answer. `nil` when this turn had none.
+    var reasoning: String? = nil
     /// A clarifying question the model posed via the `ask_user` tool, still
     /// waiting on the user — renders as an option card under the (possibly still
     /// empty) answer. Non-nil only while this turn streams.
@@ -3566,7 +3648,7 @@ struct AssistantTurnView: View {
     /// at the answer's own size, which made a running tool read as loudly as the
     /// reply it was still fetching. The elapsed suffix takes its own −2 from here,
     /// so the two keep the gradient they always had.
-    private var waitFont: CGFloat { max(11, baseFont - 2) }
+    private var waitFont: CGFloat { max(Tokens.TypeSize.meta, baseFont - 2) }
 
     /// True exactly while the post-search read cue is on screen — the window in
     /// which page titles should rotate. Drives both `waitLine` and the timer.
@@ -3595,6 +3677,18 @@ struct AssistantTurnView: View {
                 answerModel: answerModel, regenModel: regenModel))
     }
 
+    private var showThinkingFold: Bool {
+        !isAgent && !(reasoning ?? "").isEmpty
+    }
+
+    /// The thinking row's own left inset. Matches the source list's: while the
+    /// reading block's orb gutter is open, the fold sits in the same text column
+    /// as the headline above it; it closes with that gutter.
+    private var thinkingFoldIndent: CGFloat {
+        showsReadingBlock && streaming && !hasText
+            ? Self.waitOrbSize + Self.waitOrbGap : 0
+    }
+
     /// Show the wait overlay while streaming with no visible answer yet. The wait
     /// yields the INSTANT real text lands — no grace period: the line renders on
     /// top of the answer (it's an overlay), so any hold past the first tokens
@@ -3602,9 +3696,11 @@ struct AssistantTurnView: View {
     /// the streaming answer for up to a dwell). A host mid-glance just dissolves
     /// into the answer on the shared fade. Suppressed while an `ask_user`
     /// question card is up: the card IS the wait state then, and a "Waiting for
-    /// your choice…" line above it would just say it twice.
+    /// your choice…" line above it would just say it twice. Also suppressed once
+    /// a thinking fold is on screen — that row is the wait.
     private var showWait: Bool {
         streaming && !hasText && pendingQuestion == nil && !showsReadingBlock
+            && (!showThinkingFold || (orbState != .composing && activity != nil))
     }
 
     /// The mid-answer activity row. Once real text lands, `showWait` is off for
@@ -3810,6 +3906,20 @@ struct AssistantTurnView: View {
                     .padding(.bottom, 1)
                     .transition(.opacity)
             }
+            if showThinkingFold, let reasoning {
+                // No second orb under the reading block's: one live indicator per
+                // turn. The row hangs off the same text column the headline and
+                // the source list use while that gutter is open, so dropping the
+                // orb doesn't leave the line stranded to the left of everything.
+                ThinkingFoldRow(text: reasoning,
+                                live: streaming && !hasText,
+                                thinkingSince: thinkingSince,
+                                showsOrb: !showsReadingBlock)
+                    .padding(.leading, thinkingFoldIndent)
+                    .animation(.easeOut(duration: Self.blockMotion),
+                               value: thinkingFoldIndent)
+                    .padding(.bottom, hasText ? 2 : 0)
+            }
             // The answer — the SAME view whether streaming or settled, so the
             // stream→settle edge never rebuilds it. While streaming it reflows in
             // place as `text` grows; once settled it's identical but selectable.
@@ -3834,7 +3944,7 @@ struct AssistantTurnView: View {
                 // Markdown renderer otherwise keeps an intrinsic line box even
                 // though its source is empty, leaving a conspicuous blank band
                 // between the user bubble and the card.
-                .frame(height: pendingQuestion != nil && !hasText ? 0 : nil,
+                .frame(height: (!hasText && (pendingQuestion != nil || (showThinkingFold && !showWait))) ? 0 : nil,
                        alignment: .topLeading)
                 .clipped()
                 // The pre-stream wait: mood word, or the tool-activity line while a
@@ -3985,11 +4095,11 @@ struct AssistantTurnView: View {
                     // chat answers).
                     if showsFooterMetadata, let completedAt {
                         Text(completionStamp(completedAt))
-                            .font(.sf(11, weight: .medium).monospacedDigit())
+                            .font(.sf(Tokens.TypeSize.meta, weight: .medium).monospacedDigit())
                             .foregroundStyle(Tokens.text4)
                             .padding(.leading, 5)
                             .opacity(turnHovered ? 0.9 : 0.4)
-                            .animation(.easeOut(duration: 0.18), value: turnHovered)
+                            .animation(.easeOut(duration: Tokens.hoverFade), value: turnHovered)
                             .notchTooltip(L("result.completedAt",
                                             completedAt.formatted(date: .abbreviated,
                                                                   time: .shortened)))
@@ -4054,7 +4164,7 @@ struct UserQuestionCard: View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 8) {
                 Text(title)
-                    .font(.sf(13.5, weight: .semibold))
+                    .font(.sf(Tokens.TypeSize.form, weight: .medium))
                     .foregroundStyle(Tokens.text2)
                     .fixedSize(horizontal: false, vertical: true)
                 ForEach(changes, id: \.self) { changeRow($0) }
@@ -4095,7 +4205,7 @@ struct UserQuestionCard: View {
     /// actually being asked about, and carries the card's largest type.
     private func changeRow(_ line: String) -> some View {
         Text(line)
-            .font(.sf(15))
+            .font(.sf(Tokens.TypeSize.reading))
             .foregroundStyle(Tokens.text1)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -4106,7 +4216,7 @@ struct UserQuestionCard: View {
     /// floats on the panel's own glass rather than over arbitrary windows, so it
     /// needs no occluding veil and no drop shadow to sit apart.
     private var glass: some View {
-        let shape = RoundedRectangle(cornerRadius: 20, style: .continuous)
+        let shape = RoundedRectangle.menu
         return ZStack {
             shape.fill(.clear)
                 .nativeGlass(in: shape, tintOpacity: 0.14)
@@ -4143,17 +4253,17 @@ private struct UserQuestionOptionRow: View {
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.sf(12.5))
+                .font(.sf(Tokens.TypeSize.label))
                 .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 7)
                 .background(
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    RoundedRectangle.control
                         .fill(Color.white.opacity(hovering ? 0.13 : 0.07))
                 )
-                .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .contentShape(RoundedRectangle.control)
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
@@ -4891,11 +5001,15 @@ enum MarkdownParser {
     /// URL *is* the image, and showing it as a clickable string instead of the
     /// picture is never what the user wanted.
     private static func paragraphOrMedia(_ line: String) -> [MarkdownBlock] {
-        // A line that is nothing but an image/PDF URL renders as the thing itself.
+        // A line that is nothing but an image/PDF URL — or a Grok session-relative
+        // path like `images/1.jpg` — renders as the thing itself.
         if let m = line.wholeMatch(of: soloURL) {
             let url = String(m.1)
             if isPDFURL(url) { return [.pdf(title: "", url: url)] }
             if isImageURL(url) { return [.image(alt: "", url: url)] }
+        }
+        if isImageURL(line) || isPDFURL(line), isLocalMediaPath(line) {
+            return isPDFURL(line) ? [.pdf(title: "", url: line)] : [.image(alt: "", url: line)]
         }
 
         // The cheap gate: no `](` means no reference of either kind.
@@ -4941,6 +5055,15 @@ enum MarkdownParser {
             .split(separator: "#", maxSplits: 1)[0]
             .lowercased()
         return imageExtensions.contains { path.hasSuffix("." + $0) }
+    }
+
+    /// A session-relative or filesystem path Grok (and similar) drop on their
+    /// own line — `images/1.jpg`, `./images/1.jpg`, an absolute POSIX path.
+    /// Spaces and schemes are excluded so a sentence that merely ends in `.png`
+    /// stays a paragraph.
+    private static func isLocalMediaPath(_ line: String) -> Bool {
+        if line.contains("://") || line.contains(" ") { return false }
+        return line.hasPrefix("/") || line.hasPrefix("./") || line.hasPrefix("images/")
     }
 
     /// `1. item` / `2) item` → (number, text).
@@ -5497,7 +5620,7 @@ enum MathTypeset {
 /// per-block structure (sizing for headings, the bullet/number gutter for lists).
 struct MarkdownBlocks: View {
     let source: String
-    var baseFont: CGFloat = 15
+    var baseFont: CGFloat = Tokens.TypeSize.reading
     var color: Color = Tokens.text1
     /// Called when a code block's copy button writes its text to the pasteboard,
     /// so the owner (NotchBody) can re-baseline the clipboard and stop that in-app
@@ -5570,7 +5693,7 @@ struct MarkdownBlocks: View {
 /// so none of this fade machinery touches a settled turn.
 struct StreamingMarkdown: View {
     let source: String
-    var baseFont: CGFloat = 15
+    var baseFont: CGFloat = Tokens.TypeSize.reading
     var color: Color = Tokens.text1
     var onInAppCopy: (() -> Void)? = nil
 
@@ -5993,7 +6116,7 @@ struct TailFadeIfAvailable: ViewModifier {
 /// block kind looks.
 struct MarkdownBlockRow: View, Equatable {
     let block: MarkdownBlock
-    var baseFont: CGFloat = 15
+    var baseFont: CGFloat = Tokens.TypeSize.reading
     var color: Color = Tokens.text1
     var onInAppCopy: (() -> Void)? = nil
     /// True only on the growing tail block of a streaming answer: its fresh
@@ -6345,11 +6468,11 @@ private struct MarkdownTableView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 2)
         .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle.control
                 .fill(Color.white.opacity(0.04))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle.control
                 .strokeBorder(Tokens.hairline, lineWidth: 0.5)
         )
     }
@@ -6405,38 +6528,91 @@ final class AnswerMediaLoader {
     /// photograph should cost a thumbnail's memory, not a 50 MB bitmap.
     private nonisolated static let maxPixel: CGFloat = 1600
 
-    func image(for urlString: String) async -> Outcome {
-        await outcome(for: urlString, as: .image)
+    func image(for urlString: String, base: URL? = nil) async -> Outcome {
+        await outcome(for: urlString, as: .image, base: base)
     }
 
-    func pdf(for urlString: String) async -> Outcome {
-        await outcome(for: urlString, as: .pdf)
+    /// Park an already-decoded bitmap under a key the lightbox can page.
+    /// Used by compose thumbnails, which have pixels but no file yet.
+    func seedImage(_ image: NSImage, for urlString: String) {
+        cache[urlString] = .image(image)
     }
 
-    private func outcome(for urlString: String, as kind: Kind) async -> Outcome {
-        if let hit = cache[urlString] { return hit }
-        if let running = inflight[urlString] { return await running.value }
-        let task = Task { await Self.fetch(urlString, as: kind) }
-        inflight[urlString] = task
+    func pdf(for urlString: String, base: URL? = nil) async -> Outcome {
+        await outcome(for: urlString, as: .pdf, base: base)
+    }
+
+    /// Turn a markdown image target into a loadable URL. http(s) pass through;
+    /// `file://` and absolute POSIX paths load from disk; a relative path like
+    /// Grok's `images/1.jpg` is resolved against `base` (the agent project, or
+    /// the chat turn's working directory).
+    nonisolated static func resolve(_ urlString: String, base: URL?) -> URL? {
+        let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let url = URL(string: trimmed), let scheme = url.scheme?.lowercased() {
+            if scheme == "http" || scheme == "https" || scheme == "file" { return url }
+        }
+        if trimmed.hasPrefix("/") { return URL(fileURLWithPath: trimmed) }
+        if let base {
+            return base.appendingPathComponent(trimmed).standardizedFileURL
+        }
+        if trimmed.hasPrefix("file:") { return URL(string: trimmed) }
+        return nil
+    }
+
+    private func memoryKey(_ urlString: String, base: URL?) -> String {
+        (base?.path ?? "") + "\u{1e}" + urlString
+    }
+
+    private func outcome(for urlString: String, as kind: Kind, base: URL?) async -> Outcome {
+        let key = memoryKey(urlString, base: base)
+        if let hit = cache[key] ?? cache[urlString] { return hit }
+        if let running = inflight[key] ?? inflight[urlString] { return await running.value }
+        let task = Task { await Self.fetch(urlString, as: kind, base: base) }
+        inflight[key] = task
         let result = await task.value
-        inflight[urlString] = nil
+        inflight[key] = nil
+        cache[key] = result
         cache[urlString] = result
-        order.append(urlString)
-        if order.count > 64 { cache.removeValue(forKey: order.removeFirst()) }
+        order.append(key)
+        if order.count > 64 {
+            cache.removeValue(forKey: order.removeFirst())
+        }
         return result
     }
 
-    /// The off-main part: download, bound, decode. `nonisolated` so the fetch
-    /// runs on the concurrency pool, not the main thread this class lives on.
-    private nonisolated static func fetch(_ urlString: String, as kind: Kind) async -> Outcome {
-        guard let url = URL(string: urlString),
-              let scheme = url.scheme?.lowercased(),
-              scheme == "http" || scheme == "https",
-              let (data, response) = try? await URLSession.shared.data(from: url),
-              data.count <= byteCap,
-              (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? true
-        else { return .failed }
+    /// The off-main part: download or read, bound, decode. `nonisolated` so the
+    /// fetch runs on the concurrency pool, not the main thread this class lives on.
+    private nonisolated static func fetch(_ urlString: String, as kind: Kind,
+                                          base: URL?) async -> Outcome {
+        let durableKey = durableName(urlString, base: base)
+        if let cached = readDurable(durableKey) {
+            return decode(cached, as: kind)
+        }
+        guard let url = resolve(urlString, base: base) else { return .failed }
 
+        let data: Data
+        if url.isFileURL {
+            guard let bytes = try? Data(contentsOf: url), bytes.count <= byteCap
+            else { return .failed }
+            data = bytes
+        } else {
+            guard let scheme = url.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https",
+                  let (bytes, response) = try? await URLSession.shared.data(from: url),
+                  bytes.count <= byteCap,
+                  (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? true
+            else { return .failed }
+            data = bytes
+        }
+
+        let outcome = decode(data, as: kind)
+        if case .failed = outcome { return outcome }
+        writeDurable(durableKey, data)
+        return outcome
+    }
+
+    private nonisolated static func decode(_ data: Data, as kind: Kind) -> Outcome {
         switch kind {
         case .image:
             guard let image = downsampled(data) else { return .failed }
@@ -6451,6 +6627,37 @@ final class AnswerMediaLoader {
             return .pdf(PDFPreview(firstPage: page.thumbnail(of: size, for: .mediaBox),
                                    pageCount: doc.pageCount))
         }
+    }
+
+    private nonisolated static var durableDirectory: URL {
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        return base
+            .appendingPathComponent(Bundle.main.bundleIdentifier ?? "Notch", isDirectory: true)
+            .appendingPathComponent("AnswerMedia", isDirectory: true)
+    }
+
+    private nonisolated static func durableName(_ urlString: String, base: URL?) -> String {
+        let raw = (base?.path ?? "") + "\u{1e}" + urlString
+        let digest = SHA256.hash(data: Data(raw.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private nonisolated static func durableURL(_ name: String) -> URL {
+        durableDirectory.appendingPathComponent(name)
+    }
+
+    private nonisolated static func readDurable(_ name: String) -> Data? {
+        let url = durableURL(name)
+        guard let data = try? Data(contentsOf: url), data.count <= byteCap, !data.isEmpty
+        else { return nil }
+        return data
+    }
+
+    private nonisolated static func writeDurable(_ name: String, _ data: Data) {
+        let dir = durableDirectory
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? data.write(to: durableURL(name), options: .atomic)
     }
 
     /// Decode via ImageIO with a pixel cap (also normalises EXIF rotation).
@@ -6469,22 +6676,23 @@ final class AnswerMediaLoader {
 
 /// Open a media reference in the default app — same scheme gate as the loader.
 private func openAnswerMediaURL(_ urlString: String) {
-    guard let url = URL(string: urlString),
-          let scheme = url.scheme?.lowercased(),
-          scheme == "http" || scheme == "https" else { return }
-    NSWorkspace.shared.open(url)
+    guard let url = AnswerMediaLoader.resolve(urlString, base: nil) else { return }
+    let scheme = url.scheme?.lowercased()
+    if scheme == "http" || scheme == "https" || url.isFileURL {
+        NSWorkspace.shared.open(url)
+    }
 }
 
 /// The shape media takes while its download is in flight — a quiet island of
 /// fixed height, so the panel settles in one reflow when the pixels land.
 private struct MediaLoadingPlaceholder: View {
     var body: some View {
-        RoundedRectangle(cornerRadius: 10, style: .continuous)
+        RoundedRectangle.control
             .fill(Color.white.opacity(0.04))
             .frame(height: 120)
             .overlay(ProgressView().controlSize(.small).tint(.white.opacity(0.4)))
             .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle.control
                     .strokeBorder(Tokens.hairline, lineWidth: 0.5)
             )
     }
@@ -6500,7 +6708,7 @@ struct MediaLinkChip: View {
     /// (the lightbox's link, under the picture itself).
     var icon: String?
     let label: String
-    var baseFont: CGFloat = 15
+    var baseFont: CGFloat = Tokens.TypeSize.reading
     var color: Color = Tokens.text1
     let action: () -> Void
 
@@ -6536,7 +6744,7 @@ struct MediaLinkChip: View {
 private struct AnswerImageView: View {
     let alt: String
     let urlString: String
-    var baseFont: CGFloat = 15
+    var baseFont: CGFloat = Tokens.TypeSize.reading
     var color: Color = Tokens.text1
 
     /// Height ceiling for a tall image — enforced by capping the *width* instead
@@ -6547,6 +6755,7 @@ private struct AnswerImageView: View {
     /// Nil on a surface with no lightbox over it (a preview, settings copy) —
     /// there the tap falls back to opening the source.
     @Environment(\.imageLightboxHostID) private var lightboxHostID
+    @Environment(\.answerMediaBaseDirectory) private var mediaBase
 
     @State private var outcome: AnswerMediaLoader.Outcome?
 
@@ -6572,9 +6781,9 @@ private struct AnswerImageView: View {
                         .resizable()
                         .aspectRatio(ratio, contentMode: .fit)
                         .frame(maxWidth: min(image.size.width, Self.heightCap * ratio))
-                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .clipShape(RoundedRectangle.control)
                         .overlay(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            RoundedRectangle.control
                                 .strokeBorder(Tokens.hairline, lineWidth: 0.5)
                         )
                 }
@@ -6591,8 +6800,8 @@ private struct AnswerImageView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .task(id: urlString) {
-            outcome = await AnswerMediaLoader.shared.image(for: urlString)
+        .task(id: urlString + (mediaBase?.path ?? "")) {
+            outcome = await AnswerMediaLoader.shared.image(for: urlString, base: mediaBase)
         }
     }
 }
@@ -6602,9 +6811,10 @@ private struct AnswerImageView: View {
 private struct AnswerPDFView: View {
     let title: String
     let urlString: String
-    var baseFont: CGFloat = 15
+    var baseFont: CGFloat = Tokens.TypeSize.reading
     var color: Color = Tokens.text1
 
+    @Environment(\.answerMediaBaseDirectory) private var mediaBase
     @State private var outcome: AnswerMediaLoader.Outcome?
 
     var body: some View {
@@ -6639,12 +6849,12 @@ private struct AnswerPDFView: View {
                         .padding(.vertical, 7)
                     }
                     .background(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        RoundedRectangle.control
                             .fill(Color.white.opacity(0.04))
                     )
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .clipShape(RoundedRectangle.control)
                     .overlay(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        RoundedRectangle.control
                             .strokeBorder(Tokens.hairline, lineWidth: 0.5)
                     )
                 }
@@ -6660,8 +6870,8 @@ private struct AnswerPDFView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .task(id: urlString) {
-            outcome = await AnswerMediaLoader.shared.pdf(for: urlString)
+        .task(id: urlString + (mediaBase?.path ?? "")) {
+            outcome = await AnswerMediaLoader.shared.pdf(for: urlString, base: mediaBase)
         }
     }
 
@@ -6721,11 +6931,11 @@ private struct CodeBlockView: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
             .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                RoundedRectangle.inset
                     .fill(Color.white.opacity(0.06))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                RoundedRectangle.inset
                     .strokeBorder(Tokens.hairline, lineWidth: 0.5)
             )
             .overlay(alignment: .topTrailing) {
@@ -6753,7 +6963,7 @@ private struct CodeBlockView: View {
             }
         } label: {
             Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                .font(.sf(12, weight: .regular))
+                .font(.sf(Tokens.TypeSize.label, weight: .regular))
                 .foregroundStyle(hovering || copied ? Tokens.text1 : Tokens.text3)
                 // Native SF Symbols swap — the doc morphs to the check
                 // instead of hard-cutting.
@@ -6830,7 +7040,7 @@ private struct AnswerFooterButton: View {
             }
         } label: {
             Image(systemName: confirmed ? "checkmark" : icon)
-                .font(.sf(11, weight: .regular))
+                .font(.sf(Tokens.TypeSize.meta, weight: .regular))
                 .foregroundStyle(confirmed ? Tokens.text2 : Tokens.text3)
                 // Native SF Symbols swap — icon morphs to the check, no hard cut.
                 .contentTransition(.symbolEffect(.replace))
@@ -6842,7 +7052,7 @@ private struct AnswerFooterButton: View {
         .opacity(confirmed || hovering ? 1.0 : rowHovered ? 0.7 : 0.25)
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
-        .animation(.easeOut(duration: 0.18), value: rowHovered)
+        .animation(.easeOut(duration: Tokens.hoverFade), value: rowHovered)
         .animation(.easeOut(duration: 0.15), value: confirmed)
         .notchTooltip(help, shows: showsTooltip)
     }
@@ -6895,7 +7105,7 @@ private struct AnswerFooterRegenerateControl<Items: View>: View {
         HStack(spacing: 0) {
             Button(action: action) {
                 Image(systemName: "arrow.clockwise")
-                    .font(.sf(11, weight: .regular))
+                    .font(.sf(Tokens.TypeSize.meta, weight: .regular))
                     .foregroundStyle(lit ? Tokens.text2 : Tokens.text3)
                     .frame(width: 22, height: 22)
                     .contentShape(Rectangle())
@@ -6906,7 +7116,7 @@ private struct AnswerFooterRegenerateControl<Items: View>: View {
             if hasMenu {
                 Menu(content: items) {
                     Image(systemName: "chevron.down")
-                        .font(.sf(8, weight: .semibold))
+                        .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                         .foregroundStyle(lit ? Tokens.text2 : Tokens.text3)
                         .frame(width: Self.chevronWidth, height: 22)
                         .contentShape(Rectangle())
@@ -6960,8 +7170,14 @@ private struct AnswerFooterRegenerateControl<Items: View>: View {
         // Rest → row hover → pointed at: the same three levels the bare footer
         // icons keep, so the control still belongs to that toolbar.
         .opacity(lit ? 1.0 : rowHovered ? 0.7 : 0.25)
-        .animation(.easeOut(duration: Tokens.hoverFade), value: lit)
-        .animation(.easeOut(duration: 0.18), value: rowHovered)
+        // The chevron and glass arrive slower than the rest of the toolbar:
+        // easeOut at hoverFade starts at full speed and reads as a snap.
+        // Ease in-out, a beat of delay on appear, slightly quicker on leave.
+        .animation(lit
+                   ? .easeInOut(duration: 0.32).delay(0.08)
+                   : .easeInOut(duration: 0.22),
+                   value: lit)
+        .animation(.easeOut(duration: Tokens.hoverFade), value: rowHovered)
     }
 }
 
@@ -7022,7 +7238,7 @@ struct SourceBadge: View {
 
     var body: some View {
         Text(pillLabel)
-            .font(.sf(11, weight: .medium))
+            .font(.sf(Tokens.TypeSize.meta, weight: .medium))
             .tracking(0.1)
             .foregroundStyle(Tokens.text3)
             .padding(.horizontal, 9)
@@ -7185,10 +7401,10 @@ struct SourcePopoverPanel: View {
     /// inside its own bounds with it — a compact pointer-side window is only a
     /// little wider than this card, so a badge at the reading inset would push
     /// its right edge out through the window without the clamp.
-    static let width: CGFloat = 350
+    static let width: CGFloat = 320
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
+        let shape = RoundedRectangle.menu
         let scrolls = sources.count > Self.visibleRows
         // Cap the visible height at `visibleRows` rows; shorter lists size down to
         // their own content (no empty space, no scroll). Computing the height
@@ -7276,18 +7492,18 @@ private struct SourceRow: View {
         } label: {
             HStack(alignment: .firstTextBaseline, spacing: 9) {
                 Text(source.site)
-                    .font(.sf(11, weight: .semibold))
+                    .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                     .foregroundStyle(Tokens.text3)
                     .lineLimit(1)
                     .fixedSize()
                 Text(source.title)
-                    .font(.sf(11))
+                    .font(.sf(Tokens.TypeSize.meta))
                     .foregroundStyle(hovering ? Tokens.text2 : Tokens.text4)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 if let date = source.date, let day = Self.dayOnly(date) {
                     Text(day)
-                        .font(.sf(10))
+                        .font(.sf(Tokens.TypeSize.caption))
                         .foregroundStyle(Tokens.text4)
                         .fixedSize()
                 }
@@ -7326,7 +7542,7 @@ struct SavedImageThumb: View {
     let file: String
     var width: CGFloat = 34
     var height: CGFloat = 24
-    var corner: CGFloat = 5
+    var corner: CGFloat = Tokens.Radius.inset
 
     var body: some View {
         if let image = NotchModel.historyImage(named: file) {
@@ -7347,9 +7563,9 @@ struct SavedImageThumb: View {
 /// shots pasted into an agent task — shown above that turn's text wherever a saved
 /// thread is read back (the reopened panel, the archive transcript). Deliberately the
 /// same 34×24 thumbnail language as the live compose previews, so a reopened
-/// conversation looks like the one that was sent. Clicking one opens the full-size
-/// JPEG in Preview: the strip is a reminder of what was asked about, and the archive
-/// is where you'd go to look at it properly.
+/// conversation looks like the one that was sent. Clicking one opens the same
+/// in-panel lightbox a chat image uses; with no host (a settings copy) it falls
+/// back to Preview.
 struct SavedTurnImages: View {
     let files: [String]
 
@@ -7358,29 +7574,49 @@ struct SavedTurnImages: View {
     /// fits across the panel.
     private static let stripMax = 6
 
+    @Environment(\.imageLightboxHostID) private var lightboxHostID
+
     var body: some View {
         HStack(spacing: 6) {
-            ForEach(files.prefix(Self.stripMax), id: \.self) { file in
-                Button {
-                    NSWorkspace.shared.open(NotchModel.historyImageURL(file))
-                } label: {
+            ForEach(Array(files.prefix(Self.stripMax).enumerated()), id: \.offset) { index, file in
+                Button { presentLightbox(at: index) } label: {
                     SavedImageThumb(file: file)
                 }
                 .buttonStyle(.plain)
             }
             if files.count > Self.stripMax {
-                Text("+\(files.count - Self.stripMax)")
-                    .font(.sf(10, weight: .medium))
-                    .monospacedDigit()
-                    .foregroundStyle(Tokens.text4)
-                    .frame(width: 26, height: 24)
-                    .background(
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
-                            .fill(Color.white.opacity(0.06))
-                    )
+                Button { presentLightbox(at: Self.stripMax) } label: {
+                    Text("+\(files.count - Self.stripMax)")
+                        .font(.sf(Tokens.TypeSize.caption, weight: .medium))
+                        .monospacedDigit()
+                        .foregroundStyle(Tokens.text4)
+                        .frame(width: 26, height: 24)
+                        .background(
+                            RoundedRectangle.inset
+                                .fill(Color.white.opacity(0.06))
+                        )
+                }
+                .buttonStyle(.plain)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var refs: [AnswerImageRef] {
+        files.map {
+            AnswerImageRef(alt: "", urlString: NotchModel.historyImageURL($0).absoluteString)
+        }
+    }
+
+    private func presentLightbox(at index: Int) {
+        guard files.indices.contains(index) else { return }
+        if let hostID = lightboxHostID {
+            ImageLightboxCenter.shared.present(
+                .init(images: refs, index: index, host: hostID)
+            )
+        } else {
+            NSWorkspace.shared.open(NotchModel.historyImageURL(files[index]))
+        }
     }
 }
 
@@ -7409,9 +7645,13 @@ struct AgentWorkTrailView: View {
     /// block is exempt from the long-paragraph fold: a block that is still
     /// being written must not collapse under the reader mid-sentence.
     var live: Bool = false
-    /// Prose scale for the host surface. Agent records normally read at 15pt;
-    /// the split history detail uses the same compact scale as its chat turns.
-    var baseFont: CGFloat = 15
+    /// Prose scale for the host surface — the chat answer size on that page.
+    /// Trail chrome (thinking, tools, the activity ticker) steps down from this
+    /// the same way a chat wait line and a markdown code block do.
+    var baseFont: CGFloat = Tokens.TypeSize.reading
+
+    /// Status type one step under the answer — chat's wait line (`baseFont − 2`).
+    private var waitFont: CGFloat { max(Tokens.TypeSize.meta, baseFont - 2) }
 
     /// One display unit of the trail: a prose paragraph, a fold of reasoning, a
     /// plan, a follow-up prompt marker, or a run of consecutive tool calls
@@ -7480,9 +7720,9 @@ struct AgentWorkTrailView: View {
                 if run.count == 1 {
                     // A lone call carries its own headline ("$ npm test",
                     // "Editing Foo.swift") — a summary would only hide it.
-                    AgentTrailToolRow(entry: run[0])
+                    AgentTrailToolRow(entry: run[0], baseFont: baseFont)
                 } else {
-                    AgentTrailGroupRow(entries: run)
+                    AgentTrailGroupRow(entries: run, baseFont: baseFont)
                 }
             case .marker(let entry):
                 // A follow-up round's prompt marker — present only in the
@@ -7494,17 +7734,17 @@ struct AgentWorkTrailView: View {
                 // made the bubble visibly jump the moment the round settled
                 // and re-rendered as a real turn.
                 UserQuestionBubble(text: String(entry.title.dropFirst(2)),
-                                   baseFont: min(14.5, baseFont))
+                                   baseFont: min(Tokens.TypeSize.reading, baseFont))
                     .padding(.vertical, 3)
             case .thinking(let entry):
-                AgentTrailThinkingRow(text: entry.title)
+                AgentTrailThinkingRow(text: entry.title, font: waitFont)
             case .todo(let entry):
-                AgentTrailPlanRow(entry: entry)
+                AgentTrailPlanRow(entry: entry, baseFont: baseFont)
             case .prose(let entry):
-                // Narration is the agent's own words — set exactly like an
-                // answer (same MarkdownBlocks, same 15pt base), one shade
-                // quieter so the final report still leads. The block still being
-                // written (the live trail's last) never folds.
+                // Narration is the agent's own words — same MarkdownBlocks and
+                // same answer size as a chat turn, one shade quieter so the
+                // final report still leads. The block still being written (the
+                // live trail's last) never folds.
                 AgentTrailProse(text: entry.title,
                                 foldable: !(live && i == all.count - 1),
                                 baseFont: baseFont)
@@ -7522,7 +7762,7 @@ private struct AgentTrailProse: View {
     /// False for the block still streaming: folding it would collapse the
     /// paragraph under the reader as it grows.
     var foldable: Bool = true
-    var baseFont: CGFloat = 15
+    var baseFont: CGFloat = Tokens.TypeSize.reading
 
     @State private var expanded = false
 
@@ -7556,7 +7796,7 @@ private struct AgentTrailProse: View {
                     }
                 } label: {
                     Text(L(expanded ? "agent.trail.less" : "agent.trail.more"))
-                        .font(.sf(12, weight: .medium))
+                        .font(.sf(max(Tokens.TypeSize.meta, baseFont - 2), weight: .medium))
                         .foregroundStyle(Tokens.text4)
                         .contentShape(Rectangle())
                 }
@@ -7573,47 +7813,152 @@ private struct AgentTrailProse: View {
 /// there when you go looking for it.
 private struct AgentTrailThinkingRow: View {
     let text: String
+    var font: CGFloat = Tokens.TypeSize.form
+
+    var body: some View {
+        ThinkingFoldRow(text: text, font: font, showPreview: false)
+    }
+}
+
+/// The model's thinking channel, folded behind one quiet line. Collapsed by
+/// default: while the model is still thinking the header carries a one-line
+/// preview so the gist is visible without opening the scratchpad. Once the
+/// answer lands the preview drops and the row folds back to the bare
+/// "Thinking" line. The agent trail hides the preview entirely because the
+/// activity ticker already covered the live phase.
+struct ThinkingFoldRow: View {
+    let text: String
+    var live: Bool = false
+    var thinkingSince: Date? = nil
+    var font: CGFloat = Tokens.TypeSize.form
+    var showPreview: Bool = true
+    /// False when a live orb is already on screen right above this row (the
+    /// reading block's) — one turn shows one spinner, not one per row.
+    var showsOrb: Bool = true
 
     @State private var expanded = false
+    /// Held separately from `text` so the header melts between finished
+    /// thoughts instead of racing the token stream.
+    @State private var headerPreview: String? = nil
+    @State private var lastPreviewSwap = Date.distantPast
+
+    /// Cap the opened scratchpad so a long reasoning dump cannot
+    /// stretch the conversation past what the panel can scroll.
+    private static let expandedMaxHeight: CGFloat = 80
+
+    /// How long a live preview line stays before the next settled thought
+    /// may replace it. Matches the wait-line dissolve window.
+    private static let previewDwell: TimeInterval = 1.2
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Button {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
-                    expanded.toggle()
-                }
+                // Don't inherit the island's layout spring — that squash is
+                // what a click on this row used to look like.
+                var t = Transaction()
+                t.disablesAnimations = true
+                withTransaction(t) { expanded.toggle() }
             } label: {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(L("agent.trail.thinking"))
-                        .font(.sf(13))
-                        .italic()
-                        .foregroundStyle(Tokens.text4)
+                    if live, showsOrb {
+                        ThinkingOrb(state: .composing)
+                            .centeredOnTextGlyphs(fontSize: font)
+                    }
+                    if let headerPreview, !expanded {
+                        // The preview is the thinking. The word "Thinking" in
+                        // front of it says nothing the line doesn't already.
+                        Text(headerPreview)
+                            .font(.sf(font))
+                            .foregroundStyle(Tokens.text4)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .id(headerPreview)
+                            .transition(.opacity)
+                    } else {
+                        Text(L("agent.trail.thinking"))
+                            .font(.sf(font))
+                            .italic()
+                            .foregroundStyle(Tokens.text4)
+                    }
                     Image(systemName: "chevron.right")
-                        .font(.sf(7.5, weight: .semibold))
+                        .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                         .foregroundStyle(Tokens.text4)
                         .rotationEffect(.degrees(expanded ? 90 : 0))
+                    if live {
+                        WaitElapsedSuffix(since: thinkingSince, font: font)
+                            .fixedSize()
+                    }
+                    Spacer(minLength: 0)
                 }
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(ThinkingFoldPressStyle())
+            .onAppear { syncPreview(force: true) }
+            .onChange(of: text) { _, _ in syncPreview(force: !live) }
+            .onChange(of: live) { _, _ in syncPreview(force: true) }
 
-            if expanded {
-                Text(text)
-                    .font(.sf(13))
-                    .foregroundStyle(Tokens.text4)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    // The same indented rail a folded tool group unfolds into,
-                    // so "contents of the line above" reads the same everywhere.
+            Group {
+                if expanded {
+                    ViewThatFits(in: .vertical) {
+                        expandedBody
+                        ScrollView(.vertical, showsIndicators: true) {
+                            expandedBody
+                        }
+                        .frame(height: Self.expandedMaxHeight)
+                    }
+                    .frame(maxHeight: Self.expandedMaxHeight, alignment: .top)
                     .padding(.leading, 9)
                     .overlay(alignment: .leading) {
                         RoundedRectangle(cornerRadius: 0.75)
                             .fill(.white.opacity(0.08))
                             .frame(width: 1.5)
                     }
+                    .transition(.opacity)
+                }
             }
+            .animation(.easeOut(duration: 0.15), value: expanded)
         }
+    }
+
+    private var expandedBody: some View {
+        Text(text)
+            .font(.sf(font))
+            .foregroundStyle(Tokens.text4)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func syncPreview(force: Bool) {
+        // The preview belongs to the live phase only. A settled row keeps just
+        // the "Thinking" line — the finished answer is right below it, and a
+        // leftover half-sentence of reasoning above it only competes with it.
+        guard showPreview, live else {
+            withAnimation(.easeInOut(duration: 0.25)) { headerPreview = nil }
+            return
+        }
+        let next = live
+            ? ReasoningPreview.settledLine(from: text)
+            : ReasoningPreview.line(from: text)
+        if next == headerPreview { return }
+        // Keep the last finished thought on the header until a new one is ready.
+        if live, next == nil { return }
+        let now = Date()
+        if !force, live, now.timeIntervalSince(lastPreviewSwap) < Self.previewDwell {
+            return
+        }
+        withAnimation(.easeInOut(duration: 0.45)) {
+            headerPreview = next
+        }
+        lastPreviewSwap = now
+    }
+}
+
+/// No press-scale: a `.plain` button on the island still picks up a squash
+/// from the surrounding glass spring. The fold only needs a click, not give.
+private struct ThinkingFoldPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
     }
 }
 
@@ -7622,20 +7967,23 @@ private struct AgentTrailThinkingRow: View {
 /// thing in the trail you want to see without asking.
 private struct AgentTrailPlanRow: View {
     let entry: AgentLogEntry
+    var baseFont: CGFloat = Tokens.TypeSize.reading
+
+    private var waitFont: CGFloat { max(Tokens.TypeSize.meta, baseFont - 2) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(entry.title)
-                .font(.sf(12, weight: .medium))
+                .font(.sf(waitFont, weight: .medium))
                 .foregroundStyle(Tokens.text4)
             ForEach(Array(AgentTodo.decode(entry.detail ?? "").enumerated()), id: \.offset) { _, item in
                 HStack(alignment: .firstTextBaseline, spacing: 7) {
                     Image(systemName: Self.glyph(item.status))
-                        .font(.sf(10, weight: .semibold))
+                        .font(.sf(Tokens.TypeSize.caption, weight: .semibold))
                         .foregroundStyle(item.status == .done ? Tokens.text3 : Tokens.text4)
                         .frame(width: 11)
                     Text(item.text)
-                        .font(.sf(13))
+                        .font(.sf(waitFont))
                         .foregroundStyle(item.status == .pending ? Tokens.text4 : Tokens.text2)
                         .strikethrough(item.status == .done, color: Tokens.text4)
                         .fixedSize(horizontal: false, vertical: true)
@@ -7646,10 +7994,10 @@ private struct AgentTrailPlanRow: View {
         .padding(.vertical, 7)
         .padding(.horizontal, 10)
         .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            RoundedRectangle.inset
                 .fill(.white.opacity(0.03))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    RoundedRectangle.inset
                         .strokeBorder(.white.opacity(0.06), lineWidth: 0.5)
                 )
         )
@@ -7670,8 +8018,11 @@ private struct AgentTrailPlanRow: View {
 /// tall until the reader actually asks for it.
 private struct AgentTrailGroupRow: View {
     let entries: [AgentLogEntry]
+    var baseFont: CGFloat = Tokens.TypeSize.reading
 
     @State private var expanded = false
+
+    private var waitFont: CGFloat { max(Tokens.TypeSize.meta, baseFont - 2) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -7682,11 +8033,11 @@ private struct AgentTrailGroupRow: View {
             } label: {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(Self.summary(entries))
-                        .font(.sf(13))
+                        .font(.sf(waitFont))
                         .foregroundStyle(Tokens.text4)
                         .lineLimit(1)
                     Image(systemName: "chevron.right")
-                        .font(.sf(7.5, weight: .semibold))
+                        .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                         .foregroundStyle(Tokens.text4)
                         .rotationEffect(.degrees(expanded ? 90 : 0))
                 }
@@ -7696,7 +8047,7 @@ private struct AgentTrailGroupRow: View {
 
             if expanded {
                 VStack(alignment: .leading, spacing: 6) {
-                    ForEach(entries) { AgentTrailToolRow(entry: $0) }
+                    ForEach(entries) { AgentTrailToolRow(entry: $0, baseFont: baseFont) }
                 }
                 // Indented under the summary, with a hairline rail so the
                 // unfolded run reads as the summary's own contents.
@@ -7739,8 +8090,15 @@ private struct AgentTrailGroupRow: View {
 /// a quiet code-block card. Rows without output are inert (nothing to unfold).
 private struct AgentTrailToolRow: View {
     let entry: AgentLogEntry
+    var baseFont: CGFloat = Tokens.TypeSize.reading
 
     @State private var expanded = false
+
+    /// The trail's one chrome size, shared with the thinking row, the group
+    /// summary and the plan card. Mono used to step down only 1pt from the
+    /// prose, which put a visibly larger command line next to a smaller
+    /// "Thinking" line — three type sizes in a stack that says one thing.
+    private var codeFont: CGFloat { max(Tokens.TypeSize.meta, baseFont - 2) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -7751,16 +8109,14 @@ private struct AgentTrailToolRow: View {
                 }
             } label: {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    // Mono at 12 = the code rung under the 13pt secondary body,
-                    // the same base−1 step markdown code blocks use.
                     Text(entry.title)
-                        .font(.system(size: 12, design: .monospaced))
+                        .font(.system(size: codeFont, design: .monospaced))
                         .foregroundStyle(Tokens.text4)
                         .lineLimit(expanded ? nil : 1)
                         .fixedSize(horizontal: false, vertical: true)
                     if entry.detail != nil {
                         Image(systemName: "chevron.right")
-                            .font(.sf(7.5, weight: .semibold))
+                            .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                             .foregroundStyle(Tokens.text4)
                             .rotationEffect(.degrees(expanded ? 90 : 0))
                     }
@@ -7772,10 +8128,10 @@ private struct AgentTrailToolRow: View {
             if expanded, let detail = entry.detail {
                 Group {
                     if entry.kind == .diff {
-                        AgentDiffBody(patch: detail)
+                        AgentDiffBody(patch: detail, font: codeFont)
                     } else {
                         Text(detail)
-                            .font(.system(size: 12, design: .monospaced))
+                            .font(.system(size: codeFont, design: .monospaced))
                             .foregroundStyle(Tokens.text3)
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
@@ -7784,10 +8140,10 @@ private struct AgentTrailToolRow: View {
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    RoundedRectangle.inset
                         .fill(.white.opacity(0.03))
                         .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            RoundedRectangle.inset
                                 .strokeBorder(.white.opacity(0.06), lineWidth: 0.5)
                         )
                 )
@@ -7802,6 +8158,7 @@ private struct AgentTrailToolRow: View {
 /// is made rather than after the tool answers "the file was updated".
 private struct AgentDiffBody: View {
     let patch: String
+    var font: CGFloat = Tokens.TypeSize.reading
 
     /// Muted enough to sit on the panel's glass without shouting, saturated
     /// enough to read as +/− at a glance.
@@ -7813,7 +8170,7 @@ private struct AgentDiffBody: View {
             ForEach(Array(patch.split(separator: "\n", omittingEmptySubsequences: false)
                 .enumerated()), id: \.offset) { _, line in
                 Text(line.isEmpty ? " " : String(line))
-                    .font(.system(size: 12, design: .monospaced))
+                    .font(.system(size: font, design: .monospaced))
                     .foregroundStyle(Self.tint(line))
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
@@ -7844,21 +8201,31 @@ enum MenuCard {
     /// `rowPad` clears the capsule wash's own curve, so a word never sits in it.
     static let cardPad: CGFloat = 6
     static let rowPad: CGFloat = 12
-    static let fontSize: CGFloat = 11.5
+    static let fontSize: CGFloat = Tokens.TypeSize.label
     /// The trailing accessory's type size, and the minimum gap it keeps from the
     /// word (a row's HStack spacing sits on both sides of the `Spacer`) — both
     /// feed `width(titles:)`.
-    static let accessoryFontSize: CGFloat = 10
+    static let accessoryFontSize: CGFloat = Tokens.TypeSize.caption
     static let accessoryGap: CGFloat = 12
     /// Concentric with the rows: `cardPad` + a row capsule's own radius.
-    static let radius: CGFloat = 18
+    static let radius: CGFloat = Tokens.Radius.menu
     /// Rows are a fixed height at a fixed spacing, so a card that glides one wash
     /// across its rows (the agent picker) can do the arithmetic instead of
     /// measuring — and every menu keeps the same rhythm.
-    static let rowHeight: CGFloat = 26
+    static let rowHeight: CGFloat = 28
     static let rowSpacing: CGFloat = 1
     /// Row top to the next row's top.
     static var rowStride: CGFloat { rowHeight + rowSpacing }
+
+    /// The two model menus — Ask's recents and the Agent card — are one control
+    /// in two modes, hung off the same compose row, so they are the same card:
+    /// one width and one list window, read from here by both.
+    /// `pickerWidth` is the CONTENT width (what the Agent card frames its rows
+    /// at); `pickerCardWidth` adds the card's own padding, which is what
+    /// `width(titles:)` returns and so what the Ask menu caps itself at.
+    static let pickerWidth: CGFloat = 160
+    static var pickerCardWidth: CGFloat { pickerWidth + cardPad * 2 }
+    static let pickerListRows = 4
 
     /// The width a card needs to show every one of its rows whole: the widest
     /// `word + gap + accessory`, plus both paddings. Measured in the very fonts
@@ -7869,7 +8236,9 @@ enum MenuCard {
     /// A point of slack over the measurement: glyphs drawn from a fallback face
     /// (a chord's ⌥, a vendor mark) can round a hair past what the attributed
     /// measure reports, and any overshoot lands on the word as an ellipsis.
-    static func width(titles: [(String, String?)], max cap: CGFloat = .infinity) -> CGFloat {
+    static func width(titles: [(String, String?)], max cap: CGFloat = .infinity,
+                      fontSize: CGFloat = MenuCard.fontSize,
+                      accessoryFontSize: CGFloat = MenuCard.accessoryFontSize) -> CGFloat {
         let font = NSFont.systemFont(ofSize: fontSize, weight: .medium)
         let accessoryFont = NSFont.systemFont(ofSize: accessoryFontSize, weight: .regular)
         let widest = titles.map { title, accessory -> CGFloat in
@@ -7887,14 +8256,14 @@ enum MenuCard {
 /// these same values so the two floating-card species cannot drift by a point or
 /// a font weight again.
 enum ManageMenuMetrics {
-    static let radius: CGFloat = 20
+    static let radius: CGFloat = MenuCard.radius
     static let cardPadding: CGFloat = 6
     static let rowSpacing: CGFloat = 2
     static let rowHorizontalPadding: CGFloat = 8
     static let rowVerticalPadding: CGFloat = 7
     static let rowContentSpacing: CGFloat = 8
-    static let fontSize: CGFloat = 12
-    static let accessoryFontSize: CGFloat = 10
+    static let fontSize: CGFloat = MenuCard.fontSize
+    static let accessoryFontSize: CGFloat = MenuCard.accessoryFontSize
     static var rowTextHeight: CGFloat {
         ceil(NSFont.systemFont(ofSize: fontSize, weight: .medium)
             .boundingRectForFont.height)
@@ -8112,10 +8481,14 @@ struct MenuCardRow: View {
     let title: String
     /// The row's one bit of trailing furniture: a shortcut chord, a `CLI` tag.
     var accessory: String? = nil
-    /// The row's type size and slot. Defaulted to the `/` menu's own numbers —
-    /// a completion list under a caret reads at 11.5 — and raised where the rows
-    /// are the surface's primary buttons rather than a filtered list of words
-    /// (the prompt-shortcut composer).
+    /// An empty Notchi balance: the NO CREDIT chip in the trailing slot.
+    var lowBalance: Bool = false
+    /// A trailing glyph that only appears under the pointer, for a row that
+    /// leaves this surface rather than choosing something in it. Held in the
+    /// layout at rest — same as the detail card's scoring link — so arriving on
+    /// the row reveals the arrow instead of shuffling the word.
+    var hoverSymbol: String? = nil
+    /// The row's type size and slot. Defaulted to the `/` menu's own numbers.
     var fontSize: CGFloat = MenuCard.fontSize
     var accessoryFontSize: CGFloat = MenuCard.accessoryFontSize
     var height: CGFloat = MenuCard.rowHeight
@@ -8154,13 +8527,27 @@ struct MenuCardRow: View {
                         ? Tokens.text1 : Tokens.text3)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                if let accessory {
+                if lowBalance {
                     Spacer(minLength: 0)
+                    LowBalanceTag()
+                }
+                if let accessory {
+                    if !lowBalance { Spacer(minLength: 0) }
                     Text(accessory)
                         .font(.sf(accessoryFontSize, weight: .regular))
                         .foregroundStyle(selected ? Tokens.text2 : Tokens.text4)
                         .lineLimit(1)
                         .fixedSize()
+                }
+                if let hoverSymbol {
+                    if accessory == nil && !lowBalance { Spacer(minLength: 0) }
+                    Image(systemName: hoverSymbol)
+                        .font(.sf(accessoryFontSize + 1, weight: .medium))
+                        // Same ink as the row's own word — a brighter glyph beside
+                        // a dim label read as two different rows.
+                        .foregroundStyle(selected || (promptShortcutID != nil && hovering)
+                            ? Tokens.text1 : Tokens.text3)
+                        .opacity(hovering ? 1 : 0)
                 }
             }
             .padding(.horizontal, MenuCard.rowPad)
@@ -8180,7 +8567,7 @@ struct MenuCardRow: View {
             }
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PlatePressStyle())
         .onHover { inside in
             hovering = inside
             guard inside else { return }

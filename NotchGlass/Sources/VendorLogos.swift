@@ -189,7 +189,7 @@ enum VendorLogos {
         // marks: this one is a solid block, and a solid shape filling the same box
         // as a knot or a burst outweighs them badly. 80% of the slot is where it
         // stops reading as the biggest thing in the menu.
-        "Nono": Mark(
+        "Notchi": Mark(
             path: "M3 3H19V19H11V27H3ZM27 23A4 4 0 0 1 19 23A4 4 0 0 1 27 23Z",
             viewBox: CGSize(width: 30, height: 30)),
         // Vercel — the triangle. The AI Gateway ships under the Vercel brand, so

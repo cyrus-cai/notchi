@@ -670,6 +670,11 @@ final class AgentTaskManager: ObservableObject {
         var contextWindow: Int? = nil
         /// Every settled round so far, in order — the follow-up conversation.
         var exchanges: [AgentExchange] = []
+        /// The images the round IN FLIGHT was handed (filenames in the history
+        /// image store). The detail page echoes them above the live prompt, the
+        /// same way a settled round's `AgentExchange.imageFiles` are echoed;
+        /// moved into that exchange — and cleared here — when the round settles.
+        var liveImageFiles: [String] = []
         /// The latest activity line while running ("$ npm test", "Editing Foo.swift").
         var activity: String? = nil
         /// Distinct files codex reported changing, by name — the finished card's
@@ -840,9 +845,12 @@ final class AgentTaskManager: ObservableObject {
     /// availability, so this is belt-and-braces). `model` / `effort` are the
     /// armed row's explicit picks; nil leaves the CLI on its own config.
     /// `imagesJPEG` are the pasted images riding the task (already downsampled +
-    /// JPEG-encoded off-main): codex attaches them natively (one `-i <file>` per
-    /// image); claude has no image flag, so the prompt goes in as a stream-json
-    /// user message carrying base64 vision blocks instead of plain stdin text.
+    /// JPEG-encoded off-main). Three routes, one per CLI: codex attaches them
+    /// natively (one `-i <file>` per image); claude takes them as base64 vision
+    /// blocks in a stream-json stdin message; cursor, grok and commandcode have
+    /// no image channel at all, so the images are written to the temp dir and
+    /// their paths named in the prompt, which each CLI's own read tool turns
+    /// back into vision content.
     @discardableResult
     func start(folder: URL, prompt: String, engine: AgentEngine,
                model: String? = nil, effort: AgentEffort? = nil,
@@ -1041,6 +1049,7 @@ final class AgentTaskManager: ObservableObject {
         // this run settles into can show what it was handed. Same already-downsampled
         // JPEGs that go to the CLI — a couple hundred KB each, written once per spawn.
         run.currentImageFiles = imagesJPEG.compactMap { NotchModel.storeHistoryImage($0) }
+        if let i = taskIndex(taskID) { tasks[i].liveImageFiles = run.currentImageFiles }
 
         // A model flag rides only on an explicit pick from the armed row's menu
         // (`model != nil`); the default stays flag-less so the run honors the
@@ -1048,6 +1057,9 @@ final class AgentTaskManager: ObservableObject {
         // ("Model not found gpt-5.6-luna"), while the config default is what
         // the user's own CLI demonstrably runs.
         var args: [String]
+        // What the run's stdin carries. Engines with no image flag get the
+        // pasted images named as files above the task text (`promptWithImageFiles`).
+        var stdinPrompt = prompt
         switch engine {
         case .codex:
             // Sandboxed workspace-write: can edit anything under the folder and
@@ -1070,14 +1082,7 @@ final class AgentTaskManager: ObservableObject {
             // One `-i` per image is the only form BOTH paths take: `exec`'s
             // `-i` is variadic, but `exec resume`'s takes a single value per
             // occurrence, so `-i a.jpg b.jpg` is a parse error there.
-            for jpeg in imagesJPEG {
-                let url = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("notch-agent-\(UUID().uuidString).jpg")
-                if (try? jpeg.write(to: url)) != nil {
-                    args += ["-i", url.path]
-                    run.tempImageURLs.append(url)
-                }
-            }
+            for path in Self.writeTempImages(imagesJPEG, run: run) { args += ["-i", path] }
             if let resumeSession { args += [resumeSession, "-"] }
         case .claude:
             // acceptEdits auto-approves file edits under the project (the cwd),
@@ -1126,7 +1131,12 @@ final class AgentTaskManager: ObservableObject {
             // a follow-up rides `--resume <id>` (id parsed from the `end` event).
             let promptURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent("notch-grok-prompt-\(UUID().uuidString).txt")
-            try? Data(prompt.utf8).write(to: promptURL)
+            // Grok has no image flag either, and its read tool decodes an image
+            // file into vision content (verified against the installed build),
+            // so the pasted images ride the prompt file as paths.
+            try? Data(Self.promptWithImageFiles(
+                prompt, paths: Self.writeTempImages(imagesJPEG, run: run)).utf8)
+                .write(to: promptURL)
             run.tempImageURLs.append(promptURL)
             args = ["--prompt-file", promptURL.path,
                     "--output-format", "streaming-json",
@@ -1146,6 +1156,11 @@ final class AgentTaskManager: ObservableObject {
             // `--resume <id>`, the id parsed from `run_start`.
             args = ["-p", "--output-format", "json",
                     "--yolo", "--trust", "--skip-onboarding", "--no-auto-update"]
+            // No image flag here either; the CLI's `read_file` hands an image to
+            // its own `vision` tool (verified against the installed build), so
+            // the pasted images ride the stdin prompt as paths.
+            stdinPrompt = Self.promptWithImageFiles(
+                prompt, paths: Self.writeTempImages(imagesJPEG, run: run))
             if let resumeSession { args += ["--resume", resumeSession] }
             if let model { args += ["-m", model] }
             if let effort { args += ["--effort", effort.rawValue] }
@@ -1167,7 +1182,14 @@ final class AgentTaskManager: ObservableObject {
                     "--force", "--trust", "--workspace", folder.path]
             if let resumeSession { args += ["--resume", resumeSession] }
             if let model { args += ["--model", model] }
-            args.append(prompt)
+            // Cursor has no image flag, and argv is the only input channel — but
+            // its own `read` tool decodes an image file into vision content
+            // (verified against the installed build: it read a JPEG under the
+            // temp dir, outside the workspace, and answered from the pixels).
+            // So the pasted images ride as files the prompt points at, written
+            // to the temp dir like codex's and deleted on settle.
+            args.append(Self.promptWithImageFiles(
+                prompt, paths: Self.writeTempImages(imagesJPEG, run: run)))
         case .pi:
             // pi needs no unattended-approval flag at all: headless `-p` runs its
             // tools (read/write/edit/bash/ls/grep/find) without ever prompting —
@@ -1296,6 +1318,7 @@ final class AgentTaskManager: ObservableObject {
         // whole app down; the run's failure is already reported via settle.
         let writer = inPipe.fileHandleForWriting
         let isClaude = engine == .claude
+        let stdinText = stdinPrompt
         DispatchQueue.global(qos: .userInitiated).async {
             defer { try? writer.close() }
             let payload: Data
@@ -1323,7 +1346,7 @@ final class AgentTaskManager: ObservableObject {
                 line.append(Data("\n".utf8))
                 payload = line
             } else {
-                payload = Data(prompt.utf8)
+                payload = Data(stdinText.utf8)
             }
             try? writer.write(contentsOf: payload)
         }
@@ -1588,6 +1611,7 @@ final class AgentTaskManager: ObservableObject {
         run.currentPrompt = marker.currentPrompt
         run.promptMarkerID = promptMarkerID
         run.currentImageFiles = marker.currentImageFiles ?? []
+        if let i = taskIndex(taskID) { tasks[i].liveImageFiles = run.currentImageFiles }
         run.pid = pid
         run.spawnedAt = marker.processStartedAt
         runs[taskID] = run
@@ -1878,6 +1902,36 @@ final class AgentTaskManager: ObservableObject {
         if newSession { refreshInFlight(t) }
     }
 
+    /// Write a round's pasted images to the temp dir — never the project folder,
+    /// which the run must leave free of artifacts — and return their paths. The
+    /// files are recorded on `run` so `cleanupTempImages` deletes them at settle.
+    private static func writeTempImages(_ jpegs: [Data], run: RunState) -> [String] {
+        var paths: [String] = []
+        for jpeg in jpegs {
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("notch-agent-\(UUID().uuidString).jpg")
+            guard (try? jpeg.write(to: url)) != nil else { continue }
+            run.tempImageURLs.append(url)
+            paths.append(url.path)
+        }
+        return paths
+    }
+
+    /// The prompt for an engine with no image flag: the pasted images named as
+    /// files above the user's text, so the agent opens them with its own read
+    /// tool. Unchanged when the round carries no images.
+    private static func promptWithImageFiles(_ prompt: String, paths: [String]) -> String {
+        guard !paths.isEmpty else { return prompt }
+        let list = paths.enumerated()
+            .map { "[Image #\($0.offset + 1)] \($0.element)" }
+            .joined(separator: "\n")
+        let one = paths.count == 1
+        let header = one
+            ? "An image is attached to this message. Read the file first with your file-read tool \u{2014} it is part of the request:"
+            : "\(paths.count) images are attached to this message. Read the files first with your file-read tool \u{2014} they are part of the request:"
+        return header + "\n" + list + "\n\n" + prompt
+    }
+
     /// Remove the temp image files a codex run attached, if any. Idempotent.
     private func cleanupTempImages(_ run: RunState) {
         for url in run.tempImageURLs { try? FileManager.default.removeItem(at: url) }
@@ -1932,7 +1986,7 @@ final class AgentTaskManager: ObservableObject {
         // vanished the moment its card was dismissed. The answer text here is
         // what history shows, so empty results fall back to the same outcome
         // lines the card headline uses.
-        let answer: String
+        var answer: String
         switch t.outcome {
         case .success:
             let body = t.result.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1950,13 +2004,16 @@ final class AgentTaskManager: ObservableObject {
         default:
             let reason = (t.failureReason ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             if t.interrupted {
-                // Same closing line the launch-recovery interrupted rows use.
                 answer = L("agent.interrupted")
             } else {
                 answer = reason.isEmpty
                     ? L("agent.failed", t.engine.displayName)
                     : L("agent.failed", t.engine.displayName) + "\n" + reason
             }
+        }
+        if t.engine == .grok {
+            answer = GrokCLIService.salvageGeneratedImages(in: answer, workDir: t.folder)
+            t.result = answer
         }
         // A follow-up marker is only a live placeholder. Once the round becomes
         // an exchange, the prompt is rendered by `UserQuestionBubble`; leaving
@@ -1976,6 +2033,8 @@ final class AgentTaskManager: ObservableObject {
         t.exchanges.append(AgentExchange(prompt: run.currentPrompt, answer: answer,
                                          imageFiles: run.currentImageFiles,
                                          log: roundLog))
+        // The round owns its images now — the live echo would double them.
+        t.liveImageFiles = []
         tasks[i] = t
 
         // The history record is filed FIRST (via `onSettled` → Recent, keyed by

@@ -52,6 +52,36 @@ protocol AIService: Sendable {
     /// answer). The stream finishes when the model is done; it should respect
     /// cancellation (stop producing once the surrounding `Task` is cancelled).
     func stream(system: String, messages: [ChatMessage]) -> AsyncThrowingStream<String, Error>
+    /// Same request as `stream`, but reasoning-model scratchpads arrive as their
+    /// own events instead of being dropped. Default wraps `stream` as `.text` only.
+    func streamEvents(system: String, messages: [ChatMessage]) -> AsyncThrowingStream<ChatStreamEvent, Error>
+}
+
+/// One incremental event from a plain (non-tool) chat stream.
+enum ChatStreamEvent: Sendable {
+    /// Visible answer text to append.
+    case text(String)
+    /// A chunk of the model's thinking channel (`reasoning_content` / thinking
+    /// deltas). Shown folded, never mixed into the answer.
+    case reasoning(String)
+}
+
+extension AIService {
+    func streamEvents(system: String, messages: [ChatMessage]) -> AsyncThrowingStream<ChatStreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    for try await piece in stream(system: system, messages: messages) {
+                        continuation.yield(.text(piece))
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
 }
 
 /// The one place a wire output cap is still spoken about.
@@ -206,8 +236,7 @@ extension AIService {
     }
 }
 
-/// The system prompt the prototype used for its in-notch assistant. Kept here so
-/// a real implementation can reuse the exact persona.
+/// The system prompt for the in-notch assistant.
 ///
 /// The tool-use stance is a measured balance between two opposite failure
 /// modes. Answering time-sensitive questions from memory fabricates stale facts
@@ -221,7 +250,10 @@ extension AIService {
 /// equally correct answers. So the persona names the split explicitly: direct
 /// answer is the default for stable knowledge, and search remains mandatory —
 /// never memory — for changeable facts.
-let notchSystemPrompt = """
+///
+/// Tool-use stances are added by `notchSystemPrompt(advertisedTools:)` so a
+/// slim first turn does not describe tools that are not on the wire.
+private let notchSystemPromptBase = """
 You are a helpful assistant living in the notch of a Mac. Answer the user's \
 question concisely and warmly in the user's language. Keep the answer short — \
 a few sentences is usually right — and never pad; go longer only when the \
@@ -243,54 +275,87 @@ call costs the user an extra round-trip. Default to answering directly, with NO 
 tool call, whenever the answer is stable knowledge: translations, rewriting or \
 drafting text, explanations and definitions, code and technical questions, \
 how-tos, and general facts that do not change over time.
+"""
 
-Call a tool only when the answer genuinely depends on it:
-- Facts that change over time — news, current events, prices or rates, \
-rankings, "latest"/"newest" versions, who currently holds a role, anything \
-dated this year — must be searched, never answered from memory; your training \
-data is stale and today is later than your cutoff. For these, search first and \
-answer from the results.
-- What the user copied ("this", "what I copied") → read_clipboard.
-- Exact arithmetic → calculate.
-- The current clock time → current_datetime (today's date is already stated above).
-- open_url is the one tool with a side effect on the user's screen, and it is \
-gated on their words, not on usefulness: call it ONLY when this message \
-explicitly asks you to open, visit, launch, or go to a page. Never open a page \
-to research, check, verify, or show a source — use read_page or search for that, \
-and otherwise just write the link in your answer and let the user click it.
-- This Notch app's own preferences — viewing settings, changing language, icons, \
-launch at login, appearance, notes, shortcuts, model/provider, search, keys, proxy, \
-or other Settings values → manage_app_settings. For an explicit change, call it \
-directly; it presents its own single confirmation card before writing, so do not \
-also call ask_user to confirm. If the requested value is not supported, do not \
-merely explain or list alternatives: call manage_app_settings with action=open and \
-the corresponding section so the user lands on the available choices. Questions \
-about the app's keyboard shortcuts or hotkeys → action=shortcuts; use its live \
-reference instead of recalling key combinations from memory. Rebinding a chord, \
-or adding, retargeting and deleting a prompt shortcut, goes through the same \
-tool: read action=shortcuts first, then update with the scope it reports.
-- The user's own past activity in this app — "what did I work on today", "what \
-have I recorded", "what did I ask you yesterday", "summarize my week", "did I \
-ever note anything about X" → search_history. It reads their own questions, \
-notes, reminders and agent tasks, with timestamps. The current conversation is \
-already in front of you, so only reach for it to see beyond this thread.
-- Saving something for the user — "note this", "记一下", "remember that…" \
-→ create_note; anything that names a moment in time ("remind me tomorrow at \
-3", "每周一交周报") → create_reminder with an absolute local `due`. \
-Decide on your own when a request is a capture, and file the user's full final \
-text. Both tools present their own single Confirm/Cancel card before writing, so \
-never also call ask_user to confirm, and never say it was saved until the tool \
-result says so.
-
+private let notchSystemPromptCite = """
 You don't need to spell out your source every time; cite it only when it \
 matters — when the claim is contested, surprising, or the user would want to \
-check it — and otherwise just answer. \
+check it — and otherwise just answer.
+"""
+
+private let notchSystemPromptSearchLanguage = """
 When you search, prefer English-language queries and lean on English-language \
 sources, even when answering in another language — they tend to be more \
 timely and reliable. Only fall back to a Chinese-language query when the topic \
 is inherently local (a China-specific product, person, policy, or event) and \
 English sources are thin. Then answer in the user's language as usual.
 """
+
+private let notchSystemPromptToolStances: [(tools: Set<String>, copy: String)] = [
+    (["web_search"], """
+- Facts that change over time — news, current events, prices or rates, \
+rankings, "latest"/"newest" versions, who currently holds a role, anything \
+dated this year — must be searched, never answered from memory; your training \
+data is stale and today is later than your cutoff. For these, search first and \
+answer from the results.
+"""),
+    (["read_clipboard"], """
+- What the user copied ("this", "what I copied") → read_clipboard.
+"""),
+    (["calculate"], """
+- Exact arithmetic → calculate.
+"""),
+    (["current_datetime"], """
+- The current clock time → current_datetime (today's date is already stated above).
+"""),
+    (["read_page"], """
+- After a search, if a snippet is too thin → read_page on that result's URL.
+"""),
+    (["open_url"], """
+- open_url ONLY when this message explicitly asks to open, visit, launch, or \
+go to a page. Never for research — use read_page or search, or write a Markdown \
+link.
+"""),
+    (["manage_app_settings"], """
+- This Notch app's own preferences or shortcuts → manage_app_settings. \
+action=list (or action=shortcuts for hotkeys) first so the id and value you \
+send are live; then update, or open a section. The tool shows its own Confirm \
+card. If a value is not supported, open that section rather than listing \
+alternatives in text.
+"""),
+    (["search_history"], """
+- The user's own past activity in this app → search_history. The current \
+conversation is already in front of you; only reach for it to see beyond this \
+thread.
+"""),
+    (["create_note", "create_reminder"], """
+- Saving something — "note this", "记一下" → create_note; a named moment in \
+time → create_reminder with an absolute local `due`. Both show their own \
+Confirm card; never say it was saved until the tool result says so.
+"""),
+]
+
+/// The persona plus the stances for tools actually advertised this turn.
+/// `advertisedTools == nil` includes every stance (eval / `complete`).
+func notchSystemPrompt(advertisedTools: Set<String>? = nil) -> String {
+    let include: (Set<String>) -> Bool = { names in
+        guard let advertised = advertisedTools else { return true }
+        return !advertised.isDisjoint(with: names)
+    }
+    var prompt = notchSystemPromptBase
+    let bullets = notchSystemPromptToolStances.compactMap { stance -> String? in
+        include(stance.tools) ? stance.copy : nil
+    }
+    if !bullets.isEmpty {
+        prompt += "\n\nCall a tool only when the answer genuinely depends on it:\n"
+            + bullets.joined(separator: "\n")
+    }
+    prompt += "\n\n" + notchSystemPromptCite
+    if include(["web_search"]) {
+        prompt += " " + notchSystemPromptSearchLanguage
+    }
+    return prompt
+}
 
 /// The persona with the current local date inlined as the first line, so the
 /// model knows up front that "now" is later than its training cutoff and treats
@@ -299,7 +364,9 @@ English sources are thin. Then answer in the user's language as usual.
 /// has. The single-shot `complete` path and the agent path both build the prompt
 /// through here. Rendered in the user's interface language to match the answer,
 /// mirroring `DateTimeTool`'s locale handling.
-func notchSystemPromptDated(customInstructions: String? = nil) -> String {
+func notchSystemPromptDated(customInstructions: String? = nil,
+                            provider: Provider? = nil,
+                            advertisedTools: Set<String>? = nil) -> String {
     let fmt = DateFormatter()
     fmt.dateStyle = .full
     fmt.timeStyle = .none
@@ -312,7 +379,8 @@ func notchSystemPromptDated(customInstructions: String? = nil) -> String {
     case .fr:     fmt.locale = Foundation.Locale(identifier: "fr_FR")
     case .es:     fmt.locale = Foundation.Locale(identifier: "es_ES")
     }
-    var prompt = "Today is \(fmt.string(from: Date())).\n\n" + notchSystemPrompt
+    var prompt = "Today is \(fmt.string(from: Date())).\n\n"
+        + notchSystemPrompt(advertisedTools: advertisedTools)
     // The user's own preferences (XII-137), appended AFTER the built-in persona so
     // the core rules — concise, search-first, honest — are stated first and the
     // preference is a trailing refinement, not an override. Framed as "the user's
@@ -327,8 +395,31 @@ func notchSystemPromptDated(customInstructions: String? = nil) -> String {
             + "they don't conflict with the rules above (search-first, honesty, and "
             + "concision still apply):\n\(custom)"
     }
+    // Nono's model treats "default to answering directly" as license to skip
+    // search on facts that have moved since training. This restates the split
+    // so it searches on those questions and answers from the results instead of
+    // from memory. The prompt is the only enforcement: Nono's upstream cannot
+    // serve a forced `tool_choice` (see `AgentHarness.forceSearchOnChangingFacts`).
+    // Skip it when this turn has no searcher — telling the model to call a
+    // tool that is not on the wire just burns a thinking pass.
+    let searchOnWire = advertisedTools == nil
+        || advertisedTools?.contains(WebSearchTool.toolName) == true
+    if provider == .nono, searchOnWire {
+        prompt += "\n\n" + nonoChangingFactStance
+    }
     return prompt
 }
+
+/// Extra stance for Nono only — see `notchSystemPromptDated` and
+/// `AgentHarness.forceSearchOnChangingFacts`.
+let nonoChangingFactStance = """
+Do not answer a time-moving question from memory. News, prices and rates, \
+what is currently on sale, rankings, "latest"/"newest" versions, who currently \
+holds a role, weather, scores, earnings, and anything dated this year require \
+web_search on this turn. Answer only from those results. Do not hedge with \
+"as of my last update" or "typically". Speed means a short grounded answer \
+after the search, not skipping it.
+"""
 
 /// System prompt for summarizing a conversation into a short recent-list title.
 /// The title is derived from the *actual* exchange (not the user's first message),
@@ -482,11 +573,19 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     /// from Finder inherits no shell environment; the env var is still read for
     /// runs launched from a terminal. Empty when unset, which is every real
     /// install.
+    ///
+    /// Debug builds only. In a release build, a preference any process on the
+    /// Mac can write would redirect the app, and the nono token it sends, to
+    /// another host.
     static var nonoBaseURLOverride: String {
+        #if DEBUG
         let stored = UserDefaults.standard.string(forKey: "NoNoBaseURL") ?? ""
         if !stored.isEmpty { return stored.trimmingCharacters(in: .whitespaces) }
         return (ProcessInfo.processInfo.environment["NONO_BASE_URL"] ?? "")
             .trimmingCharacters(in: .whitespaces)
+        #else
+        return ""
+        #endif
     }
 
     /// Whether nono is deployed and serving.
@@ -496,7 +595,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     /// worse than one that isn't there. Flip the constant in the same change that
     /// puts the Worker live; a local override counts as live so the gateway can
     /// be worked on before then.
-    static let nonoShipsLive = false
+    static let nonoShipsLive = true
     static var nonoIsLive: Bool { nonoShipsLive || !nonoBaseURLOverride.isEmpty }
 
     /// The providers the app actually OFFERS — every case except the retired
@@ -525,13 +624,13 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .nono:
             return ProviderSpec(
-                displayName: "Nono",
+                displayName: "Notchi",
                 // Notchi's own gateway. The host is ours and public — an address,
                 // not a secret, so it belongs compiled in like every other
                 // endpoint here. What must never be compiled in is the key: a
                 // constant credential in a distributed app is public the moment
                 // the app is, so nono's key is issued per user by the gateway and
-                // lives only in the Keychain.
+                // stored in the app's preferences (`APIKeyStore`).
                 endpoint: Provider.nonoEndpoint,
                 // One named tier, not a model list. Which model runs behind it is
                 // decided in the gateway's own catalog and can be swapped without
@@ -540,9 +639,8 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
                 //
                 // There was a second tier, `nono`, and it was the head of this
                 // list, which made it every install's `defaultModel`. The gateway
-                // still answers to that name as an alias precisely because copies
-                // in the field still send it; see `ALIASES` in the gateway's
-                // `catalog.ts` for when that can be dropped.
+                // still answers to that name as an alias because copies in the
+                // field still send it.
                 models: ["nono-flash"],
                 signupHost: "notch.website",
                 signupURL: "https://notch.website",
@@ -585,7 +683,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
             return ProviderSpec(
                 displayName: "DeepSeek",
                 endpoint: "https://api.deepseek.com/v1/chat/completions",
-                models: ["deepseek-v4-flash", "deepseek-v4-pro"],
+                models: ["deepseek-flash", "deepseek-v4-pro"],
                 signupHost: "platform.deepseek.com",
                 signupURL: "https://platform.deepseek.com/api_keys/api_key",
                 envVarName: "DEEPSEEK_API_KEY")
@@ -849,8 +947,8 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // half names the real lab (see `PiCLIService.vendor(forID:)`).
         case .openrouter, .vercel, .custom, .cursorCode, .commandCode, .piCode: return nil
         // nono's ids name no vendor on purpose — that is the product. The mark
-        // the picker draws is nono's own, never the model actually running.
-        case .nono:                   return "Nono"
+        // the picker draws is Notchi's own, never the model actually running.
+        case .nono:                   return "Notchi"
         case .openai, .codex:         return "OpenAI"
         case .anthropic, .claudeCode: return "Anthropic"
         case .grokCode:               return "xAI"
@@ -885,7 +983,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     }
 
     /// Whether Notchi hosts this backend itself. True for nono alone: it spends
-    /// our credit rather than the user's, and it is the thing a subscription buys.
+    /// our credit rather than the user's, and it is the thing bought credit pays for.
     /// Every surface that draws a provider asks this to decide whether to wear the
     /// first-party aura (`BrandAura`), so ours is never one more row in a list of
     /// vendors.
@@ -917,12 +1015,15 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
 
     /// Vendor-specific extras sent with every chat request. OpenRouter's two
     /// optional attribution headers identify the app (its docs ask nicely);
+    /// nono gets which part of the app sent the request (`NoNoRequestContext`);
     /// everyone else needs nothing beyond auth.
     var extraHeaders: [String: String] {
         switch self {
         case .openrouter:
             return ["HTTP-Referer": "https://github.com/\(UpdaterService.repo)",
                     "X-Title": "Notchi"]
+        case .nono:
+            return NoNoRequestContext.headers
         default:
             return [:]
         }
@@ -1248,14 +1349,16 @@ struct OpenAICompatAIService: AIService {
         var errorDescription: String? {
             switch self {
             case .http(let provider, let status, let body):
-                // 402 is the gateway saying the caller is out of money, and it
-                // names which kind: a failed payment is fixed in the billing
-                // portal, an exhausted allowance only by waiting for the period
-                // to roll over. Collapsing both into "provider returned 402"
-                // would throw away the one thing the user needs to know.
-                if status == 402 {
-                    if body.contains("payment_required") { return L("service.error.paymentRequired") }
-                    if body.contains("insufficient_balance") { return L("service.error.outOfCredit") }
+                // 402 is the gateway saying the caller cannot spend. An empty
+                // balance gets its own line; today's cap falls through to the
+                // gateway's message, which names the figure.
+                if status == 402, body.contains("insufficient_balance") {
+                    return L("service.error.outOfCredit")
+                }
+                // The status alone is not enough to act on. The body says what
+                // went wrong.
+                if let detail = Self.detail(from: body) {
+                    return L("service.error.httpDetail", provider, status, detail)
                 }
                 return L("service.error.http", provider, status)
             case .malformedResponse(let provider):
@@ -1265,15 +1368,62 @@ struct OpenAICompatAIService: AIService {
             }
         }
 
+        /// The readable part of an error body, or nil. Most vendors and our own
+        /// gateway send the OpenAI envelope `{"error":{"message":…}}`; some send
+        /// `error` as a string or `message` at the top level. A message that is
+        /// itself an envelope (the gateway relaying an upstream error) is
+        /// unwrapped once more. HTML error pages are dropped.
+        static func detail(from body: String) -> String? {
+            var text = body.trimmingCharacters(in: .whitespacesAndNewlines)
+            for _ in 0..<2 {
+                guard text.hasPrefix("{"),
+                      let data = text.data(using: .utf8),
+                      let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                else { break }
+                let error = object["error"]
+                guard let message = (error as? [String: Any])?["message"] as? String
+                        ?? error as? String
+                        ?? object["message"] as? String
+                else { return nil }
+                text = message.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            if text.isEmpty || text.hasPrefix("<") { return nil }
+            let flat = text.split(whereSeparator: \.isNewline).joined(separator: " ")
+            return flat.count > 300 ? String(flat.prefix(300)) + "…" : flat
+        }
+
         /// The HTTP status when this is an HTTP failure, else nil — for the
         /// metadata-only diagnostics breadcrumb (XII-85), never any body text.
         var httpStatus: Int? {
             if case .http(_, let status, _) = self { return status }
             return nil
         }
+
+        /// The Notchi gateway refused the request because the balance cannot
+        /// cover it. Retrying fails the same way until credit is added.
+        var isOutOfCredit: Bool {
+            if case .http(_, 402, let body) = self { return body.contains("insufficient_balance") }
+            return false
+        }
     }
 
     func stream(system: String, messages: [ChatMessage]) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    for try await event in streamEvents(system: system, messages: messages) {
+                        if case .text(let piece) = event { continuation.yield(piece) }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    func streamEvents(system: String, messages: [ChatMessage]) -> AsyncThrowingStream<ChatStreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 // System prompt first, then the running conversation verbatim —
@@ -1344,14 +1494,16 @@ struct OpenAICompatAIService: AIService {
                         }
 
                         // Server-Sent Events: each event is a `data: {json}` line,
-                        // terminated by `data: [DONE]`. We append only `delta.content`
-                        // and deliberately skip `reasoning_content` (the model's
-                        // think-aloud) so the notch shows the answer, not the
-                        // scratchpad.
+                        // terminated by `data: [DONE]`. Answer text is `delta.content`;
+                        // a thinking model's scratchpad arrives as `reasoning_content`
+                        // and is yielded separately so chat can fold it.
                         let decoder = JSONDecoder()
                         // Whether the stream ever announced its own end. See
                         // `ServiceError.cutOff`.
                         var terminated = false
+                        // Whether the model wrote anything in its reasoning
+                        // channel. See the empty-answer retry below.
+                        var reportedReasoning = false
                         for try await line in bytes.lines {
                             if Task.isCancelled { break }
                             guard line.hasPrefix("data:") else { continue }
@@ -1368,18 +1520,28 @@ struct OpenAICompatAIService: AIService {
                             if let usage = chunk.usage {
                                 TokenMeter.shared.record(input: usage.input, output: usage.output)
                             }
-                            guard let piece = chunk.choices.first?.delta.content,
-                                  !piece.isEmpty
-                            else { continue }
+                            let delta = chunk.choices.first?.delta
+                            if let thought = delta?.thinking, !thought.isEmpty {
+                                reportedReasoning = true
+                                continuation.yield(.reasoning(thought))
+                            }
+                            guard let piece = delta?.content, !piece.isEmpty else { continue }
                             yieldedAny = true
-                            continuation.yield(piece)
+                            continuation.yield(.text(piece))
                         }
                         if Task.isCancelled { continuation.finish(); return }
                         // A clean finish that produced no text is a transient empty
                         // response (free models do this): retry it like a failure
                         // while we still can, otherwise surface it as an error so the
                         // user isn't left staring at a silent blank.
-                        if !yieldedAny && attempt < StreamRetry.maxRetries {
+                        //
+                        // Not when the model reasoned and then ended the stream
+                        // without answering, e.g. the output ceiling landing inside
+                        // the reasoning. The same request reproduces that, and nono
+                        // bills every replay for all of the reasoning again. The
+                        // agent path makes the same exception (`streamTurn`).
+                        let reasonedWithoutAnswer = reportedReasoning && terminated
+                        if !yieldedAny && !reasonedWithoutAnswer && attempt < StreamRetry.maxRetries {
                             attempt += 1
                             try await StreamRetry.waitBeforeRetry(attempt)
                             continue
@@ -1518,7 +1680,22 @@ struct OpenAICompatAIService: AIService {
                 case finishReason = "finish_reason"
             }
         }
-        struct Delta: Decodable { let content: String? }
+        struct Delta: Decodable {
+            let content: String?
+            let reasoningContent: String?
+            let reasoning: String?
+            enum CodingKeys: String, CodingKey {
+                case content
+                case reasoningContent = "reasoning_content"
+                case reasoning
+            }
+            /// The thinking channel, whichever key the vendor used.
+            var thinking: String? {
+                if let reasoningContent, !reasoningContent.isEmpty { return reasoningContent }
+                if let reasoning, !reasoning.isEmpty { return reasoning }
+                return nil
+            }
+        }
     }
 }
 
@@ -1595,6 +1772,22 @@ struct AnthropicAIService: AIService {
     }
 
     func stream(system: String, messages: [ChatMessage]) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    for try await event in streamEvents(system: system, messages: messages) {
+                        if case .text(let piece) = event { continuation.yield(piece) }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    func streamEvents(system: String, messages: [ChatMessage]) -> AsyncThrowingStream<ChatStreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 // See `OpenAICompatAIService.stream` for the retry rationale: ride
@@ -1676,12 +1869,15 @@ struct AnthropicAIService: AIService {
                             } else if let usage = event.usage {
                                 TokenMeter.shared.record(input: 0, output: usage.output)
                             }
-                            guard event.type == "content_block_delta",
-                                  let piece = event.delta?.text,
-                                  !piece.isEmpty
-                            else { continue }
+                            guard event.type == "content_block_delta" else { continue }
+                            if event.delta?.type == "thinking_delta",
+                               let thought = event.delta?.thinking, !thought.isEmpty {
+                                continuation.yield(.reasoning(thought))
+                                continue
+                            }
+                            guard let piece = event.delta?.text, !piece.isEmpty else { continue }
                             yieldedAny = true
-                            continuation.yield(piece)
+                            continuation.yield(.text(piece))
                         }
                         if Task.isCancelled { continuation.finish(); return }
                         if !yieldedAny && attempt < StreamRetry.maxRetries {
@@ -1778,7 +1974,11 @@ struct AnthropicAIService: AIService {
         /// fold at each site (see `AnthropicUsage`).
         let usage: AnthropicUsage?
         let message: Message?
-        struct Delta: Decodable { let text: String? }
+        struct Delta: Decodable {
+            let type: String?
+            let text: String?
+            let thinking: String?
+        }
         struct Message: Decodable { let usage: AnthropicUsage? }
     }
 }
@@ -2719,9 +2919,42 @@ enum ModelCatalog {
             struct Reasoning: Decodable {
                 let mandatory: Bool?
             }
+            /// Notchi Balance's own block, served by nothing else. It carries
+            /// the price per million tokens as a number — `pricing` is per
+            /// *token*, as strings, because that is the convention every other
+            /// vendor uses and this decoder has to keep reading it — the
+            /// per-request floor (`minChargeUSD`), and, where the gateway runs
+            /// a model its vendor also sells, what the same thing costs from them.
+            ///
+            /// The comparison is deliberately not computed here. Vendors change
+            /// their prices, and a table compiled into a release goes stale in
+            /// the field; a stale discount is a price the user was quoted and is
+            /// not getting. The gateway owns the figures and the date they were
+            /// read, so both can change without an app release.
+            struct NotchiPricing: Decodable, Equatable, Sendable {
+                let vendor: String?
+                let inputPerMTok: Double
+                let outputPerMTok: Double
+                /// Per-request floor in USD. Absent on an older payload that
+                /// had not started sending it yet.
+                let minChargeUSD: Double?
+                let reference: Reference?
+                /// 0…1, or nil where the gateway makes no claim.
+                let savings: Double?
+
+                struct Reference: Decodable, Equatable, Sendable {
+                    let vendor: String
+                    let inputPerMTok: Double
+                    let outputPerMTok: Double
+                    /// `YYYY-MM-DD`. Shown, because a price comparison with no
+                    /// date on it is one nobody can check.
+                    let asOf: String
+                }
+            }
+            let notchi: NotchiPricing?
 
             enum CodingKeys: String, CodingKey {
-                case id, name, description, architecture, pricing, reasoning, type, created
+                case id, name, description, architecture, pricing, reasoning, type, created, notchi
                 case contextLength = "context_length"
                 case supportedParameters = "supported_parameters"
                 case createdAt = "created_at"
@@ -2760,6 +2993,10 @@ struct ModelInfo: Identifiable, Equatable, Sendable {
     /// 0–5 filled bars each, curated where known and heuristic otherwise.
     let speed: Int
     let intelligence: Int
+    /// What this model costs on Notchi Balance, and what its vendor charges for
+    /// the same thing. `nil` for every model served by anyone else — no other
+    /// provider tells us either figure.
+    let notchiPricing: ModelCatalog.ModelList.Entry.NotchiPricing?
 
     /// The two badge tiers the reference draws — the blue "Adv. AI" (advanced,
     /// flagship-class) and "Pro" (paid/premium tier). Plain rows carry no badge.
@@ -2796,7 +3033,10 @@ struct ModelInfo: Identifiable, Equatable, Sendable {
         let params = entry.supportedParameters ?? []
         let modalities = entry.architecture?.inputModalities ?? []
         self.id = entry.id
-        self.name = entry.name?.isEmpty == false ? entry.name! : ModelRatings.prettyName(for: entry.id)
+        // A labeled name wins over the catalog's: DeepSeek's live `/v1/models`
+        // prints Flash as the id, with no hint that it is the current generation.
+        self.name = ModelRatings.labeledName(for: entry.id)
+            ?? (entry.name?.isEmpty == false ? entry.name! : ModelRatings.prettyName(for: entry.id))
         self.vendor = ModelRatings.vendor(for: entry.id, provider: provider)
         self.contextTokens = entry.contextLength
         self.vision = modalities.contains("image")
@@ -2808,6 +3048,7 @@ struct ModelInfo: Identifiable, Equatable, Sendable {
         self.intelligence = rating.intelligence
         self.tier = rating.tier
         self.created = entry.createdDate
+        self.notchiPricing = entry.notchi
     }
 
     /// Build from a bare id (providers whose `/v1/models` gives no metadata, or the
@@ -2831,6 +3072,7 @@ struct ModelInfo: Identifiable, Equatable, Sendable {
         self.intelligence = rating.intelligence
         self.tier = rating.tier
         self.created = nil
+        self.notchiPricing = nil
     }
 }
 
@@ -2970,6 +3212,7 @@ enum ModelRatings {
         ("grok",               3, 3, nil),
         // ── DeepSeek ──────────────────────────────────────────────────────────────
         ("deepseek-v4-flash",  5, 3, nil),
+        ("deepseek-flash",     5, 3, nil),
         ("deepseek-v4-pro",    2, 5, .advanced),
         ("deepseek-v4",        3, 5, .advanced),
         ("deepseek-r1",        1, 4, nil),
@@ -3247,24 +3490,41 @@ enum ModelRatings {
     /// suffix, then capitalize the first letter (`opus` → "Opus", `gpt-5.5` →
     /// "Gpt-5.5") so every model name leads with a capital. The one non-id entry —
     /// OpenRouter's free auto-router — gets its product name instead of the bare
-    /// slug remainder ("free").
+    /// slug remainder ("free"). Ids that hide they are the current generation
+    /// (see `labeledName`) get `-latest` written in, not a version number.
     static func prettyName(for id: String) -> String {
         if id == "openrouter/free" { return "Auto Router (Free)" }
-        var s = id
-        if let slash = s.lastIndex(of: "/") { s = String(s[s.index(after: slash)...]) }
-        if let colon = s.firstIndex(of: ":") { s = String(s[..<colon]) }
+        if let labeled = labeledName(for: id) { return labeled }
+        let s = slug(from: id)
         return s.prefix(1).uppercased() + s.dropFirst()
     }
 
-    /// nono's tier name from its id: each hyphen-separated word capitalized and
-    /// joined with spaces (`nono-flash` → "Nono Flash"). The gateway sends a name
-    /// of its own, but the app draws this one so a tier reads identically on the
-    /// chip, in the menu, and before any catalog fetch has landed.
-    static func nonoName(for id: String) -> String {
-        id.split(separator: "-")
-            .map { $0.prefix(1).uppercased() + $0.dropFirst() }
-            .joined(separator: " ")
+    /// Last path segment, no `:suffix` — the bit `prettyName` capitalizes.
+    private static func slug(from id: String) -> String {
+        var s = id
+        if let slash = s.lastIndex(of: "/") { s = String(s[s.index(after: slash)...]) }
+        if let colon = s.firstIndex(of: ":") { s = String(s[..<colon]) }
+        return s
     }
+
+    /// Printed name when the wire id is a rolling alias with no generation on it.
+    /// `deepseek-flash` (and the retired `deepseek-v4-flash` id, now the same
+    /// model) is shown as latest so the row is not a bare "Flash" with no date.
+    static func labeledName(for id: String) -> String? {
+        switch slug(from: id) {
+        case "deepseek-flash", "deepseek-v4-flash":
+            return "Deepseek-flash-latest"
+        default:
+            return nil
+        }
+    }
+
+    /// The first-party tier's name. The wire id stays `nono-flash` — the gateway
+    /// and every copy in the field speak it — but the product is called Blend1,
+    /// so the app draws that name and never the id. The gateway sends a name of
+    /// its own; this one is used so the tier reads identically on the chip, in
+    /// the menu, and before any catalog fetch has landed.
+    static func nonoName(for id: String) -> String { "Blend1" }
 
     /// `prettyName`, but for an id read **as `provider` serves it**. The one
     /// provider that differs is Claude Code, whose ids are the CLI's rolling
@@ -3274,9 +3534,9 @@ enum ModelRatings {
     /// because every one of these labels already sits beside the Anthropic mark.
     /// Until a probe has ever landed, the bare alias stands in.
     static func prettyName(for id: String, provider: Provider) -> String {
-        // nono's two tier names are the product's own, so the app writes them
-        // rather than passing the id through: "nono-flash" is one name, "Nono
-        // Flash", not a hyphenated slug, and it reads the same everywhere.
+        // The first-party tier's name is the product's own, so the app writes it
+        // rather than passing the id through: "nono-flash" is shown as "Blend1",
+        // not a hyphenated slug, and it reads the same everywhere.
         if provider == .nono { return nonoName(for: id) }
         // pi's ids are `<pi-provider>/<model>`. The account rides the picker's rows
         // (`PiCLIService.displayName(forID:)`); a chip is short by the same rule
@@ -3864,7 +4124,8 @@ extension OpenAICompatAIService: AgentCapableService {
 
     func streamTurn(system: String,
                     messages: [AgentMessage],
-                    tools: [ToolSpec]) -> AsyncThrowingStream<TurnEvent, Error> {
+                    tools: [ToolSpec],
+                    requiredTool: String?) -> AsyncThrowingStream<TurnEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 // Retry the connect/first-event phase on a transient blip, only
@@ -3947,6 +4208,15 @@ extension OpenAICompatAIService: AgentCapableService {
                             // never a blanket "stop reasoning". See `ToolReasoningOptOut`.
                             if noReasoning || ToolReasoningOptOut.applies(to: effectiveModel) {
                                 body["reasoning_effort"] = "none"
+                            }
+                            // Harness-forced first search on a time-moving question
+                            // (Nono). The name is canonical; the wire alias is what
+                            // the vendor's `tool_choice` field actually matches.
+                            if let requiredTool,
+                               let wire = Self.requiredToolChoice(for: requiredTool,
+                                                                  wireName: wireToolName,
+                                                                  in: wireTools) {
+                                body["tool_choice"] = wire
                             }
                         }
                         for (k, v) in bodyExtras { body[k] = v }
@@ -4051,17 +4321,17 @@ extension OpenAICompatAIService: AgentCapableService {
                             }
                             guard let delta = choice["delta"] as? [String: Any] else { continue }
 
-                            // Several OpenAI-compatible providers stream raw
-                            // private reasoning before the visible answer. Treat
-                            // its presence as a real progress signal, but never
-                            // forward the raw text. OpenRouter may additionally
-                            // send an explicitly display-safe reasoning summary;
-                            // that one can label the phase more precisely.
+                            // Several OpenAI-compatible providers stream a thinking
+                            // channel before the visible answer. Its arrival is a
+                            // progress signal, and the text is folded in chat.
                             let rawReasoning = (delta["reasoning_content"] as? String)
                                 ?? (delta["reasoning"] as? String)
-                            if let rawReasoning, !rawReasoning.isEmpty, !reportedReasoning {
-                                reportedReasoning = true
-                                continuation.yield(.reasoningStarted)
+                            if let rawReasoning, !rawReasoning.isEmpty {
+                                if !reportedReasoning {
+                                    reportedReasoning = true
+                                    continuation.yield(.reasoningStarted)
+                                }
+                                continuation.yield(.reasoningDelta(rawReasoning))
                             }
                             if let details = delta["reasoning_details"] as? [[String: Any]] {
                                 for detail in details {
@@ -4279,6 +4549,23 @@ extension OpenAICompatAIService: AgentCapableService {
         }
     }
 
+    /// `tool_choice` payload that pins the first turn to one advertised tool, or
+    /// nil when that tool is not on the wire this turn (search withdrawn, native
+    /// server search only, etc.).
+    private static func requiredToolChoice(for canonical: String,
+                                           wireName: (String) -> String,
+                                           in wireTools: [[String: Any]]) -> [String: Any]? {
+        let name = wireName(canonical)
+        for tool in wireTools {
+            if let fn = tool["function"] as? [String: Any],
+               (fn["name"] as? String) == name {
+                let type = (tool["type"] as? String) ?? "function"
+                return ["type": type, "function": ["name": name]]
+            }
+        }
+        return nil
+    }
+
     /// Lower the neutral conversation to OpenAI chat messages. The system prompt
     /// leads; a plain turn is `{role, content}`; an assistant tool-call turn is
     /// `{role:"assistant", content, tool_calls:[…]}`; a tool-results turn becomes
@@ -4323,7 +4610,8 @@ extension OpenAICompatAIService: AgentCapableService {
 extension AnthropicAIService: AgentCapableService {
     func streamTurn(system: String,
                     messages: [AgentMessage],
-                    tools: [ToolSpec]) -> AsyncThrowingStream<TurnEvent, Error> {
+                    tools: [ToolSpec],
+                    requiredTool: String?) -> AsyncThrowingStream<TurnEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 // Retry the connect/first-event phase on a transient blip, only
@@ -4368,7 +4656,13 @@ extension AnthropicAIService: AgentCapableService {
                             "max_tokens": ReplyTokens.anthropicRequiredCeiling,
                             "stream": true,
                         ]
-                        if !wireTools.isEmpty { body["tools"] = wireTools }
+                        if !wireTools.isEmpty {
+                            body["tools"] = wireTools
+                            if let requiredTool,
+                               wireTools.contains(where: { ($0["name"] as? String) == requiredTool }) {
+                                body["tool_choice"] = ["type": "tool", "name": requiredTool]
+                            }
+                        }
                         req.httpBody = try AgentWire.body(body)
 
                         let (bytes, response) = try await ProxyConfig.urlSession.bytes(for: req)
@@ -4433,13 +4727,13 @@ extension AnthropicAIService: AgentCapableService {
                                 guard let delta = obj["delta"] as? [String: Any] else { break }
                                 switch delta["type"] as? String {
                                 case "thinking_delta":
-                                    // Extended thinking is raw chain of thought.
-                                    // Its arrival is useful progress information;
-                                    // the text itself is intentionally not shown.
                                     if let thinking = delta["thinking"] as? String,
-                                       !thinking.isEmpty, !reportedReasoning {
-                                        reportedReasoning = true
-                                        continuation.yield(.reasoningStarted)
+                                       !thinking.isEmpty {
+                                        if !reportedReasoning {
+                                            reportedReasoning = true
+                                            continuation.yield(.reasoningStarted)
+                                        }
+                                        continuation.yield(.reasoningDelta(thinking))
                                     }
                                 case "text_delta":
                                     if let t = delta["text"] as? String, !t.isEmpty {

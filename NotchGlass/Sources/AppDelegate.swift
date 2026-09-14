@@ -358,6 +358,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             await RemoteModelManifest.refreshIfDue()
         }
 
+        // Register with nono at launch rather than on first use, so every install
+        // on this version has an account a grant can reach. Retried with backoff:
+        // a login-item launch often comes before the network is up.
+        Task { @MainActor in
+            for delay: UInt64 in [0, 30, 120, 600] {
+                try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
+                await NoNoAccount.shared.load()
+                if NoNoAccount.shared.hasToken { break }
+            }
+        }
+
         rebuildPanels()
 
         // The one and only first run: the screen goes black, the mark becomes a
@@ -832,6 +843,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // ⌘, can fire from anywhere — open on the screen the user is
                     // actually on (mouse position), not wherever the notch lives.
                     self.model.openSettings(on: self.displayForSummon())
+                }
+            }
+        }
+
+        NotificationCenter.default.addObserver(
+            forName: .openProviderSettingsRequested,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            let raw = note.userInfo?["provider"] as? String
+            let addCredit = note.userInfo?["addCredit"] as? Bool ?? false
+            Task { @MainActor in
+                guard let self else { return }
+                let provider = raw.flatMap(Provider.init(rawValue:)) ?? .nono
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                    self.model.openProviderSettings(provider, on: self.displayForSummon(),
+                                                    addCredit: addCredit)
                 }
             }
         }
@@ -1314,7 +1342,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let name = front?.localizedName
         SelectedTextCapture.ambient(front: front) { [weak self] selected in
             guard let self, let selected else { return }
-            withAnimation(.easeOut(duration: 0.18)) {
+            withAnimation(.easeOut(duration: Tokens.hoverFade)) {
                 self.model.attachSelectionContext(selected, from: name)
             }
         }
@@ -1645,9 +1673,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // only the glass form itself is interactive.
         panel.contentView = hosting
 
+        // A click on the open island claims the keyboard (see
+        // `NotchPanel.onClickInside`).
+        panel.onClickInside = { [weak self] in self?.focusPanelForClick(on: id) }
+
         position(panel, on: screen, id: id)
         panel.orderFrontRegardless()
         return panel
+    }
+
+    /// Hand the keyboard to the panel the user just clicked, if it isn't already
+    /// holding it. Only while that panel is open: a press on the resting notch
+    /// belongs to the open gesture, which brings the app forward itself once the
+    /// island unfurls.
+    ///
+    /// This is the same handoff the open edge runs — resign any stale key panel,
+    /// make this one key, record who was frontmost so closing hands focus back,
+    /// then activate. Without it a panel left open (pinned) while the user works
+    /// in another app can be clicked and read but answers no chord, because the
+    /// keystrokes never reach this app at all.
+    private func focusPanelForClick(on id: CGDirectDisplayID) {
+        guard model.isOpen(on: id), let panel = panels[id] else { return }
+        guard !panel.isKeyWindow || !NSApp.isActive else { return }
+        for p in panels.values where p !== panel && p.isKeyWindow {
+            p.resignKey()
+        }
+        panel.makeKeyAndOrderFront(nil)
+        if let front = NSWorkspace.shared.frontmostApplication,
+           front.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+            appToRestoreOnClose = front
+        }
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     /// The canvas, with one AppKit behaviour SwiftUI can't reach: a click that

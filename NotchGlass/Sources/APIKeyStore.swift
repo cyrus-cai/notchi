@@ -19,7 +19,8 @@ import Foundation
 /// authorization prompt (especially across rebuilds with changing ad-hoc
 /// signatures), which is more annoying than it's worth for a personal local app.
 /// `UserDefaults` keeps the key in a plist under the user's own account — low
-/// real-world risk for this use case, and no prompts.
+/// real-world risk for this use case, and no prompts. nono's gateway token is
+/// kept the same way, under `api_key.nono`.
 ///
 /// ⚠️ The trade-off: the key is stored in plaintext, so any process that can read
 /// your user defaults can read it. Fine for personal use; before distributing the
@@ -29,6 +30,7 @@ enum APIKeyStore {
     private static let keyPrefix = "api_key."
     private static let modelKeyPrefix = "model."
     private static let selectedProviderKey = "selected_provider"
+    private static let broughtProviderKey = "brought_provider"
 
     /// Built-in development keys, used only when no env var and no stored entry
     /// are present for that provider. None ship by default — every provider's key
@@ -67,6 +69,42 @@ enum APIKeyStore {
         }
         set {
             UserDefaults.standard.set(newValue.rawValue, forKey: selectedProviderKey)
+            // Every switch to a backend the user brought retargets the Settings
+            // Model pane too (see `broughtProvider`) — whichever surface made it.
+            if !newValue.isFirstParty { broughtProvider = newValue }
+        }
+    }
+
+    /// The backend the user brought themselves: the one Settings' Model pane
+    /// configures, and the only kind it can.
+    ///
+    /// Not the same question as `selectedProvider`. Notchi is picked on the panel,
+    /// from the model menu there; it has no key to paste and no model to choose, so
+    /// there is nothing about it for that pane to show. Selecting it therefore
+    /// leaves the pane exactly as it was — still the vendor you set up, still its
+    /// model — instead of replacing both rows with a backend they cannot describe.
+    ///
+    /// Resolves like `selectedProvider` when nothing is stored: the active backend
+    /// if it is one of theirs, then any provider with a key, then OpenRouter.
+    static var broughtProvider: Provider {
+        get {
+            let raw = UserDefaults.standard.string(forKey: broughtProviderKey) ?? ""
+            if let chosen = Provider(rawValue: raw),
+               Provider.offered.contains(chosen), !chosen.isFirstParty {
+                return chosen
+            }
+            let active = selectedProvider
+            if !active.isFirstParty { return active }
+            if let configured = Provider.offered.first(where: {
+                !$0.isFirstParty && read($0) != nil
+            }) {
+                return configured
+            }
+            return .openrouter
+        }
+        set {
+            guard !newValue.isFirstParty else { return }
+            UserDefaults.standard.set(newValue.rawValue, forKey: broughtProviderKey)
         }
     }
 

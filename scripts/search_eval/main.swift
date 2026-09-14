@@ -63,13 +63,15 @@ struct RecordingService: AgentCapableService {
     }
 
     func streamTurn(system: String, messages: [AgentMessage],
-                    tools: [ToolSpec]) -> AsyncThrowingStream<TurnEvent, Error> {
+                    tools: [ToolSpec],
+                    requiredTool: String?) -> AsyncThrowingStream<TurnEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 var sawMarkup = false
                 do {
                     for try await event in inner.streamTurn(system: system, messages: messages,
-                                                            tools: tools) {
+                                                            tools: tools,
+                                                            requiredTool: requiredTool) {
                         switch event {
                         case .text(let t):
                             rec.rawTextChars += t.count
@@ -292,13 +294,16 @@ func run() async {
         rec.reset()
         var harness = AgentHarness(service: service, registry: registry)
         if let searchCeiling { harness.maxSearchRounds = searchCeiling }
+        if provider == .nono { harness.forceSearchOnChangingFacts = true }
         var answer = ""
         let started = Date()
         var thrown: Error? = nil
 
         do {
             try await harness.run(
-                system: notchSystemPromptDated(),
+                system: notchSystemPromptDated(
+                    provider: provider,
+                    advertisedTools: Set(registry.tools.map(\.name))),
                 messages: [AgentMessage(kind: .text(role: "user", text: item.q))],
                 onText: { piece in answer += piece; rec.visibleChars += piece.count },
                 onActivity: { _, _ in },
