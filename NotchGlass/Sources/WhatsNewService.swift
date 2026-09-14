@@ -99,6 +99,15 @@ final class WhatsNewService: ObservableObject {
             heroAssetName: "WhatsNew080Promo",
             features: [
                 "Introducing Blend1 — Notchi now has its own model. Pick it in Ask and type; no API key, just a balance you can see and top up.",
+            ],
+            improvements: [
+                "Stop a reply in flight with Esc.",
+                "When search fails, the answer says it was the search service — and no longer stalls.",
+                "Pictures Grok generates stay in the reply.",
+            ],
+            fixes: [
+                "Clicking a pinned panel takes the keyboard, so shortcuts like ⌘P work.",
+                "Typing Chinese no longer flashes the menu bar between syllables.",
             ]
         ),
         Entry(
