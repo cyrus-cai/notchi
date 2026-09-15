@@ -907,19 +907,17 @@ final class AgentTaskManager: ObservableObject {
     /// The spawn half of `followUp`: revive the settled task as running and
     /// launch the round against its persisted session. `appendMarker` is false
     /// on a queued dispatch — that line's marker already joined the trail at
-    /// queue time. No-op (with breadcrumb) when the task never got far enough
-    /// to report a session id — nothing to resume, ever — in which case any
-    /// queued lines are cleared too, since no future settle will dispatch them.
+    /// queue time. A task that settled before reporting a session id (stopped
+    /// in its first seconds) starts a fresh session in the same folder instead.
+    /// No-op (with breadcrumb) when the engine's binary/sign-in vanished, in
+    /// which case any queued lines are cleared too.
     private func beginFollowUpRound(index i: Int, prompt: String,
                                     imagesJPEG: [Data], appendMarker: Bool,
                                     existingMarkerID: UUID?) {
         var t = tasks[i]
-        guard let session = t.sessionID, let binary = Self.binary(for: t.engine) else {
-            // Round one never reported a session id, or the engine's
-            // binary/sign-in vanished since. Breadcrumb, metadata only.
+        guard let binary = Self.binary(for: t.engine) else {
             DiagnosticsLog.shared.record(provider: "Agent/\(t.engine.displayName)",
-                                         kind: t.sessionID == nil
-                                            ? "agent-followup-dropped" : "agent-binary-missing")
+                                         kind: "agent-binary-missing")
             pendingFollowUps[t.id] = nil
             return
         }
@@ -943,7 +941,7 @@ final class AgentTaskManager: ObservableObject {
         tasks[i] = t
         launch(taskID: t.id, binary: binary, engine: t.engine, folder: t.folder,
                prompt: prompt, model: t.armedModel, effort: t.armedEffort,
-               imagesJPEG: imagesJPEG, resumeSession: session,
+               imagesJPEG: imagesJPEG, resumeSession: t.sessionID,
                promptMarkerID: markerID)
     }
 

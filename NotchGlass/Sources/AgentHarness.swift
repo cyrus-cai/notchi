@@ -672,9 +672,6 @@ struct AgentHarness {
                     }
                 case .reasoningDelta(let piece):
                     reasoningAcc += piece
-                    if reasoningAcc.count > Self.reasoningCap {
-                        reasoningAcc = String(reasoningAcc.prefix(Self.reasoningCap))
-                    }
                     onReasoning?(reasoningAcc)
                 case .text(let piece):
                     let visible = markupFilter.feed(piece)
@@ -956,9 +953,6 @@ struct AgentHarness {
         }
     }
 
-    /// Hard cap on stored thinking text so a long CoT can't bloat the archive.
-    private static let reasoningCap = 12_000
-
     /// Collapse a provider's display-safe reasoning summary into the single
     /// progress line used by the result panel. Markdown wrappers are presentation
     /// noise here; long prose is clipped rather than turning the status into a
@@ -1115,11 +1109,6 @@ struct AgentHarness {
         return .working
     }
 
-    /// How much of a search query the wait line spells out before cutting. The
-    /// row truncates at the tail on its own, but cutting here keeps the closing
-    /// quote visible instead of letting the line end mid-word.
-    private static let maxQueryChars = 24
-
     /// The query a search call is about to run, tidied for the one-line wait
     /// slot — or nil when the call's arguments haven't arrived yet (the
     /// streaming `toolCallStarted` preview passes an empty input), so the caller
@@ -1131,14 +1120,9 @@ struct AgentHarness {
             return nil
         }
         // Collapse internal whitespace so a multi-line query can't blow up the
-        // single-line slot, then cap it.
+        // single-line slot. A query wider than the slot is left to the row's own
+        // tail truncation.
         q = q.split(whereSeparator: \.isWhitespace).joined(separator: " ")
-        // A hard cut, no ellipsis: the closing quote already ends the line, and a
-        // "…" before it (with the label's own "…" after it) left the wait line
-        // trailing off in dots.
-        if q.count > maxQueryChars {
-            q = String(q.prefix(maxQueryChars)).trimmingCharacters(in: .whitespaces)
-        }
         return q
     }
 

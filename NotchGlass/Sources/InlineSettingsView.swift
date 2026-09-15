@@ -1061,24 +1061,36 @@ struct InlineSettingsView: View {
             // own tapers.
             statsReadout
 
-            // The pin, on the idle prompt's terms — the same `IdleTrailingCluster`
-            // chip, in the same glass: no button at rest (⌘P is the way in), and
-            // the tack appears only once the panel IS pinned, showing the hold and
-            // offering the click that releases it. Recent isn't reachable from
-            // Settings, so the cluster carries the pin alone. 26pt to sit at the
-            // back pill's height — the header's row height feeds `headerChrome`.
-            IdleTrailingCluster(
-                pinned: model.isAnswerPinned,
-                recentOpen: false,
-                showsRecent: false,
-                chipSize: 26,
-                togglePin: {
-                    withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
-                        model.toggleAnswerPin()
-                    }
-                },
-                toggleRecent: {}
-            )
+            // Zero spacing here: the unpinned cluster draws nothing but still
+            // takes a slot, and the header's 10pt spacing before it would pull
+            // Receipts in from the table's right edge.
+            HStack(spacing: 0) {
+                // Billing history's Receipts link. Receipts need a purchase
+                // behind them; a gift has none.
+                if section == .balances, balanceLines.contains(where: { $0.kind != .gift }) {
+                    BalancesReceiptsLink { Task { await nono.manageBilling() } }
+                        .padding(.trailing, model.isAnswerPinned ? 10 : 0)
+                }
+
+                // The pin, on the idle prompt's terms — the same `IdleTrailingCluster`
+                // chip, in the same glass: no button at rest (⌘P is the way in), and
+                // the tack appears only once the panel IS pinned, showing the hold and
+                // offering the click that releases it. Recent isn't reachable from
+                // Settings, so the cluster carries the pin alone. 26pt to sit at the
+                // back pill's height — the header's row height feeds `headerChrome`.
+                IdleTrailingCluster(
+                    pinned: model.isAnswerPinned,
+                    recentOpen: false,
+                    showsRecent: false,
+                    chipSize: 26,
+                    togglePin: {
+                        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                            model.toggleAnswerPin()
+                        }
+                    },
+                    toggleRecent: {}
+                )
+            }
         }
         .padding(.horizontal, 8)
         .padding(.top, 12)
@@ -1949,11 +1961,11 @@ struct InlineSettingsView: View {
                     .padding(.top, 6)
                     .transition(.opacity.combined(with: .move(edge: .top)))
             } else if let snapshot {
-                // Pricing, Usage, receipts, and leftover gift all live behind
-                // the ⋯ beside Add — none of them belong on the face.
+                // Pricing, Usage and Billing history all live behind the ⋯
+                // beside Add — none of them belong on the face.
                 HStack(spacing: 10) {
                     addCreditButton(bought: snapshot.credit.grantedUSD)
-                    nonoMoreMenu(showReceipts: snapshot.hasEverPaid)
+                    nonoMoreMenu()
                     Spacer(minLength: 0)
                 }
                 .padding(.top, 10)
@@ -2225,26 +2237,30 @@ struct InlineSettingsView: View {
     }
 
     /// The card's secondary menu: what the models charge, this wallet's
-    /// request list, balances, and the Stripe portal. None of those is the
+    /// request list, and its billing history. None of those is the
     /// action this row is for — Add is — so they live in a trailing ⋯ rather
     /// than sitting as peers of the purchase. Pricing, Usage and Balances each
     /// open a sub-page.
     ///
-    /// Pricing, Usage and Gifts show whether or not the wallet has ever been
-    /// paid into: the rates are what someone deciding whether to pay is looking
-    /// for, Usage is the same list once they have spent, and Gifts is every
-    /// grant even when only one is live. Receipts is the part that needs a
-    /// purchase behind it.
+    /// All three show whether or not the wallet has ever been paid into.
+    /// Receipts sit inside Billing history, under the table.
     @ViewBuilder
-    private func nonoMoreMenu(showReceipts: Bool) -> some View {
+    private func nonoMoreMenu() -> some View {
         Button {
             showingMore.toggle()
         } label: {
             Image(systemName: "ellipsis")
                 .font(.sf(Tokens.TypeSize.form, weight: .medium))
                 .foregroundStyle(receiptsMenuHovering ? Tokens.text1 : Tokens.text3)
-                .frame(width: 28, height: 30)
-                .contentShape(Rectangle())
+                .frame(width: 30, height: 30)
+                // Bare at rest; on hover it wears the lit recessed surface, the
+                // same floor and rim as Add credit beside it.
+                .background {
+                    Color.clear
+                        .recessedSurface(in: Circle(), lit: true)
+                        .opacity(receiptsMenuHovering ? 1 : 0)
+                }
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .onHover { receiptsMenuHovering = $0 }
@@ -2258,23 +2274,17 @@ struct InlineSettingsView: View {
             card: {
                 AnyView(
                     VStack(alignment: .leading, spacing: ManageMenuMetrics.rowSpacing) {
-                        nonoMoreRow(L("model.pricing")) {
+                        nonoMoreRow(icon: LucideIcons.pricingBars, title: L("model.pricing")) {
                             showingMore = false
                             withAnimation(.easeOut(duration: 0.16)) { section = .pricing }
                         }
-                        nonoMoreRow(L("model.usage")) {
+                        nonoMoreRow(icon: LucideIcons.activity, title: L("model.usage")) {
                             showingMore = false
                             withAnimation(.easeOut(duration: 0.16)) { section = .usage }
                         }
-                        nonoMoreRow(L("nono.balances")) {
+                        nonoMoreRow(icon: LucideIcons.receipt, title: L("nono.balances")) {
                             showingMore = false
                             withAnimation(.easeOut(duration: 0.16)) { section = .balances }
-                        }
-                        if showReceipts {
-                            nonoMoreRow(L("nono.receipts")) {
-                                showingMore = false
-                                Task { await nono.manageBilling() }
-                            }
                         }
                     }
                     .padding(ManageMenuMetrics.cardPadding)
@@ -2285,16 +2295,21 @@ struct InlineSettingsView: View {
             }))
     }
 
-    /// One row of the ⋯ card, in Recent's manage-menu row style.
-    private func nonoMoreRow(_ title: String, action: @escaping () -> Void) -> some View {
+    /// One row of the ⋯ card, in Recent's manage-menu row style — icon, then label.
+    private func nonoMoreRow(icon: LucideIcons.Mark, title: String,
+                             action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Text(title)
-                .font(.sf(ManageMenuMetrics.fontSize, weight: .medium))
-                .foregroundStyle(Tokens.text2)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, ManageMenuMetrics.rowHorizontalPadding)
-                .padding(.vertical, ManageMenuMetrics.rowVerticalPadding)
-                .contentShape(Rectangle())
+            HStack(spacing: ManageMenuMetrics.rowContentSpacing) {
+                LucideIcon(mark: icon)
+                    .foregroundStyle(Tokens.text3)
+                Text(title)
+                    .font(.sf(ManageMenuMetrics.fontSize, weight: .medium))
+                    .foregroundStyle(Tokens.text2)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, ManageMenuMetrics.rowHorizontalPadding)
+            .padding(.vertical, ManageMenuMetrics.rowVerticalPadding)
+            .contentShape(Rectangle())
         }
         .buttonStyle(ManageMenuRowStyle())
         .onHover { inside in
@@ -3338,12 +3353,11 @@ struct InlineSettingsView: View {
     /// Whether Notch launches itself when you log in. Off by default; flipping it
     /// on registers a login item via `SMAppService` so the notch is there from the
     /// first hover after every restart, with no manual relaunch.
-    /// Custom instructions (XII-137): one short line of personal preference the
-    /// model gets appended after its built-in persona on the Ask path — "always
-    /// answer in English", "prefer code", "metric units". Capped at
-    /// `NotchModel.customInstructionsLimit` chars (the binding truncates), empty by
-    /// default. Deliberately understated: the hint says it refines, never that it
-    /// overrides the core rules.
+    /// Custom instructions (XII-137): personal preference the model gets
+    /// appended after its built-in persona on the Ask path — "always answer in
+    /// English", "prefer code", "metric units". Empty by default. Deliberately
+    /// understated: the hint says it refines, never that it overrides the core
+    /// rules.
     /// Always folded away at rest behind the same glass disclosure chip the API
     /// key uses — including when an instruction is already on file: it is a
     /// once-in-a-while preference, not something the pane should spend a whole
@@ -6020,6 +6034,32 @@ struct InlineSettingsView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .task { await refreshBalances() }
+    }
+
+    /// Opens the Stripe portal, where each purchase's receipt is. The trailing
+    /// arrow marks it as leaving the app, as About's outbound rows do.
+    private struct BalancesReceiptsLink: View {
+        let action: () -> Void
+
+        @State private var hovering = false
+
+        var body: some View {
+            Button(action: action) {
+                HStack(spacing: 6) {
+                    Text(L("nono.receipts"))
+                        .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                        .lineLimit(1)
+                    Image(systemName: "arrow.up.right")
+                        .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                        .opacity(hovering ? 1 : 0.6)
+                }
+                .foregroundStyle(hovering ? Tokens.text1 : Tokens.text3)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
+        }
     }
 
     private var balancesTable: some View {

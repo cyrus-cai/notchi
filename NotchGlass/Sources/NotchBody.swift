@@ -870,6 +870,8 @@ struct NotchBody: View {
                 .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                 .monospacedDigit()
                 .tracking(0.3)
+                .contentTransition(.numericText(value: Double(recall.pos)))
+                .animation(reduceMotion ? nil : .snappy(duration: 0.3), value: recall.pos)
                 .foregroundStyle(Tokens.text4)
                 .lineLimit(1)
         }
@@ -1582,8 +1584,8 @@ struct NotchBody: View {
     /// The scroll's real viewport height with the composer floating over it. The
     /// tail-follow test compares the content's bottom against this, so the two
     /// must be the same number.
-    private func agentDetailScrollViewport(hasComposer: Bool) -> CGFloat {
-        agentDetailScrollHeight + (hasComposer ? agentDetailFollowUpReach : 0)
+    private var agentDetailScrollViewport: CGFloat {
+        agentDetailScrollHeight + agentDetailFollowUpReach
     }
 
     /// A live run's detail page: the task prompt, then the full work trail —
@@ -1592,11 +1594,7 @@ struct NotchBody: View {
     /// report once it settles. Same information structure as the record a
     /// settled row opens; this is the during-the-run way in.
     private func agentDetailView(_ task: AgentTaskManager.AgentTask) -> some View {
-        // The composer is only there while the run can still be talked to; with
-        // nothing to resume the page is the record alone and the scroll keeps its
-        // bare height.
-        let hasComposer = task.isRunning || task.sessionID != nil
-        return VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 10) {
             agentDetailHeader(task)
             ZStack(alignment: .bottom) {
                 ScrollViewReader { proxy in
@@ -1609,8 +1607,7 @@ struct NotchBody: View {
                                         // The trail scrolls DOWN into this, behind
                                         // the floating composer, instead of ending
                                         // on a hard cut above a sibling row.
-                                        tailRunway: hasComposer
-                                            ? agentDetailFollowUpReach : 10)
+                                        tailRunway: agentDetailFollowUpReach)
                         // Runway: the trail rests below the header, then scrolls up into
                         // this empty band to fade + frost out — the same soft top edge
                         // the detached agent window wears (`ThreadScroll`), so the page
@@ -1632,7 +1629,7 @@ struct NotchBody: View {
                         // bottom edge. A screenful of tolerance, so the animated
                         // tail-follow's own intermediate frames never read as "the
                         // user scrolled away".
-                        let atTail = bottom - agentDetailScrollViewport(hasComposer: hasComposer)
+                        let atTail = bottom - agentDetailScrollViewport
                             <= Self.agentDetailTailSlack
                         if atTail != agentDetailFollowsTail { agentDetailFollowsTail = atTail }
                     }
@@ -1641,7 +1638,7 @@ struct NotchBody: View {
                     // runway, so the resting trail — which sits above the bottom one
                     // — stays at full strength and only text that has travelled into
                     // a runway is dimmed.
-                    .scrollEdgeFade(top: true, bottom: hasComposer,
+                    .scrollEdgeFade(top: true, bottom: true,
                                     topFade: ThreadScroll.runway,
                                     bottomFade: agentDetailFollowUpReach)
                     // Frost rests while the run streams (same discipline as the result
@@ -1652,8 +1649,7 @@ struct NotchBody: View {
                     .modifier(ConditionalEdgeBlur(
                         active: !task.isRunning,
                         topHeight: ThreadScroll.band,
-                        bottomHeight: hasComposer
-                            ? max(agentDetailFollowUpReach - 4, 0) : 0,
+                        bottomHeight: max(agentDetailFollowUpReach - 4, 0),
                         topRadius: ThreadScroll.blurRadius))
                     // Follow the tail while entries stream in, like a terminal —
                     // unless the reader has scrolled up, in which case the page
@@ -1684,31 +1680,29 @@ struct NotchBody: View {
                                 }
                             }
                             // Above the floating composer, not behind it.
-                            .padding(.bottom, hasComposer ? agentDetailFollowUpReach : 0)
+                            .padding(.bottom, agentDetailFollowUpReach)
                             .transition(.scale(scale: 0.8).combined(with: .opacity))
                         }
                     }
                     .animation(.spring(response: 0.3, dampingFraction: 0.85),
                                value: agentDetailFollowsTail)
                 }
-                .frame(height: agentDetailScrollViewport(hasComposer: hasComposer))
+                .frame(height: agentDetailScrollViewport)
 
                 // A live follow-up box, same as the detached agent window carries. The
                 // run is mid-reply, so Enter can't interrupt it — the line queues and
                 // the manager dispatches it as the next round on settle (its "› "
                 // marker joins the trail above the moment it lands). The box stays after
-                // send, so several instructions can be lined up. Hidden only when the
-                // run settled without ever reporting a session id (nothing to resume,
-                // ever); a still-running or resumable task keeps it live.
+                // send, so several instructions can be lined up. It stays after the
+                // run settles too, including a run stopped before it reported a
+                // session id: that follow-up starts a fresh session in the folder.
                 //
                 // It FLOATS over the scroll's bottom rather than sitting under it —
                 // the same one design the result view's follow-up wears, so the trail
                 // dissolves behind the box instead of hard-cutting above a sibling row.
                 // The scroll's frame absorbed the gap + row it used to occupy, so the
                 // page is exactly as tall as it was.
-                if hasComposer {
-                    agentDetailFollowUpRow(task)
-                }
+                agentDetailFollowUpRow(task)
             }
         }
     }
@@ -1811,8 +1805,18 @@ struct NotchBody: View {
                     AgentFollowUpKeyHints(
                         showsInterrupt: task.isRunning && task.sessionID != nil)
                         .transition(.opacity)
+                } else if task.isRunning {
+                    // Empty field mid-round: the slot is Stop, same as the chat
+                    // follow-up while it streams. Ends the round; queued lines
+                    // are dropped with it.
+                    StopButton(compact: true) {
+                        AgentTaskManager.shared.cancel(taskID: task.id)
+                    }
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
                 }
             })
+        .animation(.spring(response: 0.3, dampingFraction: 0.78),
+                   value: task.isRunning)
     }
 
     /// Queue the line as the run's next instruction and clear the field — the box
@@ -2643,11 +2647,9 @@ struct NotchBody: View {
     /// so its task snapshot is rendered directly; when it settles the same id moves
     /// into the filed-history path without changing the selected conversation.
     private func splitAgentTaskDetail(_ task: AgentTaskManager.AgentTask) -> some View {
-        let hasComposer = task.isRunning || task.sessionID != nil
         let bottomID = "split-agent-detail-bottom-\(task.id.uuidString)"
         let attachmentReach: CGFloat = agentDetailFollowUpImages.isEmpty ? 0 : 40
-        let bottomReach = hasComposer
-            ? splitDetailBottomReach + attachmentReach : immersiveBottomReach
+        let bottomReach = splitDetailBottomReach + attachmentReach
         return ScrollViewReader { proxy in
             ScrollView {
                 AgentRecordBody(
@@ -2714,19 +2716,17 @@ struct NotchBody: View {
                     // Reading posture here too: scrolled back into the trail the
                     // box folds down to its Ask chip, and the ↓ above returns to
                     // the tail. Tapping the chip opens the box on the spot.
-                    if hasComposer {
-                        if splitAgentFollowsTail || splitComposerForced {
-                            agentDetailFollowUpRow(
-                                task,
-                                requestsFocus: splitComposerForced,
-                                chipSize: Self.splitRailChip)
+                    if splitAgentFollowsTail || splitComposerForced {
+                        agentDetailFollowUpRow(
+                            task,
+                            requestsFocus: splitComposerForced,
+                            chipSize: Self.splitRailChip)
+                            .transition(Self.followUpRise)
+                    } else {
+                        HStack(spacing: 0) {
+                            Spacer(minLength: 0)
+                            splitAskChip()
                                 .transition(Self.followUpRise)
-                        } else {
-                            HStack(spacing: 0) {
-                                Spacer(minLength: 0)
-                                splitAskChip()
-                                    .transition(Self.followUpRise)
-                            }
                         }
                     }
                 }
@@ -4919,10 +4919,6 @@ struct NotchBody: View {
             text: $model.text,
             focusTrigger: focused,
             focused: focused,
-            // A whisper of the destination's colour, the quiet twin of the
-            // tinted destination pill, so the field leans toward where Enter
-            // will send the line.
-            tint: model.submitTint,
             // Keyed on the intent *category* so a recurrence-suffix edit
             // doesn't pulse.
             pulse: AnyHashable(model.effectiveSubmitPanel),
@@ -5026,7 +5022,7 @@ struct AgentRunMetadataMenu: View {
             }
             if let folderName {
                 ResultMetadataRow(icon: LucideIcons.folder, title: folderName,
-                                  accessory: "↗", action: onOpenFolder)
+                                  hoverSymbol: "arrow.up.right", action: onOpenFolder)
             }
             if let completed {
                 ResultMetadataRow(icon: LucideIcons.clock, title: completed)
@@ -5045,7 +5041,7 @@ struct AgentRunMetadataMenu: View {
 struct ResultMetadataRow: View {
     let icon: LucideIcons.Mark
     let title: String
-    var accessory: String? = nil
+    var hoverSymbol: String? = nil
     var action: (() -> Void)? = nil
 
     @State private var hovering = false
@@ -5059,11 +5055,14 @@ struct ResultMetadataRow: View {
                 text: title,
                 color: Tokens.text2,
                 hovering: hovering)
-            if let accessory {
+            if let hoverSymbol {
                 Spacer(minLength: 4)
-                Text(accessory)
-                    .font(.sf(ManageMenuMetrics.accessoryFontSize, weight: .regular))
-                    .foregroundStyle(Tokens.text4)
+                // Same glyph, size and ink as `MenuCardRow`'s hover arrow; held in
+                // the layout at rest so hovering does not shift the title.
+                Image(systemName: hoverSymbol)
+                    .font(.sf(ManageMenuMetrics.accessoryFontSize + 1, weight: .medium))
+                    .foregroundStyle(Tokens.text2)
+                    .opacity(hovering ? 1 : 0)
             }
         }
         .padding(.horizontal, ManageMenuMetrics.rowHorizontalPadding)
@@ -5279,10 +5278,6 @@ private struct RecentRowAccessibility: ViewModifier {
 /// Recent rows wear violet. These two resolve that: agent compose paints the
 /// input the agent violet, everything else its destination's colour.
 fileprivate extension NotchModel {
-    /// Saturated body — for the field's low-opacity background wash.
-    var submitTint: Color {
-        submitGoesToAgent ? Tokens.agentTint : effectiveSubmitPanel.intentTint
-    }
     /// The luminous face — for the rim pulse and other ink on the dark glass.
     var submitInk: Color {
         submitGoesToAgent ? Tokens.agentInk : effectiveSubmitPanel.intentInk
@@ -5597,7 +5592,7 @@ struct ErrorActionRow: View {
     let action: Action
     /// The models the chevron menu offers, each flagged if it's the one already in
     /// effect (greyed — plain "Try again" is exactly that retry). Empty ⇒ no menu.
-    let models: [(model: String, isCurrent: Bool)]
+    let models: [(model: String, label: String, isCurrent: Bool)]
     let primary: () -> Void
     let retryWith: (String) -> Void
 
@@ -5657,9 +5652,9 @@ struct ErrorActionRow: View {
                             retryWith(option.model)
                         } label: {
                             if option.isCurrent {
-                                Text(L("result.regenerate.current", option.model))
+                                Text(L("result.regenerate.current", option.label))
                             } else {
-                                Text(option.model)
+                                Text(option.label)
                             }
                         }
                         .disabled(option.isCurrent)

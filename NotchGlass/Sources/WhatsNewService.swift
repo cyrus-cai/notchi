@@ -94,6 +94,21 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.8.1",
+            date: "2026-09-15",
+            improvements: [
+                "When Blend1 or another provider is busy, Notchi retries after the wait it asks for.",
+                "Text is no longer cut to a fixed length in custom instructions, Prompt Shortcuts, Thinking, and search progress.",
+                "Receipts open from Billing history, and the Blend1 ⋯ menu has icons.",
+                "The ↑/↓ history counter animates as you step through questions.",
+                "An agent task's page has a Stop button, and a task stopped early can still be followed up.",
+            ],
+            fixes: [
+                "Blend1 answers are labeled Blend1 in footers, History, and model menus.",
+                "Bold text next to Chinese punctuation no longer shows as asterisks.",
+            ]
+        ),
+        Entry(
             version: "0.8.0",
             date: "2026-09-14",
             heroAssetName: "WhatsNew080Promo",

@@ -1239,10 +1239,6 @@ struct ComposerBox<Placeholder: View, Trailing: View>: View {
     /// over another app, so the recess floor reads as a solid dark pill; glass
     /// samples through the window and stays a chip of the same material.
     var glass: Bool = false
-    /// A whisper of the destination's colour washed over the box while it holds
-    /// text — the panel chat field's routing tell, so the input leans toward
-    /// where Enter will send the line. `nil` on the surfaces that don't route.
-    var tint: Color? = nil
     /// Flash the rim whenever this changes, in `pulseTint` — the peripheral twin
     /// of the destination pill's word swap. `nil` = no pulse.
     var pulse: AnyHashable? = nil
@@ -1338,9 +1334,7 @@ struct ComposerBox<Placeholder: View, Trailing: View>: View {
         .padding(.leading, 13)
         .padding(.trailing, 6)
         .padding(.vertical, 6)
-        .modifier(ComposerBoxChrome(shape: shape, glass: glass, focused: focused,
-                                    tint: tint, isEmpty: isEmpty))
-        .animation(.smooth(duration: 0.25), value: tint)
+        .modifier(ComposerBoxChrome(shape: shape, glass: glass, focused: focused))
         .animation(.easeOut(duration: 0.2), value: focused)
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isEmpty)
         .animation(.spring(response: 0.32, dampingFraction: 0.86), value: fieldHeight)
@@ -1361,25 +1355,16 @@ private struct ComposerBoxChrome<S: InsettableShape>: ViewModifier {
     var shape: S
     var glass: Bool
     var focused: Bool
-    var tint: Color?
-    var isEmpty: Bool
 
     func body(content: Content) -> some View {
         if glass {
             content
                 .clipShape(shape)
                 .glassCapsule(in: shape, brighter: focused)
-                .overlay(
-                    shape.fill((tint ?? .clear).opacity(!isEmpty ? 0.045 : 0))
-                        .allowsHitTesting(false)
-                )
         } else {
             content
                 .background(
                     shape.fill(focused ? Tokens.recessFillLit : Tokens.recessFill)
-                        .overlay(
-                            shape.fill((tint ?? .clear).opacity(!isEmpty ? 0.045 : 0))
-                        )
                 )
                 .clipShape(shape)
                 .overlay(
@@ -3548,7 +3533,7 @@ struct AssistantTurnView: View {
     /// The models offered by the regenerate button's right-click menu (XII-135) —
     /// each with whether it's the one currently in effect (greyed as "current").
     /// Empty ⇒ no menu (just the plain left-click regenerate).
-    var regenerateModels: [(model: String, isCurrent: Bool)] = []
+    var regenerateModels: [(model: String, label: String, isCurrent: Bool)] = []
     /// Regenerate this answer with a specific model, once (XII-135).
     var onRegenerateWith: ((String) -> Void)? = nil
     /// The model this answer was regenerated with, when it wasn't the default
@@ -3579,7 +3564,10 @@ struct AssistantTurnView: View {
     /// user's own choice). `nil` when neither is set, so a plain default answer
     /// carries no caption.
     static func footerModelCaption(answerModel: String?, regenModel: String?) -> String? {
-        if let answerModel, !answerModel.isEmpty { return bareModelName(answerModel) }
+        if let answerModel, !answerModel.isEmpty {
+            return ModelRatings.isNonoID(answerModel) ? ModelRatings.nonoName(for: answerModel) : bareModelName(answerModel)
+        }
+        if let regenModel, ModelRatings.isNonoID(regenModel) { return ModelRatings.nonoName(for: regenModel) }
         return regenModel
     }
 
@@ -3605,9 +3593,9 @@ struct AssistantTurnView: View {
                 regenerateWith(option.model)
             } label: {
                 if option.isCurrent {
-                    Text(L("result.regenerate.current", option.model))
+                    Text(L("result.regenerate.current", option.label))
                 } else {
-                    Text(option.model)
+                    Text(option.label)
                 }
             }
             .disabled(option.isCurrent)
@@ -4474,10 +4462,7 @@ struct InlineMarkdownText: View {
         var text: AttributedString
         // SwiftUI's built-in inline-markdown parsing covers **bold**, *italic*,
         // and `code` — exactly the subset we need.
-        if var parsed = try? AttributedString(
-            markdown: source,
-            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        ) {
+        if var parsed = MarkdownParser.parseInline(source) {
             // The markdown parser also turns `[label](url)` into a tappable link.
             // The answer text comes from an LLM endpoint we don't fully trust, so a
             // rogue/compromised backend could embed `[ok](file:///…)` or a custom
@@ -5140,6 +5125,95 @@ enum MarkdownParser {
         String(repeating: "  ", count: max(0, indent))
     }
 
+    /// `AttributedString(markdown:)` for one line, inline syntax only, with the
+    /// `**` runs padded for cmark's flanking rule first (see
+    /// `paddingStrongDelimiters`). `nil` when the parse fails.
+    static func parseInline(_ source: String) -> AttributedString? {
+        let padded = paddingStrongDelimiters(source)
+        guard var parsed = try? AttributedString(
+            markdown: padded,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        ) else { return nil }
+        if padded.count != source.count {
+            while let i = parsed.characters.firstIndex(of: flankPad) {
+                parsed.removeSubrange(i..<parsed.characters.index(after: i))
+            }
+        }
+        return parsed
+    }
+
+    /// A Unicode space (Zs, so cmark counts it as whitespace) that answers don't
+    /// contain. Placed next to a `**` for the parse and removed after it.
+    private static let flankPad: Character = "\u{205F}"
+
+    /// cmark opens `**` only when the run is left-flanking: if the next
+    /// character is punctuation, the previous one must be whitespace or
+    /// punctuation. Chinese puts no space before `《`, so `是**《精神现象学》**`
+    /// fails on the opening side and both markers print as asterisks. The
+    /// closing side fails the same way in `**「引用」**是`. This walks the `**`
+    /// runs in order, treats them as alternately opening and closing, and puts
+    /// `flankPad` on the failing side. Code spans and escapes are copied as-is.
+    private static func paddingStrongDelimiters(_ line: String) -> String {
+        guard line.contains("**"), !line.contains(flankPad) else { return line }
+        let chars = Array(line)
+        func isSpace(_ i: Int) -> Bool {
+            i < 0 || i >= chars.count || chars[i].isWhitespace
+        }
+        func isPunct(_ i: Int) -> Bool {
+            guard i >= 0, i < chars.count else { return false }
+            return chars[i].isPunctuation || (chars[i].isASCII && chars[i].isSymbol)
+        }
+        var out = ""
+        var opening = true
+        var i = 0
+        while i < chars.count {
+            switch chars[i] {
+            case "\\":
+                out.append(contentsOf: chars[i..<min(i + 2, chars.count)])
+                i += 2
+            case "`":
+                var run = i
+                while run < chars.count, chars[run] == "`" { run += 1 }
+                let fence = run - i
+                var end = run
+                var j = run
+                while j < chars.count {
+                    guard chars[j] == "`" else { j += 1; continue }
+                    var k = j
+                    while k < chars.count, chars[k] == "`" { k += 1 }
+                    if k - j == fence { end = k; break }
+                    j = k
+                }
+                out.append(contentsOf: chars[i..<end])
+                i = end
+            case "*":
+                var end = i
+                while end < chars.count, chars[end] == "*" { end += 1 }
+                let before = i - 1, after = end
+                let run = chars[i..<end]
+                if end - i == 2, !(isSpace(before) && isSpace(after)) {
+                    if opening, !isSpace(before), !isPunct(before), isPunct(after) {
+                        out.append(flankPad)
+                        out.append(contentsOf: run)
+                    } else if !opening, isPunct(before), !isSpace(after), !isPunct(after) {
+                        out.append(contentsOf: run)
+                        out.append(flankPad)
+                    } else {
+                        out.append(contentsOf: run)
+                    }
+                    opening.toggle()
+                } else {
+                    out.append(contentsOf: run)
+                }
+                i = end
+            default:
+                out.append(chars[i])
+                i += 1
+            }
+        }
+        return out
+    }
+
     /// Escape lone `~` so cmark can't read a pair of them as strikethrough.
     ///
     /// GFM treats `~text~` as a strike, so an answer like `白天 8~12℃ / 夜间 -2~2℃`
@@ -5198,10 +5272,7 @@ enum MarkdownParser {
         // Inline math first, same as the visible renderer, so a copied line
         // reads `x²`, not `$x^2$`.
         let source = escapingLoneTildes(MathTypeset.inline(line))
-        if let parsed = try? AttributedString(
-            markdown: source,
-            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        ) {
+        if let parsed = parseInline(source) {
             return String(parsed.characters)
         }
         return source

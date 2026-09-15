@@ -2367,7 +2367,7 @@ struct DetachedSessionRootView: View {
     var onRegenerate: () -> Void = {}
     var onRegenerateWith: (String) -> Void = { _ in }
     var onChooseOption: (UUID, String) -> Void = { _, _ in }
-    var regenerateOptions: () -> [(model: String, isCurrent: Bool)] = { [] }
+    var regenerateOptions: () -> [(model: String, label: String, isCurrent: Bool)] = { [] }
     /// Enter in the composer face: the line and where it reads as going.
     var onCompose: (String, NotchModel.Panel) -> Void = { _, _ in }
     /// The composer's wanted height as its draft wraps — the window follows it.
@@ -4121,7 +4121,7 @@ struct DetachedThreadView: View {
     var onRegenerate: () -> Void
     var onRegenerateWith: (String) -> Void
     var onChooseOption: (UUID, String) -> Void
-    var regenerateOptions: () -> [(model: String, isCurrent: Bool)]
+    var regenerateOptions: () -> [(model: String, label: String, isCurrent: Bool)]
     var compactShortcut = false
     var onDesiredHeight: (CGFloat) -> Void = { _ in }
 
@@ -4977,13 +4977,11 @@ struct DetachedAgentTaskView: View {
     private func followUpRow(_ task: AgentTaskManager.AgentTask) -> some View {
         // Mid-run the field stays live: Enter queues the line and the manager
         // dispatches it as the next round on settle — typed input is never
-        // dropped. Only a run that settled without ever reporting a session id
-        // (nothing to resume, ever) goes dead.
-        let dead = !task.isRunning && task.sessionID == nil
+        // dropped. A run that settled without a session id starts a fresh one.
         // The panel agent page's own composer (`ComposerBox`), not a second one:
         // same growing silhouette, same focus-lit recess, same ⏎/⌘⏎ hints — the
         // page reads identically on both sides of a tear.
-        return ComposerBox(
+        ComposerBox(
             text: $followUp,
             glass: true,
             onSubmit: { sendFollowUp(task) },
@@ -5006,8 +5004,6 @@ struct DetachedAgentTaskView: View {
                         .transition(.opacity)
                 }
             })
-        .opacity(dead ? 0.45 : 1)
-        .disabled(dead)
     }
 
     /// `interrupting` stops the round in flight and re-opens the session with

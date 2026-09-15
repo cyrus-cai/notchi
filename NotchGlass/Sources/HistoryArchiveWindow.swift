@@ -655,6 +655,7 @@ private struct TranscriptBubble: View {
     /// Strip the vendor prefix / `:free` suffix so a bare model name shows, matching
     /// the notch footer's presentation.
     private func prettyModel(_ raw: String) -> String {
+        if ModelRatings.isNonoID(raw) { return ModelRatings.nonoName(for: raw) }
         var s = raw
         if let slash = s.lastIndex(of: "/") { s = String(s[s.index(after: slash)...]) }
         if s.hasSuffix(":free") { s = String(s.dropLast(":free".count)) }

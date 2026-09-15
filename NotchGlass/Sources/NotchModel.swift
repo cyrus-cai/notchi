@@ -2203,11 +2203,10 @@ final class NotchModel: ObservableObject {
             let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
                 .trimmingCharacters(in: CharacterSet(charactersIn: "\"“”'‘’"))
             guard !trimmed.isEmpty else { return }
-            let capped = trimmed.count > 24 ? String(trimmed.prefix(24)) : trimmed
             var shortcuts = PromptShortcutStore.current
             guard let index = shortcuts.firstIndex(where: { $0.id == id }),
                   shortcuts[index].name == nil else { return }
-            shortcuts[index].name = capped
+            shortcuts[index].name = trimmed
             PromptShortcutStore.save(shortcuts)
             NotificationCenter.default.post(name: .promptShortcutsChanged, object: nil)
         }
@@ -3542,10 +3541,6 @@ final class NotchModel: ObservableObject {
             return try preparePromptShortcut(value: value, scope: scoped, prompt: raw.prompt)
 
         case "custom_instructions":
-            guard value.count <= Self.customInstructionsLimit else {
-                throw AppSettingValidationError.message(
-                    "custom_instructions is limited to \(Self.customInstructionsLimit) characters.")
-            }
             return made(setting, L("general.customInstructions"), value.isEmpty ? nil : value,
                         .customInstructions(value), noOp: value == customInstructions)
 
@@ -3569,7 +3564,8 @@ final class NotchModel: ObservableObject {
         case "ai_model":
             let provider = try scopedProvider(scoped, defaultProvider: defaultProvider)
             let modelID = ["", "default", "automatic", "auto"].contains(Self.settingToken(value)) ? "" : value
-            let shown = modelID.isEmpty ? "Default (\(provider.defaultModel))" : modelID
+            let named: (String) -> String = { ModelRatings.isNonoID($0) ? ModelRatings.nonoName(for: $0) : $0 }
+            let shown = modelID.isEmpty ? "Default (\(named(provider.defaultModel)))" : named(modelID)
             return made("\(setting)[\(provider.rawValue)]", L("model.label"), shown,
                         .aiModel(provider, modelID),
                         noOp: modelID == APIKeyStore.storedModel(for: provider))
@@ -3707,10 +3703,6 @@ final class NotchModel: ObservableObject {
         guard !updated.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw AppSettingValidationError.message(
                 "A new prompt shortcut needs `prompt`: the instruction the chord runs on the selected text.")
-        }
-        guard updated.prompt.count <= Self.customInstructionsLimit else {
-            throw AppSettingValidationError.message(
-                "A prompt shortcut is limited to \(Self.customInstructionsLimit) characters.")
         }
         let chord = updated.shortcut?.displayString ?? L("shortcuts.promptAction.set")
         return .init(key: "prompt_shortcut[\(updated.id)]",
@@ -4893,21 +4885,14 @@ final class NotchModel: ObservableObject {
         didSet { ProxyConfig.manual = proxyURL }
     }
 
-    /// A one-line personal preference the user set in Settings (XII-137), appended
-    /// after the built-in persona on the Ask path — "always answer in English",
+    /// A personal preference the user set in Settings (XII-137), appended after
+    /// the built-in persona on the Ask path — "always answer in English",
     /// "I'm a developer, prefer code", "use metric units". Empty = zero behaviour
-    /// change (the default). Capped at `customInstructionsLimit` chars so it can't
-    /// bloat the prompt and slow first token. Persisted in UserDefaults.
-    static let customInstructionsLimit = 200
+    /// change (the default). Persisted in UserDefaults.
     @Published var customInstructions: String =
         UserDefaults.standard.string(forKey: NotchModel.customInstructionsKey) ?? ""
     {
         didSet {
-            // Enforce the cap defensively (the field also limits input) and persist.
-            if customInstructions.count > NotchModel.customInstructionsLimit {
-                customInstructions = String(customInstructions.prefix(NotchModel.customInstructionsLimit))
-                return   // the reassignment re-enters didSet, which persists
-            }
             UserDefaults.standard.set(customInstructions, forKey: NotchModel.customInstructionsKey)
         }
     }
@@ -7340,14 +7325,13 @@ final class NotchModel: ObservableObject {
                         },
                         onReasoning: { [weak self] full in
                             guard let self else { return }
-                            let clipped = full.count > 12_000 ? String(full.prefix(12_000)) : full
                             if let i = thread.firstIndex(where: { $0.id == answerID }) {
-                                thread[i].reasoning = clipped
+                                thread[i].reasoning = full
                                 self.syncInFlight(answerID, thread)
                             }
                             if self.isOnScreen(answerID: answerID),
                                let i = self.turns.firstIndex(where: { $0.id == answerID }) {
-                                self.turns[i].reasoning = clipped
+                                self.turns[i].reasoning = full
                             }
                         })
                 } else {
@@ -7380,14 +7364,13 @@ final class NotchModel: ObservableObject {
                             guard !piece.isEmpty else { continue }
                             let prior = thread.first(where: { $0.id == answerID })?.reasoning ?? ""
                             let acc = prior + piece
-                            let clipped = acc.count > 12_000 ? String(acc.prefix(12_000)) : acc
                             if let i = thread.firstIndex(where: { $0.id == answerID }) {
-                                thread[i].reasoning = clipped
+                                thread[i].reasoning = acc
                                 self.syncInFlight(answerID, thread)
                             }
                             if self.isOnScreen(answerID: answerID) {
                                 if let i = self.turns.firstIndex(where: { $0.id == answerID }) {
-                                    self.turns[i].reasoning = clipped
+                                    self.turns[i].reasoning = acc
                                 }
                                 if self.mode == .load { self.mode = .result }
                             }
@@ -7641,11 +7624,13 @@ final class NotchModel: ObservableObject {
     /// provider's available models, with the one currently in effect flagged so the
     /// menu can grey it out ("current"). Only meaningful when configured (a live
     /// backend); empty for the stub so the menu simply doesn't appear.
-    var regenerateModelOptions: [(model: String, isCurrent: Bool)] {
+    var regenerateModelOptions: [(model: String, label: String, isCurrent: Bool)] {
         guard !(ai is StubAIService) else { return [] }
         let provider = APIKeyStore.selectedProvider
         let current = APIKeyStore.effectiveModel(for: provider) ?? provider.defaultModel
-        return provider.availableModels.map { ($0, $0 == current) }
+        return provider.availableModels.map {
+            ($0, provider == .nono ? ModelRatings.nonoName(for: $0) : $0, $0 == current)
+        }
     }
 
     /// One-shot model override for the NEXT `submit()` (XII-135): a "regenerate

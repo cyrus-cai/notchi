@@ -126,6 +126,27 @@ enum LucideIcons {
         "M6 20v-4",
     ], viewBox: 24)
 
+    /// Blend1 wallet ⋯ menu rows: `pricingBars` (Models and pricing),
+    /// `activity` (Usage), `receipt` (Billing history).
+    ///
+    /// `pricingBars` is not a Lucide glyph: it is OpenAI's Pricing mark — three
+    /// outlined bars on one base, short / tall / medium — drawn on the same
+    /// 24-unit grid. Lucide's bar charts all carry axes or are single strokes.
+    static let pricingBars = Mark(paths: [
+        "M9 11H4a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h16a1 1 0 0 0 1-1V9a1 1 0 0 0-1-1h-5",
+        "M9 21V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v17",
+    ], viewBox: 24)
+
+    static let activity = Mark(paths: [
+        "M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2",
+    ], viewBox: 24)
+
+    static let receipt = Mark(paths: [
+        "M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1Z",
+        "M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8",
+        "M12 17.5v-11",
+    ], viewBox: 24)
+
     /// lucide `command` — the ⌘ loop. The keyboard-shortcuts row wears it because
     /// it *is* the subject: the glyph names the card it opens without a word.
     static let command = Mark(paths: [

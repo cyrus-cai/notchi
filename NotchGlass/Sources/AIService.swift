@@ -180,7 +180,7 @@ enum StreamRetry {
     static func isRetryable(_ error: Error) -> Bool {
         if let svc = error as? OpenAICompatAIService.ServiceError {
             switch svc {
-            case .http(_, let status, _):
+            case .http(_, let status, _, _):
                 return status == 429 || (500..<600).contains(status)
             case .malformedResponse:
                 return true   // no/!HTTPURLResponse — treat as a transient blip
@@ -215,11 +215,16 @@ enum StreamRetry {
         return min(maxBackoff, max(0, secs))
     }
 
-    /// Sleep for the chosen backoff before retry `n`, preferring the provider's
-    /// `Retry-After` when it gave one. Throws `CancellationError` if the
-    /// surrounding task was cancelled mid-wait (a newer round superseded us).
-    static func waitBeforeRetry(_ n: Int, response: URLResponse? = nil) async throws {
-        let secs = retryAfter(response) ?? backoff(forRetry: n)
+    /// Sleep for the chosen backoff before retry `n`, preferring the `Retry-After`
+    /// carried by the failed attempt's `error` when it had one. Throws
+    /// `CancellationError` if the surrounding task was cancelled mid-wait (a newer
+    /// round superseded us).
+    static func waitBeforeRetry(_ n: Int, after error: Error? = nil) async throws {
+        var hinted: TimeInterval?
+        if case .http(_, _, _, let secs)? = error as? OpenAICompatAIService.ServiceError {
+            hinted = secs
+        }
+        let secs = hinted ?? backoff(forRetry: n)
         try await Task.sleep(nanoseconds: UInt64(secs * 1_000_000_000))
     }
 }
@@ -1334,7 +1339,8 @@ struct OpenAICompatAIService: AIService {
     }
 
     enum ServiceError: LocalizedError {
-        case http(provider: String, status: Int, body: String)
+        /// `retryAfter` is the response's `Retry-After`, in seconds, when it sent one.
+        case http(provider: String, status: Int, body: String, retryAfter: TimeInterval? = nil)
         case malformedResponse(provider: String)
         /// The response body ended without any terminal signal — no `[DONE]`, no
         /// `finish_reason`, no `message_stop`. The connection was cut mid-answer.
@@ -1348,7 +1354,7 @@ struct OpenAICompatAIService: AIService {
 
         var errorDescription: String? {
             switch self {
-            case .http(let provider, let status, let body):
+            case .http(let provider, let status, let body, _):
                 // 402 is the gateway saying the caller cannot spend. An empty
                 // balance gets its own line; today's cap falls through to the
                 // gateway's message, which names the figure.
@@ -1395,14 +1401,14 @@ struct OpenAICompatAIService: AIService {
         /// The HTTP status when this is an HTTP failure, else nil — for the
         /// metadata-only diagnostics breadcrumb (XII-85), never any body text.
         var httpStatus: Int? {
-            if case .http(_, let status, _) = self { return status }
+            if case .http(_, let status, _, _) = self { return status }
             return nil
         }
 
         /// The Notchi gateway refused the request because the balance cannot
         /// cover it. Retrying fails the same way until credit is added.
         var isOutOfCredit: Bool {
-            if case .http(_, 402, let body) = self { return body.contains("insufficient_balance") }
+            if case .http(_, 402, let body, _) = self { return body.contains("insufficient_balance") }
             return false
         }
     }
@@ -1490,7 +1496,8 @@ struct OpenAICompatAIService: AIService {
                                 continue
                             }
                             throw ServiceError.http(provider: provider.displayName,
-                                                    status: http.statusCode, body: bodyText)
+                                                    status: http.statusCode, body: bodyText,
+                                                    retryAfter: StreamRetry.retryAfter(http))
                         }
 
                         // Server-Sent Events: each event is a `data: {json}` line,
@@ -1567,7 +1574,7 @@ struct OpenAICompatAIService: AIService {
                         if !yieldedAny, attempt < StreamRetry.maxRetries,
                            StreamRetry.isRetryable(error) {
                             attempt += 1
-                            do { try await StreamRetry.waitBeforeRetry(attempt) }
+                            do { try await StreamRetry.waitBeforeRetry(attempt, after: error) }
                             catch { continuation.finish(); return }
                             continue
                         }
@@ -1839,7 +1846,8 @@ struct AnthropicAIService: AIService {
                                 continue
                             }
                             throw OpenAICompatAIService.ServiceError.http(provider: provider.displayName,
-                                                                          status: http.statusCode, body: bodyText)
+                                                                          status: http.statusCode, body: bodyText,
+                                                                          retryAfter: StreamRetry.retryAfter(http))
                         }
 
                         // SSE: lines come as `event: <type>` then `data: {json}`. We
@@ -1900,7 +1908,7 @@ struct AnthropicAIService: AIService {
                         if !yieldedAny, attempt < StreamRetry.maxRetries,
                            StreamRetry.isRetryable(error) {
                             attempt += 1
-                            do { try await StreamRetry.waitBeforeRetry(attempt) }
+                            do { try await StreamRetry.waitBeforeRetry(attempt, after: error) }
                             catch { continuation.finish(); return }
                             continue
                         }
@@ -3493,6 +3501,7 @@ enum ModelRatings {
     /// slug remainder ("free"). Ids that hide they are the current generation
     /// (see `labeledName`) get `-latest` written in, not a version number.
     static func prettyName(for id: String) -> String {
+        if isNonoID(id) { return nonoName(for: id) }
         if id == "openrouter/free" { return "Auto Router (Free)" }
         if let labeled = labeledName(for: id) { return labeled }
         let s = slug(from: id)
@@ -3525,6 +3534,11 @@ enum ModelRatings {
     /// its own; this one is used so the tier reads identically on the chip, in
     /// the menu, and before any catalog fetch has landed.
     static func nonoName(for id: String) -> String { "Blend1" }
+
+    /// The wire ids the first-party tier answers to: the canonical `nono-flash` and
+    /// the older `nono` alias. Used where a stored id is shown without its provider
+    /// (an answer footer, a saved transcript).
+    static func isNonoID(_ id: String) -> Bool { id == "nono-flash" || id == "nono" }
 
     /// `prettyName`, but for an id read **as `provider` serves it**. The one
     /// provider that differs is Claude Code, whose ids are the CLI's rolling
@@ -4256,7 +4270,8 @@ extension OpenAICompatAIService: AgentCapableService {
                             if http.statusCode == 400, askingForUsage,
                                StreamUsage.markRejected(provider.endpoint) { continue }
                             throw ServiceError.http(provider: provider.displayName,
-                                                    status: http.statusCode, body: bodyText)
+                                                    status: http.statusCode, body: bodyText,
+                                                    retryAfter: StreamRetry.retryAfter(http))
                         }
 
                         // Tool calls arrive in fragments across many SSE chunks: the
@@ -4443,7 +4458,7 @@ extension OpenAICompatAIService: AgentCapableService {
                         if !emittedAny, attempt < StreamRetry.maxRetries,
                            StreamRetry.isRetryable(error) {
                             attempt += 1
-                            do { try await StreamRetry.waitBeforeRetry(attempt) }
+                            do { try await StreamRetry.waitBeforeRetry(attempt, after: error) }
                             catch { continuation.finish(); return }
                             continue
                         }
@@ -4672,7 +4687,8 @@ extension AnthropicAIService: AgentCapableService {
                         guard (200..<300).contains(http.statusCode) else {
                             let bodyText = await OpenAICompatAIService.drainErrorBody(bytes.lines)
                             throw OpenAICompatAIService.ServiceError.http(provider: provider.displayName,
-                                                                          status: http.statusCode, body: bodyText)
+                                                                          status: http.statusCode, body: bodyText,
+                                                                          retryAfter: StreamRetry.retryAfter(http))
                         }
 
                         // Anthropic streams each content block separately. A `tool_use`
@@ -4797,7 +4813,7 @@ extension AnthropicAIService: AgentCapableService {
                         if !emittedAny, attempt < StreamRetry.maxRetries,
                            StreamRetry.isRetryable(error) {
                             attempt += 1
-                            do { try await StreamRetry.waitBeforeRetry(attempt) }
+                            do { try await StreamRetry.waitBeforeRetry(attempt, after: error) }
                             catch { continuation.finish(); return }
                             continue
                         }
