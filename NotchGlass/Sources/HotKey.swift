@@ -276,6 +276,18 @@ final class ForceClickMonitor {
     /// The press started on one of Notchi's own windows, so it is not a gesture
     /// on someone else's text — see `pressIsOnOwnWindow`.
     private var pressOnOwnWindow = false
+    /// The `.hold` rung's clock: when the button went down, and the timer that
+    /// watches it. Pressure says nothing in that rung, so the press needs a
+    /// heartbeat of its own to notice the hold completing and to keep sampling
+    /// the pointer.
+    private var holdStartedAt: Date?
+    private var holdTimer: Timer?
+
+    /// How often the hold is sampled. The gesture is a second and a half long
+    /// and the only thing being watched is whether the pointer moved, so this
+    /// only has to be fine enough that a flick away is caught before the hold
+    /// completes.
+    private static let holdTick: TimeInterval = 1.0 / 30
 
     /// How long a click may find the pressure stream silent before the client is
     /// treated as dead. A click means fingers are on the pad, so frames should be
@@ -297,6 +309,12 @@ final class ForceClickMonitor {
     /// travelled path nor restarts the settle timer, so a long firm press can't
     /// disarm itself by accumulating noise.
     private static let stillSlop: CGFloat = 1.5
+    /// How far the pointer may drift from where the press went down, in total,
+    /// and still be a hold. `stillSlop` throws away tremor sample by sample, so
+    /// a hand creeping below it forever would never be caught by the step test
+    /// alone; this is the straight-line backstop. Deliberately tiny — a hold
+    /// that has wandered even a couple of points was going somewhere.
+    private static let holdDriftSlop: CGFloat = 2
     /// How long the pointer must be still before pressure counts again. Pressing
     /// harder while the pointer is on its way somewhere is how a drag feels — the
     /// hand leans in to keep hold — so pressure only builds toward the gesture
@@ -352,6 +370,7 @@ final class ForceClickMonitor {
     }
 
     deinit {
+        holdTimer?.invalidate()
         if let globalMonitor { NSEvent.removeMonitor(globalMonitor) }
         if let localMonitor { NSEvent.removeMonitor(localMonitor) }
         if let wakeObserver {
@@ -406,13 +425,15 @@ final class ForceClickMonitor {
             // The raw frame normally arrives just before mouse-down. If it races
             // behind, the first pressure frame below becomes the baseline instead.
             clickPressure = latestPressure > 1 ? latestPressure : nil
+            if ForceClickPressure.current.isEnabled, !pressOnOwnWindow { beginHold() }
         case .leftMouseDragged:
-            // The press is moving something. Disarm it for good — pressure
-            // reported for the rest of this drag belongs to holding on, not to
-            // pressing in.
+            // The press is moving something. Disarm it for good — a hold is a
+            // hand that stayed put, so any movement at all ends it, not only
+            // travel far enough to call the press a drag.
             guard mouseIsDown, !pressMoved else { break }
-            guard noteMotion() == .drag else { break }
+            guard noteMotion() != .still || driftedFromOrigin() else { break }
             pressMoved = true
+            endHold()
             progress(nil)
         case .leftMouseUp:
             // Letting go inside the hold window settles it the other way: the
@@ -439,8 +460,9 @@ final class ForceClickMonitor {
         // says the client is alive, whether or not this press is one we act on.
         lastFrameAt = Date()
         // The rung can be switched off entirely — then pressure is ignored and
-        // the herald never draws, so a plain click stays a plain click.
-        guard ForceClickPressure.current.isEnabled else { return }
+        // the herald never draws, so a plain click stays a plain click. `hold`
+        // ignores it too: that rung is decided by the clock in `tickHold`.
+        guard ForceClickPressure.current.usesPressure else { return }
         latestPressure = pressure
         peakPressure = max(peakPressure, pressure)
         guard hasTouches else {
@@ -504,6 +526,53 @@ final class ForceClickMonitor {
         pendingFirePoint = NSEvent.mouseLocation
     }
 
+    // MARK: - Hold
+
+    /// Start the `.hold` clock for this press.
+    private func beginHold() {
+        endHold()
+        holdStartedAt = Date()
+        // `.common` on purpose: a press that lands on another app's window can
+        // put this app's run loop in a tracking mode, and a default-mode timer
+        // would simply stop ticking for the length of the gesture.
+        let timer = Timer(timeInterval: Self.holdTick, repeats: true) { [weak self] _ in
+            self?.tickHold()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        holdTimer = timer
+    }
+
+    private func endHold() {
+        holdTimer?.invalidate()
+        holdTimer = nil
+        holdStartedAt = nil
+    }
+
+    /// One sample of a held press. The only question is whether the pointer
+    /// stayed where it was put: a slow drag is exactly as long as a hold, and
+    /// only the pointer tells them apart.
+    ///
+    /// The test is the strict one — ANY movement above tremor, or any drift
+    /// past `holdDriftSlop`, disarms the press for good. Waiting for the motion
+    /// to settle back down instead let a press that had visibly moved still
+    /// fire, which is the case this rules out.
+    private func tickHold() {
+        guard mouseIsDown, !firedForCurrentPress, !pressMoved, !pressOnOwnWindow,
+              let holdStartedAt else { return endHold() }
+        if noteMotion() != .still || driftedFromOrigin() {
+            pressMoved = true
+            endHold()
+            progress(nil)
+            return
+        }
+        let duration = ForceClickPressure.current.holdDuration
+        let elapsed = Date().timeIntervalSince(holdStartedAt)
+        progress(min(1, elapsed / duration))
+        guard elapsed >= duration else { return }
+        endHold()
+        fire()
+    }
+
     /// Commit the gesture. Guarded so the two paths into it — the hold expiring
     /// on the pressure stream, and the button coming up mid-hold — can't both
     /// land for one press.
@@ -546,6 +615,15 @@ final class ForceClickMonitor {
         if pressTravel > Self.dragSlop { return .drag }
         return Date().timeIntervalSince(lastMovedAt) < Self.settleWindow
             ? .moving : .still
+    }
+
+    /// Has the pointer left the spot the press went down on? Catches the creep
+    /// that `noteMotion` throws away as tremor: each step below `stillSlop`,
+    /// all of them in the same direction.
+    private func driftedFromOrigin() -> Bool {
+        guard let pressOrigin else { return false }
+        let now = NSEvent.mouseLocation
+        return hypot(now.x - pressOrigin.x, now.y - pressOrigin.y) > Self.holdDriftSlop
     }
 
     /// Is the pointer over one of our own windows?
@@ -593,6 +671,7 @@ final class ForceClickMonitor {
         pendingFireAt = nil
         pendingFirePoint = nil
         pressOnOwnWindow = false
+        endHold()
         if wasTracking { progress(nil) }
     }
 }
@@ -626,97 +705,79 @@ enum SystemLookupGesture {
     }
 }
 
-/// How firmly a normal click must continue before Notchi treats it as a Force
-/// Click. Each rung combines an absolute pressure floor with the rise from the
-/// first click, so a late raw frame cannot make an ordinary click look forced.
+/// How long a click must stay down, with the pointer still, before Notchi
+/// treats it as the selected-text gesture. Lower levels take a longer hold.
 enum ForceClickPressure: String, CaseIterable, Identifiable {
     case off
-    case light
-    case medium
-    case firm
+    case low
+    case balanced
+    case instant
 
     var id: String { rawValue }
 
     /// Whether the gesture should respond at all. `off` disarms the monitor so
-    /// pressing harder on selected text does nothing.
+    /// a held click on selected text does nothing.
     var isEnabled: Bool { self != .off }
+
+    /// Pressure rungs were removed; the gesture is hold-only on every level.
+    var usesPressure: Bool { false }
+
+    /// How long the button must stay down, and the pointer still, before this
+    /// level fires. Unused on `.off`.
+    var holdDuration: TimeInterval {
+        switch self {
+        case .off:      return .infinity
+        case .low:      return 0.55
+        case .balanced: return 0.35
+        case .instant:  return 0.18
+        }
+    }
 
     var label: String {
         switch self {
-        case .off:    return L("forceClick.off")
-        case .light:  return L("forceClick.light")
-        case .medium: return L("forceClick.medium")
-        case .firm:   return L("forceClick.firm")
+        case .off:      return L("forceClick.off")
+        case .low:      return L("hover.low")
+        case .balanced: return L("hover.balanced")
+        case .instant:  return L("hover.instant")
         }
     }
 
-    fileprivate var ratio: Float {
-        switch self {
-        case .off:    return 1
-        case .light:  return 1.70
-        case .medium: return 2.00
-        case .firm:   return 2.45
-        }
-    }
-
-    fileprivate var minimumRise: Float {
-        switch self {
-        case .off:    return 1
-        case .light:  return 65
-        case .medium: return 95
-        case .firm:   return 140
-        }
-    }
-
-    fileprivate var minimumPressure: Float {
-        switch self {
-        case .off:    return 1
-        case .light:  return 200
-        case .medium: return 260
-        case .firm:   return 360
-        }
-    }
-
-    /// How far a press at `pressure` has come toward this rung, 0…1, where 1 means
-    /// it fires. Raw pressure is reported in gram-force; Apple's own second-click
-    /// threshold is private and adapts by hardware/settings, so each rung combines
-    /// an absolute floor with the rise from the first click, tuned around the
-    /// medium values validated on a real Force Touch pad.
-    ///
-    /// The three terms are combined with `min` — the slowest one to be satisfied
-    /// is what the user still has to push through, so this hits exactly 1 at the
-    /// same moment all three conditions hold. That makes it the single definition
-    /// of the gesture: the cue can't promise a fire the monitor won't deliver.
+    /// How far a press at `pressure` has come toward firing, 0…1. Hold levels
+    /// never consult pressure, so this stays at 0.
     func progress(of pressure: Float, from baseline: Float) -> Double {
-        let absolute = Double(pressure / minimumPressure)
-        let proportional = baseline > 0
-            ? Double(pressure / (baseline * ratio))
-            : 0
-        let risen = Double((pressure - baseline) / minimumRise)
-        return max(0, min(1, min(absolute, min(proportional, risen))))
+        _ = pressure
+        _ = baseline
+        return 0
     }
 
     private static let key = "forceClickPressure"
 
-    /// Unset means **off** — a fresh install never arms the gesture. It collides
-    /// with macOS's own force-click lookup, which ships on, so an implicit
-    /// default of `.medium` handed brand-new users two panels on one press
-    /// before they had ever heard of the setting. Now the gate in Settings is
-    /// the only way it turns on: you pick a rung, the dialog walks you through
-    /// switching Apple's lookup off, and it arms.
+    /// Unset means **off** — a fresh install never arms the gesture.
     static var current: ForceClickPressure {
         get {
-            UserDefaults.standard.string(forKey: key)
-                .flatMap(ForceClickPressure.init(rawValue:)) ?? .off
+            guard let raw = UserDefaults.standard.string(forKey: key) else { return .off }
+            return decoded(raw)
         }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: key) }
+    }
+
+    /// Map stored values from the old Force-click rungs onto hold sensitivity.
+    /// `hold` / `medium` → balanced, `light` → instant, `firm` → low.
+    private static func decoded(_ raw: String) -> ForceClickPressure {
+        switch raw {
+        case "off": return .off
+        case "low", "firm": return .low
+        case "balanced", "hold", "medium": return .balanced
+        case "instant", "light": return .instant
+        default: return .off
+        }
     }
 
     /// Keep the old implicit default for Macs that already had it. Before this
     /// change an unset key meant `.medium`, so someone who has been using the
     /// gesture since 0.6.x never wrote anything down — flipping the default
     /// alone would silently disarm them on update. Anyone who has launched Notchi
-    /// before (the same signals `OnboardingService` reads) gets `.medium`
+    /// before (the same signals `OnboardingService` reads) gets `.balanced`
     /// stamped once; a true first run is left unset, i.e. off.
     static func seedDefaultForExistingInstalls() {
         let defaults = UserDefaults.standard
@@ -725,7 +786,7 @@ enum ForceClickPressure: String, CaseIterable, Identifiable {
             || defaults.bool(forKey: "onboarding_opened_once")
             || defaults.bool(forKey: "onboarding_guide_done")
         guard launchedBefore else { return }
-        defaults.set(ForceClickPressure.medium.rawValue, forKey: key)
+        defaults.set(ForceClickPressure.balanced.rawValue, forKey: key)
     }
 }
 
@@ -1894,7 +1955,6 @@ enum ReservedAppShortcut {
 /// ⌘V to paste stay fixed: changing those would make the prompt stop behaving
 /// like a Mac text field.
 enum AppShortcutAction: String, CaseIterable, Identifiable, Hashable {
-    case copyAnswer
     case regenerate
     case pin
     case newChat
@@ -1906,7 +1966,6 @@ enum AppShortcutAction: String, CaseIterable, Identifiable, Hashable {
 
     var label: String {
         switch self {
-        case .copyAnswer:  return L("shortcuts.copyAnswer")
         case .regenerate:  return L("shortcuts.regenerate")
         case .pin:         return L("shortcuts.pin")
         case .newChat:     return L("shortcuts.newChat")
@@ -1917,11 +1976,10 @@ enum AppShortcutAction: String, CaseIterable, Identifiable, Hashable {
     }
 
     /// The stable snake_case id the settings tool speaks — chat can say
-    /// "copy_answer" in any interface language and land on the same action the
+    /// "regenerate" in any interface language and land on the same action the
     /// Shortcuts pane edits. Never localized, never renamed.
     var token: String {
         switch self {
-        case .copyAnswer: return "copy_answer"
         case .regenerate: return "regenerate"
         case .pin:        return "pin"
         case .newChat:    return "new_chat"
@@ -1938,7 +1996,6 @@ enum AppShortcutAction: String, CaseIterable, Identifiable, Hashable {
             .replacingOccurrences(of: "-", with: "_")
             .replacingOccurrences(of: " ", with: "_")
         switch token {
-        case "copy_answer", "copyanswer", "copy": return .copyAnswer
         case "regenerate", "retry": return .regenerate
         case "pin": return .pin
         case "new_chat", "newchat", "new": return .newChat
@@ -1951,7 +2008,6 @@ enum AppShortcutAction: String, CaseIterable, Identifiable, Hashable {
 
     var defaultChord: ShortcutChord {
         switch self {
-        case .copyAnswer:  return ShortcutChord(keyCode: UInt32(kVK_ANSI_C), modifiers: UInt32(cmdKey))
         case .regenerate:  return ShortcutChord(keyCode: UInt32(kVK_ANSI_R), modifiers: UInt32(cmdKey))
         case .pin:         return ShortcutChord(keyCode: UInt32(kVK_ANSI_P), modifiers: UInt32(cmdKey))
         case .newChat:     return ShortcutChord(keyCode: UInt32(kVK_ANSI_N), modifiers: UInt32(cmdKey))
@@ -2149,7 +2205,6 @@ struct AppShortcutReference {
                 Entry(L("shortcuts.pasteImage"), ["⌘V"]),
             ]),
             Group(title: L("shortcuts.group.answer"), entries: [
-                editable(.copyAnswer),
                 editable(.regenerate),
                 editable(.pin),
                 editable(.newChat),

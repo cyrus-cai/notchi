@@ -98,6 +98,8 @@ function parseEntries(src) {
   return entryChunks(extractBundled(src)).map((body) => ({
     version: scalar(body, 'version'),
     date: scalar(body, 'date'),
+    headline: scalar(body, 'headline'),
+    blurb: scalar(body, 'blurb'),
     features: listField(body, 'features'),
     improvements: listField(body, 'improvements'),
     fixes: listField(body, 'fixes'),
@@ -148,6 +150,11 @@ function renderEntries(entries) {
     html += `        <span class="rel-ver">${esc(e.version)}</span>\n`;
     html += `        <span class="rel-date">${esc(fmtDate(e.date))}</span>\n`;
     html += `      </div>\n`;
+    // The release's headline, when it has one — the same line the in-app panel
+    // sets above its hero image. Without it the site's newest release opens on
+    // a bullet that assumes a story the page never told.
+    if (e.headline) html += `      <p class="rel-headline">${esc(e.headline)}</p>\n`;
+    if (e.blurb) html += `      <p class="rel-blurb">${esc(e.blurb)}</p>\n`;
     html += renderGroup('New', 'rel.new', e.features);
     html += renderGroup('Improved', 'rel.improved', e.improvements);
     html += renderGroup('Fixed', 'rel.fixed', e.fixes);

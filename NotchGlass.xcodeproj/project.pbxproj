@@ -26,6 +26,7 @@
 		A1000961 /* NoNoAccount.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000960 /* NoNoAccount.swift */; };
 		A1000C21 /* ImageStack.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000C20 /* ImageStack.swift */; };
 		A10007E1 /* LucideIcons.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10007E0 /* LucideIcons.swift */; };
+		A1000B01 /* LoopService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000B00 /* LoopService.swift */; };
 		A100001C /* HotKey.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000D /* HotKey.swift */; };
 		A1000A21 /* ForceClickHerald.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000A20 /* ForceClickHerald.swift */; };
 		A100001D /* APIKeyStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000E /* APIKeyStore.swift */; };
@@ -119,6 +120,7 @@
 		A1000960 /* NoNoAccount.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoNoAccount.swift; sourceTree = "<group>"; };
 		A1000C20 /* ImageStack.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageStack.swift; sourceTree = "<group>"; };
 		A10007E0 /* LucideIcons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LucideIcons.swift; sourceTree = "<group>"; };
+		A1000B00 /* LoopService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoopService.swift; sourceTree = "<group>"; };
 		A100000D /* HotKey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HotKey.swift; sourceTree = "<group>"; };
 		A1000A20 /* ForceClickHerald.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ForceClickHerald.swift; sourceTree = "<group>"; };
 		A100000E /* APIKeyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIKeyStore.swift; sourceTree = "<group>"; };
@@ -213,6 +215,7 @@
 				A1000960 /* NoNoAccount.swift */,
 				A1000C20 /* ImageStack.swift */,
 				A10007E0 /* LucideIcons.swift */,
+				A1000B00 /* LoopService.swift */,
 				A100000D /* HotKey.swift */,
 				A1000A20 /* ForceClickHerald.swift */,
 				A100000E /* APIKeyStore.swift */,
@@ -366,6 +369,7 @@
 				A1000961 /* NoNoAccount.swift in Sources */,
 				A1000C21 /* ImageStack.swift in Sources */,
 				A10007E1 /* LucideIcons.swift in Sources */,
+				A1000B01 /* LoopService.swift in Sources */,
 				A100001C /* HotKey.swift in Sources */,
 				A1000A21 /* ForceClickHerald.swift in Sources */,
 				A100001D /* APIKeyStore.swift in Sources */,
@@ -441,7 +445,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.8.1;
+				MARKETING_VERSION = 0.8.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -464,7 +468,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.8.1;
+				MARKETING_VERSION = 0.8.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;

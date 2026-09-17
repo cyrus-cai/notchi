@@ -109,6 +109,21 @@ enum LucideIcons {
     /// tile wears it because that figure isn't a bucket the way the three beside
     /// it are: it's a measure taken across all of them, and lending it any
     /// bucket's glyph would say it belonged to that bucket.
+    /// Lucide `repeat` — a `/loop` thread's interval row.
+    static let loop = Mark(paths: [
+        "m17 2 4 4-4 4",
+        "M3 11v-1a4 4 0 0 1 4-4h14",
+        "m7 22-4-4 4-4",
+        "M21 13v1a4 4 0 0 1-4 4H3",
+    ], viewBox: 24)
+
+    /// Lucide `square` — the stop-loop row. The `circle-stop` it replaced put a
+    /// 6pt square inside a 20pt circle; at the 13pt the row draws it, the two
+    /// strokes collapsed into a dot in a ring. One square at full size holds.
+    static let circleStop = Mark(paths: [
+        "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z",
+    ], viewBox: 24)
+
     static let hash = Mark(paths: [
         "M4 9h16",
         "M4 15h16",
@@ -151,6 +166,12 @@ enum LucideIcons {
     /// it *is* the subject: the glyph names the card it opens without a word.
     static let command = Mark(paths: [
         "M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3",
+    ], viewBox: 24)
+
+    /// lucide `shield-check` — the balance card's link to its Privacy page.
+    static let shieldCheck = Mark(paths: [
+        "M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z",
+        "m9 12 2 2 4-4",
     ], viewBox: 24)
 
     /// lucide `settings` — the gear. The source ships this as a path plus a bare

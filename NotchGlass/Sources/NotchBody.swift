@@ -19,6 +19,7 @@ struct NotchBody: View {
     /// The agent-Codex run (XII: agent-to-Codex) — observed so the idle
     /// view's task card tracks progress live and flips to the result on finish.
     @ObservedObject private var agentManager = AgentTaskManager.shared
+    @ObservedObject private var chatLoops = ChatLoopManager.shared
     /// The model catalog behind the ⌘⇧I picker — the same store Settings' chip reads,
     /// so a list fetched on one surface is already warm on the other.
     @ObservedObject private var catalog = ModelCatalogStore.shared
@@ -30,7 +31,8 @@ struct NotchBody: View {
     /// id, and only the armed "cancel?" chip actually terminates that run.
     /// Auto-disarms after a beat. One slot on purpose — arming a second row
     /// relaxes the first.
-    @State private var confirmingAgentCancelID: UUID? = nil
+    /// The round a loop record's round column has picked; nil follows the newest.
+    @State private var loopRoundSelection: Int? = nil
     /// Which agent status row the pointer is over. The row's trailing slot rests
     /// as an elapsed clock and only becomes the ✕ under the pointer, so a list of
     /// runs reads as durations at a glance and never as a row of close buttons.
@@ -107,6 +109,10 @@ struct NotchBody: View {
     /// `model.isResultMetadataMenuOpen`: the two surfaces never coexist, but the
     /// page owns its own chip and shouldn't leave the record's flag flipped.
     @State private var agentDetailMetadataOpen = false
+    /// Interval card hung off a running loop's header chip (detail page or
+    /// chat thread). Separate from the compose chip's picker: those two
+    /// surfaces never share a screen, but each owns its own open flag.
+    @State private var showLiveLoopIntervalPicker = false
     /// Whether the agent detail page is still pinned to the tail. The page
     /// follows the newest line like a terminal — but only while the reader is
     /// AT the tail: scroll up to read an earlier tool output and the follow
@@ -292,11 +298,32 @@ struct NotchBody: View {
         .onChange(of: model.showAgentFolderPicker) { _, open in
             model.isModelPickerOpen = open
         }
+        .onChange(of: model.showLoopIntervalPicker) { _, open in
+            model.isModelPickerOpen = open
+        }
+        .onChange(of: model.agentDetailTaskID) { _, _ in
+            showLiveLoopIntervalPicker = false
+        }
+        .onChange(of: model.threadHistoryID) { _, _ in
+            showLiveLoopIntervalPicker = false
+        }
+        .onChange(of: showLiveLoopIntervalPicker) { _, open in
+            if open { model.isModelPickerOpen = true }
+            else if !model.showLoopIntervalPicker
+                      && !model.showAskModelPicker
+                      && !model.showAgentPicker
+                      && !model.showAgentFolderPicker
+                      && !model.showModelPicker {
+                model.isModelPickerOpen = false
+            }
+        }
         .onChange(of: model.open) { _, isOpen in
             if isOpen {
                 refocusInput()
             } else {
                 focused = false
+                model.showLoopIntervalPicker = false
+                showLiveLoopIntervalPicker = false
             }
         }
         // Returning to the idle prompt (← / back button / Enter-submit-then-finish)
@@ -655,12 +682,11 @@ struct NotchBody: View {
     /// Shortcuts-run prompt does: that window is one action's box, with no recall
     /// surface behind it.
     ///
-    /// Typed text used to displace it too — the list folded the moment a character
-    /// landed. That coupling died with the always-on Recent chevron (see
-    /// `bucketRow`): a disclosure that stays on the row while you type has to still
-    /// open, or it's a dead control. Recent is now the chevron's state alone, in
-    /// both an empty and a filled box. (`text.didSet` matches — it clears the
-    /// keyboard highlight on a keystroke but no longer closes the list.)
+    /// Typed text doesn't displace it here; it folds it once, on the first
+    /// character of a line (`text.didSet` writes `showHistory = false` on the
+    /// empty → non-empty edge). That keeps the always-on Recent chevron (see
+    /// `bucketRow`) a live control with text in the box: reopening the list
+    /// mid-line holds, because later keystrokes don't fold it again.
     private var promptHidesRecent: Bool {
         model.usingPromptShortcutContext
     }
@@ -912,6 +938,12 @@ struct NotchBody: View {
                     askModelChip
                         .transition(.opacity)
                 }
+                // `/loop` adds one chip after the model, on either side.
+                if model.loopIntervalMinutes != nil,
+                   model.agentComposeActive || model.effectiveSubmitPanel == .chat {
+                    loopIntervalChip
+                        .transition(.opacity)
+                }
             }
             // The Recent (+ pin) cluster rides this row's trailing edge — on the
             // same line as the Ask|Agent pill, pushed right by the spacer — instead
@@ -1009,6 +1041,33 @@ struct NotchBody: View {
         )
     }
 
+    /// `/loop`'s interval chip. Its card hangs off the chip like the folder
+    /// chip's: a minutes field, then the presets.
+    private var loopIntervalChip: some View {
+        let minutes = model.loopIntervalMinutes ?? LoopInterval.lastMinutes
+        return AgentComposeChip(title: L("loop.every", LoopInterval.short(minutes)),
+                                action: { model.showLoopIntervalPicker.toggle() },
+                                icon: {
+            LucideIcon(mark: LucideIcons.loop, size: 11)
+        })
+            .help(L("loop.chip.help"))
+            .accessibilityLabel(L("loop.chip.help"))
+            .fixedSize()
+            .modifier(MenuCardWindow(
+                open: model.showLoopIntervalPicker,
+                onDismiss: { _ in model.showLoopIntervalPicker = false },
+                card: {
+                    AnyView(LoopIntervalMenuCard(
+                        selected: minutes,
+                        onSelect: { value in
+                            model.loopIntervalMinutes = value
+                            model.showLoopIntervalPicker = false
+                        },
+                        onDone: { model.showLoopIntervalPicker = false },
+                        onClear: { model.clearLoop() }))
+                }))
+    }
+
     /// The Ask bucket's model chip — the Ask-side twin of the agent compose chips,
     /// riding the same slot beside the pill. It names the model in effect and, on
     /// tap, opens the Ask recents quick menu (`AskRecentModelPickerView`) — the
@@ -1103,16 +1162,17 @@ struct NotchBody: View {
                                                  ?? $0.defaultModel)
             }
         }
-        let pinned = askPinnedModelRows
         var rows = [AskRecentModelPickerView.Row(provider: selectedProvider, id: selectedModelID)]
         for e in AskModelMRU.entries {
             let row = AskRecentModelPickerView.Row(provider: e.provider, id: e.model)
             guard !rows.contains(row), ModelCatalogStore.ready(e.provider) else { continue }
             rows.append(row)
         }
-        // A pinned model has its own row below; listing it twice would make the
-        // menu look like two different models with one name.
-        return Array(rows.filter { !pinned.contains($0) }.prefix(AskModelMRU.capacity))
+        // Our own models are never recents: the whole lineup is folded under the
+        // Notchi row below, and a copy up here would read as a second model with
+        // the same name — which is what the flat list did while the gateway's
+        // catalog was still loading.
+        return Array(rows.filter { !$0.provider.isFirstParty }.prefix(AskModelMRU.capacity))
     }
 
     /// The models pinned under the recents: our own, and only while the wallet
@@ -1127,9 +1187,39 @@ struct NotchBody: View {
         guard let snapshot = nono.snapshot, !snapshot.isEmpty, !snapshot.cappedForToday,
               ModelCatalogStore.ready(.nono) else { return [] }
         let live = catalog.liveByProvider[.nono]?.map(\.id) ?? []
-        let ids = live.isEmpty ? Provider.nono.availableModels : live
-        return ids.map { AskRecentModelPickerView.Row(provider: .nono, id: $0) }
+        var ids = live
+        if ids.isEmpty {
+            // Nothing published yet, so nothing to check against: the bundled
+            // tier, plus whatever the user is on or has asked through, so the
+            // section isn't empty while the fetch is in flight. Once the list
+            // lands it is the whole lineup — a remembered id that is no longer
+            // on it names a model the gateway will refuse, and offering it
+            // would keep a retired model on the menu for as long as it sat in
+            // history.
+            ids = Provider.nono.availableModels
+            if selectedProvider.isFirstParty, !ids.contains(selectedModelID) {
+                ids.append(selectedModelID)
+            }
+            for e in AskModelMRU.entries where e.provider.isFirstParty && !ids.contains(e.model) {
+                ids.append(e.model)
+            }
+        }
+        // Listed flat under the recents, so the lineup is capped at a few rows:
+        // past that it stops reading as "and ours" and starts being a second
+        // catalog, which is what "More models…" is for. The model in effect is
+        // kept in view whatever its place in the published order — a selection
+        // the menu cannot show is a selection the menu cannot change.
+        var kept = Array(ids.prefix(Self.askPinnedModelLimit))
+        if selectedProvider.isFirstParty, !kept.contains(selectedModelID),
+           ids.contains(selectedModelID) {
+            kept.removeLast()
+            kept.append(selectedModelID)
+        }
+        return kept.map { AskRecentModelPickerView.Row(provider: .nono, id: $0) }
     }
+
+    /// How many of our own models the Ask menu lists.
+    private static let askPinnedModelLimit = 3
 
     /// The agent CLIs that are installed *and* signed in right now — real backends
     /// that need no key, so with nothing else configured they are the shortest way
@@ -1349,8 +1439,15 @@ struct NotchBody: View {
         VStack(alignment: .leading, spacing: 0) {
             // `tasks` is stored in spawn order; show it newest-first so the most
             // recently started run sits at the top of the list.
-            ForEach(agentManager.tasks.reversed()) { task in
-                agentStatusRow(task)
+            if model.agentComposeActive {
+                ForEach(agentManager.tasks.reversed()) { task in
+                    agentStatusRow(task)
+                }
+            } else {
+                // Ask loops live here; Agent already has its own loop rows.
+                ForEach(chatLoops.loops.reversed()) { loop in
+                    chatLoopRow(loop)
+                }
             }
         }
     }
@@ -1369,45 +1466,11 @@ struct NotchBody: View {
                     .tracking(-0.1)
                     .lineLimit(1)
                     .truncationMode(.tail)
+                if task.loop != nil { loopTag }
                 Spacer(minLength: 8)
-                // Stopping a minutes-long run is destructive — two-step: the ✕
-                // arms an explicit "cancel?" chip (auto-disarms after a beat),
-                // and only that second tap actually terminates.
-                if confirmingAgentCancelID == task.id {
-                    Button {
-                        agentManager.cancel(taskID: task.id)
-                        confirmingAgentCancelID = nil
-                    } label: {
-                        Text(L("agent.cancelConfirm"))
-                            .font(.sf(Tokens.TypeSize.meta, weight: .medium))
-                            .foregroundStyle(Color(red: 1.0, green: 0.45, blue: 0.40))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .background(Capsule().fill(Color.red.opacity(0.16)))
-                            .contentShape(Capsule())
-                    }
-                    .buttonStyle(.plain)
-                    .transition(.scale(scale: 0.8, anchor: .trailing).combined(with: .opacity))
-                    .task {
-                        // Un-tapped, the armed confirm quietly relaxes back to
-                        // the plain ✕. Cancelled automatically if the chip
-                        // leaves the screen first.
-                        try? await Task.sleep(nanoseconds: 3_000_000_000)
-                        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
-                            if confirmingAgentCancelID == task.id {
-                                confirmingAgentCancelID = nil
-                            }
-                        }
-                    }
-                } else {
-                    agentRowTrailing(task) {
-                        agentCardButton("xmark", help: L("agent.cancel")) {
-                            withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
-                                confirmingAgentCancelID = task.id
-                            }
-                        }
-                    }
-                }
+                // No stop on the row: a run is stopped from its detail page,
+                // where what it is doing is on screen.
+                agentRowTrailing(task) { EmptyView() }
             } else {
                 // Settled: just the task's own name — what was asked, not a
                 // report of what came back. The dot already says how it went, and
@@ -1422,11 +1485,18 @@ struct NotchBody: View {
                         : (task.outcome == .cancelled ? Tokens.text3 : Tokens.text2))
                     .lineLimit(1)
                     .truncationMode(.tail)
+                if task.loop != nil { loopTag }
                 Spacer(minLength: 8)
-                agentRowTrailing(task) {
-                    agentCardButton("xmark", help: L("agent.dismiss")) {
-                        withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
-                            agentManager.dismissFinished(taskID: task.id)
+                if task.isLoopWaiting {
+                    // Between loop rounds: when the next one starts. Nothing to
+                    // throw away — the loop is still going.
+                    loopCountdown(task.loop?.nextRoundAt)
+                } else {
+                    agentRowTrailing(task) {
+                        agentCardButton("xmark", help: L("agent.dismiss")) {
+                            withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
+                                agentManager.dismissFinished(taskID: task.id)
+                            }
                         }
                     }
                 }
@@ -1459,14 +1529,118 @@ struct NotchBody: View {
             }
         }
         .onTapGesture {
-            if task.isRunning {
+            if task.isRunning || task.isLoopWaiting {
                 // A live run opens its detail page — the full work trail,
-                // streaming — instead of waiting for the record to exist.
+                // streaming — instead of waiting for the record to exist. So
+                // does a loop between rounds: it is still going, and the ⌘
+                // card there can end it.
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
                     model.agentDetailTaskID = task.id
                 }
             } else {
                 openAgentRecord(task)
+            }
+        }
+    }
+
+    // MARK: - Loops in the task list
+
+    /// The Loop label a loop's row carries after its name — the model card's
+    /// `Tag`, as is.
+    private var loopTag: some View {
+        ModelDetailCard.Tag(text: L("hint.loop"))
+            .fixedSize()
+    }
+
+    /// Interval chip on a running loop's header — quiet type, same card the
+    /// compose chip opens, so the schedule can change without leaving the record.
+    private func loopScheduleChip(minutes: Int,
+                                  onSelect: @escaping (Int) -> Void) -> some View {
+        LoopScheduleChip(minutes: minutes, open: $showLiveLoopIntervalPicker,
+                         onSelect: onSelect)
+    }
+
+    /// When a waiting loop's next round starts, in the slot the elapsed clock
+    /// holds on every other row.
+    private func loopCountdown(_ next: Date?) -> some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            HStack(spacing: 4) {
+                LucideIcon(mark: LucideIcons.clock, size: 11)
+                Text(LoopInterval.countdown((next ?? context.date)
+                    .timeIntervalSince(context.date)))
+                    .monospacedDigit()
+            }
+            .font(.sf(Tokens.TypeSize.meta))
+            .foregroundStyle(Tokens.text4)
+            .lineLimit(1)
+            .fixedSize()
+        }
+        .frame(minWidth: 18, minHeight: 18, alignment: .trailing)
+    }
+
+    /// A chat loop's line — the agent row's shape: bead, the loop's prompt, the
+    /// Loop label, then the round's clock or the countdown to the next. A tap
+    /// opens the thread; a finished loop leaves the list with that tap.
+    private func chatLoopRow(_ loop: ChatLoopManager.ChatLoop) -> some View {
+        HStack(spacing: 8) {
+            AgentStatusDot(running: loop.isRunning,
+                           outcome: loop.isRunning ? nil : (loop.failed ? .failure : .success))
+            Text(loop.prompt)
+                .font(.sf(loop.isRunning ? 14 : Tokens.TypeSize.reading))
+                .tracking(-0.1)
+                .foregroundStyle(loop.isRunning ? Tokens.text3
+                                 : (loop.failed ? Tokens.danger.opacity(0.9) : Tokens.text2))
+                .lineLimit(1)
+                .truncationMode(.tail)
+            loopTag
+            Spacer(minLength: 8)
+            if let started = loop.roundStartedAt {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    agentElapsedLabel(context.date.timeIntervalSince(started))
+                }
+            } else if loop.active {
+                loopCountdown(loop.nextRoundAt)
+            } else {
+                ZStack(alignment: .trailing) {
+                    if hoveredAgentRowID == loop.id {
+                        agentCardButton("xmark", help: L("agent.dismiss")) {
+                            withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
+                                chatLoops.dismiss(loop.id)
+                            }
+                        }
+                        .transition(.opacity.combined(with: .scale(scale: 0.85)))
+                    } else {
+                        agentElapsedLabel(loop.lastRoundDuration)
+                            .transition(.opacity)
+                    }
+                }
+                .frame(minWidth: 18, minHeight: 18, alignment: .trailing)
+            }
+        }
+        .padding(.leading, 10)
+        .padding(.trailing, 6)
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle.control
+                .fill(.white.opacity(hoveredAgentRowID == loop.id ? 0.015 : 0))
+                .overlay(
+                    RoundedRectangle.control
+                        .fill(.thinMaterial)
+                        .opacity(hoveredAgentRowID == loop.id ? 0.11 : 0)
+                )
+        )
+        .contentShape(RoundedRectangle.control)
+        .onHover { inside in
+            withAnimation(.easeOut(duration: 0.16)) {
+                if inside { hoveredAgentRowID = loop.id }
+                else if hoveredAgentRowID == loop.id { hoveredAgentRowID = nil }
+            }
+        }
+        .onTapGesture {
+            withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
+                model.openLoopThread(id: loop.id)
+                if !loop.active { chatLoops.dismiss(loop.id) }
             }
         }
     }
@@ -1481,7 +1655,7 @@ struct NotchBody: View {
         @ViewBuilder control: () -> Control
     ) -> some View {
         ZStack(alignment: .trailing) {
-            if hoveredAgentRowID == task.id {
+            if hoveredAgentRowID == task.id, !task.isRunning {
                 control()
                     .transition(.opacity.combined(with: .scale(scale: 0.85)))
             } else if task.isRunning {
@@ -1602,12 +1776,7 @@ struct NotchBody: View {
                         // What the record is made of — shared with the torn-off
                         // window so the page reads identically on both sides of a
                         // tear (`AgentRecordBody`).
-                        AgentRecordBody(task: task,
-                                        bottomID: Self.agentDetailBottomID,
-                                        // The trail scrolls DOWN into this, behind
-                                        // the floating composer, instead of ending
-                                        // on a hard cut above a sibling row.
-                                        tailRunway: agentDetailFollowUpReach)
+                        agentDetailRecord(task)
                         // Runway: the trail rests below the header, then scrolls up into
                         // this empty band to fade + frost out — the same soft top edge
                         // the detached agent window wears (`ThreadScroll`), so the page
@@ -1641,6 +1810,10 @@ struct NotchBody: View {
                     .scrollEdgeFade(top: true, bottom: true,
                                     topFade: ThreadScroll.runway,
                                     bottomFade: agentDetailFollowUpReach)
+                    // The round column parks below the top dissolve, not under
+                    // it (same reach the detached window hands its sticky
+                    // affordances).
+                    .environment(\.stickyScrollTopInset, ThreadScroll.runway)
                     // Frost rests while the run streams (same discipline as the result
                     // view's ConditionalTopBlur): the blurred copy re-rasterizes on
                     // every content change, and a live trail changes constantly.
@@ -1721,6 +1894,110 @@ struct NotchBody: View {
     /// on the standalone page, where the pair stands alone; the split view passes
     /// the manage bar's 34 instead, because there the chip sits on the same bottom
     /// rail as the ⋯ and the collapse chevron and has to read as one of them.
+    /// The detail page's record. A loop reads one round at a time: the loop's
+    /// prompt once at the top, then the chosen round and the round column beside
+    /// it on the right (the newest, until another is picked).
+    @ViewBuilder
+    private func agentDetailRecord(_ task: AgentTaskManager.AgentTask) -> some View {
+        if task.loop != nil {
+            let items = loopRoundItems(task)
+            let selected = selectedLoopRound(in: items)
+            VStack(alignment: .leading, spacing: 14) {
+                UserQuestionBubble(text: task.prompt, baseFont: Tokens.TypeSize.reading)
+                // The round column OVERLAYS the record rather than sitting
+                // beside it in an HStack: the overlay's frame is the travel it
+                // slides along to hold the visible top while the round scrolls
+                // (see `LoopRoundSidebar`). The record keeps the same 104pt
+                // gutter + 12pt gap the HStack gave it.
+                VStack(alignment: .leading, spacing: 10) {
+                    if let meta = agentRoundMeta(task, round: selected) {
+                        Text(meta)
+                            .font(.sf(Tokens.TypeSize.meta))
+                            .monospacedDigit()
+                            .foregroundStyle(Tokens.text4)
+                            .lineLimit(1)
+                    }
+                    // The trail scrolls DOWN into the runway, behind the
+                    // floating composer, instead of ending on a hard cut.
+                    AgentRecordBody(task: task,
+                                    bottomID: Self.agentDetailBottomID,
+                                    tailRunway: agentDetailFollowUpReach,
+                                    onlyRound: selected,
+                                    hidesLoopPrompts: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.trailing, LoopRoundSidebar.width + 12)
+                .frame(minHeight: LoopRoundSidebar.height(rows: items.count),
+                       alignment: .top)
+                .overlay(alignment: .topTrailing) {
+                    LoopRoundSidebar(items: items, selected: selected) {
+                        pickLoopRound($0, in: items)
+                    }
+                }
+            }
+            .onChange(of: task.id) { _, _ in loopRoundSelection = nil }
+        } else {
+            // The trail scrolls DOWN into this, behind the floating composer,
+            // instead of ending on a hard cut above a sibling row.
+            AgentRecordBody(task: task,
+                            bottomID: Self.agentDetailBottomID,
+                            tailRunway: agentDetailFollowUpReach)
+        }
+    }
+
+    /// A loop task's round column: every settled round (a typed follow-up named
+    /// by its own words), then the round in flight.
+    private func loopRoundItems(_ task: AgentTaskManager.AgentTask) -> [LoopRoundSidebar.Item] {
+        var items = task.exchanges.enumerated().map { index, exchange in
+            LoopRoundSidebar.Item(id: index,
+                                  title: exchange.loopRound.map { L("loop.round", $0) }
+                                      ?? exchange.prompt,
+                                  isFollowUp: exchange.loopRound == nil)
+        }
+        if task.isRunning {
+            let typed = task.log.last(where: { $0.title.hasPrefix("› ") })
+                .map { String($0.title.dropFirst(2)) }
+            items.append(LoopRoundSidebar.Item(
+                id: task.exchanges.count,
+                title: task.liveLoopRound.map { L("loop.round", $0) } ?? typed ?? task.prompt,
+                isFollowUp: task.liveLoopRound == nil,
+                running: true))
+        }
+        return items
+    }
+
+    /// The picked round, or the newest when none is picked (or the pick is gone).
+    private func selectedLoopRound(in items: [LoopRoundSidebar.Item]) -> Int {
+        if let picked = loopRoundSelection, items.contains(where: { $0.id == picked }) {
+            return picked
+        }
+        return items.last?.id ?? 0
+    }
+
+    /// Picking the newest round goes back to following the newest.
+    private func pickLoopRound(_ id: Int, in items: [LoopRoundSidebar.Item]) {
+        loopRoundSelection = id == items.last?.id ? nil : id
+    }
+
+    /// "Round 3 · 14:25 · 1m 52s" above the chosen round.
+    private func agentRoundMeta(_ task: AgentTaskManager.AgentTask, round: Int) -> String? {
+        var parts: [String] = []
+        if task.exchanges.indices.contains(round) {
+            let exchange = task.exchanges[round]
+            if let n = exchange.loopRound { parts.append(L("loop.round", n)) }
+            if let start = exchange.startedAt {
+                parts.append(start.formatted(date: .omitted, time: .shortened))
+                if let end = exchange.finishedAt {
+                    parts.append(NotchModel.formatAgentElapsed(end.timeIntervalSince(start)))
+                }
+            }
+        } else if task.isRunning {
+            if let n = task.liveLoopRound { parts.append(L("loop.round", n)) }
+            parts.append(task.startedAt.formatted(date: .omitted, time: .shortened))
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
     private func agentDetailFollowUpRow(
         _ task: AgentTaskManager.AgentTask,
         requestsFocus: Bool = true,
@@ -1763,6 +2040,20 @@ struct NotchBody: View {
                             onOpenFolder: {
                                 agentDetailMetadataOpen = false
                                 NSWorkspace.shared.open(task.folder)
+                            },
+                            loop: task.loop.map {
+                                LoopMenuInfo(intervalMinutes: $0.intervalMinutes,
+                                             rounds: $0.rounds,
+                                             nextRoundAt: $0.nextRoundAt,
+                                             active: $0.active)
+                            },
+                            onStopLoop: {
+                                agentDetailMetadataOpen = false
+                                AgentTaskManager.shared.stopLoop(taskID: task.id)
+                            },
+                            onChangeInterval: {
+                                agentDetailMetadataOpen = false
+                                showLiveLoopIntervalPicker = true
                             })
                             .manageMenuCardBackground())
                     }))
@@ -1794,8 +2085,16 @@ struct NotchBody: View {
                 return true
             },
             placeholder: {
-                Text(L(task.isRunning ? "agent.followUp.queue"
-                                      : "agent.followUp.placeholder"))
+                if task.isRunning {
+                    Text(L("agent.followUp.queue"))
+                } else if task.isLoopWaiting, let next = task.loop?.nextRoundAt {
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        Text(L("loop.waiting",
+                               LoopInterval.countdown(next.timeIntervalSince(context.date))))
+                    }
+                } else {
+                    Text(L("agent.followUp.placeholder"))
+                }
             },
             trailing: {
                 if hasAgentDetailFollowUpInput {
@@ -1808,7 +2107,7 @@ struct NotchBody: View {
                 } else if task.isRunning {
                     // Empty field mid-round: the slot is Stop, same as the chat
                     // follow-up while it streams. Ends the round; queued lines
-                    // are dropped with it.
+                    // are dropped with it. Ending the loop itself is the ⌘ card.
                     StopButton(compact: true) {
                         AgentTaskManager.shared.cancel(taskID: task.id)
                     }
@@ -1817,6 +2116,8 @@ struct NotchBody: View {
             })
         .animation(.spring(response: 0.3, dampingFraction: 0.78),
                    value: task.isRunning)
+        .animation(.spring(response: 0.3, dampingFraction: 0.78),
+                   value: task.loopActive)
     }
 
     /// Queue the line as the run's next instruction and clear the field — the box
@@ -1886,10 +2187,17 @@ struct NotchBody: View {
             // drops `agentDetailTaskID` and falls back to the idle prompt.
             backButton
             Spacer(minLength: 0)
+            if let loop = task.loop, loop.active {
+                loopScheduleChip(minutes: loop.intervalMinutes) { minutes in
+                    AgentTaskManager.shared.setLoopInterval(taskID: task.id, minutes: minutes)
+                }
+            }
             if task.isRunning {
                 TimelineView(.periodic(from: task.startedAt, by: 1)) { context in
                     agentElapsedLabel(context.date.timeIntervalSince(task.startedAt))
                 }
+            } else if task.isLoopWaiting {
+                loopCountdown(task.loop?.nextRoundAt)
             } else {
                 agentElapsedLabel(task.elapsed)
             }
@@ -3225,7 +3533,8 @@ struct NotchBody: View {
                 // with the recent list like everything else — instead of pinned above
                 // it (immersive: in the floating header; compact: a fixed sibling). So
                 // a live task scrolls away normally rather than fixed over the top.
-                if model.agentComposeActive, !agentManager.tasks.isEmpty {
+                if (model.agentComposeActive && !agentManager.tasks.isEmpty)
+                    || (!model.agentComposeActive && !chatLoops.loops.isEmpty) {
                     // No extra gap here: each agent row already carries the same 9pt
                     // vertical pad as a Recent row, so the last agent row meets the
                     // first history row on the same 18pt rhythm as any two rows.
@@ -3952,17 +4261,141 @@ struct NotchBody: View {
         .animation(.spring(response: 0.3, dampingFraction: 1.0), value: clipped)
     }
 
+    /// The thread's turns, as both conversation layouts stack them. A loop
+    /// thread reads by round instead (`loopConversation`).
+    @ViewBuilder
+    private var conversationTurns: some View {
+        if let segments = loopSegments {
+            loopConversation(segments)
+        } else {
+            ForEach(model.turns.filter { !$0.hidesUserBubble }) { turn in
+                turnView(turn)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .id(turn.id)
+            }
+        }
+    }
+
+    /// One round of a loop thread, or a follow-up typed between rounds.
+    private struct LoopSegment {
+        let title: String
+        let isFollowUp: Bool
+        let turns: [NotchModel.Turn]
+        var running: Bool { turns.contains { $0.streaming } }
+    }
+
+    /// The thread on screen split by round — nil for every thread that isn't a
+    /// loop. The first question (the loop's prompt) heads the record and is in
+    /// no segment; a later round's question is hidden, a typed follow-up's shows.
+    private var loopSegments: [LoopSegment]? {
+        let turns = model.turns
+        guard turns.contains(where: { $0.loopRound != nil }) else { return nil }
+        var segments: [LoopSegment] = []
+        var title = ""
+        var followUp = false
+        var members: [NotchModel.Turn] = []
+        var open = false
+        for (index, turn) in turns.enumerated() {
+            if turn.role == "user" {
+                if open {
+                    segments.append(LoopSegment(title: title, isFollowUp: followUp, turns: members))
+                }
+                title = turn.loopRound.map { L("loop.round", $0) } ?? turn.text
+                followUp = turn.loopRound == nil
+                members = index == 0 || turn.hidesUserBubble ? [] : [turn]
+                open = true
+            } else if open {
+                members.append(turn)
+            }
+        }
+        if open {
+            segments.append(LoopSegment(title: title, isFollowUp: followUp, turns: members))
+        }
+        return segments
+    }
+
+    /// A loop thread: its prompt once, then the chosen round and the round
+    /// column on the right (the newest, until another is picked).
+    private func loopConversation(_ segments: [LoopSegment]) -> some View {
+        let items = segments.enumerated().map { index, segment in
+            LoopRoundSidebar.Item(id: index, title: segment.title,
+                                  isFollowUp: segment.isFollowUp, running: segment.running)
+        }
+        let selected = selectedLoopRound(in: items)
+        return VStack(alignment: .leading, spacing: 16) {
+            if let first = model.turns.first(where: { $0.role == "user" }) {
+                turnView(first)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .id(first.id)
+            }
+            // Overlaid, not beside — the column holds the visible top while a
+            // long round scrolls under it (see `LoopRoundSidebar`).
+            VStack(alignment: .leading, spacing: 16) {
+                if segments.indices.contains(selected) {
+                    ForEach(segments[selected].turns) { turn in
+                        turnView(turn)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .id(turn.id)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.trailing, LoopRoundSidebar.width + 12)
+            .frame(minHeight: LoopRoundSidebar.height(rows: items.count),
+                   alignment: .top)
+            .overlay(alignment: .topTrailing) {
+                LoopRoundSidebar(items: items, selected: selected) {
+                    pickLoopRound($0, in: items)
+                }
+            }
+        }
+        .onChange(of: model.threadHistoryID) { _, _ in loopRoundSelection = nil }
+    }
+
+    /// The loop behind the thread on screen, for its ⌘ card — nil when the thread
+    /// isn't a loop this app instance is running (or ran).
+    private var threadLoopInfo: LoopMenuInfo? {
+        let id = model.threadHistoryID
+        if let loop = chatLoops.loop(for: id) {
+            return LoopMenuInfo(intervalMinutes: loop.intervalMinutes, rounds: loop.rounds,
+                                nextRoundAt: loop.nextRoundAt, active: loop.active)
+        }
+        if let loop = agentManager.tasks.first(where: { $0.id == id })?.loop {
+            return LoopMenuInfo(intervalMinutes: loop.intervalMinutes, rounds: loop.rounds,
+                                nextRoundAt: loop.nextRoundAt, active: loop.active)
+        }
+        return nil
+    }
+
+    /// Whether the thread on screen is a loop still going — the follow-up
+    /// placeholder counts down to the next round, and the ⌘ card can end it.
+    private var threadLoopActive: Bool {
+        let id = model.threadHistoryID
+        return chatLoops.isActive(id)
+            || agentManager.tasks.contains { $0.id == id && $0.loopActive }
+    }
+
+    /// Whether the follow-up field holds something to send. Stop takes the slot
+    /// from Send only while a round is streaming.
+    private var followUpHasDraft: Bool {
+        model.hasText || !model.askComposeImages.isEmpty
+    }
+
+    private func stopThreadLoop() {
+        let id = model.threadHistoryID
+        chatLoops.stop(id)
+        if agentManager.tasks.contains(where: { $0.id == id && $0.loopActive }) {
+            agentManager.stopLoop(taskID: id)
+        }
+    }
+
     /// Short-answer layout: the thread sizes to its own content, NO ScrollView, NO
     /// fixed frame height. New lines extend the stack in the same layout pass they
     /// land — the height *is* the content height, so there's nothing lagging behind
     /// to jump. This is the common case (most answers fit under `answerMaxHeight`).
     private var growingConversation: some View {
         VStack(alignment: .leading, spacing: 16) {
-            ForEach(model.turns.filter { !$0.hidesUserBubble }) { turn in
-                turnView(turn)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .id(turn.id)
-            }
+            conversationTurns
         }
         .environment(\.answerMediaBaseDirectory, answerMediaBase)
         .padding(.trailing, 8)
@@ -3994,11 +4427,7 @@ struct NotchBody: View {
                 // above the composer when the reader pins to the bottom.
                 VStack(alignment: .leading, spacing: 0) {
                     VStack(alignment: .leading, spacing: 16) {
-                        ForEach(model.turns.filter { !$0.hidesUserBubble }) { turn in
-                            turnView(turn)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .id(turn.id)
-                        }
+                        conversationTurns
                     }
                     .environment(\.answerMediaBaseDirectory, answerMediaBase)
                     // The thread's intrinsic height, read off the live scroll
@@ -4283,6 +4712,17 @@ struct NotchBody: View {
         HStack(spacing: 10) {
             backButton
             Spacer(minLength: 0)
+            if threadLoopActive, let info = threadLoopInfo {
+                loopScheduleChip(minutes: info.intervalMinutes) { minutes in
+                    let id = model.threadHistoryID
+                    chatLoops.setInterval(id, minutes: minutes)
+                    AgentTaskManager.shared.setLoopInterval(taskID: id, minutes: minutes)
+                }
+                .arrowCursor()
+                if let next = info.nextRoundAt {
+                    loopCountdown(next)
+                }
+            }
             // A folded shortcut thread's follow-up entry: its own module, set
             // apart from the detach/pin pair by the header's wider 10pt gap.
             // Same species (one-segment `GlassSegmentCluster`), separate group —
@@ -4379,7 +4819,7 @@ struct NotchBody: View {
     /// The prompt's type size, and the follow-up field's — shared by the field, its
     /// inline hint and the row metrics, so a one-line box and its row agree.
     static let idleFontSize: CGFloat = Tokens.TypeSize.prompt
-    static let followUpFontSize: CGFloat = Tokens.TypeSize.reading
+    static let followUpFontSize: CGFloat = Tokens.TypeSize.form
     /// How far a prompt grows before it stops growing and scrolls inside itself. A
     /// pasted paragraph unfolds the box downward — five lines of it — rather than
     /// scrolling off to the right where all but the tail is invisible.
@@ -4845,7 +5285,7 @@ struct NotchBody: View {
                 followUpComposer
                     .frame(maxWidth: .infinity)
 
-                if let metadata = agentFollowUpMetadata {
+                if agentFollowUpMetadata != nil || threadLoopInfo != nil {
                     GlassIconButton(systemName: "command",
                                     help: L("agent.detail"),
                                     size: 39,
@@ -4866,6 +5306,15 @@ struct NotchBody: View {
                                 onOpenFolder: {
                                     model.isResultMetadataMenuOpen = false
                                     model.openThreadAgentFolder()
+                                },
+                                loop: threadLoopInfo,
+                                onStopLoop: {
+                                    model.isResultMetadataMenuOpen = false
+                                    stopThreadLoop()
+                                },
+                                onChangeInterval: {
+                                    model.isResultMetadataMenuOpen = false
+                                    showLiveLoopIntervalPicker = true
                                 })
                                 .manageMenuCardBackground())
                         }))
@@ -4951,6 +5400,7 @@ struct NotchBody: View {
             // Send appears the moment the user starts typing a follow-up. While
             // the round is still streaming, the same slot is Stop (Esc also
             // lands on `stopStreaming`) so generation isn't keyboard-only.
+            // Ending the loop itself is the ⌘ card, not this slot.
             trailing: {
                 if model.isStreaming {
                     StopButton(compact: true) {
@@ -4959,13 +5409,15 @@ struct NotchBody: View {
                         }
                     }
                     .transition(.scale(scale: 0.6).combined(with: .opacity))
-                } else if model.hasText || !model.askComposeImages.isEmpty {
+                } else if followUpHasDraft {
                     SendButton(compact: true) { model.submitCurrent() }
                         .transition(.scale(scale: 0.6).combined(with: .opacity))
                 }
             })
         .animation(.spring(response: 0.3, dampingFraction: 0.78),
                    value: model.isStreaming)
+        .animation(.spring(response: 0.3, dampingFraction: 0.78),
+                   value: threadLoopActive)
     }
 
     /// The follow-up field's placeholder, drawn as a SwiftUI label in the slot the
@@ -4986,6 +5438,13 @@ struct NotchBody: View {
                 Text(model.agentThreadTaskRunning
                     ? L("result.followUp.agentQueue", engine.displayName)
                     : L("result.followUp.agentContinue", engine.displayName))
+            } else if threadLoopActive, let next = threadLoopInfo?.nextRoundAt {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    Text(L("loop.waiting",
+                           LoopInterval.countdown(next.timeIntervalSince(context.date))))
+                }
+            } else if threadLoopActive {
+                Text(L("loop.followUp"))
             } else {
                 Text(L(model.threadIsAgentRun ? "result.followUp.agent" : "result.followUp"))
             }
@@ -5003,6 +5462,12 @@ struct AgentRunMetadataMenu: View {
     let folderPath: String?
     let completedAt: Date?
     let onOpenFolder: () -> Void
+    /// A `/loop` thread's schedule: its interval and round count, when the next
+    /// round runs, and — while it is still going — the row that stops it.
+    var loop: LoopMenuInfo? = nil
+    var onStopLoop: (() -> Void)? = nil
+    /// Opens the interval card. Live loops only — compose already has its chip.
+    var onChangeInterval: (() -> Void)? = nil
 
     private var folderName: String? {
         guard let folderPath, !folderPath.isEmpty else { return nil }
@@ -5022,10 +5487,34 @@ struct AgentRunMetadataMenu: View {
             }
             if let folderName {
                 ResultMetadataRow(icon: LucideIcons.folder, title: folderName,
-                                  hoverSymbol: "arrow.up.right", action: onOpenFolder)
+                                  hoverSymbol: "arrow.up.right",
+                                  hint: L("agent.openFolder"),
+                                  action: onOpenFolder)
             }
             if let completed {
                 ResultMetadataRow(icon: LucideIcons.clock, title: completed)
+            }
+            if let loop {
+                ResultMetadataRow(icon: LucideIcons.loop,
+                                  title: L("loop.every", LoopInterval.short(loop.intervalMinutes))
+                                      + " · " + L("loop.round", loop.rounds),
+                                  hoverSymbol: (loop.active && onChangeInterval != nil)
+                                    ? "chevron.right" : nil,
+                                  hint: loop.active ? L("loop.change") : nil,
+                                  action: loop.active ? onChangeInterval : nil)
+                if loop.active, let next = loop.nextRoundAt {
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        ResultMetadataRow(
+                            icon: LucideIcons.clock,
+                            title: L("loop.waiting",
+                                     LoopInterval.countdown(next.timeIntervalSince(context.date))))
+                    }
+                }
+                if loop.active, let onStopLoop {
+                    ResultMetadataRow(icon: LucideIcons.circleStop, title: L("loop.stop"),
+                                      hint: L("loop.stop"),
+                                      action: onStopLoop)
+                }
             }
         }
         .padding(ManageMenuMetrics.cardPadding)
@@ -5042,6 +5531,7 @@ struct ResultMetadataRow: View {
     let icon: LucideIcons.Mark
     let title: String
     var hoverSymbol: String? = nil
+    var hint: String? = nil
     var action: (() -> Void)? = nil
 
     @State private var hovering = false
@@ -5083,7 +5573,7 @@ struct ResultMetadataRow: View {
                 .onHover { hovering = $0 }
                 .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
                 .accessibilityLabel(title)
-                .accessibilityHint(L("agent.openFolder"))
+                .accessibilityHint(hint ?? "")
         } else {
             face
                 .onHover { hovering = $0 }
@@ -6215,6 +6705,7 @@ private struct AgentChipFace<Icon: View>: View {
     var body: some View {
         HStack(spacing: 5) {
             icon
+                .foregroundStyle(tint ?? (hovering ? Tokens.text2 : Tokens.text4))
             Text(title)
                 .font(.sf(Tokens.TypeSize.label, weight: .light))
                 .foregroundStyle(tint ?? (hovering ? Tokens.text2 : Tokens.text4))
@@ -6629,6 +7120,8 @@ private struct SlashCommandMenu: View {
         switch match {
         case .shortcut(let shortcut): return shortcut.shortcut?.displayString
         case .skill: return "Skill"
+        case .mode(let command) where command == .loop:
+            return LoopInterval.short(LoopInterval.lastMinutes)
         case .mode: return nil
         }
     }
@@ -6645,7 +7138,9 @@ private struct SlashCommandMenu: View {
     /// shortcuts, and enabled skills — so the card holds still as the list filters
     /// down instead of breathing in and out per keystroke.
     private var cardWidth: CGFloat {
-        let modes = NotchModel.SlashCommand.allCases.map { ($0.title, String?.none) }
+        let modes = NotchModel.SlashCommand.allCases.map { command -> (String, String?) in
+            (command.title, command == .loop ? LoopInterval.short(LoopInterval.lastMinutes) : nil)
+        }
         let shortcuts = PromptShortcutStore.current.filter(\.isReady)
             .map { ($0.displayName, $0.shortcut?.displayString) }
         let skills = model.agentSkills.map { ($0.displayName, String?.some("Skill")) }

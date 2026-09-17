@@ -315,18 +315,21 @@ struct InlineSettingsView: View {
         case usage = "Usage"     // Blend1 request list — reached from the wallet ⋯
         case pricing = "Pricing" // Blend1 per-model rates — reached from the wallet ⋯
         case balances = "Balances" // Blend1 gifts and purchases — reached from the wallet ⋯
+        case privacy = "Privacy" // what happens to a Blend1 request — reached from the wallet's shield
         var id: String { rawValue }
 
         /// A sub-page rather than a category: reached from a parent pane, drawn
         /// across the whole panel, and left through the header's back pill or Esc.
-        var isDetail: Bool { self == .licenses || self == .usage || self == .pricing || self == .balances }
+        var isDetail: Bool {
+            self == .licenses || self == .usage || self == .pricing || self == .balances || self == .privacy
+        }
 
         /// The section a sub-page sits under — where back (and ⎋) returns to.
         /// `nil` for the top-level categories, whose back leaves settings.
         var parent: Section? {
             switch self {
             case .licenses:        return .about
-            case .usage, .pricing, .balances: return .model
+            case .usage, .pricing, .balances, .privacy: return .model
             default:               return nil
             }
         }
@@ -355,6 +358,7 @@ struct InlineSettingsView: View {
             case .usage:      return L("model.usage")
             case .pricing:    return L("model.pricing")
             case .balances:   return L("nono.balances")
+            case .privacy:    return L("nono.privacy.title")
             }
         }
     }
@@ -882,6 +886,8 @@ struct InlineSettingsView: View {
                 pricingSection
             case .balances:
                 balancesSection
+            case .privacy:
+                NonoPrivacyNote()
             }
             }
             .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -1896,6 +1902,13 @@ struct InlineSettingsView: View {
                 SettingInfo(
                     L(snapshot?.hasGift == true ? "nono.lineup.billing.gift" : "nono.lineup.billing"),
                     glyph: 10, hit: 13)
+                Spacer(minLength: 0)
+                // What happens to a request paid from this balance, on a page of
+                // its own. Only this card: a key of your own sends requests
+                // straight to its vendor.
+                PrivacyShieldButton {
+                    withAnimation(.easeOut(duration: 0.16)) { section = .privacy }
+                }
             }
 
             Group {
@@ -2036,10 +2049,11 @@ struct InlineSettingsView: View {
             Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 0) {
                 GridRow {
                     Text(L("nono.usage.col.model")).captionLabel()
-                        .frame(maxWidth: .infinity, alignment: .leading)
                     Text(L("nono.pricing.minCharge")).captionLabel()
                         .gridColumnAlignment(.trailing)
                     Text(L("nono.pricing.input")).captionLabel()
+                        .gridColumnAlignment(.trailing)
+                    Text(L("nono.pricing.cached")).captionLabel()
                         .gridColumnAlignment(.trailing)
                     Text(L("nono.pricing.output")).captionLabel()
                         .gridColumnAlignment(.trailing)
@@ -2049,11 +2063,11 @@ struct InlineSettingsView: View {
                 }
                 .padding(.bottom, 8)
 
-                Divider().overlay(Tokens.hairline).gridCellColumns(5)
+                Divider().overlay(Tokens.hairline).gridCellColumns(6)
 
                 ForEach(nonoLineupRows) { row in
                     pricingRow(row)
-                    Divider().overlay(Tokens.hairline.opacity(0.6)).gridCellColumns(5)
+                    Divider().overlay(Tokens.hairline.opacity(0.6)).gridCellColumns(6)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -2091,6 +2105,7 @@ struct InlineSettingsView: View {
                         .font(.sf(Tokens.TypeSize.label, weight: .medium))
                         .foregroundStyle(Tokens.text1)
                         .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                     // Blend entries only: a named-shelf row is the vendor's model
                     // under the vendor's name and needs no line from us.
                     if row.id == "nono-flash" || row.id == "nono" {
@@ -2098,9 +2113,13 @@ struct InlineSettingsView: View {
                     }
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .fixedSize(horizontal: true, vertical: false)
+            .layoutPriority(1)
             pricingMinCharge(row.pricing?.minChargeUSD)
             pricingRate(row.pricing?.inputPerMTok)
+            // A model billed one rate for all input quotes no cached rate, and
+            // the cell is a dash rather than a repeat of the input figure.
+            pricingRate(row.pricing?.cachedInputPerMTok)
             pricingRate(row.pricing?.outputPerMTok)
             HStack(spacing: 8) {
                 Text(L("nono.pricing.usBased"))
@@ -2354,11 +2373,13 @@ struct InlineSettingsView: View {
     }
 
     /// A per-million-token rate, the unit the lineup writes prices in. Cents
-    /// for ordinary figures; four places once a rate drops below a cent, with
+    /// for ordinary figures; four places once a rate drops below a dime, with
     /// trailing zeros stripped so "$0.0020" does not pretend at more precision
-    /// than the catalog sent.
+    /// than the catalog sent. A dime rather than a cent because the cached
+    /// rates sit just above one: two places print $0.014 as "$0.01", which is a
+    /// different price.
     static func moneyPerMillion(_ usd: Double) -> String {
-        if usd > 0 && usd < 0.01 {
+        if usd > 0 && usd < 0.1 {
             var s = String(format: "$%.4f", usd)
             while s.hasSuffix("0") { s.removeLast() }
             if s.hasSuffix(".") { s.removeLast() }
@@ -3893,8 +3914,8 @@ struct InlineSettingsView: View {
 
     /// The global selected-text gesture has no keyboard binding: this is its one
     /// setting. Four ordered positions, quantized like the hover-sensitivity
-    /// slider right above it — Off, Light, Medium, Firm. Off disarms the
-    /// gesture entirely, so a plain click stays a plain click.
+    /// slider right above it — Off, Low, Balanced, Instant. Off disarms the
+    /// gesture entirely; the other three set how long a still hold must last.
     private var forceClickPressureRow: some View {
         let controlWidth: CGFloat = 190
         return settingRow(label: L("general.forceClickPressure"),
@@ -5917,8 +5938,10 @@ struct InlineSettingsView: View {
     /// what the balance was charged. Reached from the wallet ⋯, not the
     /// sidebar — it is a receipt pad for one account, not a settings category.
     private var usageSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if let used = nono.snapshot?.credit.usedUSD, used > 0 {
+        let used = nono.snapshot?.credit.usedUSD
+        let hasSpent = (used ?? 0) > 0
+        return VStack(alignment: .leading, spacing: 12) {
+            if hasSpent, let used {
                 Text(L("nono.usage.spent", Self.moneyCharged(used)))
                     .font(.sf(Tokens.TypeSize.meta))
                     .foregroundStyle(Tokens.text4)
@@ -5926,8 +5949,14 @@ struct InlineSettingsView: View {
             }
 
             if usageLoading && usageLines.isEmpty {
+                // Centred in the pane's own body, not parked under the header:
+                // the table it stands in for fills that whole area, so the
+                // spinner reads as "this pane is filling" rather than as a
+                // first row.
                 ProgressView().controlSize(.small)
-                    .padding(.top, 8)
+                    .frame(maxWidth: .infinity,
+                           minHeight: usagePlaceholderHeight(hasSpent: hasSpent),
+                           alignment: .center)
             } else if usageFailed && usageLines.isEmpty {
                 Text(L("nono.error.unreachable"))
                     .font(.sf(Tokens.TypeSize.label))
@@ -5956,6 +5985,8 @@ struct InlineSettingsView: View {
                 Text(L("nono.usage.col.model")).captionLabel()
                 Text(L("nono.pricing.input")).captionLabel()
                     .gridColumnAlignment(.trailing)
+                Text(L("nono.pricing.cached")).captionLabel()
+                    .gridColumnAlignment(.trailing)
                 Text(L("nono.pricing.output")).captionLabel()
                     .gridColumnAlignment(.trailing)
                 Text(L("nono.usage.col.cost")).captionLabel()
@@ -5963,12 +5994,12 @@ struct InlineSettingsView: View {
             }
             .padding(.bottom, 8)
 
-            Divider().overlay(Tokens.hairline).gridCellColumns(5)
+            Divider().overlay(Tokens.hairline).gridCellColumns(6)
 
             ForEach(Array(usageLines.enumerated()), id: \.element.id) { index, line in
                 usageRow(line)
                 if index < usageLines.count - 1 {
-                    Divider().overlay(Tokens.hairline.opacity(0.6)).gridCellColumns(5)
+                    Divider().overlay(Tokens.hairline.opacity(0.6)).gridCellColumns(6)
                 }
             }
         }
@@ -5981,6 +6012,10 @@ struct InlineSettingsView: View {
             usageCell(usageModelName(line.model), color: Tokens.text1)
                 .frame(maxWidth: .infinity, alignment: .leading)
             usageCell(line.promptTokens.map(StatsFormat.count) ?? "—", color: Tokens.text2)
+            // Counted inside the prompt figure to its left, not beside it: the
+            // cost on this row is the rest of that prompt at the input rate
+            // plus this much at the cached rate.
+            usageCell(line.cachedTokens.map(StatsFormat.count) ?? "—", color: Tokens.text3)
             usageCell(line.completionTokens.map(StatsFormat.count) ?? "—", color: Tokens.text2)
             usageCell(line.billedUSD.map(Self.moneyCharged) ?? "—", color: Tokens.text1)
         }
@@ -5998,6 +6033,15 @@ struct InlineSettingsView: View {
     private func usageModelName(_ id: String) -> String {
         if id == "nono-flash" || id == "nono" { return ModelRatings.nonoName(for: id) }
         return id
+    }
+
+    /// The height left for the pane's rows once the top runway, the bottom
+    /// inset and the "spent" line above are taken out — so a placeholder can
+    /// centre itself in the area the table would occupy without pushing the
+    /// pane past its height cap (which would switch on the scroll taper).
+    private func usagePlaceholderHeight(hasSpent: Bool) -> CGFloat {
+        let body = settingsPaneHeight - Self.paneTopRunway - 20
+        return max(0, body - (hasSpent ? 26 : 0))
     }
 
     private func refreshUsage() async {
@@ -7015,6 +7059,109 @@ struct SettingInfo: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 9)
             .modifier(GlassPopoverBackground())
+        }
+    }
+}
+
+/// The balance card's way into its privacy page: an outlined shield and a
+/// line naming the page, in the About footnote link's hover grammar — quiet
+/// ink that brightens to text1. Stroked Lucide, like the ⋯ menu's glyphs.
+private struct PrivacyShieldButton: View {
+    let action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                LucideIcon(mark: LucideIcons.shieldCheck, size: 12)
+                Text(L("nono.privacy.link"))
+                    .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(hovering ? Tokens.text1 : Tokens.text3)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
+    }
+}
+
+/// What happens to a request paid from Notchi Balance — the Privacy sub-page,
+/// behind the balance card's shield. Written the way What's New writes release
+/// notes — a caption heading over short bulleted lines — because it is the same
+/// kind of reading: four separate facts, each scanned rather than read through.
+/// One column, top to bottom, at What's New's 18pt between groups.
+private struct NonoPrivacyNote: View {
+    private static let flow = ["mac", "gateway", "network"]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            group("stored")
+            group("sent")
+            group("route", flow: true)
+            group("thirdParty", count: 2)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func group(_ key: String, flow: Bool = false, count: Int = 3) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(L("nono.privacy.\(key).title"))
+                .captionLabel()
+            if flow { flowLine }
+            ForEach(1...count, id: \.self) { i in
+                // The one fact that matters on this page: we don't keep the
+                // prompt, the answer, or the files. Same weight What's New
+                // uses for an emphasized bullet.
+                bullet(L("nono.privacy.\(key).\(i)"),
+                       emphasized: key == "stored" && i == 3)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Where a request goes, as a full-width strip of three equal stops —
+    /// recessed plates, not the hairline version tag. The chevron is the
+    /// About rows'.
+    private var flowLine: some View {
+        HStack(spacing: 6) {
+            ForEach(Array(Self.flow.enumerated()), id: \.offset) { index, node in
+                if index > 0 {
+                    Image(systemName: "chevron.right")
+                        .font(.sf(Tokens.TypeSize.caption, weight: .semibold))
+                        .foregroundStyle(Tokens.text4)
+                }
+                Text(L("nono.privacy.route.flow.\(node)"))
+                    .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                    .foregroundStyle(Tokens.text1)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.85)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 8)
+                    .recessedSurface(in: RoundedRectangle.control, lit: false)
+            }
+        }
+    }
+
+    /// What's New's `bulletLine`. The "we don't store your content" line is
+    /// the one fact this page exists to make unmissable, so it takes the
+    /// emphasized weight.
+    private func bullet(_ text: String, emphasized: Bool = false) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Circle()
+                .fill(Tokens.text4)
+                .frame(width: 3, height: 3)
+                .padding(.top, 7)
+            Text(text)
+                .font(.sf(Tokens.TypeSize.label, weight: emphasized ? .medium : .regular))
+                .lineSpacing(4)
+                .foregroundStyle(emphasized ? Tokens.text1 : Tokens.text2)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }

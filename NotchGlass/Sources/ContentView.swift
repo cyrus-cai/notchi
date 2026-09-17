@@ -199,23 +199,14 @@ struct ContentView: View {
                 }
                 return true
             }
-            // Answer-state action keys (XII-131): the hover toolbar's actions, put
-            // on the keyboard so the whole flow stays hands-on-keys. Only in a
-            // settled result (not idle/settings/what's-new, not mid-stream) — the
-            // toolbar they mirror only exists there. Guarded so a follow-up being
-            // typed keeps normal editing: when the prompt field editor is first
-            // responder, ⌘C/⌘S/⌘R fall through to the system (⌘C copies the
-            // selection/line, etc.). ⌘P/⌘D handle their own state below.
-            //   ⌘C (8)  = copy the whole answer     ⌘R (15) = regenerate
+            // Answer-state action keys: regenerate on the keyboard so the
+            // flow stays hands-on-keys. Only in a settled result (not idle/
+            // settings/what's-new, not mid-stream) — the toolbar it mirrors
+            // only exists there. Guarded so a follow-up being typed keeps
+            // normal editing: when the prompt field editor is first responder,
+            // ⌘R falls through. ⌘P/⌘D handle their own state below.
             if model.mode == .result, !model.showSettings, !model.showWhatsNew,
                !model.isStreaming, !fieldEditorIsFirstResponder() {
-                if AppShortcutStore.matches(.copyAnswer, event: event),
-                   let answer = model.lastAnswerText {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(answer, forType: .string)
-                    model.rebaselineClipboardAfterInAppWrite()
-                    return true
-                }
                 if AppShortcutStore.matches(.regenerate, event: event) {
                     model.regenerateLastAnswer()
                     return true
@@ -356,8 +347,8 @@ struct ContentView: View {
 
     /// True when the key window's first responder is a text field editor — i.e. the
     /// user is typing in the prompt / follow-up / history-filter field. The
-    /// answer-state action keys (XII-131) defer to it so ⌘C/⌘S/⌘R keep their normal
-    /// editing meaning while a field is focused; only when nothing is being edited
+    /// answer-state action keys defer to it so ⌘R keeps its normal editing
+    /// meaning while a field is focused; only when nothing is being edited
     /// do they act on the answer. An `NSText` field editor is what AppKit installs
     /// as first responder for a focused `NSTextField`/`TextEditor`.
     private func fieldEditorIsFirstResponder() -> Bool {

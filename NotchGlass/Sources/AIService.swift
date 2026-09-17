@@ -362,13 +362,21 @@ func notchSystemPrompt(advertisedTools: Set<String>? = nil) -> String {
     return prompt
 }
 
-/// The persona with the current local date inlined as the first line, so the
-/// model knows up front that "now" is later than its training cutoff and treats
-/// its memory as potentially stale — turning the bare `current_datetime` tool
-/// (which the model has to *think* to call) into an unconditional fact it always
-/// has. The single-shot `complete` path and the agent path both build the prompt
-/// through here. Rendered in the user's interface language to match the answer,
-/// mirroring `DateTimeTool`'s locale handling.
+/// The persona with the current local date inlined, so the model knows that
+/// "now" is later than its training cutoff and treats its memory as potentially
+/// stale — turning the bare `current_datetime` tool (which the model has to
+/// *think* to call) into an unconditional fact it always has. The single-shot
+/// `complete` path and the agent path both build the prompt through here.
+/// Rendered in the user's interface language to match the answer, mirroring
+/// `DateTimeTool`'s locale handling.
+///
+/// The date is the **last** line, not the first. It used to lead, which read
+/// better and cost more: an upstream prompt cache matches on a prefix, so the
+/// one part of this prompt that changes every midnight sat in front of the part
+/// that never changes, and every request on a new day re-prefilled the whole
+/// persona instead of reusing it. Ordered this way, everything above the date is
+/// byte-identical from one day to the next. Nothing else here varies per
+/// request: the preferences and the stances are per-account settings.
 func notchSystemPromptDated(customInstructions: String? = nil,
                             provider: Provider? = nil,
                             advertisedTools: Set<String>? = nil) -> String {
@@ -384,8 +392,7 @@ func notchSystemPromptDated(customInstructions: String? = nil,
     case .fr:     fmt.locale = Foundation.Locale(identifier: "fr_FR")
     case .es:     fmt.locale = Foundation.Locale(identifier: "es_ES")
     }
-    var prompt = "Today is \(fmt.string(from: Date())).\n\n"
-        + notchSystemPrompt(advertisedTools: advertisedTools)
+    var prompt = notchSystemPrompt(advertisedTools: advertisedTools)
     // The user's own preferences (XII-137), appended AFTER the built-in persona so
     // the core rules — concise, search-first, honest — are stated first and the
     // preference is a trailing refinement, not an override. Framed as "the user's
@@ -412,6 +419,8 @@ func notchSystemPromptDated(customInstructions: String? = nil,
     if provider == .nono, searchOnWire {
         prompt += "\n\n" + nonoChangingFactStance
     }
+    // Last, for the prefix-cache reason in this function's doc comment.
+    prompt += "\n\nToday is \(fmt.string(from: Date()))."
     return prompt
 }
 
@@ -2777,6 +2786,14 @@ enum ModelCatalog {
             req.setValue(apiKey, forHTTPHeaderField: "x-api-key")
             req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
         }
+        // nono lists its named entries (DeepSeek, GLM) only to an app that sends
+        // its version here. 0.8.1 and earlier sent none, and label every nono
+        // row "Blend1".
+        if provider == .nono {
+            for (field, value) in NoNoRequestContext.headers where field == "X-Notchi-Version" {
+                req.setValue(value, forHTTPHeaderField: field)
+            }
+        }
         req.timeoutInterval = 10
 
         do {
@@ -2942,6 +2959,9 @@ enum ModelCatalog {
             struct NotchiPricing: Decodable, Equatable, Sendable {
                 let vendor: String?
                 let inputPerMTok: Double
+                /// Per million prompt tokens the upstream served from its cache.
+                /// `nil` where the model is billed one rate for all input.
+                let cachedInputPerMTok: Double?
                 let outputPerMTok: Double
                 /// Per-request floor in USD. Absent on an older payload that
                 /// had not started sending it yet.
@@ -3540,6 +3560,17 @@ enum ModelRatings {
     /// (an answer footer, a saved transcript).
     static func isNonoID(_ id: String) -> Bool { id == "nono-flash" || id == "nono" }
 
+    /// id → name for the named entries in nono's live catalog
+    /// ("glm-5.3-flash" → "GLM-5.3-Flash"). Written by `ModelCatalogStore.adopt`
+    /// on the main actor and read by the nonisolated `prettyName(for:provider:)`,
+    /// so it sits behind a lock, as `ClaudeCLIService.resolvedModels` does.
+    private static let nonoNamesLock = NSLock()
+    private static var storedNonoNames: [String: String] = [:]
+    static var nonoNames: [String: String] {
+        get { nonoNamesLock.lock(); defer { nonoNamesLock.unlock() }; return storedNonoNames }
+        set { nonoNamesLock.lock(); storedNonoNames = newValue; nonoNamesLock.unlock() }
+    }
+
     /// `prettyName`, but for an id read **as `provider` serves it**. The one
     /// provider that differs is Claude Code, whose ids are the CLI's rolling
     /// aliases: a chip reading "Opus" names a shelf, not a model, so the alias is
@@ -3550,8 +3581,12 @@ enum ModelRatings {
     static func prettyName(for id: String, provider: Provider) -> String {
         // The first-party tier's name is the product's own, so the app writes it
         // rather than passing the id through: "nono-flash" is shown as "Blend1",
-        // not a hyphenated slug, and it reads the same everywhere.
-        if provider == .nono { return nonoName(for: id) }
+        // not a hyphenated slug, and it reads the same everywhere. A named entry
+        // on the same gateway is the vendor's model under the vendor's name,
+        // which the live catalog carries; before it lands, the id stands in.
+        if provider == .nono {
+            return isNonoID(id) ? nonoName(for: id) : (nonoNames[id] ?? prettyName(for: id))
+        }
         // pi's ids are `<pi-provider>/<model>`. The account rides the picker's rows
         // (`PiCLIService.displayName(forID:)`); a chip is short by the same rule
         // that drops "Claude" from a Claude Code alias.

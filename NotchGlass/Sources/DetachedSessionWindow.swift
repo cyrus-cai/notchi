@@ -108,7 +108,7 @@ final class DetachedThreadStore: ObservableObject {
 /// AppKit's edge-resize on a borderless window.
 private final class DetachedWindow: NSWindow {
     var closesOnEscape = false
-    /// The app's editable chords (⌘P pin, ⌘C copy, ⌘R regenerate — see
+    /// The app's editable chords (⌘P pin, ⌘R regenerate — see
     /// `DetachedSessionWindowController.handleAppShortcut`). A detached window is
     /// its own key window, so the panel's `KeyEventCatcher` — which only acts
     /// while ITS window is key — never sees these keys; the window has to answer
@@ -2002,23 +2002,12 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
             togglePin()
             return true
         }
-        // ⌘C / ⌘R mirror the answer footer's copy and regenerate. Guarded on the
-        // follow-up field the way the panel guards its composer: with the caret
-        // in text, ⌘C copies the selection and ⌘R stays out of the way.
+        // ⌘R mirrors the answer footer's regenerate. Guarded on the follow-up
+        // field the way the panel guards its composer: with the caret in text,
+        // ⌘R stays out of the way.
         if window.firstResponder is NSText { return false }
         guard let store = threadStore,
               !store.turns.contains(where: { $0.streaming }) else { return false }
-        if AppShortcutStore.matches(.copyAnswer, event: event) {
-            // Verbatim markdown — the `doc.on.doc` footer button's text, not the
-            // plain-text twin beside it (which has no chord in the panel either).
-            let answer = store.turns.last(where: { $0.role == "assistant" })?.text
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard !answer.isEmpty else { return false }
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(answer, forType: .string)
-            model?.rebaselineClipboardAfterInAppWrite()
-            return true
-        }
         if AppShortcutStore.matches(.regenerate, event: event) {
             // The footer's own gate: only the last settled turn, and never an
             // agent report (it has no round to re-run).
@@ -3087,6 +3076,11 @@ private struct CaretProbe: View {
 /// while the field is empty; once expanded, its disclosure moves to the drawer's
 /// bottom-right corner like the main flow. Send uses this same footprint whenever
 /// text exists, so typing never creates a second button or shifts the row.
+///
+/// The slot always sits on the card's LAST row: beside the quick-action rail
+/// while that rail is up, and beside the field when it is not. Either way the
+/// button is the card's bottom-right corner, which is where the expanded
+/// ledger's disclosure already lands.
 private struct CompactShortcutTrailingControl: View {
     var hasText: Bool
     var showsHistory: Bool
@@ -3096,7 +3090,7 @@ private struct CompactShortcutTrailingControl: View {
 
     /// The shared footprint, held whether Send is showing or not.
     /// Same diameter as the main-flow `IdleTrailingCluster` Recent disclosure.
-    private static let slot: CGFloat = 30
+    static let slot: CGFloat = 30
 
     var body: some View {
         ZStack {
@@ -3510,57 +3504,64 @@ private struct CompactShortcutPromptView: View {
 
             VStack(alignment: .leading, spacing: 0) {
                 if !visiblePicks.isEmpty {
-                    GeometryReader { proxy in
-                        let count = visiblePicks.count
-                        let spacing = Self.pickSpacing
-                        let visibleSlots = count <= 2 ? CGFloat(count) : 2.25
-                        let visibleGaps: CGFloat = count <= 1 ? 0 : (count == 2 ? 1 : 2)
-                        let itemWidth = max(1,
-                            (proxy.size.width - spacing * visibleGaps) / visibleSlots)
+                    // The rail and the card's one trailing control share this
+                    // last row: the button rides the rail's trailing edge instead
+                    // of sitting a row above it, over the field.
+                    HStack(alignment: .center, spacing: 6) {
+                        GeometryReader { proxy in
+                            let count = visiblePicks.count
+                            let spacing = Self.pickSpacing
+                            let visibleSlots = count <= 2 ? CGFloat(count) : 2.25
+                            let visibleGaps: CGFloat = count <= 1 ? 0 : (count == 2 ? 1 : 2)
+                            let itemWidth = max(1,
+                                (proxy.size.width - spacing * visibleGaps) / visibleSlots)
 
-                        ScrollView(.horizontal) {
-                            LazyHStack(spacing: spacing) {
-                                ForEach(visiblePicks) { pick in
-                                    // No accessory: the shortcut that opened this
-                                    // window is the one the user just pressed. One
-                                    // item fills the rail, two split it, and a longer
-                                    // list leaves the next item peeking into view.
-                                    MenuCardRow(title: pick.displayName,
-                                                fontSize: Self.pickFontSize,
-                                                height: Self.pickRowHeight,
-                                                selected: false,
-                                                promptShortcutID: pick.id,
-                                                promptShortcutPaletteKey: pick.paletteSeed,
-                                                action: { onSubmit(pick.prompt, pick.pin) })
-                                        .frame(width: itemWidth)
+                            ScrollView(.horizontal) {
+                                LazyHStack(spacing: spacing) {
+                                    ForEach(visiblePicks) { pick in
+                                        // No accessory: the shortcut that opened this
+                                        // window is the one the user just pressed. One
+                                        // item fills the rail, two split it, and a longer
+                                        // list leaves the next item peeking into view.
+                                        MenuCardRow(title: pick.displayName,
+                                                    fontSize: Self.pickFontSize,
+                                                    height: Self.pickRowHeight,
+                                                    selected: false,
+                                                    promptShortcutID: pick.id,
+                                                    promptShortcutPaletteKey: pick.paletteSeed,
+                                                    action: { onSubmit(pick.prompt, pick.pin) })
+                                            .frame(width: itemWidth)
+                                    }
                                 }
+                                .frame(height: Self.pickRowHeight)
+                                // Runway past the trailing fade, so the last chip can
+                                // scroll fully clear of the taper instead of resting
+                                // dimmed at the end of the rail (same trick the
+                                // settings page's shortcut rail uses).
+                                .padding(.trailing, Self.pickTrailingFade)
                             }
-                            .frame(height: Self.pickRowHeight)
-                            // Runway past the trailing fade, so the last chip can
-                            // scroll fully clear of the taper instead of resting
-                            // dimmed at the end of the rail (same trick the
-                            // settings page's shortcut rail uses).
-                            .padding(.trailing, Self.pickTrailingFade)
+                            .scrollIndicators(.never)
+                            // The rail dissolves into both boundaries rather than
+                            // being sliced by the viewport — the panel's shared
+                            // overflow language (`scrollEdgeFade`), the same one the
+                            // History drawer below and the settings page's shortcut
+                            // rail already speak. It replaces a per-item
+                            // `scrollTransition` that snapped a whole capsule between
+                            // opaque and clear: a chip crossing the edge became a flat
+                            // half-transparent slab with a hard cut down its side,
+                            // which is exactly the harshness this taper removes.
+                            // Leading taper is kept short: at rest the first chip sits
+                            // flush at 0, so anything longer would visibly thin its
+                            // own corner instead of only softening what scrolls past.
+                            .scrollEdgeFade(leading: true,
+                                            trailing: true,
+                                            leadingFade: Self.pickLeadingFade,
+                                            trailingFade: Self.pickTrailingFade)
                         }
-                        .scrollIndicators(.never)
-                        // The rail dissolves into both boundaries rather than
-                        // being sliced by the viewport — the panel's shared
-                        // overflow language (`scrollEdgeFade`), the same one the
-                        // History drawer below and the settings page's shortcut
-                        // rail already speak. It replaces a per-item
-                        // `scrollTransition` that snapped a whole capsule between
-                        // opaque and clear: a chip crossing the edge became a flat
-                        // half-transparent slab with a hard cut down its side,
-                        // which is exactly the harshness this taper removes.
-                        // Leading taper is kept short: at rest the first chip sits
-                        // flush at 0, so anything longer would visibly thin its
-                        // own corner instead of only softening what scrolls past.
-                        .scrollEdgeFade(leading: true,
-                                        trailing: true,
-                                        leadingFade: Self.pickLeadingFade,
-                                        trailingFade: Self.pickTrailingFade)
+                        .frame(height: Self.picksHeight(visiblePicks.count))
+
+                        trailingControl
                     }
-                    .frame(height: Self.picksHeight(visiblePicks.count))
                     .padding(.top, Self.cardGap)
                 }
             }
@@ -3620,18 +3621,33 @@ private struct CompactShortcutPromptView: View {
     /// The field and its one trailing slot: collapsed History at rest, replaced
     /// in place by Send while the user is typing. Once expanded, the History
     /// disclosure moves to the drawer's bottom bar beside Settings.
+    ///
+    /// While the quick-action rail is up the slot itself moves down beside that
+    /// rail, so the button stays on the card's last row. The footprint is held
+    /// open here either way — the field keeps one width whether the rail is up
+    /// or not, so folding the rail never re-wraps the line being typed.
     private var composerRow: some View {
         HStack(alignment: .center, spacing: 6) {
             inputRow
                 .frame(maxWidth: .infinity)
 
-            CompactShortcutTrailingControl(
-                hasText: !trimmed.isEmpty,
-                showsHistory: state.forceTouchInvocation,
-                historyExpanded: state.forceTouchHistoryExpanded,
-                send: send,
-                toggleHistory: onToggleHistory)
+            ZStack {
+                if visiblePicks.isEmpty { trailingControl }
+            }
+            .frame(width: CompactShortcutTrailingControl.slot,
+                   height: CompactShortcutTrailingControl.slot)
         }
+    }
+
+    /// Send, or the collapsed History disclosure — whichever the state calls for.
+    /// One instance, placed on whichever row is currently the card's last.
+    private var trailingControl: some View {
+        CompactShortcutTrailingControl(
+            hasText: !trimmed.isEmpty,
+            showsHistory: state.forceTouchInvocation,
+            historyExpanded: state.forceTouchHistoryExpanded,
+            send: send,
+            toggleHistory: onToggleHistory)
     }
 
     /// The Force Touch-only ledger, physically inside the composer card. Its rows
@@ -4130,6 +4146,9 @@ struct DetachedThreadView: View {
     @State private var hoveredSourceID: UUID?
     @State private var sourceCloseWork: DispatchWorkItem?
     @State private var metadataMenuOpen = false
+    @State private var intervalPickerOpen = false
+    @ObservedObject private var chatLoops = ChatLoopManager.shared
+    @ObservedObject private var agentManager = AgentTaskManager.shared
     /// The WHOLE thread's laid-out height, mirrored out of the content probe
     /// below. `compactAnswerIsCapped` reads it: whether the card has stopped
     /// growing and handed the tail to its ScrollView is a property of the
@@ -4155,6 +4174,24 @@ struct DetachedThreadView: View {
     }
     private var hasAgentMetadata: Bool {
         agentRunCaption != nil || store.agentFolderPath != nil || store.completedAt != nil
+            || threadLoopInfo != nil
+    }
+    private var threadLoopInfo: LoopMenuInfo? {
+        let id = store.threadID
+        if let loop = chatLoops.loop(for: id) {
+            return LoopMenuInfo(intervalMinutes: loop.intervalMinutes, rounds: loop.rounds,
+                                nextRoundAt: loop.nextRoundAt, active: loop.active)
+        }
+        if let loop = agentManager.tasks.first(where: { $0.id == id })?.loop {
+            return LoopMenuInfo(intervalMinutes: loop.intervalMinutes, rounds: loop.rounds,
+                                nextRoundAt: loop.nextRoundAt, active: loop.active)
+        }
+        return nil
+    }
+    private var threadLoopActive: Bool {
+        let id = store.threadID
+        return chatLoops.isActive(id)
+            || agentManager.tasks.contains { $0.id == id && $0.loopActive }
     }
     /// ONE rhythm for every detached thread — a pointer-side prompt-shortcut
     /// answer and a torn-out session are the same view at two sizes, so they get
@@ -4582,17 +4619,37 @@ struct DetachedThreadView: View {
                 ComposerBox(
                     text: $followUp,
                     glass: true,
+                    // Rim only. A glass floor here lit the field brighter than
+                    // the answer above it; with nothing inside, the line reads
+                    // as a place to type rather than the card's loudest chip.
+                    hollow: true,
                     onSubmit: sendFollowUp,
                     onPasteImage: pasteFollowUpImage,
-                    placeholder: { Text(L("result.followUp")) },
+                    placeholder: {
+                        if threadLoopActive, let next = threadLoopInfo?.nextRoundAt {
+                            TimelineView(.periodic(from: .now, by: 1)) { context in
+                                Text(L("loop.waiting",
+                                       LoopInterval.countdown(next.timeIntervalSince(context.date))))
+                            }
+                        } else if threadLoopActive {
+                            Text(L("loop.followUp"))
+                        } else {
+                            Text(L("result.followUp"))
+                        }
+                    },
                     trailing: {
                         if hasFollowUpInput {
                             SendButton(compact: true, action: sendFollowUp)
                                 .transition(.scale(scale: 0.6).combined(with: .opacity))
                         }
                     })
-                    .opacity(streaming ? 0.45 : 1)
-                    .disabled(streaming)
+                    // The box is only as wide as what it holds: the prompt at
+                    // rest, the line being typed after that. `maxWidth`, not a
+                    // fixed width — once the text outgrows the card the cap stops
+                    // binding and the field wraps at the card's edge as before.
+                    .frame(maxWidth: followUpBoxWidth, alignment: .leading)
+                    .animation(.spring(response: 0.32, dampingFraction: 0.86),
+                               value: followUpBoxWidth)
 
                 if hasAgentMetadata {
                     GlassIconButton(systemName: "command", help: L("agent.detail"),
@@ -4603,26 +4660,93 @@ struct DetachedThreadView: View {
                     .modifier(MenuCardWindow(
                         open: metadataMenuOpen,
                         upperLeading: true,
-                        onDismiss: { _ in metadataMenuOpen = false },
+                        onDismiss: { _ in
+                            metadataMenuOpen = false
+                            intervalPickerOpen = false
+                        },
                         card: {
-                            AnyView(AgentRunMetadataMenu(
-                                engine: agentRunCaption,
-                                folderPath: store.agentFolderPath,
-                                completedAt: store.completedAt,
-                                onOpenFolder: {
-                                    metadataMenuOpen = false
-                                    if let path = store.agentFolderPath {
-                                        NSWorkspace.shared.open(URL(fileURLWithPath: path))
-                                    }
-                                })
-                                .manageMenuCardBackground())
+                            AnyView(Group {
+                                if intervalPickerOpen {
+                                    LoopIntervalMenuCard(
+                                        selected: threadLoopInfo?.intervalMinutes
+                                            ?? LoopInterval.lastMinutes,
+                                        onSelect: { minutes in
+                                            chatLoops.setInterval(store.threadID, minutes: minutes)
+                                            agentManager.setLoopInterval(taskID: store.threadID,
+                                                                         minutes: minutes)
+                                            metadataMenuOpen = false
+                                            intervalPickerOpen = false
+                                        },
+                                        onDone: {
+                                            metadataMenuOpen = false
+                                            intervalPickerOpen = false
+                                        })
+                                } else {
+                                    AgentRunMetadataMenu(
+                                        engine: agentRunCaption,
+                                        folderPath: store.agentFolderPath,
+                                        completedAt: store.completedAt,
+                                        onOpenFolder: {
+                                            metadataMenuOpen = false
+                                            if let path = store.agentFolderPath {
+                                                NSWorkspace.shared.open(URL(fileURLWithPath: path))
+                                            }
+                                        },
+                                        loop: threadLoopInfo,
+                                        onStopLoop: {
+                                            metadataMenuOpen = false
+                                            chatLoops.stop(store.threadID)
+                                            agentManager.stopLoop(taskID: store.threadID)
+                                        },
+                                        onChangeInterval: {
+                                            intervalPickerOpen = true
+                                        })
+                                        .manageMenuCardBackground()
+                                }
+                            })
                         }))
                         .transition(.scale(scale: 0.7).combined(with: .opacity))
                 }
             }
         }
+        // The row is narrower than the card now that the box hugs its text, so
+        // the slack has to be handed to the trailing edge — left to itself the
+        // stack centres, and the field drifts off the card's left margin.
+        .frame(maxWidth: .infinity, alignment: .leading)
         .animation(.spring(response: 0.3, dampingFraction: 0.78),
                    value: hasAgentMetadata)
+    }
+
+    /// The widest the follow-up box wants to be: one line of whatever it is
+    /// showing, plus the box's own chrome. Read as a CAP, so a card narrower
+    /// than this still wins and the line wraps inside it.
+    private var followUpBoxWidth: CGFloat {
+        let line = followUp.isEmpty ? followUpPlaceholderText : followUp
+        let measured = (line as NSString).size(withAttributes: [
+            .font: NSFont.systemFont(ofSize: NotchBody.followUpFontSize)
+        ]).width
+        return ceil(measured) + Self.followUpBoxChrome + followUpTrailingWidth
+    }
+
+    /// `ComposerBox`'s own horizontal insets (13 leading, 6 trailing), the
+    /// field's text inset, and room for the caret sitting after the last glyph.
+    private static let followUpBoxChrome: CGFloat =
+        13 + PromptField.textInset + 6 + 6
+
+    /// The trailing control's slot when one is up — a 27pt chip and its 6pt gap.
+    private var followUpTrailingWidth: CGFloat {
+        hasFollowUpInput ? 27 + 6 : 0
+    }
+
+    /// The same line the placeholder builder puts in the box, as plain text —
+    /// what the width above is measured from.
+    private var followUpPlaceholderText: String {
+        if threadLoopActive, let next = threadLoopInfo?.nextRoundAt {
+            return L("loop.waiting",
+                     LoopInterval.countdown(next.timeIntervalSince(Date())))
+        }
+        if threadLoopActive { return L("loop.followUp") }
+        return L("result.followUp")
     }
 
     private func sendFollowUp() {
@@ -4777,6 +4901,7 @@ struct DetachedAgentTaskView: View {
     @State private var followsTail = true
     @State private var contentBottom: CGFloat = 0
     @State private var viewportHeight: CGFloat = 0
+    @State private var showLoopIntervalPicker = false
 
     private static let bottomID = "detached-agent-bottom"
     private static let scrollSpace = "detached-agent-scroll"
@@ -4928,11 +5053,20 @@ struct DetachedAgentTaskView: View {
                 .lineLimit(1)
             Color.clear
                 .frame(maxWidth: .infinity)
+            if let loop = task.loop, loop.active {
+                LoopScheduleChip(minutes: loop.intervalMinutes,
+                                 open: $showLoopIntervalPicker) { minutes in
+                    manager.setLoopInterval(taskID: task.id, minutes: minutes)
+                }
+            }
             if task.isRunning {
                 TimelineView(.periodic(from: task.startedAt, by: 1)) { context in
                     elapsedLabel(context.date.timeIntervalSince(task.startedAt))
                 }
-                Button(action: { manager.cancel(taskID: task.id) }) {
+                Button(action: {
+                    if task.loopActive { manager.stopLoop(taskID: task.id) }
+                    else { manager.cancel(taskID: task.id) }
+                }) {
                     Image(systemName: "stop.circle")
                         .font(.sf(Tokens.TypeSize.form, weight: .semibold))
                         .foregroundStyle(Tokens.text3)
@@ -4940,6 +5074,24 @@ struct DetachedAgentTaskView: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .help(task.loopActive ? L("loop.stop") : L("agent.cancel"))
+            } else if task.isLoopWaiting {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    Text(LoopInterval.countdown((task.loop?.nextRoundAt ?? context.date)
+                        .timeIntervalSince(context.date)))
+                        .font(.sf(Tokens.TypeSize.meta))
+                        .monospacedDigit()
+                        .foregroundStyle(Tokens.text4)
+                }
+                Button(action: { manager.stopLoop(taskID: task.id) }) {
+                    Image(systemName: "stop.circle")
+                        .font(.sf(Tokens.TypeSize.form, weight: .semibold))
+                        .foregroundStyle(Tokens.text3)
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(L("loop.stop"))
             } else {
                 elapsedLabel(task.elapsed)
             }
@@ -4994,14 +5146,29 @@ struct DetachedAgentTaskView: View {
                 return true
             },
             placeholder: {
-                Text(L(task.isRunning ? "agent.followUp.queue"
-                                      : "agent.followUp.placeholder"))
+                if task.isRunning {
+                    Text(L("agent.followUp.queue"))
+                } else if task.isLoopWaiting, let next = task.loop?.nextRoundAt {
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        Text(L("loop.waiting",
+                               LoopInterval.countdown(next.timeIntervalSince(context.date))))
+                    }
+                } else {
+                    Text(L("agent.followUp.placeholder"))
+                }
             },
             trailing: {
                 if hasFollowUpInput {
                     AgentFollowUpKeyHints(
                         showsInterrupt: task.isRunning && task.sessionID != nil)
                         .transition(.opacity)
+                } else if task.isRunning {
+                    // Empty field mid-round: Stop ends this round. Ending the
+                    // loop itself is the header's stop, not this slot.
+                    StopButton(compact: true) {
+                        manager.cancel(taskID: task.id)
+                    }
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
                 }
             })
     }

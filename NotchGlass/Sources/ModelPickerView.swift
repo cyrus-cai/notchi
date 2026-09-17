@@ -193,16 +193,18 @@ private struct ModelMenuPresenter: NSViewRepresentable {
             }
             // Two blocks, not one list. Notchi ships with the app and spends the
             // balance in the card above; every other row is an account you hold
-            // with someone else. Filing it as one more vendor between OpenRouter
-            // and OpenAI — same submenu, same shape — said it was an alternative
-            // to them, which is the one thing it isn't. Its tiers ride the top
-            // level flat: there are two of them, and a submenu holding two rows
-            // is a door in front of a doorway.
+            // with someone else. So it leads the menu, above the separator, under
+            // its own heading — but as one submenu like any other provider. Flat
+            // rows were fine while it served two tiers; it now serves a lineup,
+            // and a lineup on the top level pushes every other backend off the
+            // bottom of the menu.
             let house = order.filter(\.isFirstParty)
             let houseModels = house.flatMap { byProvider[$0] ?? [] }
-            if let name = house.first?.displayName, !houseModels.isEmpty {
-                menu.addItem(.sectionHeader(title: name))
-                addRows(houseModels, to: menu)
+            if !houseModels.isEmpty {
+                menu.addItem(.sectionHeader(title: L("model.picker.official")))
+                for p in house where !(byProvider[p] ?? []).isEmpty {
+                    menu.addItem(providerItem(p, byProvider[p] ?? []))
+                }
             }
             let theirs = order.filter { !$0.isFirstParty }
             let keyed = theirs.filter { byProvider[$0]?.first?.hasKey == true }
@@ -343,6 +345,11 @@ private struct ModelMenuPresenter: NSViewRepresentable {
             // ones their own company makes count.
             case .cursorCode:
                 return CursorCLIService.vendor(forID: model.info.id) == "Cursor"
+            // Notchi resells a lineup and serves one tier of its own. Blend1 has
+            // no benchmark score to clear the floor with, and the floor would put
+            // the one model the app ships with behind "More models".
+            case .nono:
+                return ModelRatings.isNonoID(model.info.id)
             default:
                 return false
             }
@@ -507,14 +514,18 @@ struct ModelDetailCard: View {
     /// The reading to draw *right now*, which mid-hover is somewhere between the
     /// last model's figures and this one's. See `Figures`.
     let figures: Figures
-    /// Whether the pointer is over the scoring link. Pushed in rather than sensed:
-    /// see `scoringLinkFrame(in:)`.
-    let scoringHovered: Bool
-    /// Whether the pointer is over the first-party provider pill. Pushed in for
-    /// the same reason as `scoringHovered`.
+    /// Whether the pointer is over the first-party provider pill.
+    ///
+    /// Pushed in rather than sensed: the card cannot sense its own hover.
+    /// `onHover` is fed by tracking areas, and this card lives beside a tracking
+    /// `NSMenu` whose nested event loop delivers no mouse-moved events to other
+    /// windows — and even if it flipped a `@State`, SwiftUI's update pass never
+    /// gets a turn to redraw it (the same reason `figures` are pushed in frame by
+    /// frame). So `ModelDetailPanel`'s pointer poll does the hit test against the
+    /// control's screen frame and pushes the answer back in.
     let pillHovered: Bool
     /// Whether the pointer is over the add-credit row. Pushed in for the same
-    /// reason as `scoringHovered`.
+    /// reason as `pillHovered`.
     let addCreditHovered: Bool
     /// Whether the pointer is over Learn more, next to the balance.
     let learnMoreHovered: Bool
@@ -527,7 +538,6 @@ struct ModelDetailCard: View {
     /// `ModelDetailPanel.render`), where an observable object would be both the
     /// wrong lifetime and a redraw nobody is there to service.
     let wallet: Wallet?
-    let onOpenScoringDetails: () -> Void
     /// Opens this model's provider in Settings. Only wired on the first-party
     /// pill — the qualifier tag on everyone else is a name, not a door.
     let onOpenProvider: () -> Void
@@ -541,7 +551,7 @@ struct ModelDetailCard: View {
     /// first, the amount after a click.
     let showingAmount: Bool
     /// Whether the pointer is over the amount stepper. Pushed in for the same
-    /// reason as `scoringHovered`.
+    /// reason as `pillHovered`.
     let stepperHovered: Bool
     let onTopUpChange: (Double) -> Void
     /// Screen frame of the stepper, so a native menu's click swallow can
@@ -557,8 +567,6 @@ struct ModelDetailCard: View {
     /// Menu-adjacent, so it takes the corner radius of the things macOS pops up
     /// next to a menu rather than the tighter one a panel body uses.
     private static let shape = RoundedRectangle.modal
-
-    private var stats: RemoteModelManifest.ModelStats? { Provider.modelStats(model.info.id) }
 
     /// The row title, split at the qualifier the catalogs append when a bare model
     /// name would collide across engines ("Gpt-5.6-terra · commandcode").
@@ -712,7 +720,6 @@ struct ModelDetailCard: View {
                 if isFirstParty {
                     Note(symbol: "globe.americas", title: L("model.detail.nono.host"))
                 }
-                if stats != nil { scoringDetailsLink }
             }
 
             if isFirstParty { walletWell }
@@ -900,50 +907,6 @@ struct ModelDetailCard: View {
         .buttonStyle(.plain)
         .accessibilityLabel(L("model.detail.learnMore"))
         .background(ScreenFrameProbe(onChange: onLearnMoreFrame))
-    }
-
-    /// The full methodology belongs on a durable, linkable page rather than in a
-    /// translucent menu card. Only measured cards offer the link; a card running
-    /// entirely on the curated fallback has no AA figures to explain.
-    ///
-    /// It sits below the capability rows as a footnote, not as a peer of them: at
-    /// rest it is meta-weight text with the arrow barely there, and only under the
-    /// pointer does it brighten to say it is a control.
-    private var scoringDetailsLink: some View {
-        Button(action: onOpenScoringDetails) {
-            HStack(spacing: 7) {
-                Text(L("model.detail.scoringDetails"))
-                    .font(.sf(Tokens.TypeSize.meta, weight: .medium))
-                Spacer(minLength: 4)
-                // Held in the layout at rest rather than removed, so arriving on
-                // the row reveals the arrow instead of shuffling the text.
-                Image(systemName: "arrow.up.right")
-                    .font(.sf(Tokens.TypeSize.meta, weight: .medium))
-                    .opacity(scoringHovered ? 1 : 0)
-            }
-            .foregroundStyle(scoringHovered ? Tokens.text1 : Tokens.text4)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .padding(.top, 1)
-    }
-
-    /// Where the link lands on screen, given the panel it is drawn in.
-    ///
-    /// The card cannot sense its own hover: `onHover` is fed by tracking areas,
-    /// and this card lives beside a tracking `NSMenu` whose nested event loop
-    /// delivers no mouse-moved events to other windows — and even if it flipped a
-    /// `@State`, SwiftUI's update pass never gets a turn to redraw it (the same
-    /// reason `figures` are pushed in frame by frame). So `ModelDetailPanel`'s
-    /// pointer poll does the hit test against this rect and pushes the answer back
-    /// in as `scoringHovered`. Screen coordinates, so measured up from the card's
-    /// bottom edge, which is where the link sits.
-    static func scoringLinkFrame(in panelFrame: NSRect) -> NSRect {
-        let font = NSFont.systemFont(ofSize: Tokens.TypeSize.meta, weight: .medium)
-        let height = ceil(font.ascender - font.descender)
-        let inset = ModelDetailPanel.inset
-        return NSRect(x: panelFrame.minX + inset, y: panelFrame.minY + inset,
-                      width: panelFrame.width - inset * 2, height: height)
     }
 
     /// Cost efficiency, in the corner rather than as a third meter.
@@ -1357,10 +1320,8 @@ final class ModelDetailPanel {
     private var travelFrom = ModelDetailCard.Figures()
     private var travelTo = ModelDetailCard.Figures()
     private var travelStart: CFTimeInterval = 0
-    /// The pointer poll's verdict on the scoring link, pushed into the card. See
-    /// `ModelDetailCard.scoringLinkFrame(in:)`.
-    private var scoringHovered = false
-    /// Same poll, for the first-party provider pill.
+    /// The pointer poll's verdict on the first-party provider pill, pushed into
+    /// the card.
     private var pillHovered = false
     /// Screen frame of that pill, written by `ScreenFrameProbe` after layout.
     private var pillFrame: NSRect = .zero
@@ -1533,10 +1494,9 @@ final class ModelDetailPanel {
         }
         let card = ModelDetailCard(
             model: model, figures: figures,
-            scoringHovered: scoringHovered, pillHovered: pillHovered,
+            pillHovered: pillHovered,
             addCreditHovered: addCreditHovered, learnMoreHovered: learnMoreHovered,
             wallet: wallet,
-            onOpenScoringDetails: { [weak self] in self?.openScoringDetails() },
             onOpenProvider: { [weak self] in self?.openProviderSettings() },
             onPillFrame: { [weak self] in self?.pillFrame = $0 },
             topUpUSD: topUpUSD, showingAmount: showingAmount,
@@ -1587,7 +1547,6 @@ final class ModelDetailPanel {
         removeClickMonitor()
         stopTicker()
         figures = ModelDetailCard.Figures()
-        scoringHovered = false
         pillHovered = false
         pillFrame = .zero
         addCreditHovered = false
@@ -1736,15 +1695,13 @@ final class ModelDetailPanel {
         // as the window under the pointer even though this higher-level panel is
         // visibly in front. The panel owns its whole frame, so use its geometry as
         // the source of truth and keep hover live before the menu closes.
-        let scoring = ModelDetailCard.scoringLinkFrame(in: panel.frame).contains(location)
         let pill = pillFrame.contains(location)
         let addCredit = addCreditFrame.contains(location)
         let learnMore = learnMoreFrame.contains(location)
         let stepper = stepperFrame.contains(location)
-        guard scoring != scoringHovered || pill != pillHovered
+        guard pill != pillHovered
                 || addCredit != addCreditHovered || learnMore != learnMoreHovered
                 || stepper != stepperHovered else { return }
-        scoringHovered = scoring
         pillHovered = pill
         addCreditHovered = addCredit
         learnMoreHovered = learnMore
@@ -1789,17 +1746,6 @@ final class ModelDetailPanel {
             addCreditTapped()
             return
         }
-        guard let panel, panel.isVisible else { return }
-        if ModelDetailCard.scoringLinkFrame(in: panel.frame).contains(location) {
-            openScoringDetails()
-        }
-    }
-
-    private func openScoringDetails() {
-        guard let url = URL(string: "https://notch.website/scoring") else { return }
-        hide()
-        trackedMenu?.cancelTracking()
-        NSWorkspace.shared.open(url)
     }
 
     private func openProviderSettings() {
@@ -2046,6 +1992,14 @@ final class ModelCatalogStore: ObservableObject {
         guard !result.infos.isEmpty else { return }
         liveByProvider[p] = result.infos
         featuredByProvider[p] = result.openRouterFeatured
+        if p == .nono {
+            ModelRatings.nonoNames = Dictionary(result.infos.map { ($0.id, $0.name) },
+                                                uniquingKeysWith: { a, _ in a })
+            // The published list is also the answer to what we should still
+            // remember. A model of ours that has been retired is a request the
+            // gateway now refuses; left in history it would go on being offered.
+            AskModelMRU.forgetFirstParty(notIn: Set(result.infos.map(\.id)))
+        }
     }
 
     /// Fetch every keyed provider's live model list once, when a picker opens, so the
@@ -2250,9 +2204,10 @@ final class ModelCatalogStore: ObservableObject {
     /// and "Default" names nothing you can point at.
     private func title(for info: ModelInfo, provider p: Provider) -> String {
         if info.id.isEmpty { return L("model.picker.default") }
-        // nono's tier names are written here, not read off the gateway's catalog,
-        // so the menu row and the chip beside it say the same thing.
-        if p == .nono { return ModelRatings.nonoName(for: info.id) }
+        // Blend's name is written here, not read off the gateway's catalog, so
+        // the menu row and the chip beside it say the same thing. A named nono
+        // entry keeps the catalog's name, which is the vendor's.
+        if p == .nono, ModelRatings.isNonoID(info.id) { return ModelRatings.nonoName(for: info.id) }
         guard p == .claudeCode, let resolved = claudeResolved[info.id]
         else { return info.name }
         return ClaudeCLIService.displayName(forResolved: resolved)
@@ -2488,6 +2443,17 @@ enum AskModelMRU {
         }
     }
 
+    /// Forget remembered models of ours that the gateway no longer serves —
+    /// called when its catalog lands. Other providers' entries are untouched:
+    /// only our own lineup is published to us as a complete list.
+    static func forgetFirstParty(notIn served: Set<String>) {
+        let all = entries
+        let kept = all.filter { !$0.provider.isFirstParty || served.contains($0.model) }
+        guard kept.count != all.count else { return }
+        UserDefaults.standard.set(kept.map { "\($0.provider.rawValue)|\($0.model)" },
+                                  forKey: defaultsKey)
+    }
+
     static func record(provider: Provider, model: String) {
         let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -2625,9 +2591,11 @@ struct AskRecentModelPickerView: View {
                 }
             }
 
-            // Notchi's own models, held outside the scroller so they
-            // sit in the same place every time the menu opens instead of riding
-            // a history that moves under them.
+            // Notchi's own models, held outside the scroller so they sit in the
+            // same place every time the menu opens instead of riding a history
+            // that moves under them. Listed flat, as models — the lineup is
+            // capped (`NotchBody.askPinnedModelRows`) at a length that reads as
+            // a few more rows rather than a second list needing a name.
             if !pinned.isEmpty {
                 hairline
                 VStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
@@ -2666,6 +2634,7 @@ struct AskRecentModelPickerView: View {
             title: ModelRatings.prettyName(for: r.id, provider: r.provider),
             accessory: accessory(for: r),
             lowBalance: lowBalance(r),
+            brandTitle: isHouse(r),
             // The highlight here means "the model in effect", not "where the
             // cursor is" — so it carries the emphasized weight, and hover
             // does NOT move it (arming commits the pick straight to the
@@ -2704,7 +2673,8 @@ struct AskRecentModelPickerView: View {
     }
 
     /// Every row the ↑/↓ cursor can land on, in the order they are drawn: the
-    /// recents, then the pinned models. The door out is deliberately not one.
+    /// recents, then Notchi's lineup. The door out is deliberately not among
+    /// them — it picks no model.
     private var armable: [Row] { rows + pinned }
 
     /// The row's trailing word. Backends driven by the user's own signed-in
@@ -2718,6 +2688,13 @@ struct AskRecentModelPickerView: View {
         return L("nono.dailyCap")
     }
 
+    /// The house tier — the one row whose name is the product's own wordmark
+    /// ("Blend1") rather than a vendor's model id, and the one row drawn in the
+    /// brand face.
+    private func isHouse(_ r: Row) -> Bool {
+        r.provider.isFirstParty && ModelRatings.isNonoID(r.id)
+    }
+
     /// Ours, with nothing left: the row wears `LowBalanceTag`.
     private func lowBalance(_ r: Row) -> Bool {
         r.provider.isFirstParty && nono.snapshot != nil
@@ -2727,21 +2704,34 @@ struct AskRecentModelPickerView: View {
     /// Wide enough for every row whole — the models with their CLI tags, and the
     /// "More models…" door under them.
     private var cardWidth: CGFloat {
-        let models = armable.map {
-            (ModelRatings.prettyName(for: $0.id, provider: $0.provider), accessory(for: $0))
-        }
         // The door's arrow only shows under the pointer, but it is held in the
         // layout at rest — so the card is sized as if it were always there.
-        // The cap is the Agent card's own width, so the two menus are the same
-        // card at the same size; a long aggregator id truncating is the cheaper
-        // trade than one list standing wider than the other.
-        let base = MenuCard.width(titles: models + [(L("model.picker.more"), "\u{2197}")])
+        let extra: [(String, String?)] = [(L("model.picker.more"), "\u{2197}")]
+        return width(of: rows + pinned, extra: extra)
+    }
+
+    /// What a run of model rows needs to show whole. The cap is the Agent card's
+    /// own width, so the two menus are the same card at the same size; a long
+    /// aggregator id truncating is the cheaper trade than one list standing
+    /// wider than the other.
+    private func width(of models: [Row], extra: [(String, String?)] = []) -> CGFloat {
+        let titles = models.map {
+            (ModelRatings.prettyName(for: $0.id, provider: $0.provider), accessory(for: $0))
+        }
+        let base = MenuCard.width(titles: titles + extra)
         // The NO CREDIT chip is a view, not a string `MenuCard.width` can measure.
-        let tagged = armable.filter { lowBalance($0) }.map {
+        let tagged = models.filter { lowBalance($0) }.map {
             MenuCard.width(titles: [(ModelRatings.prettyName(for: $0.id, provider: $0.provider), nil)])
                 + MenuCard.accessoryGap + LowBalanceTag.width
         }
-        return min(max(base, tagged.max() ?? 0), MenuCard.pickerCardWidth)
+        // The house row is drawn in the brand face, which `MenuCard.width`
+        // measures in the system one.
+        let branded = models.filter(isHouse).map { r -> CGFloat in
+            let name = ModelRatings.prettyName(for: r.id, provider: r.provider)
+            return MenuCard.width(titles: [(name, accessory(for: r))])
+                + MenuCard.brandOverhang(name, fontSize: MenuCard.fontSize)
+        }
+        return min(max(base, tagged.max() ?? 0, branded.max() ?? 0), MenuCard.pickerCardWidth)
     }
 
     private func arm(_ r: Row) {

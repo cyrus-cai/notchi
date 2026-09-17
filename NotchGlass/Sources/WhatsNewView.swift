@@ -282,17 +282,54 @@ struct WhatsNewView: View {
                 }
             }
 
-            if let heroAssetName = entry.heroAssetName {
-                Image(heroAssetName)
-                    .resizable()
-                    .aspectRatio(2, contentMode: .fit)
-                    .frame(maxWidth: .infinity)
-                    .clipShape(RoundedRectangle.window)
-                    .overlay(
-                        RoundedRectangle.window
-                            .strokeBorder(Tokens.hairline, lineWidth: 1)
-                    )
-                    .accessibilityHidden(true)
+            // The headline and its image are one block: 10pt apart rather than
+            // the 18 between groups, so the picture reads as the headline's
+            // and not as the section that follows it.
+            if entry.headline?.isEmpty == false || entry.heroAssetName != nil
+                || entry.blurb?.isEmpty == false {
+                VStack(alignment: .leading, spacing: 10) {
+                    if let headline = entry.headline, !headline.isEmpty {
+                        // The release's one story, set like the card headlines
+                        // in Settings (16.5 medium, tracking -0.35, `text1`)
+                        // over the 12.5 bullets below — the same step those
+                        // cards use to tell a headline from its gloss.
+                        Text(headline)
+                            .font(.sf(Tokens.TypeSize.prompt, weight: .medium))
+                            .foregroundStyle(Tokens.text1)
+                            .tracking(-0.35)
+                            .lineSpacing(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    if let heroAssetName = entry.heroAssetName {
+                        // The asset's own proportions, not a fixed 2:1 — the
+                        // shape is a property of the art, and a promo cropped
+                        // to fit a number here is a worse promo.
+                        Image(heroAssetName)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(maxWidth: .infinity)
+                            .clipShape(RoundedRectangle.window)
+                            .overlay(
+                                RoundedRectangle.window
+                                    .strokeBorder(Tokens.hairline, lineWidth: 1)
+                            )
+                            .accessibilityHidden(true)
+                    }
+
+                    if let blurb = entry.blurb, !blurb.isEmpty {
+                        // The picture's caption: the panel's own 12.5 bullet
+                        // size, one step quieter in ink (`text3`), so it reads
+                        // as the image explaining itself rather than as a
+                        // fourth note that lost its dot.
+                        Text(blurb)
+                            .font(.sf(Tokens.TypeSize.label))
+                            .foregroundStyle(Tokens.text3)
+                            .lineSpacing(4)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             if !entry.features.isEmpty {

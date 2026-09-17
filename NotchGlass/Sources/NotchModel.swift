@@ -164,6 +164,10 @@ final class NotchModel: ObservableObject {
         /// "Thinking" line. `nil` when the model didn't emit a thinking channel.
         /// Persisted so a reopened thread still has the fold.
         var reasoning: String? = nil
+        /// The `/loop` round this turn belongs to (1, 2, …) — on both the round's
+        /// question and its answer. Nil on every turn the user typed. The loop
+        /// record's round column and `wireContext` read it. Persisted.
+        var loopRound: Int? = nil
 
         init(id: UUID = UUID(), role: String, text: String,
              streaming: Bool = false, usedClipboard: Bool = false,
@@ -180,7 +184,7 @@ final class NotchModel: ObservableObject {
         // it. `decodeIfPresent` + defaults is what keeps old saved conversations
         // loadable. `role`/`text` are required — every saved turn has them.
         // `toolActivity` is deliberately absent: it's runtime-only UI state.
-        enum CodingKeys: String, CodingKey { case id, role, text, streaming, hidesUserBubble, usedClipboard, sources, isError, regenModel, answerModel, imageFiles, isAgent, agentLog, reasoning }
+        enum CodingKeys: String, CodingKey { case id, role, text, streaming, hidesUserBubble, usedClipboard, sources, isError, regenModel, answerModel, imageFiles, isAgent, agentLog, reasoning, loopRound }
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -198,6 +202,7 @@ final class NotchModel: ObservableObject {
             isAgent      = try c.decodeIfPresent(Bool.self, forKey: .isAgent) ?? false
             agentLog     = try c.decodeIfPresent([AgentLogEntry].self, forKey: .agentLog)
             reasoning    = try c.decodeIfPresent(String.self, forKey: .reasoning)
+            loopRound    = try c.decodeIfPresent(Int.self, forKey: .loopRound)
         }
     }
 
@@ -591,6 +596,15 @@ final class NotchModel: ObservableObject {
     /// (`AgentFolderMRU`), with the file panel as its tail row. Hung off the chip
     /// itself, exactly like the two model menus.
     @Published var showAgentFolderPicker = false
+    /// The `/loop` interval chip's card.
+    @Published var showLoopIntervalPicker = false
+    /// `/loop` armed on the idle prompt: the minutes between rounds. Scoped to
+    /// its line like a `/`-pinned prompt shortcut — it lifts when the field
+    /// empties (submit, delete-all, close).
+    @Published var loopIntervalMinutes: Int? = nil
+    /// The loop round the next `submit()` is, stamped onto its question and
+    /// answer turns. Consumed by that submit.
+    private var nextSubmitLoopRound: Int? = nil
 
     /// A settled result's metadata card: the Chat footer's ⓘ model menu or the
     /// Agent follow-up row's command menu. Both live in a separate child window,
@@ -840,6 +854,11 @@ final class NotchModel: ObservableObject {
                 promptShortcutMode = nil
                 manualPanelOverride = Self.storedSubmitMode
             }
+            // `/loop` is scoped to its line the same way.
+            if loopIntervalMinutes != nil, empty {
+                loopIntervalMinutes = nil
+                showLoopIntervalPicker = false
+            }
             // The `/` menu's highlight is scoped to the menu being open: every
             // edit that shuts it (a space, a submit, a delete-all) parks the
             // highlight back on the top row, and every edit that *narrows* it
@@ -855,10 +874,12 @@ final class NotchModel: ObservableObject {
             // from the newest item. `isRecallingText` shields the recall's own
             // fill from tripping this (it writes `text` too).
             if !isRecallingText { historyRecallIndex = nil }
-            // Text arriving no longer folds the recent list: the Recent chevron
-            // stays on the bucket row while you type (see `NotchBody.bucketRow` /
-            // `promptHidesRecent`), so the list is that control's state alone —
-            // closing it out from under a still-lit chevron was the incoherent half.
+            // The first character of a typed line folds the recent list: the
+            // prompt is what you're looking at once you start writing, and a list
+            // sitting under a half-typed line is in the way. Only the empty →
+            // non-empty edge folds it, so the Recent chevron still works with text
+            // in the box (see `NotchBody.bucketRow`) — reopening it mid-line stays,
+            // instead of being closed again by the next keystroke.
             //
             // The keyboard highlight DOES go, every keystroke. With text in the box
             // the arrows belong to the caret (`PromptField` routes ↑/↓ to the field
@@ -867,6 +888,10 @@ final class NotchModel: ObservableObject {
             // (`historyConfirmHighlighted` also guards on `!hasText` as a backstop.)
             if hasText, highlightedHistoryIndex != nil {
                 highlightedHistoryIndex = nil
+            }
+            if !isRecallingText, !empty, showHistory,
+               oldValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                showHistory = false
             }
             // Feed the "actively typing" signal that holds off hover-leave folding
             // (the one exception to leave-collapses). Empty writes don't count —
@@ -1759,7 +1784,8 @@ final class NotchModel: ObservableObject {
                                   trackCompactTask: Bool = false,
                                   pin: ModelPin? = nil,
                                   origin: HistoryItem.Origin? = nil,
-                                  images: [NSImage] = []) -> UUID? {
+                                  images: [NSImage] = [],
+                                  mintsMirror: Bool = true) -> UUID? {
         // Never stack rounds on one thread from the window: the tear-off
         // dropped the round's task handle, so a second submit couldn't
         // supersede-cancel the first. The field is disabled while streaming;
@@ -1780,7 +1806,8 @@ final class NotchModel: ObservableObject {
                      fromPromptShortcut: fromPromptShortcut,
                      composeImages: askComposeImages,
                      regenModel: regenOverrideModel,
-                     regenProvider: regenOverrideProvider)
+                     regenProvider: regenOverrideProvider,
+                     loop: loopIntervalMinutes)
         nextSubmitSurface = origin == .forceTouch ? NoNoRequestContext.forceTouch
             : trackCompactTask ? NoNoRequestContext.shortcut
             : NoNoRequestContext.window
@@ -1810,7 +1837,7 @@ final class NotchModel: ObservableObject {
         // `syncInFlight` only lands with the first token.
         if let store = detachedThreadStores[threadHistoryID] {
             store.turns = turns
-        } else {
+        } else if mintsMirror {
             // A compose window's FIRST question has no mirror yet: mint one here,
             // already holding the pair, so the window adopts a live thread rather
             // than an empty one waiting for the first token.
@@ -1838,7 +1865,71 @@ final class NotchModel: ObservableObject {
         askComposeImages = saved.composeImages
         regenOverrideModel = saved.regenModel
         regenOverrideProvider = saved.regenProvider
+        // Handing `text` back empty lifts a `/loop` armed on the idle prompt;
+        // the borrow must leave it as it found it.
+        loopIntervalMinutes = saved.loop
         return landedThreadID
+    }
+
+    // MARK: - Chat loops
+
+    /// `ChatLoopManager` starts rounds through the ordinary chat pipeline; wire
+    /// it once at launch so a restored loop can fire before the next `/loop`.
+    private func bindChatLoops() {
+        let manager = ChatLoopManager.shared
+        manager.runRound = { [weak self] id, prompt, round in
+            self?.runChatLoopRound(threadID: id, prompt: prompt, round: round) != nil
+        }
+        manager.isThreadBusy = { [weak self] id in
+            self?.inFlightRounds.contains { $0.threadID == id } ?? false
+        }
+    }
+
+    /// Enter on the Ask side with `/loop` armed. Round one runs detached, like a
+    /// torn-off window's round, and the thread joins the task list as a loop.
+    private func startChatLoop(minutes: Int) {
+        let q = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return }
+        if selectionContext != nil { clearSelectionContext() }
+        askComposeImages = []
+        text = ""
+        bindChatLoops()
+        guard let id = runChatLoopRound(threadID: nil, prompt: q, round: 1) else { return }
+        LoopInterval.remember(minutes)
+        ChatLoopManager.shared.register(id: id, prompt: q, minutes: minutes)
+    }
+
+    /// One loop round on the thread (`nil` for round one's new thread). From
+    /// round two on the question bubble is hidden — it is the loop's own prompt,
+    /// already at the top of the record. Runs in the panel when the thread is
+    /// the one on screen, so the reader watches it arrive; detached otherwise.
+    @discardableResult
+    func runChatLoopRound(threadID: UUID?, prompt: String, round: Int) -> UUID? {
+        nextSubmitLoopRound = round
+        defer { nextSubmitLoopRound = nil }
+        let hide = round > 1
+        if let threadID, threadHistoryID == threadID, !turns.isEmpty {
+            guard !turns.contains(where: \.streaming) else { return nil }
+            let saved = (text: text, images: askComposeImages, loop: loopIntervalMinutes)
+            text = prompt
+            askComposeImages = []
+            submit(hideUserBubble: hide)
+            text = saved.text
+            askComposeImages = saved.images
+            loopIntervalMinutes = saved.loop
+            return threadID
+        }
+        var seed = threadID.flatMap { id in history.first { $0.id == id }?.conversation } ?? []
+        // A thread the app was quit mid-round carries a turn still marked
+        // streaming. That stream died with the process; left set, it makes the
+        // round refuse to start and the loop end on its first tick after launch.
+        for i in seed.indices where seed[i].streaming {
+            seed[i].streaming = false
+            seed[i].toolActivity = nil
+        }
+        return runDetachedRound(threadID: threadID ?? UUID(), seed: seed,
+                                question: prompt, hideUserBubble: hide,
+                                mintsMirror: false)
     }
 
     /// Enter pressed in a detached compose window (the torn-out idle prompt).
@@ -2239,7 +2330,7 @@ final class NotchModel: ObservableObject {
     /// reach between them — this is the one surface that names all four at once,
     /// for the people who'd rather type the destination than learn two keys.
     enum SlashCommand: String, CaseIterable, Identifiable {
-        case ask, capture, remind, agent
+        case ask, capture, remind, agent, loop
 
         var id: String { rawValue }
 
@@ -2258,6 +2349,7 @@ final class NotchModel: ObservableObject {
             case .capture: base = ["capture", "note", "notes", "memo"]
             case .remind: base = ["remind", "reminder", "todo"]
             case .agent:  base = ["agent", "code", "task"]
+            case .loop:   base = ["loop", "repeat", "every", "cron"]
             }
             return base + [title.lowercased()]
         }
@@ -2357,6 +2449,12 @@ final class NotchModel: ObservableObject {
         return true
     }
 
+    /// The interval chip's "Don't loop" — lifts `/loop` and keeps the prompt.
+    func clearLoop() {
+        loopIntervalMinutes = nil
+        showLoopIntervalPicker = false
+    }
+
     /// Esc on an open menu: drop the command word, and the menu with it, back to
     /// the blank prompt — one step out, not a panel close.
     func dismissSlashMenu() -> Bool {
@@ -2405,6 +2503,15 @@ final class NotchModel: ObservableObject {
                 promptShortcutMode = nil
                 manualPanelOverride = nil
                 setAgentBucket(true)
+            case .loop:
+                // A loop rides whichever side is up — Agent stays Agent, anything
+                // else is an Ask. All it adds is the interval chip, set to the
+                // last interval used. Tapping the chip opens the card; typing
+                // `/loop` does not.
+                promptShortcutMode = nil
+                if !agentComposeActive { pinSubmitPanel(nil) }
+                loopIntervalMinutes = LoopInterval.lastMinutes
+                showLoopIntervalPicker = false
             }
         case .shortcut(let shortcut):
             setAgentBucket(false)
@@ -2444,6 +2551,7 @@ final class NotchModel: ObservableObject {
     /// it: "Write a note…", "Remind me to…". A pinned prompt shortcut shows its
     /// name in place of the key. Agent compose keeps its own.
     var idlePlaceholderKey: String {
+        if loopIntervalMinutes != nil { return "loop.placeholder" }
         if agentComposeActive { return "agent.placeholder" }
         if let shortcut = promptShortcutMode { return shortcut.displayName }
         switch manualPanelOverride {
@@ -3513,7 +3621,7 @@ final class NotchModel: ObservableObject {
         case "action_shortcut":
             guard let scoped, let action = AppShortcutAction.parse(scoped) else {
                 throw AppSettingValidationError.message(
-                    "action_shortcut requires scope=copy_answer, regenerate, pin, new_chat, filter, picker, or detach.")
+                    "action_shortcut requires scope=regenerate, pin, new_chat, filter, picker, or detach.")
             }
             if ["default", "reset", "restore"].contains(Self.settingToken(value)) {
                 return made("\(setting)[\(action.token)]", action.label,
@@ -4431,10 +4539,6 @@ final class NotchModel: ObservableObject {
     /// other case applies straight away.
     func selectForceClickPressure(_ newValue: ForceClickPressure) {
         guard newValue != forceClickPressure else { return }
-        if newValue.isEnabled, SystemLookupGesture.usesForceClick {
-            forceClickLookupConflict = newValue
-            return
-        }
         applyForceClickPressure(newValue)
     }
 
@@ -4732,13 +4836,14 @@ final class NotchModel: ObservableObject {
     /// Stable id for the conversation currently on screen, so a follow-up updates
     /// the *same* recent-list row instead of inserting a new one each turn. Reset
     /// whenever a fresh thread begins (first question, new chat, reopened item).
-    private var threadHistoryID = UUID()
+    private(set) var threadHistoryID = UUID()
 
     init(ai: AIService = StubAIService()) {
         self.ai = ai
         loadHistoryAsync()
         startClipboardSense()
         refreshAgentSkills()
+        bindChatLoops()
         // A debounced archive write may still be pending when the user quits;
         // flush it synchronously so a ⌘Q moments after an answer can't lose the
         // newest row.
@@ -5618,6 +5723,7 @@ final class NotchModel: ObservableObject {
         showAgentPicker = false
         showAskModelPicker = false
         showAgentFolderPicker = false
+        showLoopIntervalPicker = false
         isResultMetadataMenuOpen = false
         text = ""; turns = []
         showHistory = false
@@ -5934,6 +6040,11 @@ final class NotchModel: ObservableObject {
             // runs on the backend that shortcut names.
             armModelPin(shortcut.pin)
             submit()
+            return
+        }
+        // `/loop` on the Ask side: the line becomes a thread that re-asks itself.
+        if let minutes = loopIntervalMinutes, effectiveSubmitPanel == .chat {
+            startChatLoop(minutes: minutes)
             return
         }
         // The selection carried in from the app the user came from rides along
@@ -6263,20 +6374,23 @@ final class NotchModel: ObservableObject {
             prompt = Self.agentImageOnlyPrompt(count: agentComposeImages.count)
         }
         // No single-task gate: tasks run in parallel — a submit while others
-        // are working just spawns another run.
+        // are working just spawns another run. `/loop` is read now: the folder
+        // picker below can outlive the line it belongs to.
+        let loopMinutes = loopIntervalMinutes
         if let folder = agentComposeFolder {
-            startAgentRun(folder: folder, prompt: prompt, openDetail: openDetail)
+            startAgentRun(folder: folder, prompt: prompt, openDetail: openDetail,
+                          loopMinutes: loopMinutes)
         } else {
             pickAgentFolder { [weak self] folder in
                 self?.startAgentRun(folder: folder, prompt: prompt,
-                                    openDetail: openDetail)
+                                    openDetail: openDetail, loopMinutes: loopMinutes)
             }
         }
         return true
     }
 
     private func startAgentRun(folder: URL, prompt: String,
-                               openDetail: Bool = false) {
+                               openDetail: Bool = false, loopMinutes: Int? = nil) {
         // Pass the model pick only if it still belongs to the armed engine —
         // a stale cross-engine leftover would 404 the run.
         let engine = agentArmedEngine
@@ -6288,6 +6402,7 @@ final class NotchModel: ObservableObject {
         let effort = agentEffort.flatMap {
             engine.effortChoices(forModelID: model).contains($0) ? $0 : nil
         }
+        if let loopMinutes { LoopInterval.remember(loopMinutes) }
         // What actually ran is the truest "recent" signal there is — including the
         // CLI-default pick (`model == nil`), which is a choice like any other.
         AgentModelMRU.record(engine: engine, model: model)
@@ -6306,7 +6421,7 @@ final class NotchModel: ObservableObject {
             }
             if let taskID = AgentTaskManager.shared.start(
                 folder: folder, prompt: prompt, engine: engine, model: model,
-                effort: effort, imagesJPEG: jpegs
+                effort: effort, imagesJPEG: jpegs, loopMinutes: loopMinutes
             ), openDetail {
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
                     self.agentDetailTaskID = taskID
@@ -6342,8 +6457,13 @@ final class NotchModel: ObservableObject {
             // this"), so the record is unreadable without them.
             promptTurn.imageFiles = exchange.imageFiles
             promptTurn.isAgent = true
+            // A loop's later rounds re-ask the loop's own prompt, which the
+            // record already shows at its top.
+            promptTurn.loopRound = exchange.loopRound
+            if let round = exchange.loopRound, round > 1 { promptTurn.hidesUserBubble = true }
             thread.append(promptTurn)
             var answerTurn = Turn(role: "assistant", text: exchange.answer)
+            answerTurn.loopRound = exchange.loopRound
             answerTurn.answerModel = footer
             // Marked as the agent's turn so the reopened thread knows what it is:
             // no regenerate on the report (the chat model can't redo the run),
@@ -6467,7 +6587,7 @@ final class NotchModel: ObservableObject {
             } else if let asked = askedTurn {
                 rounds.append(.init(prompt: asked.text, answer: turn.text,
                                     imageFiles: asked.imageFiles,
-                                    log: turn.agentLog ?? []))
+                                    log: turn.agentLog ?? [], loopRound: turn.loopRound))
                 askedTurn = nil
             }
         }
@@ -6541,7 +6661,7 @@ final class NotchModel: ObservableObject {
                     } else if let asked = askedTurn {
                         rounds.append(.init(prompt: asked.text, answer: turn.text,
                                             imageFiles: asked.imageFiles,
-                                            log: turn.agentLog ?? []))
+                                            log: turn.agentLog ?? [], loopRound: turn.loopRound))
                         askedTurn = nil
                     }
                 }
@@ -6762,8 +6882,17 @@ final class NotchModel: ObservableObject {
         // char budget is spent. The current question is the last kept turn, so it is
         // always admitted first — a single turn is never dropped for being too big,
         // it's just the only one that fits. Older turns beyond the budget fall off.
+        // A loop thread sends the task and the previous round, not every round
+        // so far: a week of hourly rounds would otherwise be the whole context.
+        // Round one's question (the task itself) and everything the user typed
+        // always ride.
+        let latestLoopRound = turns.compactMap(\.loopRound).max()
         let wirable = turns.filter { turn in
             if turn.id == answerID { return false }
+            if let round = turn.loopRound, let latest = latestLoopRound,
+               round < latest - 1, !(round == 1 && turn.role == "user") {
+                return false
+            }
             if turn.role == "assistant" {
                 let body = turn.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 if body.isEmpty || turn.isError { return false }
@@ -6811,6 +6940,8 @@ final class NotchModel: ObservableObject {
             surface: nextSubmitSurface
                 ?? (fromPromptShortcut ? NoNoRequestContext.shortcut : NoNoRequestContext.ask))
         nextSubmitSurface = nil
+        let loopRound = nextSubmitLoopRound
+        nextSubmitLoopRound = nil
         var q = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let pastedImages = askComposeImages
         if q.isEmpty {
@@ -6856,10 +6987,12 @@ final class NotchModel: ObservableObject {
         // This ask "uses" the model it will stream from — feed the chip menu's
         // recents (the one-shot regenerate override counts as the model used).
         let askProvider = runProvider
-        AskModelMRU.record(provider: askProvider,
-                           model: overrideModel
-                               ?? APIKeyStore.effectiveModel(for: askProvider)
-                               ?? askProvider.defaultModel)
+        // The model this round streams from, resolved once: the recents below and
+        // the tool set further down both have to name the same one.
+        let runModel = overrideModel
+            ?? APIKeyStore.effectiveModel(for: askProvider)
+            ?? askProvider.defaultModel
+        AskModelMRU.record(provider: askProvider, model: runModel)
         text = ""
         askComposeImages = []
         showHistory = false
@@ -6886,8 +7019,9 @@ final class NotchModel: ObservableObject {
         // Append this question and an empty assistant turn it'll stream into. On a
         // first question `turns` is empty (fresh thread); on a follow-up the prior
         // turns are already here, so the new pair just extends the conversation.
-        let questionTurn = Turn(role: "user", text: q,
+        var questionTurn = Turn(role: "user", text: q,
                                 hidesUserBubble: hideUserBubble)
+        questionTurn.loopRound = loopRound
         // Held so the deferred image encode below can find this exact turn again —
         // by id, never by index, since the thread on screen may have moved on (a new
         // chat, a reopened row) by the time the JPEG lands.
@@ -6895,6 +7029,7 @@ final class NotchModel: ObservableObject {
         turns.append(questionTurn)
         let answerID = UUID()
         var answerTurn = Turn(id: answerID, role: "assistant", text: "", streaming: true)
+        answerTurn.loopRound = loopRound
         // Stamp the one-shot regenerate model (XII-135) so the answer shows which
         // model produced it; rides into the saved snapshot below.
         answerTurn.regenModel = overrideModel
@@ -7225,7 +7360,16 @@ final class NotchModel: ObservableObject {
                     guard let self else { return .empty }
                     return await MainActor.run { self.searchArchive(query) }
                 })
-                if runProvider == .nono {
+                // Blend1 only, and deliberately not the whole nono provider.
+                // The filter keeps a 26B thinking model from walking a long tool
+                // list, and it pays for that with a tool set that changes with the
+                // words in the question. On a Workers AI entry that is the wrong
+                // trade: its prompt cache matches on a prefix, the tool schemas
+                // are rendered into that prefix, and a set that changes per turn
+                // re-prefills the whole prompt every time. A named entry gets the
+                // same tools on every turn, so the prefix repeats and the input is
+                // billed at the cached rate.
+                if runProvider == .nono, ModelRatings.isNonoID(runModel) {
                     agentTools = AskToolIntent.filter(agentTools, for: q)
                 }
                 let registry = ToolRegistry(agentTools)
@@ -7429,13 +7573,22 @@ final class NotchModel: ObservableObject {
                 let walkedAway = !self.isPresented(answerID: answerID)
                 self.markFinished(id: answerID)   // no-op when detached
                 self.persistThread(thread, threadID: threadID, answer: acc)
-                if walkedAway {
+                // A loop round's banner is the loop's own (`ChatLoopManager`).
+                if walkedAway, loopRound == nil {
                     self.notifyAnswerReady(threadID: threadID, question: q, answer: acc)
                 }
+                ChatLoopManager.shared.roundFinished(
+                    threadID: threadID, loopRound: loopRound,
+                    failed: acc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                    answer: acc)
             } catch is CancellationError {
                 // superseded by a newer round on the same screen; nothing to persist
                 pendingFlush?.cancel()
                 streamSettled = true
+                // A superseded loop round still ends: the loop waits from here.
+                ChatLoopManager.shared.roundFinished(threadID: threadID,
+                                                     loopRound: loopRound,
+                                                     failed: false, quietly: true)
             } catch {
                 if Task.isCancelled { return }
                 // Settle the throttle before the terminal writes below: they own
@@ -7463,12 +7616,15 @@ final class NotchModel: ObservableObject {
                     }
                     let walkedAway = !self.isPresented(answerID: answerID)
                     self.persistThread(thread, threadID: threadID, answer: saved)
+                    ChatLoopManager.shared.roundFinished(threadID: threadID,
+                                                         loopRound: loopRound, failed: false,
+                                                         answer: saved)
                     // Only touch the screen when this round still owns it.
                     if self.isOnScreen(answerID: answerID) {
                         self.updateAnswer(id: answerID, text: saved)
                         self.markFinished(id: answerID)
                         self.mode = .result
-                    } else if walkedAway {
+                    } else if walkedAway, loopRound == nil {
                         // Interrupted but salvaged a partial answer, and the user had
                         // already walked away — still notify, same as a clean finish.
                         self.notifyAnswerReady(threadID: threadID, question: q, answer: saved)
@@ -7489,6 +7645,9 @@ final class NotchModel: ObservableObject {
                     self.persistThread(thread, threadID: threadID, answer: "",
                                        outOfCredit: (error as? OpenAICompatAIService.ServiceError)?
                                            .isOutOfCredit == true)
+                    ChatLoopManager.shared.roundFinished(threadID: threadID,
+                                                         loopRound: loopRound, failed: true,
+                                                         answer: error.localizedDescription)
                     if self.isOnScreen(answerID: answerID) {
                         // Surface the REAL reason (XII-85) — `ServiceError` already
                         // localizes to e.g. "Anthropic · HTTP 401" — and raise an
@@ -7629,7 +7788,7 @@ final class NotchModel: ObservableObject {
         let provider = APIKeyStore.selectedProvider
         let current = APIKeyStore.effectiveModel(for: provider) ?? provider.defaultModel
         return provider.availableModels.map {
-            ($0, provider == .nono ? ModelRatings.nonoName(for: $0) : $0, $0 == current)
+            ($0, provider == .nono ? ModelRatings.prettyName(for: $0, provider: .nono) : $0, $0 == current)
         }
     }
 
@@ -8280,10 +8439,14 @@ final class NotchModel: ObservableObject {
         let service = ai
         do {
             var title = ""
-            for try await chunk in service.stream(
-                system: titleSystemPrompt,
-                messages: [ChatMessage(role: "user", content: prompt)]
+            let chunks = NoNoRequestContext.$current.withValue(
+                NoNoRequestContext(surface: NoNoRequestContext.title)
             ) {
+                service.stream(
+                    system: titleSystemPrompt,
+                    messages: [ChatMessage(role: "user", content: prompt)])
+            }
+            for try await chunk in chunks {
                 title += chunk
             }
             let cleaned = title
@@ -8387,6 +8550,21 @@ final class NotchModel: ObservableObject {
     func openThread(id: UUID) {
         guard let item = history.first(where: { $0.id == id }), !item.pending else { return }
         openHistory(item)
+    }
+
+    /// A chat loop's task row, tapped. A round still writing — round one's
+    /// placeholder row, or a later round on the settled thread — is attached to
+    /// the screen, so the tap lands on the answer as it arrives; otherwise the
+    /// thread opens like any Recent row.
+    func openLoopThread(id: UUID) {
+        if let round = inFlightRounds.first(where: { $0.threadID == id }) {
+            askComposeImages = []
+            showHistory = false
+            highlightedHistoryIndex = nil
+            attachInFlightRound(round)
+            return
+        }
+        openThread(id: id)
     }
 
     /// Consume the "finished while you weren't looking" bead on an agent row.
@@ -9005,6 +9183,7 @@ final class NotchModel: ObservableObject {
                 historySaveDeferred = false
                 saveHistory()
             }
+            ChatLoopManager.shared.restore()
             // The archive is now whole, so anything in the image store it doesn't
             // reference is residue (a crash between writing the JPEG and persisting
             // the row, a Clear that landed before the load) — sweep it.

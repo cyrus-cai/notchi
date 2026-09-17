@@ -447,7 +447,7 @@ Supported setting ids and values:
 - hover_sensitivity: low, balanced, or instant
 - note_destination: apple_notes or markdown_folder; notes_folder: absolute path
 - summon_shortcut: disabled, default, double_option, double_command, double_control, double_shift, or a chord such as command+shift+k
-- action_shortcut: a chord such as command+shift+c, or default to restore the shipped one. scope is required: copy_answer, regenerate, pin, new_chat, filter, picker, or detach
+- action_shortcut: a chord such as command+shift+c, or default to restore the shipped one. scope is required: regenerate, pin, new_chat, filter, picker, or detach
 - prompt_shortcut: a global chord, or remove to delete, or keep to edit only its text. prompt is required when creating one. scope picks an existing binding by chord or prompt text; omit scope to create.
 - custom_instructions: text (empty clears it); proxy: URL/host, or auto to clear
 - ai_provider: openrouter, vercel, openai, codex, claude_code, grok_code, pi_code, anthropic, gemini, deepseek, qwen, glm, kimi, minimax, mimo, custom

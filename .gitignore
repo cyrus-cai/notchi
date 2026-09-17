@@ -34,6 +34,16 @@ CLAUDE.md
 
 # Local hosted-model gateway — contains nono's private upstream routing.
 backend/
+# Wrangler's local secrets, at any depth. Today backend/.dev.vars is covered
+# by the line above, but only for as long as the whole directory stays out of
+# the repo. The moment one file in it is committed, that cover is gone and the
+# secrets are not. This line is what holds then.
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+# A stray `npm` run at the repo root leaves one here — the vitest cache turned
+# up staged on the 0.8.2 release commit. The backend keeps its own.
+node_modules/
 
 # Landing page / front-end — kept local only, deployed via Vercel, never
 # published to this repo. Includes ROADMAP/reviews docs that lived here too.

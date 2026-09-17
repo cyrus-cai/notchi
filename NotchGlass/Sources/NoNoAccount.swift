@@ -31,6 +31,8 @@ struct NoNoRequestContext: Sendable {
     static let window = "window"
     /// Background naming of a new prompt shortcut.
     static let naming = "naming"
+    /// Background titling of a conversation thread.
+    static let title = "title"
 
     @TaskLocal static var current: NoNoRequestContext?
 
@@ -269,6 +271,9 @@ final class NoNoAccount: ObservableObject {
         var at: Double
         var model: String
         var promptTokens: Int?
+        /// The part of `promptTokens` served from the upstream's cache, billed
+        /// at the cached rate. `nil` on a model with one input rate.
+        var cachedTokens: Int?
         var completionTokens: Int?
         var billedUSD: Double?
 

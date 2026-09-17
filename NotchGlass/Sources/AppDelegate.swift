@@ -956,6 +956,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for recovered in AgentTaskManager.shared.recoverInterruptedRuns() {
             model.recordAgentHistory(recovered)
         }
+        AgentTaskManager.shared.restorePersistedLoops()
 
         // A tap on an agent-Codex "task finished" banner: summon the panel and
         // reopen the run's Recent record (filed above just before the banner
@@ -1210,51 +1211,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
-        // A fired press always gets its composer. The cue is drawn before anyone
-        // knows whether there is a selection, so it waits for the stretch to settle
-        // either way and the window takes its place.
+        // The cue is drawn before anyone knows whether there is a selection, so
+        // the window waits for that stretch to settle and then takes its place.
         let deliver: (String, NSPoint, NSRunningApplication?) -> Void = { text, point, app in
             guard grownFromPressure else { return open(text, point, app) }
             ForceClickHerald.shared.whenExpanded { open(text, point, app) }
         }
-        // Did the box already open on an empty first read? Everything that lands
-        // later then only ever ADDS to it — re-opening would throw away a draft
-        // the user has already started typing into it.
-        var openedEarly = false
+        // Nothing to act on: take the cue off screen and let the press go. Left
+        // standing the cue is a glass pill above every window that takes no click
+        // and no key, with the herald latched mid-stretch so no later press can
+        // even redraw it.
+        let ignore: () -> Void = {
+            guard grownFromPressure else { return }
+            ForceClickHerald.shared.abort()
+        }
         captureSelectedText(
             pointed: grownFromPressure,
-            // The direct AX read and short clipboard probe found nothing — which
-            // is the common case for a press that wasn't on a selection at all,
-            // and for a browser whose web tree is still cold. The composer opens
-            // now rather than after the remaining wake-up ladder; a late AX result
-            // can still arrive into the open window.
+            // No early open on an empty first read any more: empty may now BE the
+            // answer, and an answer of "nothing selected" opens nothing. The box
+            // waits for the capture to finish either way.
             //
-            // Only the pointer-side destination takes this: unfolding the notch a
-            // beat early and then having context appear underneath is a bigger
-            // move than the wait it saves.
-            firstPassEmpty: config.opensInPointerWindow ? { point, app in
-                openedEarly = true
-                deliver("", point, app)
-            } : nil,
-            // Nothing selected is not a failure — it's an ordinary Ask. The same
-            // composer opens with no context: no badge, and a line that stands on
-            // its own (`startPromptShortcutRound` already sends it that way).
-            noSelection: { point, app in
-                guard !openedEarly else { return }
-                deliver("", point, app)
-            },
-            // Denied, or a capture already in flight: no composer is coming, so the
-            // cue has to be taken off screen. Left standing it is a glass pill above
-            // every window that takes no click and no key, with the herald latched
-            // mid-stretch so no later press can even redraw it.
-            unavailable: {
-                guard grownFromPressure else { return }
-                ForceClickHerald.shared.abort()
-            },
+            // Nothing selected is not a failure, but it is also not an ordinary
+            // Ask: this trigger rides a press the user was making anyway, so an
+            // empty read is far more often a press that was never aimed at Notchi
+            // than a request for an empty composer. It is ignored.
+            noSelection: { _, _ in ignore() },
+            // Denied, or a capture already in flight: nothing is coming either.
+            unavailable: ignore,
             action: { text, point, app in
-                guard openedEarly else { return deliver(text, point, app) }
-                DetachedSessionWindowController.attachCompactSelection(
-                    shortcutID: SelectedTextShortcutStore.actionID, text: text)
+                guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                else { return ignore() }
+                deliver(text, point, app)
             })
     }
 

@@ -1036,10 +1036,17 @@ struct SendButton: View {
     }
 }
 
-/// Same glass circle as `SendButton`, shown while an ask is streaming. Esc
-/// already stops the round; this is the visible twin so the verb isn't keyboard-only.
+/// Shown while an ask is streaming. Esc already stops the round; this is the
+/// visible twin so the verb isn't keyboard-only. On a loop the caller passes
+/// `help` — there the press ends the loop, not just the round in flight, and the
+/// label has to say so.
+///
+/// Unlike `SendButton` this is NOT glass and has no plate: on a light or busy
+/// desktop any fill (glass or a white wash) read as a floating chip over the
+/// composer. Only the glyph is the control; hover just brightens the ink.
 struct StopButton: View {
     var compact: Bool = false
+    var help: String? = nil
     var action: () -> Void
     @State private var hovering = false
 
@@ -1047,18 +1054,17 @@ struct StopButton: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: "stop.fill")
-                .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
+            Image(systemName: "stop.circle")
+                .font(.sf(Tokens.TypeSize.form, weight: .regular))
                 .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
                 .frame(width: size, height: size)
-                .glassCapsule(in: Circle(), brighter: hovering)
-                .contentShape(Circle())
+                .contentShape(Rectangle())
         }
-        .buttonStyle(GlassPressStyle())
+        .buttonStyle(PlatePressStyle())
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
-        .notchTooltip(L("result.stop"), edge: .top)
-        .accessibilityLabel(L("result.stop"))
+        .notchTooltip(help ?? L("result.stop"), edge: .top)
+        .accessibilityLabel(help ?? L("result.stop"))
     }
 }
 
@@ -1118,6 +1124,13 @@ struct AgentRecordBody: View {
     /// compact 13pt scale so Agent records match chat records in the same column.
     var questionFont: CGFloat = Tokens.TypeSize.reading
     var answerFont: CGFloat = Tokens.TypeSize.reading
+    /// A loop's record reads one round at a time (`LoopRoundSidebar`): the
+    /// exchange at this index, or the round in flight when the index is past the
+    /// last exchange. Nil shows every round.
+    var onlyRound: Int? = nil
+    /// Drop every loop round's question — the loop's prompt sits above the
+    /// round column instead of repeating in each round.
+    var hidesLoopPrompts: Bool = false
 
     var body: some View {
         // The flat trail (`task.log`) spans every round; the settled rounds each
@@ -1126,40 +1139,48 @@ struct AgentRecordBody: View {
         // produced so far. Split by entry id, never by index, so a capped/trimmed
         // trail still partitions cleanly.
         let claimedIDs = Set(task.exchanges.flatMap { $0.log.map(\.id) })
-        let liveTail = task.log.filter { !claimedIDs.contains($0.id) }
+        let hidesLivePrompt = hidesLoopPrompts && task.liveLoopRound != nil
+        let liveTail = task.log.filter {
+            !claimedIDs.contains($0.id) && !(hidesLivePrompt && $0.title == "› " + task.prompt)
+        }
+        let showsLive = onlyRound.map { $0 >= task.exchanges.count } ?? true
         // Two stacks, not one: the record keeps its own 14pt rhythm, while the
         // runway and the anchor sit in a 0-spaced stack below it — dropping the
         // spacing SwiftUI would otherwise insert on both sides of the runway.
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 14) {
-                ForEach(Array(task.exchanges.enumerated()), id: \.offset) { _, exchange in
-                    VStack(alignment: .leading, spacing: 5) {
-                        if !exchange.imageFiles.isEmpty {
-                            SavedTurnImages(files: exchange.imageFiles)
+                ForEach(Array(task.exchanges.enumerated()), id: \.offset) { index, exchange in
+                    if onlyRound == nil || onlyRound == index {
+                        if !(hidesLoopPrompts && exchange.loopRound != nil) {
+                            VStack(alignment: .leading, spacing: 5) {
+                                if !exchange.imageFiles.isEmpty {
+                                    SavedTurnImages(files: exchange.imageFiles)
+                                }
+                                UserQuestionBubble(text: exchange.prompt, baseFont: questionFont)
+                            }
                         }
-                        UserQuestionBubble(text: exchange.prompt, baseFont: questionFont)
-                    }
-                    // The trail's last narration entry IS this round's report (the
-                    // parser records it in both places) — drop it so it isn't
-                    // printed again by the answer just below. See
-                    // `droppingTrailingAnswer`.
-                    let trail = exchange.log.droppingTrailingAnswer(exchange.answer)
-                    if !trail.isEmpty {
-                        // Lazy: a long run's trail is hundreds of rows and this page
-                        // pins to the tail — see `isLazy`'s doc.
-                        AgentWorkTrailView(entries: trail, isLazy: true,
-                                           baseFont: answerFont)
-                    }
-                    if !exchange.answer.isEmpty {
-                        MarkdownBlocks(source: exchange.answer, baseFont: answerFont)
+                        // The trail's last narration entry IS this round's report (the
+                        // parser records it in both places) — drop it so it isn't
+                        // printed again by the answer just below. See
+                        // `droppingTrailingAnswer`.
+                        let trail = exchange.log.droppingTrailingAnswer(exchange.answer)
+                        if !trail.isEmpty {
+                            // Lazy: a long run's trail is hundreds of rows and this page
+                            // pins to the tail — see `isLazy`'s doc.
+                            AgentWorkTrailView(entries: trail, isLazy: true,
+                                               baseFont: answerFont)
+                        }
+                        if !exchange.answer.isEmpty {
+                            MarkdownBlocks(source: exchange.answer, baseFont: answerFont)
+                        }
                     }
                 }
                 // The round still in flight has no settled exchange yet. Round one
                 // carries no "› " marker, so its prompt is the task headline; a
                 // follow-up round's prompt already rides the live tail as its
                 // leading "› " marker.
-                if task.isRunning {
-                    if task.exchanges.isEmpty {
+                if task.isRunning, showsLive {
+                    if task.exchanges.isEmpty, !hidesLivePrompt {
                         // The images the round was handed echo above its prompt,
                         // the same way a settled round's do — while it runs, this
                         // is the only place the screenshot the task was built on
@@ -1239,6 +1260,10 @@ struct ComposerBox<Placeholder: View, Trailing: View>: View {
     /// over another app, so the recess floor reads as a solid dark pill; glass
     /// samples through the window and stays a chip of the same material.
     var glass: Bool = false
+    /// Trade the glass chip for a rim and a bare wash of a floor: the box stays
+    /// legible as a field without becoming the brightest thing on the surface it
+    /// sits on.
+    var hollow: Bool = false
     /// Flash the rim whenever this changes, in `pulseTint` — the peripheral twin
     /// of the destination pill's word swap. `nil` = no pulse.
     var pulse: AnyHashable? = nil
@@ -1334,7 +1359,8 @@ struct ComposerBox<Placeholder: View, Trailing: View>: View {
         .padding(.leading, 13)
         .padding(.trailing, 6)
         .padding(.vertical, 6)
-        .modifier(ComposerBoxChrome(shape: shape, glass: glass, focused: focused))
+        .modifier(ComposerBoxChrome(shape: shape, glass: glass, hollow: hollow,
+                                    focused: focused))
         .animation(.easeOut(duration: 0.2), value: focused)
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isEmpty)
         .animation(.spring(response: 0.32, dampingFraction: 0.86), value: fieldHeight)
@@ -1354,10 +1380,22 @@ struct ComposerBox<Placeholder: View, Trailing: View>: View {
 private struct ComposerBoxChrome<S: InsettableShape>: ViewModifier {
     var shape: S
     var glass: Bool
+    var hollow: Bool = false
     var focused: Bool
 
     func body(content: Content) -> some View {
-        if glass {
+        if hollow {
+            content
+                // Just enough floor to separate the field from the page — a
+                // wash, not the glass chip's lit fill.
+                .background(shape.fill(Color.white.opacity(focused ? 0.12 : 0.08)))
+                .contentShape(shape)
+                .overlay(
+                    shape.strokeBorder(Color.white.opacity(focused ? 0.30 : 0.20),
+                                       lineWidth: 0.5)
+                        .allowsHitTesting(false)
+                )
+        } else if glass {
             content
                 .clipShape(shape)
                 .glassCapsule(in: shape, brighter: focused)
@@ -1796,6 +1834,7 @@ struct PanelBackPill: View {
                 Text(title)
                     .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                     .tracking(0.4)
+                    .textCase(.uppercase)
                     .lineLimit(1)
             }
             .foregroundStyle(hovering ? Tokens.text1 : Tokens.text3)
@@ -3617,12 +3656,6 @@ struct AssistantTurnView: View {
     /// rather than pop in at full height.
     @State private var blockOpened = false
 
-    /// How long this round spent before it had anything to say — latched at the
-    /// first token and never touched again, so the anchor's suffix is a finished
-    /// duration rather than a clock that keeps running under the answer.
-    @State private var processElapsed: TimeInterval? = nil
-
-
     /// The gutter the orb occupies on the block's headline while the round is
     /// still working. It CLOSES with the orb rather than being held empty: a
     /// settled anchor left indented by a gutter nothing occupies reads as
@@ -3797,9 +3830,9 @@ struct AssistantTurnView: View {
     /// OVERLAY that vanished, and the collapsed anchor a separate sibling that
     /// appeared. Two views swapping cannot be animated into each other — the
     /// handover was a hard cut no transition could bridge, whatever easing sat on
-    /// either side. Here nothing is swapped: the words dissolve, the timer stops,
-    /// the orb fades out of its gutter, and the list's height closes, all on the
-    /// same beat, and the answer under it rises into the room that frees up.
+    /// either side. Here nothing is swapped: the words dissolve, the orb fades
+    /// out of its gutter, and the list's height closes, all on the same beat,
+    /// and the answer under it rises into the room that frees up.
     private var readingBlock: some View {
         let expanded = readingExpanded
         let working = streaming && !hasText
@@ -3842,12 +3875,6 @@ struct AssistantTurnView: View {
                             .foregroundStyle(Tokens.text4)
                             .rotationEffect(.degrees(expanded ? 0 : -90))
                             .centeredOnTextGlyphs(fontSize: waitFont)
-                        // Ticking while the round waits, frozen at the first token
-                        // (`stopped` wins) — the same slot either way, so the
-                        // digits simply stop instead of the label being replaced.
-                        WaitElapsedSuffix(since: thinkingSince, font: waitFont,
-                                          stopped: processElapsed)
-                            .fixedSize()
                     }
                 }
                 .contentShape(Rectangle())
@@ -4020,8 +4047,7 @@ struct AssistantTurnView: View {
                         // (headings, `**bold**`, lists, code fences). The paired
                         // plain-text button below strips that formatting.
                         AnswerFooterButton(icon: "doc.on.doc",
-                                           help: shortcutHelp("result.copyMarkdown",
-                                                              action: .copyAnswer),
+                                           help: L("result.copyMarkdown"),
                                            rowHovered: turnHovered,
                                            confirms: true) {
                             NSPasteboard.general.clearContents()
@@ -4110,13 +4136,6 @@ struct AssistantTurnView: View {
         // timeout) releases the round — same beat as the wait overlay's fade.
         .animation(.easeInOut(duration: Self.fade), value: pendingQuestion)
         .animation(.easeOut(duration: Self.fade), value: showsReadingBlock)
-        // Stop the clock the moment the answer starts. `hasText` is the same edge
-        // the wait itself yields on, so the number the anchor keeps is exactly
-        // what the wait line last showed.
-        .onChange(of: hasText) { _, written in
-            guard written, processElapsed == nil, let thinkingSince else { return }
-            processElapsed = Date().timeIntervalSince(thinkingSince)
-        }
     }
 }
 
@@ -8321,6 +8340,18 @@ enum MenuCard {
         }.max() ?? 0
         return min(ceil(widest) + 2 + (rowPad + cardPad) * 2, cap)
     }
+
+    /// How much wider a word is in the brand face than in the system one at the
+    /// same size — `width(titles:)` measures everything in the system face, so a
+    /// row drawn in the brand face needs this added or its word truncates.
+    static func brandOverhang(_ text: String, fontSize: CGFloat) -> CGFloat {
+        guard let brand = NSFont(name: "Prompt-Medium", size: fontSize) else { return 0 }
+        let system = NSFont.systemFont(ofSize: fontSize, weight: .medium)
+        func measure(_ font: NSFont) -> CGFloat {
+            NSAttributedString(string: text, attributes: [.font: font]).size().width
+        }
+        return max(0, ceil(measure(brand) - measure(system)))
+    }
 }
 
 /// Geometry and typography of the Recent ⋯ menu. Result metadata cards use
@@ -8559,6 +8590,13 @@ struct MenuCardRow: View {
     /// layout at rest — same as the detail card's scoring link — so arriving on
     /// the row reveals the arrow instead of shuffling the word.
     var hoverSymbol: String? = nil
+    /// Draw the word in the brand face rather than the system one. For the
+    /// product's own names, which are wordmarks rather than model ids.
+    var brandTitle: Bool = false
+    /// A row that heads a folded run of rows rather than choosing anything: the
+    /// chevron is always drawn, pointing right while the run is closed and down
+    /// while it is open. Nil on every ordinary row.
+    var disclosure: Bool? = nil
     /// The row's type size and slot. Defaulted to the `/` menu's own numbers.
     var fontSize: CGFloat = MenuCard.fontSize
     var accessoryFontSize: CGFloat = MenuCard.accessoryFontSize
@@ -8593,7 +8631,9 @@ struct MenuCardRow: View {
         return Button(action: action) {
             HStack(spacing: 6) {
                 Text(title)
-                    .font(.sf(fontSize, weight: emphasized && selected ? .medium : .regular))
+                    .font(brandTitle
+                          ? .brand(fontSize)
+                          : .sf(fontSize, weight: emphasized && selected ? .medium : .regular))
                     .foregroundStyle(selected || (promptShortcutID != nil && hovering)
                         ? Tokens.text1 : Tokens.text3)
                     .lineLimit(1)
@@ -8610,8 +8650,17 @@ struct MenuCardRow: View {
                         .lineLimit(1)
                         .fixedSize()
                 }
-                if let hoverSymbol {
+                if let disclosure {
                     if accessory == nil && !lowBalance { Spacer(minLength: 0) }
+                    Image(systemName: "chevron.right")
+                        .font(.sf(accessoryFontSize, weight: .semibold))
+                        .foregroundStyle(selected ? Tokens.text2 : Tokens.text4)
+                        .rotationEffect(.degrees(disclosure ? 90 : 0))
+                }
+                if let hoverSymbol {
+                    if accessory == nil && !lowBalance && disclosure == nil {
+                        Spacer(minLength: 0)
+                    }
                     Image(systemName: hoverSymbol)
                         .font(.sf(accessoryFontSize + 1, weight: .medium))
                         // Same ink as the row's own word — a brighter glyph beside

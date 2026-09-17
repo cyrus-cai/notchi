@@ -634,6 +634,23 @@ final class AgentTaskManager: ObservableObject {
         /// record, so a reopened run shows the same tool rows the live detail
         /// page did.
         var log: [AgentLogEntry] = []
+        /// Which loop round this was (1, 2, …); nil for a round the user typed.
+        /// Drives the loop record's round column.
+        var loopRound: Int? = nil
+        /// When the round ran — the round column's "14:25 · 1m 52s".
+        var startedAt: Date? = nil
+        var finishedAt: Date? = nil
+    }
+
+    /// A `/loop` task's schedule: its interval, how many loop rounds have
+    /// started, and when the next is due (nil while a round runs). `active`
+    /// goes false for good once the loop is over; the task can stay in the tray.
+    struct LoopState: Equatable, Codable {
+        var intervalMinutes: Int
+        let startedAt: Date
+        var rounds = 1
+        var nextRoundAt: Date? = nil
+        var active = true
     }
 
     /// One agent task, live or finished. The manager keeps every undismissed
@@ -701,8 +718,15 @@ final class AgentTaskManager: ObservableObject {
         /// offer the in-app resume (`resume`) instead of only naming a terminal
         /// command. Cleared by definition once the resumed run settles normally.
         var interrupted = false
+        /// Set on a `/loop` task.
+        var loop: LoopState? = nil
+        /// The loop round the round in flight is; nil for a typed follow-up.
+        var liveLoopRound: Int? = nil
 
         var isRunning: Bool { outcome == nil }
+        var loopActive: Bool { loop?.active == true }
+        /// Between two loop rounds: settled, with the next one still to come.
+        var isLoopWaiting: Bool { loopActive && !isRunning }
         var elapsed: TimeInterval { (finishedAt ?? Date()).timeIntervalSince(startedAt) }
     }
 
@@ -765,6 +789,8 @@ final class AgentTaskManager: ObservableObject {
         /// round's own entries out with it (for the exchange's `log`). Walked
         /// back when the log cap trims the front of a marathon trail.
         var logStartIndex = 0
+        /// The loop round this is; nil for a typed round.
+        var loopRound: Int? = nil
     }
     private var runs: [UUID: RunState] = [:]
 
@@ -780,6 +806,38 @@ final class AgentTaskManager: ObservableObject {
         let markerID: UUID
     }
     private var pendingFollowUps: [UUID: [QueuedFollowUp]] = [:]
+
+    /// Each waiting loop's wait for its next round.
+    private var loopTimers: [UUID: Task<Void, Never>] = [:]
+
+    /// Active `/loop` tasks, so a quit does not drop the schedule. A round in
+    /// flight also rides `InFlightRun`; this is what brings a waiting loop back.
+    private static let persistLoopsKey = "notch_agent_loops"
+
+    private struct PersistedAgentLoop: Codable {
+        let id: UUID
+        let engine: String
+        let folderPath: String
+        let prompt: String
+        let sessionID: String?
+        let modelID: String?
+        let armedModel: String?
+        let armedEffort: String?
+        let intervalMinutes: Int
+        let startedAt: Date
+        let rounds: Int
+        let nextRoundAt: Date?
+        let finishedAt: Date?
+        let exchanges: [CompactExchange]
+        struct CompactExchange: Codable {
+            let prompt: String
+            let answer: String
+            let imageFiles: [String]
+            let loopRound: Int?
+            let startedAt: Date?
+            let finishedAt: Date?
+        }
+    }
 
     private init() {}
 
@@ -854,7 +912,7 @@ final class AgentTaskManager: ObservableObject {
     @discardableResult
     func start(folder: URL, prompt: String, engine: AgentEngine,
                model: String? = nil, effort: AgentEffort? = nil,
-               imagesJPEG: [Data] = []) -> UUID? {
+               imagesJPEG: [Data] = [], loopMinutes: Int? = nil) -> UUID? {
         guard let binary = Self.binary(for: engine) else {
             // The entry button is availability-gated, so a missing binary or
             // sign-in here means the user pressed ⏎ and nothing happened —
@@ -864,13 +922,20 @@ final class AgentTaskManager: ObservableObject {
             return nil
         }
 
-        let t = AgentTask(engine: engine, modelID: model, folder: folder,
+        var t = AgentTask(engine: engine, modelID: model, folder: folder,
                           prompt: prompt, startedAt: Date(),
                           armedModel: model, armedEffort: effort)
+        if let loopMinutes {
+            t.loop = LoopState(intervalMinutes: loopMinutes, startedAt: Date())
+            t.liveLoopRound = 1
+        }
         tasks.append(t)
+        persistActiveLoops()
         launch(taskID: t.id, binary: binary, engine: engine, folder: folder,
                prompt: prompt, model: model, effort: effort,
-               imagesJPEG: imagesJPEG, resumeSession: nil)
+               imagesJPEG: imagesJPEG, resumeSession: nil,
+               wireSuffix: loopMinutes.map { LoopInterval.agentWireSuffix(minutes: $0) },
+               loopRound: loopMinutes == nil ? nil : 1)
         return t.id
     }
 
@@ -913,14 +978,23 @@ final class AgentTaskManager: ObservableObject {
     /// which case any queued lines are cleared too.
     private func beginFollowUpRound(index i: Int, prompt: String,
                                     imagesJPEG: [Data], appendMarker: Bool,
-                                    existingMarkerID: UUID?) {
+                                    existingMarkerID: UUID?, loopRound: Int? = nil) {
         var t = tasks[i]
+        // Any round — a loop round or one the user typed — takes the place of
+        // the loop's wait; the wait restarts when this round settles.
+        loopTimers[t.id]?.cancel()
+        loopTimers[t.id] = nil
         guard let binary = Self.binary(for: t.engine) else {
             DiagnosticsLog.shared.record(provider: "Agent/\(t.engine.displayName)",
                                          kind: "agent-binary-missing")
             pendingFollowUps[t.id] = nil
+            tasks[i].loop?.active = false
+            tasks[i].loop?.nextRoundAt = nil
+            persistActiveLoops()
             return
         }
+        t.loop?.nextRoundAt = nil
+        t.liveLoopRound = loopRound
 
         t.outcome = nil
         t.finishedAt = nil
@@ -939,10 +1013,14 @@ final class AgentTaskManager: ObservableObject {
             markerID = existingMarkerID
         }
         tasks[i] = t
+        persistActiveLoops()
         launch(taskID: t.id, binary: binary, engine: t.engine, folder: t.folder,
                prompt: prompt, model: t.armedModel, effort: t.armedEffort,
                imagesJPEG: imagesJPEG, resumeSession: t.sessionID,
-               promptMarkerID: markerID)
+               promptMarkerID: markerID,
+               wireSuffix: loopRound == nil ? nil
+                   : t.loop.map { LoopInterval.agentWireSuffix(minutes: $0.intervalMinutes) },
+               loopRound: loopRound)
     }
 
     /// Pick an interrupted run back up in-app — the GUI half of `resumeCommand`.
@@ -1034,11 +1112,16 @@ final class AgentTaskManager: ObservableObject {
     private func launch(taskID: UUID, binary: String, engine: AgentEngine, folder: URL,
                         prompt: String, model: String?, effort: AgentEffort?,
                         imagesJPEG: [Data], resumeSession: String?,
-                        promptMarkerID: UUID? = nil) {
+                        promptMarkerID: UUID? = nil,
+                        wireSuffix: String? = nil, loopRound: Int? = nil) {
         let run = RunState()
         runs[taskID] = run
         run.currentPrompt = prompt
         run.promptMarkerID = promptMarkerID
+        run.loopRound = loopRound
+        // A loop round's instruction to end its own loop rides the wire only;
+        // the round's record (`currentPrompt`) keeps what the user wrote.
+        let prompt = prompt + (wireSuffix ?? "")
         // The round's trail starts where the task's log stands now (any follow-up
         // marker already appended stays with the PREVIOUS round's tail, not this
         // round's slice — the prompt becomes the record's own user turn instead).
@@ -1298,7 +1381,7 @@ final class AgentTaskManager: ObservableObject {
         // Remember the run is in flight — WITH its pid — so a quit/crash
         // mid-run re-attaches to the still-running process on the next launch
         // instead of writing the run off.
-        Self.saveInFlight(task: tasks.first { $0.id == taskID }, currentPrompt: prompt,
+        Self.saveInFlight(task: tasks.first { $0.id == taskID }, currentPrompt: run.currentPrompt,
                           pid: run.pid, spawnedAt: run.spawnedAt,
                           imageFiles: run.currentImageFiles)
 
@@ -1403,6 +1486,9 @@ final class AgentTaskManager: ObservableObject {
         guard let i = taskIndex(taskID), !tasks[i].isRunning else { return }
         tasks.remove(at: i)
         pendingFollowUps[taskID] = nil
+        loopTimers[taskID]?.cancel()
+        loopTimers[taskID] = nil
+        persistActiveLoops()
     }
 
     /// Reveal a task's folder in Finder — the finished card's "Open Folder".
@@ -1449,6 +1535,12 @@ final class AgentTaskManager: ObservableObject {
         /// This round's images (filenames in the history image store), so a
         /// recovered exchange keeps its screenshots.
         let currentImageFiles: [String]?
+        /// Optional so a marker from before loops persisted still decodes.
+        let loop: LoopState?
+        let liveLoopRound: Int?
+        let armedModel: String?
+        let armedEffort: String?
+        let modelID: String?
     }
 
     /// Each parallel run writes its own marker under `<prefix>_<task-uuid>`.
@@ -1476,7 +1568,12 @@ final class AgentTaskManager: ObservableObject {
             sessionID: t.sessionID,
             pid: pid,
             processStartedAt: spawnedAt,
-            currentImageFiles: imageFiles.isEmpty ? nil : imageFiles)
+            currentImageFiles: imageFiles.isEmpty ? nil : imageFiles,
+            loop: t.loop,
+            liveLoopRound: t.liveLoopRound,
+            armedModel: t.armedModel,
+            armedEffort: t.armedEffort?.rawValue,
+            modelID: t.modelID)
         guard let data = try? JSONEncoder().encode(run) else { return }
         UserDefaults.standard.set(data, forKey: inFlightKey(t.id))
     }
@@ -1593,6 +1690,7 @@ final class AgentTaskManager: ObservableObject {
                           prompt: marker.prompt, startedAt: marker.startedAt)
         t.sessionID = marker.sessionID
         t.exchanges = marker.rounds.map { .init(prompt: $0.prompt, answer: $0.answer) }
+        Self.applyLoop(marker, to: &t)
         // A follow-up round reopens the trail where its prompt did originally.
         let promptMarkerID: UUID?
         if !t.exchanges.isEmpty {
@@ -1612,6 +1710,7 @@ final class AgentTaskManager: ObservableObject {
         if let i = taskIndex(taskID) { tasks[i].liveImageFiles = run.currentImageFiles }
         run.pid = pid
         run.spawnedAt = marker.processStartedAt
+        run.loopRound = marker.liveLoopRound
         runs[taskID] = run
         // Re-arm the marker this recovery just consumed — the run can outlive
         // THIS app instance too.
@@ -1706,6 +1805,7 @@ final class AgentTaskManager: ObservableObject {
         t.contextWindow = progress?.contextWindow
         t.changedFiles = progress?.changedFiles ?? []
         t.exchanges = marker.rounds.map { .init(prompt: $0.prompt, answer: $0.answer) }
+        Self.applyLoop(marker, to: &t)
         // Finished when the log stopped growing, not when we found it — keeps
         // the "finished in …" line honest.
         let attrs = try? FileManager.default.attributesOfItem(atPath: outURL.path)
@@ -1784,6 +1884,94 @@ final class AgentTaskManager: ObservableObject {
                                          answer: L("agent.interrupted"),
                                          imageFiles: marker.currentImageFiles ?? []))
         return t
+    }
+
+    private static func applyLoop(_ marker: InFlightRun, to task: inout AgentTask) {
+        task.loop = marker.loop
+        task.liveLoopRound = marker.liveLoopRound
+        task.armedModel = marker.armedModel ?? task.armedModel
+        if let effort = marker.armedEffort {
+            task.armedEffort = AgentEffort(rawValue: effort)
+        }
+        task.modelID = marker.modelID ?? task.modelID
+    }
+
+    /// Bring waiting `/loop` tasks back after launch. Call after
+    /// `recoverInterruptedRuns` so a round still in flight is re-attached first
+    /// and this only fills in the ones that were between rounds.
+    func restorePersistedLoops() {
+        guard let data = UserDefaults.standard.data(forKey: Self.persistLoopsKey),
+              let records = try? JSONDecoder().decode([PersistedAgentLoop].self, from: data)
+        else { return }
+        let now = Date()
+        for record in records {
+            let lifetimeEnd = record.startedAt.addingTimeInterval(LoopInterval.lifetime)
+            let next = record.nextRoundAt
+                ?? now.addingTimeInterval(TimeInterval(record.intervalMinutes * 60))
+            guard next <= lifetimeEnd else { continue }
+            if let i = taskIndex(record.id) {
+                if tasks[i].loop == nil {
+                    tasks[i].loop = LoopState(intervalMinutes: record.intervalMinutes,
+                                              startedAt: record.startedAt,
+                                              rounds: record.rounds,
+                                              nextRoundAt: tasks[i].isRunning ? nil : next,
+                                              active: true)
+                    tasks[i].armedModel = record.armedModel ?? tasks[i].armedModel
+                    if let effort = record.armedEffort {
+                        tasks[i].armedEffort = AgentEffort(rawValue: effort)
+                    }
+                    if let round = tasks[i].liveLoopRound, runs[record.id]?.loopRound == nil {
+                        runs[record.id]?.loopRound = round
+                    }
+                }
+                if tasks[i].isLoopWaiting { scheduleLoopRound(record.id, at: next) }
+                continue
+            }
+            guard let engine = AgentEngine(rawValue: record.engine) else { continue }
+            var t = AgentTask(id: record.id, engine: engine,
+                              folder: URL(fileURLWithPath: record.folderPath),
+                              prompt: record.prompt,
+                              startedAt: record.finishedAt ?? record.startedAt)
+            t.sessionID = record.sessionID
+            t.modelID = record.modelID
+            t.armedModel = record.armedModel
+            t.armedEffort = record.armedEffort.flatMap(AgentEffort.init)
+            t.exchanges = record.exchanges.map {
+                .init(prompt: $0.prompt, answer: $0.answer, imageFiles: $0.imageFiles,
+                      loopRound: $0.loopRound, startedAt: $0.startedAt,
+                      finishedAt: $0.finishedAt)
+            }
+            t.finishedAt = record.finishedAt ?? now
+            t.outcome = .success
+            t.loop = LoopState(intervalMinutes: record.intervalMinutes,
+                               startedAt: record.startedAt, rounds: record.rounds,
+                               nextRoundAt: next, active: true)
+            tasks.append(t)
+            scheduleLoopRound(record.id, at: next)
+        }
+        persistActiveLoops()
+    }
+
+    private func persistActiveLoops() {
+        let records: [PersistedAgentLoop] = tasks.compactMap { t in
+            guard let loop = t.loop, loop.active else { return nil }
+            return PersistedAgentLoop(
+                id: t.id, engine: t.engine.rawValue, folderPath: t.folder.path,
+                prompt: t.prompt, sessionID: t.sessionID, modelID: t.modelID,
+                armedModel: t.armedModel, armedEffort: t.armedEffort?.rawValue,
+                intervalMinutes: loop.intervalMinutes, startedAt: loop.startedAt,
+                rounds: loop.rounds,
+                nextRoundAt: t.isRunning ? nil : loop.nextRoundAt,
+                finishedAt: t.finishedAt,
+                exchanges: t.exchanges.map {
+                    .init(prompt: $0.prompt, answer: $0.answer, imageFiles: $0.imageFiles,
+                          loopRound: $0.loopRound, startedAt: $0.startedAt,
+                          finishedAt: $0.finishedAt)
+                })
+        }
+        if let data = try? JSONEncoder().encode(records) {
+            UserDefaults.standard.set(data, forKey: Self.persistLoopsKey)
+        }
     }
 
     // MARK: - Run log files & process probing
@@ -2013,6 +2201,22 @@ final class AgentTaskManager: ObservableObject {
             answer = GrokCLIService.salvageGeneratedImages(in: answer, workDir: t.folder)
             t.result = answer
         }
+        // A loop round can end its own loop: the agent writes the done marker at
+        // the end of its report. The marker never reaches the record.
+        var loopDone = false
+        if run.loopRound != nil, answer.contains(LoopInterval.doneMarker) {
+            loopDone = true
+            let strip: (String) -> String = {
+                $0.replacingOccurrences(of: LoopInterval.doneMarker, with: "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            answer = strip(answer)
+            t.result = strip(t.result)
+            if answer.isEmpty {
+                answer = L("agent.done", t.engine.displayName,
+                           NotchModel.formatAgentElapsed(t.elapsed))
+            }
+        }
         // A follow-up marker is only a live placeholder. Once the round becomes
         // an exchange, the prompt is rendered by `UserQuestionBubble`; leaving
         // the marker in either trail printed the same instruction again below.
@@ -2030,10 +2234,38 @@ final class AgentTaskManager: ObservableObject {
             ? Array(t.log[roundStartIndex...]) : []
         t.exchanges.append(AgentExchange(prompt: run.currentPrompt, answer: answer,
                                          imageFiles: run.currentImageFiles,
-                                         log: roundLog))
+                                         log: roundLog,
+                                         loopRound: run.loopRound,
+                                         startedAt: t.startedAt,
+                                         finishedAt: t.finishedAt))
         // The round owns its images now — the live echo would double them.
         t.liveImageFiles = []
+        t.liveLoopRound = nil
+
+        // Where the loop stands after this round — decided before the record is
+        // filed and the banner posted, since both say whether it goes on. A stop
+        // by hand ends it quietly; a failed loop round, the agent's done marker,
+        // or a next round past the loop's lifetime end it with a banner.
+        var loopEnded = false
+        if var loop = t.loop, loop.active {
+            if t.outcome == .cancelled && run.interruptPrompt == nil {
+                loop.active = false
+            } else if t.interrupted {
+                // The round died with the app (quit, crash, kill), not on its
+                // own merits. The loop outlives the process — it waits out the
+                // interval and runs the next round.
+            } else if run.loopRound != nil && (t.outcome == .failure || loopDone) {
+                loop.active = false
+                loopEnded = true
+            } else if Date().addingTimeInterval(TimeInterval(loop.intervalMinutes * 60))
+                        > loop.startedAt.addingTimeInterval(LoopInterval.lifetime) {
+                loop.active = false
+                loopEnded = true
+            }
+            t.loop = loop
+        }
         tasks[i] = t
+        persistActiveLoops()
 
         // The history record is filed FIRST (via `onSettled` → Recent, keyed by
         // the task id), so the banner's tap below can land on an existing row.
@@ -2043,13 +2275,28 @@ final class AgentTaskManager: ObservableObject {
         // on, so a finished run announces itself. Not a cancel, though: the user
         // just did that by hand, so there's nothing to announce (the row is
         // still filed above — it just doesn't buzz).
+        // A loop's banner says so: each loop round replaces the last one without
+        // a sound; the loop's end sounds.
         if t.outcome != .cancelled {
+            var subtitle: String? = nil
+            var silent = false
+            if let loop = t.loop {
+                if loopEnded {
+                    subtitle = L("notify.loop.ended", loop.rounds)
+                } else if loop.active, let round = run.loopRound {
+                    subtitle = L("notify.loop.round", round)
+                    silent = true
+                }
+            }
             NotificationService.shared.postAgentFinished(
                 engineName: t.engine.displayName,
                 prompt: t.exchanges.last?.prompt ?? t.prompt,
                 failureReason: t.failureReason,
                 success: t.outcome == .success,
-                threadID: t.id)
+                threadID: t.id,
+                subtitle: subtitle,
+                silent: silent,
+                answer: t.exchanges.last?.answer)
         }
 
         // An interrupt is a cancel that hands over: the stopped round is filed
@@ -2076,7 +2323,60 @@ final class AgentTaskManager: ObservableObject {
                                    imagesJPEG: next.imagesJPEG, appendMarker: false,
                                    existingMarkerID: next.markerID)
             }
+            return
         }
+
+        // Nothing handed over and nothing queued: a live loop waits for its next
+        // round, counted from now.
+        if taskIndex(taskID).map({ tasks[$0].loopActive }) == true {
+            scheduleLoopRound(taskID)
+        }
+    }
+
+    /// The header chip's new pick. A waiting loop restarts its wait from now;
+    /// a round already streaming keeps going and uses the new gap after it.
+    func setLoopInterval(taskID: UUID, minutes: Int) {
+        guard LoopInterval.typedRange.contains(minutes),
+              let i = taskIndex(taskID), tasks[i].loopActive
+        else { return }
+        LoopInterval.remember(minutes)
+        tasks[i].loop?.intervalMinutes = minutes
+        persistActiveLoops()
+        if tasks[i].isLoopWaiting { scheduleLoopRound(taskID) }
+    }
+
+    /// End a task's loop — the ⌘ card's Stop. A round in flight is stopped
+    /// like any other; a waiting loop simply never starts its next round.
+    func stopLoop(taskID: UUID) {
+        loopTimers[taskID]?.cancel()
+        loopTimers[taskID] = nil
+        guard let i = taskIndex(taskID), tasks[i].loop != nil else { return }
+        tasks[i].loop?.active = false
+        tasks[i].loop?.nextRoundAt = nil
+        persistActiveLoops()
+        if tasks[i].isRunning { cancel(taskID: taskID) }
+    }
+
+    private func scheduleLoopRound(_ taskID: UUID, at date: Date? = nil) {
+        guard let i = taskIndex(taskID), let loop = tasks[i].loop, loop.active else { return }
+        let next = date ?? Date().addingTimeInterval(TimeInterval(loop.intervalMinutes * 60))
+        tasks[i].loop?.nextRoundAt = next
+        persistActiveLoops()
+        loopTimers[taskID]?.cancel()
+        loopTimers[taskID] = Task { [weak self] in
+            do { try await LoopInterval.wait(until: next) } catch { return }
+            self?.fireLoopRound(taskID)
+        }
+    }
+
+    private func fireLoopRound(_ taskID: UUID) {
+        loopTimers[taskID] = nil
+        guard let i = taskIndex(taskID), tasks[i].loopActive, !tasks[i].isRunning else { return }
+        tasks[i].loop?.rounds += 1
+        persistActiveLoops()
+        let round = tasks[i].loop?.rounds ?? 1
+        beginFollowUpRound(index: i, prompt: tasks[i].prompt, imagesJPEG: [],
+                           appendMarker: true, existingMarkerID: nil, loopRound: round)
     }
 }
 

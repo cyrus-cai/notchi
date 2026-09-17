@@ -49,8 +49,12 @@ enum APIKeyStore {
     /// Which backend is active. Persisted in `UserDefaults`. When the user has
     /// never explicitly picked one, prefer a provider they already configured a
     /// key for (installs that predate this default never wrote the selection),
-    /// and otherwise default to OpenRouter — the only backend that works without
-    /// pasting a key (one-click connect, free models).
+    /// and otherwise default to Blend1 — the only backend that needs no setup at
+    /// all. Every install registers with the gateway at launch
+    /// (see `AppDelegate`), so a fresh one already has an account and the welcome
+    /// gift behind it, and the first question can be asked without connecting
+    /// anything. OpenRouter, the previous default, still needs its one-click
+    /// connect before it answers.
     static var selectedProvider: Provider {
         get {
             let raw = UserDefaults.standard.string(forKey: selectedProviderKey) ?? ""
@@ -65,7 +69,7 @@ enum APIKeyStore {
             if let configured = Provider.offered.first(where: { read($0) != nil }) {
                 return configured
             }
-            return .openrouter
+            return Provider.offered.contains(.nono) ? .nono : .openrouter
         }
         set {
             UserDefaults.standard.set(newValue.rawValue, forKey: selectedProviderKey)

@@ -62,20 +62,32 @@ final class NotificationService: NSObject {
     /// - Parameters:
     ///   - threadID: the history id of the finished conversation (the tap target).
     ///   - title: the short conversation title, when one is ready, else nil.
-    ///   - question: the user's first question — the banner's fallback body when
-    ///     there's no title yet, and always its subtitle context.
-    func postAnswerReady(threadID: UUID, title: String?, question: String) {
+    ///   - question: the user's question. A loop banner uses it as the subtitle.
+    ///   - answer: the round's reply — a loop banner's body.
+    ///   - subtitle: a loop round's "Loop Round 4 ready" / "Loop ended · 7 rounds",
+    ///     used as the banner title so the round number is the first line.
+    ///   - silent: a loop's in-between rounds replace their banner without a sound.
+    func postAnswerReady(threadID: UUID, title: String?, question: String,
+                         answer: String? = nil,
+                         subtitle: String? = nil, silent: Bool = false) {
         ensureAuthorization { [weak self] granted in
             guard granted, let self else { return }
             let content = UNMutableNotificationContent()
-            content.title = L("notify.answerReady.title")
-            // Prefer the generated title; fall back to the raw question so the
-            // banner always says *which* question is done, never a bare generic.
-            let line = (title?.isEmpty == false ? title! : question)
-            content.body = line
+            if let subtitle {
+                content.title = subtitle
+                content.subtitle = question
+                let reply = (answer ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                content.body = reply.isEmpty ? question : reply
+            } else {
+                content.title = L("notify.answerReady.title")
+                // Prefer the generated title; fall back to the raw question so the
+                // banner always says *which* question is done, never a bare generic.
+                let line = (title?.isEmpty == false ? title! : question)
+                content.body = line
+            }
             content.categoryIdentifier = Self.answerCategory
             content.userInfo = [Self.threadIDKey: threadID.uuidString]
-            content.sound = .default
+            content.sound = silent ? nil : .default
 
             // Immediate delivery (nil trigger). The id is the thread id so a
             // follow-up that finishes detached replaces its own prior banner
@@ -100,21 +112,34 @@ final class NotificationService: NSObject {
     ///     just landed, and the prompt is what the user actually remembers.
     ///   - failureReason: takes the body's place on a failure: once it went
     ///     wrong, "why" beats "which".
+    ///   - subtitle: a loop round's "Loop Round 4 ready" / "Loop ended · 7 rounds".
+    ///     When set, that line is the title; the prompt and answer fill the rest.
+    ///   - silent: a loop's in-between rounds replace their banner without a sound.
     func postAgentFinished(engineName: String, prompt: String,
                               failureReason: String?,
-                              success: Bool, threadID: UUID) {
+                              success: Bool, threadID: UUID,
+                              subtitle: String? = nil, silent: Bool = false,
+                              answer: String? = nil) {
         ensureAuthorization { [weak self] granted in
             guard granted, let self else { return }
             let content = UNMutableNotificationContent()
-            content.title = L(success ? "notify.agent.done" : "notify.agent.failed",
-                              engineName)
             let reason = (failureReason ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            // A failure with no reason still names its task rather than going blank.
-            content.body = (!success && !reason.isEmpty) ? reason : prompt
+            let reply = (answer ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if let subtitle {
+                content.title = subtitle
+                content.subtitle = prompt
+                content.body = (!success && !reason.isEmpty) ? reason
+                    : (reply.isEmpty ? prompt : reply)
+            } else {
+                content.title = L(success ? "notify.agent.done" : "notify.agent.failed",
+                                  engineName)
+                // A failure with no reason still names its task rather than going blank.
+                content.body = (!success && !reason.isEmpty) ? reason : prompt
+            }
             content.categoryIdentifier = Self.agentCategory
             content.userInfo = [Self.threadIDKey: threadID.uuidString]
-            content.sound = .default
+            content.sound = silent ? nil : .default
             // One agent task at a time → one stable id, so a rerun replaces
             // its prior banner instead of stacking.
             let request = UNNotificationRequest(

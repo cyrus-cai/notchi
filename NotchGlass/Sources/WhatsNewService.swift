@@ -17,7 +17,12 @@ final class WhatsNewService: ObservableObject {
     static let shared = WhatsNewService()
 
     /// One published release. `version` is the only required field; `date` is an
-    /// optional adornment. The notes are split into four sections the panel renders
+    /// optional adornment. `headline` is the one thing the release is about, set
+    /// large over the hero image — a release with a single story leads with it
+    /// instead of burying it as the first bullet — and `blurb` is the paragraph
+    /// under that image which says what the headline and the picture mean, since
+    /// neither a six-word line nor a promo shot can carry the whole change on its
+    /// own. The notes are split into four sections the panel renders
     /// under their own headings — `features` (brand-new capabilities),
     /// `improvements` (refinements to things that already existed), `fixes` (what
     /// got fixed), and `others` (project/personal housekeeping such as support and
@@ -25,7 +30,9 @@ final class WhatsNewService: ObservableObject {
     struct Entry: Identifiable, Equatable {
         var version: String
         var date: String?
+        var headline: String?
         var heroAssetName: String?
+        var blurb: String?
         var features: [String]
         var improvements: [String]
         var fixes: [String]
@@ -57,7 +64,9 @@ final class WhatsNewService: ObservableObject {
         init(
             version: String,
             date: String? = nil,
+            headline: String? = nil,
             heroAssetName: String? = nil,
+            blurb: String? = nil,
             features: [String] = [],
             improvements: [String] = [],
             fixes: [String] = [],
@@ -66,7 +75,9 @@ final class WhatsNewService: ObservableObject {
             actionAfter: Int? = nil
         ) {
             self.version = version; self.date = date
+            self.headline = headline
             self.heroAssetName = heroAssetName
+            self.blurb = blurb
             self.features = features; self.improvements = improvements
             self.fixes = fixes; self.others = others
             self.action = action; self.actionAfter = actionAfter
@@ -93,6 +104,23 @@ final class WhatsNewService: ObservableObject {
     /// English-only by design. Order doesn't matter — `sorted` puts the newest
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
+        Entry(
+            version: "0.8.2",
+            date: "2026-09-17",
+            headline: "Run GLM-5.3-Flash on your Notchi Balance.",
+            heroAssetName: "WhatsNew082Promo",
+            blurb: "Pick GLM-5.3-Flash in Ask and pay for it from your Notchi Balance. No Zhipu key, no separate subscription.",
+            features: [
+                "Type /loop before a prompt to repeat it every 10 minutes to once a day, in Ask or as an agent task.",
+                "A model card shows its input, output, and cached prices before you spend on it.",
+            ],
+            improvements: [
+                "Hold sensitivity replaces force-click pressure: Off, Low, Balanced, Instant.",
+            ],
+            fixes: [
+                "A slow drag across selected text no longer opens Notchi.",
+            ]
+        ),
         Entry(
             version: "0.8.1",
             date: "2026-09-15",
