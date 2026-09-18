@@ -105,6 +105,17 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.8.3",
+            date: "2026-09-18",
+            headline: "Repeat a prompt with /loop.",
+            heroAssetName: "WhatsNew083Promo",
+            blurb: "Type /loop before a prompt, in Ask or as an agent task, and Notchi runs it again on a schedule. A failed round or a lost connection doesn't end it; stop or continue it from the ⌘ menu.",
+            improvements: [
+                "The version list in What's New is now a column of tick marks.",
+                "The Thinking row is hidden while a search is running.",
+            ]
+        ),
+        Entry(
             version: "0.8.2",
             date: "2026-09-17",
             headline: "Run GLM-5.3-Flash on your Notchi Balance.",

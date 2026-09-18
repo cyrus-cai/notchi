@@ -2043,7 +2043,12 @@ struct InlineSettingsView: View {
             Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 0) {
                 GridRow {
                     Text(L("nono.usage.col.model")).captionLabel()
+                    // Zero-width cell: the column is as wide as its figures,
+                    // and the header extends left into the gap after the
+                    // model names instead of widening the column.
                     Text(L("nono.pricing.minCharge")).captionLabel()
+                        .fixedSize()
+                        .frame(width: 0, alignment: .trailing)
                         .gridColumnAlignment(.trailing)
                     Text(L("nono.pricing.input")).captionLabel()
                         .gridColumnAlignment(.trailing)
@@ -2133,19 +2138,27 @@ struct InlineSettingsView: View {
 
     /// The per-request floor. Same loading rule as the rates: a spinner until
     /// this page's fetch lands, not a guessed figure.
-    @ViewBuilder
     private func pricingMinCharge(_ usd: Double?) -> some View {
-        if let usd {
-            Text(Self.moneyPerMillion(usd))
-                .font(.brand(Tokens.TypeSize.label))
-                .foregroundStyle(Tokens.text2)
-                .monospacedDigit()
-                .lineLimit(1)
-        } else if nonoRatesLoading {
-            ProgressView().controlSize(.mini)
-        } else {
-            usageCell("—", color: Tokens.text4)
-        }
+        // The column is sized to "$0.00" in every state, spinner included, so
+        // the header's width stays the same; a longer figure extends left into
+        // the model column rather than widening this one.
+        Text("$0.00")
+            .font(.brand(Tokens.TypeSize.label))
+            .monospacedDigit()
+            .hidden()
+            .overlay(alignment: .trailing) {
+                if let usd {
+                    Self.moneyText(usd, size: Tokens.TypeSize.label)
+                        .foregroundStyle(Tokens.text2)
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .fixedSize()
+                } else if nonoRatesLoading {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    usageCell("—", color: Tokens.text4)
+                }
+            }
     }
 
     /// A per-1M-token rate; "/M" is the unit. While the fetch this page started
@@ -2155,8 +2168,7 @@ struct InlineSettingsView: View {
     private func pricingRate(_ usd: Double?) -> some View {
         if let usd {
             HStack(alignment: .firstTextBaseline, spacing: 1) {
-                Text(Self.moneyPerMillion(usd))
-                    .font(.brand(Tokens.TypeSize.label))
+                Self.moneyText(usd, size: Tokens.TypeSize.label)
                     .foregroundStyle(Tokens.text1)
                 Text("/M")
                     .font(.sf(Tokens.TypeSize.meta))
@@ -2373,6 +2385,21 @@ struct InlineSettingsView: View {
             return s
         }
         return String(format: "$%.2f", usd)
+    }
+
+    /// `moneyPerMillion` as Text. Below $1 the leading "0." and any zeros up to
+    /// the first significant digit are set smaller: "0.000" in "$0.0002", "0."
+    /// in "$0.15", all of "0.00" in "$0.00".
+    static func moneyText(_ usd: Double, size: CGFloat) -> Text {
+        let s = moneyPerMillion(usd)
+        guard usd >= 0 && usd < 1, s.hasPrefix("$0") else {
+            return Text(s).font(.brand(size))
+        }
+        let digits = s.dropFirst()
+        let cut = digits.firstIndex { $0 != "0" && $0 != "." } ?? digits.endIndex
+        return Text("$").font(.brand(size))
+            + Text(String(digits[..<cut])).font(.brand(size * 0.78))
+            + Text(String(digits[cut...])).font(.brand(size))
     }
 
     // MARK: - OpenRouter one-click connect

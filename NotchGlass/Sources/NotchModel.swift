@@ -222,7 +222,10 @@ final class NotchModel: ObservableObject {
         var title: String? = nil
         /// What the recent list should display: the generated title when available,
         /// otherwise the first user message for backward compatibility.
-        var displayTitle: String { title ?? q }
+        var displayTitle: String { isLoop ? q : title ?? q }
+        /// A `/loop` thread. Its row shows the loop's prompt, not a generated
+        /// title, and carries the Loop tag.
+        var isLoop: Bool { (turns ?? []).contains { $0.loopRound != nil } }
 
         /// Every image attached anywhere in this conversation, in turn order — a
         /// screenshot an Ask rode in on, the shots pasted into an agent task. The
@@ -611,6 +614,13 @@ final class NotchModel: ObservableObject {
     /// so leaving the island to reach one must not fold the result page out from
     /// under the pointer.
     @Published var isResultMetadataMenuOpen = false
+
+    /// A card hung off the island in its own window is open. The pointer on that
+    /// card reads as outside the island, so leave-folding and hover-only chrome
+    /// treat these as the pointer still being inside.
+    var isFloatingCardOpen: Bool {
+        isModelPickerOpen || isFolderPickerOpen || isResultMetadataMenuOpen || slashMenuOpen
+    }
 
     /// The agent task whose detail page is open — the full-page work trail a
     /// status row's tap opens while its run is live (a settled row opens its
@@ -5544,8 +5554,7 @@ final class NotchModel: ObservableObject {
         // rows reads as "left the island" and would fold the panel out from under
         // the menu being read. Ordinary leave-folding resumes the moment the menu
         // is gone (a picked row, a keystroke past the command word, Esc).
-        if isAnswerPinned || isModelPickerOpen || isFolderPickerOpen
-            || isResultMetadataMenuOpen || slashMenuOpen || detachDrag != nil {
+        if isAnswerPinned || isFloatingCardOpen || detachDrag != nil {
             cancelLeaveWatch()
             return
         }
@@ -5607,8 +5616,7 @@ final class NotchModel: ObservableObject {
     private func recheckLeaveWatch() {
         guard let watch = leaveWatch else { return }
         guard open else { leaveWatch = nil; return }
-        if isAnswerPinned || isModelPickerOpen || isFolderPickerOpen
-            || isResultMetadataMenuOpen || slashMenuOpen {
+        if isAnswerPinned || isFloatingCardOpen {
             cancelLeaveWatch(); return
         }
         // Parked back over (or still over) the island: nothing to fold, but keep
@@ -6579,6 +6587,22 @@ final class NotchModel: ObservableObject {
         // settled normally and stays in the transcript; the last IS the interrupted
         // round (its answer is the "Task interrupted" notice) — its prompt is what
         // goes back to the CLI, so the work resumes where it was cut off.
+        var rounds = agentRounds(of: item)
+        guard let cut = rounds.popLast() else { return }
+        // The screenshots that round rode in on go back out with it — they were
+        // often the whole task ("fix this").
+        let jpegs = cut.imageFiles.compactMap { try? Data(contentsOf: Self.historyImageURL($0)) }
+
+        AgentTaskManager.shared.resume(taskID: item.id, engine: engine,
+                                       folder: URL(fileURLWithPath: resume.folderPath),
+                                       headline: item.q, session: resume.session,
+                                       priorRounds: rounds, prompt: cut.prompt,
+                                       imagesJPEG: jpegs)
+        newChat()
+    }
+
+    /// An agent thread's rounds, rebuilt from its Recent row.
+    private func agentRounds(of item: HistoryItem) -> [AgentTaskManager.AgentExchange] {
         var rounds: [AgentTaskManager.AgentExchange] = []
         var askedTurn: Turn? = nil
         for turn in item.conversation {
@@ -6591,17 +6615,43 @@ final class NotchModel: ObservableObject {
                 askedTurn = nil
             }
         }
-        guard let cut = rounds.popLast() else { return }
-        // The screenshots that round rode in on go back out with it — they were
-        // often the whole task ("fix this").
-        let jpegs = cut.imageFiles.compactMap { try? Data(contentsOf: Self.historyImageURL($0)) }
+        return rounds
+    }
 
-        AgentTaskManager.shared.resume(taskID: item.id, engine: engine,
-                                       folder: URL(fileURLWithPath: resume.folderPath),
-                                       headline: item.q, session: resume.session,
-                                       priorRounds: rounds, prompt: cut.prompt,
-                                       imagesJPEG: jpegs)
-        newChat()
+    /// The Recent row of an agent loop thread whose loop the manager no longer
+    /// holds (its task was dismissed, or the app relaunched), when it kept the
+    /// CLI session that can continue it.
+    private func dismissedAgentLoop(_ id: UUID) -> (item: HistoryItem, engine: AgentEngine,
+                                                   resume: HistoryItem.AgentResume)? {
+        let task = AgentTaskManager.shared.tasks.first { $0.id == id }
+        guard task?.loop == nil, task?.isRunning != true,
+              let item = history.first(where: { $0.id == id }),
+              item.source == .agent, item.isLoop,
+              let resume = item.agentResume,
+              let engine = AgentEngine(rawValue: resume.engine) else { return nil }
+        return (item, engine, resume)
+    }
+
+    /// The ⌘ card's facts for such a thread: a stopped loop.
+    func dismissedAgentLoopInfo(_ id: UUID) -> LoopMenuInfo? {
+        guard let found = dismissedAgentLoop(id) else { return nil }
+        let rounds = (found.item.turns ?? []).compactMap(\.loopRound).max() ?? 1
+        return LoopMenuInfo(
+            intervalMinutes: AgentTaskManager.shared.stoppedLoopInterval(taskID: id)
+                ?? LoopInterval.lastMinutes,
+            rounds: rounds, nextRoundAt: nil, active: false)
+    }
+
+    /// The Continue in such a thread's ⌘ card. False when the thread is not one.
+    @discardableResult
+    func reviveAgentLoop(_ id: UUID) -> Bool {
+        guard let found = dismissedAgentLoop(id) else { return false }
+        AgentTaskManager.shared.reviveLoop(
+            taskID: id, engine: found.engine,
+            folder: URL(fileURLWithPath: found.resume.folderPath),
+            headline: found.item.q, session: found.resume.session,
+            priorRounds: agentRounds(of: found.item))
+        return true
     }
 
     /// The engine that can pick the on-screen agent thread's CLI session back up
@@ -6653,18 +6703,7 @@ final class NotchModel: ObservableObject {
                 // The task is gone (row dismissed, or the app relaunched since):
                 // rebuild the prior rounds from the record and spawn a resumed run
                 // under the row's own id.
-                var rounds: [AgentTaskManager.AgentExchange] = []
-                var askedTurn: Turn? = nil
-                for turn in item.conversation {
-                    if turn.role == "user" {
-                        askedTurn = turn
-                    } else if let asked = askedTurn {
-                        rounds.append(.init(prompt: asked.text, answer: turn.text,
-                                            imageFiles: asked.imageFiles,
-                                            log: turn.agentLog ?? [], loopRound: turn.loopRound))
-                        askedTurn = nil
-                    }
-                }
+                let rounds = self.agentRounds(of: item)
                 manager.resume(taskID: item.id, engine: engine,
                                folder: URL(fileURLWithPath: resume.folderPath),
                                headline: item.q, session: resume.session,
@@ -8389,7 +8428,8 @@ final class NotchModel: ObservableObject {
         // request on the round that just failed is the wrong moment for it — the
         // row falls back to the question, which is exactly what it should show.
         let atMilestone = thread.count > 2 && thread.count % 4 == 0
-        if !failed, existingTitle == nil || atMilestone {
+        let isLoop = thread.contains { $0.loopRound != nil }
+        if !failed, !isLoop, existingTitle == nil || atMilestone {
             Task { [weak self] in
                 guard let self, let title = await self.generateTitle(for: thread) else { return }
                 await MainActor.run {
@@ -9015,6 +9055,10 @@ final class NotchModel: ObservableObject {
         Self.deleteHistoryImages(item.imageFiles)
         history.removeAll { $0.id == id }
         saveHistory()
+        if !ChatLoopManager.shared.isActive(id) { ChatLoopManager.shared.forget(id) }
+        if AgentTaskManager.shared.tasks.first(where: { $0.id == id })?.loopActive != true {
+            AgentTaskManager.shared.forgetStoppedLoop(taskID: id)
+        }
 
         guard let current = highlightedHistoryIndex else {
             if DebugFeatureFlags.historySplitView, unifiedHistoryCount == 0 {

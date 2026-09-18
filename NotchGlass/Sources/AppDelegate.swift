@@ -956,6 +956,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for recovered in AgentTaskManager.shared.recoverInterruptedRuns() {
             model.recordAgentHistory(recovered)
         }
+        // Start the path monitor now, so its first reading is in before a loop
+        // round asks whether the Mac is online.
+        _ = NetworkReachability.shared
         AgentTaskManager.shared.restorePersistedLoops()
 
         // A tap on an agent-Codex "task finished" banner: summon the panel and

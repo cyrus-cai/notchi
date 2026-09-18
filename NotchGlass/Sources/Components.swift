@@ -3699,7 +3699,14 @@ struct AssistantTurnView: View {
     }
 
     private var showThinkingFold: Bool {
-        !isAgent && !(reasoning ?? "").isEmpty
+        !isAgent && !(reasoning ?? "").isEmpty && !toolActivityOwnsWait
+    }
+
+    /// A tool is running before any answer text: the tool line ("Searching …")
+    /// is the only row shown. The thinking fold returns once the tool clears.
+    private var toolActivityOwnsWait: Bool {
+        streaming && !hasText && pendingQuestion == nil && !showsReadingBlock
+            && orbState != .composing && activity != nil
     }
 
     /// The thinking row's own left inset. Matches the source list's: while the
@@ -3721,7 +3728,7 @@ struct AssistantTurnView: View {
     /// a thinking fold is on screen — that row is the wait.
     private var showWait: Bool {
         streaming && !hasText && pendingQuestion == nil && !showsReadingBlock
-            && (!showThinkingFold || (orbState != .composing && activity != nil))
+            && ((reasoning ?? "").isEmpty || isAgent || toolActivityOwnsWait)
     }
 
     /// The mid-answer activity row. Once real text lands, `showWait` is off for
@@ -7935,6 +7942,8 @@ struct ThinkingFoldRow: View {
     /// Cap the opened scratchpad so a long reasoning dump cannot
     /// stretch the conversation past what the panel can scroll.
     private static let expandedMaxHeight: CGFloat = 80
+    /// Taper length at the top and bottom of the scrolling scratchpad.
+    private static let expandedFade: CGFloat = 16
 
     /// How long a live preview line stays before the next settled thought
     /// may replace it. Matches the wait-line dissolve window.
@@ -7993,7 +8002,11 @@ struct ThinkingFoldRow: View {
                         expandedBody
                         ScrollView(.vertical, showsIndicators: true) {
                             expandedBody
+                                // Room for each taper, so the first / last
+                                // line sits at full strength at either end.
+                                .padding(.vertical, Self.expandedFade / 2)
                         }
+                        .scrollEdgeFade(top: true, bottom: true, fade: Self.expandedFade)
                         .frame(height: Self.expandedMaxHeight)
                     }
                     .frame(maxHeight: Self.expandedMaxHeight, alignment: .top)

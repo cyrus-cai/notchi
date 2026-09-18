@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Network
 
 // MARK: - /loop
 
@@ -58,13 +59,51 @@ enum LoopInterval {
 
     /// Wait for a wall-clock moment. Checked every 30s rather than slept out in
     /// one go, so a Mac that sleeps past the deadline runs the round once on
-    /// wake instead of sleeping the whole remainder again.
+    /// wake instead of sleeping the whole remainder again. A round that comes
+    /// due while the Mac is offline waits until the network is back.
     static func wait(until date: Date) async throws {
         while true {
             let remaining = date.timeIntervalSinceNow
-            if remaining <= 0 { return }
+            if remaining <= 0 { break }
             try await Task.sleep(nanoseconds: UInt64(min(remaining, 30) * 1_000_000_000))
         }
+        while !NetworkReachability.shared.isOnline {
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+        }
+    }
+
+    /// When a loop's next round is due after a failed round: right away if the
+    /// Mac is offline (`wait` then holds it until the network is back), one
+    /// interval from now otherwise.
+    static func nextAfterFailure(intervalMinutes: Int) -> Date {
+        NetworkReachability.shared.isOnline
+            ? Date().addingTimeInterval(TimeInterval(intervalMinutes * 60))
+            : Date()
+    }
+}
+
+/// Whether the Mac has a usable network path. Loops read it so a round never
+/// starts offline.
+final class NetworkReachability: @unchecked Sendable {
+    static let shared = NetworkReachability()
+
+    private let monitor = NWPathMonitor()
+    private let lock = NSLock()
+    private var online = true
+
+    var isOnline: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return online
+    }
+
+    private init() {
+        monitor.pathUpdateHandler = { [weak self] path in
+            guard let self else { return }
+            self.lock.lock()
+            self.online = path.status == .satisfied
+            self.lock.unlock()
+        }
+        monitor.start(queue: DispatchQueue(label: "notch.loop.reachability", qos: .utility))
     }
 }
 
@@ -84,9 +123,9 @@ struct LoopMenuInfo: Equatable {
 /// unchanged); this owns only the schedule: when the next round is due, how
 /// many have run, and when the loop is over.
 ///
-/// Active loops are written to `UserDefaults` so a quit does not end them; the
-/// thread itself already lives in Recent. A finished loop's tray row does not
-/// come back — tap it before quit, or find the thread in Recent.
+/// Loops are written to `UserDefaults` so a quit does not end them; the thread
+/// itself already lives in Recent. A stopped loop stays on disk after its tray
+/// row is dismissed, so reopening its thread from Recent can still continue it.
 @MainActor
 final class ChatLoopManager: ObservableObject {
     static let shared = ChatLoopManager()
@@ -96,7 +135,7 @@ final class ChatLoopManager: ObservableObject {
         let id: UUID
         let prompt: String
         var intervalMinutes: Int
-        let startedAt: Date
+        var startedAt: Date
         /// Loop rounds started so far.
         var rounds = 1
         /// Set while a loop round is running.
@@ -106,6 +145,9 @@ final class ChatLoopManager: ObservableObject {
         var active = true
         /// Ended on a failed round, for the settled row's dot.
         var failed = false
+        /// A stopped loop whose tray row was tapped or closed. The loop is kept
+        /// so its thread can continue it.
+        var dismissed = false
 
         var isRunning: Bool { roundStartedAt != nil }
         var isWaiting: Bool { active && !isRunning }
@@ -123,6 +165,10 @@ final class ChatLoopManager: ObservableObject {
         let rounds: Int
         let lastRoundDuration: TimeInterval
         let nextRoundAt: Date?
+        /// Absent in records written before stopped loops were kept.
+        var active: Bool? = nil
+        var failed: Bool? = nil
+        var dismissed: Bool? = nil
     }
 
     private static let persistKey = "notch_chat_loops"
@@ -144,6 +190,21 @@ final class ChatLoopManager: ObservableObject {
 
     func loop(for id: UUID) -> ChatLoop? { loops.first { $0.id == id } }
     func isActive(_ id: UUID) -> Bool { loop(for: id)?.active == true }
+    /// The loops the task list shows.
+    var listed: [ChatLoop] { loops.filter { !$0.dismissed } }
+
+    /// The ⌘ card's facts for a thread. A loop thread with no record (stopped
+    /// and dismissed before stopped loops were kept) reads as stopped, from its
+    /// turns.
+    func menuInfo(for id: UUID, turns: [NotchModel.Turn]) -> LoopMenuInfo? {
+        if let loop = loop(for: id) {
+            return LoopMenuInfo(intervalMinutes: loop.intervalMinutes, rounds: loop.rounds,
+                                nextRoundAt: loop.nextRoundAt, active: loop.active)
+        }
+        guard let rounds = turns.compactMap(\.loopRound).max() else { return nil }
+        return LoopMenuInfo(intervalMinutes: LoopInterval.lastMinutes, rounds: rounds,
+                            nextRoundAt: nil, active: false)
+    }
 
     /// Arm the waits. `NotchModel` calls this after Recent is on disk and
     /// `runRound` is wired, so a due round continues the saved thread.
@@ -151,8 +212,10 @@ final class ChatLoopManager: ObservableObject {
         guard !restored else { return }
         restored = true
         let now = Date()
-        loops.removeAll {
-            $0.startedAt.addingTimeInterval(LoopInterval.lifetime) < now
+        for i in loops.indices where loops[i].active
+            && loops[i].startedAt.addingTimeInterval(LoopInterval.lifetime) < now {
+            loops[i].active = false
+            loops[i].nextRoundAt = nil
         }
         persist()
         for loop in loops where loop.active && !loop.isRunning {
@@ -168,14 +231,17 @@ final class ChatLoopManager: ObservableObject {
         else { return }
         let now = Date()
         for record in records {
-            let next = record.nextRoundAt
-                ?? now.addingTimeInterval(TimeInterval(record.intervalMinutes * 60))
+            let active = record.active ?? true
+            let next = active ? record.nextRoundAt
+                ?? now.addingTimeInterval(TimeInterval(record.intervalMinutes * 60)) : nil
             loops.append(ChatLoop(id: record.id, prompt: record.prompt,
                                   intervalMinutes: record.intervalMinutes,
                                   startedAt: record.startedAt, rounds: record.rounds,
                                   roundStartedAt: nil,
                                   lastRoundDuration: record.lastRoundDuration,
-                                  nextRoundAt: next, active: true))
+                                  nextRoundAt: next, active: active,
+                                  failed: record.failed ?? false,
+                                  dismissed: record.dismissed ?? false))
         }
     }
 
@@ -206,7 +272,7 @@ final class ChatLoopManager: ObservableObject {
         let loop = loops[i]
         let pastLifetime = Date().addingTimeInterval(loop.interval)
             > loop.startedAt.addingTimeInterval(LoopInterval.lifetime)
-        if (loopRound != nil && failed) || pastLifetime {
+        if pastLifetime {
             end(threadID, failed: loopRound != nil && failed)
             notify(loop, subtitle: L("notify.loop.ended", loop.rounds),
                    silent: false, answer: answer)
@@ -216,7 +282,14 @@ final class ChatLoopManager: ObservableObject {
             notify(loop, subtitle: L("notify.loop.round", loop.rounds),
                    silent: true, answer: answer)
         }
-        schedule(threadID)
+        // A failed round does not end the loop; only Stop does. Offline, the
+        // next round runs as soon as the network is back.
+        if failed {
+            schedule(threadID, at: LoopInterval.nextAfterFailure(
+                intervalMinutes: loop.intervalMinutes))
+        } else {
+            schedule(threadID)
+        }
     }
 
     /// The Stop in the loop's ⌘ card. A round already streaming finishes; no
@@ -225,10 +298,43 @@ final class ChatLoopManager: ObservableObject {
         end(id, failed: false)
     }
 
-    /// Drop a finished loop's row from the task list. The thread stays in Recent.
+    /// The Continue in a stopped loop's ⌘ card. The next round runs now and
+    /// the loop's lifetime counts again from here. `turns` rebuilds a loop
+    /// thread that has no record (see `menuInfo`).
+    func resume(_ id: UUID, turns: [NotchModel.Turn] = []) {
+        if loop(for: id) == nil,
+           let rounds = turns.compactMap(\.loopRound).max(),
+           let prompt = turns.first(where: { $0.role == "user" })?.text {
+            loops.append(ChatLoop(id: id, prompt: prompt,
+                                  intervalMinutes: LoopInterval.lastMinutes,
+                                  startedAt: Date(), rounds: rounds,
+                                  roundStartedAt: nil, active: false))
+        }
+        guard let i = loops.firstIndex(where: { $0.id == id }), !loops[i].active
+        else { return }
+        loops[i].active = true
+        loops[i].failed = false
+        loops[i].dismissed = false
+        loops[i].startedAt = Date()
+        persist()
+        schedule(id, at: Date())
+    }
+
+    /// Drop a finished loop's row from the task list. The thread stays in
+    /// Recent and can still continue the loop.
     func dismiss(_ id: UUID) {
-        guard loop(for: id)?.active != true else { return }
+        guard let i = loops.firstIndex(where: { $0.id == id }), !loops[i].active
+        else { return }
+        loops[i].dismissed = true
+        persist()
+    }
+
+    /// The thread was deleted from Recent.
+    func forget(_ id: UUID) {
+        timers[id]?.cancel()
+        timers[id] = nil
         loops.removeAll { $0.id == id }
+        persist()
     }
 
     /// The header chip's new pick. A waiting loop restarts its wait from now;
@@ -270,13 +376,14 @@ final class ChatLoopManager: ObservableObject {
     }
 
     private func persist() {
-        let records: [Record] = loops.compactMap { loop in
-            guard loop.active else { return nil }
-            return Record(id: loop.id, prompt: loop.prompt,
-                          intervalMinutes: loop.intervalMinutes,
-                          startedAt: loop.startedAt, rounds: loop.rounds,
-                          lastRoundDuration: loop.lastRoundDuration,
-                          nextRoundAt: loop.isRunning ? nil : loop.nextRoundAt)
+        let records: [Record] = loops.map { loop in
+            Record(id: loop.id, prompt: loop.prompt,
+                   intervalMinutes: loop.intervalMinutes,
+                   startedAt: loop.startedAt, rounds: loop.rounds,
+                   lastRoundDuration: loop.lastRoundDuration,
+                   nextRoundAt: loop.isRunning ? nil : loop.nextRoundAt,
+                   active: loop.active, failed: loop.failed,
+                   dismissed: loop.dismissed)
         }
         if let data = try? JSONEncoder().encode(records) {
             UserDefaults.standard.set(data, forKey: Self.persistKey)
@@ -602,9 +709,8 @@ struct LoopScheduleChip: View {
 // MARK: - Round column
 
 /// A loop record's right column: one row per round, plus any follow-up typed
-/// between rounds (named by its own words, a step dimmer). The rows are
-/// Settings' sidebar rows (`InlineSettingsView.SidebarItem`) one-for-one — a
-/// 104pt column of 28pt capsules, the 0.08 wash on the selected one.
+/// between rounds. Each row is a `RailTick`; the round's name shows as a
+/// tooltip.
 ///
 /// The column is *sticky*: it rides the visible top of the record instead of
 /// the record's layout top, so a round taller than the viewport doesn't carry
@@ -620,51 +726,36 @@ struct LoopRoundSidebar: View {
         var running = false
     }
 
-    static let width: CGFloat = 104
+    static let width: CGFloat = RailTick.hitWidth
 
     let items: [Item]
     let selected: Int
     let onSelect: (Int) -> Void
 
-    /// How many round rows sit on screen before the column scrolls. Matches
-    /// the `/` menu's nine-row window, so a long loop doesn't stretch the
-    /// record past the rest of the page.
-    private static let visibleRows = 9
-    private static var rowStride: CGFloat { 28 + 2 }
+    private static var rowStride: CGFloat { RailTick.rowHeight }
 
     /// The column's laid-out height for `rows` rounds. The record reserves this
     /// much height so a short round can't let the column hang off its bottom.
     static func height(rows: Int) -> CGFloat {
-        CGFloat(min(max(rows, 1), visibleRows)) * rowStride - 2
+        CGFloat(max(rows, 1)) * rowStride
     }
 
     @Environment(\.stickyScrollTopInset) private var stickyTopInset
+    /// The tick under the pointer, by index into `items`.
+    @State private var hoveredIndex: Int?
 
     var body: some View {
-        let list = LazyVStack(alignment: .leading, spacing: 2) {
-            ForEach(items) { item in
-                LoopRoundSidebarRow(item: item, selected: item.id == selected) {
+        VStack(alignment: .trailing, spacing: 0) {
+            ForEach(items.indices, id: \.self) { index in
+                let item = items[index]
+                LoopRoundSidebarRow(item: item, selected: item.id == selected,
+                                    hoverDistance: hoveredIndex.map { abs($0 - index) },
+                                    onHover: { inside in
+                                        if inside { hoveredIndex = index }
+                                        else if hoveredIndex == index { hoveredIndex = nil }
+                                    }) {
                     withAnimation(.easeOut(duration: 0.16)) { onSelect(item.id) }
                 }
-            }
-        }
-        Group {
-            if items.count > Self.visibleRows {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        list
-                    }
-                    .scrollIndicators(.hidden)
-                    .frame(height: CGFloat(Self.visibleRows) * Self.rowStride - 2)
-                    .onAppear { proxy.scrollTo(selected, anchor: .center) }
-                    .onChange(of: selected) { _, id in
-                        withAnimation(.easeOut(duration: 0.16)) {
-                            proxy.scrollTo(id, anchor: .center)
-                        }
-                    }
-                }
-            } else {
-                list
             }
         }
         .frame(width: Self.width, alignment: .topTrailing)
@@ -704,40 +795,17 @@ private struct StickyColumn: ViewModifier {
 private struct LoopRoundSidebarRow: View {
     let item: LoopRoundSidebar.Item
     let selected: Bool
+    let hoverDistance: Int?
+    let onHover: (Bool) -> Void
     let action: () -> Void
 
-    @State private var hovering = false
-
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 6) {
-                Text(item.title)
-                    .font(.sf(Tokens.TypeSize.label, weight: .medium))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .foregroundStyle(selected ? Tokens.text1
-                        : (hovering ? Tokens.text2
-                           : (item.isFollowUp ? Tokens.text4 : Tokens.text3)))
-                if item.running {
-                    AgentStatusDot(running: true, outcome: nil)
-                        .scaleEffect(5.0 / 7.0)
-                        .frame(width: 5, height: 5)
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 10)
-            .frame(height: 28)
-            .background(
-                Capsule().fill(.white.opacity(selected ? 0.08 : (hovering ? 0.04 : 0)))
-            )
-            .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
-        .accessibilityLabel(item.title)
-        .accessibilityAddTraits(selected ? [.isSelected] : [])
-        .accessibilityValue(item.running ? L("agent.thinking") : "")
-        .id(item.id)
+        RailTick(selected: selected, hoverDistance: hoverDistance, alignment: .trailing,
+                 onHover: onHover, action: action)
+            .help(item.title)
+            .accessibilityLabel(item.title)
+            .accessibilityAddTraits(selected ? [.isSelected] : [])
+            .accessibilityValue(item.running ? L("agent.thinking") : "")
+            .id(item.id)
     }
 }

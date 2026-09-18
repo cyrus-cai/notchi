@@ -1445,7 +1445,7 @@ struct NotchBody: View {
                 }
             } else {
                 // Ask loops live here; Agent already has its own loop rows.
-                ForEach(chatLoops.loops.reversed()) { loop in
+                ForEach(chatLoops.listed.reversed()) { loop in
                     chatLoopRow(loop)
                 }
             }
@@ -1564,11 +1564,16 @@ struct NotchBody: View {
     /// holds on every other row.
     private func loopCountdown(_ next: Date?) -> some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
+            let seconds = max(0, Int(((next ?? context.date)
+                .timeIntervalSince(context.date)).rounded(.up)))
             HStack(spacing: 4) {
                 LucideIcon(mark: LucideIcons.clock, size: 11)
-                Text(LoopInterval.countdown((next ?? context.date)
-                    .timeIntervalSince(context.date)))
+                // Rolls like the elapsed clock (`agentElapsedLabel`); the
+                // animation has to ride the Text for `numericText` to fire.
+                Text(LoopInterval.countdown(TimeInterval(seconds)))
                     .monospacedDigit()
+                    .contentTransition(.numericText(value: Double(seconds)))
+                    .animation(reduceMotion ? nil : .snappy(duration: 0.3), value: seconds)
             }
             .font(.sf(Tokens.TypeSize.meta))
             .foregroundStyle(Tokens.text4)
@@ -2050,6 +2055,10 @@ struct NotchBody: View {
                             onStopLoop: {
                                 agentDetailMetadataOpen = false
                                 AgentTaskManager.shared.stopLoop(taskID: task.id)
+                            },
+                            onContinueLoop: {
+                                agentDetailMetadataOpen = false
+                                AgentTaskManager.shared.resumeLoop(taskID: task.id)
                             },
                             onChangeInterval: {
                                 agentDetailMetadataOpen = false
@@ -3534,7 +3543,7 @@ struct NotchBody: View {
                 // it (immersive: in the floating header; compact: a fixed sibling). So
                 // a live task scrolls away normally rather than fixed over the top.
                 if (model.agentComposeActive && !agentManager.tasks.isEmpty)
-                    || (!model.agentComposeActive && !chatLoops.loops.isEmpty) {
+                    || (!model.agentComposeActive && !chatLoops.listed.isEmpty) {
                     // No extra gap here: each agent row already carries the same 9pt
                     // vertical pad as a Recent row, so the last agent row meets the
                     // first history row on the same 18pt rhythm as any two rows.
@@ -3551,7 +3560,9 @@ struct NotchBody: View {
                                 .foregroundStyle(Tokens.text2)
                                 .lineLimit(1)
                                 .truncationMode(.tail)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .layoutPriority(-1)
+                            if item.isLoop { loopTag }
+                            Spacer(minLength: 0)
                             // Ask rows show how long ago; Note/Reminder captures
                             // show where tapping goes, in the same trailing slot —
                             // so the Recent list reads as one ledger of everything
@@ -4356,15 +4367,20 @@ struct NotchBody: View {
     /// isn't a loop this app instance is running (or ran).
     private var threadLoopInfo: LoopMenuInfo? {
         let id = model.threadHistoryID
-        if let loop = chatLoops.loop(for: id) {
-            return LoopMenuInfo(intervalMinutes: loop.intervalMinutes, rounds: loop.rounds,
-                                nextRoundAt: loop.nextRoundAt, active: loop.active)
-        }
         if let loop = agentManager.tasks.first(where: { $0.id == id })?.loop {
             return LoopMenuInfo(intervalMinutes: loop.intervalMinutes, rounds: loop.rounds,
                                 nextRoundAt: loop.nextRoundAt, active: loop.active)
         }
-        return nil
+        if let info = model.dismissedAgentLoopInfo(id) { return info }
+        return chatLoops.menuInfo(for: id, turns: chatLoopTurns)
+    }
+
+    /// The thread's turns when it is an Ask thread — what a chat loop with no
+    /// record is rebuilt from. Empty for an agent thread, whose loop is the
+    /// agent manager's.
+    private var chatLoopTurns: [NotchModel.Turn] {
+        let id = model.threadHistoryID
+        return model.history.first(where: { $0.id == id })?.source == .agent ? [] : model.turns
     }
 
     /// Whether the thread on screen is a loop still going — the follow-up
@@ -4379,6 +4395,15 @@ struct NotchBody: View {
     /// from Send only while a round is streaming.
     private var followUpHasDraft: Bool {
         model.hasText || !model.askComposeImages.isEmpty
+    }
+
+    private func continueThreadLoop() {
+        let id = model.threadHistoryID
+        if agentManager.tasks.first(where: { $0.id == id })?.loop != nil {
+            agentManager.resumeLoop(taskID: id)
+        } else if !model.reviveAgentLoop(id) {
+            chatLoops.resume(id, turns: chatLoopTurns)
+        }
     }
 
     private func stopThreadLoop() {
@@ -4704,9 +4729,12 @@ struct NotchBody: View {
     // pointer leaves, so the answer can be read without hovering it (see
     // `NotchModel.collapseOnLeave`).
     /// Whether the result header's trailing chips (follow-up / detach / pin) are
-    /// showing: only under the pointer, or while the answer is pinned — see the
-    /// note at their use site.
-    private var headerChipsShown: Bool { model.pointerInside || model.isAnswerPinned }
+    /// showing: only under the pointer, while the answer is pinned, or while a
+    /// card in its own window (the ⌘ menu, pickers) is open — the pointer on that
+    /// card reads as outside the island. See the note at their use site.
+    private var headerChipsShown: Bool {
+        model.pointerInside || model.isAnswerPinned || model.isFloatingCardOpen
+    }
 
     private var resultHeader: some View {
         HStack(spacing: 10) {
@@ -5312,6 +5340,10 @@ struct NotchBody: View {
                                     model.isResultMetadataMenuOpen = false
                                     stopThreadLoop()
                                 },
+                                onContinueLoop: {
+                                    model.isResultMetadataMenuOpen = false
+                                    continueThreadLoop()
+                                },
                                 onChangeInterval: {
                                     model.isResultMetadataMenuOpen = false
                                     showLiveLoopIntervalPicker = true
@@ -5466,6 +5498,8 @@ struct AgentRunMetadataMenu: View {
     /// round runs, and — while it is still going — the row that stops it.
     var loop: LoopMenuInfo? = nil
     var onStopLoop: (() -> Void)? = nil
+    /// Restarts a stopped loop.
+    var onContinueLoop: (() -> Void)? = nil
     /// Opens the interval card. Live loops only — compose already has its chip.
     var onChangeInterval: (() -> Void)? = nil
 
@@ -5514,6 +5548,11 @@ struct AgentRunMetadataMenu: View {
                     ResultMetadataRow(icon: LucideIcons.circleStop, title: L("loop.stop"),
                                       hint: L("loop.stop"),
                                       action: onStopLoop)
+                }
+                if !loop.active, let onContinueLoop {
+                    ResultMetadataRow(icon: LucideIcons.play, title: L("loop.continue"),
+                                      hint: L("loop.continue"),
+                                      action: onContinueLoop)
                 }
             }
         }

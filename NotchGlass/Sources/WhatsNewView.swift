@@ -33,10 +33,11 @@ struct WhatsNewView: View {
     /// moment — otherwise every release the jump flies past would claim the rail.
     @State private var trackingResumesAt: Date = .distantPast
 
-    /// Width of the version rail — enough for a version number plus the current
-    /// badge on one line, and no wider: the reading column is what the 600pt
-    /// panel is for.
-    private let railWidth: CGFloat = 118
+    /// The rail tick under the pointer, by index into `displayedEntries`.
+    @State private var hoveredRailIndex: Int?
+
+    /// Width of the version rail — the longest bar plus its inset.
+    private let railWidth: CGFloat = 32
 
     /// How far below the viewport top a release's first line must pass before the
     /// rail calls it the one being read. A little slack, so a section counts as
@@ -132,38 +133,30 @@ struct WhatsNewView: View {
     /// Scrolls on its own once the history outgrows the panel, and follows the
     /// reading position so the active row is always in sight.
     private var versionRail: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(displayedEntries) { entry in
-                        VersionItem(
-                            version: entry.version,
-                            isCurrent: entry.version == UpdaterService.currentVersion,
-                            selected: entry.version == active
-                        ) {
-                            active = entry.version
-                            // Hand the jump to the notes column. A fresh token each
-                            // time, so clicking the same row twice still fires.
-                            jumpTarget = JumpTarget(version: entry.version)
-                        }
-                        .id(Self.railID(entry.version))
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(displayedEntries.indices, id: \.self) { index in
+                let entry = displayedEntries[index]
+                VersionItem(
+                    version: entry.version,
+                    selected: entry.version == active,
+                    hoverDistance: hoveredRailIndex.map { abs($0 - index) },
+                    onHover: { inside in
+                        if inside { hoveredRailIndex = index }
+                        else if hoveredRailIndex == index { hoveredRailIndex = nil }
                     }
-                }
-                // The rail's first row starts level with the notes' first line: both
-                // columns sit below the same runway (see `notesColumn`).
-                .padding(.top, 28)
-                .padding(.bottom, 20)
-            }
-            .onChange(of: active) { _, version in
-                guard !version.isEmpty else { return }
-                withAnimation(.easeOut(duration: 0.2)) {
-                    proxy.scrollTo(Self.railID(version), anchor: .center)
+                ) {
+                    active = entry.version
+                    // Hand the jump to the notes column. A fresh token each
+                    // time, so clicking the same row twice still fires.
+                    jumpTarget = JumpTarget(version: entry.version)
                 }
             }
         }
-        .frame(width: railWidth, height: columnHeight)
-        .scrollIndicators(.never)
-        .scrollEdgeFade(top: true, bottom: true, topFade: 28, bottomFade: edgeFade)
+        .padding(.leading, 6)
+        // The rail's first tick sits level with the notes' first line: both
+        // columns sit below the same runway (see `notesColumn`).
+        .padding(.top, 30)
+        .frame(width: railWidth, height: columnHeight, alignment: .topLeading)
     }
 
     private static func railID(_ version: String) -> String { "whatsnew.rail." + version }
@@ -274,6 +267,9 @@ struct WhatsNewView: View {
                 Text(entry.version)
                     .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                     .foregroundStyle(Tokens.text3)
+                if entry.version == UpdaterService.currentVersion {
+                    CurrentBadge()
+                }
                 Spacer(minLength: 0)
                 if let date = entry.date, !date.isEmpty {
                     Text(date)
@@ -495,57 +491,76 @@ struct WhatsNewView: View {
 
     // MARK: - Rail row
 
-    /// One version in the rail: just the number, with the running build's release
-    /// carrying a small caps badge beside it. Quiet text that brightens on hover,
-    /// a faint fill when it's the release being read — the same translucent-chip
-    /// language as the Settings sidebar. Every row is one line, so every row is a
-    /// capsule, the panel's default chip.
+    /// One release in the rail, drawn as a `RailTick` with no number. The
+    /// version shows as a tooltip.
     private struct VersionItem: View {
         var version: String
-        var isCurrent: Bool
         var selected: Bool
+        var hoverDistance: Int?
+        var onHover: (Bool) -> Void
         var action: () -> Void
 
-        @State private var hovering = false
-
         var body: some View {
-            Button(action: action) {
-                HStack(spacing: 6) {
-                    Text(version)
-                        .font(.sf(Tokens.TypeSize.label, weight: .medium))
-                        .lineLimit(1)
-                        .foregroundStyle(selected ? Tokens.text1 : (hovering ? Tokens.text2 : Tokens.text3))
-                        .layoutPriority(1)
-
-                    if isCurrent {
-                        // A tag, not a second line: caps inside a hairline
-                        // outline at the panel's small-tag radius — an outline
-                        // rather than a fill, so the badge doesn't fight the
-                        // row's own wash when this release is the selected one.
-                        Text(L("whatsnew.currentBadge"))
-                            .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
-                            .tracking(0.5)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.75)
-                            .foregroundStyle(Tokens.text2)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 2.5)
-                            .overlay(
-                                RoundedRectangle.inset
-                                    .strokeBorder(Tokens.hairline, lineWidth: 0.5)
-                            )
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .frame(minHeight: 30)
-                .background(Capsule().fill(.white.opacity(selected ? 0.08 : (hovering ? 0.04 : 0))))
-                .contentShape(Capsule())
-            }
-            .buttonStyle(.plain)
-            .onHover { hovering = $0 }
+            RailTick(selected: selected, hoverDistance: hoverDistance, alignment: .leading,
+                     onHover: onHover, action: action)
+                .help(version)
+                .accessibilityLabel(version)
         }
+    }
+}
+
+/// A short horizontal tick in a navigation rail: one per entry, the selected one
+/// in full white, the rest dim. While the pointer is over a tick, that tick is
+/// the longest and its neighbours lengthen by how close they are
+/// (`hoverDistance`). Used by the What's New version rail and the loop round
+/// column.
+struct RailTick: View {
+    static let rowHeight: CGFloat = 12
+    static let hitWidth: CGFloat = 24
+    var selected: Bool
+    /// Rows between this tick and the hovered one; nil when no tick is hovered.
+    var hoverDistance: Int?
+    var alignment: Alignment = .leading
+    var onHover: (Bool) -> Void
+    var action: () -> Void
+
+    private static let hoverWidths: [CGFloat] = [20, 14, 10, 7]
+
+    private var width: CGFloat {
+        guard let d = hoverDistance else { return 5 }
+        return d < Self.hoverWidths.count ? Self.hoverWidths[d] : 5
+    }
+
+    var body: some View {
+        Button(action: action) {
+            Capsule()
+                .fill(selected || hoverDistance == 0 ? Tokens.text1 : Tokens.text4)
+                .frame(width: width, height: 1.5)
+                .frame(width: Self.hitWidth, height: Self.rowHeight, alignment: alignment)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover(perform: onHover)
+        .animation(.easeOut(duration: 0.14), value: hoverDistance)
+        .animation(.easeOut(duration: 0.2), value: selected)
+    }
+}
+
+/// The running build's release, marked beside its version in the notes column:
+/// caps inside a hairline outline at the panel's small-tag radius.
+private struct CurrentBadge: View {
+    var body: some View {
+        Text(L("whatsnew.currentBadge"))
+            .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+            .tracking(0.5)
+            .lineLimit(1)
+            .foregroundStyle(Tokens.text2)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2.5)
+            .overlay(
+                RoundedRectangle.inset
+                    .strokeBorder(Tokens.hairline, lineWidth: 0.5)
+            )
     }
 }
 

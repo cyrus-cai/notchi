@@ -2833,7 +2833,7 @@ struct DetachedSessionRootView: View {
                                   onTogglePin: onTogglePin,
                                   onClose: onClose)
         } else if let threadStore = state.threadStore {
-            DetachedThreadView(store: threadStore, pinned: state.pinned,
+            DetachedThreadView(store: threadStore, model: model, pinned: state.pinned,
                                onTogglePin: onTogglePin,
                                onClose: onClose,
                                onInAppCopy: onInAppCopy,
@@ -4128,6 +4128,8 @@ private struct DetachedThreadContentHeightKey: PreferenceKey {
 /// session back to the notch.
 struct DetachedThreadView: View {
     @ObservedObject var store: DetachedThreadStore
+    /// Reads and continues a loop whose agent task left the tray.
+    var model: NotchModel? = nil
     var pinned: Bool
     var onTogglePin: () -> Void
     var onClose: () -> Void
@@ -4178,15 +4180,17 @@ struct DetachedThreadView: View {
     }
     private var threadLoopInfo: LoopMenuInfo? {
         let id = store.threadID
-        if let loop = chatLoops.loop(for: id) {
-            return LoopMenuInfo(intervalMinutes: loop.intervalMinutes, rounds: loop.rounds,
-                                nextRoundAt: loop.nextRoundAt, active: loop.active)
-        }
         if let loop = agentManager.tasks.first(where: { $0.id == id })?.loop {
             return LoopMenuInfo(intervalMinutes: loop.intervalMinutes, rounds: loop.rounds,
                                 nextRoundAt: loop.nextRoundAt, active: loop.active)
         }
-        return nil
+        if let info = model?.dismissedAgentLoopInfo(id) { return info }
+        return chatLoops.menuInfo(for: id, turns: chatLoopTurns)
+    }
+    /// The thread's turns when it is an Ask thread — what a chat loop with no
+    /// record is rebuilt from. Empty for an agent thread.
+    private var chatLoopTurns: [NotchModel.Turn] {
+        store.turns.contains(where: \.isAgent) ? [] : store.turns
     }
     private var threadLoopActive: Bool {
         let id = store.threadID
@@ -4697,6 +4701,14 @@ struct DetachedThreadView: View {
                                             metadataMenuOpen = false
                                             chatLoops.stop(store.threadID)
                                             agentManager.stopLoop(taskID: store.threadID)
+                                        },
+                                        onContinueLoop: {
+                                            metadataMenuOpen = false
+                                            if agentManager.tasks.first(where: { $0.id == store.threadID })?.loop != nil {
+                                                agentManager.resumeLoop(taskID: store.threadID)
+                                            } else if model?.reviveAgentLoop(store.threadID) != true {
+                                                chatLoops.resume(store.threadID, turns: chatLoopTurns)
+                                            }
                                         },
                                         onChangeInterval: {
                                             intervalPickerOpen = true
