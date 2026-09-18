@@ -718,7 +718,10 @@ struct ModelDetailCard: View {
                                supported: true)
                 }
                 if isFirstParty {
-                    Note(symbol: "globe.americas", title: L("model.detail.nono.host"))
+                    let official = ModelRatings.nonoOfficialHost(id: model.info.id,
+                                                                 pricing: model.info.notchiPricing)
+                    Note(symbol: official ? "globe" : "globe.americas",
+                         title: L(official ? "model.detail.nono.host.official" : "model.detail.nono.host"))
                 }
             }
 

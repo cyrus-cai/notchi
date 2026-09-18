@@ -3563,6 +3563,16 @@ enum ModelRatings {
     /// (an answer footer, a saved transcript).
     static func isNonoID(_ id: String) -> Bool { id == "nono-flash" || id == "nono" }
 
+    /// Whether a Notchi Balance model is served from the vendor's own API
+    /// rather than a US host (Workers AI / Darkbloom). The catalog flag
+    /// `notchi.official` is the source of truth; vendor `DeepSeek` and the
+    /// public id `deepseek-flash` cover a cached payload that predates it.
+    static func nonoOfficialHost(id: String, pricing: ModelCatalog.ModelList.Entry.NotchiPricing?) -> Bool {
+        if pricing?.official == true { return true }
+        let vendor = pricing?.vendor ?? vendor(for: id, provider: .nono)
+        return vendor == "DeepSeek" || id == "deepseek-flash"
+    }
+
     /// id → name for the named entries in nono's live catalog
     /// ("glm-5.3-flash" → "GLM-5.3-Flash"). Written by `ModelCatalogStore.adopt`
     /// on the main actor and read by the nonisolated `prettyName(for:provider:)`,

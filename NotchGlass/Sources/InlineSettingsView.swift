@@ -2098,7 +2098,7 @@ struct InlineSettingsView: View {
             pricingRate(row.pricing?.cachedInputPerMTok)
             pricingRate(row.pricing?.outputPerMTok)
             HStack(spacing: 8) {
-                Text(L(row.pricing?.official == true ? "nono.pricing.official" : "nono.pricing.usBased"))
+                Text(L(pricingOriginKey(row)))
                     .font(.sf(Tokens.TypeSize.meta))
                     .foregroundStyle(Tokens.text3)
                     .lineLimit(1)
@@ -2118,6 +2118,17 @@ struct InlineSettingsView: View {
             .frame(maxWidth: .infinity, alignment: .trailing)
         }
         .padding(.vertical, 9)
+    }
+
+    /// "Official Provider" for a first-party named entry on the vendor's own
+    /// API; "US Provider" for Blend and for named entries hosted on Workers AI.
+    /// `notchi.official` is the catalog signal. Vendor `DeepSeek` (and the
+    /// public id `deepseek-flash`) is the same fact when a cached `/v1/models`
+    /// payload predates that field.
+    private func pricingOriginKey(_ row: NonoLineupRow) -> String {
+        if row.pricing?.official == true { return "nono.pricing.official" }
+        return ModelRatings.nonoOfficialHost(id: row.id, pricing: row.pricing)
+            ? "nono.pricing.official" : "nono.pricing.usBased"
     }
 
     /// The per-request floor. Same loading rule as the rates: a spinner until
@@ -7110,8 +7121,7 @@ private struct NonoPrivacyNote: View {
                         .foregroundStyle(Tokens.text4)
                 }
                 Text(L("nono.privacy.route.flow.\(node)"))
-                    .font(.sf(Tokens.TypeSize.meta, weight: .medium))
-                    .foregroundStyle(Tokens.text1)
+                    .captionLabel(color: Tokens.text1)
                     .multilineTextAlignment(.center)
                     .lineLimit(2)
                     .minimumScaleFactor(0.85)
