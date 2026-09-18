@@ -2034,12 +2034,6 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// Teaser marks under the live lineup — labs people already know, not the
-    /// full catalog. Each name must match a `VendorLogos.table` key.
-    private static let upcomingVendors = [
-        "OpenAI", "Anthropic", "Google", "xAI", "Meta", "DeepSeek", "Qwen", "Mistral",
-    ]
-
     /// What this balance pays for: every model the gateway serves, the
     /// per-request floor, and the two rates it charges against the wallet. Not
     /// a picker — picking happens on the panel. Ruled like `usageTable`; it
@@ -2071,24 +2065,6 @@ struct InlineSettingsView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-
-            VStack(spacing: 10) {
-                HStack(spacing: 14) {
-                    ForEach(Self.upcomingVendors, id: \.self) { vendor in
-                        VendorLogo(vendor: vendor)
-                            .frame(width: 18, height: 18)
-                    }
-                }
-                .opacity(0.42)
-
-                Text(L("nono.pricing.moreComingSoon"))
-                    .font(.sf(Tokens.TypeSize.label))
-                    .foregroundStyle(Tokens.text3)
-                    .lineLimit(1)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.top, 36)
-            .padding(.bottom, 12)
         }
         .task { await refreshNonoRates() }
     }
@@ -2122,7 +2098,7 @@ struct InlineSettingsView: View {
             pricingRate(row.pricing?.cachedInputPerMTok)
             pricingRate(row.pricing?.outputPerMTok)
             HStack(spacing: 8) {
-                Text(L("nono.pricing.usBased"))
+                Text(L(row.pricing?.official == true ? "nono.pricing.official" : "nono.pricing.usBased"))
                     .font(.sf(Tokens.TypeSize.meta))
                     .foregroundStyle(Tokens.text3)
                     .lineLimit(1)

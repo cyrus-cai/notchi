@@ -2958,6 +2958,9 @@ enum ModelCatalog {
             /// read, so both can change without an app release.
             struct NotchiPricing: Decodable, Equatable, Sendable {
                 let vendor: String?
+                /// First-party named entry on the vendor's own API. Absent on
+                /// older payloads; the pricing row then keeps "US Provider".
+                let official: Bool?
                 let inputPerMTok: Double
                 /// Per million prompt tokens the upstream served from its cache.
                 /// `nil` where the model is billed one rate for all input.
