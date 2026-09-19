@@ -110,7 +110,6 @@ final class WhatsNewService: ObservableObject {
             improvements: [
                 "Regenerate sits beside the question, hidden until you hover that row.",
                 "The Balances table now names each credit and gift.",
-                "A long site name no longer pushes the date off a search source.",
             ]
         ),
         Entry(
