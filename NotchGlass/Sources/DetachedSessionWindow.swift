@@ -4838,7 +4838,17 @@ struct DetachedThreadView: View {
                         .foregroundStyle(Tokens.text4)
                         .padding(.leading, 12)
                 }
-                UserQuestionBubble(text: turn.text)
+                QuestionRow(
+                    text: turn.text,
+                    regenerate: regenerateTarget(forQuestion: turn).map { answer in
+                        QuestionRow.Regenerate(
+                            disabled: answer.streaming,
+                            models: regenerateOptions(),
+                            action: onRegenerate,
+                            actionWith: onRegenerateWith
+                        )
+                    }
+                )
             }
         } else {
             VStack(alignment: .leading, spacing: 10) {
@@ -4850,13 +4860,26 @@ struct DetachedThreadView: View {
         }
     }
 
+    /// The answer a question's regenerate control re-runs: the thread's last
+    /// turn, when it directly follows this question and is a chat answer.
+    private func regenerateTarget(forQuestion turn: NotchModel.Turn) -> NotchModel.Turn? {
+        guard let index = store.turns.firstIndex(where: { $0.id == turn.id }),
+              index + 1 == store.turns.count - 1
+        else { return nil }
+        let answer = store.turns[index + 1]
+        return answer.role == "user" || answer.isAgent ? nil : answer
+    }
+
     /// The panel's full answer view — wait line, sources badge, and the settled
     /// footer (copy · plain copy · regenerate · model ⓘ) — so the torn-out
     /// thread keeps every action the panel offers. Regenerate belongs only to the
     /// last answer and stays disabled while that answer is still streaming.
     private func assistantTurn(_ turn: NotchModel.Turn) -> some View {
         let isLastTurn = store.turns.last?.id == turn.id
-        let canRegenerate = isLastTurn && !turn.isAgent
+        // Regenerate sits beside the question bubble; the footer keeps it only
+        // when that bubble is hidden.
+        let questionHidden = store.turns.dropLast().last?.hidesUserBubble ?? true
+        let canRegenerate = isLastTurn && questionHidden && !turn.isAgent
         return AssistantTurnView(
             text: turn.text,
             streaming: turn.streaming,

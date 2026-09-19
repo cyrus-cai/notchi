@@ -6074,8 +6074,11 @@ struct InlineSettingsView: View {
     private var balancesSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             if balancesLoading && balanceLines.isEmpty {
+                // Centred the same way as Usage's.
                 ProgressView().controlSize(.small)
-                    .padding(.top, 8)
+                    .frame(maxWidth: .infinity,
+                           minHeight: usagePlaceholderHeight(hasSpent: false),
+                           alignment: .center)
             } else if balancesFailed && balanceLines.isEmpty {
                 Text(L("nono.error.unreachable"))
                     .font(.sf(Tokens.TypeSize.label))
@@ -6123,21 +6126,22 @@ struct InlineSettingsView: View {
     private var balancesTable: some View {
         Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 0) {
             GridRow {
-                Text(L("nono.balances.col.date")).captionLabel()
+                Text(L("nono.balances.col.name")).captionLabel()
                 Text(L("nono.balances.col.amount")).captionLabel()
                     .gridColumnAlignment(.trailing)
                 Text(L("nono.balances.col.kind")).captionLabel()
+                Text(L("nono.balances.col.date")).captionLabel()
                 Text(L("nono.balances.col.expires")).captionLabel()
                     .gridColumnAlignment(.trailing)
             }
             .padding(.bottom, 8)
 
-            Divider().overlay(Tokens.hairline).gridCellColumns(4)
+            Divider().overlay(Tokens.hairline).gridCellColumns(5)
 
             ForEach(Array(balanceLines.enumerated()), id: \.element.id) { index, line in
                 balanceRow(line)
                 if index < balanceLines.count - 1 {
-                    Divider().overlay(Tokens.hairline.opacity(0.6)).gridCellColumns(4)
+                    Divider().overlay(Tokens.hairline.opacity(0.6)).gridCellColumns(5)
                 }
             }
         }
@@ -6145,15 +6149,23 @@ struct InlineSettingsView: View {
 
     private func balanceRow(_ line: NoNoAccount.BalanceLine) -> some View {
         GridRow {
-            usageCell(line.date.formatted(.dateTime.month(.abbreviated).day()),
-                      color: Tokens.text2)
+            usageCell(balanceName(line), color: Tokens.text1)
             usageCell(Self.moneyCharged(line.amountUSD), color: Tokens.text1)
             balanceKindTag(line.kind)
+            usageCell(line.date.formatted(.dateTime.month(.abbreviated).day()),
+                      color: Tokens.text2)
             usageCell(line.expiresDate.map {
                 $0.formatted(.dateTime.month(.abbreviated).day().year())
             } ?? "—", color: Tokens.text2)
         }
         .padding(.vertical, 9)
+    }
+
+    private func balanceName(_ line: NoNoAccount.BalanceLine) -> String {
+        switch line.kind {
+        case .purchase: return L("nono.balances.name.purchase")
+        case .gift: return line.title ?? L("nono.balances.name.welcome")
+        }
     }
 
     /// Gift is a smoked rose chip; a purchase is the same chip without the tint.

@@ -302,6 +302,9 @@ final class NoNoAccount: ObservableObject {
 
         var id: String
         var kind: Kind
+        /// A gift's name, set by the operator per campaign. Nil on a purchase
+        /// and on gifts from before names existed, which are welcome gifts.
+        var title: String?
         var amountUSD: Double
         var expiresAt: Double?
         var at: Double

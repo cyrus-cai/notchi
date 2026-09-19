@@ -4611,6 +4611,19 @@ struct NotchBody: View {
     /// `ScrollViewReader` scrolls to it to keep the newest text in view.
     private let scrollBottomID = "conversation-bottom"
 
+    /// The answer a question's regenerate control would re-run: the turn right
+    /// after it, when that turn is the thread's last, is a chat answer (an agent
+    /// report can't be re-run by the chat model), and no error row is up (the
+    /// error row owns the re-run then).
+    private func regenerateTarget(forQuestion turn: NotchModel.Turn) -> NotchModel.Turn? {
+        guard model.visibleAskError == nil,
+              let index = model.turns.firstIndex(where: { $0.id == turn.id }),
+              index + 1 == model.turns.count - 1
+        else { return nil }
+        let answer = model.turns[index + 1]
+        return answer.role == "user" || answer.isAgent ? nil : answer
+    }
+
     /// One bubble in the thread. A user turn reads as a quiet, dimmer line tagged
     /// "You"; an assistant turn renders full markdown at body weight. A streaming
     /// assistant turn with no text yet shows the thinking dots, so the wait reads
@@ -4644,7 +4657,20 @@ struct NotchBody: View {
                 // itself says "this is what you asked", so no tag is needed and the
                 // thread reads cleaner. It hugs its content (not full width) and
                 // left-aligns with the answer below.
-                UserQuestionBubble(text: turn.text)
+                // Regenerate sits beside the question it re-runs, hidden until
+                // the pointer is on this row. Offered only on the question whose
+                // answer is the thread's last turn (same gate the answer footer used).
+                QuestionRow(
+                    text: turn.text,
+                    regenerate: regenerateTarget(forQuestion: turn).map { answer in
+                        QuestionRow.Regenerate(
+                            disabled: answer.streaming,
+                            models: model.regenerateModelOptions,
+                            action: { model.regenerateLastAnswer() },
+                            actionWith: { model.regenerateLastAnswer(model: $0) }
+                        )
+                    }
+                )
             }
         } else {
             // Assistant turn — streaming AND settled share ONE view tree, so the
@@ -4660,6 +4686,9 @@ struct NotchBody: View {
             // ChatGPT/Claude handoff always copies the whole thread — so both ride
             // only the last turn's footer, never mid-thread ones.
             let isLastTurn = model.turns.last?.id == turn.id
+            let questionHidden = model.turns.dropLast().last?.hidesUserBubble ?? true
+            let footerRegenerate = isLastTurn && questionHidden && !turn.isAgent
+                && model.visibleAskError == nil
             // An agent run's report never offers regenerate: the chat model can't
             // re-run the task in its folder, so "regenerating" it would only
             // hallucinate a fresh report over the real one. (Chat follow-ups on
@@ -4669,7 +4698,6 @@ struct NotchBody: View {
             // owns the re-run — its label retries, its chevron retries on another
             // model — so a second regenerate control in the footer would be the
             // same action twice.
-            let canRegenerate = isLastTurn && !turn.isAgent && model.visibleAskError == nil
             VStack(alignment: .leading, spacing: 14) {
                 // An agent answer carries its round's work trail above the report —
                 // the record's copy of the live detail page, so a reopened run
@@ -4703,12 +4731,11 @@ struct NotchBody: View {
                     // second metadata line under the report.
                     showsFooterMetadata: !turn.isAgent,
                     onInAppCopy: { model.rebaselineClipboardAfterInAppWrite() },
-                    onRegenerate: canRegenerate ? { model.regenerateLastAnswer() } : nil,
-                    // Right-click the regenerate button to re-run this answer with a
-                    // different model, once (XII-135). Only on the last turn (same gate
-                    // as plain regenerate).
-                    regenerateModels: canRegenerate ? model.regenerateModelOptions : [],
-                    onRegenerateWith: canRegenerate ? { model.regenerateLastAnswer(model: $0) } : nil,
+                    // Regenerate normally sits beside the question bubble; it stays
+                    // in the footer only when that bubble is hidden.
+                    onRegenerate: footerRegenerate ? { model.regenerateLastAnswer() } : nil,
+                    regenerateModels: footerRegenerate ? model.regenerateModelOptions : [],
+                    onRegenerateWith: footerRegenerate ? { model.regenerateLastAnswer(model: $0) } : nil,
                     regenModel: turn.regenModel,
                     answerModel: turn.answerModel,
                     reasoning: turn.reasoning,
@@ -6483,6 +6510,59 @@ struct RecentEntryStyle: ButtonStyle {
 /// height rounds its corners by half the *tall* box — a bloated, over-round blob;
 /// the smaller radius keeps a multi-line quote reading as a tidy card.
 /// `style: .continuous` matches the panel's other rounded shapes.
+/// A question bubble with its regenerate control trailing it. The control is
+/// hidden until the pointer is over the row.
+struct QuestionRow: View {
+    struct Regenerate {
+        let disabled: Bool
+        let models: [(model: String, label: String, isCurrent: Bool)]
+        let action: () -> Void
+        let actionWith: (String) -> Void
+    }
+
+    let text: String
+    let regenerate: Regenerate?
+
+    @State private var hovered = false
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 6) {
+            UserQuestionBubble(text: text)
+            if let regenerate {
+                AnswerFooterRegenerateControl(
+                    help: shortcutHelp("result.regenerate", action: .regenerate),
+                    menuHelp: L("result.regenerate.with"),
+                    rowHovered: hovered,
+                    hasMenu: !regenerate.models.isEmpty,
+                    hidesAtRest: true,
+                    icon: "arrow.counterclockwise",
+                    action: regenerate.action
+                ) {
+                    Text(L("result.regenerate.with"))
+                    ForEach(regenerate.models, id: \.model) { option in
+                        Button {
+                            regenerate.actionWith(option.model)
+                        } label: {
+                            if option.isCurrent {
+                                Text(L("result.regenerate.current", option.label))
+                            } else {
+                                Text(option.label)
+                            }
+                        }
+                        .disabled(option.isCurrent)
+                    }
+                }
+                .disabled(regenerate.disabled)
+                .fixedSize()
+                // Centers the 22pt control on a single-line bubble (~33pt tall).
+                .padding(.top, 5.5)
+            }
+        }
+        .contentShape(Rectangle())
+        .onHover { hovered = $0 }
+    }
+}
+
 struct UserQuestionBubble: View {
     let text: String
     /// The question's type size. The result view reads at the panel's own 14.5;

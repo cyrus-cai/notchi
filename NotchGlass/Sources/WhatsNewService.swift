@@ -105,6 +105,15 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.8.4",
+            date: "2026-09-19",
+            improvements: [
+                "Regenerate sits beside the question, hidden until you hover that row.",
+                "The Balances table now names each credit and gift.",
+                "A long site name no longer pushes the date off a search source.",
+            ]
+        ),
+        Entry(
             version: "0.8.3",
             date: "2026-09-18",
             headline: "Repeat a prompt with /loop.",

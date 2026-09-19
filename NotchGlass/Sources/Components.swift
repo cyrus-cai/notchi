@@ -7168,13 +7168,17 @@ private struct AnswerFooterButton: View {
 /// (`GlassSegmentCluster`, the code block's copy chip). Nothing else in the
 /// footer takes glass — a row of standing pills would outweigh the answer above
 /// it; here the capsule is what tells you the chevron is a separate target.
-private struct AnswerFooterRegenerateControl<Items: View>: View {
+struct AnswerFooterRegenerateControl<Items: View>: View {
     let help: String
     let menuHelp: String
     /// True while the cursor is anywhere over the owning turn — surfaces the
     /// whole footer as one unit at half strength.
     let rowHovered: Bool
     let hasMenu: Bool
+    /// Fully hidden (and not clickable) until the owning row is hovered, instead
+    /// of resting at 0.25. Used beside the question bubble.
+    var hidesAtRest: Bool = false
+    var icon: String = "arrow.clockwise"
     let action: () -> Void
     @ViewBuilder var items: () -> Items
 
@@ -7201,7 +7205,7 @@ private struct AnswerFooterRegenerateControl<Items: View>: View {
     var body: some View {
         HStack(spacing: 0) {
             Button(action: action) {
-                Image(systemName: "arrow.clockwise")
+                Image(systemName: icon)
                     .font(.sf(Tokens.TypeSize.meta, weight: .regular))
                     .foregroundStyle(lit ? Tokens.text2 : Tokens.text3)
                     .frame(width: 22, height: 22)
@@ -7266,7 +7270,8 @@ private struct AnswerFooterRegenerateControl<Items: View>: View {
         }
         // Rest → row hover → pointed at: the same three levels the bare footer
         // icons keep, so the control still belongs to that toolbar.
-        .opacity(lit ? 1.0 : rowHovered ? 0.7 : 0.25)
+        .opacity(lit ? 1.0 : rowHovered ? 0.7 : hidesAtRest ? 0 : 0.25)
+        .allowsHitTesting(lit || rowHovered || !hidesAtRest)
         // The chevron and glass arrive slower than the rest of the toolbar:
         // easeOut at hoverFade starts at full speed and reads as a snap.
         // Ease in-out, a beat of delay on appear, slightly quicker on leave.
@@ -7588,21 +7593,25 @@ private struct SourceRow: View {
             if let url = URL(string: source.url) { NSWorkspace.shared.open(url) }
         } label: {
             HStack(alignment: .firstTextBaseline, spacing: 9) {
-                Text(source.site)
-                    .font(.sf(Tokens.TypeSize.meta, weight: .medium))
-                    .foregroundStyle(Tokens.text3)
-                    .lineLimit(1)
-                    .fixedSize()
                 Text(source.title)
                     .font(.sf(Tokens.TypeSize.meta))
                     .foregroundStyle(hovering ? Tokens.text2 : Tokens.text4)
                     .lineLimit(1)
                     .truncationMode(.tail)
+                // Width goes to the date first, then the site, and the title takes
+                // what is left, so a long site name never pushes the date out.
+                Text(source.site)
+                    .font(.sf(Tokens.TypeSize.meta))
+                    .foregroundStyle(Tokens.text3)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .layoutPriority(1)
                 if let date = source.date, let day = Self.dayOnly(date) {
                     Text(day)
                         .font(.sf(Tokens.TypeSize.caption))
                         .foregroundStyle(Tokens.text4)
                         .fixedSize()
+                        .layoutPriority(2)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
