@@ -411,6 +411,14 @@ private struct ClipboardSenseEars: View {
         }
     }
 
+    /// The destination's colour, read straight off the stage — Ask blue, Note
+    /// yellow, Remind orange, the same faces the Recent chips and the composer
+    /// wear (`Panel.leafInk`). A failure has no destination left to name, so it
+    /// falls back to plain ink.
+    private var ink: Color {
+        sense.destinationInk ?? Tokens.text3
+    }
+
     var body: some View {
         HStack(spacing: 0) {
             // Left ear — the outcome phrase, then the dots, then the verdict.
@@ -428,7 +436,10 @@ private struct ClipboardSenseEars: View {
             // Right ear — the key to press, only while the offer stands.
             ZStack {
                 if isHinting {
-                    earText("⌘C", color: Tokens.text3)
+                    // The key stays a step behind the phrase it belongs to —
+                    // same hue, less of it, so the shortcut reads as the
+                    // footnote and not a second announcement.
+                    earText("⌘C", color: ink.opacity(0.55))
                         .background(GeometryReader { proxy in
                             Color.clear.preference(
                                 key: SenseEarWidthsKey.self,
@@ -448,13 +459,16 @@ private struct ClipboardSenseEars: View {
         Group {
             switch sense {
             case .hinting(let panel):
-                earText(panel == .reminder ? L("sense.reminder") : L("sense.note"),
-                        color: Tokens.text3)
+                earText(panel == .chat ? L("sense.ask")
+                        : panel == .reminder ? L("sense.reminder") : L("sense.note"),
+                        color: ink)
             case .saving:
                 ThinkingDots(dot: 4, spacing: 5)
                     .fixedSize()
             case .saved:
-                earText(L("sense.saved"), color: Tokens.text4)
+                // The write landed — the word steps back toward meta weight,
+                // keeping only enough of the hue to say where it went.
+                earText(L("sense.saved"), color: ink.opacity(0.7))
             case .failed:
                 earText(L("sense.failed"), color: Tokens.text4)
             case .idle:

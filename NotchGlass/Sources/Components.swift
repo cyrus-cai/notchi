@@ -7730,10 +7730,11 @@ struct SavedTurnImages: View {
 
 /// The transcript of an agent run's work, in the CLI apps' own display grammar:
 /// narration the agent wrote between tool calls reads as prose; the tool calls
-/// BETWEEN two narrations fold into one summary row ("4 commands · 2 file
-/// edits") that expands to the individual calls — each of which expands again
-/// to the output it captured. Folded by default so a busy run reads as a story,
-/// not a wall of terminal lines. Shared by the live agent detail page and a
+/// of one round fold into one summary row ("4 commands · 2 file edits") that
+/// expands to the individual calls — each of which expands again to the output
+/// it captured. Thinking in that same stretch merges into one fold and does
+/// not split the calls. Folded by default so a busy run reads as a story, not
+/// a wall of terminal lines. Shared by the live agent detail page and a
 /// reopened run's record, so the two read identically.
 struct AgentWorkTrailView: View {
     let entries: [AgentLogEntry]
@@ -7760,10 +7761,9 @@ struct AgentWorkTrailView: View {
     private var waitFont: CGFloat { max(Tokens.TypeSize.meta, baseFont - 2) }
 
     /// One display unit of the trail: a prose paragraph, a fold of reasoning, a
-    /// plan, a follow-up prompt marker, or a run of consecutive tool calls
-    /// (folded together). Identified by its first entry's id, which stays stable
-    /// while a live run grows the trailing group — so the group's expand state
-    /// survives streaming.
+    /// plan, a follow-up prompt marker, or a run of tool calls (folded together).
+    /// Identified by its first entry's id, which stays stable while a live run
+    /// grows the trailing group — so the group's expand state survives streaming.
     private enum Block: Identifiable {
         case prose(AgentLogEntry)
         case thinking(AgentLogEntry)
@@ -7779,29 +7779,55 @@ struct AgentWorkTrailView: View {
         }
     }
 
-    /// Fold consecutive mono entries into `.tools` runs, keeping everything else
-    /// as its own block, in order.
+    /// One work stretch — thinking plus every tool call until the next
+    /// narration, plan, or prompt marker. Reasoning used to flush the tool
+    /// run, so one round painted as Thinking / 3 reads / Thinking / 3 reads.
+    /// Thinking no longer splits the calls; consecutive thoughts merge into
+    /// one fold. Narration still starts a new stretch, so the story between
+    /// rounds stays in order.
     private var blocks: [Block] {
         var out: [Block] = []
-        var run: [AgentLogEntry] = []
-        func flush() {
-            guard !run.isEmpty else { return }
-            out.append(.tools(run)); run = []
+        var thoughts: [AgentLogEntry] = []
+        var tools: [AgentLogEntry] = []
+        func flushWork() {
+            if !thoughts.isEmpty {
+                out.append(.thinking(Self.mergedThinking(thoughts)))
+                thoughts = []
+            }
+            if !tools.isEmpty {
+                out.append(.tools(tools))
+                tools = []
+            }
         }
         for entry in entries {
-            if entry.mono {
-                run.append(entry)
+            if entry.kind == .thinking {
+                thoughts.append(entry)
                 continue
             }
-            flush()
+            if entry.mono {
+                tools.append(entry)
+                continue
+            }
+            flushWork()
             switch entry.kind {
-            case .thinking: out.append(.thinking(entry))
-            case .todo:     out.append(.todo(entry))
-            default:        out.append(entry.title.hasPrefix("› ") ? .marker(entry) : .prose(entry))
+            case .todo: out.append(.todo(entry))
+            default:    out.append(entry.title.hasPrefix("› ") ? .marker(entry) : .prose(entry))
             }
         }
-        flush()
+        flushWork()
         return out
+    }
+
+    /// Consecutive thinking entries become one fold. First id stays so the
+    /// expand state survives as later chunks land.
+    private static func mergedThinking(_ entries: [AgentLogEntry]) -> AgentLogEntry {
+        guard entries.count > 1 else { return entries[0] }
+        var first = entries[0]
+        first.title = entries.map(\.title)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+        return first
     }
 
     var body: some View {

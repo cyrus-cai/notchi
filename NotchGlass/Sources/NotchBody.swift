@@ -3920,18 +3920,24 @@ struct NotchBody: View {
                 if !turn.imageFiles.isEmpty { total += 30 }  // the image strip
             } else {
                 // An agent turn stacks its work trail above the report. Folded
-                // (the default), each RUN of consecutive tool calls is a single
-                // summary row; the narration between runs reads as prose.
+                // (the default), one round's tool calls are a single summary
+                // row; narration between rounds reads as prose.
                 if turn.isAgent,
                    let trail = turn.agentLog?.droppingTrailingAnswer(turn.text) {
                     var inToolRun = false
+                    var inThinking = false
                     for entry in trail {
-                        if entry.mono {
+                        if entry.kind == .thinking {
+                            if !inThinking { total += 22 }
+                            inThinking = true
+                        } else if entry.mono {
+                            inThinking = false
                             if !inToolRun { total += 20 }
                             inToolRun = true
                         } else {
-                            total += height(entry.title, 15) + 7
+                            inThinking = false
                             inToolRun = false
+                            total += height(entry.title, 15) + 7
                         }
                         if total > ceiling { return true }
                     }
@@ -5865,6 +5871,34 @@ extension NotchModel.Panel {
         switch self {
         case .chat:              return Tokens.askInk
         case .note, .reminder:   return Tokens.captureInk
+        }
+    }
+
+    /// The LEAF face, for surfaces that name one destination outright rather
+    /// than the merged Capture mode — today the resting notch's copy-sense hint,
+    /// which says "Note" or "Set Reminder", never "Capture". Same rule the
+    /// Recent chips follow (`HistoryItem.Source.tint`): a named leaf wears its
+    /// own colour, the mode wears the amber between them.
+    var leafInk: Color {
+        switch self {
+        case .chat:     return Tokens.askInk
+        case .note:     return Tokens.noteInk
+        case .reminder: return Tokens.reminderInk
+        }
+    }
+}
+
+/// What colour the resting notch wears while it is offering a copied line: the
+/// destination's own leaf face, carried through the write so the hint, the
+/// verdict and the rim around them stay one colour from offer to saved. A
+/// failure names no destination, so it has none and stays plain ink.
+extension NotchModel.ClipboardSense {
+    var destinationInk: Color? {
+        switch self {
+        case .hinting(let panel), .saving(let panel), .saved(let panel):
+            return panel.leafInk
+        case .idle, .failed:
+            return nil
         }
     }
 }

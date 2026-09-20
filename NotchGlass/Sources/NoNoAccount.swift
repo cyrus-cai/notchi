@@ -409,6 +409,43 @@ final class NoNoAccount: ObservableObject {
     /// What the wallet holds right now, gifts included.
     var remainingUSD: Double { snapshot?.credit.remainingUSD ?? 0 }
 
+    // MARK: - Copy Sense
+
+    /// Jev's verdict on one copied string (`POST /v1/sense`). `kind` is one of
+    /// the gateway's `SENSE_KINDS`; `none` means copied only to paste.
+    struct SenseVerdict: Decodable, Equatable {
+        var kind: String
+        var saveProbability: Double
+    }
+
+    /// What an account must have bought, over its life, before Jev is offered.
+    /// Mirrors the gateway's own `MIN_PAID_USD` (`backend/src/sense.ts`) — the
+    /// two have to agree, or the app offers a pick the route then refuses.
+    static let senseMinPaidUSD = 1.0
+
+    /// Whether this account may use Jev at all: a token, and at least
+    /// `senseMinPaidUSD` bought at some point — the same test `/v1/sense`
+    /// applies. What is left does not matter, only what was bought: someone who
+    /// bought $5 and spent it stays eligible. Nil snapshot (not read yet) counts
+    /// as no. Using Jev is $0 once that bar is met.
+    var canUseRemoteSense: Bool {
+        hasToken && (snapshot?.credit.grantedUSD ?? 0) >= Self.senseMinPaidUSD
+    }
+
+    /// Whether Copy Sense should ask Jev for this copy: the account qualifies
+    /// and the user picked Jev in Settings.
+    var usesRemoteSense: Bool { CopySenseEngine.current == .jev && canUseRemoteSense }
+
+    /// Ask the gateway about one clip. Nil on any failure — the caller then uses
+    /// the on-device classifier. The caller must have run `ClipPrivacy` first.
+    func sense(_ text: String) async -> SenseVerdict? {
+        guard usesRemoteSense else { return nil }
+        guard var request = try? jsonRequest("/sense", body: ["text": text], authorized: true) else { return nil }
+        // A hint that arrives after this is no longer about the copy just made.
+        request.timeoutInterval = 5
+        return try? await send(request)
+    }
+
     // MARK: - Transport
 
     /// The gateway's API root — the chat endpoint minus its method path, so the
@@ -427,12 +464,16 @@ final class NoNoAccount: ObservableObject {
     }
 
     private func post<T: Decodable>(_ path: String, body: [String: Any], authorized: Bool) async throws -> T {
+        try await send(jsonRequest(path, body: body, authorized: authorized))
+    }
+
+    private func jsonRequest(_ path: String, body: [String: Any], authorized: Bool) throws -> URLRequest {
         var request = URLRequest(url: URL(string: base + path)!)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if authorized { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        return try await send(request)
+        return request
     }
 
     private func send<T: Decodable>(_ request: URLRequest) async throws -> T {
@@ -466,5 +507,38 @@ final class NoNoAccount: ObservableObject {
             return L("nono.error.unreachable")
         }
         return text
+    }
+}
+
+/// Which classifier Copy Sense asks. On-device is the whole feature for a free
+/// account; Jev is the gateway route (`/v1/sense`), which refuses any account
+/// that has never bought credit, so the pick only shows for accounts that
+/// qualify.
+enum CopySenseEngine: String, CaseIterable, Identifiable {
+    /// `IntentEngine` alone. The copied text never leaves the Mac.
+    case onDevice
+    /// Jev through the gateway, with `IntentEngine` as the fallback whenever the
+    /// request fails or the account stops qualifying. `ClipPrivacy` drops
+    /// credentials before anything is sent, and the route stores no text.
+    case jev
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .onDevice: return L("senseEngine.local")
+        case .jev:      return L("senseEngine.jev")
+        }
+    }
+
+    private static let key = "copySenseEngine"
+    static var current: CopySenseEngine {
+        get {
+            UserDefaults.standard.string(forKey: key)
+                .flatMap(CopySenseEngine.init) ?? .jev
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: key)
+        }
     }
 }

@@ -417,6 +417,11 @@ struct InlineSettingsView: View {
     /// which nudges `AppDelegate` to re-evaluate immediately.
     @State private var hideInFullscreen: Bool = HideNotchInFullscreen.isEnabled
 
+    /// Which classifier Copy Sense asks (on-device / Jev) — mirrors the
+    /// persisted value; writes go through `selectCopySenseEngine`. Read per
+    /// copy by `NoNoAccount.usesRemoteSense`, so a change applies to the next one.
+    @State private var copySenseEngine: CopySenseEngine = .current
+
     /// Where note captures land (Apple Notes / Markdown folder) — mirrors the
     /// persisted value; writes go through `selectNoteDestination`. Consulted per
     /// write, so the switch applies to the very next jot.
@@ -819,12 +824,21 @@ struct InlineSettingsView: View {
                 }
             case .capture:
                 // The whole path a line takes into the notch, in the order it
-                // travels: what the panel picks up when it opens, how it gets
-                // its subject, then where a jot finally files. These rows used
-                // to be split across Notes and General, which put "what gets
-                // captured" and "where it goes" on different pages.
+                // travels: where the text comes from, then where a jot finally
+                // files. These rows used to be split across Notes and General,
+                // which put "what gets captured" and "where it goes" on
+                // different pages; the two captions here name that split
+                // inside one page instead of relying on row order to imply it.
+                // Copy sensing is the feature; Jev is how that feature
+                // classifies, so the two share a tighter stack instead of
+                // sitting as peer rows among the other capture paths.
+                Text(L("capture.sources"))
+                    .captionLabel()
                 copySenseRow
                 selectionContextRow
+                Text(L("capture.destination"))
+                    .captionLabel()
+                    .padding(.top, 2)
                 noteDestinationRow
             case .general:
                 // What's left once the capture rows moved out is genuinely
@@ -961,7 +975,16 @@ struct InlineSettingsView: View {
                             topFade: Self.paneTopFade, bottomFade: 32)
             // A pane swap starts at the top again; the observer only reports on
             // the next bounds change, so clear the flag here.
+            .onAppear {
+                // Once per appearance: a tag marked read while this pane is up
+                // stays up, and is gone the next time Settings opens.
+                showsRefreshedTag = !SettingsNewMarks.copySenseSeen
+            }
             .onChange(of: section) {
+                if section == .capture, !captureTabSeen {
+                    captureTabSeen = true
+                    SettingsNewMarks.captureTabSeen = true
+                }
                 paneScrolledOffTop = false
                 statsHover = nil
                 // The new pane measures its own longest label; keeping the old
@@ -983,7 +1006,10 @@ struct InlineSettingsView: View {
                     // The gear's update dot continues here: it leads to settings,
                     // then the About entry carries it the rest of the way to the
                     // update action — a quiet neutral dot, never a coloured one.
-                    badged: s == .about && isUpdateAvailable
+                    // Capture wears the same dot until it has been opened once,
+                    // for the settings that are new inside it.
+                    badged: (s == .about && isUpdateAvailable)
+                        || (s == .capture && !captureTabSeen)
                 ) {
                     withAnimation(.easeOut(duration: 0.16)) { section = s }
                 }
@@ -2197,6 +2223,16 @@ struct InlineSettingsView: View {
     /// where Stripe's flat fee costs the most per dollar and a default should
     /// not steer people into it.
     @State private var topUpUSD: Double = 5
+    /// Set when the wallet was opened by picking Jev in Copy sensing: the
+    /// purchase that follows turns Jev on by itself.
+    @State private var armJevAfterTopUp = false
+    /// Whether the sidebar still wears its dot on Capture. Mirrored in `@State`
+    /// so the pane redraws the moment that pane is opened.
+    @State private var captureTabSeen = SettingsNewMarks.captureTabSeen
+    /// Whether the Copy sensing row wears its tag. Read ONCE per appearance of
+    /// Settings (see `onAppear`) rather than tracked live: opening the menu
+    /// records the tag as read, and this visit keeps showing it anyway.
+    @State private var showsRefreshedTag = false
     @State private var addCreditHovering = false
     @State private var receiptsMenuHovering = false
     @State private var usageLines: [NoNoAccount.UsageLine] = []
@@ -2237,6 +2273,14 @@ struct InlineSettingsView: View {
                         // not on the balance being non-zero, is what makes this
                         // work for a repeat purchase.
                         await nono.awaitCredit(boughtAbove: bought)
+                        // This purchase was started by asking for Jev in Copy
+                        // sensing. It is on now — unless the amount bought still
+                        // falls short of the bar, in which case the pick is
+                        // simply dropped rather than half-applied.
+                        if armJevAfterTopUp {
+                            armJevAfterTopUp = false
+                            if nono.canUseRemoteSense { selectCopySenseMode(.jev) }
+                        }
                     }
                     showingAmount = false
                 } else {
@@ -2968,6 +3012,65 @@ struct InlineSettingsView: View {
     private func menuOption(_ title: String, selected: Bool) -> some View {
         if selected {
             Label(title, systemImage: "checkmark")
+        } else {
+            Text(title)
+        }
+    }
+
+    /// The mark on a setting that changed since the user last looked. Same tag
+    /// shape as the Jev row's, so a badge is one species on this pane.
+    struct RefreshedBadge: View {
+        var body: some View {
+            SenseTopUpTag(text: L("tag.refreshed"), lit: true,
+                          tint: Tokens.accent, filled: true)
+        }
+    }
+
+    /// One tag on the Jev row. Shaped like `LowBalanceTag` — same corner, same padding, same
+    /// hairline — but an outline in the CTA blue rather than that one's filled
+    /// rose, because nothing here is wrong: it is an offer, not a warning.
+    struct SenseTopUpTag: View {
+        let text: String
+        let lit: Bool
+        /// The ink. White is the default — a menu row is already carrying an
+        /// accent when it is highlighted. The one exception is the tag that says
+        /// Jev costs nothing, which is the offer itself and wears the pane's CTA
+        /// blue so it is not read as another piece of fine print.
+        var tint: Color = Tokens.text1
+        /// Filled instead of outlined — for the one badge that is an
+        /// announcement rather than a condition: outlines read as fine print,
+        /// and this one has to be seen before it is read.
+        var filled: Bool = false
+
+        var body: some View {
+            Text(text)
+                // `LowBalanceTag`'s fitting — semibold, a little tracking, 5×2
+                // padding — one size up, at caption: the badge size is for a tag
+                // that sits inside a row of its own, and this one has to be read
+                // across a menu. Still under the menu's own words, so it cannot
+                // be mistaken for more of the name.
+                .font(.sf(Tokens.TypeSize.caption, weight: .semibold))
+                .tracking(0.4)
+                .foregroundStyle(tint.opacity(lit ? 1 : 0.92))
+                .lineLimit(1)
+                .fixedSize()
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                // Outline only — that is what makes a menu row's tag a tag
+                // rather than a block of colour sitting inside the row.
+                .background(filled ? tint.opacity(0.22) : .clear, in: LowBalanceTag.shape)
+                .overlay(LowBalanceTag.shape
+                    .strokeBorder(tint.opacity(filled ? 0 : (lit ? 0.62 : 0.45)),
+                                  lineWidth: 0.6))
+                .contentShape(LowBalanceTag.shape)
+        }
+    }
+
+    /// The same row for a title carrying its own runs (the Jev row's tag).
+    @ViewBuilder
+    private func menuOption(_ title: AttributedString, selected: Bool) -> some View {
+        if selected {
+            Label { Text(title) } icon: { Image(systemName: "checkmark") }
         } else {
             Text(title)
         }
@@ -4150,19 +4253,312 @@ struct InlineSettingsView: View {
     // MARK: - Copy sensing
 
     /// Copy sensing: whether the *closed* notch watches ⌘C and offers to file a
-    /// copied note/reminder (press ⌘C again to confirm). The prose ("press ⌘C
-    /// again to confirm") lives in the ⓘ beside the title.
+    /// copied note/reminder (press ⌘C again to confirm), and which classifier
+    /// reads the copy when it does.
+    ///
+    /// One menu, three states — off, on-device, advanced — rather than a switch
+    /// with a second switch nested under it. The engine is not a separate
+    /// feature to turn on; it is which grade of the same feature is running, and
+    /// a nested toggle also left the pane a row taller whenever sensing was on.
+    /// Advanced is listed for every account and disabled for one the gateway
+    /// would refuse; the pick is stored either way, so adding balance restores
+    /// it.
     private var copySenseRow: some View {
-        settingRow(label: L("general.copySense"), info: L("general.copySense.hint")) {
-            Toggle("", isOn: Binding(
-                get: { model.copySenseEnabled },
-                set: { Haptics.levelChange(); model.copySenseEnabled = $0 }
-            ))
-            .labelsHidden()
-            .toggleStyle(.switch)
-            .controlSize(.mini)
-            .tint(Tokens.text2)
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            // `settingRow`'s label half, rebuilt here because its ⓘ takes a
+            // string and this one opens a grid.
+            HStack(spacing: 3) {
+                Text(L("general.copySense"))
+                    .font(.sf(Tokens.TypeSize.form, weight: .medium))
+                    .foregroundStyle(Tokens.text2)
+                    .lineLimit(1)
+                    .fixedSize()
+                if showsRefreshedTag {
+                    RefreshedBadge()
+                        .padding(.leading, 3)
+                }
+                SettingInfoPopover { copySenseComparisonTable }
+            }
+            .frame(minWidth: 64, alignment: .leading)
+            // Opening the menu marks the tag read, but does NOT take it off
+            // the row: something disappearing under the cursor at the moment of
+            // the click reads as a glitch, and the tag is still the label for
+            // what is on screen. It is gone the next time Settings is opened.
+            NativeMenuChip(title: copySenseModeLabel, items: copySenseMenuItems) {
+                SettingsNewMarks.copySenseSeen = true
+            }
+            Spacer(minLength: 0)
         }
+        // Whether Jev is on the table depends on the account, which this pane
+        // never had a reason to read. Stale-guarded, so reopening Settings is
+        // not a request per visit.
+        .task { await nono.refreshIfStale() }
+    }
+
+    /// How far this account is from the bar, as money: what it has bought over
+    /// `NoNoAccount.senseMinPaidUSD`. A tag that says only what is required
+    /// leaves someone who has already put in $1 with no idea they are halfway;
+    /// the pair says both the bar and their own standing against it.
+    ///
+    /// Read off the one constant the gateway also holds, so raising the bar
+    /// never leaves a stale number in a menu row.
+    private var senseTopUpProgress: String {
+        let paid = nono.snapshot?.credit.grantedUSD ?? 0
+        return "$\(Self.plainMoney(paid))/$\(Self.plainMoney(NoNoAccount.senseMinPaidUSD))"
+    }
+
+    /// The bar as money, for the prose that names it. Same single source as the
+    /// tag, so the two can never disagree about the price.
+    static var senseMinPaidMoney: String { "$" + plainMoney(NoNoAccount.senseMinPaidUSD) }
+
+    /// A figure for that pair: whole dollars stay whole, so a fresh account
+    /// reads "$0/$1" rather than "$0.00/$1.00"; the sign is added by the
+    /// caller.
+    private static func plainMoney(_ amount: Double) -> String {
+        amount == amount.rounded()
+            ? String(format: "%.0f", amount)
+            : String(format: "%.2f", amount)
+    }
+
+    /// The three states as menu rows. Jev's row carries the tag when this
+    /// account cannot use it yet — what it takes, and how far it already is —
+    /// which is why this row's menu is an `NSMenu` (see `NativeMenuChip`).
+    private var copySenseMenuItems: [NativeMenuItem] {
+        [
+            NativeMenuItem(title: L("senseMode.off"), selected: copySenseMode == nil) {
+                selectCopySenseMode(nil)
+            },
+            NativeMenuItem(title: CopySenseEngine.onDevice.label,
+                           selected: copySenseMode == .onDevice) {
+                selectCopySenseMode(.onDevice)
+            },
+            // Tags are for the account that cannot use Jev yet: what it costs
+            // to use (nothing) and what it takes to reach. Once it is reached
+            // they have both been answered, and the row is just a row.
+            NativeMenuItem(title: CopySenseEngine.jev.label,
+                           tag: nono.canUseRemoteSense ? nil : Self.senseTagImage(
+                               free: L("senseEngine.tag.free"),
+                               gate: L("senseEngine.tag.paidOnly", senseTopUpProgress)),
+                           selected: copySenseMode == .jev) {
+                selectCopySenseMode(.jev)
+            },
+        ]
+    }
+
+    /// The row's tags as one image — the only thing an `NSMenuItem` will draw
+    /// after its words. Two of them, drawn only for an account that cannot use
+    /// Jev yet: what using it costs (nothing), and the gate with this account's
+    /// own standing against it. Not a template: the pills' ink is the point, exactly as
+    /// `LowBalanceTag.menuImage` keeps its rose. Cached per text, so the figure
+    /// changing re-renders and nothing else does.
+    @MainActor
+    private static func senseTagImage(free: String, gate: String) -> NSImage? {
+        let key = "\(free)|\(gate)" as NSString
+        if let hit = senseTagCache.object(forKey: key) { return hit }
+        let renderer = ImageRenderer(content:
+            HStack(spacing: 4) {
+                SenseTopUpTag(text: free, lit: false, tint: Tokens.accent)
+                SenseTopUpTag(text: gate, lit: false)
+            })
+        renderer.scale = 3
+        guard let cg = renderer.cgImage else { return nil }
+        let image = NSImage(cgImage: cg,
+                            size: NSSize(width: CGFloat(cg.width) / 3,
+                                         height: CGFloat(cg.height) / 3))
+        senseTagCache.setObject(image, forKey: key)
+        return image
+    }
+
+    private static let senseTagCache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 8
+        return cache
+    }()
+
+    /// What the menu reads right now: nil is off, otherwise the engine that
+    /// would actually run.
+    private var copySenseMode: CopySenseEngine? {
+        model.copySenseEnabled ? effectiveCopySenseEngine : nil
+    }
+
+    private var copySenseModeLabel: String {
+        copySenseMode?.label ?? L("senseMode.off")
+    }
+
+    /// Picking an engine turns the feature on as well — the menu's three states
+    /// are one decision, so choosing "Advanced" from off cannot leave sensing
+    /// off. Off keeps the stored engine untouched, so switching back on returns
+    /// to the grade that was picked.
+    private func selectCopySenseMode(_ newValue: CopySenseEngine?) {
+        guard newValue != copySenseMode else { return }
+        Haptics.levelChange()
+        guard let engine = newValue else {
+            model.copySenseEnabled = false
+            return
+        }
+        // Asked for Jev without the credit for it: this is the one pick that
+        // cannot be granted here, so it takes them to the one place that can —
+        // the wallet card at the top of Model, with the amount already unfolded.
+        // The intent is remembered, so the purchase landing turns Jev on rather
+        // than leaving them to come back and pick it a second time.
+        if engine == .jev, !nono.canUseRemoteSense {
+            armJevAfterTopUp = true
+            // The smallest purchase, not the card's usual $5: arriving here is
+            // someone answering a price, so the amount in front of them starts
+            // at the least they can put in and steps up from there.
+            topUpUSD = max(1, NoNoAccount.minimumTopUpUSD)
+            showingAmount = true
+            withAnimation(.easeOut(duration: 0.16)) { section = .model }
+            return
+        }
+        selectCopySenseEngine(engine)
+        if !model.copySenseEnabled { model.copySenseEnabled = true }
+    }
+
+    /// The two engines side by side. Every line the answer is yes or no is a
+    /// check or a cross, so the difference reads at a glance instead of being
+    /// assembled out of two paragraphs; the facts that are not yes/no — where
+    /// Jev runs, how credentials are dropped, and who can pick it — sit under
+    /// the grid in one card. The credential line used to be a grid row with a
+    /// check in both columns, which said it happens without ever saying how. It hangs off the row’s ⓘ, like every other note this
+    /// pane keeps out of the way.
+    private var copySenseComparisonTable: some View {
+        CopySenseNoteUnderGrid(spacing: 12) {
+            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 10) {
+                GridRow {
+                    // The row column's own head: what the two engines are being
+                    // compared ON, so the leftmost column is not an unlabelled
+                    // list of phrases.
+                    Text(L("senseEngine.table.head"))
+                        .captionLabel()
+                        .fixedSize()
+                    // `fixedSize`, or the flexible mark cells below take the
+                    // leftover width and the headers truncate to "ON-DE…".
+                    Text(CopySenseEngine.onDevice.label)
+                        .captionLabel(color: comparisonTint(.onDevice))
+                        .fixedSize()
+                        .gridColumnAlignment(.center)
+                    Text(CopySenseEngine.jev.label)
+                        .captionLabel(color: comparisonTint(.jev))
+                        .fixedSize()
+                        .gridColumnAlignment(.center)
+                }
+                ForEach(Self.copySenseComparisonRows) { row in
+                    GridRow {
+                        Text(L(row.label))
+                            .font(.sf(Tokens.TypeSize.meta))
+                            .foregroundStyle(Tokens.text2)
+                            .fixedSize()
+                        comparisonMark(row.local, engine: .onDevice)
+                        comparisonMark(row.jev, engine: .jev)
+                    }
+                }
+            }
+            CopySenseNoteCard()
+        }
+    }
+
+    /// Lays the notes under the comparison grid at the grid's own width: a
+    /// sentence that still fits stays on one line; only overflow wraps.
+    private struct CopySenseNoteUnderGrid: Layout {
+        var spacing: CGFloat
+
+        func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+            guard subviews.count == 2 else { return .zero }
+            let grid = subviews[0].sizeThatFits(.unspecified)
+            let notes = subviews[1].sizeThatFits(.init(width: grid.width, height: nil))
+            return CGSize(width: grid.width, height: grid.height + spacing + notes.height)
+        }
+
+        func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+            guard subviews.count == 2 else { return }
+            let grid = subviews[0].sizeThatFits(.unspecified)
+            subviews[0].place(at: bounds.origin, proposal: .init(grid))
+            let notes = subviews[1].sizeThatFits(.init(width: grid.width, height: nil))
+            subviews[1].place(
+                at: CGPoint(x: bounds.minX, y: bounds.minY + grid.height + spacing),
+                proposal: .init(width: grid.width, height: notes.height)
+            )
+        }
+    }
+
+    /// The prose under the comparison grid, as one card instead of three loose
+    /// paragraphs: a heading, and the facts the grid cannot answer with a check
+    /// or a cross.
+    private struct CopySenseNoteCard: View {
+        var body: some View {
+            VStack(alignment: .leading, spacing: 8) {
+                // The same caption the grid's own heads wear, so the card
+                // reads as a section of this popover rather than a title on top
+                // of one.
+                Text(L("senseEngine.note.title"))
+                    .captionLabel(color: Tokens.text3)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(L("senseEngine.table.note.cloud"))
+                    // The credential line reads at the card's own strength, not
+                    // its footnote ink: it is the one paragraph here someone
+                    // needs to have read before turning any of this on.
+                    Text(L("senseEngine.table.note.secrets"))
+                        .foregroundStyle(Tokens.text2)
+                    Text(L("senseEngine.table.note.access", InlineSettingsView.senseMinPaidMoney))
+                }
+                .font(.sf(Tokens.TypeSize.meta))
+                .foregroundStyle(Tokens.text4)
+                .lineSpacing(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .recessedSurface(in: RoundedRectangle.menu, lit: false)
+        }
+    }
+
+    /// One comparison line: a capability, and whether each engine has it.
+    private struct CopySenseComparisonRow: Identifiable {
+        let label: String
+        let local: Bool
+        let jev: Bool
+        var id: String { label }
+    }
+
+    private static let copySenseComparisonRows: [CopySenseComparisonRow] = [
+        .init(label: "senseEngine.table.notes", local: true, jev: true),
+        .init(label: "senseEngine.table.tasks", local: false, jev: true),
+        .init(label: "senseEngine.table.questions", local: false, jev: true),
+        .init(label: "senseEngine.table.details", local: false, jev: true),
+    ]
+
+    /// The mark in one cell. Jev's column is ink and the on-device column is
+    /// reference — fixed, not following the current pick: the table is read to
+    /// decide whether Jev is worth it, so the column being weighed is the one
+    /// that has to be legible, whichever one happens to be running. A cross
+    /// never competes with a check for attention.
+    private func comparisonMark(_ yes: Bool, engine: CopySenseEngine) -> some View {
+        let active = engine == .jev
+        return Image(systemName: yes ? "checkmark" : "xmark")
+            .font(.sf(Tokens.TypeSize.label, weight: .semibold))
+            .foregroundStyle(yes ? (active ? Tokens.text1 : Tokens.text3)
+                                 : Tokens.text4.opacity(0.7))
+    }
+
+    /// Same fixed emphasis as the marks below it: Jev's head at full strength,
+    /// the other as reference.
+    private func comparisonTint(_ engine: CopySenseEngine) -> Color {
+        engine == .jev ? Tokens.text2 : Tokens.text4
+    }
+
+    /// The engine that would actually run: an account that cannot use Jev reads
+    /// on-device, whatever the stored pick says.
+    private var effectiveCopySenseEngine: CopySenseEngine {
+        nono.canUseRemoteSense ? copySenseEngine : .onDevice
+    }
+
+    private func selectCopySenseEngine(_ newValue: CopySenseEngine) {
+        guard newValue != copySenseEngine else { return }
+        copySenseEngine = newValue
+        CopySenseEngine.current = newValue
     }
 
     // MARK: - Shortcuts
@@ -7074,6 +7470,7 @@ struct SettingInfo: View {
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+        .holdsPanelWhilePresented(showing)
         .popover(isPresented: $showing, arrowEdge: .bottom) {
             Group {
                 if let rich { Text(rich) } else { Text(plain ?? "") }
@@ -7085,6 +7482,41 @@ struct SettingInfo: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 9)
             .modifier(GlassPopoverBackground())
+        }
+    }
+}
+
+/// `SettingInfo` for a note that is not a sentence — the Copy Sense engine
+/// comparison, which is a grid. Same mark, same hover, same glass popover; only
+/// the body and its width differ, so a table is not forced through a string.
+struct SettingInfoPopover<Content: View>: View {
+    var glyph: CGFloat = Tokens.TypeSize.label
+    var hit: CGFloat = 20
+    @ViewBuilder var content: () -> Content
+
+    @State private var showing = false
+    @State private var hovering = false
+
+    var body: some View {
+        Button { showing.toggle() } label: {
+            Image(systemName: "info.circle")
+                .font(.sf(glyph, weight: .regular))
+                .foregroundStyle(hovering ? Tokens.text2 : Tokens.text4)
+                .frame(width: hit, height: hit)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+        .holdsPanelWhilePresented(showing)
+        .popover(isPresented: $showing, arrowEdge: .bottom) {
+            // No width of its own: the content sizes the popover. A cap here
+            // clipped the widest column instead of wrapping it, so anything
+            // that needs a ceiling (prose) sets its own.
+            content()
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .modifier(GlassPopoverBackground())
         }
     }
 }
@@ -7217,21 +7649,56 @@ struct GlassMenu<Content: View>: View {
 
     @State private var hovering = false
 
-    private typealias Metrics = (font: CGFloat, chevron: CGFloat, gap: CGFloat,
-                                 height: CGFloat, lead: CGFloat, trail: CGFloat,
-                                 logo: CGFloat)
+    /// The width a compact chip needs for `title`, measured in the face SwiftUI
+    /// will draw it in. Callers that must size a rigid row around the chip (the
+    /// agent card's bottom bar) can then do arithmetic instead of a geometry read.
+    static func compactWidth(for title: String) -> CGFloat {
+        GlassChipFace.compactWidth(for: title)
+    }
+
+    var body: some View {
+        Menu {
+            content()
+        } label: {
+            GlassChipFace(title: title, compact: compact, logoVendor: logoVendor,
+                          logoFallback: logoFallback, logoSymbol: logoSymbol,
+                          aura: aura, hovering: hovering)
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+    }
+}
+
+/// The face every picker chip on the pane wears. Its own view because two kinds
+/// of chip draw it: `GlassMenu`, whose menu is SwiftUI's, and `NativeMenuChip`,
+/// whose menu is an `NSMenu` — a row whose items need more than a title and a
+/// leading icon has to build its menu in AppKit, and it must not look like a
+/// different control for it.
+struct GlassChipFace: View {
+    var title: String
+    var compact: Bool = false
+    var logoVendor: String? = nil
+    var logoFallback: String = ""
+    var logoSymbol: String? = nil
+    var aura: Bool = false
+    var hovering: Bool
+
+    typealias Metrics = (font: CGFloat, chevron: CGFloat, gap: CGFloat,
+                         height: CGFloat, lead: CGFloat, trail: CGFloat,
+                         logo: CGFloat)
 
     /// The compact fitting, one place: a 20pt pill that sits inside a 25pt bar.
     /// Its corner is always height/2 — fully round, the same capsule the effort
     /// slider's thumb and the compose row's chips use.
-    // Computed, not stored: a generic type can't hold static storage.
-    private static var compactMetrics: Metrics { (Tokens.TypeSize.meta, Tokens.TypeSize.badge, 5, 20, 10, 8, 12) }
-    private static var regularMetrics: Metrics { (Tokens.TypeSize.form, Tokens.TypeSize.caption, 7, 30, 11, 9, 15) }
+    static let compactMetrics: Metrics = (Tokens.TypeSize.meta, Tokens.TypeSize.badge, 5, 20, 10, 8, 12)
+    static let regularMetrics: Metrics = (Tokens.TypeSize.form, Tokens.TypeSize.caption, 7, 30, 11, 9, 15)
 
     private var metrics: Metrics { compact ? Self.compactMetrics : Self.regularMetrics }
-    /// The width a compact chip needs for `title`, measured in the face SwiftUI
-    /// will draw it in. Callers that must size a rigid row around the chip (the
-    /// agent card's bottom bar) can then do arithmetic instead of a geometry read.
+
     static func compactWidth(for title: String) -> CGFloat {
         let m = compactMetrics
         let font = NSFont.systemFont(ofSize: m.font, weight: .medium)
@@ -7242,43 +7709,154 @@ struct GlassMenu<Content: View>: View {
 
     var body: some View {
         let m = metrics
-        return Menu {
-            content()
-        } label: {
-            HStack(spacing: m.gap) {
-                if let logoVendor {
-                    VendorLogo(vendor: logoVendor, fallback: logoFallback,
-                               symbol: logoSymbol)
-                        .frame(width: m.logo, height: m.logo)
-                }
-                if !title.isEmpty {
-                    Text(title)
-                        .font(.sf(m.font, weight: compact ? .medium : .regular))
-                        .foregroundStyle(Tokens.text1)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.sf(m.chevron, weight: .semibold))
-                    .foregroundStyle(Tokens.text3)
+        return HStack(spacing: m.gap) {
+            if let logoVendor {
+                VendorLogo(vendor: logoVendor, fallback: logoFallback,
+                           symbol: logoSymbol)
+                    .frame(width: m.logo, height: m.logo)
             }
-            // Icon-only (empty title) pills get symmetric padding so the chevron
-            // sits centered; labelled pills keep the tighter trailing inset. A
-            // logo leads with the same 10pt inset the model chip uses, so the two
-            // stacked chips share one left edge.
-            .padding(.leading, logoVendor != nil ? 10 : (title.isEmpty ? m.trail : m.lead))
-            .padding(.trailing, m.trail)
-            .frame(height: m.height)
-            .recessedSurface(in: Capsule(), lit: hovering)
-            .brandAura(in: Capsule(), active: aura)
-            .contentShape(Capsule())
+            if !title.isEmpty {
+                Text(title)
+                    .font(.sf(m.font, weight: compact ? .medium : .regular))
+                    .foregroundStyle(Tokens.text1)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            Image(systemName: "chevron.up.chevron.down")
+                .font(.sf(m.chevron, weight: .semibold))
+                .foregroundStyle(Tokens.text3)
         }
-        .menuStyle(.button)
+        // Icon-only (empty title) pills get symmetric padding so the chevron
+        // sits centered; labelled pills keep the tighter trailing inset. A
+        // logo leads with the same 10pt inset the model chip uses, so the two
+        // stacked chips share one left edge.
+        .padding(.leading, logoVendor != nil ? 10 : (title.isEmpty ? m.trail : m.lead))
+        .padding(.trailing, m.trail)
+        .frame(height: m.height)
+        .recessedSurface(in: Capsule(), lit: hovering)
+        .brandAura(in: Capsule(), active: aura)
+        .contentShape(Capsule())
+    }
+}
+
+/// One row of a `NativeMenuChip`'s menu: a title, an optional tag drawn after it
+/// (an image, because that is the only thing an `NSMenuItem` will place there),
+/// and what picking it does.
+struct NativeMenuItem {
+    var title: String
+    var tag: NSImage? = nil
+    var selected: Bool = false
+    var action: () -> Void
+}
+
+/// A picker chip whose menu is an `NSMenu`. Identical face to `GlassMenu` —
+/// only the menu differs, and it differs because SwiftUI's `Menu` renders a row
+/// as a title plus one LEADING image and silently drops anything else (an
+/// `Image(nsImage:)` row draws blank). An `NSMenuItem` takes an attributed
+/// title, so a tag can be attached after the words, the way `ModelPickerView`
+/// hangs `LowBalanceTag` off a model row.
+struct NativeMenuChip: View {
+    var title: String
+    var items: [NativeMenuItem]
+    /// Run when the menu is opened, whether or not a row is picked — what marks
+    /// a "New" badge beside it as read.
+    var onOpen: (() -> Void)? = nil
+
+    @State private var hovering = false
+    @State private var presenting = false
+
+    var body: some View {
+        Button { onOpen?(); presenting = true } label: {
+            GlassChipFace(title: title, hovering: hovering)
+        }
         .buttonStyle(.plain)
-        .menuIndicator(.hidden)
         .fixedSize()
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+        .background(NativeMenuPresenter(isPresented: $presenting, items: items))
+    }
+}
+
+/// Pops `items` as a real menu under the chip. The anchor is an empty AppKit
+/// view behind the face; `popUp` runs its own event loop, so it is never called
+/// from inside a view update (same rule `ModelPickerView` follows).
+private struct NativeMenuPresenter: NSViewRepresentable {
+    @Binding var isPresented: Bool
+    var items: [NativeMenuItem]
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        // Decoration only — the SwiftUI face in front of it takes every click.
+        v.setAccessibilityElement(false)
+        return v
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        context.coordinator.parent = self
+        guard isPresented, !context.coordinator.showing else { return }
+        context.coordinator.showing = true
+        DispatchQueue.main.async { context.coordinator.present(from: view) }
+    }
+
+    final class Coordinator: NSObject, NSMenuDelegate {
+        var parent: NativeMenuPresenter
+        var showing = false
+        private var picked: (() -> Void)?
+
+        init(_ parent: NativeMenuPresenter) { self.parent = parent }
+
+        func present(from view: NSView) {
+            guard view.window != nil else { finish(); return }
+            let menu = NSMenu()
+            menu.delegate = self
+            let font = NSFont.menuFont(ofSize: 0)
+            for (i, item) in parent.items.enumerated() {
+                let row = NSMenuItem(title: item.title, action: #selector(pick(_:)), keyEquivalent: "")
+                row.target = self
+                row.tag = i
+                row.state = item.selected ? .on : .off
+                if let tag = item.tag {
+                    let title = NSMutableAttributedString(string: item.title + "  ",
+                                                          attributes: [.font: font])
+                    let chip = NSTextAttachment()
+                    chip.image = tag
+                    // Centred on the menu font's cap height, like the model
+                    // picker's own tagged rows.
+                    chip.bounds = NSRect(x: 0, y: (font.capHeight - tag.size.height) / 2,
+                                         width: tag.size.width, height: tag.size.height)
+                    title.append(NSAttributedString(attachment: chip))
+                    row.attributedTitle = title
+                }
+                menu.addItem(row)
+            }
+            let bottom = view.isFlipped ? view.bounds.maxY : view.bounds.minY
+            // Blocks in a nested event loop until the menu closes.
+            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: bottom), in: view)
+            finish()
+        }
+
+        /// The menu hangs off the island in its own window, so the pointer
+        /// reaching a lower row reads as leaving it — hold the panel for as long
+        /// as the menu is up (see `InfoPopoverGate`).
+        func menuWillOpen(_ menu: NSMenu) { InfoPopoverGate.enter() }
+        func menuDidClose(_ menu: NSMenu) { InfoPopoverGate.exit() }
+
+        @objc private func pick(_ sender: NSMenuItem) {
+            guard parent.items.indices.contains(sender.tag) else { return }
+            // Run the action after the nested loop has unwound, so the state it
+            // writes is not published from inside menu tracking.
+            picked = parent.items[sender.tag].action
+        }
+
+        private func finish() {
+            showing = false
+            if parent.isPresented { parent.isPresented = false }
+            let action = picked
+            picked = nil
+            action?()
+        }
     }
 }
 
@@ -7734,5 +8312,24 @@ private struct HotKeyRecorder: NSViewRepresentable {
                 ShortcutRecording.setActive(false)
             }
         }
+    }
+}
+
+/// The "New" marks on the settings pane, and whether they have been answered.
+/// One flag per mark rather than one for the pair: the sidebar's dot is read by
+/// opening the pane, the badge inside it by opening the control, and a dot that
+/// took its badge with it would hide the very thing it was pointing at.
+enum SettingsNewMarks {
+    private static let captureKey = "settingsCaptureTabSeen"
+    private static let copySenseKey = "settingsCopySenseSeen"
+
+    static var captureTabSeen: Bool {
+        get { UserDefaults.standard.bool(forKey: captureKey) }
+        set { UserDefaults.standard.set(newValue, forKey: captureKey) }
+    }
+
+    static var copySenseSeen: Bool {
+        get { UserDefaults.standard.bool(forKey: copySenseKey) }
+        set { UserDefaults.standard.set(newValue, forKey: copySenseKey) }
     }
 }

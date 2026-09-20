@@ -5020,6 +5020,11 @@ final class NotchModel: ObservableObject {
     /// ⌘C again to file. Nothing is ever routed on a guess.
     static let senseActionFloor = 0.55
 
+    /// Jev's floor: the probability that the clip is one of the save kinds
+    /// rather than `none`. Lower than the local floor because Jev decides
+    /// "worth saving" directly, and the hint still needs a second ⌘C.
+    static let senseRemoteFloor = 0.5
+
     /// How long a hint stays up with no response before it fades on its own.
     private static let senseHintTimeout: TimeInterval = 5.0
 
@@ -5136,6 +5141,9 @@ final class NotchModel: ObservableObject {
         // Text this app itself produced (a parked draft, a copied answer) is not
         // a jot the user wants filed back at them.
         guard !isCurrentSessionText(clip) else { return nil }
+        // Credentials are never sensed: no hint, no classification, and nothing
+        // sent to the gateway. Runs before either classifier.
+        guard !ClipPrivacy.containsSecret(clip) else { return nil }
         return clip
     }
 
@@ -5161,9 +5169,11 @@ final class NotchModel: ObservableObject {
         return true
     }
 
-    /// Classify a fresh copy and raise (or decline to raise) the hint. Same
-    /// engine and note→reminder split as the in-panel chip, but at the higher
-    /// `senseActionFloor` — an unsure read means no hint, not a default.
+    /// Classify a fresh copy and raise (or decline to raise) the hint. An
+    /// account that has bought Notchi Balance and picked Jev in Settings asks
+    /// the gateway (`NoNoAccount.sense`); everyone else, and any failed request,
+    /// uses the on-device engine at the higher `senseActionFloor`. The
+    /// note→reminder split is the same local date check either way.
     private func senseClassify(_ clip: String) {
         guard clip != senseCapturedClip else { return }   // already filed this text
         // The busy dots own the strip while a detached answer streams; a hint on
@@ -5171,9 +5181,21 @@ final class NotchModel: ObservableObject {
         guard roundsInFlight == 0, !noteSaving else { return }
         senseClassifyTask?.cancel()
         senseClassifyTask = Task { [weak self] in
-            let reading = await IntentEngine.shared.classify(clip)
+            let shouldOffer: Bool
+            // Only Jev reads a copy as a question; the on-device engine's `ask`
+            // fires on too much copied text (code, passages) to offer an Ask.
+            var asks = false
+            if let verdict = await NoNoAccount.shared.sense(clip) {
+                shouldOffer = verdict.kind != "none"
+                    && verdict.saveProbability >= Self.senseRemoteFloor
+                asks = verdict.kind == "question"
+            } else {
+                let reading = await IntentEngine.shared.classify(clip)
+                shouldOffer = reading.intent == .note
+                    && reading.confidence >= Self.senseActionFloor
+            }
             guard !Task.isCancelled, let self, !self.open, self.copySenseEnabled else { return }
-            guard reading.intent == .note, reading.confidence >= Self.senseActionFloor else {
+            guard shouldOffer else {
                 self.senseCancelHint()
                 return
             }
@@ -5181,11 +5203,12 @@ final class NotchModel: ObservableObject {
                 ?? RemindersService.recurrenceDate(in: clip)
             self.senseClip = clip
             self.senseHintShownAt = Date()
-            self.clipboardSense = .hinting(panel: due != nil ? .reminder : .note)
+            self.clipboardSense = .hinting(panel: asks ? .chat : due != nil ? .reminder : .note)
         }
     }
 
-    /// The confirm: file the clip where the hint said it would go, narrating
+    /// The confirm: an Ask hint opens the panel and asks the clip (`senseAsk`);
+    /// otherwise file the clip where the hint said it would go, narrating
     /// saving → saved (or failed) in the strip. Writes go straight to the
     /// services — the submit-path plumbing (input-box state, saved cues) belongs
     /// to the open panel. The Recent row still lands via `persistCapture`, so a
@@ -5196,6 +5219,10 @@ final class NotchModel: ObservableObject {
         // Claim the clip now, not on success — an open-panel chip tapped during
         // the in-flight write must not file a duplicate. Released on failure.
         senseCapturedClip = clip
+        if panel == .chat {
+            senseAsk(clip)
+            return
+        }
         clipboardSense = .saving(panel: panel)
         switch panel {
         case .reminder:
@@ -5213,7 +5240,7 @@ final class NotchModel: ObservableObject {
                 }
             }
         case .note, .chat:
-            // Honor the note destination here too — a closed-notch capture is the
+            // `.chat` returned above. Honor the note destination here too — a closed-notch capture is the
             // same jot as a typed one, so it files to the same place.
             if NoteDestination.current == .markdownFolder {
                 FileNotesService.writeNote(clip) { [weak self] result in
@@ -5235,6 +5262,22 @@ final class NotchModel: ObservableObject {
                 }
             }
         }
+    }
+
+    /// Open the panel on a new conversation and submit the clip as the question,
+    /// the same way a prompt shortcut submits its instruction.
+    private func senseAsk(_ clip: String) {
+        senseClip = nil
+        clipboardSense = .idle
+        mode = .idle
+        openPanel(on: activeDisplay)
+        newChat()
+        // The re-copy that confirmed this moved the pasteboard past the open
+        // baseline; without this the first turn would attach the same text again
+        // as "something the user copied".
+        pasteboardChangeCountAtOpen = NSPasteboard.general.changeCount
+        text = clip
+        submit()
     }
 
     private func senseWriteLanded(clip: String, panel: Panel, source: HistoryItem.Source, link: String?) {
@@ -5554,7 +5597,10 @@ final class NotchModel: ObservableObject {
         // rows reads as "left the island" and would fold the panel out from under
         // the menu being read. Ordinary leave-folding resumes the moment the menu
         // is gone (a picked row, a keystroke past the command word, Esc).
-        if isAnswerPinned || isFloatingCardOpen || detachDrag != nil {
+        // An open ⓘ popover holds the panel for the same reason the `/` card
+        // does: it hangs off the island in its own window (see
+        // `InfoPopoverGate`).
+        if isAnswerPinned || isFloatingCardOpen || InfoPopoverGate.open || detachDrag != nil {
             cancelLeaveWatch()
             return
         }
@@ -5616,7 +5662,7 @@ final class NotchModel: ObservableObject {
     private func recheckLeaveWatch() {
         guard let watch = leaveWatch else { return }
         guard open else { leaveWatch = nil; return }
-        if isAnswerPinned || isFloatingCardOpen {
+        if isAnswerPinned || isFloatingCardOpen || InfoPopoverGate.open {
             cancelLeaveWatch(); return
         }
         // Parked back over (or still over) the island: nothing to fold, but keep

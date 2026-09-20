@@ -1186,6 +1186,51 @@ enum TooltipOverlayGate {
     }
 }
 
+/// Counts the ⓘ popovers that are up. An `NSPopover` hung off a settings row
+/// draws in its OWN window, and a tall one overhangs the panel — so the pointer
+/// moving down into the part of it that hangs past the island's edge reads as
+/// leaving the island, and the panel folds out from under what is being read.
+/// The `/` menu card has the same shape of problem and the same answer (see
+/// `NotchModel.isFloatingCardOpen`): while one is up, leave-folding stands down.
+///
+/// A counter rather than a flag, because two marks can be open across a
+/// re-render, and `depth` is floored at zero so an unbalanced exit cannot wedge
+/// the panel permanently open.
+@MainActor
+enum InfoPopoverGate {
+    private(set) static var depth = 0
+    static var open: Bool { depth > 0 }
+
+    static func enter() { depth += 1 }
+    static func exit() { depth = max(0, depth - 1) }
+}
+
+extension View {
+    /// Hold the panel open while this view's popover is presented, and release
+    /// the hold if the view goes away still showing (a panel closed by Esc, a
+    /// settings pane swapped) — otherwise that hold would never be given back.
+    func holdsPanelWhilePresented(_ showing: Bool) -> some View {
+        modifier(PanelHoldWhilePresented(showing: showing))
+    }
+}
+
+private struct PanelHoldWhilePresented: ViewModifier {
+    let showing: Bool
+    @State private var held = false
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: showing) { _, now in sync(now) }
+            .onDisappear { sync(false) }
+    }
+
+    private func sync(_ now: Bool) {
+        guard now != held else { return }
+        held = now
+        if now { InfoPopoverGate.enter() } else { InfoPopoverGate.exit() }
+    }
+}
+
 /// A hover tooltip drawn in the notch's own visual language instead of AppKit's
 /// stock yellow `.help()` bubble — the flat OS tooltip that hasn't changed in
 /// decades and reads as a foreign chip on the dark glass. This one is a small
