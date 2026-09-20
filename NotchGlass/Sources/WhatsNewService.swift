@@ -109,7 +109,6 @@ final class WhatsNewService: ObservableObject {
             date: "2026-09-20",
             features: [
                 "Copy sensing can use Jev to detect tasks, dates, questions, addresses, and order numbers.",
-                "Copied keys, passwords, and card numbers are skipped on this Mac: no hint, no send.",
             ],
             improvements: [
                 "Thinking in an agent round folds into one row and no longer splits the tool calls.",
