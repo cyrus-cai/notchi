@@ -835,7 +835,6 @@ struct InlineSettingsView: View {
                 Text(L("capture.sources"))
                     .captionLabel()
                 copySenseRow
-                selectionContextRow
                 Text(L("capture.destination"))
                     .captionLabel()
                     .padding(.top, 2)
@@ -3852,23 +3851,6 @@ struct InlineSettingsView: View {
             Toggle("", isOn: Binding(
                 get: { !hideInFullscreen },
                 set: { Haptics.levelChange(); selectHideInFullscreen(!$0) }
-            ))
-            .labelsHidden()
-            .toggleStyle(.switch)
-            .controlSize(.mini)
-            .tint(Tokens.text2)
-        }
-    }
-
-    /// Whether opening the panel carries in whatever the user had highlighted in
-    /// the app they came from (`NotchModel.selectionContext`). On by default; off
-    /// stops the accessibility read itself, not just the badge.
-    private var selectionContextRow: some View {
-        settingRow(label: L("general.selectionContext"),
-                   info: L("general.selectionContext.hint")) {
-            Toggle("", isOn: Binding(
-                get: { model.selectionContextEnabled },
-                set: { Haptics.levelChange(); model.selectionContextEnabled = $0 }
             ))
             .labelsHidden()
             .toggleStyle(.switch)

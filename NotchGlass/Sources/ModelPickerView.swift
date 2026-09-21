@@ -2471,11 +2471,11 @@ enum AskModelMRU {
 }
 
 /// What the Ask model chip opens: the agent quick picker's little glass card, on the
-/// chat side — one row per recently used model (vendor mark + pretty name), nothing
-/// else. Unlike the agent card (which stays open for its effort slider), this is a
-/// plain menu: a click picks the model AND closes — one gesture, done. ↑/↓ still
-/// arm live for keyboard users (Return / Esc close). The armed row is mirrored in
-/// local state because a pick commits straight to UserDefaults, which re-renders
+/// chat side — BYOK recents and Notchi's lineup as two fleets behind the same
+/// bottom-row menu the agent card uses for engines, not stacked in one list.
+/// A click picks the model AND closes — one gesture, done. ↑/↓ still arm live
+/// for keyboard users (Return / Esc close). The armed row is mirrored in local
+/// state because a pick commits straight to UserDefaults, which re-renders
 /// nothing on its own.
 struct AskRecentModelPickerView: View {
     struct Row: Hashable {
@@ -2483,12 +2483,16 @@ struct AskRecentModelPickerView: View {
         let id: String
     }
 
+    /// The two fleets this card switches between — BYOK recents (capped at ten)
+    /// and Notchi's whole lineup. Same job as `AgentEngine` on the other card.
+    private enum Source: Hashable {
+        case byok, notchi
+    }
+
     let rows: [Row]
-    /// Models pinned under the recents, outside the scroller: the first-party
-    /// lineup, listed for a subscriber whether or not they have asked through it
-    /// lately. A plan is bought so those models are there — leaving them to age
-    /// out of a ten-slot history would hide what the user is paying for. Empty
-    /// for everyone else.
+    /// Notchi's lineup — shown as its own source, not pinned under the recents.
+    /// Empty when the wallet can't spend, so the switch disappears and the card
+    /// is BYOK only.
     let pinned: [Row]
     let onSelect: (Row) -> Void
     /// The way out of the recents: open Settings' Model pane, where the full
@@ -2496,6 +2500,9 @@ struct AskRecentModelPickerView: View {
     let onMoreModels: () -> Void
     let onDone: () -> Void
 
+    @State private var source: Source
+    @State private var sourceHovering = false
+    @State private var lastPick: [Source: Row] = [:]
     @State private var current: Row
     /// A local keyDown monitor is the only reliable way to own the arrow keys inside a
     /// popover — a focused field editor swallows them before SwiftUI sees them.
@@ -2503,6 +2510,11 @@ struct AskRecentModelPickerView: View {
     /// Whether the list is mid-scroll at either edge — the gate for the fades.
     @State private var scrolledOffTop = false
     @State private var scrolledOffBottom = false
+    /// The clip view's last reported offset. Held in a reference so storing it
+    /// on every scroll tick does not re-render the card; only the two crossings
+    /// above are state.
+    @State private var scrollOffset = OffsetBox()
+    private final class OffsetBox { var value: CGFloat = 0 }
     /// The quick menu is a custom child panel rather than an `NSMenu`, so the
     /// shared model-detail panel cannot discover its frame from AppKit's menu
     /// windows. This probe retains the SwiftUI card's exact screen rect and lets
@@ -2521,41 +2533,77 @@ struct AskRecentModelPickerView: View {
         self.onMoreModels = onMoreModels
         self.onDone = onDone
         _current = State(initialValue: Row(provider: selectedProvider, id: selectedModelID))
+        _source = State(initialValue: selectedProvider.isFirstParty && !pinned.isEmpty
+                            ? .notchi : .byok)
+    }
+
+    private var visibleRows: [Row] { fleet(for: source) }
+
+    private func fleet(for source: Source) -> [Row] {
+        switch source {
+        case .byok: return rows
+        case .notchi: return pinned
+        }
+    }
+
+    /// BYOK is always on the switch — even with no recents, it is the door into
+    /// the rest of the catalog. Notchi only when the wallet can actually serve.
+    private var sources: [Source] {
+        var out: [Source] = [.byok]
+        if !pinned.isEmpty { out.append(.notchi) }
+        return out
+    }
+
+    private var showsSourceSwitch: Bool { sources.count > 1 }
+
+    private func sourceTitle(_ source: Source) -> String {
+        switch source {
+        case .byok: return "BYOK"
+        case .notchi: return Provider.nono.displayName
+        }
     }
 
     /// The list window, in rows — the Agent card's four, because the two menus
     /// hang off the same compose row and are read as one control in two modes.
-    /// The recents run to ten; the rest scrolls, so the card's height stops
-    /// depending on how many models the user has been through.
-    /// Rows are a fixed height at a fixed spacing, so the height is arithmetic —
-    /// demanded explicitly rather than `.frame(maxHeight:)`, which inside a
-    /// floating card just takes whatever height was last proposed and clips.
+    /// Held at four rows on both sources: sizing to the armed fleet made the
+    /// card jump every time BYOK and Notchi didn't have the same count.
     private static let listRows = MenuCard.pickerListRows
     /// How deep the list dissolves at whichever edge is mid-scroll — two thirds of
     /// a row, enough to see a row go instead of reading as a hard cut.
     private static let edgeFade: CGFloat = 18
+    /// Skip the scroll ease for one `current` change — a source flip, whose
+    /// new list should land already scrolled, not ease through the old one.
+    @State private var snapScroll = false
 
-    /// Sized to content while the recents are short, capped at the window once
-    /// they outgrow it.
+    /// Four rows, both sources. A short fleet leaves air in the window rather
+    /// than shrinking the card; the extra is cheaper than a resize on every flip.
     private var listHeight: CGFloat {
-        CGFloat(max(1, min(rows.count, Self.listRows))) * MenuCard.rowStride - MenuCard.rowSpacing
+        CGFloat(Self.listRows) * MenuCard.rowStride - MenuCard.rowSpacing
     }
 
     /// What the rows actually add up to — the other half of the bottom-edge test
     /// (the observer reports the offset, not the remaining travel).
     private var contentHeight: CGFloat {
-        CGFloat(max(1, rows.count)) * MenuCard.rowStride - MenuCard.rowSpacing
+        CGFloat(max(1, visibleRows.count)) * MenuCard.rowStride - MenuCard.rowSpacing
     }
 
     /// Whether the list outgrows the window and scrolls — the gate for the fades.
-    private var overflowing: Bool { rows.count > Self.listRows }
+    private var overflowing: Bool { visibleRows.count > Self.listRows }
+
+    private func updateEdgeFades() {
+        let offset = scrollOffset.value
+        let top = offset > 0.5
+        if top != scrolledOffTop { scrolledOffTop = top }
+        let bottom = offset < contentHeight - listHeight - 0.5
+        if bottom != scrolledOffBottom { scrolledOffBottom = bottom }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ScrollViewReader { proxy in
                 ScrollView(showsIndicators: false) {
                     VStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
-                        ForEach(rows, id: \.self) { r in
+                        ForEach(visibleRows, id: \.self) { r in
                             modelRow(r).id(r)
                         }
                     }
@@ -2564,10 +2612,8 @@ struct AskRecentModelPickerView: View {
                     // offset: driving a gradient's length from the offset rebuilds
                     // the mask on every tick.
                     .onScrollOffsetChange { offset in
-                        let top = offset > 0.5
-                        if top != scrolledOffTop { scrolledOffTop = top }
-                        let bottom = offset < contentHeight - listHeight - 0.5
-                        if bottom != scrolledOffBottom { scrolledOffBottom = bottom }
+                        scrollOffset.value = offset
+                        updateEdgeFades()
                     }
                 }
                 // The shared dissolve at both overflow edges instead of a hard cut,
@@ -2576,39 +2622,32 @@ struct AskRecentModelPickerView: View {
                                 bottom: overflowing && scrolledOffBottom,
                                 fade: Self.edgeFade)
                 .frame(height: listHeight)
-                // Open on the model in effect — with ten recents it can sit below
-                // the fold, and a menu that opens blind to its own selection makes
-                // the user hunt for their bearings. A pinned model is already in
-                // view, so it is nothing to scroll to.
+                // Open on the model in effect — with ten recents or the whole
+                // Notchi lineup it can sit below the fold, and a menu that
+                // opens blind to its own selection makes the user hunt.
                 .onAppear {
-                    guard rows.contains(current) else { return }
+                    guard visibleRows.contains(current) else { return }
                     proxy.scrollTo(current, anchor: .center)
                 }
-                // ↑/↓ re-arms live, so follow the armed row. A click picks and
-                // dismisses, so this only ever runs for keyboard moves.
+                // ↑/↓ re-arms live, so follow the armed row. A source flip
+                // lands already scrolled (`snapScroll`); animating that one
+                // would ease through the list that just left.
                 .onChange(of: current) {
-                    guard rows.contains(current) else { return }
-                    withAnimation(.easeOut(duration: 0.12)) {
-                        proxy.scrollTo(current, anchor: .center)
-                    }
+                    let animated = !snapScroll
+                    snapScroll = false
+                    followSelection(proxy, animated: animated)
                 }
+                // Re-derive the fades from the real offset against the new
+                // fleet's height. Forcing both off here drew the top edge as a
+                // hard cut for a frame until the scroll notification turned the
+                // fade back on — the flash at the top of the list on a flip.
+                .onChange(of: source) { updateEdgeFades() }
             }
 
-            // Notchi's own models, held outside the scroller so they sit in the
-            // same place every time the menu opens instead of riding a history
-            // that moves under them. Listed flat, as models — the lineup is
-            // capped (`NotchBody.askPinnedModelRows`) at a length that reads as
-            // a few more rows rather than a second list needing a name.
-            if !pinned.isEmpty {
-                hairline
-                VStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
-                    ForEach(pinned, id: \.self) { modelRow($0) }
-                }
-            }
-            // The tail row out of the recents and into the whole catalog. It sits
-            // OUTSIDE the scroller — a door you can always reach, not a row that
-            // can scroll away. A hairline sets it apart from the models above: it
-            // isn't a model to arm, and the ↑/↓ cursor deliberately skips it.
+            // The tail row out of BYOK recents and into the whole catalog.
+            // Drawn on both sources so flipping the switch cannot insert or
+            // remove a row and resize the card. On Notchi it is still the
+            // door into Settings; it is not a model, and ↑/↓ skip it.
             hairline
             MenuCardRow(title: L("model.picker.more"),
                         hoverSymbol: "arrow.up.right",
@@ -2617,21 +2656,32 @@ struct AskRecentModelPickerView: View {
                 onDone()
                 onMoreModels()
             }
+            if showsSourceSwitch {
+                hairline
+                sourceRow
+            }
         }
         .padding(MenuCard.cardPad)
         // Sized by its own rows like the `/` card, capped so one long model id
-        // can't stretch the menu across the panel.
-        .frame(width: cardWidth, alignment: .leading)
+        // can't stretch the menu across the panel. Height is the chrome
+        // above, not the armed fleet: a source flip must not ask the
+        // hosting window to refit through an empty pass.
+        .frame(width: cardWidth, height: cardHeight, alignment: .topLeading)
+        .animation(nil, value: source)
         .background(ModelDetailAnchorProbe(anchor: detailAnchor))
-        .onAppear(perform: installKeyMonitor)
+        .onAppear {
+            if rows.contains(current) { lastPick[.byok] = current }
+            if pinned.contains(current) { lastPick[.notchi] = current }
+            installKeyMonitor()
+        }
         .onDisappear {
             removeKeyMonitor()
             ModelDetailPanel.shared.scheduleHide()
         }
     }
 
-    /// One model row, in the recents or pinned under them — the two run the same
-    /// row so a pinned model can't drift from the list above it.
+    /// One model row, BYOK or Notchi — the two fleets share the row so a source
+    /// flip can't drift the list's language.
     private func modelRow(_ r: Row) -> some View {
         MenuCardRow(
             title: ModelRatings.prettyName(for: r.id, provider: r.provider),
@@ -2646,9 +2696,10 @@ struct AskRecentModelPickerView: View {
             emphasized: true,
             selected: r == current,
             haptic: false) {
-                // Menu semantics: one click picks and dismisses. Clicking
-                // the already-armed row just dismisses.
-                if r != current { arm(r) }
+                // Menu semantics: one click picks and dismisses. Always
+                // commit: a source flip only moves the highlight, and
+                // tapping that row is what writes the pick.
+                arm(r)
                 // The card goes with the menu, in the same click. Left to the
                 // list's `onDisappear` it hides a beat late, so the detail card
                 // hangs in the air after the menu it belonged to is gone.
@@ -2664,8 +2715,8 @@ struct AskRecentModelPickerView: View {
             }
     }
 
-    /// The rule between two runs of rows — recents from pinned, pinned from the
-    /// door out of the card.
+    /// The rule between the card's sections — models from More models, More
+    /// models from the source switch.
     private var hairline: some View {
         Rectangle().fill(.white.opacity(0.07))
             .frame(height: 0.5)
@@ -2675,10 +2726,9 @@ struct AskRecentModelPickerView: View {
             .padding(.vertical, 7)
     }
 
-    /// Every row the ↑/↓ cursor can land on, in the order they are drawn: the
-    /// recents, then Notchi's lineup. The door out is deliberately not among
-    /// them — it picks no model.
-    private var armable: [Row] { rows + pinned }
+    /// Every row the ↑/↓ cursor can land on: the armed source's models. The
+    /// door out and the source switch pick no model.
+    private var armable: [Row] { visibleRows }
 
     /// The row's trailing word. Backends driven by the user's own signed-in
     /// CLI wear the tag: in a list that otherwise means "a key we hold", it
@@ -2704,12 +2754,15 @@ struct AskRecentModelPickerView: View {
             && ModelDetailCard.Wallet.current?.state == .empty
     }
 
-    /// Wide enough for every row whole — the models with their CLI tags, and the
-    /// "More models…" door under them.
+    /// Wide enough for every row whole across both sources, so flipping the
+    /// switch doesn't resize the card. The door's arrow only shows under the
+    /// pointer, but it is held in the layout at rest.
     private var cardWidth: CGFloat {
-        // The door's arrow only shows under the pointer, but it is held in the
-        // layout at rest — so the card is sized as if it were always there.
-        let extra: [(String, String?)] = [(L("model.picker.more"), "\u{2197}")]
+        var extra: [(String, String?)] = [(L("model.picker.more"), "\u{2197}")]
+        if showsSourceSwitch {
+            extra.append((sourceTitle(.byok), nil))
+            extra.append((sourceTitle(.notchi), nil))
+        }
         return width(of: rows + pinned, extra: extra)
     }
 
@@ -2739,7 +2792,90 @@ struct AskRecentModelPickerView: View {
 
     private func arm(_ r: Row) {
         current = r
+        lastPick[r.provider.isFirstParty ? .notchi : .byok] = r
         onSelect(r)
+    }
+
+    /// Flip the list to the other source, restoring what was last highlighted
+    /// there (or its first model). The pick is not committed: writing it on
+    /// the flip retitled the chip, which resized, which dragged this card
+    /// with it. A click (or Return) is what writes.
+    private func switchSource(_ next: Source) {
+        guard next != source else { return }
+        snapScroll = true
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            source = next
+            if let pick = lastPick[next] ?? fleet(for: next).first {
+                current = pick
+                lastPick[next] = pick
+            }
+        }
+    }
+
+    private func followSelection(_ proxy: ScrollViewProxy, animated: Bool = true) {
+        guard visibleRows.contains(current) else { return }
+        if animated {
+            withAnimation(.easeOut(duration: 0.12)) {
+                proxy.scrollTo(current, anchor: .center)
+            }
+        } else {
+            proxy.scrollTo(current, anchor: .center)
+        }
+    }
+
+    /// Hairline plus the 7pt it keeps from the rows on each side.
+    private static var sectionRule: CGFloat { 0.5 + 7 + 7 }
+
+    /// The card's height with the list window and both chrome rows in place,
+    /// so a source flip cannot change `fittingSize`.
+    private var cardHeight: CGFloat {
+        var h = listHeight + Self.sectionRule + MenuCard.rowHeight
+        if showsSourceSwitch {
+            h += Self.sectionRule + MenuCard.rowHeight
+        }
+        return h + MenuCard.cardPad * 2
+    }
+
+    /// The source switch: a plain full-width row carrying the fleet name, and a
+    /// chevron that surfaces with the hover wash — the agent card's engine row.
+    private var sourceRow: some View {
+        let shape = Capsule(style: .continuous)
+        return Menu {
+            ForEach(sources, id: \.self) { s in
+                Button { switchSource(s) } label: {
+                    if s == source {
+                        Label(sourceTitle(s), systemImage: "checkmark")
+                    } else {
+                        Text(sourceTitle(s))
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Text(sourceTitle(source))
+                    .font(.sf(MenuCard.fontSize, weight: .regular))
+                    .foregroundStyle(sourceHovering ? Tokens.text2 : Tokens.text4)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                    .foregroundStyle(Tokens.text3)
+                    .opacity(sourceHovering ? 1 : 0)
+            }
+            .padding(.horizontal, MenuCard.rowPad)
+            .frame(height: MenuCard.rowHeight)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background { if sourceHovering { shape.fill(.white.opacity(0.06)) } }
+            .contentShape(shape)
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .onHover { sourceHovering = $0 }
+        .animation(.easeOut(duration: Tokens.rowFade), value: sourceHovering)
     }
 
     /// Reuse the catalog's full metadata whenever the recent row is still present

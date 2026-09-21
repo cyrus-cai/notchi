@@ -37,9 +37,6 @@ struct NotchBody: View {
     /// as an elapsed clock and only becomes the ✕ under the pointer, so a list of
     /// runs reads as durations at a glance and never as a row of close buttons.
     @State private var hoveredAgentRowID: UUID? = nil
-    /// Pointer over the one-time "turn this off in Settings" line
-    /// (`selectionContextHintLine`) — it brightens like every other quiet link.
-    @State private var hoveringSelectionHint = false
     /// Where the agent model+effort card hangs from: half the chip's width, i.e.
     /// the point under its centre — **frozen for as long as the card is up**.
     /// The chip re-titles live while you pick ("Opus 5 medium" → "Sonnet 5
@@ -293,6 +290,11 @@ struct NotchBody: View {
             model.isModelPickerOpen = open
         }
         .onChange(of: model.showAskModelPicker) { _, open in
+            // Same refresh the Settings chip pays for: Notchi's named entries
+            // only exist on the live `/v1/models` list, and this menu is that
+            // list — waiting until Settings has been opened would leave it as
+            // Blend1 plus whatever the user has already asked through.
+            if open { Task { await catalog.loadAll() } }
             model.isModelPickerOpen = open
         }
         .onChange(of: model.showAgentFolderPicker) { _, open in
@@ -492,10 +494,6 @@ struct NotchBody: View {
                 // selection is riding along too.
                 if let selection = model.selectionContext {
                     selectionContextLine(selection)
-                        .padding(.bottom, 8)
-                        .transition(moduleTransition)
-                } else if model.selectionContextHintShown {
-                    selectionContextHintLine
                         .padding(.bottom, 8)
                         .transition(moduleTransition)
                 }
@@ -721,9 +719,6 @@ struct NotchBody: View {
                     if let selection = model.selectionContext {
                         selectionContextLine(selection)
                             .padding(.bottom, 8)
-                    } else if model.selectionContextHintShown {
-                        selectionContextHintLine
-                            .padding(.bottom, 8)
                     }
                     if model.agentComposeActive {
                         if !model.agentComposeImages.isEmpty {
@@ -851,35 +846,6 @@ struct NotchBody: View {
                              selection: selection) {
             withAnimation(.easeOut(duration: Tokens.hoverFade)) { model.dropSelectionContext() }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    /// Said once, in the slot the chip just vacated, the first time the user drops
-    /// a carried selection: there's a switch for this. It takes the same footnote
-    /// voice as the note-save cue and retires itself after a few seconds — and it
-    /// is a button, because a hint that names Settings and then makes you go find
-    /// them yourself is half a hint. Tapping it lands on General, where the row is.
-    private var selectionContextHintLine: some View {
-        Button {
-            model.retireSelectionContextHint()
-            model.settingsSection = "General"
-            withAnimation(.spring(response: 0.42, dampingFraction: 0.8)) {
-                model.openSettings()
-            }
-        } label: {
-            HStack(spacing: 4) {
-                Text(L("selection.context.hint.off"))
-                Image(systemName: "arrow.up.right")
-                    .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
-            }
-            .font(.sf(Tokens.TypeSize.label))
-            .tracking(0.2)
-            .foregroundStyle(hoveringSelectionHint ? Tokens.text2 : Tokens.text4)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { hoveringSelectionHint = $0 }
-        .animation(.easeOut(duration: Tokens.hoverFade), value: hoveringSelectionHint)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -1071,13 +1037,13 @@ struct NotchBody: View {
     /// The Ask bucket's model chip — the Ask-side twin of the agent compose chips,
     /// riding the same slot beside the pill. It names the model in effect and, on
     /// tap, opens the Ask recents quick menu (`AskRecentModelPickerView`) — the
-    /// agent card's little glass sibling listing the five most recently used
-    /// models, instead of detouring through the full cross-provider catalog (which
-    /// stays reachable from Settings). The popover hangs off the chip itself — a
-    /// menu should pop from the control that opened it, not float detached under
-    /// the island the way the keyboard-summoned pickers do. Reads the selection
-    /// straight from the store like the settings chip, so the chip can never show
-    /// a stale model.
+    /// agent card's little glass sibling, switching BYOK recents and Notchi's
+    /// lineup from the same bottom-row menu the agent card uses for engines.
+    /// The full cross-provider catalog stays reachable from Settings via
+    /// "More models…". The popover hangs off the chip itself — a menu should pop
+    /// from the control that opened it, not float detached under the island the
+    /// way the keyboard-summoned pickers do. Reads the selection straight from
+    /// the store like the settings chip, so the chip can never show a stale model.
     ///
     /// With nothing configured it names the gap instead — "Choose model…" in the
     /// danger ink, the one chip in the row that is reporting a problem rather than
@@ -1129,8 +1095,8 @@ struct NotchBody: View {
                     onSelect: { row in
                         ModelCatalogStore.select(provider: row.provider, model: row.id)
                     },
-                    // "More models…" hands off to Settings' Model pane — the full
-                    // cross-provider catalog the recents menu deliberately doesn't carry.
+                    // "More models…" (BYOK only) hands off to Settings' Model pane —
+                    // the full cross-provider catalog the recents menu doesn't carry.
                     onMoreModels: {
                         model.settingsSection = "Model"
                         withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
@@ -1143,12 +1109,13 @@ struct NotchBody: View {
             }))
     }
 
-    /// The rows the Ask chip's quick menu shows: the selection in effect first, then
-    /// the most recently asked-through models (`AskModelMRU`), skipping duplicates
-    /// and providers that can't serve right now, capped at the MRU's ten. No
-    /// padding: fewer recents than that just means a shorter menu — every row is
-    /// something the user actually used or picked, never a catalog filler. Past
-    /// five the menu keeps its height and scrolls (see `AskRecentModelPickerView`).
+    /// BYOK rows for the Ask chip's quick menu: the selection in effect first (when
+    /// it isn't a Notchi model), then the most recently asked-through keyed/CLI
+    /// models (`AskModelMRU`), skipping duplicates and providers that can't serve
+    /// right now, capped at the MRU's ten. No padding: fewer recents than that
+    /// just means a shorter menu — every row is something the user actually used
+    /// or picked, never a catalog filler. Past four the menu keeps its height and
+    /// scrolls (see `AskRecentModelPickerView`).
     ///
     /// With nothing configured there are no recents worth listing — the "selection
     /// in effect" is a provider default nobody chose and every MRU slot is empty —
@@ -1175,51 +1142,23 @@ struct NotchBody: View {
         return Array(rows.filter { !$0.provider.isFirstParty }.prefix(AskModelMRU.capacity))
     }
 
-    /// The models pinned under the recents: our own, and only while the wallet
-    /// can actually pay for a turn. An empty balance cannot serve a request, so
-    /// it pins nothing — a row that answers with a billing error is worse than
-    /// no row.
+    /// Notchi's lineup for the Ask chip's source switch: every model the
+    /// gateway currently serves, whether or not this account has asked
+    /// through it. An empty or capped balance cannot pay for a turn, so
+    /// it offers nothing — a row that answers with a billing error is
+    /// worse than no row. The list window scrolls past four rows.
     ///
-    /// The lineup is whatever the gateway last published (`liveByProvider`),
-    /// falling back to the bundled tier so the section is never empty for
-    /// someone who has credit and has not opened the full picker yet.
+    /// The lineup is the live `/v1/models` snapshot (`liveByProvider`).
+    /// Until that fetch lands, the bundled Blend1 row keeps the section
+    /// from being empty — never a remembered id, which would turn this
+    /// into a recents list of models already used.
     private var askPinnedModelRows: [AskRecentModelPickerView.Row] {
         guard let snapshot = nono.snapshot, !snapshot.isEmpty, !snapshot.cappedForToday,
               ModelCatalogStore.ready(.nono) else { return [] }
         let live = catalog.liveByProvider[.nono]?.map(\.id) ?? []
-        var ids = live
-        if ids.isEmpty {
-            // Nothing published yet, so nothing to check against: the bundled
-            // tier, plus whatever the user is on or has asked through, so the
-            // section isn't empty while the fetch is in flight. Once the list
-            // lands it is the whole lineup — a remembered id that is no longer
-            // on it names a model the gateway will refuse, and offering it
-            // would keep a retired model on the menu for as long as it sat in
-            // history.
-            ids = Provider.nono.availableModels
-            if selectedProvider.isFirstParty, !ids.contains(selectedModelID) {
-                ids.append(selectedModelID)
-            }
-            for e in AskModelMRU.entries where e.provider.isFirstParty && !ids.contains(e.model) {
-                ids.append(e.model)
-            }
-        }
-        // Listed flat under the recents, so the lineup is capped at a few rows:
-        // past that it stops reading as "and ours" and starts being a second
-        // catalog, which is what "More models…" is for. The model in effect is
-        // kept in view whatever its place in the published order — a selection
-        // the menu cannot show is a selection the menu cannot change.
-        var kept = Array(ids.prefix(Self.askPinnedModelLimit))
-        if selectedProvider.isFirstParty, !kept.contains(selectedModelID),
-           ids.contains(selectedModelID) {
-            kept.removeLast()
-            kept.append(selectedModelID)
-        }
-        return kept.map { AskRecentModelPickerView.Row(provider: .nono, id: $0) }
+        let ids = live.isEmpty ? Provider.nono.availableModels : live
+        return ids.map { AskRecentModelPickerView.Row(provider: .nono, id: $0) }
     }
-
-    /// How many of our own models the Ask menu lists.
-    private static let askPinnedModelLimit = 3
 
     /// The agent CLIs that are installed *and* signed in right now — real backends
     /// that need no key, so with nothing else configured they are the shortest way

@@ -548,30 +548,6 @@ final class NotchModel: ObservableObject {
     /// something else.
     private var dismissedSelection: String?
 
-    /// Settings → General, "Use selected text": whether opening the panel reads
-    /// what the user had highlighted outside. On by default — it is the whole
-    /// point of a notch you talk to ("translate this" with nothing copied) — but
-    /// people who live with a permanent selection in an editor want the prompt to
-    /// stay blank, so it is one switch away. Off also stops the accessibility read
-    /// happening at all, not just the badge from drawing.
-    @Published var selectionContextEnabled: Bool =
-        UserDefaults.standard.object(forKey: NotchModel.selectionContextKey) as? Bool ?? true
-    {
-        didSet {
-            UserDefaults.standard.set(selectionContextEnabled,
-                                      forKey: NotchModel.selectionContextKey)
-            if !selectionContextEnabled { clearSelectionContext() }
-        }
-    }
-    private static let selectionContextKey = "selectionContextEnabled"
-
-    /// The one-time "you can switch this off in Settings" note, shown after the
-    /// user drops a carried selection for the FIRST time — see
-    /// `dropSelectionContext`. Retires itself after a few seconds.
-    @Published private(set) var selectionContextHintShown = false
-    private var selectionContextHintTask: Task<Void, Never>?
-    private static let selectionContextHintSeenKey = "selectionContextHintSeen"
-
     /// The model picker popover (anchored to the model chip in settings) is open.
     /// While set, `collapseOnLeave` bails exactly as it does for a pinned answer: the
     /// popover is a separate window outside the island's tracking area, so moving the
@@ -591,8 +567,9 @@ final class NotchModel: ObservableObject {
     @Published var showAgentPicker = false
 
     /// The Ask model chip's quick menu — the agent quick picker's card on the chat
-    /// side, listing the ten most recently used models (`AskModelMRU`). `NotchBody`
-    /// hangs the popover off the panel body like the other two pickers.
+    /// side, switching BYOK recents (`AskModelMRU`, ten) and Notchi's lineup from
+    /// a bottom-row menu. `NotchBody` hangs the popover off the panel body like
+    /// the other two pickers.
     @Published var showAskModelPicker = false
 
     /// The agent compose's folder chip menu — the recently worked-in projects
@@ -5921,8 +5898,7 @@ final class NotchModel: ObservableObject {
     /// captured its own selection each own the surface — dropping a second
     /// context badge onto any of them would be noise at best.
     var acceptsSelectionContext: Bool {
-        selectionContextEnabled
-            && mode == .idle && turns.isEmpty
+        mode == .idle && turns.isEmpty
             && !showSettings && !showWhatsNew
             && !agentComposeActive
             && promptShortcutContext == nil
@@ -5945,29 +5921,6 @@ final class NotchModel: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         selectionContext = nil
         selectionContextSource = nil
-        // The × is the first moment we can be sure the user has both noticed the
-        // feature and wanted it gone — so it is the one moment worth spending on
-        // telling them where the switch lives. Once ever, then never again: a
-        // reminder that repeats is nagging about a thing they already handled.
-        guard !UserDefaults.standard.bool(forKey: Self.selectionContextHintSeenKey)
-        else { return }
-        UserDefaults.standard.set(true, forKey: Self.selectionContextHintSeenKey)
-        selectionContextHintTask?.cancel()
-        selectionContextHintShown = true
-        selectionContextHintTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 6_000_000_000)
-            guard !Task.isCancelled else { return }
-            withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
-                self?.selectionContextHintShown = false
-            }
-        }
-    }
-
-    /// Take the one-time hint off screen early — the user followed it into
-    /// Settings, or the page moved on underneath it.
-    func retireSelectionContextHint() {
-        selectionContextHintTask?.cancel()
-        selectionContextHintShown = false
     }
 
     /// Drop the carried selection because the page changed under it (a new chat,
@@ -5977,7 +5930,6 @@ final class NotchModel: ObservableObject {
     private func clearSelectionContext() {
         selectionContext = nil
         selectionContextSource = nil
-        retireSelectionContextHint()
     }
 
     /// A prompt shortcut whose presentation is a compact pointer-side window.

@@ -7600,9 +7600,11 @@ private struct SourceRow: View {
                     .truncationMode(.tail)
                 // Width goes to the date first, then the site, and the title takes
                 // what is left, so a long site name never pushes the date out.
+                // Site stays at the date's quiet ink — hover only lifts the title,
+                // never the publisher name beside it.
                 Text(source.site)
                     .font(.sf(Tokens.TypeSize.meta))
-                    .foregroundStyle(Tokens.text3)
+                    .foregroundStyle(Tokens.text4)
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .layoutPriority(1)
