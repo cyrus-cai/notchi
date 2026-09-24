@@ -13,9 +13,6 @@ struct NotchBody: View {
     /// Self-update state — read here only to badge the settings gear with a dot
     /// when a newer release is available (the action itself lives in settings).
     @ObservedObject private var updater = UpdaterService.shared
-    /// Release-notes state — read here to surface the "what's new" cue in the idle
-    /// input row once, on the first launch after an update (see `unseenVersion`).
-    @ObservedObject private var whatsNew = WhatsNewService.shared
     /// The agent-Codex run (XII: agent-to-Codex) — observed so the idle
     /// view's task card tracks progress live and flips to the result on finish.
     @ObservedObject private var agentManager = AgentTaskManager.shared
@@ -60,6 +57,16 @@ struct NotchBody: View {
     /// content with no measure→frame feedback loop, so it grows smoothly in the same
     /// frame the text lands.)
     @State private var measuredAnswerHeight: CGFloat = 0
+    /// The oldest turn the result page mounts (see `threadWindowStart(of:)`).
+    /// Pinned when the page opens, so a streaming answer can't move it; moved
+    /// earlier by `loadOlderTurns`. Nil: not pinned yet.
+    @State private var threadWindowStartID: UUID? = nil
+    /// The main-thread reveal's measurements (see `mainThreadReveal`): the turn
+    /// stack a pull lays out, the result header it fades in, and the idle
+    /// prompt + bucket row at rest, which the pull folds into the follow-up row.
+    @State private var revealThreadHeight: CGFloat = 0
+    @State private var revealHeaderHeight: CGFloat = 26
+    @State private var idleBottomHeight: CGFloat = 0
     /// Width (pt) of everything the prompt field is currently showing — committed
     /// text plus any in-progress IME composition (pinyin) — reported live by the
     /// field via `onCaretWidth`. It's how the placeholder knows to get out of the
@@ -73,9 +80,6 @@ struct NotchBody: View {
     /// wrapped text up to `NotchBody.promptMaxLines`, after which it scrolls inside
     /// itself. The input rows size themselves off these.
     @State private var inputHeight: CGFloat = PromptField.lineHeight(for: NotchBody.idleFontSize)
-    /// Cursor over the bucket row's "what's new" chip — brightens its glass, in the
-    /// same step the Recent chevron beside it takes (see `whatsNewCue`).
-    @State private var whatsNewHovered = false
     /// Cursor over an "Update to X" chip — one per host (the idle prompt's bucket
     /// row, the recent list's manage bar); they're never on screen together, but
     /// separate flags keep the hover honest either way (see `updateCue`).
@@ -88,6 +92,9 @@ struct NotchBody: View {
     /// one-shot on a selection, so an always-open composer would cost a row of
     /// height nobody asked for. Reset whenever the thread changes underneath it.
     @State private var followUpExpanded = false
+    /// Pointer over the result follow-up box. Stop is drawn only while a round
+    /// is streaming and the pointer is here; Esc still stops the round.
+    @State private var followUpHovered = false
     /// The live agent-detail page's own follow-up line — kept separate from the
     /// idle prompt's `model.text` so a line typed while watching a run doesn't
     /// leak into the fresh-chat box the page falls back to when the task ends.
@@ -137,14 +144,6 @@ struct NotchBody: View {
     /// which read as a ~0.5s stall before the list moved. Only LATER changes (a preview
     /// appearing/clearing while open) animate, so those still slide. Reset on close.
     @State private var didMeasureImmersiveHeader = false
-    /// Which answer's source badge is currently open (hovered), shared between the
-    /// badge in the scroll and the floating panel rendered by `resultView` so the
-    /// popup escapes the scroll's clip (XII-118). `nil` = none open.
-    @State private var hoveredSourceID: UUID? = nil
-    /// Deferred-close handle for the source popup, so leaving the pill doesn't snap
-    /// it shut before the cursor can cross the gap to the panel. Cancelled when the
-    /// cursor reaches the panel (or re-enters the pill).
-    @State private var sourceCloseWork: DispatchWorkItem? = nil
     /// Whether the manage bar's secondary controls (Settings + Clear) are revealed.
     /// The first level is a single ⋯ chip; tapping it unfurls the two actions to its
     /// right. Local presentational state — collapses on selection or a second tap.
@@ -191,6 +190,7 @@ struct NotchBody: View {
         self.model = model
         _conversation = ObservedObject(wrappedValue: model.conversation)
         _measuredAnswerHeight = State(initialValue: model.lastMeasuredAnswerHeight)
+        _idleBottomHeight = State(initialValue: model.idleBottomRestHeight)
     }
 
     /// The panel's content inset — the SAME on all four sides, so the follow-up
@@ -214,21 +214,11 @@ struct NotchBody: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            switch model.mode {
-            case .result:
-                resultView
-            case .load:
-                // A follow-up already has the thread on screen — keep showing the
-                // conversation (its last bubble renders the thinking dots) so the
-                // prior turns don't vanish while the answer is in flight. Only the
-                // very first question, with nothing on screen yet, gets the bare
-                // centered load view.
-                if model.turns.isEmpty {
-                    loadView
-                } else {
-                    resultView
-                }
-            case .idle:
+            // The idle page also stays up through a main-thread reveal — a pull,
+            // or a line sent from the prompt (whose round has already moved
+            // `mode` on) — until it hands over to the result page. Same branch
+            // either way, so the prompt isn't rebuilt when the send starts it.
+            if model.mode == .idle || model.threadPulling {
                 // An open agent detail page owns the idle slot: the run's full
                 // work trail, live while it works. Falls back to the idle panel
                 // by itself once the task is dismissed (the lookup fails).
@@ -237,6 +227,19 @@ struct NotchBody: View {
                 } else {
                     idleView
                 }
+            } else if model.mode == .load && model.turns.isEmpty {
+                // Only the very first question, with nothing on screen yet, gets
+                // the bare centered load view.
+                loadView
+            } else {
+                // A follow-up already has the thread on screen — keep showing the
+                // conversation (its last bubble renders the thinking dots) so the
+                // prior turns don't vanish while the answer is in flight. One
+                // branch for `.load` and `.result`: as two `switch` cases they were
+                // two view identities, so every round tore the whole thread down
+                // and rebuilt it when its first text flipped `.load` → `.result`
+                // (and a follow-up's `.result` → `.load` did it once more).
+                resultView
             }
         }
         .padding(.horizontal, NotchBody.panelPadding)
@@ -293,7 +296,7 @@ struct NotchBody: View {
             // Same refresh the Settings chip pays for: Notchi's named entries
             // only exist on the live `/v1/models` list, and this menu is that
             // list — waiting until Settings has been opened would leave it as
-            // Blend1 plus whatever the user has already asked through.
+            // the bundled row plus whatever the user has already asked through.
             if open { Task { await catalog.loadAll() } }
             model.isModelPickerOpen = open
         }
@@ -492,6 +495,19 @@ struct NotchBody: View {
                 // row of its own rather than a turn in the slot below: an image
                 // pasted onto the same prompt must not hide the fact that a
                 // selection is riding along too.
+                // Unified threads (Settings → Lab): the end of the main thread's
+                // newest answer, above the prompt, while Enter would continue it.
+                // A two-finger pull (or a click) opens it into the thread's
+                // result page — see `mainThreadReveal`.
+                // The unified threads guide's invitation holds the peek's slot
+                // until Start, or until a question goes to the main thread.
+                if showsUnifiedIntroInvite {
+                    UnifiedIntroInvite(model: model)
+                        .transition(moduleTransition)
+                } else if showsMainThreadPeek, let peek = model.mainThreadPeek {
+                    mainThreadReveal(peek.item, answer: peek.answer, live: peek.live)
+                        .transition(moduleTransition)
+                }
                 if let selection = model.selectionContext {
                     selectionContextLine(selection)
                         .padding(.bottom, 8)
@@ -523,26 +539,50 @@ struct NotchBody: View {
                     .transition(moduleTransition)
                 }
 
-                idleInputRow
+                // The prompt and the bucket row share one box, so a thread pull
+                // can fold them into the follow-up row as a unit (see
+                // `ThreadRevealBottom`); at rest the box adds nothing.
+                VStack(alignment: .leading, spacing: 0) {
+                    // The invitation takes the prompt's place until Start or ×.
+                    if !showsUnifiedIntroInvite {
+                        idleInputRow
+                    }
 
-                // (The `/` command menu is NOT in this stack — it lives in its own
-                // borderless window, hung under the input by `SlashMenuHost`. It
-                // takes no space here, moves nothing, and is free to overhang the
-                // island's edge.)
+                    // (The `/` command menu is NOT in this stack — it lives in its own
+                    // borderless window, hung under the input by `SlashMenuHost`. It
+                    // takes no space here, moves nothing, and is free to overhang the
+                    // island's edge.)
 
-                // The bucket row (XII: agent-to-Codex): the destination pill as
-                // fixed chrome below the input, with the folder / model / effort
-                // chips unfurling beside it while Agent is armed — same slot and
-                // glass language as the one-tap presets. It rides the panel even
-                // with no agent CLI installed: the pill is now where the routing
-                // (Ask / Note / Remind) shows itself, so it can't be optional.
-                // (Both the pill and the Recent chevron leave the row while
-                // Recent is expanded — the chevron moves to the manage bar's
-                // bottom-right — so the row itself drops out when nothing is left.)
-                if bucketRowHasContent {
-                    bucketRow
-                        .transition(moduleTransition)
+                    // The bucket row (XII: agent-to-Codex): the destination pill as
+                    // fixed chrome below the input, with the folder / model / effort
+                    // chips unfurling beside it while Agent is armed — same slot and
+                    // glass language as the one-tap presets. It rides the panel even
+                    // with no agent CLI installed: the pill is now where the routing
+                    // (Ask / Note / Remind) shows itself, so it can't be optional.
+                    // (Both the pill and the Recent chevron leave the row while
+                    // Recent is expanded — the chevron moves to the manage bar's
+                    // bottom-right — so the row itself drops out when nothing is left.)
+                    if bucketRowHasContent {
+                        bucketRow
+                            .transition(moduleTransition)
+                    }
                 }
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                    // Unmeasured, a collapse that started before the idle page
+                    // ever showed takes its first reading.
+                    guard !model.threadPulling || idleBottomHeight == 0 else { return }
+                    idleBottomHeight = height
+                    model.idleBottomRestHeight = height
+                }
+                .modifier(ThreadRevealBottom(live: model.threadPullLive,
+                                             active: model.threadPulling,
+                                             restHeight: idleBottomHeight,
+                                             targetHeight: Self.composerRowHeight,
+                                             sideInset: NotchBody.resultSideInset,
+                                             standIn: RevealStill(key: [model.text, focused ? "focused" : ""]) {
+                                                 followUpStandIn
+                                             }
+                                             .equatable()))
 
                 // Agent runs' presence (XII: agent-to-Codex): one status line per
                 // task — the live activity while it works, the outcome once it
@@ -586,6 +626,194 @@ struct NotchBody: View {
         .animation(.spring(response: 0.42, dampingFraction: 0.78), value: model.hasText)
     }
 
+    /// The main-thread peek shows only while the line in the prompt would join
+    /// the main thread: not over an agent task, a prompt shortcut (chord or `/`),
+    /// a carried-in selection, or an armed `/loop`, which all start threads of
+    /// their own. A pasted image takes the peek's slot: the thumbnail strip
+    /// sits where the peek was instead of stacking under it.
+    /// The unified threads guide's invitation, in the peek's slot and in place
+    /// of the prompt.
+    private var showsUnifiedIntroInvite: Bool {
+        guard showsMainThreadPeek, let intro = model.unifiedIntro else { return false }
+        return intro.threadID == nil
+    }
+
+    private var showsMainThreadPeek: Bool {
+        !model.agentComposeActive
+            && !model.usingPromptShortcutContext
+            && model.promptShortcutMode == nil
+            && model.selectionContext == nil
+            && model.loopIntervalMinutes == nil
+            && model.askComposeImages.isEmpty
+    }
+
+    // MARK: - Main-thread reveal (Unified threads)
+
+    /// Visible height of the peek at rest: the bottom edge of the newest
+    /// answer's last card and a sliver above it — and the gap under it.
+    private static let peekHeight: CGFloat = 30
+    private static let peekGap: CGFloat = 6
+    /// The follow-up row on one line: `ComposerBox`'s resting height.
+    private static let composerRowHeight: CGFloat = Tokens.Control.rail
+    /// The result page's text column plus the turn stack's 8pt trailing inset.
+    /// The reveal lays the thread out at this width at every progress, so no
+    /// line re-wraps while the panel widens under it.
+    private static let resultStackWidth: CGFloat =
+        Tokens.openWidthResult - (panelPadding + resultSideInset) * 2
+
+    /// Where a thread pull ends: the result page's geometry for the thread it
+    /// opens, from the same constants `resultView` is built on. Short thread:
+    /// header row + 18pt gap, the whole stack, the 24pt gap, the follow-up row.
+    /// Long thread: the 407pt scroller pinned to its bottom — the last turn
+    /// rests 64pt (runway + anchor) above the frame's bottom, where the
+    /// follow-up floats — with the top fade and frost under the header.
+    private var revealTargets: ThreadRevealTargets {
+        let height = revealThreadHeight
+        guard height > answerMaxHeight else {
+            return ThreadRevealTargets(headerSlot: revealHeaderHeight + 18,
+                                       viewport: height, gap: 24, fade: 0)
+        }
+        let tail = clippedBottomRunway + 2
+        return ThreadRevealTargets(headerSlot: 0,
+                                   viewport: clippedAnswerMaxHeight + resultHeaderReach - tail,
+                                   gap: tail - Self.composerRowHeight,
+                                   fade: resultHeaderReach)
+    }
+
+    /// The main thread above the idle prompt. At rest it is the peek: the
+    /// newest answer, drawn by `turnView` exactly as the thread draws it,
+    /// clipped to `peekHeight`, faded and frosted toward the top. During a pull
+    /// (`NotchModel.threadPullProgress`) it lays out the thread's recent turns
+    /// and opens toward the result page — see `ThreadRevealTop`. A click plays
+    /// the same open.
+    private func mainThreadReveal(_ item: NotchModel.HistoryItem,
+                                  answer: NotchModel.Turn,
+                                  live: [NotchModel.Turn]?) -> some View {
+        let pulling = model.threadPulling
+        // A sent line's reveal draws the live thread — its new question and the
+        // answer on the way; a pull draws the saved row. A round still streaming
+        // on the main thread is not on the row yet: the peek draws its question
+        // and answer from the round's mirror.
+        let thread = model.threadPullSubmitting ? model.turns : (live ?? item.conversation)
+        let resting = live.map { turns in
+            Array(turns.filter { $0.isDrawn || $0.id == answer.id }.suffix(2))
+        } ?? [answer]
+        let shown = pulling ? Self.revealTurns(of: thread) : resting
+        // The three drawn parts are frozen on their data (`RevealStill`): the
+        // reveal re-runs its layout every animation frame, and without the
+        // freeze every turn's body — markdown, link cards — re-ran with it.
+        return ThreadRevealTop(
+            live: model.threadPullLive,
+            active: pulling,
+            targets: revealTargets,
+            peekHeight: Self.peekHeight,
+            peekGap: Self.peekGap,
+            sideInset: NotchBody.resultSideInset,
+            showsHeader: pulling,
+            header: RevealStill(key: [model.isAnswerPinned, headerChipsShown]) {
+                resultHeader()
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+                        revealHeaderHeight = $0
+                    }
+            }
+            .equatable(),
+            thread: RevealStill(key: RevealThreadKey(turns: shown, measures: pulling)) {
+                revealThread(shown, in: thread, measures: pulling)
+                    .frame(width: Self.resultStackWidth, alignment: .leading)
+            }
+            .equatable(),
+            frost: RevealStill(key: RevealThreadKey(turns: resting, measures: false)) {
+                revealThread(resting, in: live ?? item.conversation, measures: false)
+                    .frame(width: Self.resultStackWidth, alignment: .leading)
+            }
+            .equatable())
+        .contentShape(Rectangle())
+        .onTapGesture { model.animateThreadPullOpen() }
+        .onAppear {
+            model.installThreadPullMonitor()
+            syncThreadPullSpan()
+        }
+        .onChange(of: revealTargets) { _, _ in syncThreadPullSpan() }
+        .onChange(of: idleBottomHeight) { _, _ in syncThreadPullSpan() }
+        .onChange(of: pulling) { _, isPulling in
+            // A pull that settled back leaves nothing measured behind: the next
+            // result page (a new question) must size itself from scratch.
+            guard !isPulling, model.mode == .idle else { return }
+            revealThreadHeight = 0
+            measuredAnswerHeight = 0
+            model.lastMeasuredAnswerHeight = 0
+        }
+    }
+
+    /// The turn stack the reveal draws — the same views and spacing as the
+    /// result page's (`growingConversation` / `clippedConversation`). While a
+    /// pull is under way its height is the thread's measured height: it sets
+    /// the reveal's target and seeds `measuredAnswerHeight`, so the result page
+    /// the pull hands over to mounts in the same layout.
+    private func revealThread(_ turns: [NotchModel.Turn], in thread: [NotchModel.Turn],
+                              measures: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            ForEach(turns) { turn in
+                turnView(turn, thread: thread)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .id(turn.id)
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+            guard measures else { return }
+            revealThreadHeight = height
+            measuredAnswerHeight = height
+            model.lastMeasuredAnswerHeight = height
+            model.threadPullMeasured()
+        }
+        .padding(.trailing, 8)
+    }
+
+    /// The turns a pull lays out: the newest, enough to fill the result page's
+    /// scroller several times over, not a long main thread's whole history.
+    /// Fewer than that means the whole thread.
+    /// The same turns the result page mounts when it opens (`threadWindowStart`),
+    /// so the page the pull hands over to draws exactly what the pull drew.
+    private static func revealTurns(of thread: [NotchModel.Turn]) -> [NotchModel.Turn] {
+        let visible = thread.filter(\.isDrawn)
+        return Array(visible[threadWindowStart(of: visible, before: visible.endIndex)...])
+    }
+
+    /// The pull follows the fingers point for point: the distance that reaches
+    /// progress 1 is how much the panel grows, held to a range a trackpad
+    /// stroke covers comfortably.
+    private func syncThreadPullSpan() {
+        let targets = revealTargets
+        let opened = targets.headerSlot + targets.viewport + targets.gap + Self.composerRowHeight
+        let rest = Self.peekHeight + Self.peekGap + idleBottomHeight
+        model.threadPullSpan = min(max(opened - rest, 160), 420)
+    }
+
+    /// The follow-up row as the result page will mount it, for the second half
+    /// of a pull: the same `ComposerBox` with the same placeholder, tint and
+    /// focus look, but it never takes the caret or a click — the idle prompt
+    /// keeps both until the real row replaces this one at the end of the pull.
+    private var followUpStandIn: some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            ComposerBox(
+                text: .constant(model.text),
+                focusTrigger: false,
+                focused: focused,
+                pulse: AnyHashable(model.effectiveSubmitPanel),
+                pulseTint: model.submitInk,
+                slotFloor: Self.splitRailChip - 12,
+                onSubmit: {},
+                placeholder: { followUpPlaceholderLabel },
+                trailing: {
+                    if followUpHasDraft {
+                        SendButton(compact: true) {}
+                    }
+                })
+            .frame(maxWidth: .infinity)
+        }
+    }
+
     /// The idle prompt field, with the live note-error reset wired in. Shared by
     /// the flat idle layout and the immersive history header so the field — and
     /// all its focus/IME plumbing — exists exactly once, never duplicated.
@@ -619,11 +847,14 @@ struct NotchBody: View {
     ///
     /// That invisibility is also why it carries `grabCursor()`: the hand is the
     /// only thing telling you the strip is grabbable at all.
+    @ViewBuilder
     private var detachGrip: some View {
-        Color.clear
-            .contentShape(Rectangle())
-            .grabCursor()
-            .gesture(detachDragGesture)
+        if NotchModel.detachedWindowsEnabled {
+            Color.clear
+                .contentShape(Rectangle())
+                .grabCursor()
+                .gesture(detachDragGesture)
+        }
     }
 
     /// Take the immersive (input-floats-over-scroll) layout only when the recent
@@ -893,7 +1124,11 @@ struct NotchBody: View {
             // drop out while the Recent list is expanded: the recall view shouldn't
             // also carry the compose-family chrome.
             if !recentListShown {
-                BucketTogglePill(model: model)
+                if model.unifiedThreadsEnabled {
+                    UnifiedComposeModeControl(model: model)
+                } else {
+                    BucketTogglePill(model: model)
+                }
                 if model.agentComposeActive {
                     agentComposeChips
                         .transition(.opacity)
@@ -920,35 +1155,22 @@ struct NotchBody: View {
             // once Recent is up (see `manageBar`), so the way out of the list sits in
             // the bottom-right corner.
             if !recentListShown {
-                let cluster = idleTrailingCluster()
-                // The first-launch-after-update cue rides the same trailing edge,
-                // just inside the Recent chevron — glass beside glass. It keeps the
-                // row alive on its own when the cluster has nothing to draw (a first
-                // run with no history and no pin).
+                let cluster = idleTrailingCluster(flat: model.unifiedThreadsEnabled)
                 // A waiting build says so in words right here, on the home page —
                 // not as a dot behind the ⋯ menu (see `updateCue`).
-                // A grant that landed this launch outranks both the update chip
-                // and "What's New": it holds the edge alone until it is tapped.
+                // A grant that landed this launch outranks the update chip: it
+                // holds the edge alone until it is tapped.
                 let showsGift = !model.hasText && nono.justGrantedUSD > 0.0000005
                 let pending = model.hasText || showsGift ? nil : updateChipFace
-                // One chip on that edge, never two: an update waiting outranks the
-                // notes for the build already running, so "What's New" stands down
-                // until the update is taken.
-                let showsCue = !model.hasText && whatsNew.unseenVersion != nil
-                                && pending == nil && !showsGift
-                if !cluster.isEmpty || showsGift || showsCue || pending != nil {
+                if !cluster.isEmpty || showsGift || pending != nil {
                     Spacer(minLength: 8)
                     if showsGift {
                         giftCue
                             .transition(.scale(scale: 0.7).combined(with: .opacity))
                     }
                     if let pending {
-                        updateCue(face: pending, height: 30,
+                        updateCue(face: pending, height: Tokens.Control.chip,
                                   hovered: $updateCueIdleHovered)
-                            .transition(.scale(scale: 0.7).combined(with: .opacity))
-                    }
-                    if showsCue {
-                        whatsNewCue
                             .transition(.scale(scale: 0.7).combined(with: .opacity))
                     }
                     if !cluster.isEmpty { cluster }
@@ -982,7 +1204,8 @@ struct NotchBody: View {
     /// glass cluster, configured against the model. Built here once and hosted in
     /// one of two places: the bucket row's trailing edge when a local agent CLI
     /// gives us that row, else the input row's own trailing slot.
-    private func idleTrailingCluster(chipSize: CGFloat = 30) -> IdleTrailingCluster {
+    private func idleTrailingCluster(chipSize: CGFloat = Tokens.Control.chip,
+                                     flat: Bool = false) -> IdleTrailingCluster {
         IdleTrailingCluster(
             pinned: model.isAnswerPinned,
             recentOpen: model.showHistory,
@@ -991,6 +1214,7 @@ struct NotchBody: View {
                 ? agentManager.runningTasks.count
                 : (model.agentComposeActive ? agentManager.runningTasks.count : 0),
             chipSize: chipSize,
+            flat: flat,
             togglePin: {
                 withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
                     model.toggleAnswerPin()
@@ -1003,7 +1227,17 @@ struct NotchBody: View {
                     // starts un-highlighted (the caret stays in the input).
                     model.highlightedHistoryIndex = nil
                 }
-            }
+            },
+            openSettings: flat ? {
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                    model.openSettings()
+                }
+            } : nil,
+            openReleaseNotes: flat ? {
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                    model.openWhatsNew(on: nil)
+                }
+            } : nil
         )
     }
 
@@ -1063,6 +1297,10 @@ struct NotchBody: View {
                                                       provider: selectedProvider)
                             : L("model.choose"),
                          tint: model.isConfigured ? nil : Tokens.danger.opacity(0.62),
+                         fontSize: model.unifiedThreadsEnabled
+                            ? UnifiedComposeModeControl.fontSize
+                            : Tokens.TypeSize.label,
+                         fontWeight: model.unifiedThreadsEnabled ? .regular : .light,
                          action: {
             if model.isConfigured || !availableCLIProviders.isEmpty {
                 // The menu pins our own models for a subscriber, and nothing else
@@ -1149,7 +1387,7 @@ struct NotchBody: View {
     /// worse than no row. The list window scrolls past four rows.
     ///
     /// The lineup is the live `/v1/models` snapshot (`liveByProvider`).
-    /// Until that fetch lands, the bundled Blend1 row keeps the section
+    /// Until that fetch lands, the bundled `auto-us` row keeps the section
     /// from being empty — never a remembered id, which would turn this
     /// into a recents list of models already used.
     private var askPinnedModelRows: [AskRecentModelPickerView.Row] {
@@ -1401,7 +1639,7 @@ struct NotchBody: View {
                 // each step — the panel twin of the resting notch's ticker. The
                 // changing words and the ticking clock are the "it's alive" signal.
                 CrossfadeText(text: task.activity ?? L("agent.thinking"),
-                              font: 14, color: Tokens.text3)
+                              font: Tokens.TypeSize.form, color: Tokens.text3)
                     .tracking(-0.1)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -1417,7 +1655,7 @@ struct NotchBody: View {
                 // target that opens it; the ✕ throws the row away without opening
                 // (the record stays in Recent either way).
                 Text(task.prompt)
-                    .font(.sf(Tokens.TypeSize.reading))
+                    .font(.sf(Tokens.TypeSize.form))
                     .tracking(-0.1)
                     .foregroundStyle(task.outcome == .failure
                         ? Tokens.danger.opacity(0.9)
@@ -1530,7 +1768,7 @@ struct NotchBody: View {
             AgentStatusDot(running: loop.isRunning,
                            outcome: loop.isRunning ? nil : (loop.failed ? .failure : .success))
             Text(loop.prompt)
-                .font(.sf(loop.isRunning ? 14 : Tokens.TypeSize.reading))
+                .font(.sf(Tokens.TypeSize.form))
                 .tracking(-0.1)
                 .foregroundStyle(loop.isRunning ? Tokens.text3
                                  : (loop.failed ? Tokens.danger.opacity(0.9) : Tokens.text2))
@@ -1684,14 +1922,14 @@ struct NotchBody: View {
     }
 
     /// The detail scroll's height. Tuned so the whole page (26pt header + 10 gap
-    /// + this + 10 gap + 39pt follow-up row = 320pt) matches the immersive
+    /// + this + 10 gap + 34pt follow-up row = 320pt) matches the immersive
     /// history layout, whose 320pt list is the only thing that opens the island
     /// (its input header floats as an overlay, taking no layout height) — the
     /// agent page must never make the island taller than the recent list does.
-    private let agentDetailScrollHeight: CGFloat = 235
+    private let agentDetailScrollHeight: CGFloat = 240
 
     /// The gap the composer used to sit below the scroll in, and the runway the
-    /// trail now travels down into behind it. The floating composer's own 39pt
+    /// trail now travels down into behind it. The floating composer's own 34pt
     /// box plus that gap is what the scroll's viewport absorbs
     /// (`agentDetailScrollViewport`), so the page's total height is exactly what
     /// it was as a sibling row — the island never resizes for this change.
@@ -1789,7 +2027,7 @@ struct NotchBody: View {
                         if !agentDetailFollowsTail {
                             GlassIconButton(systemName: "arrow.down",
                                             help: L("agent.trail.toBottom"),
-                                            size: 26, glyphSize: 11,
+                                            size: Tokens.Control.header, glyphSize: 11,
                                             showsTooltip: false) {
                                 agentDetailFollowsTail = true
                                 withAnimation(.easeOut(duration: 0.2)) {
@@ -1834,10 +2072,7 @@ struct NotchBody: View {
     /// here rather than earned: a live run always has an engine and a folder to
     /// name, and a chip that appeared only at settle would move the send button
     /// mid-run.
-    /// `chipSize` is the ⌘ chip's diameter. It matches the composer's own 39pt box
-    /// on the standalone page, where the pair stands alone; the split view passes
-    /// the manage bar's 34 instead, because there the chip sits on the same bottom
-    /// rail as the ⋯ and the collapse chevron and has to read as one of them.
+    /// `chipSize` is the ⌘ chip's diameter, the composer box's own height.
     /// The detail page's record. A loop reads one round at a time: the loop's
     /// prompt once at the top, then the chosen round and the round column beside
     /// it on the right (the newest, until another is picked).
@@ -1847,7 +2082,8 @@ struct NotchBody: View {
             let items = loopRoundItems(task)
             let selected = selectedLoopRound(in: items)
             VStack(alignment: .leading, spacing: 14) {
-                UserQuestionBubble(text: task.prompt, baseFont: Tokens.TypeSize.reading)
+                UserQuestionBubble(text: task.prompt, baseFont: Tokens.TypeSize.reading,
+                                   isAgent: true)
                 // The round column OVERLAYS the record rather than sitting
                 // beside it in an HStack: the overlay's frame is the travel it
                 // slides along to hold the visible top while the round scrolls
@@ -1945,7 +2181,7 @@ struct NotchBody: View {
     private func agentDetailFollowUpRow(
         _ task: AgentTaskManager.AgentTask,
         requestsFocus: Bool = true,
-        chipSize: CGFloat = 39
+        chipSize: CGFloat = Tokens.Control.rail
     ) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             if !agentDetailFollowUpImages.isEmpty {
@@ -2012,7 +2248,7 @@ struct NotchBody: View {
     private func agentDetailComposer(
         _ task: AgentTaskManager.AgentTask,
         requestsFocus: Bool = true,
-        slotFloor: CGFloat = 27
+        slotFloor: CGFloat = Tokens.Control.composerSlot
     ) -> some View {
         // The shared box (`ComposerBox`) — the same control the chat follow-up
         // is, and the same one this page's torn-off window carries.
@@ -2133,7 +2369,7 @@ struct NotchBody: View {
             // button is the only reliable way out (Esc closes the whole panel).
             // Same chevron the result header carries; taps `newChat()`, which
             // drops `agentDetailTaskID` and falls back to the idle prompt.
-            backButton
+            backButton()
             Spacer(minLength: 0)
             if let loop = task.loop, loop.active {
                 loopScheduleChip(minutes: loop.intervalMinutes) { minutes in
@@ -2150,22 +2386,23 @@ struct NotchBody: View {
                 agentElapsedLabel(task.elapsed)
             }
             // Folder access already lives in the metadata menu beside the
-            // follow-up field. Keep only the detach action in the header.
-            GlassSegmentCluster(segments: [
-                .init(tooltip: shortcutHelp("detached.open", action: .detach),
-                      action: { model.openDetachedWindow() }) {
-                    Image(systemName: "macwindow.on.rectangle")
-                        .font(.sf(Tokens.TypeSize.label, weight: .semibold))
-                },
-            ])
+            // follow-up field. The detach action is the only header control,
+            // and it is off while separate windows are parked.
+            if NotchModel.detachedWindowsEnabled {
+                GlassSegmentCluster(segments: [
+                    .init(tooltip: shortcutHelp("detached.open", action: .detach),
+                          action: { model.openDetachedWindow() }) {
+                        Image(systemName: "macwindow.on.rectangle")
+                            .font(.sf(Tokens.TypeSize.label, weight: .semibold))
+                    },
+                ])
+            }
         }
         // The detail header is also the run's tear-off grip — drag the page out
         // and the task splits into its own window. The hand cursor rides the
         // WHOLE strip, buttons included, because the whole strip really is
         // draggable: the icons win the tap, the drag arms past its minimum.
-        .contentShape(Rectangle())
-        .grabCursor()
-        .gesture(detachDragGesture)
+        .tearOffGrip(NotchModel.detachedWindowsEnabled, gesture: detachDragGesture)
     }
 
     /// A small quiet icon button for the agent card's corner actions — a bare
@@ -2212,8 +2449,12 @@ struct NotchBody: View {
     /// `immersiveHistoryView` as an overlay across the bottom of the scroll frame.
     private var manageBar: some View {
         HStack(spacing: 6) {
-            // The single ⋯ chip. It only toggles the menu.
-            moreEntry
+            // The single ⋯ chip. It only toggles the menu. Unified threads drop it:
+            // their prompt row's ⋯ hover group carries Release notes, History and
+            // Settings instead.
+            if !model.unifiedThreadsEnabled {
+                moreEntry
+            }
 
             // A waiting build sits OUTSIDE the menu, next to the ⋯ — spelled out,
             // one tap, no digging. It stays put while the menu is up (the menu
@@ -2221,7 +2462,7 @@ struct NotchBody: View {
             // update row meanwhile (see `updateMenuRow`), so the action lives in
             // exactly one place.
             if let pending = updateChipFace {
-                updateCue(face: pending, height: 34,
+                updateCue(face: pending, height: Tokens.Control.rail,
                           hovered: $updateCueBarHovered)
                     .transition(
                         .move(edge: .leading)
@@ -2248,9 +2489,9 @@ struct NotchBody: View {
 
             // The Recent (+ pin) cluster, handed over from the header for as long as
             // the list is up (see `bucketRow` / `inputRow`).
-            // Sized to the ⋯ chip opposite it (34, not the prompt row's 30) — the
-            // bar's two corners are one pair of controls and have to read as one.
-            let cluster = idleTrailingCluster(chipSize: 34)
+            // Sized to the ⋯ chip opposite it (the rail, not the prompt row's
+            // chip) — the bar's two corners are one pair of controls.
+            let cluster = idleTrailingCluster(chipSize: Tokens.Control.rail)
             if !cluster.isEmpty {
                 cluster
             }
@@ -2261,8 +2502,8 @@ struct NotchBody: View {
         .overlay(alignment: .bottomLeading) {
             if manageExpanded {
                 manageMenu
-                    // Lift the menu's bottom edge just above the 34pt ⋯ chip.
-                    .offset(y: -(34 + 8))
+                    // Lift the menu's bottom edge just above the ⋯ chip.
+                    .offset(y: -(Tokens.Control.rail + 8))
                     // Unfurl UP and OUT of the ⋯ chip: grow from its top-left
                     // corner with a small rise, rather than popping in place —
                     // the upward mirror of how the island's other modules move.
@@ -2713,11 +2954,7 @@ struct NotchBody: View {
             // Another record opens at its top: back to reading posture.
             splitRecordAtTail = false
             splitComposerForced = false
-            sourceCloseWork?.cancel()
-            sourceCloseWork = nil
-            hoveredSourceID = nil
         }
-        .sourcePopoverOverlay(hoveredID: $hoveredSourceID, closeWork: $sourceCloseWork)
     }
 
     /// The master column deliberately carries only enough chrome to identify and
@@ -2912,8 +3149,8 @@ struct NotchBody: View {
                     task: task,
                     bottomID: bottomID,
                     tailRunway: bottomReach,
-                    questionFont: Self.splitDetailFont,
-                    answerFont: Self.splitDetailFont
+                    questionFont: Tokens.TypeSize.reading,
+                    answerFont: Tokens.TypeSize.reading
                 )
                 .padding(.trailing, 8)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -2961,7 +3198,7 @@ struct NotchBody: View {
                     if !splitAgentFollowsTail {
                         GlassIconButton(systemName: "arrow.down",
                                         help: L("agent.trail.toBottom"),
-                                        size: 26, glyphSize: 11,
+                                        size: Tokens.Control.header, glyphSize: 11,
                                         showsTooltip: false) {
                             splitAgentFollowsTail = true
                             withAnimation(.easeOut(duration: 0.2)) {
@@ -3013,11 +3250,12 @@ struct NotchBody: View {
         if let item {
             if item.pending {
                 VStack(alignment: .leading, spacing: 14) {
-                    UserQuestionBubble(text: item.q, baseFont: Self.splitDetailFont)
+                    UserQuestionBubble(text: item.q, baseFont: Tokens.TypeSize.reading,
+                                       isAgent: item.source == .agent)
                     HStack(spacing: 8) {
                         RecentPendingDots()
                         Text(L("recent.answering"))
-                            .font(.sf(Self.splitDetailFont))
+                            .font(.sf(Tokens.TypeSize.form))
                             .foregroundStyle(Tokens.text3)
                     }
                     Spacer(minLength: 0)
@@ -3034,7 +3272,7 @@ struct NotchBody: View {
                     + (showsResume ? 47 : 0)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
-                        ForEach(item.conversation.filter { !$0.hidesUserBubble }) { turn in
+                        ForEach(item.conversation.filter(\.isDrawn)) { turn in
                             savedTurnView(turn, item: item)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
@@ -3102,7 +3340,7 @@ struct NotchBody: View {
                 // jump to the app that owns it are the whole record.
                 VStack(alignment: .leading, spacing: 14) {
                     Text(item.q)
-                        .font(.sf(Self.splitDetailFont))
+                        .font(.sf(Tokens.TypeSize.form))
                         .foregroundStyle(Tokens.text1)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -3144,27 +3382,24 @@ struct NotchBody: View {
                         .foregroundStyle(Tokens.text4)
                         .padding(.leading, 12)
                 }
-                UserQuestionBubble(text: turn.text, baseFont: Self.splitDetailFont)
+                UserQuestionBubble(text: turn.text, baseFont: Tokens.TypeSize.reading,
+                                   isAgent: turn.isAgent, reaction: turn.reaction)
             }
         } else {
             VStack(alignment: .leading, spacing: 14) {
-                if turn.isAgent,
-                   let trail = turn.agentLog?.droppingTrailingAnswer(turn.text),
-                   !trail.isEmpty {
-                    AgentWorkTrailView(entries: trail, baseFont: Self.splitDetailFont)
-                }
                 AssistantTurnView(
                     text: turn.text,
                     sources: turn.sources,
-                    hoveredSourceID: $hoveredSourceID,
-                    sourceCloseWork: $sourceCloseWork,
-                    baseFont: Self.splitDetailFont,
+                    baseFont: Tokens.TypeSize.reading,
                     isAgent: turn.isAgent,
                     completedAt: turn.isAgent && item.conversation.last?.id == turn.id
                         ? item.t : nil,
                     onInAppCopy: { model.rebaselineClipboardAfterInAppWrite() },
                     answerModel: turn.answerModel,
-                    reasoning: turn.reasoning
+                    agentTrail: turn.isAgent
+                        ? (turn.agentLog?.droppingTrailingAnswer(turn.text) ?? []) : [],
+                    question: item.conversation.question(before: turn.id),
+                    sharedLinks: turn.sharedLinks
                 )
             }
         }
@@ -3193,7 +3428,7 @@ struct NotchBody: View {
                     }
                     .foregroundStyle(Tokens.text1)
                     .padding(.horizontal, 12)
-                    .frame(height: 39)
+                    .frame(height: Tokens.Control.rail)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(SetupModelButtonStyle())
@@ -3305,11 +3540,6 @@ struct NotchBody: View {
         immersiveBottomReach + NotchBody.followUpRowHeight
     }
 
-    /// Reading size for the split experiment's detail column — one step under the
-    /// result view's 14.5, so question, answer and the list beside them all read
-    /// at the same scale instead of the transcript shouting over the column.
-    private static let splitDetailFont: CGFloat = 13
-
     /// Width of the split experiment's master column. Narrow on purpose: the
     /// column only has to carry a one-line title, and every point it gives up
     /// goes to the thread being read beside it. The end-of-list footer stays on
@@ -3325,7 +3555,7 @@ struct NotchBody: View {
     /// own chip diameter — the ⌘ has to be the chevron's twin, not a size of its
     /// own — and `splitRailTrailing` clears the chevron by the bar's 6pt spacing
     /// (chevron: 34 wide, sitting 5 past the edge → 34 - 5 + 6).
-    private static let splitRailChip: CGFloat = 34
+    private static let splitRailChip: CGFloat = Tokens.Control.rail
     private static let splitRailDrop: CGFloat = -5
     private static let splitRailTrailing: CGFloat = 35
 
@@ -3420,11 +3650,11 @@ struct NotchBody: View {
 
     /// Height of the compact scroll region, and the two content measurements the
     /// compact overflow test weighs against it: one recent row (9pt padding on each
-    /// side of a 14pt line) and the end-of-list footer (hairline + gap + one 25pt
+    /// side of a 13pt line) and the end-of-list footer (hairline + gap + one 25pt
     /// glass pill, plus its 10pt lead-in). Estimates, not measurements — they only
     /// decide whether the bottom taper is worth drawing.
     private let compactListHeight: CGFloat = 220
-    private let compactRowHeight: CGFloat = 35
+    private let compactRowHeight: CGFloat = 34
     private let historyFooterHeight: CGFloat = 50
 
     /// The recent list. `immersive` swaps the compact, below-the-header list for
@@ -3494,7 +3724,7 @@ struct NotchBody: View {
                     Button { model.openHistory(item) } label: {
                         HStack(alignment: .firstTextBaseline, spacing: 12) {
                             Text(item.displayTitle)
-                                .font(.sf(Tokens.TypeSize.reading))
+                                .font(.sf(Tokens.TypeSize.form))
                                 .tracking(-0.1)
                                 .foregroundStyle(Tokens.text2)
                                 .lineLimit(1)
@@ -3716,7 +3946,7 @@ struct NotchBody: View {
 
     private var loadView: some View {
         VStack(alignment: .leading, spacing: 0) {
-            resultHeader
+            resultHeader()
             // No drawn rule here — the gap alone separates the chevron from the
             // content below. Roughly the rhythm the old Divider held (its 9pt
             // top/bottom pad plus the hairline) so the spacing reads the same.
@@ -3852,10 +4082,12 @@ struct NotchBody: View {
             return CGFloat(lines) * em * 1.45
         }
 
+        // Bubbles and answer cards both set one step under the reading size.
+        let card = Tokens.TypeSize.stepDown(Tokens.TypeSize.reading)
         var total: CGFloat = 0
         for turn in turns where !turn.hidesUserBubble {
             if turn.role == "user" {
-                total += height(turn.text, Tokens.TypeSize.reading) + 26        // bubble padding
+                total += height(turn.text, card) + 26        // bubble padding
                 if !turn.imageFiles.isEmpty { total += 30 }  // the image strip
             } else {
                 // An agent turn stacks its work trail above the report. Folded
@@ -3876,12 +4108,12 @@ struct NotchBody: View {
                         } else {
                             inThinking = false
                             inToolRun = false
-                            total += height(entry.title, 15) + 7
+                            total += height(entry.title, card) + 7
                         }
                         if total > ceiling { return true }
                     }
                 }
-                total += height(turn.text, 15) + 16
+                total += height(turn.text, card) + 16
                 if let r = turn.reasoning, !r.isEmpty { total += 22 }
             }
             total += 16                                      // the stack's turn spacing
@@ -3910,7 +4142,7 @@ struct NotchBody: View {
             // the ZStack below), so the thread can travel up behind it and dissolve
             // — mirroring how the immersive recent list runs under the input header.
             if !isAnswerClipped {
-                resultHeader
+                resultHeader()
                 // No drawn rule between the chevron and the thread — a quiet gap does
                 // the separating instead. Matches the rhythm the old Divider held (its
                 // 9pt top/bottom pad plus the hairline) so the layout doesn't shift.
@@ -3957,7 +4189,7 @@ struct NotchBody: View {
             // the header renders at the same spot as the sibling it replaces.
             .overlay(alignment: .top) {
                 if isAnswerClipped {
-                    resultHeader
+                    resultHeader()
                         .transition(.opacity)
                 }
             }
@@ -4035,11 +4267,6 @@ struct NotchBody: View {
         .animation(.spring(response: 0.3, dampingFraction: 1.0), value: isAnswerClipped)
         .animation(.spring(response: 0.42, dampingFraction: 0.82), value: model.lastSavedNote)
         .animation(.spring(response: 0.42, dampingFraction: 0.82), value: model.noteSaving)
-        // Float the source popup here, at the result-view level — OUTSIDE the
-        // conversation ScrollView — so it's never clipped by the scroll's height
-        // (which was chopping the popup's top off, XII-118). Shared with every
-        // other surface that shows a source badge (see `sourcePopoverOverlay`).
-        .sourcePopoverOverlay(hoveredID: $hoveredSourceID, closeWork: $sourceCloseWork)
         // Only the answer panel takes the wider side inset (see `resultSideInset`);
         // it rides on top of the body's uniform 15.
         .padding(.horizontal, NotchBody.resultSideInset)
@@ -4059,7 +4286,7 @@ struct NotchBody: View {
                 Image(systemName: "slider.horizontal.3")
                     .font(.sf(Tokens.TypeSize.form, weight: .medium))
                 Text(L("result.setUpModel"))
-                    .font(.sf(Tokens.TypeSize.reading, weight: .medium))
+                    .font(.sf(Tokens.TypeSize.form, weight: .medium))
                 Spacer(minLength: 0)
                 Image(systemName: "arrow.up.right")
                     .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
@@ -4068,7 +4295,7 @@ struct NotchBody: View {
             .foregroundStyle(Tokens.text1)
             .padding(.leading, 13)
             .padding(.trailing, 12)
-            .frame(height: 39)
+            .frame(height: Tokens.Control.rail)
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
         }
@@ -4097,7 +4324,7 @@ struct NotchBody: View {
                     Image(systemName: "arrow.clockwise")
                         .font(.sf(Tokens.TypeSize.form, weight: .medium))
                     Text(L("agent.resume", engine.displayName))
-                        .font(.sf(Tokens.TypeSize.reading, weight: .medium))
+                        .font(.sf(Tokens.TypeSize.form, weight: .medium))
                     Spacer(minLength: 0)
                     Image(systemName: "chevron.right")
                         .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
@@ -4106,7 +4333,7 @@ struct NotchBody: View {
                 .foregroundStyle(Tokens.text1)
                 .padding(.leading, 13)
                 .padding(.trailing, 12)
-                .frame(height: 39)
+                .frame(height: Tokens.Control.rail)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
             }
@@ -4203,6 +4430,9 @@ struct NotchBody: View {
             // real measurement so the clipped layout holds while suspended.
             guard $0 > 0 else { return }
             measuredAnswerHeight = $0
+            // A collapse swaps this page for the reveal at progress 1, whose
+            // geometry comes from this height on its first frame.
+            revealThreadHeight = $0
             // Mirror to the model (a plain var — no invalidation) so `fullClose`
             // can park the measurement with the session; the next mount seeds its
             // layout decision from it (see `init`).
@@ -4215,6 +4445,11 @@ struct NotchBody: View {
         // layout there's no `.frame(height:)` to animate, so day-to-day streaming
         // growth carries no animation here at all — it just reflows.
         .animation(.spring(response: 0.3, dampingFraction: 1.0), value: clipped)
+        // The page mounts the newest turns of the thread it opens on and keeps
+        // that window while it is up (see `threadWindowStart`).
+        .onAppear { pinThreadWindow() }
+        .onChange(of: model.threadHistoryID) { _, _ in pinThreadWindow() }
+        .onDisappear { threadWindowStartID = nil }
     }
 
     /// The thread's turns, as both conversation layouts stack them. A loop
@@ -4224,12 +4459,199 @@ struct NotchBody: View {
         if let segments = loopSegments {
             loopConversation(segments)
         } else {
-            ForEach(model.turns.filter { !$0.hidesUserBubble }) { turn in
-                turnView(turn)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .id(turn.id)
+            let lastID = model.turns.last?.id
+            let visible = model.turns.filter(\.isDrawn)
+            ForEach(visible[mountedStart(of: visible)...]) { turn in
+                SettledTurn(turn: turn, live: turn.streaming || turn.id == lastID) {
+                    turnView(turn)
+                }
+                .equatable()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .id(turn.id)
+            }
+            // The unified threads guide's ending, under its answer.
+            if let intro = model.unifiedIntro, let answerID = intro.answerID,
+               intro.threadID == model.threadHistoryID {
+                UnifiedIntroEnd(model: model, answerID: answerID,
+                                offersSeparate: model.unifiedThreadsEnabled,
+                                previousName: intro.previous?.name)
             }
         }
+    }
+
+    // MARK: - Turn window
+
+    /// How much of a thread the result page mounts at a time, counted back from
+    /// the newest turn. Every mounted turn is laid out on every streaming flush,
+    /// and a unified main thread never starts over, so mounting all of it made
+    /// each question typed on the idle prompt slower than the last. This is
+    /// two to three screens of the scroller, more than `OlderTurnsLoader`'s
+    /// reach, so opening a thread does not mount a second page at once; the
+    /// rest mounts a page at a time as the reader scrolls up to it
+    /// (`loadOlderTurns`). A pull mounts this window twice (the reveal, then
+    /// the result page), so its size is what each pull costs.
+    private static let windowTurns = 10
+    private static let windowCharacters = 3000
+
+    /// The index in `turns` of the oldest turn of the page that ends just before
+    /// `end`: turns are taken newest first until `windowTurns` of them, or
+    /// `windowCharacters` of text, are in. 0 when the rest of the thread fits.
+    private static func threadWindowStart(of turns: [NotchModel.Turn], before end: Int) -> Int {
+        var start = end
+        var characters = 0
+        while start > 0 {
+            start -= 1
+            characters += turns[start].text.count
+            if end - start >= windowTurns || characters >= windowCharacters { break }
+        }
+        return start
+    }
+
+    /// The index of the oldest mounted turn in `visible`: the pinned one, or,
+    /// before the page has pinned one (its first frame), the opening window.
+    private func mountedStart(of visible: [NotchModel.Turn]) -> Int {
+        if let id = threadWindowStartID, let i = visible.firstIndex(where: { $0.id == id }) {
+            return i
+        }
+        return Self.threadWindowStart(of: visible, before: visible.endIndex)
+    }
+
+    /// Pin the window the page opened on. Called when the page mounts and when
+    /// another thread replaces the one on screen.
+    private func pinThreadWindow() {
+        let visible = model.turns.filter(\.isDrawn)
+        guard !visible.isEmpty else { threadWindowStartID = nil; return }
+        threadWindowStartID = visible[Self.threadWindowStart(of: visible, before: visible.endIndex)].id
+    }
+
+    /// Mount the next page of older turns above the window.
+    private func loadOlderTurns() {
+        let visible = model.turns.filter(\.isDrawn)
+        let current = mountedStart(of: visible)
+        guard current > 0 else { return }
+        threadWindowStartID = visible[Self.threadWindowStart(of: visible, before: current)].id
+    }
+
+    /// Whether turns older than the window are still unmounted.
+    private var hasOlderTurns: Bool {
+        guard loopSegments == nil else { return false }
+        return mountedStart(of: model.turns.filter(\.isDrawn)) > 0
+    }
+
+    /// Mounts older turns when the reader scrolls near the top of the thread,
+    /// and keeps the text they are reading where it is while those turns are
+    /// inserted above it. Works on the real clip view, like
+    /// `ScrollOffsetObserver`: on macOS 14 SwiftUI reports no reliable scroll
+    /// offset, and inserting content above the viewport moves what is on
+    /// screen unless the offset grows by the inserted height.
+    private struct OlderTurnsLoader: NSViewRepresentable {
+        var hasOlder: Bool
+        var load: () -> Void
+
+        /// How close to the top, in points, the viewport gets before the next
+        /// page mounts — about one screen, so the page is in before the top is
+        /// reached.
+        private static let reach: CGFloat = 600
+
+        final class Host: NSView {
+            var attach: ((NSView) -> Void)?
+            override func viewDidMoveToWindow() {
+                super.viewDidMoveToWindow()
+                if window != nil { attach?(self) }
+            }
+        }
+
+        func makeCoordinator() -> Coordinator { Coordinator() }
+
+        func makeNSView(context: Context) -> Host {
+            let host = Host(frame: .zero)
+            context.coordinator.parent = self
+            let coordinator = context.coordinator
+            host.attach = { [weak coordinator] view in coordinator?.attach(from: view) }
+            return host
+        }
+
+        func updateNSView(_ nsView: Host, context: Context) {
+            context.coordinator.parent = self
+        }
+
+        static func dismantleNSView(_ nsView: Host, coordinator: Coordinator) {
+            coordinator.detach()
+        }
+
+        final class Coordinator {
+            var parent: OlderTurnsLoader?
+            weak var clipView: NSClipView?
+            weak var documentView: NSView?
+            /// Distance from the viewport's top to the content's bottom when a
+            /// page was asked for. Nil while no page is on its way.
+            var distanceFromBottom: CGFloat?
+            private var request = 0
+
+            func attach(from view: NSView) {
+                guard clipView == nil, let scrollView = view.enclosingScrollView,
+                      let document = scrollView.documentView else { return }
+                clipView = scrollView.contentView
+                documentView = document
+                scrollView.contentView.postsBoundsChangedNotifications = true
+                document.postsFrameChangedNotifications = true
+                NotificationCenter.default.addObserver(
+                    self, selector: #selector(boundsChanged),
+                    name: NSView.boundsDidChangeNotification, object: scrollView.contentView)
+                NotificationCenter.default.addObserver(
+                    self, selector: #selector(documentResized),
+                    name: NSView.frameDidChangeNotification, object: document)
+            }
+
+            func detach() {
+                NotificationCenter.default.removeObserver(self)
+                clipView = nil
+                documentView = nil
+            }
+
+            @objc private func boundsChanged() {
+                guard let clipView, let documentView, distanceFromBottom == nil,
+                      parent?.hasOlder == true,
+                      clipView.bounds.origin.y < OlderTurnsLoader.reach else { return }
+                distanceFromBottom = documentView.frame.height - clipView.bounds.origin.y
+                request += 1
+                let sent = request
+                parent?.load()
+                // A page that changed nothing never resizes the content.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                    guard let self, self.request == sent else { return }
+                    self.distanceFromBottom = nil
+                }
+            }
+
+            @objc private func documentResized() {
+                guard let clipView, let documentView, let distance = distanceFromBottom else { return }
+                distanceFromBottom = nil
+                clipView.scroll(to: NSPoint(x: clipView.bounds.origin.x,
+                                            y: max(0, documentView.frame.height - distance)))
+                clipView.enclosingScrollView?.reflectScrolledClipView(clipView)
+            }
+        }
+    }
+
+    /// One turn of the thread, redrawn only when the turn itself changes. Every
+    /// write to `turns` — each ~33ms streaming flush — re-runs this body, and
+    /// `AssistantTurnView` carries closures, so SwiftUI can't tell a settled
+    /// turn is unchanged and re-ran every turn in the thread with it: on a long
+    /// thread the flushes alone kept the main thread busy. A settled turn's view
+    /// reads nothing but the turn; the last turn (regenerate, the error row,
+    /// the completion stamp) and a streaming turn (the wait line, activity)
+    /// also read model state, so those two always redraw.
+    private struct SettledTurn<Content: View>: View, Equatable {
+        let turn: NotchModel.Turn
+        let live: Bool
+        @ViewBuilder let content: () -> Content
+
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            !lhs.live && !rhs.live && lhs.turn == rhs.turn
+        }
+
+        var body: some View { content() }
     }
 
     /// One round of a loop thread, or a follow-up typed between rounds.
@@ -4260,7 +4682,7 @@ struct NotchBody: View {
                 followUp = turn.loopRound == nil
                 members = index == 0 || turn.hidesUserBubble ? [] : [turn]
                 open = true
-            } else if open {
+            } else if open, turn.isDrawn {
                 members.append(turn)
             }
         }
@@ -4369,6 +4791,12 @@ struct NotchBody: View {
         }
         .environment(\.answerMediaBaseDirectory, answerMediaBase)
         .padding(.trailing, 8)
+        // Always the content's own height. Offered less, the answer cards
+        // compress (a card squeezed to just its Thinking row hid the answer
+        // under it), and the island's measure and placement passes then
+        // disagree on its height: the canvas centers the shorter island in
+        // the taller slot and a strip of wallpaper opens above the notch.
+        .fixedSize(horizontal: false, vertical: true)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -4439,23 +4867,34 @@ struct NotchBody: View {
                 // instead of hard-cutting below it. The bottom has its own runway
                 // Spacer inside the VStack (above), so no .padding(.bottom) is needed.
                 .padding(.top, resultHeaderReach)
+                // A long thread mounts only its newest turns; older ones mount as
+                // the reader scrolls up to them (see `OlderTurnsLoader`).
+                .background(OlderTurnsLoader(hasOlder: hasOlderTurns) { loadOlderTurns() })
+                // The model asks this scroller whether the thread is at its
+                // bottom before an upward swipe folds it into the peek.
+                .background(EnclosingScrollViewReporter { model.threadScrollView = $0 })
             }
             // Taller than `answerMaxHeight` (300): absorbs the 24pt gap + 39pt
             // follow-up row that no longer sit as VStack siblings, PLUS the floating
             // header block (`resultHeaderReach`, 44pt) the clipped layout lifts out
             // of the VStack flow — keeping the panel the same total height. The
             // `isAnswerClipped` threshold stays at 300.
+            // Mounts at the bottom, where the `onAppear` scroll below takes it
+            // anyway. Mounted at the top, the page showed the oldest turns of
+            // its window, link cards and all, for a frame before that scroll —
+            // and the top of the window is within `OlderTurnsLoader`'s reach,
+            // so it also mounted a page of older turns nobody asked for.
+            .defaultScrollAnchor(.bottom)
             .frame(height: clippedAnswerMaxHeight + resultHeaderReach)
             // Sticky affordances inside the thread (a code block's copy button)
             // park below the floating header block instead of at the bare viewport
             // top, where the header and its dissolve would swallow them.
             .environment(\.stickyScrollTopInset, resultHeaderReach)
             .scrollIndicators(.never)
-            // Submitting a follow-up appends two turns and flips mode
-            // result→load→result, which rebuilds the ScrollView and resets its
-            // offset to the top. Snap straight back to the bottom (no animation) so
-            // there's no visible jump up — the streaming tail-follow below is what
-            // gets the smooth motion.
+            // Submitting a follow-up appends two turns below the fold. Snap
+            // straight to the bottom (no animation) so the new question is in
+            // view at once — the streaming tail-follow below is what gets the
+            // smooth motion.
             //
             // TWICE, on purpose. `onChange` runs while SwiftUI is still updating:
             // the ScrollView's content at that instant is the OLD, shorter thread,
@@ -4484,6 +4923,13 @@ struct NotchBody: View {
             // so the text-keyed follow above never fires for it — the trail would
             // extend down behind the composer unseen. Same tail, keyed on the log.
             .onChange(of: model.turns.last?.agentLog?.count) { _, _ in
+                withAnimation(.easeOut(duration: 0.2)) {
+                    proxy.scrollTo(scrollBottomID, anchor: .bottom)
+                }
+            }
+            // The bubbles after an answer's first land one at a time, some after
+            // the stream has ended (`BubblePacer`). Follow each one.
+            .onReceive(BubblePacer.shared.$revision.dropFirst()) { _ in
                 withAnimation(.easeOut(duration: 0.2)) {
                     proxy.scrollTo(scrollBottomID, anchor: .bottom)
                 }
@@ -4556,25 +5002,16 @@ struct NotchBody: View {
     /// `ScrollViewReader` scrolls to it to keep the newest text in view.
     private let scrollBottomID = "conversation-bottom"
 
-    /// The answer a question's regenerate control would re-run: the turn right
-    /// after it, when that turn is the thread's last, is a chat answer (an agent
-    /// report can't be re-run by the chat model), and no error row is up (the
-    /// error row owns the re-run then).
-    private func regenerateTarget(forQuestion turn: NotchModel.Turn) -> NotchModel.Turn? {
-        guard model.visibleAskError == nil,
-              let index = model.turns.firstIndex(where: { $0.id == turn.id }),
-              index + 1 == model.turns.count - 1
-        else { return nil }
-        let answer = model.turns[index + 1]
-        return answer.role == "user" || answer.isAgent ? nil : answer
-    }
-
     /// One bubble in the thread. A user turn reads as a quiet, dimmer line tagged
     /// "You"; an assistant turn renders full markdown at body weight. A streaming
     /// assistant turn with no text yet shows the thinking dots, so the wait reads
     /// the same in a follow-up as it does on the first question.
+    /// `thread` is the conversation the turn belongs to — the one on screen
+    /// unless given (the idle page's main-thread reveal draws a saved row).
     @ViewBuilder
-    private func turnView(_ turn: NotchModel.Turn) -> some View {
+    private func turnView(_ turn: NotchModel.Turn,
+                          thread: [NotchModel.Turn]? = nil) -> some View {
+        let thread = thread ?? model.turns
         if turn.role == "user" {
             VStack(alignment: .leading, spacing: 5) {
                 // Permanent clipboard trace: when this question's message was enriched
@@ -4601,21 +5038,9 @@ struct NotchBody: View {
                 // tint with a hairline border — instead of a "You" label. The bubble
                 // itself says "this is what you asked", so no tag is needed and the
                 // thread reads cleaner. It hugs its content (not full width) and
-                // left-aligns with the answer below.
-                // Regenerate sits beside the question it re-runs, hidden until
-                // the pointer is on this row. Offered only on the question whose
-                // answer is the thread's last turn (same gate the answer footer used).
-                QuestionRow(
-                    text: turn.text,
-                    regenerate: regenerateTarget(forQuestion: turn).map { answer in
-                        QuestionRow.Regenerate(
-                            disabled: answer.streaming,
-                            models: model.regenerateModelOptions,
-                            action: { model.regenerateLastAnswer() },
-                            actionWith: { model.regenerateLastAnswer(model: $0) }
-                        )
-                    }
-                )
+                // left-aligns with the answer below. Regenerate lives on the
+                // answer's right-click menu.
+                UserQuestionBubble(text: turn.text, isAgent: turn.isAgent, reaction: turn.reaction)
             }
         } else {
             // Assistant turn — streaming AND settled share ONE view tree, so the
@@ -4626,13 +5051,11 @@ struct NotchBody: View {
             // thinking/activity overlay on top while the text is still empty; the
             // overlay never participates in the answer's layout, so it can't shift
             // it, and `textSelection` just toggles on the unchanged tree.
-            // Footer actions that only make sense at the thread's tail: regenerate
-            // re-runs THIS question (and would orphan any later turns), and the
-            // ChatGPT/Claude handoff always copies the whole thread — so both ride
-            // only the last turn's footer, never mid-thread ones.
-            let isLastTurn = model.turns.last?.id == turn.id
-            let questionHidden = model.turns.dropLast().last?.hidesUserBubble ?? true
-            let footerRegenerate = isLastTurn && questionHidden && !turn.isAgent
+            // Right-click actions that only make sense at the thread's tail:
+            // regenerate re-runs THIS question (and would orphan any later turns),
+            // so it rides only the last turn, never mid-thread ones.
+            let isLastTurn = thread.last?.id == turn.id
+            let canRegenerate = isLastTurn && !turn.isAgent
                 && model.visibleAskError == nil
             // An agent run's report never offers regenerate: the chat model can't
             // re-run the task in its folder, so "regenerating" it would only
@@ -4641,17 +5064,9 @@ struct NotchBody: View {
             //
             // A failed round drops it too: the error row under the answer already
             // owns the re-run — its label retries, its chevron retries on another
-            // model — so a second regenerate control in the footer would be the
+            // model — so a second regenerate control on the answer would be the
             // same action twice.
             VStack(alignment: .leading, spacing: 14) {
-                // An agent answer carries its round's work trail above the report —
-                // the record's copy of the live detail page, so a reopened run
-                // reads the way the run looked while it worked.
-                if turn.isAgent,
-                   let trail = turn.agentLog?.droppingTrailingAnswer(turn.text),
-                   !trail.isEmpty {
-                    AgentWorkTrailView(entries: trail)
-                }
                 AssistantTurnView(
                     text: turn.text,
                     streaming: turn.streaming,
@@ -4663,8 +5078,6 @@ struct NotchBody: View {
                     thinkingSince: turn.streaming
                         ? (turn.thinkingStartedAt ?? model.thinkingStartedAt) : nil,
                     sources: turn.sources,
-                    hoveredSourceID: $hoveredSourceID,
-                    sourceCloseWork: $sourceCloseWork,
                     isAgent: turn.isAgent,
                     // The record's completion time, shown as the report footer's
                     // stamp — only on the last agent turn, so the single stored
@@ -4676,30 +5089,36 @@ struct NotchBody: View {
                     // second metadata line under the report.
                     showsFooterMetadata: !turn.isAgent,
                     onInAppCopy: { model.rebaselineClipboardAfterInAppWrite() },
-                    // Regenerate normally sits beside the question bubble; it stays
-                    // in the footer only when that bubble is hidden.
-                    onRegenerate: footerRegenerate ? { model.regenerateLastAnswer() } : nil,
-                    regenerateModels: footerRegenerate ? model.regenerateModelOptions : [],
-                    onRegenerateWith: footerRegenerate ? { model.regenerateLastAnswer(model: $0) } : nil,
+                    // Regenerate lives on the last answer's right-click menu.
+                    onRegenerate: canRegenerate ? { model.regenerateLastAnswer() } : nil,
+                    regenerateModels: canRegenerate ? model.regenerateModelOptions : [],
+                    onRegenerateWith: canRegenerate ? { model.regenerateLastAnswer(model: $0) } : nil,
                     regenModel: turn.regenModel,
                     answerModel: turn.answerModel,
-                    reasoning: turn.reasoning,
+                    // An agent answer carries its round's work trail inside its
+                    // card — the record's copy of the live detail page, so a
+                    // reopened run reads the way the run looked while it worked.
+                    agentTrail: turn.isAgent
+                        ? (turn.agentLog?.droppingTrailingAnswer(turn.text) ?? []) : [],
                     // The `ask_user` question card, when the model has paused this
                     // still-streaming answer on a choice only the user can make.
                     pendingQuestion: turn.streaming
                         ? (turn.pendingQuestion ?? model.pendingQuestion(for: turn.id)) : nil,
                     onChooseOption: { questionID, option in
                         model.chooseUserOption(option, questionID: questionID)
-                    }
+                    },
+                    question: thread.question(before: turn.id),
+                    sharedLinks: turn.sharedLinks,
+                    turnID: turn.id
                 )
             }
         }
     }
 
-    // Back chevron leads (the question itself is the "You" turn below, so no title
-    // here); a pin button trails top-right. Pinning holds the panel open when the
-    // pointer leaves, so the answer can be read without hovering it (see
-    // `NotchModel.collapseOnLeave`).
+    // Trailing chips sit top-right. The back chevron leads only when the
+    // follow-up field is absent (`showsBack`); otherwise it sits beside that
+    // field. Pinning holds the panel open when the pointer leaves, so the
+    // answer can be read without hovering it (see `NotchModel.collapseOnLeave`).
     /// Whether the result header's trailing chips (follow-up / detach / pin) are
     /// showing: only under the pointer, while the answer is pinned, or while a
     /// card in its own window (the ⌘ menu, pickers) is open — the pointer on that
@@ -4708,9 +5127,9 @@ struct NotchBody: View {
         model.pointerInside || model.isAnswerPinned || model.isFloatingCardOpen
     }
 
-    private var resultHeader: some View {
+    private func resultHeader() -> some View {
         HStack(spacing: 10) {
-            backButton
+            backButton()
             Spacer(minLength: 0)
             if threadLoopActive, let info = threadLoopInfo {
                 loopScheduleChip(minutes: info.intervalMinutes) { minutes in
@@ -4724,7 +5143,7 @@ struct NotchBody: View {
                 }
             }
             // A folded shortcut thread's follow-up entry: its own module, set
-            // apart from the detach/pin pair by the header's wider 10pt gap.
+            // apart from the pin/more pair by the header's wider 10pt gap.
             // Same species (one-segment `GlassSegmentCluster`), separate group —
             // it's a composer, not a view action, so it doesn't join their pair.
             Group {
@@ -4734,12 +5153,23 @@ struct NotchBody: View {
                 }
                 ResultTrailingCluster(
                     pinned: model.isAnswerPinned,
+                    moreOpen: $model.isResultMoreMenuOpen,
                     togglePin: {
                         withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
                             model.toggleAnswerPin()
                         }
                     },
-                    detach: { model.openDetachedWindow() }
+                    detach: NotchModel.detachedWindowsEnabled
+                        ? {
+                            model.isResultMoreMenuOpen = false
+                            model.openDetachedWindow()
+                        }
+                        : nil as (() -> Void)?,
+                    messageSoundsEnabled: model.messageSoundsEnabled,
+                    toggleMessageSounds: {
+                        Haptics.levelChange()
+                        model.messageSoundsEnabled.toggle()
+                    }
                 )
             }
             // These are buttons sitting on the header's tear-off grip, which pushes
@@ -4762,9 +5192,7 @@ struct NotchBody: View {
         // `NotchModel.detachDragChanged`). Buttons keep their taps — the drag
         // only arms past its minimum distance — so the hand cursor covers the
         // whole strip, which is exactly how far the drag reaches.
-        .contentShape(Rectangle())
-        .grabCursor()
-        .gesture(detachDragGesture)
+        .tearOffGrip(NotchModel.detachedWindowsEnabled, gesture: detachDragGesture)
     }
 
     /// The folded follow-up's entry point (shortcut threads only): one speech
@@ -4806,8 +5234,8 @@ struct NotchBody: View {
     /// finishes detached and lands in Recent (see `NotchModel.newChat`). Also bound
     /// to the ← arrow key (see ContentView's key handler), so a glance-and-go feels
     /// keyboard-native.
-    private var backButton: some View {
-        GlassBackButton {
+    private func backButton(size: CGFloat = Tokens.Control.header) -> some View {
+        GlassBackButton(size: size) {
             withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                 model.newChat()
             }
@@ -4818,7 +5246,7 @@ struct NotchBody: View {
 
     /// The prompt's type size, and the follow-up field's — shared by the field, its
     /// inline hint and the row metrics, so a one-line box and its row agree.
-    static let idleFontSize: CGFloat = Tokens.TypeSize.prompt
+    static let idleFontSize: CGFloat = Tokens.TypeSize.reading
     static let followUpFontSize: CGFloat = Tokens.TypeSize.form
     /// How far a prompt grows before it stops growing and scrolls inside itself. A
     /// pasted paragraph unfolds the box downward — five lines of it — rather than
@@ -4836,7 +5264,7 @@ struct NotchBody: View {
     /// line of text that is already on screen.
     static let promptGrowth: Animation = .spring(response: 0.22, dampingFraction: 0.9)
     /// A follow-up box at rest: one 27pt line in 6pt of padding.
-    static let followUpRowHeight: CGFloat = 39
+    static let followUpRowHeight: CGFloat = Tokens.Control.rail
     /// A composer box's silhouette at a given height — a true pill on its resting
     /// line, and *the same corner* once the draft wraps.
     ///
@@ -4910,6 +5338,11 @@ struct NotchBody: View {
                         // An open `/` menu owns the arrows before anything else —
                         // they walk its rows.
                         if model.slashMenuStep(1) { return true }
+                        // Unified threads: ↓ opens the main thread, as a
+                        // two-finger pull does. An open Recent list keeps it.
+                        if model.unifiedThreadsEnabled, !model.showHistory {
+                            return model.openMainThreadFromKey()
+                        }
                         if model.recallNextQuestion() { return true }
                         return withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                             model.historyNavigateDown()
@@ -4926,6 +5359,8 @@ struct NotchBody: View {
                             model.historyNavigateUp()
                         }
                         if steppedList { return true }
+                        // Unified threads: ↑ recalls nothing.
+                        if model.unifiedThreadsEnabled { return true }
                         return model.recallPreviousQuestion()
                     },
                     // Keep ↑/↓ routed to recall even after the box fills with a
@@ -5097,9 +5532,7 @@ struct NotchBody: View {
             }
 
             // With the destination spelled out in the pill below, the trailing send
-            // pill would just repeat it — so this slot stays empty. The "what's new"
-            // cue moved down to the bucket row's trailing edge, beside the Recent
-            // chevron, where the panel's other glass chips live.
+            // pill would just repeat it — so this slot stays empty.
         }
         // Grows with the box: the prompt keeps its resting breathing room and the row
         // gains a line's height for every line the text wraps to, so the panel unfolds
@@ -5128,10 +5561,12 @@ struct NotchBody: View {
     }
 
     /// This launch's grant, on the bucket row's trailing edge. Same glass capsule
-    /// and ink as `updateCue`. Tapping it opens the wallet card, where the
-    /// balance rolls up to include the grant.
+    /// and ink as `updateCue`; in the unified-threads row it draws like the ⋯
+    /// chip beside it instead (`ClusterChipSurface`, flat). Tapping it opens the
+    /// wallet card, where the balance rolls up to include the grant.
     private var giftCue: some View {
-        Button {
+        let flat = model.unifiedThreadsEnabled
+        return Button {
             nono.claimGrant()
             withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                 model.openProviderSettings(.nono)
@@ -5140,51 +5575,24 @@ struct NotchBody: View {
             (Text(L("nono.gift.got.pre"))
                 + Text(InlineSettingsView.moneyCharged(nono.justGrantedUSD))
                 + Text(L("nono.gift.got.post")))
-                .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                .font(.sf(Tokens.TypeSize.meta, weight: flat ? .regular : .medium))
                 .lineLimit(1)
                 .foregroundStyle(giftCueHovered ? Tokens.text1 : Tokens.text2)
-                .padding(.horizontal, 10)
-                .frame(height: 30)
-                .glassCapsule(in: Capsule(), brighter: giftCueHovered)
-                .contentShape(Capsule())
+                .padding(.horizontal, flat ? 7 : 10)
+                .frame(height: flat ? Tokens.Control.inline : Tokens.Control.chip)
+                .modifier(ClusterChipSurface(flat: flat, hovering: giftCueHovered,
+                                             shape: Capsule()))
         }
         .buttonStyle(GlassPressStyle())
         .onHover { giftCueHovered = $0 }
         .animation(.easeOut(duration: Tokens.hoverFade), value: giftCueHovered)
     }
 
-    /// The first-launch-after-update cue: normally "What's New" on the bucket row's
-    /// trailing edge, immediately left of the Recent chevron. Same glass language as
-    /// the chevron cluster's "N running" capsule (`glassCapsule` + `GlassPressStyle`),
-    /// so the two sit on that edge as one family. Tapping it opens the release-notes
-    /// panel, and `openWhatsNew` marks this version seen, so the cue shows once.
-    private var whatsNewCue: some View {
-        Button {
-            withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
-                model.openWhatsNew(on: nil)
-            }
-        } label: {
-            Text(L("whatsnew.cue"))
-                .font(.sf(Tokens.TypeSize.meta, weight: .medium))
-                .lineLimit(1)
-            .foregroundStyle(whatsNewHovered ? Tokens.text1 : Tokens.text2)
-            .padding(.horizontal, 10)
-            // The cluster's chip height — the cue lines up with the chevron
-            // beside it instead of sitting a hair short.
-            .frame(height: 30)
-            .glassCapsule(in: Capsule(), brighter: whatsNewHovered)
-            .contentShape(Capsule())
-        }
-        .buttonStyle(GlassPressStyle())
-        .onHover { whatsNewHovered = $0 }
-        .animation(.easeOut(duration: Tokens.hoverFade), value: whatsNewHovered)
-    }
-
     /// The waiting-update chip: the action promoted OUT of the ⋯
     /// menu onto the surfaces themselves — the idle prompt's bucket row and the
     /// recent list's manage bar. A new build is the one thing worth surfacing,
-    /// and a 5pt dot on the ⋯ chip asked the user to go looking for it. Same
-    /// glass capsule as the "what's new" cue beside it, plus the arrow-up mark
+    /// and a 5pt dot on the ⋯ chip asked the user to go looking for it. Glass
+    /// capsule plus the arrow-up mark
     /// the About row uses, so the chip reads as the update family wherever it
     /// lands. Tapping installs and relaunches.
     ///
@@ -5281,49 +5689,56 @@ struct NotchBody: View {
                     model.removeAskComposeImage(at: $0)
                 }
             }
-            HStack(alignment: .bottom, spacing: 6) {
-                followUpComposer
-                    .frame(maxWidth: .infinity)
+            // Box and ⌘ chip share the split rail's 34pt, bottom-aligned.
+            HStack(alignment: .bottom, spacing: 8) {
+                HStack(alignment: .bottom, spacing: 6) {
+                    // Locked while the unified threads guide runs in this thread.
+                    followUpComposer
+                        .frame(maxWidth: .infinity)
+                        .opacity(model.unifiedIntroLocksInput ? 0.4 : 1)
+                        .allowsHitTesting(!model.unifiedIntroLocksInput)
 
-                if agentFollowUpMetadata != nil || threadLoopInfo != nil {
-                    GlassIconButton(systemName: "command",
-                                    help: L("agent.detail"),
-                                    size: 39,
-                                    glyphSize: 13,
-                                    showsTooltip: false) {
-                        model.isResultMetadataMenuOpen.toggle()
+                    if agentFollowUpMetadata != nil || threadLoopInfo != nil {
+                        GlassIconButton(systemName: "command",
+                                        help: L("agent.detail"),
+                                        size: Self.splitRailChip,
+                                        glyphSize: Self.splitRailChip * (11.5 / 30),
+                                        showsTooltip: false) {
+                            model.isResultMetadataMenuOpen.toggle()
+                        }
+                        .modifier(MenuCardWindow(
+                            open: model.isResultMetadataMenuOpen,
+                            upperLeading: true,
+                            onDismiss: { _ in model.isResultMetadataMenuOpen = false },
+                            card: {
+                                AnyView(AgentRunMetadataMenu(
+                                    engine: agentFollowUpRunCaption?
+                                        .components(separatedBy: " · ").first,
+                                    folderPath: model.currentThreadAgentFolder,
+                                    completedAt: model.currentThreadCompletedAt,
+                                    onOpenFolder: {
+                                        model.isResultMetadataMenuOpen = false
+                                        model.openThreadAgentFolder()
+                                    },
+                                    loop: threadLoopInfo,
+                                    onStopLoop: {
+                                        model.isResultMetadataMenuOpen = false
+                                        stopThreadLoop()
+                                    },
+                                    onContinueLoop: {
+                                        model.isResultMetadataMenuOpen = false
+                                        continueThreadLoop()
+                                    },
+                                    onChangeInterval: {
+                                        model.isResultMetadataMenuOpen = false
+                                        showLiveLoopIntervalPicker = true
+                                    })
+                                    .manageMenuCardBackground())
+                            }))
+                            .transition(.scale(scale: 0.7).combined(with: .opacity))
                     }
-                    .modifier(MenuCardWindow(
-                        open: model.isResultMetadataMenuOpen,
-                        upperLeading: true,
-                        onDismiss: { _ in model.isResultMetadataMenuOpen = false },
-                        card: {
-                            AnyView(AgentRunMetadataMenu(
-                                engine: agentFollowUpRunCaption?
-                                    .components(separatedBy: " · ").first,
-                                folderPath: model.currentThreadAgentFolder,
-                                completedAt: model.currentThreadCompletedAt,
-                                onOpenFolder: {
-                                    model.isResultMetadataMenuOpen = false
-                                    model.openThreadAgentFolder()
-                                },
-                                loop: threadLoopInfo,
-                                onStopLoop: {
-                                    model.isResultMetadataMenuOpen = false
-                                    stopThreadLoop()
-                                },
-                                onContinueLoop: {
-                                    model.isResultMetadataMenuOpen = false
-                                    continueThreadLoop()
-                                },
-                                onChangeInterval: {
-                                    model.isResultMetadataMenuOpen = false
-                                    showLiveLoopIntervalPicker = true
-                                })
-                                .manageMenuCardBackground())
-                        }))
-                        .transition(.scale(scale: 0.7).combined(with: .opacity))
                 }
+                .frame(maxWidth: .infinity)
             }
         }
         .animation(.spring(response: 0.3, dampingFraction: 0.78),
@@ -5376,6 +5791,7 @@ struct NotchBody: View {
             // doesn't pulse.
             pulse: AnyHashable(model.effectiveSubmitPanel),
             pulseTint: model.submitInk,
+            slotFloor: Self.splitRailChip - 12,
             // Route by intent, same as the idle prompt — a follow-up line like
             // "remind me to ping Alex tomorrow at 9am" files to Reminders
             // instead of being asked to the AI. A plain question still resolves
@@ -5402,22 +5818,35 @@ struct NotchBody: View {
             },
             placeholder: { followUpPlaceholderLabel },
             // Send appears the moment the user starts typing a follow-up. While
-            // the round is still streaming, the same slot is Stop (Esc also
-            // lands on `stopStreaming`) so generation isn't keyboard-only.
-            // Ending the loop itself is the ⌘ card, not this slot.
+            // the round is still streaming, that slot is Stop, but only while
+            // the pointer is over the box — the glyph stays out of the way the
+            // rest of the time. Esc still lands on `stopStreaming`. Ending the
+            // loop itself is the ⌘ card, not this slot.
             trailing: {
                 if model.isStreaming {
-                    StopButton(compact: true) {
-                        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
-                            model.stopStreaming()
+                    if followUpHovered {
+                        StopButton(compact: true) {
+                            withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                                model.stopStreaming()
+                            }
                         }
+                        .transition(.scale(scale: 0.6).combined(with: .opacity))
                     }
-                    .transition(.scale(scale: 0.6).combined(with: .opacity))
                 } else if followUpHasDraft {
                     SendButton(compact: true) { model.submitCurrent() }
                         .transition(.scale(scale: 0.6).combined(with: .opacity))
                 }
             })
+        // The field is an NSTextView, so SwiftUI `onHover` drops out the moment
+        // the pointer crosses into it. The probe covers the whole box and
+        // reports enter/exit over the editor; hit testing stays off so the
+        // field and the stop button still receive the click.
+        .overlay {
+            PointerHoverProbe { followUpHovered = $0 }
+                .allowsHitTesting(false)
+        }
+        .animation(.spring(response: 0.3, dampingFraction: 0.78),
+                   value: followUpHovered)
         .animation(.spring(response: 0.3, dampingFraction: 0.78),
                    value: model.isStreaming)
         .animation(.spring(response: 0.3, dampingFraction: 0.78),
@@ -5455,6 +5884,70 @@ struct NotchBody: View {
         }
     }
 
+}
+
+/// Hover over a composer whose editor is an `NSTextView`. SwiftUI `onHover`
+/// reports exit as soon as the pointer enters that AppKit view, so the stop
+/// glyph would vanish while the pointer was still inside the box. Tracking
+/// here is geometric: it still fires when the editor (or the stop button) is
+/// the view under the pointer.
+private struct PointerHoverProbe: NSViewRepresentable {
+    var onChange: (Bool) -> Void
+
+    func makeNSView(context: Context) -> PointerHoverProbeView {
+        let view = PointerHoverProbeView()
+        view.onChange = onChange
+        return view
+    }
+
+    func updateNSView(_ view: PointerHoverProbeView, context: Context) {
+        view.onChange = onChange
+    }
+}
+
+private final class PointerHoverProbeView: NSView {
+    var onChange: (Bool) -> Void = { _ in }
+    private var inside = false
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas { removeTrackingArea(area) }
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil))
+        sync()
+    }
+
+    override func layout() {
+        super.layout()
+        sync()
+    }
+
+    override func mouseEntered(with event: NSEvent) { setInside(true) }
+    override func mouseExited(with event: NSEvent) { setInside(false) }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil { setInside(false) }
+        else { sync() }
+    }
+
+    private func sync() {
+        guard let window, bounds.width > 0, bounds.height > 0 else { return }
+        let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        setInside(bounds.contains(point))
+    }
+
+    private func setInside(_ next: Bool) {
+        guard next != inside else { return }
+        inside = next
+        let report = onChange
+        DispatchQueue.main.async { report(next) }
+    }
 }
 
 /// The command chip beside an agent thread's follow-up field opens this compact
@@ -5933,10 +6426,9 @@ private struct ActiveFilterChip: View {
                     .foregroundStyle(hovering ? Tokens.text2 : Tokens.text4)
             }
             .padding(.horizontal, 12)
-            // Match the ⋯ chip beside it exactly (GlassIconButton size 34), so the
-            // pair reads as one bar of same-height controls, not a big circle with
-            // a smaller tag hanging off it.
-            .frame(height: 34)
+            // Match the ⋯ chip beside it exactly, so the pair reads as one bar of
+            // same-height controls.
+            .frame(height: Tokens.Control.rail)
             .glassCapsule(in: Capsule(), brighter: hovering, tint: source.tint)
             .contentShape(Capsule())
         }
@@ -6154,7 +6646,7 @@ struct ErrorActionRow: View {
                     Image(systemName: symbol)
                         .font(.sf(Tokens.TypeSize.form, weight: .medium))
                     Text(title)
-                        .font(.sf(Tokens.TypeSize.reading, weight: .medium))
+                        .font(.sf(Tokens.TypeSize.form, weight: .medium))
                     // Without a menu the row keeps its plain affordance glyph; with
                     // one, that trailing slot IS the menu (below), so it isn't
                     // drawn twice. Actions that lead to Settings point out of the
@@ -6168,7 +6660,7 @@ struct ErrorActionRow: View {
                 .foregroundStyle(Tokens.text1)
                 .padding(.leading, 13)
                 .padding(.trailing, hasMenu ? 6 : 12)
-                .frame(height: 39)
+                .frame(height: Tokens.Control.rail)
                 .contentShape(Rectangle())
             }
             .buttonStyle(ErrorActionPressStyle())
@@ -6192,7 +6684,7 @@ struct ErrorActionRow: View {
                     Image(systemName: "chevron.down")
                         .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
                         .foregroundStyle(Tokens.text3)
-                        .frame(width: 26, height: 39)
+                        .frame(width: Tokens.Control.header, height: Tokens.Control.rail)
                         .contentShape(Rectangle())
                 }
                 .menuStyle(.button)
@@ -6263,22 +6755,37 @@ struct IdleTrailingCluster: View {
     /// The chip's diameter. Defaults one step down from the ⋯ chip — in the prompt
     /// row these sit inside the input's chrome, not on the panel's. The manage bar
     /// passes the ⋯'s own 34 so the bar's two corners read as a matched pair.
-    var chipSize: CGFloat = 30
+    var chipSize: CGFloat = Tokens.Control.chip
+    /// Lab unified-threads row: the chips drop their glass and draw like the
+    /// Chat chip beside them — its 6pt wash at rest and on hover, its height.
+    var flat: Bool = false
     var togglePin: () -> Void
     var toggleRecent: () -> Void
+    /// When set, the Recent chevron becomes a ⋯ chip that expands on hover into
+    /// Release notes, History (the Recent toggle) and Settings.
+    var openSettings: (() -> Void)? = nil
+    var openReleaseNotes: (() -> Void)? = nil
 
     /// Nothing to draw when neither segment is live — an empty capsule of glass
     /// would still read as a control. A live run always draws (the "N running"
-    /// chip), even before any Recent history exists to disclose.
-    var isEmpty: Bool { !pinned && !showsRecent && runningCount == 0 }
+    /// chip), even before any Recent history exists to disclose. The ⋯ chip
+    /// always draws: Settings is always reachable from it.
+    var isEmpty: Bool {
+        !pinned && !showsRecent && runningCount == 0 && openSettings == nil
+    }
 
-    private enum Segment { case pin, recent }
+    private enum Segment { case pin, recent, more, releaseNotes, settings }
+
+    /// The flat chips' height — the Chat chip's (its 14pt line of 11pt text plus
+    /// 3.5pt top and bottom), so both chips share top and bottom edges on the row.
+    private static let flatSize: CGFloat = Tokens.Control.inline
 
     @State private var hovered: Segment? = nil
+    @State private var moreExpanded = false
 
     /// Glyph point size, held at the 11.5/30 ratio the 30pt chip was drawn at, so a
     /// bigger chip doesn't end up with a proportionally smaller mark inside it.
-    private var glyphSize: CGFloat { chipSize * (11.5 / 30) }
+    private var glyphSize: CGFloat { flat ? 10 : chipSize * (11.5 / 30) }
 
 
     var body: some View {
@@ -6288,7 +6795,7 @@ struct IdleTrailingCluster: View {
             // open, and clicking it lets go.
             if pinned {
                 segment(.pin, action: togglePin,
-                        tooltip: shortcutHelp("result.unpin", action: .pin)) {
+                        tooltip: pinHelp(pinned: true)) {
                     PinStateGlyph(pinned: true, size: glyphSize, weight: .semibold)
                 }
                 .transition(.scale(scale: 0.6).combined(with: .opacity))
@@ -6301,6 +6808,9 @@ struct IdleTrailingCluster: View {
             // capsule collapses back to the plain chevron that closes the list.
             if runningCount > 0 && !recentOpen {
                 runningRecentChip
+                    .transition(.scale(scale: 0.7).combined(with: .opacity))
+            } else if let openSettings, !recentOpen {
+                moreGroup(openSettings: openSettings)
                     .transition(.scale(scale: 0.7).combined(with: .opacity))
             } else if showsRecent || recentOpen {
                 segment(.recent, action: toggleRecent,
@@ -6321,6 +6831,52 @@ struct IdleTrailingCluster: View {
         .animation(.spring(response: 0.34, dampingFraction: 0.82), value: recentOpen)
     }
 
+    /// ⋯ at rest; under the pointer it gives way to Release notes, History and
+    /// Settings. The
+    /// group expands leftward from the ⋯'s slot, so the pointer that opened it
+    /// lands on Settings and stays inside the group.
+    private func moreGroup(openSettings: @escaping () -> Void) -> some View {
+        let chipTransition = AnyTransition.scale(scale: 0.7, anchor: .trailing)
+            .combined(with: .opacity)
+        return HStack(spacing: 6) {
+            if moreExpanded {
+                if let openReleaseNotes {
+                    segment(.releaseNotes, action: openReleaseNotes,
+                            tooltip: L("recent.menu.releaseNotes")) {
+                        LucideIcon(mark: LucideIcons.scrollText, size: glyphSize + 2)
+                    }
+                    .transition(chipTransition)
+                }
+                if showsRecent {
+                    segment(.recent, action: toggleRecent,
+                            tooltip: L("recent.recent")) {
+                        LucideIcon(mark: LucideIcons.clock, size: glyphSize + 2)
+                    }
+                    .transition(chipTransition)
+                }
+                segment(.settings, action: openSettings,
+                        tooltip: L("recent.menu.settings")) {
+                    LucideIcon(mark: LucideIcons.settings, size: glyphSize + 2)
+                }
+                .transition(chipTransition)
+            } else {
+                segment(.more, action: { moreExpanded = true },
+                        tooltip: L("recent.manage"), showsTooltip: false) {
+                    Image(systemName: "ellipsis")
+                }
+                .transition(.opacity)
+            }
+        }
+        .contentShape(Rectangle())
+        .onHover { inside in
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                moreExpanded = inside
+            }
+            // A found update surfaces as the row's update chip beside this group.
+            if inside { UpdaterService.shared.check(ifOlderThan: 60) }
+        }
+    }
+
     /// The disclosure while runs are live: the same glass, stretched to a capsule
     /// that carries a breathing bead, the "N running" count, and the chevron. Tapping
     /// it drops the Recent list, whose top rows are those very runs (with their
@@ -6331,7 +6887,7 @@ struct IdleTrailingCluster: View {
             HStack(spacing: 5) {
                 AgentStatusDot(running: true, outcome: nil)
                 Text(L("agent.running.count", runningCount))
-                    .font(.sf(glyphSize, weight: .semibold))
+                    .font(.sf(flat ? Tokens.TypeSize.meta : glyphSize, weight: .regular))
                     .monospacedDigit()
                     .contentTransition(.numericText(value: Double(runningCount)))
                     // Roll the digit natively, the way the row clock ticks: the
@@ -6344,10 +6900,9 @@ struct IdleTrailingCluster: View {
                     .animation(.spring(response: 0.32, dampingFraction: 0.8), value: recentOpen)
             }
             .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
-            .padding(.horizontal, 10)
-            .frame(height: chipSize)
-            .glassCapsule(in: Capsule(), brighter: hovering)
-            .contentShape(Capsule())
+            .padding(.horizontal, flat ? 7 : 10)
+            .frame(height: flat ? Self.flatSize : chipSize)
+            .modifier(ClusterChipSurface(flat: flat, hovering: hovering, shape: Capsule()))
         }
         .buttonStyle(GlassPressStyle())
         .onHover { inside in
@@ -6375,9 +6930,9 @@ struct IdleTrailingCluster: View {
             glyph()
                 .font(.sf(glyphSize, weight: .semibold))
                 .foregroundStyle(hovering ? Tokens.text1 : Tokens.text3)
-                .frame(width: chipSize, height: chipSize)
-                .glassCapsule(in: Circle(), brighter: hovering)
-                .contentShape(Circle())
+                .frame(width: flat ? Self.flatSize : chipSize,
+                       height: flat ? Self.flatSize : chipSize)
+                .modifier(ClusterChipSurface(flat: flat, hovering: hovering, shape: Circle()))
         }
         .buttonStyle(GlassPressStyle())
         .onHover { inside in
@@ -6390,11 +6945,50 @@ struct IdleTrailingCluster: View {
     }
 }
 
-/// The result header's trailing control — detach + pin — held in ONE Liquid Glass
+/// The cluster chip's backing: glass in `shape`, or — flat — the Chat chip's
+/// wash at its rest and hover opacities, in an 8pt rounded rect.
+private struct ClusterChipSurface<S: InsettableShape>: ViewModifier {
+    var flat: Bool
+    var hovering: Bool
+    var shape: S
+
+    func body(content: Content) -> some View {
+        if flat {
+            let rect = RoundedRectangle(cornerRadius: 8, style: .continuous)
+            content
+                .background(rect.fill(Color.white.opacity(hovering ? 0.12 : 0.07)))
+                .contentShape(rect)
+        } else {
+            content
+                .glassCapsule(in: shape, brighter: hovering)
+                .contentShape(shape)
+        }
+    }
+}
+
+extension View {
+    /// The tear-off grip: the strip is a drag target and shows the open hand.
+    /// Omitted while separate windows are parked, so the header stays a normal
+    /// click surface.
+    @ViewBuilder
+    func tearOffGrip<G: Gesture>(_ enabled: Bool, gesture: G) -> some View {
+        if enabled {
+            self
+                .contentShape(Rectangle())
+                .grabCursor()
+                .gesture(gesture)
+        } else {
+            self
+        }
+    }
+}
+
+/// The result header's trailing control — pin, then more — held in ONE Liquid Glass
 /// capsule (`glassCapsule` = native `.glassEffect` on macOS 26+, blur fallback
 /// below). Two marks, one continuous pill: bare glyphs read as loose chrome
 /// floating over the answer, while the grouped-glass shape makes them a single
-/// control, matching the back button's glass circle opposite them.
+/// control, matching the back button's glass circle opposite them. Detach lives
+/// in the more menu, which hangs under the right-hand mark.
 ///
 /// The glass lives on the capsule and only there: a hovered segment marks itself
 /// with ink and a soft circle of light, never a second pane of glass nested inside
@@ -6405,30 +6999,78 @@ struct IdleTrailingCluster: View {
 /// the leave-fold if the pointer is already gone.
 struct ResultTrailingCluster: View {
     var pinned: Bool
+    @Binding var moreOpen: Bool
     var togglePin: () -> Void
-    /// Tear-off action. When set, a detach chip joins the pin, to its left — the
-    /// two view actions read as one pair (tight 6pt spacing), set apart from the
-    /// composer chip further left by the header's wider 10pt gap.
+    /// Tear-off action. When set, a more mark sits to the pin's right and this
+    /// action is the row in the menu it opens.
     var detach: (() -> Void)? = nil
+    /// Global message tones (send, reply, reaction). The row stays in this
+    /// menu; the flag applies to every conversation, including ones already
+    /// split into their own window.
+    var messageSoundsEnabled: Bool = true
+    var toggleMessageSounds: () -> Void = {}
 
     var body: some View {
         GlassSegmentCluster(segments: {
             var segs: [GlassSegmentCluster.Segment] = []
-            if let detach {
-                segs.append(.init(tooltip: shortcutHelp("detached.open", action: .detach),
-                                  action: detach) {
-                    Image(systemName: "macwindow.on.rectangle")
-                        .font(.sf(Tokens.TypeSize.label, weight: .light))
-                })
-            }
             segs.append(.init(engaged: pinned,
-                              tooltip: shortcutHelp(pinned ? "result.unpin" : "result.pin",
-                                                    action: .pin),
+                              tooltip: pinHelp(pinned: pinned),
                               action: togglePin) {
                 PinStateGlyph(pinned: pinned, size: 12, weight: .light)
             })
+            segs.append(.init(id: "more",
+                              engaged: moreOpen,
+                              tooltip: L("recent.manage"),
+                              action: { moreOpen.toggle() }) {
+                Image(systemName: "ellipsis")
+                    .font(.sf(15, weight: .bold))
+            })
             return segs
-        }())
+        }(), showsTooltips: !moreOpen)
+        .modifier(MenuCardWindow(
+            open: moreOpen,
+            lowerTrailing: true,
+            onDismiss: { _ in moreOpen = false },
+            card: { AnyView(moreMenu) }
+        ))
+    }
+
+    private var moreMenu: some View {
+        let title = Self.actionTitle("detached.open")
+        let chord = AppShortcutStore.chord(for: .detach).displayString
+        let soundTitle = L("messageSounds.short")
+        let detachWidth = detach == nil
+            ? 0
+            : MenuCard.width(titles: [(title, chord)])
+        return VStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
+            if detach != nil {
+                MenuCardRow(title: title, accessory: chord, selected: false) {
+                    moreOpen = false
+                    detach?()
+                }
+            }
+            MenuCardRow(title: soundTitle, symbol: "bell", isOn: messageSoundsEnabled, selected: false) {
+                toggleMessageSounds()
+            }
+        }
+        .padding(MenuCard.cardPad)
+        // Sized by the rows themselves: the mini switch draws wider than any
+        // constant measured for it, and a guessed width truncated the word.
+        .frame(minWidth: detachWidth)
+        .fixedSize(horizontal: true, vertical: false)
+        .manageMenuCardBackground()
+    }
+
+    /// The localized action name without its hard-coded chord. The live chord
+    /// rides the row's accessory, the same way `shortcutHelp` rebuilds a tooltip.
+    private static func actionTitle(_ key: String) -> String {
+        var base = L(key)
+        if base.hasSuffix(")"), let open = base.lastIndex(of: "(") {
+            base = String(base[..<open]).trimmingCharacters(in: .whitespaces)
+        } else if base.hasSuffix("）"), let open = base.lastIndex(of: "（") {
+            base = String(base[..<open]).trimmingCharacters(in: .whitespaces)
+        }
+        return base
     }
 }
 
@@ -6438,6 +7080,9 @@ struct ResultTrailingCluster: View {
 /// chip in the header. It used to be a bare glyph over a flat white-wash hover
 /// pill, which read as a different material from the glass cluster opposite it.
 private struct GlassBackButton: View {
+    /// 26 in the headers; the follow-up rail passes its chip size so the circle
+    /// matches the box beside it.
+    var size: CGFloat = Tokens.Control.header
     let action: () -> Void
     @State private var hovering = false
 
@@ -6446,7 +7091,7 @@ private struct GlassBackButton: View {
             Image(systemName: "chevron.left")
                 .font(.sf(Tokens.TypeSize.form, weight: .semibold))
                 .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
-                .frame(width: 26, height: 26)
+                .frame(width: size, height: size)
                 .glassCapsule(in: Circle(), brighter: hovering)
                 .contentShape(Circle())
         }
@@ -6483,65 +7128,25 @@ struct RecentEntryStyle: ButtonStyle {
 /// height rounds its corners by half the *tall* box — a bloated, over-round blob;
 /// the smaller radius keeps a multi-line quote reading as a tidy card.
 /// `style: .continuous` matches the panel's other rounded shapes.
-/// A question bubble with its regenerate control trailing it. The control is
-/// hidden until the pointer is over the row.
-struct QuestionRow: View {
-    struct Regenerate {
-        let disabled: Bool
-        let models: [(model: String, label: String, isCurrent: Bool)]
-        let action: () -> Void
-        let actionWith: (String) -> Void
-    }
-
-    let text: String
-    let regenerate: Regenerate?
-
-    @State private var hovered = false
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 6) {
-            UserQuestionBubble(text: text)
-            if let regenerate {
-                AnswerFooterRegenerateControl(
-                    help: shortcutHelp("result.regenerate", action: .regenerate),
-                    menuHelp: L("result.regenerate.with"),
-                    rowHovered: hovered,
-                    hasMenu: !regenerate.models.isEmpty,
-                    hidesAtRest: true,
-                    icon: "arrow.counterclockwise",
-                    action: regenerate.action
-                ) {
-                    Text(L("result.regenerate.with"))
-                    ForEach(regenerate.models, id: \.model) { option in
-                        Button {
-                            regenerate.actionWith(option.model)
-                        } label: {
-                            if option.isCurrent {
-                                Text(L("result.regenerate.current", option.label))
-                            } else {
-                                Text(option.label)
-                            }
-                        }
-                        .disabled(option.isCurrent)
-                    }
-                }
-                .disabled(regenerate.disabled)
-                .fixedSize()
-                // Centers the 22pt control on a single-line bubble (~33pt tall).
-                .padding(.top, 5.5)
-            }
-        }
-        .contentShape(Rectangle())
-        .onHover { hovered = $0 }
-    }
-}
-
 struct UserQuestionBubble: View {
     let text: String
-    /// The question's type size. The result view reads at the panel's own 14.5;
-    /// the split history experiment sets it smaller so its narrow reading column
-    /// runs at one size with the list beside it.
+    /// The surface's reading size. The bubble sets its text one step under it.
     var baseFont: CGFloat = Tokens.TypeSize.reading
+    /// Agent prompts wear the agent violet; everything else wears Ask blue —
+    /// the same tints the destination pill uses.
+    var isAgent: Bool = false
+    /// The emoji Jev reacted with (`Turn.reaction`), shown on the top-right
+    /// corner. Nil shows nothing.
+    var reaction: String? = nil
+
+    /// Set one step under `baseFont`, the same step the answer card takes.
+    private var bubbleFont: CGFloat { Tokens.TypeSize.stepDown(baseFont) }
+
+    /// Saturated body colour, washed over the dark glass. Same table as the
+    /// Ask / Agent destination pill (`Panel.intentTint` / `Tokens.agentTint`).
+    private var tint: Color {
+        isAgent ? Tokens.agentTint : NotchModel.Panel.chat.intentTint
+    }
 
     /// Prompt shortcuts keep the captured text inside an explicit wire envelope so
     /// the model cannot mistake it for the instruction. That envelope is transport
@@ -6595,8 +7200,8 @@ struct UserQuestionBubble: View {
     /// Corner radius — a fixed modest card once the bubble is clearly multi-line, a
     /// pill when it's a short single/double line. Derived purely from the text (no
     /// geometry read), so there's no measurement feeding back into layout.
-    private let multiLineRadius: CGFloat = Tokens.Radius.menu
-    private let pillRadius: CGFloat = 16.5   // ~half a single-line bubble height
+    private var multiLineRadius: CGFloat { ChatBubbleChrome.cardRadius }
+    private var pillRadius: CGFloat { ChatBubbleChrome.pillRadius }
 
     /// Cheap, allocation-light estimate of whether the collapsed text is truncated —
     /// purely from the string, NO GeometryReader (a height probe here is exactly what
@@ -6632,7 +7237,7 @@ struct UserQuestionBubble: View {
             VStack(alignment: .leading, spacing: 8) {
                 if !quote.instruction.isEmpty {
                     Text(quote.instruction)
-                        .font(.sf(baseFont, weight: .medium))
+                        .font(.sf(bubbleFont, weight: .medium))
                         .tracking(-0.1)
                         .foregroundStyle(Tokens.text2)
                         // Reserve at least one collapsed line for the quote itself.
@@ -6641,7 +7246,7 @@ struct UserQuestionBubble: View {
                 }
 
                 Text(quote.selection)
-                    .font(.sf(baseFont, weight: .medium))
+                    .font(.sf(bubbleFont, weight: .medium))
                     .tracking(-0.1)
                     .foregroundStyle(Tokens.text3)
                     .lineLimit(expanded ? nil : max(
@@ -6665,7 +7270,7 @@ struct UserQuestionBubble: View {
             .textSelection(.enabled)
         } else {
             Text(text)
-                .font(.sf(baseFont, weight: .medium))
+                .font(.sf(bubbleFont, weight: .medium))
                 .tracking(-0.1)
                 .foregroundStyle(Tokens.text2)
                 // Collapsed to a fixed cap until the user expands; nil = unlimited.
@@ -6678,7 +7283,15 @@ struct UserQuestionBubble: View {
         }
     }
 
+    /// Capped at the answer card's column, so a long question wraps at the
+    /// same width as the reply under it.
     var body: some View {
+        FractionWidthLayout(fraction: AnswerCard<EmptyView>.widthFraction, hugs: true) {
+            bubble
+        }
+    }
+
+    private var bubble: some View {
         VStack(alignment: .leading, spacing: 6) {
             // Expanded: the full text can be tall, so it scrolls WITHIN a capped
             // frame instead of pushing the bubble (and the whole result view) past
@@ -6717,16 +7330,30 @@ struct UserQuestionBubble: View {
                 .buttonStyle(.plain)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
+        .padding(.horizontal, ChatBubbleChrome.horizontalPad)
+        .padding(.vertical, ChatBubbleChrome.verticalPad)
         .background(
             RoundedRectangle(cornerRadius: radius, style: .continuous)
-                .fill(Color.white.opacity(0.06))
+                .fill(tint.opacity(0.18))
                 .overlay(
                     RoundedRectangle(cornerRadius: radius, style: .continuous)
                         .strokeBorder(Tokens.hairline, lineWidth: 1)
                 )
         )
+        .overlay(alignment: .topTrailing) {
+            if let reaction {
+                Text(reaction)
+                    .font(.system(size: 12))
+                    .frame(width: 22, height: 22)
+                    .background(
+                        Circle()
+                            .fill(.ultraThinMaterial)
+                            .overlay(Circle().strokeBorder(Tokens.hairline, lineWidth: 1))
+                    )
+                    .offset(x: 9, y: -9)
+                    .transition(.scale(scale: 0.4).combined(with: .opacity))
+            }
+        }
     }
 }
 
@@ -6793,13 +7420,15 @@ private struct AgentChipFace<Icon: View>: View {
     /// Overrides the resting ink. Used when the chip is reporting something wrong
     /// rather than naming a setting — the Ask chip with no model configured.
     var tint: Color? = nil
+    var fontSize: CGFloat = Tokens.TypeSize.label
+    var fontWeight: Font.Weight = .light
 
     var body: some View {
         HStack(spacing: 5) {
             icon
                 .foregroundStyle(tint ?? (hovering ? Tokens.text2 : Tokens.text4))
             Text(title)
-                .font(.sf(Tokens.TypeSize.label, weight: .light))
+                .font(.sf(fontSize, weight: fontWeight))
                 .foregroundStyle(tint ?? (hovering ? Tokens.text2 : Tokens.text4))
                 .lineLimit(1)
         }
@@ -6813,6 +7442,8 @@ private struct AgentChipFace<Icon: View>: View {
 struct AgentComposeChip<Icon: View>: View {
     var title: String
     var tint: Color? = nil
+    var fontSize: CGFloat = Tokens.TypeSize.label
+    var fontWeight: Font.Weight = .light
     var action: () -> Void
     @ViewBuilder var icon: () -> Icon
 
@@ -6820,7 +7451,8 @@ struct AgentComposeChip<Icon: View>: View {
 
     var body: some View {
         Button(action: action) {
-            AgentChipFace(icon: icon(), title: title, hovering: hovering, tint: tint)
+            AgentChipFace(icon: icon(), title: title, hovering: hovering, tint: tint,
+                          fontSize: fontSize, fontWeight: fontWeight)
         }
         // No press scale. These chips open a menu card that hangs off the chip's
         // own frame; a chip that shrinks and springs back under the click moves
@@ -6896,6 +7528,14 @@ struct MenuCardWindow: ViewModifier {
     /// bottom-trailing corner nearest the control. Used by result metadata so the
     /// menu doesn't cover the follow-up composer below it.
     var upperLeading: Bool = false
+    /// Put the card wholly below and to the left of its anchor, with the card's
+    /// top-trailing corner nearest the control. Used by the result header's more
+    /// menu, which sits on the right edge and has to open downward.
+    var lowerTrailing: Bool = false
+    /// Hang the card beside its anchor as a submenu: leading edge just past the
+    /// card the anchor row sits in, top row level with that row. Flips to the
+    /// left when the right side of the display has no room.
+    var trailing: Bool = false
     /// A click that isn't part of using the menu — in another app (`insideApp`
     /// false) or anywhere in ours but the card and the anchor.
     let onDismiss: (_ insideApp: Bool) -> Void
@@ -6904,6 +7544,7 @@ struct MenuCardWindow: ViewModifier {
     func body(content: Content) -> some View {
         content.background(
             MenuCardHost(open: open, centered: centered, upperLeading: upperLeading,
+                         lowerTrailing: lowerTrailing, trailing: trailing,
                          onDismiss: onDismiss, card: card())
         )
     }
@@ -6913,6 +7554,8 @@ private struct MenuCardHost: NSViewRepresentable {
     let open: Bool
     let centered: Bool
     let upperLeading: Bool
+    let lowerTrailing: Bool
+    let trailing: Bool
     let onDismiss: (Bool) -> Void
     let card: AnyView
 
@@ -6922,6 +7565,8 @@ private struct MenuCardHost: NSViewRepresentable {
         (view as? MenuCardAnchorView)?.apply(card: card, open: open,
                                              centered: centered,
                                              upperLeading: upperLeading,
+                                             lowerTrailing: lowerTrailing,
+                                             trailing: trailing,
                                              onDismiss: onDismiss)
     }
 
@@ -6952,6 +7597,8 @@ private final class MenuCardAnchorView: NSView {
     private var isOpen = false
     private var centered = false
     private var upperLeading = false
+    private var lowerTrailing = false
+    private var trailing = false
     /// Set by `dismissOpen` so a stale `apply(open: true)` — the binding has not
     /// come down yet — cannot rebuild the window we just ordered out.
     private var dismissed = false
@@ -6968,10 +7615,13 @@ private final class MenuCardAnchorView: NSView {
     private var frameObservers: [NSObjectProtocol] = []
 
     func apply(card: AnyView, open: Bool, centered: Bool, upperLeading: Bool,
+               lowerTrailing: Bool = false, trailing: Bool = false,
                onDismiss: @escaping (Bool) -> Void) {
         self.onDismiss = onDismiss
         self.centered = centered
         self.upperLeading = upperLeading
+        self.lowerTrailing = lowerTrailing
+        self.trailing = trailing
         guard open else {
             dismissed = false
             closeMenu()
@@ -7015,7 +7665,11 @@ private final class MenuCardAnchorView: NSView {
         panel.hasShadow = false          // the card draws its own
         panel.isMovable = false
         panel.isReleasedWhenClosed = false
-        panel.ignoresMouseEvents = false
+        // A submenu hangs off another card's panel, and its shadow margin lies
+        // over that card's right edge. Left unset, the margin's clear pixels
+        // pass the pointer through to the rows underneath.
+        let nested = host is MenuCardPanel
+        if !nested { panel.ignoresMouseEvents = false }
         // Dark like the island, and along for the ride across Spaces / full-screen.
         panel.appearance = NSAppearance(named: .darkAqua)
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary,
@@ -7029,7 +7683,8 @@ private final class MenuCardAnchorView: NSView {
         self.panel = panel
         self.hosting = hosting
         self.isOpen = true
-        Self.current = self
+        // `current` is the top-level menu; a submenu closing must not clear it.
+        if !nested { Self.current = self }
         TooltipOverlayGate.enter()
         installDismissMonitors()
         installFrameObservers(on: host)
@@ -7125,6 +7780,8 @@ private final class MenuCardAnchorView: NSView {
             }
             if event.window === window,
                bounds.contains(convert(event.locationInWindow, from: nil)) { return }
+            // A submenu hung off this card: a click there is a pick in this menu.
+            if let clicked = event.window, let panel, clicked.parent === panel { return }
             // The model detail card rides beside this menu as a separate panel.
             // A click there is still using the menu.
             if ModelDetailPanel.shared.owns(event.window) { return }
@@ -7151,6 +7808,25 @@ private final class MenuCardAnchorView: NSView {
                 x: anchor.maxX - size.width + margin,
                 y: anchor.maxY + Self.gap - margin
             )
+        } else if lowerTrailing {
+            // Same trailing alignment, opening downward: the card's top-right
+            // meets the control's bottom-right.
+            origin = CGPoint(
+                x: anchor.maxX - size.width + margin,
+                y: anchor.minY - Self.gap - size.height + margin
+            )
+        } else if trailing {
+            // The anchor is a row inside a card; the card's edge is `cardPad`
+            // further out.
+            let inset = MenuCard.cardPad
+            origin = CGPoint(
+                x: anchor.maxX + inset + Self.gap - margin,
+                y: anchor.maxY + inset - size.height + margin
+            )
+            if let visible = (host.screen ?? NSScreen.main)?.visibleFrame,
+               origin.x + size.width - margin > visible.maxX - 8 {
+                origin.x = anchor.minX - inset - Self.gap - size.width + margin
+            }
         } else {
             origin = CGPoint(
                 x: (centered ? anchor.midX - (size.width - margin * 2) / 2
@@ -7273,6 +7949,57 @@ private struct SlashCommandMenu: View {
         // gets its IDEAL width, so the selected row's wash would stop at the end of
         // its own word instead of spanning the card.
         .frame(width: cardWidth, alignment: .leading)
+    }
+}
+
+/// Unified threads replace the Ask|Agent glass pill with a plain mode word.
+/// One click switches Chat ⇄ Agent; the word itself is the current destination,
+/// "Chat" where the pill used to say "Ask".
+private struct UnifiedComposeModeControl: View {
+    @ObservedObject var model: NotchModel
+    @State private var hovering = false
+
+    /// Shared with the model name beside it, one step under the pill's label.
+    static let fontSize: CGFloat = Tokens.TypeSize.meta
+
+    private var title: String {
+        if model.agentComposeActive { return L("hint.agent") }
+        if let shortcut = model.promptShortcutMode { return shortcut.displayName }
+        switch model.manualPanelOverride ?? .chat {
+        case .chat:      return L("hint.chat")
+        case .note:      return L("hint.capture")
+        case .reminder:  return L("hint.remind") + model.submitLabelSuffix
+        }
+    }
+
+    /// The destination colour (Ask blue, Agent purple, Capture amber), lifted
+    /// for text on the dark glass. The chip behind it stays neutral.
+    private var ink: Color {
+        if model.agentComposeActive { return Tokens.agentInk }
+        return (model.manualPanelOverride ?? .chat).intentInk
+    }
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+        return Button {
+            guard model.agentAvailable else { return }
+            withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) {
+                model.applyComposeMode(model.agentComposeActive ? .ask : .agent)
+            }
+        } label: {
+            Text(title)
+                .font(.sf(Self.fontSize, weight: .regular))
+                .foregroundStyle(ink)
+                .lineLimit(1)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3.5)
+                .background(shape.fill(Color.white.opacity(hovering ? 0.12 : 0.07)))
+                .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+        .accessibilityLabel(title)
     }
 }
 
@@ -7422,9 +8149,9 @@ private struct BucketTogglePill: View {
             .padding(.vertical, 3)
             .offset(x: agentOn ? Self.wordWidth(ask, spelled: false) + Self.wordGap : 0)
         }
-        // Match the Recent disclosure chevron's fixed 30pt (IdleTrailingCluster's
-        // chipSize) so the pill and the trailing dropdown line up on the row.
-        .frame(height: 30)
+        // Match the Recent disclosure chevron (IdleTrailingCluster's chipSize) so
+        // the pill and the trailing dropdown line up on the row.
+        .frame(height: Tokens.Control.chip)
         .padding(.horizontal, Self.sidePad)
         // The glass takes the DESTINATION's colour, not a fixed Ask blue: the pill
         // is the routing's face now, so Capture ambers the capsule the way the
@@ -7514,8 +8241,7 @@ private struct BucketWord: View {
     var body: some View {
         Button(action: action) {
             content
-                .foregroundStyle(active ? Tokens.text1
-                                        : (hovering ? Tokens.text2 : Tokens.text4))
+                .foregroundStyle(active || hovering ? Tokens.text3 : Tokens.text4)
                 // Asymmetric on purpose: the trailing 8pt the word used to pad
                 // with now lives inside the label's box as the wipe's falloff.
                 .padding(.leading, BucketTogglePill.wordPad)
@@ -7742,3 +8468,354 @@ struct SettledPopover<PopContent: View>: ViewModifier {
         }
     }
 }
+
+// MARK: - Main-thread reveal (Unified threads)
+
+/// Hands the AppKit scroll view around it to `report` once it is in a window.
+fileprivate struct EnclosingScrollViewReporter: NSViewRepresentable {
+    let report: (NSScrollView) -> Void
+
+    final class Host: NSView {
+        var report: ((NSScrollView) -> Void)?
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if window != nil, let scroll = enclosingScrollView { report?(scroll) }
+        }
+    }
+
+    func makeNSView(context: Context) -> Host {
+        let host = Host(frame: .zero)
+        host.report = report
+        return host
+    }
+
+    func updateNSView(_ nsView: Host, context: Context) {
+        nsView.report = report
+    }
+}
+
+/// The result page's geometry for the thread a pull opens — what
+/// `ThreadRevealTop` reaches at progress 1. See `NotchBody.revealTargets`.
+fileprivate struct ThreadRevealTargets: Equatable {
+    /// Room above the thread for the header row (0 when it floats over it).
+    var headerSlot: CGFloat
+    /// Height from the thread's top edge to the last turn's bottom.
+    var viewport: CGFloat
+    /// From the last turn's bottom to the follow-up row.
+    var gap: CGFloat
+    /// The top fade's length.
+    var fade: CGFloat
+}
+
+/// What the reveal's thread is drawn from: its turns, and whether this
+/// drawing is the one that reports the thread's height.
+fileprivate struct RevealThreadKey: Equatable {
+    var turns: [NotchModel.Turn]
+    var measures: Bool
+}
+
+/// A view that redraws only when `key` changes. The reveal hands its parts in
+/// through these, so an animation frame — which recomputes the reveal's
+/// geometry — doesn't re-run the bodies of everything inside it.
+fileprivate struct RevealStill<Key: Equatable, Content: View>: View, Equatable {
+    let key: Key
+    @ViewBuilder let content: () -> Content
+
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.key == rhs.key }
+
+    var body: some View { content() }
+}
+
+private func revealLerp(_ from: CGFloat, _ to: CGFloat, _ t: CGFloat) -> CGFloat {
+    from + (to - from) * t
+}
+
+private func revealSmoothstep(_ from: CGFloat, _ to: CGFloat, _ x: CGFloat) -> CGFloat {
+    let t = min(max((x - from) / (to - from), 0), 1)
+    return t * t * (3 - 2 * t)
+}
+
+/// The thread above the idle prompt, from the peek (progress 0) to the result
+/// page's thread area (progress 1), every value interpolated from the one
+/// progress. It reads the progress from `ThreadPullLive`, so a pull frame
+/// re-runs this view alone, not the page around it. The thread is laid
+/// out at its full height and bottom-aligned in a viewport that grows with
+/// the pull, so its last card stays put under the fingers and the turns
+/// above it come into view.
+///
+/// The peek's frost is a blurred copy of the newest answer alone, over the
+/// bottom of the viewport. It is there at rest and fades out as the motion
+/// starts: a blurred copy of the whole thread would double what the reveal
+/// draws, and one resized every frame is re-rasterized every frame.
+fileprivate struct ThreadRevealTop<Header: View, Thread: View, Frost: View>: View {
+    @ObservedObject var live: ThreadPullLive
+    /// A pull is under way; at rest the reveal is the peek (progress 0).
+    let active: Bool
+    let targets: ThreadRevealTargets
+    let peekHeight: CGFloat
+    let peekGap: CGFloat
+    let sideInset: CGFloat
+    let showsHeader: Bool
+    let header: Header
+    let thread: Thread
+    let frost: Frost
+
+    /// The peek's own fade (clear at the top to this at the bottom) and frost.
+    private let peekAlpha: CGFloat = 0.85
+    private let peekBlurRadius: CGFloat = 6
+
+    var body: some View {
+        let p = active ? min(max(live.progress, 0), 1) : 0
+        let frostOpacity = 1 - revealSmoothstep(0, 0.2, p)
+        VStack(alignment: .leading, spacing: 0) {
+            Color.clear.frame(height: revealLerp(0, targets.headerSlot, p))
+            ZStack(alignment: .bottom) {
+                Color.clear
+                    .frame(maxWidth: .infinity)
+                    .frame(height: revealLerp(peekHeight, targets.viewport, p))
+                    .overlay(alignment: .bottomLeading) { thread }
+                    .clipped()
+                    .mask(ThreadRevealFade(length: revealLerp(peekHeight, targets.fade, p),
+                                           alpha: revealLerp(peekAlpha, 1, p)))
+                if frostOpacity > 0 {
+                    // The peek's frost, the same recipe as `progressiveTopBlur`:
+                    // the faded peek, blurred, masked to deepen toward the top.
+                    Color.clear
+                        .frame(maxWidth: .infinity)
+                        .frame(height: peekHeight)
+                        .overlay(alignment: .bottomLeading) { frost }
+                        .clipped()
+                        .mask(ThreadRevealFade(length: peekHeight, alpha: peekAlpha))
+                        .drawingGroup()
+                        .blur(radius: peekBlurRadius)
+                        .mask(
+                            LinearGradient(
+                                stops: [
+                                    .init(color: .black, location: 0),
+                                    .init(color: .black, location: 0.45),
+                                    .init(color: .clear, location: 0.9),
+                                    .init(color: .clear, location: 1),
+                                ],
+                                startPoint: .top, endPoint: .bottom))
+                        .opacity(frostOpacity)
+                }
+            }
+            .allowsHitTesting(false)
+        }
+        .padding(.bottom, revealLerp(peekGap, targets.gap, p))
+        .overlay(alignment: .top) {
+            if showsHeader {
+                header
+                    .opacity(p * p)
+                    .allowsHitTesting(false)
+            }
+        }
+        .padding(.horizontal, sideInset * p)
+    }
+}
+
+/// The reveal's opacity mask: clear at the top, ramping over `length` to
+/// `alpha`, which holds to the bottom. A zero length is `alpha` everywhere.
+fileprivate struct ThreadRevealFade: View {
+    let length: CGFloat
+    let alpha: CGFloat
+
+    var body: some View {
+        GeometryReader { geo in
+            let height = max(geo.size.height, 1)
+            LinearGradient(
+                stops: [
+                    .init(color: .black.opacity(length < 0.5 ? alpha : 0), location: 0),
+                    .init(color: .black.opacity(alpha), location: min(length / height, 1)),
+                    .init(color: .black.opacity(alpha), location: 1),
+                ],
+                startPoint: .top, endPoint: .bottom)
+        }
+    }
+}
+
+/// The idle prompt + bucket row during a pull: they fade out while their box
+/// shrinks to the follow-up row's height, and a still of the follow-up row
+/// fades in at the box's bottom. At progress 0 it changes nothing.
+fileprivate struct ThreadRevealBottom<StandIn: View>: ViewModifier {
+    @ObservedObject var live: ThreadPullLive
+    let active: Bool
+    let restHeight: CGFloat
+    let targetHeight: CGFloat
+    let sideInset: CGFloat
+    let standIn: StandIn
+
+    func body(content: Content) -> some View {
+        let p = active ? min(max(live.progress, 0), 1) : 0
+        content
+            .opacity(1 - revealSmoothstep(0, 0.55, p))
+            .frame(height: p > 0 ? revealLerp(restHeight, targetHeight, p) : nil,
+                   alignment: .top)
+            .overlay(alignment: .bottom) {
+                if p > 0 {
+                    standIn
+                        .opacity(revealSmoothstep(0.35, 1, p))
+                        .allowsHitTesting(false)
+                }
+            }
+            .padding(.horizontal, sideInset * p)
+    }
+}
+
+/// The unified threads guide's invitation (`NotchModel.unifiedIntro`) in the
+/// peek's slot: a message from Notchi drawn as an answer, Start, and × to
+/// dismiss it.
+private struct UnifiedIntroInvite: View {
+    @ObservedObject var model: NotchModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            AssistantTurnView(text: L("unifiedIntro.invite", NotchModel.unifiedIntroVersion),
+                              showsFooterMetadata: false)
+            HStack(spacing: 6) {
+                GlassTextButton(title: L("unifiedIntro.start"),
+                                tint: NotchModel.Panel.chat.intentTint) {
+                    withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                        model.startUnifiedIntro()
+                    }
+                }
+                GlassIconButton(systemName: "xmark", help: L("unifiedIntro.dismiss"),
+                                size: Tokens.Control.header,
+                                glyphSize: Tokens.TypeSize.caption,
+                                showsTooltip: false) {
+                    withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) {
+                        model.dismissUnifiedIntro()
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.bottom, 12)
+    }
+}
+
+/// The guide's choices under its newest bubble, once that bubble has landed:
+/// End tour, End tour on the previous model, and going back to separate
+/// threads while that is still on.
+private struct UnifiedIntroEnd: View {
+    @ObservedObject var model: NotchModel
+    let answerID: UUID
+    let offersSeparate: Bool
+    let previousName: String?
+    @ObservedObject private var pacer = BubblePacer.shared
+
+    var body: some View {
+        if !pacer.typing(answerID),
+           !(model.turns.first(where: { $0.id == answerID })?.streaming ?? true) {
+            if model.unifiedIntro?.endShownFor == answerID {
+                choices
+            } else {
+                // Held back for a pause after the last bubble, so the choices
+                // do not land together with it.
+                Color.clear
+                    .frame(height: 0)
+                    .task(id: answerID) {
+                        try? await Task.sleep(for: .seconds(NotchModel.unifiedIntroEndPause))
+                        guard !Task.isCancelled else { return }
+                        withAnimation(.easeOut(duration: 0.3)) {
+                            model.showUnifiedIntroEnd(answerID)
+                        }
+                    }
+            }
+        }
+    }
+
+    private var choices: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if offersSeparate {
+                UnifiedIntroLearnMoreCard {
+                    model.settingsSection = InlineSettingsView.Section.pricing.rawValue
+                    withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                        model.openSettings()
+                    }
+                }
+                .padding(.bottom, 4)
+            }
+            HStack(spacing: 8) {
+                GlassTextButton(title: L("unifiedIntro.end"),
+                                fontSize: Tokens.TypeSize.form,
+                                tint: NotchModel.Panel.chat.intentTint) { finish(.end) }
+                if let previousName {
+                    GlassTextButton(title: L("unifiedIntro.endKeeping", previousName),
+                                    fontSize: Tokens.TypeSize.form) { finish(.previous) }
+                }
+            }
+            if offersSeparate {
+                UnifiedIntroOption(title: L("unifiedIntro.separate")) { finish(.separate) }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .transition(.opacity)
+    }
+
+    private func finish(_ ending: NotchModel.UnifiedIntroEnding) {
+        withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) {
+            model.finishUnifiedIntro(ending)
+        }
+    }
+}
+
+/// A small option under End tour: plain text at regular weight, the quiet
+/// button's ink.
+private struct UnifiedIntroOption: View {
+    let title: String
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.sf(Tokens.TypeSize.meta))
+                .foregroundStyle(hovering ? Tokens.text1 : Tokens.text3)
+                .lineLimit(1)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+    }
+}
+
+/// The guide's card to Settings' Models and pricing page, drawn like the
+/// compact link card at the width of its text: the title and "Settings" on
+/// the left, the model's mark on the right.
+private struct UnifiedIntroLearnMoreCard: View {
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: ChatBubbleChrome.cardRadius, style: .continuous)
+        Button(action: action) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(L("unifiedIntro.learnMore", NotchModel.unifiedIntroAutoName))
+                        .font(.sf(Tokens.TypeSize.label, weight: .semibold))
+                        .foregroundStyle(Tokens.text1)
+                        .lineLimit(1)
+                    Text(L("settings.title"))
+                        .font(.sf(Tokens.TypeSize.meta))
+                        .foregroundStyle(Tokens.text3)
+                        .lineLimit(1)
+                }
+                VendorLogo(vendor: ModelRatings.vendor(for: NotchModel.unifiedIntroAutoModel,
+                                                       provider: .nono),
+                           fallback: NotchModel.unifiedIntroAutoModel)
+                    .frame(width: 16, height: 16)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .fixedSize()
+            .background(shape.fill(Color.white.opacity(hovering ? 0.12 : 0.08)))
+            .overlay(shape.strokeBorder(Tokens.hairline, lineWidth: 1))
+            .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+    }
+}
+

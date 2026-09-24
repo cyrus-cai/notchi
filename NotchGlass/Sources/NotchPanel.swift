@@ -66,6 +66,11 @@ final class NotchPanel: NSPanel {
     /// keyboard the way clicking any window does.
     var onClickInside: (() -> Void)?
 
+    /// A double-click landed inside the panel, anywhere but an editable text
+    /// field (there a double-click selects a word). The AppDelegate pins the
+    /// open panel in answer.
+    var onDoubleClickInside: (() -> Void)?
+
     init(contentRect: NSRect) {
         super.init(
             contentRect: contentRect,
@@ -154,12 +159,19 @@ final class NotchPanel: NSPanel {
     }
 
     override func sendEvent(_ event: NSEvent) {
+        // Before `onClickInside`, so the handler still sees the state recorded
+        // at the first click of the pair.
+        if event.type == .leftMouseDown, event.clickCount == 2,
+           !isOverEditableText(event.locationInWindow) {
+            onDoubleClickInside?()
+        }
         switch event.type {
         case .leftMouseDown, .rightMouseDown, .otherMouseDown:
             onClickInside?()
         default:
             break
         }
+        if event.type == .rightMouseDown, showAnswerMenuOverSelectableText(event) { return }
         super.sendEvent(event)
     }
 
@@ -180,5 +192,62 @@ final class NotchPanel: NSPanel {
         composing = isComposing
         let want = isComposing ? Self.editingLevel : Self.restingLevel
         if level != want { level = want }
+    }
+}
+
+// MARK: - Selectable text
+
+extension NSWindow {
+    /// The view SwiftUI puts behind `.textSelection(.enabled)` text at this
+    /// window point, if any. It is an `AppKitTextInteractionView`, which neither
+    /// `hitTest` returns (the hosting view answers for it) nor subclasses
+    /// `NSText`, so it is found by class name and frame.
+    func selectableTextView(at windowPoint: NSPoint) -> NSView? {
+        guard let content = contentView else { return nil }
+        func search(_ view: NSView) -> NSView? {
+            for sub in view.subviews where !sub.isHidden {
+                if NSStringFromClass(type(of: sub)).contains("TextInteractionView"),
+                   sub.convert(sub.bounds, to: nil).contains(windowPoint) {
+                    return sub
+                }
+                if let found = search(sub) { return found }
+            }
+            return nil
+        }
+        return search(content)
+    }
+
+    /// A right-click on selectable text goes to the text view, which shows the
+    /// system text menu (Cut / Copy / Paste / Font…) instead of the
+    /// `.contextMenu` the answer declares. With no selection that menu's Copy is
+    /// disabled, so this shows the SwiftUI menu at that point instead. With a
+    /// selection the system menu stays, since its Copy copies the selection.
+    /// Returns true when it showed a menu.
+    func isOverEditableText(_ point: NSPoint) -> Bool {
+        guard let contentView,
+              var view = contentView.hitTest(contentView.convert(point, from: nil)) else { return false }
+        while true {
+            if let text = view as? NSText, text.isEditable { return true }
+            if let field = view as? NSTextField, field.isEditable { return true }
+            guard let parent = view.superview else { return false }
+            view = parent
+        }
+    }
+
+    func showAnswerMenuOverSelectableText(_ event: NSEvent) -> Bool {
+        guard let textView = selectableTextView(at: event.locationInWindow) else { return false }
+        if firstResponder === textView, let systemMenu = textView.menu(for: event) {
+            systemMenu.update()
+            if systemMenu.items.contains(where: {
+                $0.action == #selector(NSText.copy(_:)) && $0.isEnabled
+            }) { return false }
+        }
+        var host = textView.superview
+        while let view = host, !NSStringFromClass(type(of: view)).contains("HostingView") {
+            host = view.superview
+        }
+        guard let host, let menu = host.menu(for: event), !menu.items.isEmpty else { return false }
+        NSMenu.popUpContextMenu(menu, with: event, for: host)
+        return true
     }
 }

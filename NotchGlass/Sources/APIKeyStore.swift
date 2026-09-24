@@ -49,7 +49,7 @@ enum APIKeyStore {
     /// Which backend is active. Persisted in `UserDefaults`. When the user has
     /// never explicitly picked one, prefer a provider they already configured a
     /// key for (installs that predate this default never wrote the selection),
-    /// and otherwise default to Blend1 — the only backend that needs no setup at
+    /// and otherwise default to Notchi Balance — the only backend that needs no setup at
     /// all. Every install registers with the gateway at launch
     /// (see `AppDelegate`), so a fresh one already has an account and the welcome
     /// gift behind it, and the first question can be asked without connecting
@@ -117,7 +117,9 @@ enum APIKeyStore {
     /// The effective key to use right now for `provider`:
     /// env var → stored entry → bundled default. `nil` when none is available.
     static func current(for provider: Provider) -> String? {
-        if let env = ProcessInfo.processInfo.environment[provider.envVarName],
+        // `getenv`, not `ProcessInfo.environment`: that builds the whole
+        // environment dictionary per call, and model menus call this per render.
+        if let raw = getenv(provider.envVarName), case let env = String(cString: raw),
            !env.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return env
         }
@@ -133,7 +135,7 @@ enum APIKeyStore {
     /// True when the provider's env var is forcing a key — then the Settings field
     /// is informational only, since the env override wins.
     static func hasEnvOverride(for provider: Provider) -> Bool {
-        let env = ProcessInfo.processInfo.environment[provider.envVarName]
+        let env = getenv(provider.envVarName).map { String(cString: $0) }
         return env?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
     }
 
@@ -324,7 +326,11 @@ enum APIKeyStore {
     /// so the Settings field shows what's actually stored. An empty value means
     /// "use the provider's `defaultModel`".
     static func storedModel(for provider: Provider) -> String {
-        UserDefaults.standard.string(forKey: modelDefaultsKey(for: provider)) ?? ""
+        let stored = UserDefaults.standard.string(forKey: modelDefaultsKey(for: provider)) ?? ""
+        // Blend1 is retired: a saved pick of it reads as no pick, so it runs
+        // the provider's default, `auto-us`.
+        if provider == .nono, ModelRatings.isNonoID(stored) { return "" }
+        return stored
     }
 
     /// Save (or clear, when empty) the user's model override for `provider`.

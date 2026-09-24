@@ -591,7 +591,7 @@ private struct StatsPagerButton: View {
             Image(systemName: symbol)
                 .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
                 .foregroundStyle(tint)
-                .frame(width: 22, height: 22)
+                .frame(width: Tokens.Control.inline, height: Tokens.Control.inline)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

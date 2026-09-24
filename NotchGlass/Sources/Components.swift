@@ -984,7 +984,7 @@ struct SendButton: View {
     var action: () -> Void
     @State private var hovering = false
 
-    private var size: CGFloat { compact ? 27 : 30 }
+    private var size: CGFloat { compact ? Tokens.Control.header : Tokens.Control.chip }
 
     var body: some View {
         Button(action: action) {
@@ -1050,7 +1050,7 @@ struct StopButton: View {
     var action: () -> Void
     @State private var hovering = false
 
-    private var size: CGFloat { compact ? 27 : 30 }
+    private var size: CGFloat { compact ? Tokens.Control.header : Tokens.Control.chip }
 
     var body: some View {
         Button(action: action) {
@@ -1086,7 +1086,7 @@ struct AgentFollowUpKeyHints: View {
         // `ComposerBox` bottom-aligns trailing content so it follows the last
         // line of a growing draft. Give this label the same one-line slot as
         // the editor, keeping their text vertically centred at rest.
-        .frame(height: 27, alignment: .center)
+        .frame(height: Tokens.Control.composerSlot, alignment: .center)
         .padding(.trailing, 6)
         .accessibilityElement(children: .combine)
     }
@@ -1156,7 +1156,8 @@ struct AgentRecordBody: View {
                                 if !exchange.imageFiles.isEmpty {
                                     SavedTurnImages(files: exchange.imageFiles)
                                 }
-                                UserQuestionBubble(text: exchange.prompt, baseFont: questionFont)
+                                UserQuestionBubble(text: exchange.prompt, baseFont: questionFont,
+                                                   isAgent: true)
                             }
                         }
                         // The trail's last narration entry IS this round's report (the
@@ -1164,14 +1165,25 @@ struct AgentRecordBody: View {
                         // printed again by the answer just below. See
                         // `droppingTrailingAnswer`.
                         let trail = exchange.log.droppingTrailingAnswer(exchange.answer)
-                        if !trail.isEmpty {
-                            // Lazy: a long run's trail is hundreds of rows and this page
-                            // pins to the tail — see `isLazy`'s doc.
-                            AgentWorkTrailView(entries: trail, isLazy: true,
-                                               baseFont: answerFont)
-                        }
-                        if !exchange.answer.isEmpty {
-                            MarkdownBlocks(source: exchange.answer, baseFont: answerFont)
+                        if !trail.isEmpty || !exchange.answer.isEmpty {
+                            // A lazy trail's ideal width is the "Thinking" label, so a
+                            // hugging card wraps Chinese narration a few characters
+                            // per line. Prose takes the column; a tool-only round
+                            // still ends at its text.
+                            AnswerCard(hugs: Self.trailHugs(trail)) {
+                                VStack(alignment: .leading, spacing: 12) {
+                                    if !trail.isEmpty {
+                                        // Lazy: a long run's trail is hundreds of rows and this
+                                        // page pins to the tail — see `isLazy`'s doc.
+                                        AgentWorkTrailView(entries: trail, isLazy: true,
+                                                           baseFont: Tokens.TypeSize.stepDown(answerFont))
+                                    }
+                                    if !exchange.answer.isEmpty {
+                                        MarkdownBlocks(source: exchange.answer,
+                                                       baseFont: Tokens.TypeSize.stepDown(answerFont))
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1189,18 +1201,29 @@ struct AgentRecordBody: View {
                             if !task.liveImageFiles.isEmpty {
                                 SavedTurnImages(files: task.liveImageFiles)
                             }
-                            UserQuestionBubble(text: task.prompt, baseFont: questionFont)
+                            UserQuestionBubble(text: task.prompt, baseFont: questionFont,
+                                               isAgent: true)
                         }
                     } else if !task.liveImageFiles.isEmpty {
                         // A follow-up round's prompt is the trail's leading "› "
                         // marker, so its images sit directly above the trail.
                         SavedTurnImages(files: task.liveImageFiles)
                     }
-                    if !liveTail.isEmpty {
+                    // A follow-up round's "› " marker is the question, so it
+                    // stays outside the card the way a settled round's does.
+                    let liveMarker = liveTail.first.flatMap { $0.title.hasPrefix("› ") ? $0 : nil }
+                    let liveWork = liveMarker == nil ? liveTail : Array(liveTail.dropFirst())
+                    if let liveMarker {
+                        UserQuestionBubble(text: String(liveMarker.title.dropFirst(2)),
+                                           baseFont: questionFont, isAgent: true)
+                    }
+                    AnswerCard(hugs: Self.trailHugs(liveWork)) {
+                    VStack(alignment: .leading, spacing: 12) {
+                    if !liveWork.isEmpty {
                         // `live`: the trailing block is still being written, so it
                         // must not fold under the reader.
-                        AgentWorkTrailView(entries: liveTail, isLazy: true, live: true,
-                                           baseFont: answerFont)
+                        AgentWorkTrailView(entries: liveWork, isLazy: true, live: true,
+                                           baseFont: Tokens.TypeSize.stepDown(answerFont))
                     }
                     // The collapsed row's ticker, following the trail — what the run
                     // is doing right now. Same step-under-the-answer face a chat wait
@@ -1216,10 +1239,13 @@ struct AgentRecordBody: View {
                     if !NotchBody.trailTailIsStreamingProse(task.log),
                        !trailAlreadyShowsActivity {
                         CrossfadeText(text: activity,
-                                      font: max(Tokens.TypeSize.meta, answerFont - 2), color: Tokens.text3)
+                                      font: max(Tokens.TypeSize.meta, Tokens.TypeSize.stepDown(answerFont) - 2),
+                                      color: Tokens.text3)
                             .tracking(-0.1)
                             .lineLimit(1)
                             .padding(.vertical, 2)
+                    }
+                    }
                     }
                 }
             }
@@ -1227,6 +1253,15 @@ struct AgentRecordBody: View {
             Color.clear.frame(height: 1).id(bottomID)
         }
         .environment(\.answerMediaBaseDirectory, task.folder)
+    }
+
+    /// Tool rows report a real line width and can hug. Narration and thinking
+    /// do not: the lazy stack sizes itself to the fold header, and the paragraph
+    /// then wraps inside that.
+    private static func trailHugs(_ entries: [AgentLogEntry]) -> Bool {
+        !entries.contains {
+            !$0.mono && !$0.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
     }
 }
 
@@ -1269,10 +1304,9 @@ struct ComposerBox<Placeholder: View, Trailing: View>: View {
     var pulse: AnyHashable? = nil
     var pulseTint: Color = .white
     /// The field's slot floor — the height the box holds while the text is one
-    /// line, before it grows. 27 (+12 of padding = a 39pt box) is the standalone
-    /// default; the split view's bottom rail passes 22 so the box comes out 34pt,
+    /// line, before it grows. Plus 12 of padding it comes out at the rail's 34pt,
     /// the same height as the round chips it sits between.
-    var slotFloor: CGFloat = 27
+    var slotFloor: CGFloat = Tokens.Control.composerSlot
     var onSubmit: () -> Void
     /// Let the owning compose attach a clipboard image before the editor falls
     /// back to its ordinary text paste. Follow-up surfaces opt in only when the
@@ -1296,7 +1330,7 @@ struct ComposerBox<Placeholder: View, Trailing: View>: View {
     private var fieldHeight: CGFloat {
         height > 0 ? height : PromptField.lineHeight(for: fontSize)
     }
-    /// The box's own outline: the field's slot (27pt at rest, taller once the
+    /// The box's own outline: the field's slot (22pt at rest, taller once the
     /// text wraps) plus 6pt of padding top and bottom.
     private var shape: RoundedRectangle {
         NotchBody.composerShape(height: max(slotFloor, fieldHeight) + 12)
@@ -1354,7 +1388,10 @@ struct ComposerBox<Placeholder: View, Trailing: View>: View {
             .animation(.easeOut(duration: 0.16), value: caretWidth == 0)
             .animation(.easeOut(duration: 0.16), value: text.isEmpty)
 
+            // Held to the slot so a 26pt Send/Stop in the 22pt slot overhangs
+            // into the padding instead of growing the box.
             trailing()
+                .frame(height: slotFloor)
         }
         .padding(.leading, 13)
         .padding(.trailing, 6)
@@ -1519,11 +1556,10 @@ struct GlassIconButton: View {
     /// Which side the hover hint floats on — `.top` by default, since these chips
     /// sit at the panel's bottom edge where up is where the room is.
     var tipEdge: VerticalEdge = .top
-    var size: CGFloat = 30
-    /// Glyph point size inside the capsule. Defaults to the original 14pt; the
-    /// compact header corners pass a smaller value so the glass reads as a quiet
-    /// mark rather than a full button.
-    var glyphSize: CGFloat = 14
+    var size: CGFloat = Tokens.Control.chip
+    /// Glyph point size inside the capsule. The compact header corners pass a
+    /// smaller value so the glass reads as a quiet mark rather than a full button.
+    var glyphSize: CGFloat = Tokens.TypeSize.form
     /// Whether the hover tooltip shows. Some of these chips are so familiar they
     /// shouldn't cover the panel with a hint; the accessibility label stays either
     /// way.
@@ -1788,6 +1824,9 @@ struct GlassTextButton: View {
     /// Text size; the capsule's padding scales with it so the pill stays
     /// proportional. Defaults to the original 11pt.
     var fontSize: CGFloat = Tokens.TypeSize.meta
+    /// Washes the glass in a colour, for the one action a surface leads with.
+    /// A tinted pill reads in brighter ink.
+    var tint: Color? = nil
     var action: () -> Void
 
     @State private var hovering = false
@@ -1796,10 +1835,12 @@ struct GlassTextButton: View {
         Button(action: action) {
             Text(title)
                 .font(.sf(fontSize, weight: .medium))
-                .foregroundStyle(hovering ? Tokens.text2 : Tokens.text4)
+                .foregroundStyle(tint == nil
+                                 ? (hovering ? Tokens.text2 : Tokens.text4)
+                                 : (hovering ? Tokens.text1 : Tokens.text2))
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
-                .glassCapsule(in: Capsule(), brighter: hovering)
+                .glassCapsule(in: Capsule(), brighter: hovering, tint: tint)
                 .contentShape(Capsule())
         }
         .buttonStyle(GlassPressStyle())
@@ -1870,7 +1911,7 @@ struct PanelBackButton: View {
             Image(systemName: "chevron.left")
                 .font(.sf(Tokens.TypeSize.form, weight: .semibold))
                 .foregroundStyle(Tokens.text2)
-                .frame(width: 26, height: 26)
+                .frame(width: Tokens.Control.header, height: Tokens.Control.header)
                 .contentShape(Rectangle())
         }
         .buttonStyle(RecentEntryStyle())
@@ -2450,6 +2491,7 @@ private struct ConfirmDialogPressStyle: ButtonStyle {
 struct ThinkingDots: View {
     var dot: CGFloat = 6
     var spacing: CGFloat = 7
+    var minHeight: CGFloat = 22
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var phase = false
 
@@ -2470,7 +2512,7 @@ struct ThinkingDots: View {
                     )
             }
         }
-        .frame(minHeight: 22)
+        .frame(minHeight: minHeight)
         .onAppear { if !reduceMotion { phase = true } }
     }
 }
@@ -3378,6 +3420,8 @@ struct WaitElapsedSuffix: View {
     /// this — the wait it measures is over, and a stopwatch still running beside
     /// a finished result reads as though the round were somehow still going.
     var stopped: TimeInterval? = nil
+    /// Space before the label, present only while the label is.
+    var leadingGap: CGFloat = 0
 
     /// How long the wait must run before the timer surfaces.
     private static let threshold: TimeInterval = 6
@@ -3387,6 +3431,7 @@ struct WaitElapsedSuffix: View {
             .font(.sf(font - 2))
             .monospacedDigit()
             .foregroundStyle(Tokens.text4)
+            .padding(.leading, leadingGap)
             .transition(.opacity)
     }
 
@@ -3442,7 +3487,7 @@ private struct ReadingSourceRow: View {
 /// scrolls its overflow inside it, so a seven-source round shows the same height
 /// as a two-source one and can never push the composer down the panel.
 ///
-/// The shell is `SourcePopover`'s, deliberately: explicit height math (a
+/// The shell uses explicit height math (a
 /// `ScrollView` has no intrinsic size to cap), `.basedOnSize` bounce so a short
 /// list doesn't rubber-band, and the shared `scrollEdgeFade` taper instead of a
 /// hard cut at both overflow edges.
@@ -3457,7 +3502,13 @@ private struct ReadingSourceList: View {
     private static let visibleRows = 4
     private static let rowSpacing: CGFloat = 2
     private static let fade: CGFloat = 12
-    private static let bottomID = "reading-list-tail"
+    private static let space = "reading-list"
+
+    /// How far the rows have scrolled, and how far their end sits past the
+    /// viewport's bottom edge. Each edge fades only while rows are actually
+    /// hidden behind it, so the first row is not dimmed at rest.
+    @State private var scrolledFromTop: CGFloat = 0
+    @State private var hiddenBelow: CGFloat = 0
 
     private var rowHeight: CGFloat { PromptField.lineHeight(for: font) }
 
@@ -3472,33 +3523,47 @@ private struct ReadingSourceList: View {
     }
 
     var body: some View {
-        let scrolls = sources.count > Self.visibleRows
         let height = Self.viewportHeight(count: sources.count, font: font)
         ScrollViewReader { proxy in
             ScrollView(.vertical, showsIndicators: false) {
+                // No trailing anchor view: one added 3pt past the last row, so a
+                // list of four or fewer could still be dragged by that much.
                 VStack(alignment: .leading, spacing: Self.rowSpacing) {
                     ForEach(sources) { source in
                         ReadingSourceRow(source: source, font: font)
                             .frame(height: rowHeight)
                     }
-                    Color.clear.frame(height: 1).id(Self.bottomID)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .background(GeometryReader { geo in
+                    let frame = geo.frame(in: .named(Self.space))
+                    Color.clear
+                        .onAppear { track(frame, viewport: height) }
+                        .onChange(of: frame) { _, f in track(f, viewport: height) }
+                })
             }
+            .coordinateSpace(name: Self.space)
             .scrollBounceBehavior(.basedOnSize)
-            .scrollEdgeFade(top: scrolls, bottom: scrolls,
+            .scrollEdgeFade(top: scrolledFromTop > 0.5, bottom: hiddenBelow > 0.5,
                             topFade: Self.fade, bottomFade: Self.fade)
             .frame(height: height)
             // Only fires on growth AFTER the first layout, which is exactly the
             // case worth chasing: a later round adding addresses. A batch that is
             // already complete when the list appears opens at its first result.
             .onChange(of: sources.count) { _, _ in
-                guard sticksToBottom else { return }
+                guard sticksToBottom, let last = sources.last else { return }
                 withAnimation(.easeOut(duration: 0.2)) {
-                    proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                    proxy.scrollTo(last.id, anchor: .bottom)
                 }
             }
         }
+    }
+
+    private func track(_ frame: CGRect, viewport: CGFloat) {
+        let top = max(0, -frame.minY)
+        let below = max(0, frame.maxY - viewport)
+        if top != scrolledFromTop { scrolledFromTop = top }
+        if below != hiddenBelow { hiddenBelow = below }
     }
 }
 
@@ -3523,8 +3588,7 @@ private struct ReadingSourceList: View {
 /// momentarily empty (the "空白帧" between questions).
 struct AssistantTurnView: View {
     let text: String
-    /// Still in flight. Gates the wait overlay and holds the source badge back
-    /// until the answer settles (so it doesn't jump as rounds add sources).
+    /// Still in flight. Gates the wait overlay until real answer text lands.
     var streaming: Bool = false
     /// The live tool-activity line ("Searching the web…") when a tool is running,
     /// else nil — takes the wait slot over the mood word while present.
@@ -3539,30 +3603,18 @@ struct AssistantTurnView: View {
     /// the wait line (only surfaces past its threshold; see `WaitElapsedSuffix`).
     var thinkingSince: Date? = nil
     var sources: [WebSource] = []
-    @Binding var hoveredSourceID: UUID?
-    @Binding var sourceCloseWork: DispatchWorkItem?
     var baseFont: CGFloat = Tokens.TypeSize.reading
     var color: Color = Tokens.text1
     /// This turn is an agent run's report (reopened agent session). Its footer drops
     /// the "Copy as plain text" action — an agent report is copied as Markdown only.
     var isAgent: Bool = false
     /// When this agent report's run finished — the reopened record's own timestamp.
-    /// Non-nil only on a settled agent report turn; renders as a quiet completion
-    /// stamp at the end of the footer. `nil` (no stamp) for ordinary chat answers.
+    /// Non-nil only on a settled agent report turn; shown as a quiet completion
+    /// stamp in the right-click menu. `nil` (no stamp) for ordinary chat answers.
     var completedAt: Date? = nil
-    /// Whether this answer surface carries the full action row.
-    var showsFooter: Bool = true
-    /// Show the footer from the answer's first text instead of waiting for the
-    /// request to settle. The compact pointer-side card runs this way: its window
-    /// sizes itself to its content, so a footer that appeared only at settle would
-    /// add its height after the fact and land below the fold while the AppKit
-    /// frame animation caught up. Present from the first token, it is simply part
-    /// of the stack the window is measured from. Regenerate stays disabled until
-    /// cleanup ends either way.
-    var stabilizesFooterWhileStreaming: Bool = false
-    /// Keep the model info and agent completion stamp in the footer. The main
-    /// panel's agent report moves those two pieces into the command chip beside
-    /// its follow-up composer; detached threads keep the original footer metadata.
+    /// Keep the model info and agent completion stamp in the right-click menu.
+    /// The main panel's agent report moves those two pieces into the command chip
+    /// beside its follow-up composer; detached threads keep the original metadata.
     var showsFooterMetadata: Bool = true
     var onInAppCopy: (() -> Void)? = nil
     /// Re-run this answer's question for a fresh take. Non-nil only on the LAST
@@ -3580,18 +3632,27 @@ struct AssistantTurnView: View {
     var regenModel: String? = nil
     /// The concrete model the provider actually ran, echoed back in the stream —
     /// the real reply behind the `openrouter/free` auto-router. When present it
-    /// takes precedence over `regenModel` in the footer caption, shown as a bare
+    /// takes precedence over `regenModel` in the menu caption, shown as a bare
     /// model name (vendor prefix and `:free` suffix stripped).
     var answerModel: String? = nil
-    /// Thinking-channel text from a reasoning model, shown folded above the
-    /// answer. `nil` when this turn had none.
-    var reasoning: String? = nil
+    /// An agent turn's work trail. Drawn at the top of the answer card.
+    var agentTrail: [AgentLogEntry] = []
     /// A clarifying question the model posed via the `ask_user` tool, still
     /// waiting on the user — renders as an option card under the (possibly still
     /// empty) answer. Non-nil only while this turn streams.
     var pendingQuestion: NotchModel.PendingUserQuestion? = nil
     /// The user tapped an option on the question card: (question id, option text).
     var onChooseOption: ((UUID, String) -> Void)? = nil
+    /// The user's words this answer replies to. An address they wrote may come
+    /// back as a link card, like a page the search found (`LinkCardSplitter`).
+    var question: String = ""
+    /// Pages the answer handed over that were found open (`Turn.sharedLinks`),
+    /// drawn as cards like a page the search found.
+    var sharedLinks: [String] = []
+    /// The turn this is, so the bubbles after the first land at a person's
+    /// pace (`BubblePacer`). `nil` shows them all at once.
+    var turnID: UUID? = nil
+    @ObservedObject private var pacer = BubblePacer.shared
 
     /// One opacity beat, shared by the wait-overlay fade so the handoff reads as
     /// part of the same calm rhythm rather than a separate flourish.
@@ -3604,9 +3665,9 @@ struct AssistantTurnView: View {
     /// carries no caption.
     static func footerModelCaption(answerModel: String?, regenModel: String?) -> String? {
         if let answerModel, !answerModel.isEmpty {
-            return ModelRatings.isNonoID(answerModel) ? ModelRatings.nonoName(for: answerModel) : bareModelName(answerModel)
+            return ModelRatings.nonoDisplayName(for: answerModel) ?? bareModelName(answerModel)
         }
-        if let regenModel, ModelRatings.isNonoID(regenModel) { return ModelRatings.nonoName(for: regenModel) }
+        if let regenModel, let name = ModelRatings.nonoDisplayName(for: regenModel) { return name }
         return regenModel
     }
 
@@ -3641,20 +3702,22 @@ struct AssistantTurnView: View {
         }
     }
 
-    /// True while the cursor is anywhere over this turn (answer text or footer).
-    /// Drives the footer's island-hover: the action icons rest nearly invisible
-    /// and surface together as one toolbar when the cursor enters the answer,
-    /// instead of each icon lighting up on its own.
-    @State private var turnHovered = false
-
     /// The reader's own last call on the reading block, once they've made one.
     /// `nil` = still following the round itself (open while it reads, shut once it
     /// answers). A tap latches this and the block stops steering itself.
     @State private var userExpanded: Bool? = nil
+    /// The wait line's ideal width, which sizes the card before the answer has text.
+    @State private var waitRowWidth: CGFloat = 0
 
     /// False until the block has drawn once, so its first appearance can OPEN
     /// rather than pop in at full height.
     @State private var blockOpened = false
+    /// The list's laid-out height. Written only inside `withAnimation`, so the
+    /// card and the island interpolate this instead of cutting to the open or
+    /// closed size in one frame.
+    @State private var revealedListHeight: CGFloat = 0
+    /// Chevron and list opacity, flipped in the same transaction as the height.
+    @State private var listExpandedVisual = false
 
     /// The gutter the orb occupies on the block's headline while the round is
     /// still working. It CLOSES with the orb rather than being held empty: a
@@ -3669,7 +3732,32 @@ struct AssistantTurnView: View {
     /// at the answer's own size, which made a running tool read as loudly as the
     /// reply it was still fetching. The elapsed suffix takes its own −2 from here,
     /// so the two keep the gradient they always had.
-    private var waitFont: CGFloat { max(Tokens.TypeSize.meta, baseFont - 2) }
+    private var waitFont: CGFloat { max(Tokens.TypeSize.meta, cardFont - 2) }
+
+    /// How far the pre-answer wait row sits left of the text edge. The orb is
+    /// taller than the text line, so at the bubble's 14pt side padding it had
+    /// about 6pt above and below it and 14pt to its left. Pulled left by this
+    /// much, it is concentric with the pill's rounded end: the same gap on the
+    /// left as on the top and bottom.
+    private var waitOrbPull: CGFloat {
+        max(0, ChatBubbleChrome.horizontalPad - waitOrbInset)
+    }
+
+    /// The orb's distance from the card's top and left edges in the wait pill.
+    /// The reading block's working headline uses the same inset, so "Searching…"
+    /// and "Reading 6 results…" put the orb in the same place.
+    private var waitOrbInset: CGFloat {
+        ChatBubbleChrome.verticalPad + (Self.lineHeight(cardFont) - Self.waitOrbSize) / 2
+    }
+
+    /// The answer card's text size: one step under the surface's reading size.
+    private var cardFont: CGFloat { Tokens.TypeSize.stepDown(baseFont) }
+
+    /// The height SwiftUI gives one line of `.sf(size, weight: .medium)` text.
+    static func lineHeight(_ size: CGFloat) -> CGFloat {
+        let font = NSFont.systemFont(ofSize: size, weight: .medium)
+        return ceil(font.ascender - font.descender + font.leading)
+    }
 
     /// True exactly while the post-search read cue is on screen — the window in
     /// which page titles should rotate. Drives both `waitLine` and the timer.
@@ -3684,7 +3772,20 @@ struct AssistantTurnView: View {
     /// tool-round away. Treating whitespace-only as empty keeps the wait lit until
     /// genuine answer text lands. Re-evaluated live (not latched) so the wait
     /// comes back whenever the answer is momentarily empty again between rounds.
-    private var hasText: Bool { !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    private var hasText: Bool { hasLeadText || linkLayout.hasMore }
+
+    /// The answer cut into bubbles: the first message, then each later
+    /// message and each page handed over on a line of its own as a card.
+    private var linkLayout: LinkCardLayout {
+        LinkCardSplitter.layout(renderedText, streaming: streaming,
+                                sources: sources, question: question,
+                                shared: sharedLinks)
+    }
+
+    /// Whether the first bubble has text of its own.
+    private var hasLeadText: Bool {
+        !linkLayout.lead.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     /// The answer as the user should actually read/copy it. Provider-native
     /// citation metadata turns numeric markers into clickable Markdown links.
@@ -3698,23 +3799,12 @@ struct AssistantTurnView: View {
                 answerModel: answerModel, regenModel: regenModel))
     }
 
-    private var showThinkingFold: Bool {
-        !isAgent && !(reasoning ?? "").isEmpty && !toolActivityOwnsWait
-    }
-
-    /// A tool is running before any answer text: the tool line ("Searching …")
-    /// is the only row shown. The thinking fold returns once the tool clears.
-    private var toolActivityOwnsWait: Bool {
-        streaming && !hasText && pendingQuestion == nil && !showsReadingBlock
-            && orbState != .composing && activity != nil
-    }
-
-    /// The thinking row's own left inset. Matches the source list's: while the
-    /// reading block's orb gutter is open, the fold sits in the same text column
-    /// as the headline above it; it closes with that gutter.
-    private var thinkingFoldIndent: CGFloat {
-        showsReadingBlock && streaming && !hasText
-            ? Self.waitOrbSize + Self.waitOrbGap : 0
+    /// The empty answer takes no height under a choice card or the reading
+    /// block: those are the whole card until the first token lands. Left at
+    /// its line box under the reading block, it added the stack's 6pt under
+    /// the list, so the card's bottom edge sat further out than its top.
+    private var answerCollapsed: Bool {
+        !hasLeadText && (pendingQuestion != nil || linkLayout.hasMore || showsReadingBlock)
     }
 
     /// Show the wait overlay while streaming with no visible answer yet. The wait
@@ -3724,11 +3814,10 @@ struct AssistantTurnView: View {
     /// the streaming answer for up to a dwell). A host mid-glance just dissolves
     /// into the answer on the shared fade. Suppressed while an `ask_user`
     /// question card is up: the card IS the wait state then, and a "Waiting for
-    /// your choice…" line above it would just say it twice. Also suppressed once
-    /// a thinking fold is on screen — that row is the wait.
+    /// your choice…" line above it would just say it twice. Reasoning streaming
+    /// in does not end it: the thinking fold waits for the first answer token.
     private var showWait: Bool {
         streaming && !hasText && pendingQuestion == nil && !showsReadingBlock
-            && ((reasoning ?? "").isEmpty || isAgent || toolActivityOwnsWait)
     }
 
     /// The mid-answer activity row. Once real text lands, `showWait` is off for
@@ -3741,13 +3830,14 @@ struct AssistantTurnView: View {
     /// Suppressed under an `ask_user` card exactly like `showWait` (the card is
     /// the wait state then).
     private var showActivityRow: Bool {
-        streaming && hasText && activity != nil && pendingQuestion == nil
+        streaming && hasText && toolRunning && pendingQuestion == nil
     }
 
-    /// A compact answer's toolbar follows the renderer's own completion edge, not
-    /// request cleanup. Every other surface preserves settled-only behavior.
-    private var footerIsVisible: Bool {
-        !streaming || stabilizesFooterWhileStreaming
+    /// A tool is running. "Thinking…" and reasoning summaries arrive as
+    /// activity too, on the `.composing` orb; those are not tools, and the wait
+    /// shows the three dots for them.
+    private var toolRunning: Bool {
+        activity != nil && orbState != .composing
     }
 
     /// The pages this answer pulled in, one row per distinct host in first-seen
@@ -3779,6 +3869,14 @@ struct AssistantTurnView: View {
     /// Open while the round is still reading, shut once it has spoken — unless the
     /// reader has taken the block over, in which case their call stands.
     private var readingExpanded: Bool { userExpanded ?? !hasText }
+
+    /// Height the list should settle at. The frame reads `revealedListHeight`,
+    /// not this: a direct write snaps the island, because a scoped `.animation`
+    /// does not turn that layout change into one.
+    private var readingListTarget: CGFloat {
+        guard readingExpanded, blockOpened else { return 0 }
+        return ReadingSourceList.viewportHeight(count: readingSources.count, font: waitFont) + 5
+    }
 
     /// The block's one headline, evolving in place: the live wait line while the
     /// round is still working ("Reading 8 results…", "Searching …"), then the
@@ -3814,15 +3912,17 @@ struct AssistantTurnView: View {
             // smaller suffix's baseline lands ~0.5pt above the word's — a whole
             // retina pixel of visible float right beside it. The orb rides the
             // same baseline, optically centred on the glyphs.
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 0) {
                 CrossfadeText(text: line, font: waitFont, color: Tokens.text2)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 // The elapsed suffix sits OUTSIDE the dissolving word (a sibling,
                 // fixed size) so the ticking seconds never ride the word-change
                 // transition, and a long activity line truncates while the timer
-                // stays visible.
-                WaitElapsedSuffix(since: thinkingSince, font: waitFont)
+                // stays visible. Its gap belongs to the label: as stack spacing it
+                // stayed reserved before the timer shows, widening the pill's
+                // right side by 8pt.
+                WaitElapsedSuffix(since: thinkingSince, font: waitFont, leadingGap: 8)
                     .fixedSize()
             }
         }
@@ -3843,8 +3943,6 @@ struct AssistantTurnView: View {
     private var readingBlock: some View {
         let expanded = readingExpanded
         let working = streaming && !hasText
-        let listHeight = ReadingSourceList.viewportHeight(count: readingSources.count,
-                                                          font: waitFont)
         // Spacing 0: the gap under the headline is the LIST's own top padding, so
         // it collapses with the list instead of leaving a stranded band behind.
         return VStack(alignment: .leading, spacing: 0) {
@@ -3877,11 +3975,6 @@ struct AssistantTurnView: View {
                                       shimmers: working)
                             .lineLimit(1)
                             .truncationMode(.tail)
-                        Image(systemName: "chevron.down")
-                            .font(.sf(waitFont - 4, weight: .semibold))
-                            .foregroundStyle(Tokens.text4)
-                            .rotationEffect(.degrees(expanded ? 0 : -90))
-                            .centeredOnTextGlyphs(fontSize: waitFont)
                     }
                 }
                 .contentShape(Rectangle())
@@ -3891,6 +3984,9 @@ struct AssistantTurnView: View {
             // full size and only crossfade it, which is what made open and shut
             // read as a jump. Clipped so the rows slide out of view under the
             // headline rather than overrunning the answer while the frame closes.
+            // The height itself is a state value written inside `withAnimation`
+            // (`revealReadingList`): a scoped animation on this frame does not
+            // carry the card or the island, so those cut to the new height.
             ReadingSourceList(sources: readingSources, font: waitFont,
                               sticksToBottom: working)
                 .padding(.top, 5)
@@ -3898,109 +3994,110 @@ struct AssistantTurnView: View {
                 // orb's gutter while the round works, and the block's own left edge
                 // once that gutter has closed.
                 .padding(.leading, working ? Self.waitOrbSize + Self.waitOrbGap : 0)
-                .frame(height: expanded && blockOpened ? listHeight + 5 : 0,
-                       alignment: .top)
+                .frame(height: revealedListHeight, alignment: .top)
                 .clipped()
-                .opacity(expanded && blockOpened ? 1 : 0)
-                .allowsHitTesting(expanded)
+                .opacity(listExpandedVisual ? 1 : 0)
+                .allowsHitTesting(expanded && revealedListHeight > 1)
         }
-        .animation(.easeOut(duration: Self.blockMotion), value: expanded)
+        // While the round works, the orb sits at the wait pill's inset
+        // (`waitOrbInset`) from the card's left edge, and from its top edge
+        // when the block leads the card.
+        .padding(.leading, working ? -waitOrbPull : 0)
+        .padding(.top, topInset(working: working))
         .animation(.easeOut(duration: Self.blockMotion), value: working)
-        .animation(.easeOut(duration: Self.blockMotion), value: readingSources.count)
-        // The first draw OPENS instead of popping in at full height — the same
-        // motion the block later closes with, run in reverse.
         .onAppear {
-            withAnimation(.easeOut(duration: Self.blockMotion)) { blockOpened = true }
+            blockOpened = true
+            let target = readingExpanded
+                ? ReadingSourceList.viewportHeight(count: readingSources.count, font: waitFont) + 5
+                : 0
+            revealReadingList(to: target)
+        }
+        .onChange(of: readingListTarget) { _, target in
+            guard target != revealedListHeight else { return }
+            revealReadingList(to: target)
         }
     }
 
-    /// The block's one timing. Every part of the handover — height, orb, words,
-    /// chevron — runs on this, so they read as one movement rather than several.
+    /// Space above the reading block when it leads the card. Working: the orb at
+    /// the wait pill's inset. Settled with the list open: 4pt more than the
+    /// bubble's own inset. Settled and collapsed: the bubble's inset.
+    private func topInset(working: Bool) -> CGFloat {
+        guard agentTrail.isEmpty else { return 0 }
+        if working { return waitOrbInset - ChatBubbleChrome.verticalPad }
+        return listExpandedVisual ? 4 : 0
+    }
+
+    /// Interpolate the list's height, and the chevron with it. Owning the
+    /// transaction is what lets the card and the island follow the height
+    /// instead of jumping to it.
+    private func revealReadingList(to target: CGFloat) {
+        withAnimation(.spring(response: 0.36, dampingFraction: 1)) {
+            revealedListHeight = target
+            listExpandedVisual = target > 0
+        }
+    }
+
+    /// Timing for the orb gutter closing as the round finishes speaking. The
+    /// list's height uses its own spring (`revealReadingList`) so the card
+    /// follows it continuously.
     private static let blockMotion: TimeInterval = 0.26
 
+    /// Whether the card has anything to hold. An `ask_user` card on its own is
+    /// already a card; an empty answer card around nothing would be a blank box.
+    private var cardHasContent: Bool {
+        hasLeadText || showWait || showsReadingBlock
+            || !agentTrail.isEmpty || (showActivityRow && !linkLayout.hasMore)
+    }
+
     var body: some View {
+        let layout = linkLayout
+        let landed = turnID.map { pacer.shown($0, total: layout.rest.count, streaming: streaming) }
+            ?? layout.rest.count
+        let typing = turnID.map { pacer.typing($0) } ?? false
+        let cardCount = layout.rest.filter {
+            if case .link = $0 { return true }
+            return false
+        }.count
         VStack(alignment: .leading,
                spacing: pendingQuestion != nil && !hasText ? 0 : 6) {
-            // What this answer read (see `readingBlock`) — present from the first
-            // result through the settled turn.
-            if showsReadingBlock {
-                readingBlock
-                    .padding(.bottom, 1)
-                    .transition(.opacity)
+            // An answer that opens with a card has no first bubble unless the
+            // reading block or the work trail needs one.
+            if cardHasContent || !layout.hasMore {
+                AnswerCard(visible: cardHasContent) { cardContent }
+                    .contextMenu { answerTurnMenu }
             }
-            if showThinkingFold, let reasoning {
-                // No second orb under the reading block's: one live indicator per
-                // turn. The row hangs off the same text column the headline and
-                // the source list use while that gutter is open, so dropping the
-                // orb doesn't leave the line stranded to the left of everything.
-                ThinkingFoldRow(text: reasoning,
-                                live: streaming && !hasText,
-                                thinkingSince: thinkingSince,
-                                showsOrb: !showsReadingBlock)
-                    .padding(.leading, thinkingFoldIndent)
-                    .animation(.easeOut(duration: Self.blockMotion),
-                               value: thinkingFoldIndent)
-                    .padding(.bottom, hasText ? 2 : 0)
-            }
-            // The answer — the SAME view whether streaming or settled, so the
-            // stream→settle edge never rebuilds it. While streaming it reflows in
-            // place as `text` grows; once settled it's identical but selectable.
-            // Selection stays ENABLED the whole time — including while streaming —
-            // on purpose. Toggling `.textSelection` at stream-end would swap between
-            // its two distinct modifier types (`Enabled`/`Disabled…`), changing the
-            // view's identity and re-introducing exactly the rebuild-jump this unified
-            // view exists to kill. A constant `.enabled` keeps one identity throughout,
-            // so the answer just reflows in place and never jumps. (The earlier reason
-            // to disable mid-stream — the tail-follow `scrollTo` collapsing a drag —
-            // only bites in the long, clipped/scrolling layout; the jump-free guarantee
-            // matters more, and most answers are short and never scroll.)
-            MarkdownBlocks(source: renderedText, baseFont: baseFont, color: color,
-                           onInAppCopy: onInAppCopy, streamingTail: streaming)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .textSelection(.enabled)
-                // Reserve a line's worth of height while the answer is still empty
-                // so the wait overlay has somewhere to sit and the bubble doesn't
-                // pop from zero-height to one-line when the first token lands.
-                .frame(minHeight: showWait ? baseFont * 1.6 : 0, alignment: .leading)
-                // A choice card replaces the pre-answer wait completely. The empty
-                // Markdown renderer otherwise keeps an intrinsic line box even
-                // though its source is empty, leaving a conspicuous blank band
-                // between the user bubble and the card.
-                .frame(height: (!hasText && (pendingQuestion != nil || (showThinkingFold && !showWait))) ? 0 : nil,
-                       alignment: .topLeading)
-                .clipped()
-                // The pre-stream wait: mood word, or the tool-activity line while a
-                // tool runs. An overlay (not a sibling) so it never shifts the
-                // answer; both layers stay mounted and cross-fade on their own
-                // opacity, so the slot is never blank between rounds.
-                .overlay(alignment: .topLeading) {
-                    // ONE line, crossfading in place: mood word → "Searching…" →
-                    // the page title it's reading → next page. Never two stacked
-                    // layers — `waitLine` folds all of those into a single string
-                    // so the slot just dissolves from one to the next.
-                    Group {
-                        if let waitLine { waitRow(waitLine) }
-                    }
-                    .opacity(showWait ? 1 : 0)
-                    .allowsHitTesting(false)
-                }
 
-            // The mid-answer activity row (see `showActivityRow`): the same wait
-            // row, but as a SIBLING under the growing text — an overlay would sit
-            // on top of the answer. It appears only while a tool is actually
-            // running past the first text ("Searching the web…" under a spoken
-            // preface), and dissolves when the tool clears and the answer resumes.
-            if showActivityRow, let waitLine {
-                waitRow(waitLine)
-                    // Clear the paragraph's OWN leading. Body text runs at
-                    // `lineSpacing(baseFont * 0.45)` ≈ 7pt between its lines, so
-                    // at the stack's bare 6pt this row sat tighter than the prose
-                    // it follows and read as one more line of that paragraph
-                    // rather than a separate status row. 12pt puts clear air
-                    // between the spoken preface and the tool cue under it.
-                    .padding(.top, 6)
-                    .allowsHitTesting(false)
-                    .transition(.opacity)
+            // Each later message and each page handed over on its own line is
+            // its own bubble. They land one at a time (`BubblePacer`).
+            // Keyed by page, not position: a card kept at a position another
+            // page moved into would show the other page until its own is drawn.
+            ForEach(Self.keyed(Array(layout.rest.prefix(landed))), id: \.id) { item in
+                switch item.segment {
+                case .link(let url, let label):
+                    LinkCardView(url: url, title: cardTitle(url, label: label),
+                                 large: cardCount == 1)
+                        .transition(Self.landing)
+                case .text(let body):
+                    AnswerCard {
+                        MarkdownBlocks(source: body, baseFont: cardFont, color: color,
+                                       onInAppCopy: onInAppCopy)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                    }
+                    .contextMenu { answerTurnMenu }
+                    .transition(Self.landing)
+                case .media(let body):
+                    FractionWidthLayout(fraction: AnswerCard<EmptyView>.widthFraction) {
+                        MarkdownBlocks(source: body, baseFont: cardFont, color: color)
+                    }
+                    .contextMenu { answerTurnMenu }
+                    .transition(Self.landing)
+                }
+            }
+            // The next bubble is on its way.
+            if typing {
+                typingBubble
+                    .transition(Self.landing)
             }
 
             // The `ask_user` question card: the model has paused this answer to ask
@@ -4014,128 +4111,7 @@ struct AssistantTurnView: View {
                 .padding(.top, hasText ? 2 : 0)
                 .transition(.opacity)
             }
-
-            // Answer footer: the source badge (when web-grounded, XII-118) plus a
-            // quiet toolbar of answer actions — copy · regenerate · continue in
-            // ChatGPT/Claude — in one row under the answer. Info on the left,
-            // actions in escalating order (take it → redo it → leave with it).
-            // Most surfaces wait for request settlement. A compact pointer-side
-            // answer shows the row from its first text; regenerate remains disabled
-            // until request cleanup ends. The icons share `turnHovered`.
-            if showsFooter
-                && (!streaming || stabilizesFooterWhileStreaming)
-                && (hasText || !sources.isEmpty) {
-                // Optically align the row's left edge with the answer text above
-                // it. When a bare icon leads, its 11pt glyph sits centered in a
-                // 22pt hit-frame, so it rests ~5pt inset from x=0 — the row reads
-                // as indented past the text. Pull the row back by that inset so
-                // the first glyph lands on the text's left edge. A leading source
-                // badge is a bounded pill whose capsule is already flush at x=0,
-                // so it needs no shift.
-                let leadInset: CGFloat = sources.isEmpty ? -5 : 0
-                // The same story vertically, and it's why this row crowded the
-                // answer exactly when it was web-grounded: a bare icon's 11pt
-                // glyph is centered in a 22pt hit-frame, so an icon-led row
-                // already carries ~5pt of air above the glyph, while a leading
-                // source badge is a flush capsule that carries none. The gap read
-                // ~13pt without sources and a cramped 8pt with them. Pay the badge
-                // case that difference so the footer sits the same distance under
-                // the answer either way.
-                let leadTop: CGFloat = sources.isEmpty ? 2 : 7
-                HStack(spacing: 2) {
-                    if !sources.isEmpty {
-                        SourceBadge(sources: sources,
-                                    hoveredID: $hoveredSourceID,
-                                    pendingClose: $sourceCloseWork)
-                            .padding(.trailing, 6)
-                    }
-                    if hasText {
-                        // Copy the answer verbatim — markdown syntax intact
-                        // (headings, `**bold**`, lists, code fences). The paired
-                        // plain-text button below strips that formatting.
-                        AnswerFooterButton(icon: "doc.on.doc",
-                                           help: L("result.copyMarkdown"),
-                                           rowHovered: turnHovered,
-                                           confirms: true) {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(
-                                renderedText.trimmingCharacters(in: .whitespacesAndNewlines),
-                                forType: .string
-                            )
-                            onInAppCopy?()
-                        }
-                        // Copy with every markdown mark removed — plain prose for
-                        // pasting into fields that don't render markdown. Skipped on
-                        // an agent report (the detail page copies as Markdown only).
-                        if !isAgent {
-                            AnswerFooterButton(icon: "text.alignleft",
-                                               help: L("result.copyPlainText"),
-                                               rowHovered: turnHovered,
-                                               confirms: true) {
-                                NSPasteboard.general.clearContents()
-                                NSPasteboard.general.setString(
-                                    MarkdownParser.plainText(renderedText)
-                                        .trimmingCharacters(in: .whitespacesAndNewlines),
-                                    forType: .string
-                                )
-                                onInAppCopy?()
-                            }
-                        }
-                    }
-                    if let onRegenerate {
-                        AnswerFooterRegenerateControl(
-                            help: shortcutHelp("result.regenerate", action: .regenerate),
-                            menuHelp: L("result.regenerate.with"),
-                            rowHovered: turnHovered,
-                            hasMenu: !regenerateModels.isEmpty && onRegenerateWith != nil,
-                            action: onRegenerate
-                        ) {
-                            if let onRegenerateWith {
-                                regenerateModelItems(onRegenerateWith)
-                            }
-                        }
-                        .disabled(streaming)
-                    }
-                    // The model that produced this answer — an ⓘ glyph whose
-                    // tooltip is the model name. Prefer the concrete model the
-                    // provider actually ran (the real reply behind
-                    // `openrouter/free`), shown as a bare name; fall back to the
-                    // regenerate-with pick when none was reported.
-                    if showsFooterMetadata,
-                       let caption = Self.footerModelCaption(answerModel: answerModel,
-                                                             regenModel: regenModel) {
-                        AnswerFooterButton(icon: "info.circle",
-                                           help: caption,
-                                           rowHovered: turnHovered) {}
-                    }
-                    // When the run finished — the settled agent report's completion
-                    // stamp. A quiet caption (not a button): the wall-clock time on
-                    // its own today, month·day·time once older, in the same
-                    // hover-reveal rhythm as the action icons. Its tooltip carries
-                    // the full date. Only on agent reports (`completedAt` is nil for
-                    // chat answers).
-                    if showsFooterMetadata, let completedAt {
-                        Text(completionStamp(completedAt))
-                            .font(.sf(Tokens.TypeSize.meta, weight: .medium).monospacedDigit())
-                            .foregroundStyle(Tokens.text4)
-                            .padding(.leading, 5)
-                            .opacity(turnHovered ? 0.9 : 0.4)
-                            .animation(.easeOut(duration: Tokens.hoverFade), value: turnHovered)
-                            .notchTooltip(L("result.completedAt",
-                                            completedAt.formatted(date: .abbreviated,
-                                                                  time: .shortened)))
-                    }
-                }
-                .padding(.leading, leadInset)
-                .padding(.top, leadTop)
-                .opacity(footerIsVisible ? 1 : 0)
-                .allowsHitTesting(footerIsVisible)
-                .accessibilityHidden(!footerIsVisible)
-                // No transition: the final text and this opacity land together.
-                .animation(nil, value: footerIsVisible)
-            }
         }
-        .onHover { turnHovered = $0 }
         .animation(.easeInOut(duration: Self.fade), value: showWait)
         .animation(.easeInOut(duration: Self.fade), value: showActivityRow)
         .animation(.easeInOut(duration: 0.12), value: activity != nil)
@@ -4143,6 +4119,375 @@ struct AssistantTurnView: View {
         // timeout) releases the round — same beat as the wait overlay's fade.
         .animation(.easeInOut(duration: Self.fade), value: pendingQuestion)
         .animation(.easeOut(duration: Self.fade), value: showsReadingBlock)
+        .animation(Self.landingSpring, value: landed)
+        .animation(Self.landingSpring, value: typing)
+        .onAppear { syncPacer(layout) }
+        .onChange(of: layout.rest) { _, _ in syncPacer(linkLayout) }
+        .onChange(of: streaming) { _, _ in syncPacer(linkLayout) }
+    }
+
+    /// A bubble after the first arrives the way a message does: it grows out of
+    /// its corner by the previous bubble.
+    private static let landing: AnyTransition =
+        .scale(scale: 0.85, anchor: .topLeading).combined(with: .opacity)
+    private static let landingSpring: Animation = .spring(response: 0.34, dampingFraction: 0.82)
+
+    /// The typing bubble between two bubbles: the three dots, or the running
+    /// tool's line when the model went back to search.
+    private var typingBubble: some View {
+        AnswerCard {
+            if toolRunning, let waitLine {
+                waitRow(waitLine)
+            } else {
+                ThinkingDots(minHeight: Self.lineHeight(cardFont))
+                    .fixedSize()
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    /// Each later bubble with an id that stays with it: a card by its page, a
+    /// text bubble by its place among the text bubbles.
+    private static func keyed(_ segments: [AnswerSegment]) -> [(id: String, segment: AnswerSegment)] {
+        var texts = 0
+        return segments.map { segment in
+            switch segment {
+            case .link(let url, _):
+                return ("link\u{1e}" + url.absoluteString, segment)
+            case .text, .media:
+                texts += 1
+                return ("text\u{1e}\(texts)", segment)
+            }
+        }
+    }
+
+    private func syncPacer(_ layout: LinkCardLayout) {
+        guard let turnID else { return }
+        let items: [BubblePacer.Item] = layout.rest.map { segment in
+            switch segment {
+            case .link(let url, let label): return .link(url, title: cardTitle(url, label: label))
+            case .text(let body): return .text(body.count)
+            case .media: return .media
+            }
+        }
+        pacer.sync(turnID, items: items, streaming: streaming)
+    }
+
+    /// The title a card shows until the page's own arrives: the search's title
+    /// for that page, else the link text the model wrote.
+    private func cardTitle(_ url: URL, label: String?) -> String? {
+        let target = url.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return sources.first {
+            $0.url.trimmingCharacters(in: CharacterSet(charactersIn: "/")) == target
+        }?.title ?? label
+    }
+
+    /// Everything inside the answer card: the agent's work trail or the reading
+    /// block and thinking fold, then the answer and its live activity row.
+    @ViewBuilder
+    private var cardContent: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if !agentTrail.isEmpty {
+                AgentWorkTrailView(entries: agentTrail, baseFont: cardFont)
+                    .padding(.bottom, hasText ? 6 : 0)
+            }
+            // What this answer read (see `readingBlock`) — present from the first
+            // result through the settled turn.
+            if showsReadingBlock {
+                readingBlock
+                    .padding(.bottom, hasLeadText ? 1 : 0)
+                    .transition(.opacity)
+            }
+            // The answer — the SAME view whether streaming or settled, so the
+            // stream→settle edge never rebuilds it. While streaming it reflows in
+            // place as `text` grows; once settled it's identical but selectable.
+            // Selection stays ENABLED the whole time — including while streaming —
+            // on purpose. Toggling `.textSelection` at stream-end would swap between
+            // its two distinct modifier types (`Enabled`/`Disabled…`), changing the
+            // view's identity and re-introducing exactly the rebuild-jump this unified
+            // view exists to kill. A constant `.enabled` keeps one identity throughout,
+            // so the answer just reflows in place and never jumps. (The earlier reason
+            // to disable mid-stream — the tail-follow `scrollTo` collapsing a drag —
+            // only bites in the long, clipped/scrolling layout; the jump-free guarantee
+            // matters more, and most answers are short and never scroll.)
+            MarkdownBlocks(source: linkLayout.lead, baseFont: cardFont, color: color,
+                           onInAppCopy: onInAppCopy,
+                           streamingTail: streaming && !linkLayout.hasMore)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
+                .contextMenu { answerTurnMenu }
+                // Reserve a line's worth of height while the answer is still empty
+                // so the wait overlay has somewhere to sit and the bubble doesn't
+                // pop from zero-height to one-line when the first token lands.
+                // Exactly one text line: a one-line question bubble is the same
+                // line plus the same padding, so the waiting card matches it.
+                .frame(height: showWait ? Self.lineHeight(cardFont) : nil, alignment: .leading)
+                // The card hugs its ideal width; while the answer is still empty,
+                // that is the wait line's width (measured below).
+                .frame(idealWidth: showWait ? waitRowWidth : nil, alignment: .leading)
+                // A choice card replaces the pre-answer wait completely. The empty
+                // Markdown renderer otherwise keeps an intrinsic line box even
+                // though its source is empty, leaving a conspicuous blank band
+                // between the user bubble and the card.
+                .frame(height: answerCollapsed ? 0 : nil, alignment: .topLeading)
+                .clipped()
+                // A zero-height row still takes the stack's 6pt spacing, which
+                // left a choice-card-only turn with a 6pt band above the card.
+                .padding(.top, answerCollapsed ? -6 : 0)
+                // The pre-stream wait: mood word, or the tool-activity line while a
+                // tool runs. An overlay (not a sibling) so it never shifts the
+                // answer; both layers stay mounted and cross-fade on their own
+                // opacity, so the slot is never blank between rounds.
+                // Centred, not top-pinned: the orb is taller than the one-line
+                // slot, and pinned to the top it hung below the card's middle.
+                .overlay(alignment: .leading) {
+                    // ONE line, crossfading in place: mood word → "Searching…" →
+                    // the page title it's reading → next page. Never two stacked
+                    // layers — `waitLine` folds all of those into a single string
+                    // so the slot just dissolves from one to the next.
+                    // Measured at its ideal width: the wait line is an overlay,
+                    // so the hugging card would otherwise size itself to the
+                    // empty answer under it. With no tool running, the wait is
+                    // the three dots (the chat-app typing indicator) instead of
+                    // the orb and mood word; a tool's line still names the tool.
+                    Group {
+                        if !toolRunning {
+                            ThinkingDots(minHeight: Self.lineHeight(cardFont))
+                                .fixedSize()
+                                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
+                                    waitRowWidth = $0
+                                }
+                                .transition(.opacity)
+                        } else if let waitLine {
+                            waitRow(waitLine)
+                                .background(alignment: .leading) {
+                                    waitRow(waitLine)
+                                        .fixedSize()
+                                        .hidden()
+                                        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
+                                            waitRowWidth = $0 - waitOrbPull
+                                        }
+                                }
+                                // Negative padding, not an offset: it also widens the width
+                                // offered to the row, so the line keeps its full length.
+                                .padding(.leading, -waitOrbPull)
+                                .transition(.opacity)
+                        }
+                    }
+                    .opacity(showWait ? 1 : 0)
+                    .allowsHitTesting(false)
+                }
+
+            // The mid-answer activity row (see `showActivityRow`): the same wait
+            // row, but as a SIBLING under the growing text — an overlay would sit
+            // on top of the answer. It appears only while a tool is actually
+            // running past the first text ("Searching the web…" under a spoken
+            // preface), and dissolves when the tool clears and the answer resumes.
+            if showActivityRow, !linkLayout.hasMore, let waitLine {
+                waitRow(waitLine)
+                    // Clear the paragraph's OWN leading. Body text runs at
+                    // `lineSpacing(baseFont * 0.45)` ≈ 7pt between its lines, so
+                    // at the stack's bare 6pt this row sat tighter than the prose
+                    // it follows and read as one more line of that paragraph
+                    // rather than a separate status row. 12pt puts clear air
+                    // between the spoken preface and the tool cue under it.
+                    .padding(.top, 6)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+            }
+        }
+    }
+
+    /// Copy the answer verbatim — markdown syntax intact (headings, `**bold**`,
+    /// lists, code fences).
+    private func copyAnswerMarkdown() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(
+            renderedText.trimmingCharacters(in: .whitespacesAndNewlines),
+            forType: .string
+        )
+        onInAppCopy?()
+        Haptics.confirm()
+    }
+
+    /// Copy with every markdown mark removed — plain prose for pasting into
+    /// fields that don't render markdown.
+    private func copyAnswerPlainText() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(
+            MarkdownParser.plainText(renderedText)
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            forType: .string
+        )
+        onInAppCopy?()
+        Haptics.confirm()
+    }
+
+    /// Right-click on the answer bubble. Same actions the footer icons used to
+    /// carry (copy, copy as plain text, regenerate, which model answered),
+    /// grouped like a Messages context menu. Reactions are not in this menu yet.
+    @ViewBuilder
+    private var answerTurnMenu: some View {
+        if hasText {
+            Button {
+                copyAnswerMarkdown()
+            } label: {
+                Label(L("result.copyMarkdown"), systemImage: "doc.on.doc")
+            }
+            if !isAgent {
+                Button {
+                    copyAnswerPlainText()
+                } label: {
+                    Label(L("result.copyPlainText"), systemImage: "text.alignleft")
+                }
+            }
+            if let onRegenerate {
+                Divider()
+                Button {
+                    onRegenerate()
+                } label: {
+                    Label(shortcutHelp("result.regenerate", action: .regenerate),
+                          systemImage: "arrow.clockwise")
+                }
+                .disabled(streaming)
+                if !regenerateModels.isEmpty, let onRegenerateWith {
+                    Menu {
+                        regenerateModelItems(onRegenerateWith)
+                    } label: {
+                        Label(L("result.regenerate.with"),
+                              systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .disabled(streaming)
+                }
+            }
+            if showsFooterMetadata {
+                let caption = Self.footerModelCaption(answerModel: answerModel,
+                                                      regenModel: regenModel)
+                if caption != nil || completedAt != nil {
+                    Divider()
+                }
+                if let caption {
+                    Button {} label: {
+                        Label(L("result.modelUsed", caption), systemImage: "info.circle")
+                    }
+                    .disabled(true)
+                }
+                if let completedAt {
+                    Button {} label: {
+                        Label(L("result.completedAt",
+                                completedAt.formatted(date: .abbreviated,
+                                                      time: .shortened)),
+                              systemImage: "clock")
+                    }
+                    .disabled(true)
+                }
+            }
+        }
+    }
+}
+
+/// Shared chrome for the question bubble and the answer card, so a one-line
+/// reply is the same pill as the question above it: same padding, and a corner
+/// that is half the bubble's height instead of the flatter menu radius.
+enum ChatBubbleChrome {
+    static let horizontalPad: CGFloat = 14
+    static let verticalPad: CGFloat = 8
+    /// ~half a single-line bubble — `UserQuestionBubble`'s pill.
+    static let pillRadius: CGFloat = 16.5
+    static let cardRadius: CGFloat = Tokens.Radius.menu
+    /// Cards at or under this height are a pill. Searching / a one-line answer
+    /// land here; a wrapped reply goes over and uses `cardRadius`.
+    static let pillHeight: CGFloat = 44
+
+    static func radius(forHeight height: CGFloat) -> CGFloat {
+        guard height > 0 else { return pillRadius }
+        return height <= pillHeight ? height / 2 : cardRadius
+    }
+}
+
+/// The card an answer sits in: the question bubble's recipe (`UserQuestionBubble`
+/// — faint white floor, hairline rim, a pill on one line and the menu radius
+/// once it wraps), capped at three quarters of the column so a reply reads as a
+/// message rather than the page. `visible: false` drops the chrome but keeps
+/// the same view, so the card appearing under a streaming answer never rebuilds
+/// what is inside it.
+struct AnswerCard<Content: View>: View {
+    var visible: Bool = true
+    /// False keeps the three-quarter column even when the text's ideal width is
+    /// narrower. The agent record needs this: its lazy trail reports the fold
+    /// header as its width, and a hugging card then wraps the paragraph there.
+    var hugs: Bool = true
+    @ViewBuilder let content: Content
+    @State private var cardHeight: CGFloat = 0
+
+    static var widthFraction: CGFloat { 3.0 / 4.0 }
+
+    private var radius: CGFloat {
+        visible ? ChatBubbleChrome.radius(forHeight: cardHeight) : 0
+    }
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+        FractionWidthLayout(fraction: visible ? Self.widthFraction : 1,
+                            hugs: visible && hugs) {
+            content
+                .padding(.horizontal, visible ? ChatBubbleChrome.horizontalPad : 0)
+                .padding(.vertical, visible ? ChatBubbleChrome.verticalPad : 0)
+                .background(
+                    shape
+                        .fill(Color.white.opacity(visible ? 0.06 : 0))
+                        .overlay(
+                            shape.strokeBorder(visible ? Tokens.hairline : .clear, lineWidth: 1)
+                        )
+                )
+                .contentShape(shape)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+                    cardHeight = $0
+                }
+        }
+    }
+}
+
+/// Offers its one child a fraction of the proposed width and pins it to the
+/// leading edge; the layout itself still takes the full width so the row it
+/// sits in keeps its alignment. With `hugs`, the child gets its ideal width
+/// instead when that is narrower, so a short answer's card ends at its text.
+struct FractionWidthLayout: Layout {
+    let fraction: CGFloat
+    var hugs: Bool = false
+
+    /// The child's ideal width, measured once per change of the child rather
+    /// than on every sizing and placing pass: an answer card's text measured
+    /// at an unlimited width is the costliest layout in a long thread.
+    func makeCache(subviews: Subviews) -> CGFloat? {
+        guard hugs, let child = subviews.first else { return nil }
+        return child.sizeThatFits(.unspecified).width
+    }
+
+    func updateCache(_ cache: inout CGFloat?, subviews: Subviews) {
+        cache = makeCache(subviews: subviews)
+    }
+
+    private func childWidth(ideal: CGFloat?, available: CGFloat?) -> CGFloat? {
+        guard let available else { return nil }
+        let limit = available * fraction
+        guard let ideal else { return limit }
+        return min(ideal, limit)
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout CGFloat?) -> CGSize {
+        guard let child = subviews.first else { return .zero }
+        let size = child.sizeThatFits(ProposedViewSize(width: childWidth(ideal: cache, available: proposal.width),
+                                                       height: proposal.height))
+        return CGSize(width: proposal.width ?? size.width, height: size.height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize,
+                       subviews: Subviews, cache: inout CGFloat?) {
+        guard let child = subviews.first else { return }
+        child.place(at: bounds.origin, anchor: .topLeading,
+                    proposal: ProposedViewSize(width: childWidth(ideal: cache, available: bounds.width),
+                                               height: bounds.height))
     }
 }
 
@@ -5046,11 +5391,16 @@ enum MarkdownParser {
         return rest.isEmpty ? media : [.paragraph(text: rest)] + media
     }
 
+    /// Everything before the first `?` or `#`. Not `split(…)[0]`: split drops
+    /// empty pieces, so a line of only `#` or `?` — a heading marker mid-stream,
+    /// before its space arrives — came back empty and trapped on `[0]`.
+    private static func urlPath(_ urlString: String) -> Substring {
+        urlString.prefix { $0 != "?" && $0 != "#" }
+    }
+
     /// Does the URL's path (query/fragment ignored) end in `.pdf`?
     private static func isPDFURL(_ urlString: String) -> Bool {
-        let path = urlString.split(separator: "?", maxSplits: 1)[0]
-            .split(separator: "#", maxSplits: 1)[0]
-        return path.lowercased().hasSuffix(".pdf")
+        urlPath(urlString).lowercased().hasSuffix(".pdf")
     }
 
     /// Image file types `AnswerMediaLoader` can actually decode through ImageIO.
@@ -5062,9 +5412,7 @@ enum MarkdownParser {
 
     /// Does the URL's path (query/fragment ignored) end in an image extension?
     private static func isImageURL(_ urlString: String) -> Bool {
-        let path = urlString.split(separator: "?", maxSplits: 1)[0]
-            .split(separator: "#", maxSplits: 1)[0]
-            .lowercased()
+        let path = urlPath(urlString).lowercased()
         return imageExtensions.contains { path.hasSuffix("." + $0) }
     }
 
@@ -7100,549 +7448,6 @@ private struct CodeBlockView: View {
     }
 }
 
-/// One ghost icon in a settled answer's footer toolbar — copy, regenerate, and
-/// continue-elsewhere all share this recipe. The copy affordance exists because
-/// SwiftUI selection can't cross the per-block `Text` views the answer renders
-/// through — a drag stops at every block edge, so multi-line copy needs one tap.
-///
-/// Island-hover in three levels: nearly invisible at rest, the whole row
-/// surfaces together when the cursor enters the owning turn (`rowHovered`), and
-/// the pointed-at button alone goes full — so the toolbar reads as one unit on
-/// approach, not scattered dots that light up one by one. `confirms` flips the
-/// icon to a checkmark for a beat after the tap, for copy-style actions whose
-/// effect is otherwise invisible; regenerate skips it (the answer visibly
-/// re-streaming IS the feedback).
-private struct AnswerFooterButton: View {
-    let icon: String
-    let help: String
-    /// True while the cursor is anywhere over the owning turn — brightens the
-    /// whole footer as one unit (owned by `AssistantTurnView`).
-    let rowHovered: Bool
-    var showsTooltip: Bool = true
-    var confirms: Bool = false
-    let action: () -> Void
-
-    @State private var hovering = false
-    @State private var confirmed = false
-
-    var body: some View {
-        Button {
-            action()
-            guard confirms else { return }
-            Haptics.confirm()
-            withAnimation(.easeOut(duration: 0.15)) { confirmed = true }
-            Task {
-                try? await Task.sleep(for: .seconds(1.5))
-                withAnimation(.easeOut(duration: 0.25)) { confirmed = false }
-            }
-        } label: {
-            Image(systemName: confirmed ? "checkmark" : icon)
-                .font(.sf(Tokens.TypeSize.meta, weight: .regular))
-                .foregroundStyle(confirmed ? Tokens.text2 : Tokens.text3)
-                // Native SF Symbols swap — icon morphs to the check, no hard cut.
-                .contentTransition(.symbolEffect(.replace))
-                .frame(width: 22, height: 22)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        // Rest → row hover → direct hover/checkmark: 0.25 → 0.7 → 1.
-        .opacity(confirmed || hovering ? 1.0 : rowHovered ? 0.7 : 0.25)
-        .onHover { hovering = $0 }
-        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
-        .animation(.easeOut(duration: Tokens.hoverFade), value: rowHovered)
-        .animation(.easeOut(duration: 0.15), value: confirmed)
-        .notchTooltip(help, shows: showsTooltip)
-    }
-}
-
-/// The footer's regenerate control: one button with a tail. The glyph re-runs
-/// the answer with the same model; the chevron flush against it drops the model
-/// list. The chevron exists because that pick used to live on right-click only —
-/// a menu nobody found (a trackpad user had to two-finger tap a 22pt icon to
-/// learn it was there) — and it surfaces only under the pointer on this very
-/// control, so a resting footer stays the marks it always was.
-///
-/// The two halves share ONE Liquid Glass capsule, lit whenever either is
-/// pointed at: they are two ends of a single control, and two abutting pills
-/// would say otherwise. Same material as the island's other chips
-/// (`GlassSegmentCluster`, the code block's copy chip). Nothing else in the
-/// footer takes glass — a row of standing pills would outweigh the answer above
-/// it; here the capsule is what tells you the chevron is a separate target.
-struct AnswerFooterRegenerateControl<Items: View>: View {
-    let help: String
-    let menuHelp: String
-    /// True while the cursor is anywhere over the owning turn — surfaces the
-    /// whole footer as one unit at half strength.
-    let rowHovered: Bool
-    let hasMenu: Bool
-    /// Fully hidden (and not clickable) until the owning row is hovered, instead
-    /// of resting at 0.25. Used beside the question bubble.
-    var hidesAtRest: Bool = false
-    var icon: String = "arrow.clockwise"
-    let action: () -> Void
-    @ViewBuilder var items: () -> Items
-
-    /// ONE hover flag for the whole control, read from the capsule's own tracking
-    /// area — not one per half. Two `.onHover`s meant crossing from the glyph to
-    /// the chevron went `glyph: false` → (a frame with neither half lit) →
-    /// `chevron: true`, and that empty frame collapsed the tail to zero width and
-    /// dropped the glass, only for the pointer to relight it: a visible flicker
-    /// every time you slid across the seam.
-    @State private var hovering = false
-    /// The regenerate menu is its own window. Moving onto a row is a hover-leave
-    /// of this control, which would collapse the chevron (the menu's anchor)
-    /// under the open menu. Hold the tail out for as long as tracking lasts.
-    @State private var menuHeld = false
-
-    /// The capsule's width. Narrower than the glyph's square: the chevron is a
-    /// tail, not a second icon.
-    private static var chevronWidth: CGFloat { 16 }
-
-    /// The pointer is on the control — either half, or the padding between them —
-    /// or the menu this chevron opened is still tracking.
-    private var lit: Bool { hovering || menuHeld }
-
-    var body: some View {
-        HStack(spacing: 0) {
-            Button(action: action) {
-                Image(systemName: icon)
-                    .font(.sf(Tokens.TypeSize.meta, weight: .regular))
-                    .foregroundStyle(lit ? Tokens.text2 : Tokens.text3)
-                    .frame(width: 22, height: 22)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .notchTooltip(help)
-
-            if hasMenu {
-                Menu(content: items) {
-                    Image(systemName: "chevron.down")
-                        .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
-                        .foregroundStyle(lit ? Tokens.text2 : Tokens.text3)
-                        .frame(width: Self.chevronWidth, height: 22)
-                        .contentShape(Rectangle())
-                }
-                .menuStyle(.button)
-                .buttonStyle(.plain)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                // The chevron belongs to the regenerate glyph, not to the row:
-                // it opens only when the pointer is actually on this control
-                // (and stays open once the pointer crosses onto the chevron
-                // itself). Everywhere else it isn't dim, it isn't there — zero
-                // width, clipped, so the icons after it close the gap. Width and
-                // opacity ride the same curve as the glass behind them, so the
-                // capsule and its tail arrive as one motion.
-                .frame(width: lit ? Self.chevronWidth : 0)
-                .opacity(lit ? 1 : 0)
-                .clipped()
-                .allowsHitTesting(lit)
-                // Unconditional: `shows: lit` swapped the branch of a
-                // `_ConditionalContent` as the control lit, rebuilding the Menu
-                // underneath the pointer. The tip only appears on hover anyway,
-                // and the chevron is only hit-testable while lit.
-                .notchTooltip(menuHelp)
-            }
-        }
-        // Air inside the capsule: flush against the glyphs it read as shrink-wrap
-        // rather than a chip. The padding is constant — it belongs to the
-        // control, not to the hover — so the row doesn't shuffle when the glass
-        // arrives.
-        .padding(.horizontal, 4)
-        // The whole capsule is one hover target, so the seam between the glyph
-        // and its tail isn't a gap the pointer can fall through.
-        .contentShape(Capsule())
-        .onHover { hovering = $0 }
-        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in
-            if hovering { menuHeld = true }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)) { _ in
-            menuHeld = false
-        }
-        .background {
-            // A whisper of a chip, not a button plate: the resting fill and rim
-            // (`brighter: false`, rim pulled back) rather than the lit ones, and
-            // the whole layer held under full strength. It only has to separate
-            // the two halves from the bare icons beside them.
-            Color.clear
-                .glassCapsule(in: Capsule(), brighter: false, rim: 0.6)
-                .opacity(lit ? 0.75 : 0)
-        }
-        // Rest → row hover → pointed at: the same three levels the bare footer
-        // icons keep, so the control still belongs to that toolbar.
-        .opacity(lit ? 1.0 : rowHovered ? 0.7 : hidesAtRest ? 0 : 0.25)
-        .allowsHitTesting(lit || rowHovered || !hidesAtRest)
-        // The chevron and glass arrive slower than the rest of the toolbar:
-        // easeOut at hoverFade starts at full speed and reads as a snap.
-        // Ease in-out, a beat of delay on appear, slightly quicker on leave.
-        .animation(lit
-                   ? .easeInOut(duration: 0.32).delay(0.08)
-                   : .easeInOut(duration: 0.22),
-                   value: lit)
-        .animation(.easeOut(duration: Tokens.hoverFade), value: rowHovered)
-    }
-}
-
-/// The floating source popup's request, published up the view tree by the hovered
-/// badge: where it is (`anchor`, the pill's frame) and what to show (`sources`).
-/// `nil` when no badge is hovered. An ancestor *outside* the conversation
-/// ScrollView reads this and draws the panel, so the popup escapes the scroll's
-/// clip that was chopping it off (XII-118).
-struct SourcePopoverRequest: Equatable {
-    let id: UUID
-    let anchor: Anchor<CGRect>
-    let sources: [WebSource]
-    static func == (a: SourcePopoverRequest, b: SourcePopoverRequest) -> Bool { a.id == b.id }
-}
-
-struct SourcePopoverKey: PreferenceKey {
-    static let defaultValue: SourcePopoverRequest? = nil
-    static func reduce(value: inout SourcePopoverRequest?, nextValue: () -> SourcePopoverRequest?) {
-        // Last writer wins — at most one badge is hovered at a time.
-        if let next = nextValue() { value = next }
-    }
-}
-
-/// A source badge shown under a search-grounded answer (XII-118). Rests as a
-/// compact pill — just the first source's site name plus "+N" for the rest, e.g.
-/// "tmtpost + 3", no icons. **Hover** the pill and a floating panel pops up over
-/// the content listing every source as "site · title (date)"; click a row to open
-/// the original page. The panel is rendered by an ancestor (see
-/// `conversationOverlay`) so it floats above the answer and is never clipped by
-/// the scroll view.
-///
-/// `hoveredID` is the shared "which badge is open" state owned by `NotchBody`: the
-/// badge sets it to its own `id` on hover and clears it on exit; the floating
-/// panel keeps it set while the cursor is over the panel, so moving up onto a row
-/// doesn't dismiss it. The pill only *publishes its anchor* when it's the open one.
-struct SourceBadge: View {
-    let sources: [WebSource]
-    @Binding var hoveredID: UUID?
-    /// Shared deferred-close handle (owned by `NotchBody`): when the cursor leaves
-    /// the pill we don't close immediately — we schedule a close ~140ms out, and
-    /// the floating panel cancels it the moment the cursor lands on it. Without
-    /// this, the 6pt gap between pill and panel is a dead zone that snaps the popup
-    /// shut before the cursor can cross it.
-    @Binding var pendingClose: DispatchWorkItem?
-
-    /// Identity for "this badge is the open one". MUST be `@State`, not a plain
-    /// `let`: the parent turn re-runs its body whenever its own `turnHovered`
-    /// flips — which happens the instant the cursor moves onto the floating
-    /// panel, because the panel (an overlay above the ScrollView) steals the
-    /// hit test from the turn underneath. A plain `let UUID()` would be
-    /// regenerated by that re-init, so `hoveredID` (holding the old UUID) no
-    /// longer matches, `isOpen` flips false, the anchor unpublishes, and the
-    /// panel tears itself down one frame after the cursor reaches it. `@State`
-    /// storage survives struct re-inits, keeping the badge's identity stable
-    /// for as long as it exists in the hierarchy.
-    @State private var id = UUID()
-    private var isOpen: Bool { hoveredID == id }
-
-    var body: some View {
-        Text(pillLabel)
-            .font(.sf(Tokens.TypeSize.meta, weight: .medium))
-            .tracking(0.1)
-            .foregroundStyle(Tokens.text3)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 4)
-            .background(
-                Capsule().fill(Color.white.opacity(isOpen ? 0.10 : 0.06))
-            )
-            .overlay(Capsule().stroke(Tokens.hairline, lineWidth: 0.5))
-            .contentShape(Capsule())
-            // Publish this pill's frame + sources up to the ancestor overlay, but
-            // only while it's the open one — so the ancestor knows where to float
-            // the panel. A hidden tracking value when closed keeps the key present.
-            .anchorPreference(key: SourcePopoverKey.self, value: .bounds) { anchor in
-                isOpen ? SourcePopoverRequest(id: id, anchor: anchor, sources: sources) : nil
-            }
-            .onHover { hovering in
-                if hovering {
-                    pendingClose?.cancel()      // re-entered the pill — cancel any close
-                    pendingClose = nil
-                    hoveredID = id
-                } else if isOpen {
-                    scheduleClose()             // grace period to reach the panel
-                }
-            }
-    }
-
-    /// Close after a short grace period, unless something (the panel's hover, or
-    /// re-entering the pill) cancels it first.
-    private func scheduleClose() {
-        pendingClose?.cancel()
-        let work = DispatchWorkItem {
-            if hoveredID == id { hoveredID = nil }
-        }
-        pendingClose = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.14, execute: work)
-    }
-
-    /// "tmtpost + 3" — the first source's short site name, plus a count of the
-    /// rest. A single source just shows its site, no "+".
-    private var pillLabel: String {
-        let lead = sources.first?.site ?? L("source.badge.fallback")
-        let extra = sources.count - 1
-        return extra > 0 ? "\(lead) + \(extra)" : lead
-    }
-}
-
-extension View {
-    /// Float the hovered source badge's popup above this view. Attach it to an
-    /// ancestor OUTSIDE the conversation ScrollView: the hovered badge publishes
-    /// its frame through `SourcePopoverKey`, we resolve it in this view's
-    /// coordinate space and place the panel just ABOVE the badge, clamped to the
-    /// left edge so a badge near the right doesn't push it off-screen. Rendered
-    /// here, the popup escapes the scroll's clip that was chopping its top off
-    /// (XII-118).
-    ///
-    /// EVERY surface that shows a `SourceBadge` must carry this — the badge alone
-    /// only publishes an anchor, so a window without the overlay renders the pill
-    /// and then nothing happens on hover. The panel and the detached thread
-    /// window both go through this one implementation so neither can drift.
-    ///
-    /// `hoveredID` / `closeWork` are the host's shared "which badge is open" and
-    /// deferred-close state, the same pair the badges are handed.
-    func sourcePopoverOverlay(hoveredID: Binding<UUID?>,
-                              closeWork: Binding<DispatchWorkItem?>) -> some View {
-        overlayPreferenceValue(SourcePopoverKey.self) { request in
-            GeometryReader { geo in
-                if let request {
-                    let rect = geo[request.anchor]
-                    SourcePopoverPanel(
-                        sources: request.sources,
-                        keepOpen: {
-                            // Cursor reached the panel — cancel the pending close
-                            // and keep this badge open.
-                            closeWork.wrappedValue?.cancel()
-                            closeWork.wrappedValue = nil
-                            hoveredID.wrappedValue = request.id
-                        },
-                        dismiss: {
-                            // Left the panel — close after the same grace period so
-                            // a slip back toward the pill doesn't flicker it shut.
-                            closeWork.wrappedValue?.cancel()
-                            let work = DispatchWorkItem {
-                                if hoveredID.wrappedValue == request.id {
-                                    hoveredID.wrappedValue = nil
-                                }
-                            }
-                            closeWork.wrappedValue = work
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.14,
-                                                          execute: work)
-                        }
-                    )
-                    // Horizontal fixed (the panel sets its own width); leave
-                    // vertical flexible so the panel's own maxHeight cap applies and
-                    // overflowing rows scroll instead of growing the card.
-                    .fixedSize(horizontal: true, vertical: false)
-                    // Anchor the panel's BOTTOM-leading right at the badge's top,
-                    // so it pops up over the answer. No visual gap is subtracted
-                    // here: the panel carries its own transparent `bridgeGap` strip
-                    // at its bottom, which spans the gap as a continuous hover
-                    // region so the pill → panel crossing never falls into a dead
-                    // zone.
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
-                    // Held inside the host on BOTH sides: at the badge's own left
-                    // edge normally, pulled back when the card would otherwise
-                    // hang out past the right rim (the compact window is barely
-                    // wider than the card).
-                    .offset(x: min(max(0, rect.minX),
-                                   max(0, geo.size.width - SourcePopoverPanel.width)),
-                            y: rect.minY - geo.size.height)
-                    .transition(.opacity)
-                }
-            }
-            .allowsHitTesting(request != nil)
-            .animation(.easeInOut(duration: 0.16), value: request)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .notchOverlayChromePresented)) { _ in
-            closeWork.wrappedValue?.cancel()
-            closeWork.wrappedValue = nil
-            hoveredID.wrappedValue = nil
-        }
-    }
-}
-
-/// The floating source list — a self-contained card backed by the **same Liquid
-/// Glass** the island uses (`nativeGlass`: genuine `.glassEffect(.clear)` on
-/// macOS 26+, blurred fallback below) so the wallpaper refracts through it and the
-/// panel reads as a piece of the same glass surface floated out, not a flat opaque
-/// block. A soft dark veil under the glass keeps the source rows legible over any
-/// wallpaper, and a specular hairline rim + soft shadow seat it as a layer above
-/// the answer. Rendered by an ancestor overlay (escaping the scroll clip) and
-/// positioned over the badge by the caller. `keepOpen`/`dismiss` let it hold the
-/// badge open while the cursor is over its rows.
-struct SourcePopoverPanel: View {
-    let sources: [WebSource]
-    let keepOpen: () -> Void
-    let dismiss: () -> Void
-
-    // Show at most this many rows; the rest scroll. ~18pt per row (11pt line +
-    // 2pt padding top/bottom) plus the 7pt inter-row gap.
-    private static let visibleRows = 4
-    private static let rowHeight: CGFloat = 18
-    private static let rowSpacing: CGFloat = 7
-    // Runways the edge fades taper across when the list scrolls. They live INSIDE
-    // the scroll viewport (as content padding), so they double as the card's
-    // vertical padding — see `cardPadding` below.
-    private static let topRunway: CGFloat = 14
-    private static let bottomRunway: CGFloat = 24
-    private static let cardPadding: CGFloat = 14
-
-    /// Transparent hover bridge below the card, spanning the gap down to the
-    /// badge's top edge. Without it the cursor crosses a dead strip on its way
-    /// from pill → panel, and both `.onHover`s read "not hovering" during the
-    /// crossing — which fires the pill's deferred close before the panel can
-    /// cancel it, snapping the popup shut mid-reach. The bridge is part of the
-    /// panel's hover region, so hover stays continuous the whole way across.
-    /// Must match the gap the caller leaves in `NotchBody` (`bridgeGap`).
-    static let bridgeGap: CGFloat = 6
-
-    /// The card's fixed width. Public because the host overlay clamps the panel
-    /// inside its own bounds with it — a compact pointer-side window is only a
-    /// little wider than this card, so a badge at the reading inset would push
-    /// its right edge out through the window without the clamp.
-    static let width: CGFloat = 320
-
-    var body: some View {
-        let shape = RoundedRectangle.menu
-        let scrolls = sources.count > Self.visibleRows
-        // Cap the visible height at `visibleRows` rows; shorter lists size down to
-        // their own content (no empty space, no scroll). Computing the height
-        // explicitly — rather than letting `.fixedSize` measure it — lets the
-        // ScrollView scroll the overflow once there are more rows than fit.
-        //
-        // The runways count toward that height. They're content padding, so they
-        // occupy the viewport: leaving them out capped the viewport at bare row
-        // math and the runways then ate it from both ends — the 4th row fell out
-        // of view and the card read as two blank bands squeezing three rows.
-        let topRunway = scrolls ? Self.topRunway : 0
-        let bottomRunway = scrolls ? Self.bottomRunway : 0
-        let shownRows = CGFloat(min(sources.count, Self.visibleRows))
-        let rowsHeight = max(0, shownRows * Self.rowHeight + (shownRows - 1) * Self.rowSpacing)
-        let visibleHeight = rowsHeight + topRunway + bottomRunway
-        ScrollView(.vertical, showsIndicators: scrolls) {
-            VStack(alignment: .leading, spacing: Self.rowSpacing) {
-                ForEach(sources) { source in
-                    SourceRow(source: source)
-                }
-            }
-            // Breathing room each fade falls across, so the first / last row rests
-            // outside its taper at full strength at either end of the scroll.
-            .padding(.top, topRunway)
-            .padding(.bottom, bottomRunway)
-        }
-        .scrollBounceBehavior(.basedOnSize)
-        // The shared dissolve at both overflow edges (`scrollEdgeFade`) instead of a
-        // hard cut — only when the list actually scrolls; a short list that fits
-        // stays crisp. A thin feather up top, where only a row on its way out needs
-        // swallowing.
-        .scrollEdgeFade(top: scrolls, bottom: scrolls,
-                        topFade: Self.topRunway, bottomFade: Self.bottomRunway)
-        .frame(height: visibleHeight)
-        .padding(.horizontal, 16)
-        // A scrolling list already carries its own vertical inset (the runways) —
-        // stacking the card's padding on top of it doubled the gap above the first
-        // row. Only a short, runway-less list needs the card padding here.
-        .padding(.vertical, scrolls ? 0 : Self.cardPadding)
-        // A fixed width gives the rows a definite bound to truncate long titles
-        // against (instead of stretching the popup to the longest line).
-        .frame(width: Self.width, alignment: .leading)
-        .background {
-            // Real Liquid Glass: the high-transparency `.clear` material refracts
-            // the wallpaper through the whole card; a soft dark veil over it keeps
-            // the rows readable against bright backgrounds (the same recipe the
-            // quick-tools popover uses — glass over a legibility veil).
-            shape.fill(.clear).nativeGlass(in: shape)
-                .overlay(shape.fill(Color.black.opacity(0.55)))
-        }
-        .overlay(
-            // Specular hairline rim — a top-bright → bottom-faint edge, the
-            // signature glass bevel, instead of a flat uniform outline.
-            shape.strokeBorder(
-                LinearGradient(
-                    colors: [.white.opacity(0.22), .white.opacity(0.06)],
-                    startPoint: .top, endPoint: .bottom
-                ),
-                lineWidth: 0.75
-            )
-        )
-        .clipShape(shape)
-        .shadow(color: .black.opacity(0.5), radius: 18, y: 6)
-        // Extend the hover region downward by `bridgeGap` with a transparent
-        // strip so the pill → panel crossing is never un-hovered (see comment
-        // on `bridgeGap`). The card keeps its visual position; only the
-        // hit-testable area grows down to meet the badge.
-        .padding(.bottom, Self.bridgeGap)
-        .background(Color.clear.contentShape(Rectangle()))
-        // Hovering the panel (card + bridge) keeps the badge open; leaving it
-        // dismisses — so the round-trip pill → row works, and moving away closes.
-        .onHover { $0 ? keepOpen() : dismiss() }
-    }
-}
-
-/// One expanded source row: "site · title", with the date trailing if known.
-/// Clicking opens the URL. Hover lifts it slightly so it reads as actionable.
-private struct SourceRow: View {
-    let source: WebSource
-    @State private var hovering = false
-
-    var body: some View {
-        Button {
-            if let url = URL(string: source.url) { NSWorkspace.shared.open(url) }
-        } label: {
-            HStack(alignment: .firstTextBaseline, spacing: 9) {
-                Text(source.title)
-                    .font(.sf(Tokens.TypeSize.meta))
-                    .foregroundStyle(hovering ? Tokens.text2 : Tokens.text4)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                // Width goes to the date first, then the site, and the title takes
-                // what is left, so a long site name never pushes the date out.
-                // Site stays at the date's quiet ink — hover only lifts the title,
-                // never the publisher name beside it.
-                Text(source.site)
-                    .font(.sf(Tokens.TypeSize.meta))
-                    .foregroundStyle(Tokens.text4)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .layoutPriority(1)
-                if let date = source.date, let day = Self.dayOnly(date) {
-                    Text(day)
-                        .font(.sf(Tokens.TypeSize.caption))
-                        .foregroundStyle(Tokens.text4)
-                        .fixedSize()
-                        .layoutPriority(2)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 2)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-    }
-
-    /// Show just the calendar day, not a full timestamp. Providers report dates
-    /// inconsistently — some send a clean "2026-06-23", others a full ISO instant
-    /// like "2026-06-20T10:26:35.000Z". Take the leading "YYYY-MM-DD" when the
-    /// string is ISO-shaped; otherwise pass it through unchanged (a non-ISO label
-    /// like "Jun 2026" stays as-is). Returns nil for empty input so the row hides
-    /// the date entirely.
-    static func dayOnly(_ raw: String) -> String? {
-        let s = raw.trimmingCharacters(in: .whitespaces)
-        guard !s.isEmpty else { return nil }
-        // ISO-shaped: the date is the part before any "T" (or space) separator.
-        let datePart = s.prefix { $0 != "T" && $0 != " " }
-        // Only trust the truncation when it really is a YYYY-MM-DD prefix; for any
-        // other shape, show the original string untouched.
-        let isISODay = datePart.count == 10
-            && datePart.allSatisfy { $0.isNumber || $0 == "-" }
-        return isISODay ? String(datePart) : s
-    }
-}
-
 /// One saved attachment, drawn from the history image store by filename. Renders
 /// nothing at all when the file is gone (a cleared store, a hand-deleted JPEG) —
 /// a missing picture is silence, never a broken-image box.
@@ -7868,7 +7673,8 @@ struct AgentWorkTrailView: View {
                 // made the bubble visibly jump the moment the round settled
                 // and re-rendered as a real turn.
                 UserQuestionBubble(text: String(entry.title.dropFirst(2)),
-                                   baseFont: min(Tokens.TypeSize.reading, baseFont))
+                                   baseFont: min(Tokens.TypeSize.reading, baseFont),
+                                   isAgent: true)
                     .padding(.vertical, 3)
             case .thinking(let entry):
                 AgentTrailThinkingRow(text: entry.title, font: waitFont)
@@ -8367,6 +8173,12 @@ enum MenuCard {
     static var pickerCardWidth: CGFloat { pickerWidth + cardPad * 2 }
     static let pickerListRows = 4
 
+    /// Slot for a row's trailing switch (`MenuCardRow.isOn`): the mini
+    /// `.switch` Settings uses, measured.
+    static let switchWidth: CGFloat = 26
+    /// Slot for a row's leading glyph (`MenuCardRow.symbol`).
+    static let symbolWidth: CGFloat = 16
+
     /// The width a card needs to show every one of its rows whole: the widest
     /// `word + gap + accessory`, plus both paddings. Measured in the very fonts
     /// SwiftUI will draw them in (`Font.sf` IS the system face, the same trick
@@ -8631,6 +8443,8 @@ struct PromptShortcutCardSurface<S: InsettableShape>: View {
 /// the alignment tap on pointer enter; the model pickers leave that off.
 struct MenuCardRow: View {
     let title: String
+    /// An SF Symbol drawn before the word. Nil on every ordinary row.
+    var symbol: String? = nil
     /// The row's one bit of trailing furniture: a shortcut chord, a `CLI` tag.
     var accessory: String? = nil
     /// An empty Notchi balance: the NO CREDIT chip in the trailing slot.
@@ -8647,6 +8461,10 @@ struct MenuCardRow: View {
     /// chevron is always drawn, pointing right while the run is closed and down
     /// while it is open. Nil on every ordinary row.
     var disclosure: Bool? = nil
+    /// A setting flipped in place: the row draws Settings' mini switch in the
+    /// trailing slot, and a click anywhere on the row flips it. Nil on every
+    /// ordinary row.
+    var isOn: Bool? = nil
     /// The row's type size and slot. Defaulted to the `/` menu's own numbers.
     var fontSize: CGFloat = MenuCard.fontSize
     var accessoryFontSize: CGFloat = MenuCard.accessoryFontSize
@@ -8680,6 +8498,12 @@ struct MenuCardRow: View {
         let shape = Capsule(style: .continuous)
         return Button(action: action) {
             HStack(spacing: 6) {
+                if let symbol {
+                    Image(systemName: symbol)
+                        .font(.sf(fontSize, weight: .regular))
+                        .foregroundStyle(selected ? Tokens.text1 : Tokens.text3)
+                        .frame(width: MenuCard.symbolWidth)
+                }
                 Text(title)
                     .font(brandTitle
                           ? .brand(fontSize)
@@ -8706,6 +8530,19 @@ struct MenuCardRow: View {
                         .font(.sf(accessoryFontSize, weight: .semibold))
                         .foregroundStyle(selected ? Tokens.text2 : Tokens.text4)
                         .rotationEffect(.degrees(disclosure ? 90 : 0))
+                }
+                if let isOn {
+                    if accessory == nil && !lowBalance && disclosure == nil {
+                        Spacer(minLength: 0)
+                    }
+                    // Drawn, not hit: the row's own button takes the click, so
+                    // the whole row flips it and the switch never eats a press.
+                    Toggle("", isOn: .constant(isOn))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.mini)
+                        .tint(Tokens.text2)
+                        .allowsHitTesting(false)
                 }
                 if let hoverSymbol {
                     if accessory == nil && !lowBalance && disclosure == nil {
@@ -8832,3 +8669,4 @@ extension View {
         }
     }
 }
+

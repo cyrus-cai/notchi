@@ -89,6 +89,24 @@ enum Tokens {
         static let shell: CGFloat = 30
     }
 
+    // MARK: Control
+    //
+    // Four diameters for round buttons, and the composer box's resting height.
+    // 18 / 21 / 24 / 27 / 39 were drift.
+    enum Control {
+        /// In-row chips: reset, close, a back chip inside a card.
+        static let inline: CGFloat = 22
+        /// Header back, jump-to-latest, the compact Send/Stop.
+        static let header: CGFloat = 26
+        /// The standard glass chip: Send/Stop, the idle cluster, image chips.
+        static let chip: CGFloat = 30
+        /// The bottom rail: ⋯, collapse, ⌘, the composer box and the action rows
+        /// that stand in for it.
+        static let rail: CGFloat = 34
+        /// The composer's one-line slot inside its 6pt top and bottom padding.
+        static let composerSlot: CGFloat = rail - 12
+    }
+
     // MARK: Type
     //
     // Eight sizes. Half-point neighbors (11.5 / 12, 14 / 14.5 / 15) were drift.
@@ -101,6 +119,12 @@ enum Tokens {
         static let reading: CGFloat = 14.5
         static let prompt: CGFloat = 16.5
         static let figure: CGFloat = 26
+
+        /// The next size down the scale — what an answer card sets its text in,
+        /// one step under the surface's reading size.
+        static func stepDown(_ size: CGFloat) -> CGFloat {
+            [meta, label, form, reading, prompt].last { $0 < size } ?? size
+        }
     }
 
     // Danger accent — used sparingly for genuine errors and destructive actions
@@ -146,8 +170,8 @@ enum Tokens {
     // itself as Note when Enter might file a reminder.
     static let captureTint  = Color(red: 1.00, green: 0.71, blue: 0.02)
     static let captureInk   = Color(red: 1.00, green: 0.84, blue: 0.57)
-    static let agentTint    = Color(red: 0.64, green: 0.44, blue: 1.00)
-    static let agentInk     = Color(red: 0.82, green: 0.72, blue: 1.00)
+    static let agentTint    = Color(red: 0.40, green: 0.36, blue: 0.62)
+    static let agentInk     = Color(red: 0.64, green: 0.62, blue: 0.76)
 
     // MARK: Prism
     //
@@ -237,6 +261,24 @@ struct LowBalanceTag: View {
         guard let cg = renderer.cgImage else { return nil }
         return NSImage(cgImage: cg, size: NSSize(width: CGFloat(cg.width) / 3,
                                                  height: CGFloat(cg.height) / 3))
+    }
+}
+
+/// A $0 rate in the Notchi pricing table. `LowBalanceTag`'s face in a muted
+/// teal. `limited` for a rate that is free now and may not stay free.
+struct FreeTag: View {
+    var limited = false
+    private static let teal = Color(red: 0.42, green: 0.80, blue: 0.76)
+
+    var body: some View {
+        Text(L(limited ? "nono.pricing.freeForNow" : "nono.pricing.free"))
+            .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+            .tracking(0.8)
+            .foregroundStyle(Self.teal.opacity(0.85))
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(Self.teal.opacity(0.10), in: LowBalanceTag.shape)
+            .overlay(LowBalanceTag.shape.strokeBorder(Self.teal.opacity(0.26), lineWidth: 0.6))
     }
 }
 

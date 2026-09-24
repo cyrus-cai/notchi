@@ -522,6 +522,12 @@ struct AgentHarness {
     /// Growing thinking-channel text for the chat fold. Called with the
     /// accumulated string so far, not a delta.
     typealias ReasoningSink = @MainActor (String) -> Void
+    /// Pages the answer hands over that opened: the ones the model wrote on a
+    /// line of their own, and a search's Wikipedia article added for a reply
+    /// that wrote none. Called once, as the reply ends and before that article's
+    /// line is appended, so the answer can trust them as cards
+    /// (`Turn.sharedLinks`). Main-actor.
+    typealias LinksSink = @MainActor ([URL]) -> Void
 
     /// Run the loop to completion. `onText` receives answer chunks; `onActivity`
     /// receives tool-progress labels; `onSources` receives any web sources a search
@@ -541,7 +547,8 @@ struct AgentHarness {
              onActivity: @escaping ActivitySink,
              onSources: @escaping SourcesSink,
              onModel: ModelSink? = nil,
-             onReasoning: ReasoningSink? = nil) async throws {
+             onReasoning: ReasoningSink? = nil,
+             onLinks: LinksSink? = nil) async throws {
         var convo = messages
         var iteration = 0
         // True once the model has run at least one tool round. It changes what the
@@ -581,6 +588,34 @@ struct AgentHarness {
         // told so instead of seeing it as a model failure.
         var searchFailure: SearchServiceError? = nil
         var searchWorked = false
+        // Everything the model has said across the rounds, and the pages the
+        // search returned — a link line naming one of those is already trusted.
+        var spokenText = ""
+        var allSources: [WebSource] = []
+        let question: String = messages.reversed().lazy.compactMap { message -> String? in
+            if case .text(let role, let text) = message.kind, role == "user" { return text }
+            return nil
+        }.first ?? ""
+        // As the reply ends: check the pages the model wrote on a line of
+        // their own and trust the ones that open. A reply that wrote none gets
+        // the search's Wikipedia article about what it answered, on a line
+        // after it. The answer draws trusted lines as cards and drops the rest.
+        func finishLinks() async {
+            let written = LinkLine.urls(in: spokenText)
+            let sourceKeys = Set(allSources.compactMap { URL(string: $0.url) }.map(LinkLine.key))
+            let unchecked = written
+                .filter { !sourceKeys.contains(LinkLine.key($0)) }
+                .prefix(LinkCheck.maxPerAnswer)
+            var trusted = await LinkCheck.opened(Array(unchecked))
+            var appended: URL? = nil
+            if written.isEmpty,
+               let article = LinkCheck.wikipediaArticle(about: question, in: allSources) {
+                appended = article
+                trusted.append(article)
+            }
+            if !trusted.isEmpty { onLinks?(trusted) }
+            if let appended { onText("\n\n" + appended.absoluteString) }
+        }
 
         while true {
             try Task.checkCancellation()
@@ -682,6 +717,7 @@ struct AgentHarness {
                         preserveFetchCue = false
                     }
                     assistantText += visible
+                    spokenText += visible
                     onText(visible)
                 case .model(let ran):
                     // Report the concrete model once for the whole answer — the
@@ -693,6 +729,7 @@ struct AgentHarness {
                     }
                 case .sources(let responseSources):
                     if !responseSources.isEmpty { onSources(responseSources) }
+                    allSources += responseSources
                 case .toolCallStarted(let name):
                     // The model has committed to a tool; its arguments are still
                     // streaming. Raise the activity line NOW, from the name alone,
@@ -726,6 +763,7 @@ struct AgentHarness {
             // stream ended mid-`<` it was just a stray `<`, so let it through.
             if let tail = markupFilter.flush(), !tail.isEmpty {
                 assistantText += tail
+                spokenText += tail
                 onText(tail)
             }
 
@@ -818,6 +856,7 @@ struct AgentHarness {
                 if let searchFailure, !searchWorked {
                     onText(L("search.error.notice", searchFailure.service, searchFailure.detail))
                 }
+                await finishLinks()
                 return
             }
 
@@ -906,6 +945,7 @@ struct AgentHarness {
             // caller's side across rounds.
             let roundSources = completed.flatMap(\.sources)
             if !roundSources.isEmpty { onSources(roundSources) }
+            allSources += roundSources
             // Don't clear into a blank gap: the next turn is the model reading these
             // results and composing the answer, which takes a real round-trip. Carry
             // a "composing…" cue through that gap so the wait stays narrated; the

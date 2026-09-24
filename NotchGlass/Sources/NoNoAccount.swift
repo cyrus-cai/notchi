@@ -446,6 +446,59 @@ final class NoNoAccount: ObservableObject {
         return try? await send(request)
     }
 
+    // MARK: - Reactions
+
+    /// Jev's reaction to one sent chat message (`POST /v1/react`). `reaction`
+    /// is one of the gateway's tapbacks; `none` means no reaction. `emoji` is
+    /// the glyph for that tapback — a feeling, or the thing the message is
+    /// about (a car, a cake). Older gateways omit the glyph.
+    struct ReactVerdict: Decodable, Equatable {
+        var reaction: String
+        var probability: Double
+        /// Glyph the gateway chose. Absent on older gateways; `emoji` then
+        /// falls back to the original six names.
+        private var glyph: String?
+
+        enum CodingKeys: String, CodingKey {
+            case reaction, probability
+            case glyph = "emoji"
+        }
+
+        /// The emoji shown on the bubble, nil for `none` or an unknown name.
+        var emoji: String? {
+            if let glyph, Self.isTapback(glyph) { return glyph }
+            switch reaction {
+            case "thumbs_up": return "👍"
+            case "heart":     return "❤️"
+            case "laugh":     return "😂"
+            case "exclaim":   return "‼️"
+            case "sad":       return "😢"
+            case "celebrate": return "🎉"
+            default:          return nil
+            }
+        }
+
+        /// A tapback is a short non-ASCII glyph. A name or a sentence in
+        /// `emoji` is not shown.
+        private static func isTapback(_ text: String) -> Bool {
+            let scalars = Array(text.unicodeScalars)
+            guard (1...16).contains(scalars.count) else { return false }
+            return scalars.allSatisfy { $0.value > 127 }
+        }
+    }
+
+    /// Ask the gateway for a reaction to `text`, with the assistant's previous
+    /// reply as context. Same gate as Copy Sense's Jev: accounts that bought
+    /// `senseMinPaidUSD` or more. Nil for everyone else and on any failure.
+    /// The caller must have run `ClipPrivacy` first.
+    func react(to text: String, previous: String) async -> ReactVerdict? {
+        guard canUseRemoteSense else { return nil }
+        guard var request = try? jsonRequest("/react", body: ["text": text, "previous": previous],
+                                             authorized: true) else { return nil }
+        request.timeoutInterval = 5
+        return try? await send(request)
+    }
+
     // MARK: - Transport
 
     /// The gateway's API root — the chat endpoint minus its method path, so the

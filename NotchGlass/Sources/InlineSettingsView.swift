@@ -311,6 +311,7 @@ struct InlineSettingsView: View {
         case general = "General" // language, app presence, permissions, + Advanced (proxy)
         case stats = "Stats"     // what the archive adds up to — read-only
         case about = "About"     // version + self-update
+        case lab = "Lab"         // experiments that change how the app behaves, off by default
         case licenses = "Licenses" // third-party attribution and licences
         case usage = "Usage"     // Blend1 request list — reached from the wallet ⋯
         case pricing = "Pricing" // Blend1 per-model rates — reached from the wallet ⋯
@@ -340,7 +341,7 @@ struct InlineSettingsView: View {
         /// an inserted gap reads as a layout slip rather than a boundary. So the
         /// bands live in the ORDER and nowhere else — what answers and what it
         /// takes in, then how the app presents and behaves, then the two pages
-        /// that only report.
+        /// that only report, then Lab last.
         static var sidebarCases: [Section] { allCases.filter { !$0.isDetail } }
 
         /// The sidebar label, localized. The raw value stays English (a stable
@@ -350,6 +351,7 @@ struct InlineSettingsView: View {
             case .model:      return L("sidebar.model")
             case .capture:    return L("sidebar.capture")
             case .general:    return L("sidebar.general")
+            case .lab:        return L("sidebar.lab")
             case .shortcuts:  return L("sidebar.shortcuts")
             case .appearance: return L("sidebar.appearance")
             case .stats:      return L("sidebar.stats")
@@ -666,7 +668,7 @@ struct InlineSettingsView: View {
     /// used to track each pane's measured content height, which meant the island
     /// resized on every category switch (and re-measured on every layout pass) —
     /// a fixed frame is both steadier to look at and cheaper to draw.
-    private static let headerChrome: CGFloat = 12 + 26 + 4 + 12
+    private static let headerChrome: CGFloat = 12 + Tokens.Control.header + 4 + 12
     private var settingsPaneHeight: CGFloat {
         NotchBody.immersiveListHeight - Self.headerChrome
     }
@@ -854,6 +856,22 @@ struct InlineSettingsView: View {
                 menuBarIconRow
                 permissionsSection
                 advancedSection
+            case .lab:
+                HStack(spacing: 3) {
+                    Text(L("lab.threads"))
+                        .captionLabel()
+                    SettingInfo(L("lab.unifiedThreads.hint"), glyph: Tokens.TypeSize.caption)
+                }
+                Text(L("lab.threads.about"))
+                    .font(.sf(Tokens.TypeSize.meta))
+                    .foregroundStyle(Tokens.text3)
+                    .fixedSize(horizontal: false, vertical: true)
+                unifiedThreadsRow
+                Text(L("lab.evaluationNotice"))
+                    .font(.sf(Tokens.TypeSize.meta))
+                    .foregroundStyle(Tokens.text3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 2)
             case .shortcuts:
                 shortcutsSection
             case .appearance:
@@ -882,6 +900,7 @@ struct InlineSettingsView: View {
                     }
                 }
                 liveActivityRow
+                messageSoundsRow
                 Text(L("appearance.displays"))
                     .captionLabel()
                     .padding(.top, 2)
@@ -1001,6 +1020,7 @@ struct InlineSettingsView: View {
             ForEach(Section.sidebarCases) { s in
                 SidebarItem(
                     title: s.title,
+                    symbol: s == .lab ? "flask" : nil,
                     selected: section == s,
                     // The gear's update dot continues here: it leads to settings,
                     // then the About entry carries it the rest of the way to the
@@ -1012,6 +1032,9 @@ struct InlineSettingsView: View {
                 ) {
                     withAnimation(.easeOut(duration: 0.16)) { section = s }
                 }
+                // Lab is experiments, not settings: a gap sets it apart
+                // from the categories above.
+                .padding(.top, s == .lab ? 10 : 0)
             }
             Spacer(minLength: 0)
         }
@@ -1026,21 +1049,48 @@ struct InlineSettingsView: View {
 
     /// One category row: quiet text that brightens on hover, a faint fill when
     /// selected — same translucent-chip language as GlassMenu, minus the border.
+    /// Lab is the exception: a flask, with the word kept as the tooltip.
     private struct SidebarItem: View {
         var title: String
+        var symbol: String? = nil
         var selected: Bool
         var badged: Bool
         var action: () -> Void
 
         @State private var hovering = false
 
+        private var ink: Color {
+            selected ? Tokens.text1 : (hovering ? Tokens.text2 : Tokens.text3)
+        }
+
         var body: some View {
             Button(action: action) {
+                content
+                    .foregroundStyle(ink)
+                    .background(
+                        Capsule()
+                            .fill(.white.opacity(selected ? 0.08 : (hovering ? 0.04 : 0)))
+                    )
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(title)
+            .notchTooltip(title, shows: symbol != nil)
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
+        }
+
+        @ViewBuilder
+        private var content: some View {
+            if let symbol {
+                Image(systemName: symbol)
+                    .font(.sf(Tokens.TypeSize.label, weight: .medium))
+                    .frame(width: 28, height: 28)
+            } else {
                 HStack(spacing: 6) {
                     Text(title)
                         .font(.sf(Tokens.TypeSize.label, weight: .medium))
                         .lineLimit(1)
-                        .foregroundStyle(selected ? Tokens.text1 : (hovering ? Tokens.text2 : Tokens.text3))
                     if badged {
                         Circle()
                             .fill(Tokens.text2)
@@ -1050,15 +1100,7 @@ struct InlineSettingsView: View {
                 }
                 .padding(.horizontal, 10)
                 .frame(height: 28)
-                .background(
-                    Capsule()
-                        .fill(.white.opacity(selected ? 0.08 : (hovering ? 0.04 : 0)))
-                )
-                .contentShape(Capsule())
             }
-            .buttonStyle(.plain)
-            .onHover { hovering = $0 }
-            .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
         }
     }
 
@@ -1113,7 +1155,7 @@ struct InlineSettingsView: View {
                     pinned: model.isAnswerPinned,
                     recentOpen: false,
                     showsRecent: false,
-                    chipSize: 26,
+                    chipSize: Tokens.Control.header,
                     togglePin: {
                         withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
                             model.toggleAnswerPin()
@@ -2039,7 +2081,7 @@ struct InlineSettingsView: View {
     }
 
     /// Names and prices from the live catalog, falling back to the bundled
-    /// Blend1 id so the list is never empty for someone looking at a funded
+    /// ids so the list is never empty for someone looking at a funded
     /// wallet before the fetch has returned.
     private var nonoLineupRows: [NonoLineupRow] {
         if let live = catalog.liveByProvider[.nono], !live.isEmpty {
@@ -2054,27 +2096,20 @@ struct InlineSettingsView: View {
             }
         }
         return Provider.nono.availableModels.map { id in
-            NonoLineupRow(id: id, name: ModelRatings.nonoName(for: id),
+            NonoLineupRow(id: id, name: ModelRatings.prettyName(for: id, provider: .nono),
                           info: ModelInfo(id: id, vendor: ModelRatings.vendor(for: id, provider: .nono)))
         }
     }
 
-    /// What this balance pays for: every model the gateway serves, the
-    /// per-request floor, and the two rates it charges against the wallet. Not
-    /// a picker — picking happens on the panel. Ruled like `usageTable`; it
-    /// refetches the rates each time it opens.
+    /// What this balance pays for: every model the gateway serves and the
+    /// rates it charges against the wallet. Not
+    /// a picker — picking happens on the panel. One rule under the header, none
+    /// between rows; it refetches the rates each time it opens.
     private var pricingSection: some View {
         VStack(spacing: 0) {
             Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 0) {
                 GridRow {
                     Text(L("nono.usage.col.model")).captionLabel()
-                    // Zero-width cell: the column is as wide as its figures,
-                    // and the header extends left into the gap after the
-                    // model names instead of widening the column.
-                    Text(L("nono.pricing.minCharge")).captionLabel()
-                        .fixedSize()
-                        .frame(width: 0, alignment: .trailing)
-                        .gridColumnAlignment(.trailing)
                     Text(L("nono.pricing.input")).captionLabel()
                         .gridColumnAlignment(.trailing)
                     Text(L("nono.pricing.cached")).captionLabel()
@@ -2087,16 +2122,44 @@ struct InlineSettingsView: View {
                 }
                 .padding(.bottom, 8)
 
-                Divider().overlay(Tokens.hairline).gridCellColumns(6)
+                Divider().overlay(Tokens.hairline).gridCellColumns(5)
 
-                ForEach(nonoLineupRows) { row in
-                    pricingRow(row)
-                    Divider().overlay(Tokens.hairline.opacity(0.6)).gridCellColumns(6)
+                // Blend entries first, the resold lineup after, headed the way
+                // the model picker heads them (`addRows`). One set of column
+                // headers over both runs, so the rates still line up across
+                // them. A lineup that is all one kind gets no headings.
+                let rows = nonoLineupRows
+                let house = rows.filter { ModelRatings.isNonoBlend(id: $0.id, pricing: $0.pricing) }
+                let rest = rows.filter { !ModelRatings.isNonoBlend(id: $0.id, pricing: $0.pricing) }
+                if !house.isEmpty, !rest.isEmpty {
+                    pricingGroupHeader(L("model.picker.houseModels",
+                                         ModelRatings.vendor(for: house[0].id, provider: .nono)))
+                        .padding(.top, 12)
+                    ForEach(house) { row in
+                        pricingRow(row)
+                    }
+                    pricingGroupHeader(L("model.picker.otherModels"))
+                        .padding(.top, 18)
+                    ForEach(rest) { row in
+                        pricingRow(row)
+                    }
+                } else {
+                    ForEach(rows) { row in
+                        pricingRow(row)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .task { await refreshNonoRates() }
+    }
+
+    private func pricingGroupHeader(_ title: String) -> some View {
+        Text(title)
+            .captionLabel()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .gridCellColumns(5)
+            .padding(.bottom, 2)
     }
 
     private func pricingRow(_ row: NonoLineupRow) -> some View {
@@ -2114,19 +2177,18 @@ struct InlineSettingsView: View {
                         .fixedSize(horizontal: true, vertical: false)
                     // Blend entries only: a named-shelf row is the vendor's model
                     // under the vendor's name and needs no line from us.
-                    if row.id == "nono-flash" || row.id == "nono" {
+                    if ModelRatings.isNonoBlend(id: row.id, pricing: row.pricing) {
                         SettingInfo(L("nono.pricing.blendTagline"))
                     }
                 }
             }
             .fixedSize(horizontal: true, vertical: false)
             .layoutPriority(1)
-            pricingMinCharge(row.pricing?.minChargeUSD)
             pricingRate(row.pricing?.inputPerMTok)
             // A model billed one rate for all input quotes no cached rate, and
             // the cell is a dash rather than a repeat of the input figure.
             pricingRate(row.pricing?.cachedInputPerMTok)
-            pricingRate(row.pricing?.outputPerMTok)
+            pricingRate(row.pricing?.outputPerMTok, limitedFree: true)
             HStack(spacing: 8) {
                 Text(L(pricingOriginKey(row)))
                     .font(.sf(Tokens.TypeSize.meta))
@@ -2151,47 +2213,26 @@ struct InlineSettingsView: View {
     }
 
     /// "Official Provider" for a first-party named entry on the vendor's own
-    /// API; "US Provider" for Blend and for named entries hosted on Workers AI.
-    /// `notchi.official` is the catalog signal. Vendor `DeepSeek` (and the
-    /// public id `deepseek-flash`) is the same fact when a cached `/v1/models`
-    /// payload predates that field.
+    /// API; "No Specific Region" for an entry the catalog pins to no region;
+    /// "US Provider" otherwise. See `ModelRatings.nonoHost`.
     private func pricingOriginKey(_ row: NonoLineupRow) -> String {
-        if row.pricing?.official == true { return "nono.pricing.official" }
-        return ModelRatings.nonoOfficialHost(id: row.id, pricing: row.pricing)
-            ? "nono.pricing.official" : "nono.pricing.usBased"
-    }
-
-    /// The per-request floor. Same loading rule as the rates: a spinner until
-    /// this page's fetch lands, not a guessed figure.
-    private func pricingMinCharge(_ usd: Double?) -> some View {
-        // The column is sized to "$0.00" in every state, spinner included, so
-        // the header's width stays the same; a longer figure extends left into
-        // the model column rather than widening this one.
-        Text("$0.00")
-            .font(.brand(Tokens.TypeSize.label))
-            .monospacedDigit()
-            .hidden()
-            .overlay(alignment: .trailing) {
-                if let usd {
-                    Self.moneyText(usd, size: Tokens.TypeSize.label)
-                        .foregroundStyle(Tokens.text2)
-                        .monospacedDigit()
-                        .lineLimit(1)
-                        .fixedSize()
-                } else if nonoRatesLoading {
-                    ProgressView().controlSize(.mini)
-                } else {
-                    usageCell("—", color: Tokens.text4)
-                }
-            }
+        switch ModelRatings.nonoHost(id: row.id, pricing: row.pricing) {
+        case .official: return "nono.pricing.official"
+        case .us: return "nono.pricing.usBased"
+        case .anyRegion: return "nono.pricing.anyRegion"
+        }
     }
 
     /// A per-1M-token rate; "/M" is the unit. While the fetch this page started
     /// has not landed, a spinner rather than the last figure seen: that may be
-    /// the price that just changed, which is why we asked.
+    /// the price that just changed, which is why we asked. A $0 rate is a
+    /// FREE tag; a $0 output rate says it is free for now, since it may not
+    /// stay free.
     @ViewBuilder
-    private func pricingRate(_ usd: Double?) -> some View {
-        if let usd {
+    private func pricingRate(_ usd: Double?, limitedFree: Bool = false) -> some View {
+        if usd == 0 {
+            FreeTag(limited: limitedFree)
+        } else if let usd {
             HStack(alignment: .firstTextBaseline, spacing: 1) {
                 Self.moneyText(usd, size: Tokens.TypeSize.label)
                     .foregroundStyle(Tokens.text1)
@@ -2313,7 +2354,7 @@ struct InlineSettingsView: View {
             Image(systemName: "ellipsis")
                 .font(.sf(Tokens.TypeSize.form, weight: .medium))
                 .foregroundStyle(receiptsMenuHovering ? Tokens.text1 : Tokens.text3)
-                .frame(width: 30, height: 30)
+                .frame(width: Tokens.Control.chip, height: Tokens.Control.chip)
                 // Bare at rest; on hover it wears the lit recessed surface, the
                 // same floor and rim as Add credit beside it.
                 .background {
@@ -3212,7 +3253,7 @@ struct InlineSettingsView: View {
                     }
                     // Square frame so the chip style's capsule resolves to a true
                     // circle rather than a vertical oval.
-                    .frame(width: 30, height: 30)
+                    .frame(width: Tokens.Control.chip, height: Tokens.Control.chip)
                 }
                 .buttonStyle(ShortcutChipStyle(rest: 0.055, restStroke: 0.1))
                 .disabled(modelsBusy)
@@ -3859,6 +3900,36 @@ struct InlineSettingsView: View {
         }
     }
 
+    /// Lab: unified threads. Off, every question from the idle prompt starts a
+    /// thread of its own; on, they continue one main thread (see
+    /// `NotchModel.unifiedThreadsEnabled`). Two cards in the placement row's
+    /// grammar, each drawing what the history looks like under that choice.
+    private var unifiedThreadsRow: some View {
+        HStack(alignment: .top, spacing: 12) {
+            unifiedThreadsCard(unified: false)
+            unifiedThreadsCard(unified: true)
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func unifiedThreadsCard(unified: Bool) -> some View {
+        let selected = model.unifiedThreadsEnabled == unified
+        return PickerCard(selected: selected) {
+            guard !selected else { return }
+            Haptics.levelChange()
+            model.unifiedThreadsEnabled = unified
+        } content: {
+            VStack(spacing: 7) {
+                MiniThreads(unified: unified)
+                    .opacity(selected ? 1 : 0.55)
+                Text(L(unified ? "lab.threads.unified" : "lab.threads.separate"))
+                    .font(.sf(Tokens.TypeSize.meta, weight: selected ? .medium : .regular))
+                    .foregroundStyle(selected ? Tokens.text1 : Tokens.text3)
+                    .lineLimit(1)
+            }
+        }
+    }
+
     /// Whether background work flexes the resting notch's busy ears (the verb on
     /// the left shoulder, the elapsed clock on the right). One global switch:
     /// off keeps the closed notch flat for agent runs and detached Ask rounds
@@ -3870,6 +3941,23 @@ struct InlineSettingsView: View {
             Toggle("", isOn: Binding(
                 get: { model.liveActivityEnabled },
                 set: { Haptics.levelChange(); model.liveActivityEnabled = $0 }
+            ))
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .tint(Tokens.text2)
+        }
+    }
+
+    /// The message tones: sending, each reply bubble landing, and a reaction.
+    /// Same flag as the row in the result header's more menu.
+    private var messageSoundsRow: some View {
+        settingRow(label: L("messageSounds"),
+                   info: L("messageSounds.hint"),
+                   aligned: true) {
+            Toggle("", isOn: Binding(
+                get: { model.messageSoundsEnabled },
+                set: { Haptics.levelChange(); model.messageSoundsEnabled = $0 }
             ))
             .labelsHidden()
             .toggleStyle(.switch)
@@ -4755,7 +4843,7 @@ struct InlineSettingsView: View {
                         Image(systemName: "chevron.left")
                             .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
                             .foregroundStyle(Tokens.text2)
-                            .frame(width: 24, height: 24)
+                            .frame(width: Tokens.Control.inline, height: Tokens.Control.inline)
                     }
                     .buttonStyle(PromptTemplateChipStyle(shape: Circle()))
                     .accessibilityLabel(L("shortcuts.promptAction.templates.back"))
@@ -4780,7 +4868,7 @@ struct InlineSettingsView: View {
                     Image(systemName: "xmark")
                         .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                         .foregroundStyle(Tokens.text2)
-                        .frame(width: 24, height: 24)
+                        .frame(width: Tokens.Control.inline, height: Tokens.Control.inline)
                 }
                 .buttonStyle(PromptTemplateChipStyle(shape: Circle()))
                 .accessibilityLabel(L("detached.close"))
@@ -5084,9 +5172,9 @@ struct InlineSettingsView: View {
                     addPromptShortcut(from: template)
                 } label: {
                     Image(systemName: "plus")
-                        .font(.sf(Tokens.TypeSize.reading, weight: .semibold))
+                        .font(.sf(Tokens.TypeSize.form, weight: .semibold))
                         .foregroundStyle(Tokens.text1)
-                        .frame(width: 34, height: 34)
+                        .frame(width: Tokens.Control.rail, height: Tokens.Control.rail)
                 }
                 .buttonStyle(PromptTemplateChipStyle(shape: Circle(), active: true))
                 .accessibilityLabel(L("shortcuts.promptAction.add"))
@@ -5331,7 +5419,7 @@ struct InlineSettingsView: View {
 
     /// The header's add chip — smaller than a row's chips, and the height the
     /// title row reserves so the pane's top edge never shaves it.
-    private static let promptAddChipSize: CGFloat = 24
+    private static let promptAddChipSize: CGFloat = Tokens.Control.inline
 
     /// One shortcut, as a small card: its AI name over its chord. The whole card
     /// is the control — clicking it opens the editor — and the pointer is answered
@@ -5490,7 +5578,7 @@ struct InlineSettingsView: View {
                     Image(systemName: "xmark")
                         .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                         .foregroundStyle(Tokens.text3)
-                        .frame(width: 22, height: 22)
+                        .frame(width: Tokens.Control.inline, height: Tokens.Control.inline)
                 }
                 .buttonStyle(ShortcutChipStyle(rest: 0.035, restStroke: 0.08))
                 .accessibilityLabel(L("detached.close"))
@@ -5786,10 +5874,10 @@ struct InlineSettingsView: View {
             // their shipped value.
             if target == .summon {
                 Menu {
-                    Button("Double-tap Command") {
+                    Button(L("general.shortcut.doubleTapCommand")) {
                         restoreSummonDoubleTap(UInt32(cmdKey))
                     }
-                    Button("Double-tap Option") {
+                    Button(L("general.shortcut.doubleTapOption")) {
                         restoreSummonDoubleTap(UInt32(optionKey))
                     }
                 } label: {
@@ -5811,7 +5899,7 @@ struct InlineSettingsView: View {
                     Image(systemName: "arrow.counterclockwise")
                         .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
                         .foregroundStyle(Tokens.text3)
-                        .frame(width: 24, height: 24)
+                        .frame(width: Tokens.Control.inline, height: Tokens.Control.inline)
                 }
                 .buttonStyle(ShortcutChipStyle(rest: 0.055, restStroke: 0.1))
                 .help(L("shortcuts.reset"))
@@ -6423,8 +6511,7 @@ struct InlineSettingsView: View {
     }
 
     private func usageModelName(_ id: String) -> String {
-        if id == "nono-flash" || id == "nono" { return ModelRatings.nonoName(for: id) }
-        return id
+        return ModelRatings.nonoDisplayName(for: id) ?? id
     }
 
     /// The height left for the pane's rows once the top runway, the bottom
@@ -7531,15 +7618,15 @@ private struct PrivacyShieldButton: View {
 /// What happens to a request paid from Notchi Balance — the Privacy sub-page,
 /// behind the balance card's shield. Written the way What's New writes release
 /// notes — a caption heading over short bulleted lines — because it is the same
-/// kind of reading: four separate facts, each scanned rather than read through.
+/// kind of reading: separate facts, each scanned rather than read through.
 /// One column, top to bottom, at What's New's 18pt between groups.
 private struct NonoPrivacyNote: View {
     private static let flow = ["mac", "gateway", "network"]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            group("stored")
-            group("sent")
+            group("stored", count: 4)
+            group("sent", count: 5)
             group("route", flow: true)
             group("thirdParty", count: 2)
         }
@@ -7556,7 +7643,7 @@ private struct NonoPrivacyNote: View {
                 // prompt, the answer, or the files. Same weight What's New
                 // uses for an emphasized bullet.
                 bullet(L("nono.privacy.\(key).\(i)"),
-                       emphasized: key == "stored" && i == 3)
+                       emphasized: key == "stored" && i == 4)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -8066,6 +8153,51 @@ private struct MiniDisplay: View {
                     .frame(width: 12, height: 2)
             }
         }
+    }
+}
+
+/// A miniature thread glyph for the Lab's thread picker. Separate: two short
+/// threads side by side, one question and answer each. Unified: one thread
+/// holding both exchanges in order. Same strokes and fills as `MiniDisplay`.
+private struct MiniThreads: View {
+    let unified: Bool
+
+    var body: some View {
+        if unified {
+            thread(exchanges: 2, width: 66)
+        } else {
+            HStack(spacing: 6) {
+                thread(exchanges: 1, width: 30)
+                thread(exchanges: 1, width: 30)
+            }
+        }
+    }
+
+    private func thread(exchanges: Int, width: CGFloat) -> some View {
+        VStack(spacing: 3) {
+            ForEach(0..<exchanges, id: \.self) { _ in
+                // The question: a bright bubble on the right.
+                Capsule()
+                    .fill(.white.opacity(0.9))
+                    .frame(width: 11, height: 3)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                // The answer: a dimmer line on the left.
+                Capsule()
+                    .fill(.white.opacity(0.4))
+                    .frame(width: width * 0.55, height: 3)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(.horizontal, 4)
+        .frame(width: width, height: 26)
+        .background(
+            RoundedRectangle(cornerRadius: 3)
+                .fill(.white.opacity(0.10))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 3)
+                .strokeBorder(.white.opacity(0.45), lineWidth: 1)
+        )
     }
 }
 

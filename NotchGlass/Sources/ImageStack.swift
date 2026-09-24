@@ -145,6 +145,16 @@ struct ImageExpandStack: View {
         return -(bounds.min + bounds.max) / 2
     }
 
+    /// Slide the cards so their leftmost corner sits on the box's leading edge.
+    private var leadingShift: CGFloat {
+        var low = CGFloat.greatestFiniteMagnitude
+        for index in images.indices {
+            low = min(low, offset(index).width - halfExtent(index).width)
+        }
+        guard low < .greatestFiniteMagnitude else { return 0 }
+        return -(Self.designWidth / 2 + low)
+    }
+
     /// The fan is drawn at the demo's scale and shrunk to fit a narrower answer
     /// column, so the whole interaction keeps its proportions on any panel width.
     private var scale: CGFloat { min(1, columnWidth / Self.designWidth) }
@@ -181,11 +191,11 @@ struct ImageExpandStack: View {
                     .zIndex(Double(expanded ? 20 + index : 10 + index))
             }
         }
-        .offset(y: centeringShift)
+        .offset(x: leadingShift, y: centeringShift)
         .frame(width: Self.designWidth, height: contentHeight)
-        .scaleEffect(scale, anchor: .center)
+        .scaleEffect(scale, anchor: .leading)
         .frame(height: contentHeight * scale)
-        .frame(maxWidth: .infinity, alignment: .center)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             GeometryReader { geo in
                 Color.clear
@@ -652,10 +662,14 @@ private struct ImageLightbox: View {
     @ViewBuilder
     private func picture(_ ref: AnswerImageRef, maxWidth: CGFloat, maxHeight: CGFloat) -> some View {
         if let image = decoded[ref.urlString] {
+            // Sized to the picture's own aspect ratio, so the frame, its border
+            // and its shadow end where the picture does.
+            let size = image.size
+            let fit = size.width > 0 && size.height > 0
+                ? min(maxWidth / size.width, maxHeight / size.height) : 1
             Image(nsImage: image)
                 .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(maxWidth: maxWidth, maxHeight: maxHeight)
+                .frame(width: size.width * fit, height: size.height * fit)
                 .clipShape(RoundedRectangle.inset)
                 .overlay(
                     RoundedRectangle.inset
@@ -784,7 +798,7 @@ private struct ImageLightbox: View {
     private func pageButton(_ glyph: String, by delta: Int) -> some View {
         GlassIconButton(systemName: glyph,
                         help: L(delta < 0 ? "gallery.previous" : "gallery.next"),
-                        size: 30,
+                        size: Tokens.Control.chip,
                         glyphSize: 12,
                         showsTooltip: false) {
             _ = slide(by: delta)

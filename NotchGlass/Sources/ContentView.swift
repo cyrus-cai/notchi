@@ -15,7 +15,7 @@ struct ContentView: View {
     /// relaunch, without each child view having to observe the store itself.
     @EnvironmentObject private var loc: Localization
     @Environment(\.notchMetrics) private var metrics
-    /// Reduce-motion skips the close dissolve (the content fade beat), collapsing in
+    /// Reduce-motion skips the close beat (the content pull-in), collapsing in
     /// one step — mirrors how the open spring already degrades to a plain settle.
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -217,8 +217,7 @@ struct ContentView: View {
             // header all carry. Pinned → the panel stays open when the pointer
             // leaves (see NotchModel.collapseOnLeave). Not over What's New (it owns
             // no pin), so that one falls through to the system. keyCode 35 is P, 2 is D.
-            if AppShortcutStore.matches(.pin, event: event),
-               model.mode != .load, !model.showWhatsNew {
+            if AppShortcutStore.matches(.pin, event: event), model.canTogglePin {
                 withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
                     model.toggleAnswerPin()
                 }
@@ -876,6 +875,19 @@ struct NotchIsland: View {
         NotchShape(bottomRadius: bottomRadius, topRadius: topFlare)
     }
 
+    /// The body's exit on close. It shrinks toward the notch, anchored at its top
+    /// edge, down to the resting notch's width, on the same transaction as the
+    /// shell's retract, so its width follows the shell's width through the whole
+    /// spring. Blur and fade lag the shrink (see `FoldIntoNotch`), so the content
+    /// stays readable for most of the retract and is gone by the time the shell
+    /// reaches rest. Reduce Motion keeps a plain fade.
+    private var foldIntoNotch: AnyTransition {
+        guard !reduceMotion else { return .opacity }
+        let scale = min(1, metrics.restWidth / max(model.openWidth, 1))
+        return .modifier(active: FoldIntoNotch(progress: 1, endScale: scale),
+                         identity: FoldIntoNotch(progress: 0, endScale: scale))
+    }
+
     var body: some View {
         // The island sizes its HEIGHT to its content (the constant black zone +,
         // when open, the glass body). We deliberately do NOT pin height to a
@@ -946,31 +958,38 @@ struct NotchIsland: View {
             .scaleEffect(x: 1 / peekScaleX, y: 1 / peekScaleY, anchor: peekContentAnchor)
 
             // The glass body unfurls below the notch zone when open. On the way out
-            // it fades FIRST (driven by `model.closing`), while the shell holds its
-            // expanded size — then `beginClose` drops `open`, this view leaves, and
-            // the shell retracts. So content dissolves, then the form collapses,
-            // instead of both clamping shut on one transaction. The `.opacity`
-            // transition still carries the open fade-in (and the final unmount).
+            // the content stays on screen and shrinks into the notch together with
+            // the shell: `model.closing` first pulls it in a few percent (the
+            // close has visibly started), then `beginClose` drops `open` and the
+            // removal transition scales it toward the notch on the shell's own
+            // retract spring, blurring and fading as it goes. The old close faded
+            // the content out before the shell moved, so the whole retract played
+            // as an empty black slab.
             if isOpen {
                 NotchBody(model: model)
                     // The shoulders widen the FRAME, not the content box — pad
                     // them back off so the body lays out in exactly `openWidth`,
                     // flush with the form's straight sides.
                     .padding(.horizontal, topFlare)
-                    .opacity(model.closing ? 0 : 1)
-                    // Ease the dissolve over the model's content-fade window so it
-                    // completes just as `beginClose` fires the shell retract.
-                    .animation(.easeOut(duration: NotchModel.closeContentFade), value: model.closing)
+                    .scaleEffect(model.closing && !reduceMotion ? 0.97 : 1, anchor: .top)
+                    .animation(.easeOut(duration: NotchModel.closeAnticipation), value: model.closing)
                     // The pre-tear feel: the body gives a few points toward the
                     // pull (tanh-saturated), so the glass reads as grabbed
                     // before the window tears free. Release springs it home on
                     // `detachDragEnded`'s transaction.
                     .offset(detachLean)
                     .opacity(model.detachDrag == nil ? 1 : 0.94)
-                    .transition(.opacity)
+                    .transition(.asymmetric(insertion: .opacity, removal: foldIntoNotch))
             }
         }
-        .frame(width: width)
+        // During a thread pull the width comes from the pull's progress frame by
+        // frame, as the reveal's heights do. Left to the implicit `openWidth`
+        // spring below, layout took the final width at once and the window
+        // server animated the glass layer on its own, so the glass drew at a
+        // stale width and snapped to the real one on the last frame.
+        .modifier(PullWidthFrame(live: model.threadPullLive,
+                                 pulling: isOpen && model.threadPulling,
+                                 width: width, flare: topFlare))
         .padding(.top, -topBleed)   // pull the form up so it bleeds off the top
         .background(GlassMaterial(bottomRadius: bottomRadius,
                                   topRadius: topFlare,
@@ -1175,7 +1194,10 @@ struct NotchIsland: View {
         .onChange(of: earRight) { _, _ in
             model.registerRestingEars(left: earLeft, right: earRight)
         }
-        .animation(.spring(response: 0.42, dampingFraction: 0.72), value: model.openWidth)
+        // Keyed off during a pull: the pull's own animation carries the width
+        // (see `PullWidthFrame`), and this spring would replace it.
+        .animation(.spring(response: 0.42, dampingFraction: 0.72),
+                   value: !model.threadPulling ? model.openWidth : -1)
         .animation(.spring(response: 0.42, dampingFraction: 0.78), value: model.mode)
         // The note-save feedback line (Saving… → Added to Notes → gone) changes the
         // body's intrinsic height. Without these, only the inner idleView spring
@@ -1337,6 +1359,29 @@ struct NotchIsland: View {
     }
 }
 
+/// `foldIntoNotch`'s render, driven by one animated `progress` (0 = open,
+/// 1 = folded). The scale is linear in progress so the content's width tracks the
+/// shell's; opacity falls as 1 − p³ and blur grows as p², so both stay near zero
+/// through the first half of the retract. The close spring overshoots, so
+/// progress is clamped.
+private struct FoldIntoNotch: ViewModifier, Animatable {
+    var progress: CGFloat
+    let endScale: CGFloat
+
+    var animatableData: CGFloat {
+        get { progress }
+        set { progress = newValue }
+    }
+
+    func body(content: Content) -> some View {
+        let p = min(max(progress, 0), 1)
+        content
+            .scaleEffect(1 - (1 - endScale) * p, anchor: .top)
+            .blur(radius: 6 * p * p)
+            .opacity(1 - p * p * p)
+    }
+}
+
 /// The components of the entry kick, in render terms: a horizontal nudge (pt),
 /// a top-hinged x-shear (x shift per pt of y), and a vertical squash (scaleY
 /// delta, negative = compressed).
@@ -1408,5 +1453,20 @@ struct KeyEventCatcher: NSViewRepresentable {
             }
         }
         deinit { if let m = monitor { NSEvent.removeMonitor(m) } }
+    }
+}
+
+/// The island's width. While a thread pull runs it is interpolated from the
+/// pull's progress on every frame; otherwise it is `width` as given.
+private struct PullWidthFrame: ViewModifier {
+    @ObservedObject var live: ThreadPullLive
+    let pulling: Bool
+    let width: CGFloat
+    let flare: CGFloat
+
+    func body(content: Content) -> some View {
+        let p = min(max(live.progress, 0), 1)
+        let pulled = Tokens.openWidthIdle + (Tokens.openWidthResult - Tokens.openWidthIdle) * p
+        return content.frame(width: pulling ? pulled + flare * 2 : width)
     }
 }

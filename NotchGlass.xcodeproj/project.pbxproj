@@ -25,6 +25,7 @@
 		A1000741 /* VendorLogos.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000740 /* VendorLogos.swift */; };
 		A1000961 /* NoNoAccount.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000960 /* NoNoAccount.swift */; };
 		A1000C71 /* ClipPrivacy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000C70 /* ClipPrivacy.swift */; };
+		A1000C81 /* LinkCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000C80 /* LinkCard.swift */; };
 		A1000C21 /* ImageStack.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000C20 /* ImageStack.swift */; };
 		A10007E1 /* LucideIcons.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10007E0 /* LucideIcons.swift */; };
 		A1000B01 /* LoopService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000B00 /* LoopService.swift */; };
@@ -120,6 +121,7 @@
 		A1000740 /* VendorLogos.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VendorLogos.swift; sourceTree = "<group>"; };
 		A1000960 /* NoNoAccount.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoNoAccount.swift; sourceTree = "<group>"; };
 		A1000C70 /* ClipPrivacy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipPrivacy.swift; sourceTree = "<group>"; };
+		A1000C80 /* LinkCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkCard.swift; sourceTree = "<group>"; };
 		A1000C20 /* ImageStack.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageStack.swift; sourceTree = "<group>"; };
 		A10007E0 /* LucideIcons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LucideIcons.swift; sourceTree = "<group>"; };
 		A1000B00 /* LoopService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoopService.swift; sourceTree = "<group>"; };
@@ -216,6 +218,7 @@
 				A1000740 /* VendorLogos.swift */,
 				A1000960 /* NoNoAccount.swift */,
 				A1000C70 /* ClipPrivacy.swift */,
+				A1000C80 /* LinkCard.swift */,
 				A1000C20 /* ImageStack.swift */,
 				A10007E0 /* LucideIcons.swift */,
 				A1000B00 /* LoopService.swift */,
@@ -371,6 +374,7 @@
 				A1000741 /* VendorLogos.swift in Sources */,
 				A1000961 /* NoNoAccount.swift in Sources */,
 				A1000C71 /* ClipPrivacy.swift in Sources */,
+				A1000C81 /* LinkCard.swift in Sources */,
 				A1000C21 /* ImageStack.swift in Sources */,
 				A10007E1 /* LucideIcons.swift in Sources */,
 				A1000B01 /* LoopService.swift in Sources */,
@@ -449,7 +453,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.8.6;
+				MARKETING_VERSION = 0.9.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -472,7 +476,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.8.6;
+				MARKETING_VERSION = 0.9.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;

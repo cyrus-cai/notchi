@@ -576,7 +576,7 @@ private struct HistoryDetailView: View {
     private var capture: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text(item.q)
-                .font(.sf(Tokens.TypeSize.reading))
+                .font(.sf(Tokens.TypeSize.form))
                 .foregroundStyle(Tokens.text1)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -626,7 +626,7 @@ private struct TranscriptBubble: View {
                 SavedTurnImages(files: turn.imageFiles)
             }
             Text(turn.text)
-                .font(.sf(Tokens.TypeSize.reading))
+                .font(.sf(Tokens.TypeSize.form))
                 .foregroundStyle(Tokens.text1)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -655,7 +655,7 @@ private struct TranscriptBubble: View {
     /// Strip the vendor prefix / `:free` suffix so a bare model name shows, matching
     /// the notch footer's presentation.
     private func prettyModel(_ raw: String) -> String {
-        if ModelRatings.isNonoID(raw) { return ModelRatings.nonoName(for: raw) }
+        if let name = ModelRatings.nonoDisplayName(for: raw) { return name }
         var s = raw
         if let slash = s.lastIndex(of: "/") { s = String(s[s.index(after: slash)...]) }
         if s.hasSuffix(":free") { s = String(s.dropLast(":free".count)) }

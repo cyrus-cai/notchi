@@ -95,8 +95,15 @@ final class UpdaterService: ObservableObject {
     /// Silent daily check — called at launch and whenever the panel opens, so a
     /// long-running agent still notices releases. Throttled to once per 24h.
     func checkIfDue() {
+        check(ifOlderThan: 24 * 3600)
+    }
+
+    /// Silent check, skipped when the last one landed within `interval`. The idle
+    /// prompt's ⋯ hover calls this with a short interval, so repeated hovers don't
+    /// spend GitHub's unauthenticated rate limit.
+    func check(ifOlderThan interval: TimeInterval) {
         if let last = UserDefaults.standard.object(forKey: lastCheckKey) as? Date,
-           Date().timeIntervalSince(last) < 24 * 3600 {
+           Date().timeIntervalSince(last) < interval {
             return
         }
         check()

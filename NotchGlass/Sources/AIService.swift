@@ -266,8 +266,27 @@ question genuinely needs it. Concision is a rule about the answer you write, \
 not about how hard you think: reason as thoroughly as the question deserves, \
 then say it briefly. No markdown headers.
 
-When you mention a link, write it as a Markdown inline link — [visible text](url) \
-— never a bare URL, so it renders as a clickable link rather than plain text.
+Write the way a person texts a friend, not the way a product page or a document \
+reads. Say the answer itself in the first sentence — for "what is X", what X is, \
+in plain words — then add the one or two things that matter most, in sentences. \
+Never write a lead-in like "Key features:" / "核心特点：" followed by bullets that \
+each open with a bold label; that is the document voice this rule forbids. A list \
+is fine only for steps or truly parallel options, and stays with the sentence \
+that introduces it.
+
+The app shows your reply as chat bubbles, and a blank line starts a new bubble. \
+Send one thing per bubble — usually one to three — and leave a blank line only \
+where a new message would start. When the question names someone or something \
+by a partial or ambiguous name ("dario", "the Apple event"), the first bubble is \
+one short line saying which one you mean — "You mean Dario Amodei of Anthropic." \
+— and the answer follows in the next bubble.
+
+For a person's or an organisation's background, history, or career, give the \
+concrete facts — years, places, schools, employers, numbers — in order, not a \
+summary of the kind of work they do. Keep each date on the event it belongs to.
+
+When you mention a link inside a sentence, write it as a Markdown inline link — \
+[visible text](url) — so it renders as a clickable link rather than plain text.
 
 When an image is what the user asked to see — a photo, chart, diagram, logo, \
 map, or screenshot — embed it as Markdown image syntax, ![alt](direct image url), \
@@ -280,6 +299,26 @@ call costs the user an extra round-trip. Default to answering directly, with NO 
 tool call, whenever the answer is stable knowledge: translations, rewriting or \
 drafting text, explanations and definitions, code and technical questions, \
 how-tos, and general facts that do not change over time.
+"""
+
+/// How the answer hands over a page worth opening on its own: its URL on a
+/// line by itself, which the harness checks and the answer draws as a card
+/// (`LinkCardSplitter`). A line whose page does not open is dropped. Text and
+/// not a tool call, because some models never call a tool after their reply.
+private let notchSystemPromptLinkLine = """
+A reply about one named thing that has its own page always ends with that \
+page's bare URL on a line by itself — also when you answered from memory: \
+- a product, app, website, company, or open-source project → its official site \
+or repository; \
+- a person, book, film, show, game, or event → its English Wikipedia article \
+(en.wikipedia.org), whose title you are more likely to get exactly right; \
+- a paper or document → the page it is published on; \
+- a place — a hospital, restaurant, shop, school, landmark, address — and any \
+"where is" question → https://maps.apple.com/?q= followed by the place's full \
+name, URL-encoded. \
+The same goes for the one report or page your answer rests on. One URL per \
+line, at most three, and don't also link it in the text. The app shows each \
+such line as a preview card and drops a line whose page does not open.
 """
 
 private let notchSystemPromptCite = """
@@ -348,6 +387,7 @@ func notchSystemPrompt(advertisedTools: Set<String>? = nil) -> String {
         return !advertised.isDisjoint(with: names)
     }
     var prompt = notchSystemPromptBase
+    prompt += "\n\n" + notchSystemPromptLinkLine
     let bullets = notchSystemPromptToolStances.compactMap { stance -> String? in
         include(stance.tools) ? stance.copy : nil
     }
@@ -595,7 +635,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         #if DEBUG
         let stored = UserDefaults.standard.string(forKey: "NoNoBaseURL") ?? ""
         if !stored.isEmpty { return stored.trimmingCharacters(in: .whitespaces) }
-        return (ProcessInfo.processInfo.environment["NONO_BASE_URL"] ?? "")
+        return (getenv("NONO_BASE_URL").map { String(cString: $0) } ?? "")
             .trimmingCharacters(in: .whitespaces)
         #else
         return ""
@@ -651,11 +691,14 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
                 // an app release — that indirection is the point, so this id is
                 // the whole public surface.
                 //
-                // There was a second tier, `nono`, and it was the head of this
-                // list, which made it every install's `defaultModel`. The gateway
-                // still answers to that name as an alias because copies in the
-                // field still send it.
-                models: ["nono-flash"],
+                // `nono` and then `nono-flash` (Blend1) were the head of this
+                // list, which made each every install's `defaultModel`. Both are
+                // retired; the gateway runs either as `auto-us` because copies
+                // in the field still send them.
+                //
+                // The head is `auto-us`, so a user who has not picked a model
+                // runs Auto (US).
+                models: ["auto-us"],
                 signupHost: "notch.website",
                 signupURL: "https://notch.website",
                 envVarName: "NONO_API_KEY")
@@ -2800,21 +2843,7 @@ enum ModelCatalog {
             let (data, response) = try await ProxyConfig.urlSession.data(for: req)
             guard let http = response as? HTTPURLResponse,
                   (200..<300).contains(http.statusCode) else { return nil }
-            let list = try JSONDecoder().decode(ModelList.self, from: data)
-            // Clean the catalog before anything else looks at it — the picker, the
-            // featured split and the shortlist all inherit from this one place.
-            // Two passes: drop what chat can't call (`Entry.isChatModel`), then
-            // collapse each model's dated snapshots into one row (`ModelSnapshots`).
-            let entries = ModelSnapshots.collapse(
-                list.data.filter { !$0.id.isEmpty && $0.isChatModel })
-            // id → rich metadata, so the reordered/​filtered id lists below can
-            // carry their `ModelInfo` along without re-decoding.
-            let byID = Dictionary(entries.map { ($0.id, ModelInfo(entry: $0, provider: provider)) },
-                                  uniquingKeysWith: { a, _ in a })
-            func infos(for ids: [String]) -> [ModelInfo] {
-                ids.map { byID[$0]
-                    ?? ModelInfo(id: $0, vendor: ModelRatings.vendor(for: $0, provider: provider)) }
-            }
+            let entries = try chatEntries(in: data)
             // OpenRouter's catalog is its full marketplace. Keep that complete
             // chat catalog available: a pasted key may have credits, and hiding
             // every paid model makes the provider look like a free-only backend.
@@ -2836,14 +2865,61 @@ enum ModelCatalog {
                 }
                 let ids = ["openrouter/free"] + featured + rest + paid
                 return Result(models: ids, openRouterFeatured: Set(featured),
-                              infos: infos(for: ids))
+                              infos: infos(for: ids, in: entries, provider: provider))
             }
-            let ids = entries.map(\.id)
-            return ids.isEmpty ? nil : Result(models: ids, openRouterFeatured: [],
-                                              infos: infos(for: ids))
+            let result = plainResult(entries, provider: provider)
+            if provider == .nono, result != nil {
+                UserDefaults.standard.set(data, forKey: persistedNonoKey)
+            }
+            return result
         } catch {
             return nil
         }
+    }
+
+    /// nono's last good `/v1/models` body. The in-memory `cache` above ends with
+    /// the process, so without this every launch showed the Ask menu's Notchi
+    /// list as the bundled Blend1 row until the gateway answered. The raw body is
+    /// stored rather than the parsed result, so a relaunch decodes it the same way
+    /// a live fetch does.
+    private static let persistedNonoKey = "ModelCatalog.nonoModels"
+
+    /// The catalog `persistedNonoKey` holds, or `nil` when nothing is stored or it
+    /// no longer decodes. Shown until this launch's live fetch lands.
+    static func persistedNono() -> Result? {
+        guard let data = UserDefaults.standard.data(forKey: persistedNonoKey),
+              let entries = try? chatEntries(in: data) else { return nil }
+        return plainResult(entries, provider: .nono)
+    }
+
+    /// The chat models in one `/v1/models` body. Cleaned before anything else
+    /// looks at it — the picker, the featured split and the shortlist all inherit
+    /// from this one place. Two passes: drop what chat can't call
+    /// (`Entry.isChatModel`), then collapse each model's dated snapshots into one
+    /// row (`ModelSnapshots`).
+    private static func chatEntries(in data: Data) throws -> [ModelList.Entry] {
+        let list = try JSONDecoder().decode(ModelList.self, from: data)
+        return ModelSnapshots.collapse(list.data.filter { !$0.id.isEmpty && $0.isChatModel })
+    }
+
+    /// `ids` with their rich metadata from `entries`, so a reordered or filtered
+    /// id list carries its `ModelInfo` along without re-decoding.
+    private static func infos(for ids: [String], in entries: [ModelList.Entry],
+                              provider: Provider) -> [ModelInfo] {
+        let byID = Dictionary(entries.map { ($0.id, ModelInfo(entry: $0, provider: provider)) },
+                              uniquingKeysWith: { a, _ in a })
+        return ids.map { byID[$0]
+            ?? ModelInfo(id: $0, vendor: ModelRatings.vendor(for: $0, provider: provider)) }
+    }
+
+    /// Every provider but OpenRouter: the catalog in the vendor's own order.
+    private static func plainResult(_ entries: [ModelList.Entry], provider: Provider) -> Result? {
+        // Blend1 is retired. A gateway not yet redeployed, or a body stored
+        // before it was, still lists `nono-flash`; it is not offered.
+        let entries = provider == .nono ? entries.filter { !ModelRatings.isNonoID($0.id) } : entries
+        let ids = entries.map(\.id)
+        return ids.isEmpty ? nil : Result(models: ids, openRouterFeatured: [],
+                                          infos: infos(for: ids, in: entries, provider: provider))
     }
 
     /// Turn a chat endpoint into its `/models` sibling:
@@ -2961,6 +3037,10 @@ enum ModelCatalog {
                 /// First-party named entry on the vendor's own API. Absent on
                 /// older payloads; the pricing row then keeps "US Provider".
                 let official: Bool?
+                /// Where the upstream runs: "official", "us", or "any" (no
+                /// specific region). Absent on older payloads; `official`
+                /// then decides.
+                let host: String?
                 let inputPerMTok: Double
                 /// Per million prompt tokens the upstream served from its cache.
                 /// `nil` where the model is billed one rate for all input.
@@ -3551,26 +3631,51 @@ enum ModelRatings {
         }
     }
 
-    /// The first-party tier's name. The wire id stays `nono-flash` — the gateway
-    /// and every copy in the field speak it — but the product is called Blend1,
-    /// so the app draws that name and never the id. The gateway sends a name of
-    /// its own; this one is used so the tier reads identically on the chip, in
-    /// the menu, and before any catalog fetch has landed.
+    /// The retired first-party tier's name. `nono-flash` was sold as Blend1 and
+    /// is no longer offered; the name stays for answers it already gave (a
+    /// footer, a saved transcript, the usage list).
     static func nonoName(for id: String) -> String { "Blend1" }
 
-    /// The wire ids the first-party tier answers to: the canonical `nono-flash` and
-    /// the older `nono` alias. Used where a stored id is shown without its provider
-    /// (an answer footer, a saved transcript).
+    /// The retired first-party ids: `nono-flash` (Blend1) and the older `nono`.
+    /// The gateway runs both as `auto-us`. Used where a stored id is shown
+    /// without its provider (an answer footer, a saved transcript), and to drop
+    /// a saved pick of either (`APIKeyStore.storedModel`).
     static func isNonoID(_ id: String) -> Bool { id == "nono-flash" || id == "nono" }
 
-    /// Whether a Notchi Balance model is served from the vendor's own API
-    /// rather than a US host (Workers AI / Darkbloom). The catalog flag
-    /// `notchi.official` is the source of truth; vendor `DeepSeek` and the
-    /// public id `deepseek-flash` cover a cached payload that predates it.
-    static func nonoOfficialHost(id: String, pricing: ModelCatalog.ModelList.Entry.NotchiPricing?) -> Bool {
-        if pricing?.official == true { return true }
+    /// Where a Notchi Balance model is served from.
+    enum NonoHost { case official, us, anyRegion }
+
+    /// The catalog's `notchi.host` when it sends one. Older payloads carry only
+    /// `notchi.official`; vendor `DeepSeek` and the public id `deepseek-flash`
+    /// cover a cached payload that predates that too. Anything else is a US host.
+    static func nonoHost(id: String, pricing: ModelCatalog.ModelList.Entry.NotchiPricing?) -> NonoHost {
+        switch pricing?.host {
+        case "official": return .official
+        case "any": return .anyRegion
+        case "us": return .us
+        default: break
+        }
+        if pricing?.official == true { return .official }
         let vendor = pricing?.vendor ?? vendor(for: id, provider: .nono)
-        return vendor == "DeepSeek" || id == "deepseek-flash"
+        return vendor == "DeepSeek" || id == "deepseek-flash" ? .official : .us
+    }
+
+    /// Whether a Notchi Balance model is on the Blend shelf: Notchi's own name,
+    /// no vendor mark. Blend1 by id; any other entry the catalog sends with no
+    /// vendor.
+    static func isNonoBlend(id: String, pricing: ModelCatalog.ModelList.Entry.NotchiPricing?) -> Bool {
+        if isNonoID(id) { return true }
+        guard let pricing else { return false }
+        return pricing.vendor == nil
+    }
+
+    /// The name to show for a stored Blend id, where no provider rides along
+    /// (an answer footer, a saved transcript, the usage list): Blend1's own, or
+    /// the name the live catalog gave another Blend entry. `nil` for any other
+    /// id, which keeps its usual bare form.
+    static func nonoDisplayName(for id: String) -> String? {
+        if isNonoID(id) { return nonoName(for: id) }
+        return nonoBlendHosts[id] != nil ? nonoNames[id] : nil
     }
 
     /// id → name for the named entries in nono's live catalog
@@ -3582,6 +3687,15 @@ enum ModelRatings {
     static var nonoNames: [String: String] {
         get { nonoNamesLock.lock(); defer { nonoNamesLock.unlock() }; return storedNonoNames }
         set { nonoNamesLock.lock(); storedNonoNames = newValue; nonoNamesLock.unlock() }
+    }
+
+    /// The Blend-shelf ids in nono's live catalog other than Blend1's own (the
+    /// Auto entries), with where each runs. Written beside `nonoNames`, under
+    /// the same lock.
+    private static var storedNonoBlendHosts: [String: NonoHost] = [:]
+    static var nonoBlendHosts: [String: NonoHost] {
+        get { nonoNamesLock.lock(); defer { nonoNamesLock.unlock() }; return storedNonoBlendHosts }
+        set { nonoNamesLock.lock(); storedNonoBlendHosts = newValue; nonoNamesLock.unlock() }
     }
 
     /// `prettyName`, but for an id read **as `provider` serves it**. The one
@@ -3598,7 +3712,8 @@ enum ModelRatings {
         // on the same gateway is the vendor's model under the vendor's name,
         // which the live catalog carries; before it lands, the id stands in.
         if provider == .nono {
-            return isNonoID(id) ? nonoName(for: id) : (nonoNames[id] ?? prettyName(for: id))
+            if isNonoID(id) { return nonoName(for: id) }
+            return nonoNames[id] ?? (id == "auto-us" ? "Auto (US)" : prettyName(for: id))
         }
         // pi's ids are `<pi-provider>/<model>`. The account rides the picker's rows
         // (`PiCLIService.displayName(forID:)`); a chip is short by the same rule

@@ -175,6 +175,8 @@ private final class DetachedWindow: NSWindow {
                     return
                 }
             }
+        case .rightMouseDown:
+            if showAnswerMenuOverSelectableText(event) { return }
         case .leftMouseUp:
             let wasDragging = dragging
             dragging = false
@@ -211,7 +213,11 @@ private final class DetachedWindow: NSWindow {
             if v is NSControl || v is NSText { return false }
             view = v.superview
         }
-        return true
+        // SwiftUI's `.textSelection(.enabled)` text is none of those: it is an
+        // `AppKitTextInteractionView` that `hitTest` never returns (the hosting
+        // view answers for it). Found by frame instead, so a drag across the
+        // question or the answer selects rather than moving the window.
+        return selectableTextView(at: event.locationInWindow) == nil
     }
 
     /// LSUIElement app: there is no menu-bar Close item to catch ⌘W, so the
@@ -3090,7 +3096,7 @@ private struct CompactShortcutTrailingControl: View {
 
     /// The shared footprint, held whether Send is showing or not.
     /// Same diameter as the main-flow `IdleTrailingCluster` Recent disclosure.
-    static let slot: CGFloat = 30
+    static let slot: CGFloat = Tokens.Control.chip
 
     var body: some View {
         ZStack {
@@ -3123,7 +3129,7 @@ private struct CompactHistoryDisclosure: View {
     @State private var hovering = false
 
     /// Same diameter as the main-flow `IdleTrailingCluster` Recent disclosure.
-    private static let size: CGFloat = 30
+    private static let size: CGFloat = Tokens.Control.chip
 
     var body: some View {
         Button(action: action) {
@@ -3139,7 +3145,7 @@ private struct CompactHistoryDisclosure: View {
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
         .animation(CompactHistoryMotion.spring, value: expanded)
-        .accessibilityLabel("History")
+        .accessibilityLabel(L("history.window.title"))
     }
 }
 
@@ -3150,7 +3156,7 @@ private struct CompactNotificationCloseButton: View {
     var action: () -> Void
     @State private var hovering = false
 
-    private static let size: CGFloat = 18
+    private static let size: CGFloat = Tokens.Control.inline
 
     var body: some View {
         let shape = Circle()
@@ -3275,7 +3281,7 @@ struct DetachedWindowGlass: View {
 /// The card and the field inside it are the app's two existing recipes stacked:
 /// the shortcut rows are `MenuCardRow`s (the `/` menu's rows, verbatim), and the
 /// input is the `ComposerBox` recess every other input in a slab wears — same
-/// 39pt resting row, same 13/6/6 insets, same lit floor and rim. One surface,
+/// 34pt resting row, same 13/6/6 insets, same lit floor and rim. One surface,
 /// nothing invented for it.
 private struct CompactShortcutPromptView: View {
     @ObservedObject var state: DetachedWindowState
@@ -3321,14 +3327,13 @@ private struct CompactShortcutPromptView: View {
     static let inputLeadingPadding: CGFloat = MenuCard.rowPad - PromptField.textInset
     private static let inputTrailingPadding: CGFloat = 4
     private static let inputVerticalPadding: CGFloat = 4
-    /// The input's type size: the card's own row type, not the notch's 16.5 idle
-    /// prompt. That size is scaled to the island — dropped into this small card
-    /// it towers over the shortcut titles right below it, and the box reads as
-    /// two type scales stacked.
-    private static let fontSize: CGFloat = Tokens.TypeSize.reading
+    /// The input's type size: the notch follow-up field's size, one step over the
+    /// shortcut titles right below it.
+    private static let fontSize: CGFloat = NotchBody.followUpFontSize
+    /// The field's one-line slot: the rail height less the vertical inset.
+    static let inputSlot: CGFloat = Tokens.Control.rail - inputVerticalPadding * 2
     static var restingRowHeight: CGFloat {
-        max(34, max(27, PromptField.lineHeight(for: fontSize))
-            + inputVerticalPadding * 2)
+        max(inputSlot, PromptField.lineHeight(for: fontSize)) + inputVerticalPadding * 2
     }
     static var cardCornerRadius: CGFloat {
         (cardPad * 2 + restingRowHeight) / 2
@@ -3454,7 +3459,7 @@ private struct CompactShortcutPromptView: View {
     }
     /// The input row: the field's slot plus the compact vertical inset.
     private var rowHeight: CGFloat {
-        max(34, max(27, fieldHeight) + Self.inputVerticalPadding * 2)
+        max(Self.inputSlot, fieldHeight) + Self.inputVerticalPadding * 2
     }
 
     private var cardHeight: CGFloat {
@@ -3656,7 +3661,7 @@ private struct CompactShortcutPromptView: View {
     private var historyDrawer: some View {
         Group {
             if historyItems.isEmpty {
-                Text("No Force Touch history yet")
+                Text(L("forceTouch.history.empty"))
                     .font(.sf(Tokens.TypeSize.form))
                     .foregroundStyle(Tokens.text4)
                     .frame(maxWidth: .infinity, minHeight: Self.historyRowHeight,
@@ -3732,7 +3737,7 @@ private struct CompactShortcutPromptView: View {
             systemName: "slider.horizontal.3",
             hoverSystemName: "arrow.up.right",
             help: L("recent.menu.settings"),
-            size: 34,
+            size: Tokens.Control.rail,
             showsTooltip: false,
             action: onOpenSettings)
     }
@@ -3748,7 +3753,7 @@ private struct CompactShortcutPromptView: View {
         GlassIconButton(
             systemName: "power",
             help: L("recent.menu.disable"),
-            size: 34,
+            size: Tokens.Control.rail,
             showsTooltip: false
         ) {
             withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
@@ -3808,7 +3813,7 @@ private struct CompactShortcutPromptView: View {
                     .transition(.opacity)
             }
         }
-        .frame(height: max(27, fieldHeight))
+        .frame(height: max(Self.inputSlot, fieldHeight))
         .background(CaretProbe(report: onCaretOffset))
         .animation(.easeOut(duration: 0.16), value: caretWidth == 0)
         .animation(.easeOut(duration: 0.16), value: state.compactPromptDraft.isEmpty)
@@ -4145,8 +4150,6 @@ struct DetachedThreadView: View {
 
     @State private var followUp = ""
     @State private var followUpImages: [NSImage] = []
-    @State private var hoveredSourceID: UUID?
-    @State private var sourceCloseWork: DispatchWorkItem?
     @State private var metadataMenuOpen = false
     @State private var intervalPickerOpen = false
     @ObservedObject private var chatLoops = ChatLoopManager.shared
@@ -4161,7 +4164,7 @@ struct DetachedThreadView: View {
 
     private var streaming: Bool { store.turns.contains { $0.streaming } }
     private var renderedTurns: [NotchModel.Turn] {
-        store.turns.filter { !$0.hidesUserBubble }
+        store.turns.filter(\.isDrawn)
     }
     private var latestAssistantTurn: NotchModel.Turn? {
         renderedTurns.last(where: { $0.role == "assistant" })
@@ -4259,7 +4262,7 @@ struct DetachedThreadView: View {
     static let headerHeight: CGFloat = 32
     static let compactFollowUpGap: CGFloat = 8
     static let followUpGap: CGFloat = 8
-    static let followUpHeight: CGFloat = 39
+    static let followUpHeight: CGFloat = Tokens.Control.rail
     /// The fade and frost bands are exactly the gaps the thread rests between —
     /// never deeper — so a card at rest is crisp edge to edge and only content
     /// that has actually travelled into a gap gets dissolved.
@@ -4293,7 +4296,7 @@ struct DetachedThreadView: View {
         compactShortcut ? Self.compactFollowUpGap : Self.followUpGap
     }
     /// The runway the thread travels DOWN into, behind the floating composer:
-    /// the box's own 39pt reach from the viewport's bottom edge, the gap it used
+    /// the box's own 34pt reach from the viewport's bottom edge, the gap it used
     /// to stand in as a sibling row, and whatever resting space this face already
     /// kept under its content. The scroll's frame grew by exactly the gap + row
     /// the sibling layout occupied, so a card is the same height it always was —
@@ -4324,12 +4327,6 @@ struct DetachedThreadView: View {
             + compactCardPadding * 2
             + CompactShortcutMetrics.answerChrome
     }
-    /// What the answer footer adds under the prose: 6pt of stack spacing, the
-    /// row's 2pt top inset, and a 22pt icon frame. Only the AppKit text estimate
-    /// needs this — the SwiftUI probe measures the footer along with everything
-    /// else in the turn stack — and the estimate is a floor, so the badge-led
-    /// row's slightly taller lead-in is safe to round down to.
-    private static let compactFooterHeight: CGFloat = 30
     private var latestAnswerText: String {
         latestAssistantTurn?.text
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -4461,11 +4458,19 @@ struct DetachedThreadView: View {
                         if compactShortcut, !compactAnswerIsCapped { return }
                         proxy.scrollTo(Self.bottomID, anchor: .bottom)
                     }
-                    // Regular detached threads append their footer on settle. At the
-                    // ceiling it lands below the fold, so follow their tail once more
-                    // after layout. A compact answer carries its footer from the first
-                    // token (`stabilizesFooterWhileStreaming`), so settling adds no
-                    // height there and the tail is already where the reader left it.
+                    // Settling can still add a line under a long thread. At the
+                    // ceiling it lands below the fold, so follow the tail once more
+                    // after layout. A compact answer is already sized to its text,
+                    // so settling adds no height there and the tail is already
+                    // where the reader left it.
+                    // The bubbles after an answer's first land one at a time, some
+                    // after the stream has ended (`BubblePacer`). Follow each one.
+                    .onReceive(BubblePacer.shared.$revision.dropFirst()) { _ in
+                        if compactShortcut, !compactAnswerIsCapped { return }
+                        withAnimation(.easeOut(duration: 0.2)) {
+                            proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                        }
+                    }
                     .onChange(of: streaming) { _, nowStreaming in
                         guard !nowStreaming else { return }
                         guard !compactShortcut else { return }
@@ -4514,11 +4519,6 @@ struct DetachedThreadView: View {
             guard compactShortcut, !latestAnswerText.isEmpty else { return }
             onDesiredHeight(estimatedCompactWindowHeight(for: latestAnswerText))
         }
-        // The hovered source badge's popup, floated at the window level — outside
-        // the thread's ScrollView, which would otherwise clip it. Without this the
-        // badge in a detached window published its anchor to nobody: the pill sat
-        // there and hovering it did nothing at all. Same modifier the panel uses.
-        .sourcePopoverOverlay(hoveredID: $hoveredSourceID, closeWork: $sourceCloseWork)
     }
 
     /// The thread has outgrown the window's ceiling — past here the window stops
@@ -4568,15 +4568,17 @@ struct DetachedThreadView: View {
         // Nothing written yet: the waiting card's own floor governs (see
         // `compactInitialHeight`) — this estimate has nothing to say yet.
         guard !plain.isEmpty else { return 0 }
+        // The answer card's text size (`AssistantTurnView.cardFont`).
+        let size = Tokens.TypeSize.stepDown(Tokens.TypeSize.reading)
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byWordWrapping
-        paragraph.lineSpacing = 15 * 0.45
+        paragraph.lineSpacing = size * 0.45
         let bounds = (plain as NSString).boundingRect(
             with: NSSize(width: Self.compactAnswerTextWidth,
                          height: CGFloat.greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             attributes: [
-                .font: NSFont.systemFont(ofSize: Tokens.TypeSize.reading),
+                .font: NSFont.systemFont(ofSize: size),
                 .paragraphStyle: paragraph,
             ])
         // Same arithmetic the real measurement goes through (chrome, card
@@ -4585,7 +4587,7 @@ struct DetachedThreadView: View {
         // card's height while the layout is resting and the window would wear
         // the difference as dead space.
         return compactWindowHeight(
-            forContentHeight: ceil(bounds.height) + compactFooterHeight
+            forContentHeight: ceil(bounds.height)
         )
     }
 
@@ -4657,7 +4659,8 @@ struct DetachedThreadView: View {
 
                 if hasAgentMetadata {
                     GlassIconButton(systemName: "command", help: L("agent.detail"),
-                                    size: 39, glyphSize: 13,
+                                    size: Tokens.Control.rail,
+                                    glyphSize: Tokens.Control.rail * (11.5 / 30),
                                     showsTooltip: false) {
                         metadataMenuOpen.toggle()
                     }
@@ -4745,9 +4748,10 @@ struct DetachedThreadView: View {
     private static let followUpBoxChrome: CGFloat =
         13 + PromptField.textInset + 6 + 6
 
-    /// The trailing control's slot when one is up — a 27pt chip and its 6pt gap.
+    /// The trailing control's slot when one is up — the compact Send chip and its
+    /// 6pt gap.
     private var followUpTrailingWidth: CGFloat {
-        hasFollowUpInput ? 27 + 6 : 0
+        hasFollowUpInput ? Tokens.Control.header + 6 : 0
     }
 
     /// The same line the placeholder builder puts in the box, as plain text —
@@ -4838,48 +4842,20 @@ struct DetachedThreadView: View {
                         .foregroundStyle(Tokens.text4)
                         .padding(.leading, 12)
                 }
-                QuestionRow(
-                    text: turn.text,
-                    regenerate: regenerateTarget(forQuestion: turn).map { answer in
-                        QuestionRow.Regenerate(
-                            disabled: answer.streaming,
-                            models: regenerateOptions(),
-                            action: onRegenerate,
-                            actionWith: onRegenerateWith
-                        )
-                    }
-                )
+                UserQuestionBubble(text: turn.text, isAgent: turn.isAgent, reaction: turn.reaction)
             }
         } else {
-            VStack(alignment: .leading, spacing: 10) {
-                if let log = turn.agentLog?.droppingTrailingAnswer(turn.text), !log.isEmpty {
-                    AgentWorkTrailView(entries: log)
-                }
-                assistantTurn(turn)
-            }
+            assistantTurn(turn)
         }
     }
 
-    /// The answer a question's regenerate control re-runs: the thread's last
-    /// turn, when it directly follows this question and is a chat answer.
-    private func regenerateTarget(forQuestion turn: NotchModel.Turn) -> NotchModel.Turn? {
-        guard let index = store.turns.firstIndex(where: { $0.id == turn.id }),
-              index + 1 == store.turns.count - 1
-        else { return nil }
-        let answer = store.turns[index + 1]
-        return answer.role == "user" || answer.isAgent ? nil : answer
-    }
-
-    /// The panel's full answer view — wait line, sources badge, and the settled
-    /// footer (copy · plain copy · regenerate · model ⓘ) — so the torn-out
-    /// thread keeps every action the panel offers. Regenerate belongs only to the
-    /// last answer and stays disabled while that answer is still streaming.
+    /// The panel's full answer view — wait line and the same right-click
+    /// actions the panel offers (copy · plain copy · regenerate · model ⓘ).
+    /// Regenerate belongs only to the last answer and stays disabled while
+    /// that answer is still streaming.
     private func assistantTurn(_ turn: NotchModel.Turn) -> some View {
         let isLastTurn = store.turns.last?.id == turn.id
-        // Regenerate sits beside the question bubble; the footer keeps it only
-        // when that bubble is hidden.
-        let questionHidden = store.turns.dropLast().last?.hidesUserBubble ?? true
-        let canRegenerate = isLastTurn && questionHidden && !turn.isAgent
+        let canRegenerate = isLastTurn && !turn.isAgent
         return AssistantTurnView(
             text: turn.text,
             streaming: turn.streaming,
@@ -4888,16 +4864,8 @@ struct DetachedThreadView: View {
             thinkingWord: turn.thinkingWord ?? "",
             thinkingSince: turn.streaming ? turn.thinkingStartedAt : nil,
             sources: turn.sources,
-            hoveredSourceID: $hoveredSourceID,
-            sourceCloseWork: $sourceCloseWork,
             isAgent: turn.isAgent,
             completedAt: (turn.isAgent && isLastTurn) ? store.completedAt : nil,
-            // Compact shortcut answers carry the footer too now — copy lives
-            // with the answer in every window, not on a pill beside one of them.
-            // It rides UNDER the answer, in the scroll, in every face; the compact
-            // card only shows it earlier (see `stabilizesFooterWhileStreaming`).
-            showsFooter: true,
-            stabilizesFooterWhileStreaming: compactShortcut,
             showsFooterMetadata: !turn.isAgent,
             onInAppCopy: onInAppCopy,
             onRegenerate: canRegenerate ? onRegenerate : nil,
@@ -4905,9 +4873,12 @@ struct DetachedThreadView: View {
             onRegenerateWith: canRegenerate ? onRegenerateWith : nil,
             regenModel: turn.regenModel,
             answerModel: turn.answerModel,
-            reasoning: turn.reasoning,
+            agentTrail: turn.agentLog?.droppingTrailingAnswer(turn.text) ?? [],
             pendingQuestion: turn.streaming ? turn.pendingQuestion : nil,
-            onChooseOption: onChooseOption
+            onChooseOption: onChooseOption,
+            question: store.turns.question(before: turn.id),
+            sharedLinks: turn.sharedLinks,
+            turnID: turn.id
         )
     }
 
@@ -4942,7 +4913,7 @@ struct DetachedAgentTaskView: View {
     private static let scrollSpace = "detached-agent-scroll"
     private static let tailSlack: CGFloat = 28
     /// The floating composer's reach up from the viewport's bottom edge: its own
-    /// 39pt box plus the 8pt gap it used to stand in as a sibling row.
+    /// 34pt box plus the 8pt gap it used to stand in as a sibling row.
     private static let followUpReach: CGFloat =
         DetachedThreadView.followUpHeight + DetachedThreadView.followUpGap
     /// …and the empty scroll space the trail travels down into behind it, which
@@ -5047,7 +5018,7 @@ struct DetachedAgentTaskView: View {
                         if !followsTail {
                             GlassIconButton(systemName: "arrow.down",
                                             help: L("agent.trail.toBottom"),
-                                            size: 26, glyphSize: 11,
+                                            size: Tokens.Control.header, glyphSize: 11,
                                             showsTooltip: false) {
                                 followsTail = true
                                 withAnimation(.easeOut(duration: 0.2)) {
@@ -5083,7 +5054,7 @@ struct DetachedAgentTaskView: View {
         HStack(spacing: 10) {
             AgentStatusDot(running: task.isRunning, outcome: task.outcome)
             Text("\(task.engine.displayName) · \(task.folder.lastPathComponent)")
-                .font(.sf(Tokens.TypeSize.reading, weight: .medium))
+                .font(.sf(Tokens.TypeSize.form, weight: .medium))
                 .foregroundStyle(Tokens.text2)
                 .lineLimit(1)
             Color.clear
@@ -5105,7 +5076,7 @@ struct DetachedAgentTaskView: View {
                     Image(systemName: "stop.circle")
                         .font(.sf(Tokens.TypeSize.form, weight: .semibold))
                         .foregroundStyle(Tokens.text3)
-                        .frame(width: 24, height: 24)
+                        .frame(width: Tokens.Control.inline, height: Tokens.Control.inline)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -5122,7 +5093,7 @@ struct DetachedAgentTaskView: View {
                     Image(systemName: "stop.circle")
                         .font(.sf(Tokens.TypeSize.form, weight: .semibold))
                         .foregroundStyle(Tokens.text3)
-                        .frame(width: 24, height: 24)
+                        .frame(width: Tokens.Control.inline, height: Tokens.Control.inline)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)

@@ -2153,6 +2153,14 @@ func shortcutHelp(_ localizationKey: String, action: AppShortcutAction) -> Strin
     return "\(base) (\(AppShortcutStore.chord(for: action).displayString))"
 }
 
+/// The notch panel's pin tooltip. Its gesture is a double-click anywhere on the
+/// panel, so that is what the tooltip names instead of the ⌘P chord.
+func pinHelp(pinned: Bool) -> String {
+    let base = shortcutHelp(pinned ? "result.unpin" : "result.pin", action: .pin)
+    guard let open = base.lastIndex(of: "(") else { return base }
+    return "\(base[..<open])(\(L("result.pinGesture")))"
+}
+
 /// The single source of truth for the keyboard-shortcut reference shown both in
 /// Settings and to the model when somebody asks about shortcuts in chat. Keep
 /// fixed chords here beside the one live, user-configurable summon shortcut so
@@ -2213,8 +2221,7 @@ struct AppShortcutReference {
             Group(title: L("shortcuts.group.panel"), entries: [
                 editable(.filter),
                 editable(.picker),
-                editable(.detach),
-            ]),
+            ] + (NotchModel.detachedWindowsEnabled ? [editable(.detach)] : [])),
         ]
     }
 }

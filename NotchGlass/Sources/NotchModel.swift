@@ -3,6 +3,7 @@ import Combine
 import AppKit   // NSWorkspace — opening Notes/Reminders for a Recent capture
 import Carbon.HIToolbox
 import UniformTypeIdentifiers   // UTType — is a pasted file URL an image? (agent ⌘V)
+import AudioToolbox   // MessageTone — system sounds
 
 /// Images loaded back out of the history store (`NotchModel.historyImage(named:)`),
 /// keyed by filename. File-scope rather than a static on the (main-actor) model, so
@@ -168,6 +169,33 @@ final class NotchModel: ObservableObject {
         /// question and its answer. Nil on every turn the user typed. The loop
         /// record's round column and `wireContext` read it. Persisted.
         var loopRound: Int? = nil
+        /// The emoji Jev put on this *user* turn (`/v1/react`) — shown on the
+        /// bubble's corner. Nil on assistant turns and when Jev chose none.
+        /// Persisted, so a reopened thread keeps it.
+        var reaction: String? = nil
+        /// Pages this *assistant* answer handed over that the harness found
+        /// open — written on a line of their own.
+        /// Their lines in `text` are drawn as cards, like a page the search
+        /// returned (`LinkCardSplitter`). Persisted, so a reopened thread keeps
+        /// its cards.
+        var sharedLinks: [String] = []
+        /// True on a turn the app wrote into the thread itself (the unified
+        /// threads guide), not one the user sent or a model answered. Drawn like
+        /// any other turn, never sent to the model. Persisted.
+        var isLocal: Bool = false
+
+        /// Whether the thread draws this turn. Two kinds stay in the transcript
+        /// without a place on screen: a prompt shortcut's hidden request, and
+        /// the empty answer of a round the user replaced with a new line before
+        /// any text arrived. Drawn, that answer is a blank card a line tall
+        /// between the two questions.
+        var isDrawn: Bool {
+            if hidesUserBubble { return false }
+            guard role == "assistant", !streaming, !isError else { return true }
+            return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || !sources.isEmpty || !sharedLinks.isEmpty
+                || !(agentLog ?? []).isEmpty
+        }
 
         init(id: UUID = UUID(), role: String, text: String,
              streaming: Bool = false, usedClipboard: Bool = false,
@@ -184,7 +212,7 @@ final class NotchModel: ObservableObject {
         // it. `decodeIfPresent` + defaults is what keeps old saved conversations
         // loadable. `role`/`text` are required — every saved turn has them.
         // `toolActivity` is deliberately absent: it's runtime-only UI state.
-        enum CodingKeys: String, CodingKey { case id, role, text, streaming, hidesUserBubble, usedClipboard, sources, isError, regenModel, answerModel, imageFiles, isAgent, agentLog, reasoning, loopRound }
+        enum CodingKeys: String, CodingKey { case id, role, text, streaming, hidesUserBubble, usedClipboard, sources, isError, regenModel, answerModel, imageFiles, isAgent, agentLog, reasoning, loopRound, reaction, sharedLinks, isLocal }
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -203,6 +231,9 @@ final class NotchModel: ObservableObject {
             agentLog     = try c.decodeIfPresent([AgentLogEntry].self, forKey: .agentLog)
             reasoning    = try c.decodeIfPresent(String.self, forKey: .reasoning)
             loopRound    = try c.decodeIfPresent(Int.self, forKey: .loopRound)
+            reaction     = try c.decodeIfPresent(String.self, forKey: .reaction)
+            sharedLinks  = try c.decodeIfPresent([String].self, forKey: .sharedLinks) ?? []
+            isLocal      = try c.decodeIfPresent(Bool.self, forKey: .isLocal) ?? false
         }
     }
 
@@ -330,6 +361,13 @@ final class NotchModel: ObservableObject {
         /// names that cause instead of the generic failed badge. Persisted.
         var outOfCredit: Bool = false
 
+        /// Unified threads (Settings → Lab): this row is the main thread — the
+        /// chat that questions from the panel's own prompt continue while the
+        /// lab is on. The newest such row is the one continued, and the idle
+        /// prompt shows the end of its answer. Rows saved before the lab, or
+        /// started any other way, are `false`.
+        var mainThread: Bool = false
+
         /// The turns to restore on reopen: the saved thread when present, else a
         /// two-turn thread rebuilt from the legacy `q`/`a` fields. A note/reminder
         /// capture has no conversation at all — never synthesize a ghost assistant
@@ -367,7 +405,7 @@ final class NotchModel: ObservableObject {
         // item has always had them.
         enum CodingKeys: String, CodingKey {
             case id, q, a, t, turns, title, source, origin, link, agentOutcome, agentResume,
-                 agentInterrupted, agentSeen, failed, outOfCredit
+                 agentInterrupted, agentSeen, failed, outOfCredit, mainThread
         }
 
         init(from decoder: Decoder) throws {
@@ -394,6 +432,7 @@ final class NotchModel: ObservableObject {
             // rows that succeeded.
             failed = try c.decodeIfPresent(Bool.self, forKey: .failed) ?? false
             outOfCredit = try c.decodeIfPresent(Bool.self, forKey: .outOfCredit) ?? false
+            mainThread = try c.decodeIfPresent(Bool.self, forKey: .mainThread) ?? false
         }
 
         /// Content search for the `search_history` tool — every place the user's own
@@ -458,14 +497,12 @@ final class NotchModel: ObservableObject {
             }
         }
     }
-    /// The brief "content dissolving" beat between a close request and the shell
-    /// actually retracting. Closing used to be one snap — `open` flipped false and
-    /// the glass body and its content collapsed on the same transaction, reading as
-    /// a clamp. Now `beginClose()` raises this first: the content fades out while the
-    /// shell holds its expanded size, and only once it's gone does `fullClose()` drop
-    /// `open` and let the shell retract — so closing mirrors the staged feel of the
-    /// open. `open` stays true through this beat, so window key-handoff and the
-    /// expanded geometry hold until the real close lands.
+    /// The brief beat between a close request and the shell actually retracting.
+    /// `beginClose()` raises this first: the content pulls in a few percent toward
+    /// the notch while the shell holds its expanded size, then `fullClose()` drops
+    /// `open` and the content shrinks into the notch with the retracting shell.
+    /// `open` stays true through this beat, so window key-handoff and the expanded
+    /// geometry hold until the real close lands.
     @Published var closing = false
     /// Which screen's island is unfurled. With one panel per display sharing this
     /// model, `open` alone would unfurl every screen at once — views gate on
@@ -591,12 +628,24 @@ final class NotchModel: ObservableObject {
     /// so leaving the island to reach one must not fold the result page out from
     /// under the pointer.
     @Published var isResultMetadataMenuOpen = false
+    /// The result header's more menu (detach lives here). Same child-window
+    /// problem as the metadata card: the pointer leaves the island to use it.
+    @Published var isResultMoreMenuOpen = false
+
+    /// Whether the message tones play: sending, each reply bubble landing, and
+    /// a reaction. One switch for the whole app — the notch and every detached
+    /// window read the same flag (`MessageTone.isEnabled`). Off unless the user
+    /// has turned it on.
+    @Published var messageSoundsEnabled: Bool = MessageTone.isEnabled {
+        didSet { MessageTone.isEnabled = messageSoundsEnabled }
+    }
 
     /// A card hung off the island in its own window is open. The pointer on that
     /// card reads as outside the island, so leave-folding and hover-only chrome
     /// treat these as the pointer still being inside.
     var isFloatingCardOpen: Bool {
-        isModelPickerOpen || isFolderPickerOpen || isResultMetadataMenuOpen || slashMenuOpen
+        isModelPickerOpen || isFolderPickerOpen || isResultMetadataMenuOpen
+            || isResultMoreMenuOpen || slashMenuOpen
     }
 
     /// The agent task whose detail page is open — the full-page work trail a
@@ -810,6 +859,17 @@ final class NotchModel: ObservableObject {
     /// when a round's task starts and removed on the same defer that settles
     /// `roundsInFlight`, so the two can never disagree.
     private var inFlightRounds: [InFlightRound] = []
+
+    /// Bumped when a main-thread round's mirror changes while the idle prompt
+    /// (and so the peek) is on screen, so the peek redraws the round as it
+    /// streams. Not bumped otherwise: a round streaming behind a closed panel
+    /// must not invalidate the tree on every chunk.
+    @Published private var mainThreadPeekRevision = 0
+
+    private func touchMainThreadPeek(_ threadID: UUID) {
+        guard open, mode == .idle, turns.isEmpty, isMainThread(threadID) else { return }
+        mainThreadPeekRevision &+= 1
+    }
 
     /// The cursor's velocity at the instant the island opened — SwiftUI
     /// orientation (+x right, +y down), points/second. Hover-opens pass the
@@ -1153,7 +1213,7 @@ final class NotchModel: ObservableObject {
     ///   · Panel closed → test against the STATIC resting-notch rect (the live
     ///     frame is mid-collapse and would validate its own sweep artifacts).
     ///   · Panel open → test against the live island frame with generous slop
-    ///     (an honest re-entry during the close dissolve must still cancel it).
+    ///     (an honest re-entry during the close beat must still cancel it).
     /// Unknown geometry (nil) falls back to trusting the event.
     ///
     /// On the closed→open edge two further gates apply, both aimed at the same
@@ -1444,6 +1504,11 @@ final class NotchModel: ObservableObject {
 
     // MARK: - Detached session windows (tear-off / 分裂)
 
+    /// Tear-off into its own window. Off for now; the window code stays so this
+    /// can come back by flipping the flag. Compact shortcut windows are a
+    /// different path and are not gated here.
+    static let detachedWindowsEnabled = false
+
     /// The live tear-off drag, while the ghost card is still attached to the
     /// island: set by the header drag gesture (NotchBody), rendered as the ghost
     /// card + goo bridge by NotchIsland's overlay.
@@ -1489,6 +1554,7 @@ final class NotchModel: ObservableObject {
     /// Nil only on the pages that own the whole body (settings, What's New),
     /// which have nothing to carry.
     var detachableSession: DetachedSession? {
+        guard Self.detachedWindowsEnabled else { return nil }
         guard open, !showSettings, !showWhatsNew else { return nil }
         if let id = agentDetailTaskID { return .agentTask(id: id) }
         if mode != .idle, !turns.isEmpty, !showHistory {
@@ -1744,6 +1810,8 @@ final class NotchModel: ObservableObject {
         seed.removeLast()
         guard let questionTurn = seed.last, questionTurn.role == "user" else { return }
         seed.removeLast()
+        if seed.isEmpty, isMainThread(threadID) { nextSubmitMainThread = true }
+        nextSubmitIsRegenerate = true
         let pin = model.map { ModelPin(provider: APIKeyStore.selectedProvider, model: $0) }
         runDetachedRound(threadID: threadID, seed: seed,
                          question: questionTurn.text, pin: pin)
@@ -2458,6 +2526,40 @@ final class NotchModel: ObservableObject {
     /// on the classifier again.
     @Published var promptShortcutMode: PromptShortcut? = nil
 
+    /// Pin where the next line goes, without clearing the field. The `/` menu
+    /// and the unified-thread mode word both land here.
+    func applyComposeMode(_ command: SlashCommand) {
+        typedNoteTriggerPrefix = nil
+        typedNoteModeActive = false
+        switch command {
+        case .ask:
+            setAgentBucket(false)
+            promptShortcutMode = nil
+            pinSubmitPanel(nil)
+        case .capture:
+            setAgentBucket(false)
+            promptShortcutMode = nil
+            pinSubmitPanel(.note)
+        case .remind:
+            setAgentBucket(false)
+            promptShortcutMode = nil
+            pinSubmitPanel(.reminder)
+        case .agent:
+            promptShortcutMode = nil
+            manualPanelOverride = nil
+            setAgentBucket(true)
+        case .loop:
+            // A loop rides whichever side is up — Agent stays Agent, anything
+            // else is an Ask. All it adds is the interval chip, set to the
+            // last interval used. Tapping the chip opens the card; typing
+            // `/loop` does not.
+            promptShortcutMode = nil
+            if !agentComposeActive { pinSubmitPanel(nil) }
+            loopIntervalMinutes = LoopInterval.lastMinutes
+            showLoopIntervalPicker = false
+        }
+    }
+
     /// Land on a row. Clear the command word FIRST (the field is now empty and
     /// ready for the real line), then pin where Enter will send it — that order
     /// matters, since emptying the field is exactly what clears
@@ -2473,33 +2575,7 @@ final class NotchModel: ObservableObject {
         slashHighlight = 0
         switch match {
         case .mode(let command):
-            switch command {
-            case .ask:
-                setAgentBucket(false)
-                promptShortcutMode = nil
-                pinSubmitPanel(nil)
-            case .capture:
-                setAgentBucket(false)
-                promptShortcutMode = nil
-                pinSubmitPanel(.note)
-            case .remind:
-                setAgentBucket(false)
-                promptShortcutMode = nil
-                pinSubmitPanel(.reminder)
-            case .agent:
-                promptShortcutMode = nil
-                manualPanelOverride = nil
-                setAgentBucket(true)
-            case .loop:
-                // A loop rides whichever side is up — Agent stays Agent, anything
-                // else is an Ask. All it adds is the interval chip, set to the
-                // last interval used. Tapping the chip opens the card; typing
-                // `/loop` does not.
-                promptShortcutMode = nil
-                if !agentComposeActive { pinSubmitPanel(nil) }
-                loopIntervalMinutes = LoopInterval.lastMinutes
-                showLoopIntervalPicker = false
-            }
+            applyComposeMode(command)
         case .shortcut(let shortcut):
             setAgentBucket(false)
             manualPanelOverride = nil
@@ -4481,6 +4557,7 @@ final class NotchModel: ObservableObject {
             if !historySearchQuery.isEmpty { noteUserTyping() }
             filteredHistoryCache = nil
             agentFilteredHistoryCache = nil
+            chatFilteredHistoryCache = nil
         }
     }
     /// Source filter for the recent list — `nil` shows everything. Set from the
@@ -4492,6 +4569,7 @@ final class NotchModel: ObservableObject {
         didSet {
             if historySourceFilter != oldValue { highlightedHistoryIndex = nil }
             filteredHistoryCache = nil
+            chatFilteredHistoryCache = nil
         }
     }
     /// Whether the inline settings panel is showing in place of the recent list.
@@ -4560,6 +4638,8 @@ final class NotchModel: ObservableObject {
         didSet {
             filteredHistoryCache = nil
             agentFilteredHistoryCache = nil
+            chatFilteredHistoryCache = nil
+            historyBucketCounts = nil
         }
     }
 
@@ -4693,9 +4773,22 @@ final class NotchModel: ObservableObject {
     /// Footer affordances use this instead of the global archive count so an Agent
     /// list never advertises rows that are outside its scope.
     var recentScopeHistoryCount: Int {
-        history.lazy.filter { item in
-            self.agentComposeActive ? item.source == .agent : item.source != .agent
-        }.count
+        let counts = bucketCounts
+        return agentComposeActive ? counts.agent : counts.chat
+    }
+
+    /// Rows per bucket, counted once per change to `history`. NotchBody reads
+    /// `recentScopeHistoryCount` several times per body evaluation, and a
+    /// count that walked the archive each time grew with the archive.
+    private var historyBucketCounts: (chat: Int, agent: Int)? = nil
+
+    private var bucketCounts: (chat: Int, agent: Int) {
+        if let cached = historyBucketCounts { return cached }
+        var agent = 0
+        for item in history where item.source == .agent { agent += 1 }
+        let counts = (chat: history.count - agent, agent: agent)
+        historyBucketCounts = counts
+        return counts
     }
 
     /// Memoized `filteredHistory`, invalidated by the didSets of its only three
@@ -4709,6 +4802,9 @@ final class NotchModel: ObservableObject {
     /// text query. Keeping two caches prevents the standalone archive / Ask ledger
     /// from inheriting Agent's implicit source scope.
     private var agentFilteredHistoryCache: [HistoryItem]? = nil
+
+    /// Chat's slice of `filteredHistory`, invalidated with it.
+    private var chatFilteredHistoryCache: [HistoryItem]? = nil
 
     private var recentFilteredHistory: [HistoryItem] {
         if agentComposeActive {
@@ -4726,7 +4822,10 @@ final class NotchModel: ObservableObject {
         // Chat is a sibling bucket, not the old all-source ledger: Agent rows
         // never bleed into it. The optional source filter can only narrow within
         // Ask / Notes / Reminders.
-        return filteredHistory.filter { $0.source != .agent }
+        if let cached = chatFilteredHistoryCache { return cached }
+        let items = filteredHistory.filter { $0.source != .agent }
+        chatFilteredHistoryCache = items
+        return items
     }
 
     /// The global filter pipeline retained for the standalone all-history archive.
@@ -4950,6 +5049,816 @@ final class NotchModel: ObservableObject {
     }
     /// Legacy key name, kept so the setting survives the agent-only → global move.
     private static let liveActivityKey = "agentNotchActivityEnabled"
+
+    /// Settings → Lab → Unified threads. Off by default, and off means the old
+    /// behavior exactly: every question from the idle prompt is a thread of its
+    /// own. On, each of those questions is a follow-up on one main thread — one
+    /// Recent row — and the idle prompt shows the end of its newest answer
+    /// (`mainThreadPeek`).
+    @Published var unifiedThreadsEnabled: Bool =
+        UserDefaults.standard.bool(forKey: NotchModel.unifiedThreadsKey)
+    {
+        didSet {
+            UserDefaults.standard.set(unifiedThreadsEnabled,
+                                      forKey: NotchModel.unifiedThreadsKey)
+            // The invitation lives in the peek, which only unified threads has.
+            // The guide's thread stays: its options answer whatever is left.
+            if !unifiedThreadsEnabled, unifiedIntro?.threadID == nil { unifiedIntro = nil }
+        }
+    }
+    private static let unifiedThreadsKey = "unifiedThreadsEnabled"
+
+    // MARK: - Unified threads guide
+
+    /// The one-time guide that turns unified threads on for an account holding
+    /// a gift. It starts as an invitation in the peek's slot. Its Start button
+    /// opens a main thread the app writes itself: what unified threads does, a
+    /// link as answers show it, and the model this conversation uses, with End
+    /// tour and two small options under it. Nil when not showing. Ends on End
+    /// tour, on the next question sent, or when unified threads is turned off
+    /// before Start.
+    struct UnifiedIntro: Equatable {
+        /// The Ask selection before Start moved it to Auto. Nil when Ask was
+        /// already on Auto, so the card offers no model choice.
+        struct PreviousModel: Equatable {
+            var provider: Provider
+            var storedModel: String
+            var nonoStoredModel: String
+            var name: String
+        }
+
+        var previous: PreviousModel?
+        /// The guide's thread and the answer the choice card hangs under, once
+        /// Start was pressed.
+        var threadID: UUID?
+        var answerID: UUID?
+        /// The answer the choices have been shown under, once their pause after
+        /// its last bubble has passed.
+        var endShownFor: UUID?
+    }
+
+    @Published private(set) var unifiedIntro: UnifiedIntro?
+
+    private static let unifiedIntroDoneKey = "unifiedThreadsIntroShown"
+    static let unifiedIntroAutoModel = "auto-us"
+    /// The release the guide introduces.
+    static let unifiedIntroVersion = "0.9.0"
+    private static let unifiedIntroLink = "https://notch.website/releases.html"
+
+    static var unifiedIntroAutoName: String {
+        ModelRatings.prettyName(for: unifiedIntroAutoModel, provider: .nono)
+    }
+
+    /// Show the invitation when the account has a gift and unified threads is
+    /// off. Shown once per install; `NOTCH_DEMO_UNIFIED_INTRO=1` shows it on
+    /// every launch, and `=thread` also presses Start.
+    func maybeStartUnifiedIntro() {
+        guard unifiedIntro == nil else { return }
+        let demo = ProcessInfo.processInfo.environment["NOTCH_DEMO_UNIFIED_INTRO"]
+        let forced = demo == "1" || demo == "thread"
+        if !forced {
+            guard !UserDefaults.standard.bool(forKey: Self.unifiedIntroDoneKey),
+                  !unifiedThreadsEnabled,
+                  !OnboardingService.shared.showIntro,
+                  Provider.offered.contains(.nono),
+                  NoNoAccount.shared.snapshot?.hasGift == true
+            else { return }
+            UserDefaults.standard.set(true, forKey: Self.unifiedIntroDoneKey)
+        }
+        unifiedThreadsEnabled = true
+        unifiedIntro = UnifiedIntro()
+        // The guide stands in for this version's What's New chip.
+        WhatsNewService.shared.markSeen()
+        if demo == "thread" { startUnifiedIntro() }
+    }
+
+    /// Whether the guide's thread is on screen with the guide still running. Its
+    /// follow-up field is locked until the guide ends, so a typed line cannot
+    /// land in the middle of the guide's messages.
+    var unifiedIntroLocksInput: Bool {
+        guard let threadID = unifiedIntro?.threadID else { return false }
+        return threadHistoryID == threadID && mode == .result
+    }
+
+    /// The invitation's ×: close it without the tour. Unified threads stays on.
+    func dismissUnifiedIntro() {
+        guard unifiedIntro?.threadID == nil else { return }
+        unifiedIntro = nil
+    }
+
+    /// The invitation's Start: move Ask to Auto, and open the guide's thread as
+    /// the main thread with its answer landing bubble by bubble.
+    func startUnifiedIntro() {
+        guard var intro = unifiedIntro, intro.threadID == nil else { return }
+        let provider = APIKeyStore.selectedProvider
+        let current = APIKeyStore.effectiveModel(for: provider) ?? provider.defaultModel
+        if !(provider == .nono && current == Self.unifiedIntroAutoModel) {
+            intro.previous = .init(provider: provider,
+                                   storedModel: APIKeyStore.storedModel(for: provider),
+                                   nonoStoredModel: APIKeyStore.storedModel(for: .nono),
+                                   name: ModelRatings.prettyName(for: current, provider: provider))
+            ModelCatalogStore.select(provider: .nono, model: Self.unifiedIntroAutoModel)
+        }
+
+        let version = Self.unifiedIntroVersion
+        var invite = Turn(role: "assistant", text: L("unifiedIntro.invite", version))
+        invite.isLocal = true
+        var start = Turn(role: "user", text: L("unifiedIntro.start"))
+        start.isLocal = true
+        let bubbles = [
+            L("unifiedIntro.b1", version),
+            L("unifiedIntro.b2"),
+            L("unifiedIntro.b3"),
+            Self.unifiedIntroLink,
+            L("unifiedIntro.about", Self.unifiedIntroAutoName),
+        ] + Self.unifiedIntroCost(switched: intro.previous != nil)
+        var answer = Turn(role: "assistant", text: bubbles[..<2].joined(separator: "\n\n"),
+                          streaming: true)
+        answer.isLocal = true
+        answer.sharedLinks = [Self.unifiedIntroLink]
+
+        // One main thread: the guide's row takes the flag from any older one.
+        for i in history.indices where history[i].mainThread { history[i].mainThread = false }
+        let id = UUID()
+        var settled = answer
+        settled.text = bubbles.joined(separator: "\n\n")
+        settled.streaming = false
+        var item = HistoryItem(id: id, q: start.text, a: settled.text, t: Date(),
+                               turns: [invite, start, settled])
+        item.title = L("unifiedIntro.title", version)
+        item.mainThread = true
+        history.insert(item, at: 0)
+        saveHistory()
+
+        turns = [invite, start, answer]
+        threadHistoryID = id
+        mode = .result
+        intro.threadID = id
+        intro.answerID = answer.id
+        unifiedIntro = intro
+        streamUnifiedIntro(answer.id, bubbles: bubbles, written: 2)
+        reactToUnifiedIntroStart(start.id, threadID: id)
+    }
+
+    /// Notchi's 👌 on Start, put on once the guide's thread is on screen, with
+    /// the haptic and tapback tone of a reaction.
+    private func reactToUnifiedIntroStart(_ id: UUID, threadID: UUID) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self else { return }
+            let emoji = "👌"
+            if let h = self.history.firstIndex(where: { $0.id == threadID }),
+               let t = self.history[h].turns?.firstIndex(where: { $0.id == id }) {
+                self.history[h].turns?[t].reaction = emoji
+                self.saveHistory()
+            }
+            guard let i = self.turns.firstIndex(where: { $0.id == id }) else { return }
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+                self.turns[i].reaction = emoji
+            }
+            Haptics.alignment()
+            MessageTone.play(MessageTone.tapback(for: emoji))
+        }
+    }
+
+    /// The pause between the guide's last bubble landing and its choices
+    /// showing.
+    static let unifiedIntroEndPause: TimeInterval = 1.5
+
+    /// Show the guide's choices under `answerID`.
+    func showUnifiedIntroEnd(_ answerID: UUID) {
+        guard var intro = unifiedIntro, intro.answerID == answerID else { return }
+        intro.endShownFor = answerID
+        unifiedIntro = intro
+    }
+
+    /// The guide's answer grows a message at a time, each after the one before
+    /// could be read, the way a streamed answer grows. Given whole, the result
+    /// page laid out for the full text while the bubbles were still landing.
+    /// The text runs one message ahead of the screen: while streaming,
+    /// `BubblePacer` holds the newest text bubble back until the next arrives,
+    /// and lands the last one when the stream ends.
+    private func streamUnifiedIntro(_ id: UUID, bubbles: [String], written: Int) {
+        let delay = Self.unifiedIntroReadingTime(bubbles[written - 2])
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, let i = self.turns.firstIndex(where: { $0.id == id }) else { return }
+            if written < bubbles.count {
+                self.turns[i].text = bubbles[..<(written + 1)].joined(separator: "\n\n")
+                self.streamUnifiedIntro(id, bubbles: bubbles, written: written + 1)
+            } else {
+                self.turns[i].streaming = false
+            }
+        }
+    }
+
+    /// How long one of the guide's messages takes to read: a second, plus its
+    /// length at 20 characters a second, 9 in Chinese, Japanese and Korean. A
+    /// link card gets a look of two and a half seconds.
+    private static func unifiedIntroReadingTime(_ bubble: String) -> TimeInterval {
+        if bubble.hasPrefix("http") { return 2.5 }
+        let perSecond: Double
+        switch Localization.shared.language.resolved {
+        case .zhHans, .zhHant, .ja, .ko: perSecond = 9
+        default: perSecond = 20
+        }
+        return 1.0 + Double(bubble.count) / perSecond
+    }
+
+    /// The guide's last bubble: that Auto is now the default model, and that
+    /// the gift pays for it. Empty when neither applies.
+    private static func unifiedIntroCost(switched: Bool) -> [String] {
+        let gift = NoNoAccount.shared.snapshot?.hasGift == true
+        switch (switched, gift) {
+        case (true, true): return [L("unifiedIntro.switched.free")]
+        case (true, false): return [L("unifiedIntro.switched")]
+        case (false, true): return [L("unifiedIntro.free")]
+        case (false, false): return []
+        }
+    }
+
+    /// The guide's choices: End tour, End tour with Ask back on the model it
+    /// used before Start, and a small option to go back to separate threads.
+    /// The small option leaves the two End tour buttons on offer.
+    enum UnifiedIntroEnding { case end, previous, separate }
+
+    /// A choice from the guide's end. It goes into the thread as the user's
+    /// line, and the app answers it.
+    func finishUnifiedIntro(_ ending: UnifiedIntroEnding) {
+        guard var intro = unifiedIntro, let threadID = intro.threadID else { return }
+        let line: String
+        let reply: String
+        switch ending {
+        case .end:
+            line = L("unifiedIntro.end")
+            reply = L("unifiedIntro.reply.auto", Self.unifiedIntroAutoName)
+        case .previous:
+            guard let previous = intro.previous else { return }
+            restoreAskModel(previous)
+            line = L("unifiedIntro.endKeeping", previous.name)
+            reply = L("unifiedIntro.reply.previous", previous.name)
+        case .separate:
+            guard unifiedThreadsEnabled else { return }
+            line = L("unifiedIntro.separate")
+            reply = L("unifiedIntro.reply.separate")
+        }
+
+        var question = Turn(role: "user", text: line)
+        question.isLocal = true
+        var answer = Turn(role: "assistant", text: reply, streaming: true)
+        answer.isLocal = true
+        if let i = history.firstIndex(where: { $0.id == threadID }) {
+            var settled = answer
+            settled.streaming = false
+            history[i].turns = (history[i].turns ?? []) + [question, settled]
+            history[i].a = reply
+            saveHistory()
+        }
+        guard ending == .separate else {
+            // Both End tour buttons go back to the home page, where the peek
+            // shows the reply as the main thread's newest answer.
+            unifiedIntro = nil
+            if threadHistoryID == threadID { newChat() }
+            return
+        }
+        if threadHistoryID == threadID { turns += [question, answer] }
+        unifiedThreadsEnabled = false
+        intro.answerID = answer.id
+        unifiedIntro = intro
+        settleUnifiedIntroTurn(answer.id)
+    }
+
+    /// The guide's answers arrive whole: marked streaming so the bubbles after
+    /// the first land one at a time (`BubblePacer`), then settled.
+    private func settleUnifiedIntroTurn(_ id: UUID) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self, let i = self.turns.firstIndex(where: { $0.id == id }) else { return }
+            self.turns[i].streaming = false
+        }
+    }
+
+    private func restoreAskModel(_ previous: UnifiedIntro.PreviousModel) {
+        APIKeyStore.saveModel(previous.nonoStoredModel, for: .nono)
+        APIKeyStore.selectedProvider = previous.provider
+        APIKeyStore.saveModel(previous.storedModel, for: previous.provider)
+        NotificationCenter.default.post(name: .aiBackendChanged, object: nil)
+    }
+
+    /// Overrides how the next `submit()` decides whether a new thread joins the
+    /// main thread. `nil`: decide from how the round started. `false`: never (a
+    /// `/`-pinned prompt shortcut, which submits like a typed line). `true`: a
+    /// regenerate that emptied the main thread — it re-runs under the same id,
+    /// so the main thread keeps its row.
+    /// Consumed on entry to `submit()`.
+    private var nextSubmitMainThread: Bool? = nil
+
+    /// Set by a regenerate just before it re-runs `submit()`, so the re-run
+    /// doesn't play the send tone. Consumed on entry to `submit()`.
+    private var nextSubmitIsRegenerate = false
+
+    // MARK: - Thread pull (Unified threads)
+
+    /// How far a two-finger pull on the idle prompt has opened the main thread:
+    /// 0 is the peek at rest, 1 is the thread's result page. `nil` while no pull
+    /// is under way. NotchBody draws every in-between state from this one number
+    /// and `openWidth` widens with it, so the idle page becomes the result page
+    /// in one continuous motion.
+    ///
+    /// Only the start and end of a pull (`threadPulling`) publish on the model.
+    /// The value itself lives on `threadPullLive`, which the three views that
+    /// draw it observe, so a pull frame re-runs those views and not every view
+    /// that observes the model.
+    private(set) var threadPullProgress: CGFloat? {
+        get { threadPulling ? threadPullLive.progress : nil }
+        set {
+            if let newValue {
+                threadPullLive.progress = newValue
+                if !threadPulling { threadPulling = true }
+            } else {
+                if threadPulling { threadPulling = false }
+                threadPullLive.progress = 0
+            }
+        }
+    }
+
+    /// A pull is under way. Views that change layout for a pull read this.
+    @Published private(set) var threadPulling = false
+
+    /// The pull's progress, for the views that draw it frame by frame.
+    let threadPullLive = ThreadPullLive()
+
+    /// Points of pull that reach progress 1. NotchBody sets it from the height
+    /// the panel has to grow, so the panel's bottom edge tracks the fingers.
+    var threadPullSpan: CGFloat = 240
+
+    /// The row a pull opens — the peek's, fixed when the pull starts.
+    private(set) var threadPullItemID: UUID?
+
+    /// The pull under way runs backwards: an upward swipe at the bottom of the
+    /// main thread's result page folds the thread back into the peek, from
+    /// progress 1 down to 0.
+    private var threadPullCollapsing = false
+
+    /// The main thread's result page scroller, reported by NotchBody while the
+    /// long layout is mounted. A collapse starts only from its bottom.
+    weak var threadScrollView: NSScrollView?
+
+    /// The idle prompt + bucket row's height at rest, kept across panel
+    /// closes: a collapse can start on a panel that opened straight onto the
+    /// result page, before the idle page has been measured.
+    var idleBottomRestHeight: CGFloat = 0
+
+    private enum ThreadPullGesture {
+        case none, pending, pendingAttach, pendingCollapse, tracking, ignoring, coasting
+    }
+    private var threadPullGesture: ThreadPullGesture = .none
+    private var threadPullDistance: CGFloat = 0
+    private var threadPullSamples: [(time: TimeInterval, delta: CGFloat)] = []
+    private var threadPullMonitor: Any?
+    /// Counts settles, so each one's ending runs once and only for itself.
+    private var threadPullSettle = 0
+    /// Drives a settle's frames (see `settleThreadPull`).
+    private var threadPullTicker: Timer?
+    /// A click or wheel open waiting for the thread's first measurement, so the
+    /// motion starts from the real target geometry.
+    private var threadPullAutoOpenPending = false
+    /// The reveal is a sent line's, not a pull's: the thread is already in
+    /// `turns` (with the new question and its answer on the way), so the reveal
+    /// draws `turns` and hands over without reopening the row.
+    private(set) var threadPullSubmitting = false
+
+    /// Whether a pull can start: the idle prompt with the peek showing and
+    /// nothing else on the page.
+    private var threadPullAvailable: Bool {
+        // A main thread with a round still streaming isn't on the saved row
+        // yet — the prompt reattaches that round instead (see `submit`).
+        guard let peek = mainThreadPeek,
+              !inFlightRounds.contains(where: { $0.threadID == peek.item.id })
+        else { return false }
+        return threadPullPageClear
+    }
+
+    /// The peek is live (a main-thread round still streaming): a pull down
+    /// reattaches that round, as a click or ↓ does, instead of tracking.
+    private var threadPullAttachesRound: Bool {
+        guard threadPullProgress == nil, let peek = mainThreadPeek,
+              inFlightRounds.contains(where: { $0.threadID == peek.item.id })
+        else { return false }
+        return threadPullPageClear
+    }
+
+    /// The idle prompt with nothing else on the page. The unified threads
+    /// guide's invitation holds the pull until Start or × answers it.
+    private var threadPullPageClear: Bool {
+        open && mode == .idle && turns.isEmpty && unifiedIntro == nil
+            && !showSettings && !showWhatsNew && !showHistory
+            && agentDetailTaskID == nil && !agentComposeActive
+            && promptShortcutContext == nil && promptShortcutMode == nil
+            && selectionContext == nil && loopIntervalMinutes == nil
+            && askComposeImages.isEmpty && recallPosition == nil
+            && !noteSaving && lastSavedNote == nil && noteError == nil
+    }
+
+    /// Whether an upward swipe can fold the page back into the peek: the main
+    /// thread's result page, settled and scrolled to its bottom, with nothing
+    /// on it the idle page at progress 1 doesn't draw, and nothing that would
+    /// keep the peek off the idle page once it is back.
+    private var threadCollapseAvailable: Bool {
+        guard open, mode == .result, !turns.isEmpty, !isStreaming,
+              mainThreadPeek?.item.id == threadHistoryID,
+              !inFlightRounds.contains(where: { $0.threadID == threadHistoryID })
+        else { return false }
+        return !showSettings && !showWhatsNew && !showHistory
+            && agentDetailTaskID == nil && !fromPromptShortcut
+            && visibleAskError == nil && openAgentResume == nil && isConfigured
+            && !isResultMoreMenuOpen && !agentComposeActive
+            && promptShortcutMode == nil && loopIntervalMinutes == nil
+            && askComposeImages.isEmpty && recallPosition == nil
+            && !noteSaving && lastSavedNote == nil
+            && threadScrolledToBottom
+    }
+
+    /// The short layout has no scroller, so it is always at its bottom.
+    private var threadScrolledToBottom: Bool {
+        guard let scroll = threadScrollView, scroll.window != nil,
+              let document = scroll.documentView else { return true }
+        return scroll.contentView.bounds.maxY >= document.frame.height - 2
+    }
+
+    /// Scroll events reach the pull through one app-wide monitor, installed the
+    /// first time the panel body mounts. It consumes a gesture only once that
+    /// gesture has become a pull; everything else passes through.
+    func installThreadPullMonitor() {
+        guard threadPullMonitor == nil else { return }
+        threadPullMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            guard let self else { return event }
+            let consumed = MainActor.assumeIsolated { self.handleThreadPullScroll(event) }
+            return consumed ? nil : event
+        }
+    }
+
+    /// Positive `scrollingDeltaY` moves content down — with natural scrolling,
+    /// fingers moving down — which is the pull. Negative, on the main thread's
+    /// result page, is the collapse.
+    private func handleThreadPullScroll(_ event: NSEvent) -> Bool {
+        // The coast after the fingers lift belongs to the gesture that ended.
+        if event.momentumPhase != [] {
+            guard threadPullGesture == .coasting else { return false }
+            if event.momentumPhase == .ended || event.momentumPhase == .cancelled {
+                threadPullGesture = .none
+            }
+            return true
+        }
+        let dy = event.scrollingDeltaY
+        // A mouse wheel has no phases, so it can't be tracked: one notch down
+        // plays the whole open.
+        if event.phase == [] {
+            guard dy > 0, threadPullProgress == nil, pullTargetsPanel(event) else { return false }
+            if threadPullAttachesRound { return attachMainThreadRound() }
+            guard threadPullAvailable else { return false }
+            animateThreadPullOpen()
+            return true
+        }
+        switch event.phase {
+        case .began:
+            threadPullSamples = []
+            threadPullDistance = 0
+            guard threadPullProgress == nil, pullTargetsPanel(event) else {
+                threadPullGesture = .ignoring
+                return false
+            }
+            if threadPullAvailable {
+                threadPullGesture = .pending
+                return true
+            }
+            if threadPullAttachesRound {
+                threadPullGesture = .pendingAttach
+                return true
+            }
+            if threadCollapseAvailable {
+                // Not consumed: until the swipe turns out to be a collapse, it
+                // may be a scroll, and the thread's scroller needs its start.
+                threadPullGesture = .pendingCollapse
+                return false
+            }
+            threadPullGesture = .ignoring
+            return false
+        case .changed:
+            switch threadPullGesture {
+            case .pending:
+                // Up, or mostly sideways, isn't a pull.
+                if dy < 0 || abs(event.scrollingDeltaX) > abs(dy) {
+                    threadPullGesture = .ignoring
+                    return false
+                }
+                guard dy > 0, let item = mainThreadPeek?.item else { return true }
+                threadPullItemID = item.id
+                threadPullGesture = .tracking
+                trackThreadPull(dy)
+                return true
+            case .pendingAttach:
+                if dy < 0 || abs(event.scrollingDeltaX) > abs(dy) {
+                    threadPullGesture = .ignoring
+                    return false
+                }
+                guard dy > 0 else { return true }
+                threadPullGesture = .coasting
+                _ = attachMainThreadRound()
+                return true
+            case .pendingCollapse:
+                // Down, or twice as sideways as up, is a scroll. A step with
+                // no vertical part decides nothing yet.
+                if dy > 0 || abs(event.scrollingDeltaX) > 2 * abs(dy) && dy != 0 {
+                    threadPullGesture = .ignoring
+                    return false
+                }
+                guard dy < 0 else { return false }
+                guard beginThreadCollapse() else {
+                    threadPullGesture = .ignoring
+                    return false
+                }
+                threadPullGesture = .tracking
+                trackThreadPull(dy)
+                return true
+            case .tracking:
+                trackThreadPull(dy)
+                return true
+            case .coasting:
+                return true
+            case .none, .ignoring:
+                return false
+            }
+        case .ended, .cancelled:
+            switch threadPullGesture {
+            case .tracking:
+                threadPullGesture = .coasting
+                releaseThreadPull()
+                return true
+            case .pending, .pendingAttach, .coasting:
+                threadPullGesture = .coasting
+                return true
+            case .pendingCollapse, .none, .ignoring:
+                threadPullGesture = .none
+                return false
+            }
+        default:
+            return threadPullGesture == .tracking
+        }
+    }
+
+    private func pullTargetsPanel(_ event: NSEvent) -> Bool {
+        event.window is NotchPanel && pointerInside
+    }
+
+    /// One tracked step: the pull follows the fingers point for point. Reaching
+    /// the end opens the thread — or, collapsing, lands on the peek — without
+    /// waiting for the fingers to lift.
+    private func trackThreadPull(_ dy: CGFloat) {
+        // Distance and samples count along the pull's own direction.
+        let step = threadPullCollapsing ? -dy : dy
+        threadPullDistance = max(0, threadPullDistance + step)
+        let now = ProcessInfo.processInfo.systemUptime
+        threadPullSamples.append((now, step))
+        threadPullSamples.removeAll { now - $0.time > 0.08 }
+        let travelled = min(threadPullDistance / max(threadPullSpan, 1), 1)
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            threadPullProgress = threadPullCollapsing ? 1 - travelled : travelled
+        }
+        if travelled >= 1 {
+            threadPullGesture = .coasting
+            endThreadPull(opened: !threadPullCollapsing)
+        }
+    }
+
+    /// Fingers lifted mid-pull: past a third of the way, or flicked down, it
+    /// opens; otherwise it settles back to the peek. A collapse lands past a
+    /// fifth of the way, or a quick swipe past a tenth; shorter and slower, it
+    /// is a reader nudging past the end of the thread, and the page stays.
+    private func releaseThreadPull() {
+        guard let progress = threadPullProgress else { return }
+        let times = threadPullSamples.map(\.time)
+        let elapsed = max((times.max() ?? 0) - (times.min() ?? 0), 1.0 / 120)
+        let velocity = threadPullSamples.reduce(0) { $0 + $1.delta } / elapsed
+        let speed = velocity / max(threadPullSpan, 1)
+        if threadPullCollapsing {
+            let travelled = 1 - progress
+            let closes = (travelled > 0.2 && velocity > -250) || (travelled > 0.1 && velocity > 400)
+            settleThreadPull(open: !closes, velocity: -speed)
+            return
+        }
+        let opens = velocity > 500 || (progress > 0.33 && velocity > -250)
+        settleThreadPull(open: opens, velocity: speed)
+    }
+
+    /// An upward swipe's first step on the main thread's result page: the page
+    /// is swapped for the idle page at progress 1, which draws it identically,
+    /// and the swipe runs the reveal backwards from there. The follow-up's
+    /// draft moves to the prompt, which continues the same thread.
+    private func beginThreadCollapse() -> Bool {
+        let id = threadHistoryID
+        guard history.contains(where: { $0.id == id }) else { return false }
+        let draft = text
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            newChat()
+            text = draft
+            threadPullItemID = id
+            threadPullCollapsing = true
+            threadPullProgress = 1
+        }
+        return true
+    }
+
+    /// The whole open as one motion, for a click on the peek or a wheel notch.
+    /// The thread mounts at progress 0 first (it looks exactly like the peek);
+    /// the motion starts once NotchBody has measured it.
+    func animateThreadPullOpen() {
+        if attachMainThreadRound() { return }
+        guard threadPullProgress == nil, threadPullAvailable,
+              let item = mainThreadPeek?.item else { return }
+        threadPullItemID = item.id
+        threadPullGesture = .none
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { threadPullProgress = 0 }
+        threadPullAutoOpenPending = true
+        // In case no new measurement arrives (the thread's height is unchanged).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+            self?.startPendingThreadPullOpen()
+        }
+    }
+
+    /// ↓ on the empty idle prompt: the same open as a pull. Returns whether the
+    /// main thread was there to open.
+    func openMainThreadFromKey() -> Bool {
+        if attachMainThreadRound() { return true }
+        guard threadPullProgress == nil, threadPullAvailable else { return false }
+        animateThreadPullOpen()
+        return true
+    }
+
+    /// A live peek (a main-thread round still streaming) opens the way its
+    /// pending Recent row does: the round goes back on screen.
+    private func attachMainThreadRound() -> Bool {
+        guard threadPullProgress == nil, open, mode == .idle, turns.isEmpty,
+              let item = mainThreadPeek?.item,
+              let round = inFlightRounds.last(where: { $0.threadID == item.id })
+        else { return false }
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+            attachInFlightRound(round)
+        }
+        return true
+    }
+
+    /// A line sent from the idle prompt continues the main thread; the page
+    /// opens onto it with the same motion as a pull — the idle page stays up,
+    /// drawing `turns`, while the progress runs 0 → 1, then hands over to the
+    /// result page.
+    private func beginSubmitReveal(threadID: UUID) {
+        threadPullItemID = threadID
+        threadPullSubmitting = true
+        threadPullGesture = .none
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { threadPullProgress = 0 }
+        threadPullAutoOpenPending = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+            self?.startPendingThreadPullOpen()
+        }
+    }
+
+    /// NotchBody reports here once it has measured the thread a pull opens.
+    func threadPullMeasured() {
+        guard threadPullAutoOpenPending else { return }
+        DispatchQueue.main.async { [weak self] in self?.startPendingThreadPullOpen() }
+    }
+
+    private func startPendingThreadPullOpen() {
+        guard threadPullAutoOpenPending, threadPullProgress != nil else { return }
+        threadPullAutoOpenPending = false
+        settleThreadPull(open: true, velocity: 0)
+    }
+
+    /// `velocity` is progress per second, held to ten times the distance left
+    /// to cover.
+    ///
+    /// The settle writes the progress itself, one un-animated value per frame,
+    /// as the fingers do while tracking. It used to hand the progress to a
+    /// SwiftUI spring, and SwiftUI sometimes stopped interpolating the panel's
+    /// width part way (the heights went on) and never called the completion: the
+    /// panel sat narrow until a 0.6 s fallback ended the pull, then jumped to
+    /// the result page's width in one frame. `threadPullSettle` stops a
+    /// settle's ticker once a newer pull or an ending has replaced it.
+    private func settleThreadPull(open opens: Bool, velocity: CGFloat) {
+        let from = Double(threadPullProgress ?? 0)
+        let to: Double = opens ? 1 : 0
+        let remaining = to - from
+        let initial = abs(remaining) > 0.01
+            ? min(max(Double(velocity) / remaining, -10), 10) * remaining : 0
+        let spring = Spring(duration: 0.42, bounce: 0)
+        let duration = spring.settlingDuration(fromValue: from, toValue: to,
+                                               initialVelocity: initial, epsilon: 0.001)
+        threadPullSettle += 1
+        let settle = threadPullSettle
+        let start = CACurrentMediaTime()
+        threadPullTicker?.invalidate()
+        let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self, self.threadPullSettle == settle else {
+                    timer.invalidate()
+                    return
+                }
+                let t = CACurrentMediaTime() - start
+                if t >= duration {
+                    self.endThreadPull(opened: opens)
+                    return
+                }
+                let value = spring.value(fromValue: from, toValue: to,
+                                         initialVelocity: initial, time: t)
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) { self.threadPullProgress = CGFloat(value) }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        threadPullTicker = timer
+    }
+
+    /// The pull's last frame. Opened, the idle page at progress 1 is swapped for
+    /// the real result page, which is drawn identically, so the swap can't be
+    /// seen. Cancelled, the page at progress 0 is the peek it started as. A
+    /// collapse ends the same two ways: on the peek, or back on the thread.
+    private func endThreadPull(opened: Bool) {
+        guard threadPullProgress != nil else { return }
+        threadPullSettle += 1
+        threadPullTicker?.invalidate()
+        threadPullTicker = nil
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            if opened, !threadPullSubmitting, let id = threadPullItemID,
+               let item = history.first(where: { $0.id == id }) {
+                // The draft in the prompt carries into the follow-up field — the
+                // prompt already continued this thread.
+                let draft = text
+                openHistory(item)
+                text = draft
+            }
+            threadPullProgress = nil
+            threadPullItemID = nil
+            threadPullSubmitting = false
+            threadPullCollapsing = false
+        }
+    }
+
+    /// Drop a pull in flight — the panel closed or the page changed under it.
+    private func resetThreadPull() {
+        threadPullSettle += 1
+        threadPullTicker?.invalidate()
+        threadPullTicker = nil
+        threadPullProgress = nil
+        threadPullItemID = nil
+        threadPullSubmitting = false
+        threadPullCollapsing = false
+        threadPullAutoOpenPending = false
+        if threadPullGesture == .tracking || threadPullGesture == .pending
+            || threadPullGesture == .pendingAttach {
+            threadPullGesture = .coasting
+        }
+    }
+
+    /// Whether `threadID`'s row is the main thread and the lab is on.
+    private func isMainThread(_ threadID: UUID) -> Bool {
+        unifiedThreadsEnabled && (history.first(where: { $0.id == threadID })?.mainThread ?? false)
+    }
+
+    /// The main thread's newest answer turn and the row it belongs to. The idle
+    /// prompt shows the bottom of it. Nil with the lab off, and until the first
+    /// main-thread question is sent.
+    ///
+    /// While a round on the main thread is still streaming, its question and
+    /// answer are only in the round's mirror (the row is written when the round
+    /// ends), so the peek draws them from the mirror (`live`, the round's whole
+    /// thread).
+    var mainThreadPeek: (item: HistoryItem, answer: Turn, live: [Turn]?)? {
+        guard unifiedThreadsEnabled else { return nil }
+        _ = mainThreadPeekRevision
+        for item in history where item.mainThread && item.source == .ask {
+            if let round = inFlightRounds.last(where: { $0.threadID == item.id }),
+               let answer = round.thread.first(where: { $0.id == round.answerID }) {
+                return (item, answer, round.thread)
+            }
+            guard !item.pending else { continue }
+            if let answer = item.conversation.last(where: {
+                $0.role == "assistant" && !$0.isError
+                    && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }) {
+                return (item, answer, nil)
+            }
+        }
+        return nil
+    }
 
     /// Whether the assistant's answers are written by hand instead of typeset
     /// (Settings → Appearance, "Handwritten answers"). Off by default — the
@@ -5366,7 +6275,15 @@ final class NotchModel: ObservableObject {
             // A grant sent while the app runs reaches the prompt's chip on this
             // open, not the next launch. Here rather than in NotchBody: the body
             // mounts already open and never sees this edge.
-            Task { await NoNoAccount.shared.refreshIfStale() }
+            // The unified threads guide needs the gift. Decided here, from the
+            // account the launch already read, so the first frame of this open
+            // already shows the invitation; decided again after the refresh
+            // for an account that was not read yet.
+            maybeStartUnifiedIntro()
+            Task {
+                await NoNoAccount.shared.refreshIfStale()
+                maybeStartUnifiedIntro()
+            }
             if mode == .idle, turns.isEmpty, let round = inFlightRounds.last {
                 // A round is still streaming in the background — the busy
                 // extension is out, and hovering the working notch should land
@@ -5409,9 +6326,9 @@ final class NotchModel: ObservableObject {
         // entry watch has just been answered (by itself or by another route in).
         cancelLeaveWatch()
         cancelEntryWatch()
-        // Re-entering during the close dissolve cancels it: clear the flag so the
-        // content (held mounted while `open` is true) springs back to full opacity
-        // instead of completing its fade, and the pending `beginClose` timer no-ops.
+        // Re-entering during the close beat cancels it: clear the flag so the
+        // content (held mounted while `open` is true) springs back to full size,
+        // and the pending `beginClose` timer no-ops.
         closing = false
         open = true
         // An open retires a visible sense hint (the panel takes over the screen),
@@ -5459,7 +6376,7 @@ final class NotchModel: ObservableObject {
         if !open {
             pasteboardChangeCountAtOpen = pasteboardChangeCountAtRest
         }
-        // Cancel any in-flight close dissolve (see `openPanel`), and any pending
+        // Cancel any in-flight close beat (see `openPanel`), and any pending
         // leave watch — this keyboard summon supersedes it.
         closing = false
         cancelLeaveWatch()
@@ -5518,7 +6435,7 @@ final class NotchModel: ObservableObject {
         if !open {
             pasteboardChangeCountAtOpen = pasteboardChangeCountAtRest
         }
-        // Cancel any in-flight close dissolve (see `openPanel`), and any pending
+        // Cancel any in-flight close beat (see `openPanel`), and any pending
         // leave watch — this keyboard summon supersedes it.
         closing = false
         cancelLeaveWatch()
@@ -5543,6 +6460,13 @@ final class NotchModel: ObservableObject {
     func toggleAnswerPin() {
         isAnswerPinned.toggle()
         if !isAnswerPinned { collapseOnLeave(from: activeDisplay) }
+    }
+
+    /// Whether ⌘P and double-click may toggle the pin: wherever a pin button is on
+    /// screen. The only `.load` page without one is the first question's bare wait
+    /// (`turns` empty); a follow-up in `.load` shows the thread and its header pin.
+    var canTogglePin: Bool {
+        !(mode == .load && turns.isEmpty) && !showWhatsNew
     }
 
     /// Auto-retract once the pointer leaves — for EVERY page (the rule the user
@@ -5671,17 +6595,15 @@ final class NotchModel: ObservableObject {
         beginClose(sequenced: watch.sequenced)
     }
 
-    /// How long the content lingers, fading, before the shell retracts. Kept short
-    /// — this is a dissolve to soften the snap, not a second animation the user
-    /// waits through; the shell's own retract spring picks up right after. Paced
-    /// with the calmer `closeSpring` so the two beats read as one motion.
-    static let closeContentFade: TimeInterval = 0.16
+    /// How long the content pulls in before the shell retracts. Short: the content
+    /// reacts the moment the close starts, and the shell's retract spring, which
+    /// carries the content into the notch, picks up right after.
+    static let closeAnticipation: TimeInterval = 0.08
 
-    /// The two-beat close. The first beat fades the content out while the shell
-    /// holds its expanded size (`closing = true`, `open` still true); the second,
-    /// once the content is gone, drops `open` so the shell retracts. This makes the
-    /// close symmetric with the open — content and shell move in sequence rather
-    /// than clamping shut on one transaction.
+    /// The two-beat close. The first beat pulls the content in slightly while the
+    /// shell holds its expanded size (`closing = true`, `open` still true); the
+    /// second drops `open` so the shell retracts and the content shrinks into the
+    /// notch with it.
     ///
     /// `sequenced` is the caller's reduce-motion gate (the views own that
     /// environment value): when motion is reduced — or when there's nothing to fade
@@ -5693,7 +6615,7 @@ final class NotchModel: ObservableObject {
         guard open, sequenced else { fullClose(); return }
         guard !closing else { return }
         closing = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + NotchModel.closeContentFade) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + NotchModel.closeAnticipation) { [weak self] in
             // The close may have been overtaken — a hover re-opened the island, or a
             // full close already fired — in which case `closing` was cleared and this
             // stale beat must not yank the panel shut.
@@ -5709,6 +6631,8 @@ final class NotchModel: ObservableObject {
     func fullClose() {
         // A pending leave watch is moot once the panel actually closes.
         cancelLeaveWatch()
+        // A pull caught mid-way closes as the idle page it started from.
+        resetThreadPull()
         // Park the page the user was on, so a reopen within the TTL lands right
         // back here (closing gestures navigate, they never destroy). A bare idle
         // prompt has nothing worth parking — its unsent draft rides the separate,
@@ -5733,7 +6657,7 @@ final class NotchModel: ObservableObject {
         task = nil
         open = false
         // The two-beat close has landed (or this was a direct hard close): the shell
-        // is retracting now, so drop the dissolve flag. Clearing it here also disarms
+        // is retracting now, so drop the close flag. Clearing it here also disarms
         // any in-flight `beginClose` timer — its `guard self.closing` then no-ops.
         closing = false
         activeDisplay = nil
@@ -5756,6 +6680,7 @@ final class NotchModel: ObservableObject {
         showAgentFolderPicker = false
         showLoopIntervalPicker = false
         isResultMetadataMenuOpen = false
+        isResultMoreMenuOpen = false
         text = ""; turns = []
         showHistory = false
         showSettings = false
@@ -5789,6 +6714,7 @@ final class NotchModel: ObservableObject {
     /// and lands in Recent, so backing out while waiting never loses the round.
     func newChat() {
         task = nil
+        resetThreadPull()
         // ← / ⌘N is the one gesture that DESTROYS a session (closing only parks).
         // Drop any parked page too, so "start fresh" can't be haunted by a
         // snapshot from before the reset.
@@ -6045,6 +6971,8 @@ final class NotchModel: ObservableObject {
             // Same shortcut, same pin: a `/`-driven run is the chord's twin, so it
             // runs on the backend that shortcut names.
             armModelPin(shortcut.pin)
+            // …and like the chord, it keeps a thread of its own.
+            nextSubmitMainThread = false
             submit()
             return
         }
@@ -6383,6 +7311,7 @@ final class NotchModel: ObservableObject {
         // are working just spawns another run. `/loop` is read now: the folder
         // picker below can outlive the line it belongs to.
         let loopMinutes = loopIntervalMinutes
+        if loopMinutes == nil { MessageTone.play(MessageTone.sent) }
         if let folder = agentComposeFolder {
             startAgentRun(folder: folder, prompt: prompt, openDetail: openDetail,
                           loopMinutes: loopMinutes)
@@ -6924,8 +7853,10 @@ final class NotchModel: ObservableObject {
         // Round one's question (the task itself) and everything the user typed
         // always ride.
         let latestLoopRound = turns.compactMap(\.loopRound).max()
-        let wirable = turns.filter { turn in
-            if turn.id == answerID { return false }
+        // Newest first and lazy: the walk below stops at the budget, so a long
+        // thread's older turns are never filtered (the trim copies each answer).
+        let wirable = turns.reversed().lazy.filter { turn in
+            if turn.id == answerID || turn.isLocal { return false }
             if let round = turn.loopRound, let latest = latestLoopRound,
                round < latest - 1, !(round == 1 && turn.role == "user") {
                 return false
@@ -6938,13 +7869,14 @@ final class NotchModel: ObservableObject {
         }
         var kept: [Turn] = []
         var used = 0
-        for turn in wirable.reversed() {
+        for turn in wirable {
             // Admit the newest turn unconditionally; after that, stop once adding the
             // next-older turn would blow the budget (older history just drops off).
             if !kept.isEmpty && used + turn.text.count > wireContextCharBudget { break }
             used += turn.text.count
-            kept.insert(turn, at: 0)
+            kept.append(turn)
         }
+        kept.reverse()
         // The untrimmed list always opened with the thread's first user question;
         // the budget cut can land between a question and its answer, leaving an
         // assistant turn first — which Anthropic rejects (the conversation must
@@ -6965,6 +7897,19 @@ final class NotchModel: ObservableObject {
     }
 
     func submit(hideUserBubble: Bool = false) {
+        // Unified threads: whether a NEW thread started by this round joins the
+        // main thread. Only a line typed into the panel's own prompt does — a
+        // prompt shortcut, a selection ask, a detached window, Force Touch and
+        // /loop keep threads of their own. Read before the line below clears
+        // `fromPromptShortcut` and before `nextSubmitSurface` is consumed.
+        let mainThreadOverride = nextSubmitMainThread
+        nextSubmitMainThread = nil
+        let isRegenerate = nextSubmitIsRegenerate
+        nextSubmitIsRegenerate = false
+        let joinsMainThread = unifiedThreadsEnabled
+            && (mainThreadOverride ?? (!hideUserBubble && !fromPromptShortcut
+                                       && nextSubmitSurface == nil
+                                       && nextSubmitLoopRound == nil))
         // A line the user actually typed ends the shortcut's one-shot character —
         // from here the thread is an ordinary conversation, so the follow-up input
         // goes back to being a full field instead of a collapsed button.
@@ -6985,6 +7930,9 @@ final class NotchModel: ObservableObject {
             guard !pastedImages.isEmpty else { return }
             q = Self.agentImageOnlyPrompt(count: pastedImages.count)
         }
+        // Messages' send tone for a line that actually goes out — not for a
+        // regenerate re-running the same question, or a /loop round.
+        if !isRegenerate, loopRound == nil { MessageTone.play(MessageTone.sent) }
         // A follow-up on an agent thread whose CLI session is still resumable
         // goes back to the AGENT, not the chat model: the result view is the
         // run's conversation, so Enter there means "next instruction". Only
@@ -6996,6 +7944,11 @@ final class NotchModel: ObservableObject {
             continueAgentThread(prompt: q, images: pastedImages)
             return
         }
+        // The guide's thread takes no typed line until the guide ends.
+        if unifiedIntroLocksInput { return }
+        // The next question on the main thread ends the unified threads guide:
+        // the invitation unanswered, or the guide left from its thread.
+        if unifiedIntro != nil, joinsMainThread { unifiedIntro = nil }
         // Clear any prior error state — this attempt replaces it (XII-85).
         askError = nil
         // One-shot regenerate-with-model override (XII-135): build a service pinned
@@ -7035,13 +7988,36 @@ final class NotchModel: ObservableObject {
         showHistory = false
         highlightedHistoryIndex = nil
 
+        // Unified threads: a line typed on the idle prompt continues the main
+        // thread. Its turns come back on screen and this round is a follow-up on
+        // its row. A main thread with a round still streaming is reattached first,
+        // the same as opening its pending row. No main-thread row (never started,
+        // or deleted from Recent): the round below starts one.
+        if turns.isEmpty, joinsMainThread, mainThreadOverride == nil,
+           let main = history.first(where: { $0.mainThread && $0.source == .ask }) {
+            if let round = inFlightRounds.last(where: { $0.threadID == main.id }) {
+                attachInFlightRound(round)
+            } else if !main.pending {
+                // From the idle prompt with the peek showing, the thread opens
+                // with the pull's motion (see `beginSubmitReveal`). Read before
+                // the thread lands in `turns`.
+                let reveals = threadPullAvailable
+                turns = main.conversation
+                threadHistoryID = main.id
+                threadImages = activeModelSupportsVision ? Self.parkedImages(for: main) : nil
+                if reveals { beginSubmitReveal(threadID: main.id) }
+            }
+        }
+
         // A first question starts a fresh thread: give it a new history id so it
         // becomes its own recent row. A follow-up keeps the existing id, so the
         // whole conversation stays one row, updated in place. Captured before the
         // append below empties this out — clipboard injection keys off it too
         // (only a first turn pulls in the clipboard).
         let firstTurn = turns.isEmpty
-        if firstTurn { threadHistoryID = UUID() }
+        // …except a regenerate that emptied the main thread, which keeps its id
+        // so its row is replaced in place (see `nextSubmitMainThread`).
+        if firstTurn && mainThreadOverride != true { threadHistoryID = UUID() }
         // Submitting never touches the pin. A follow-up keeps the pin the user set
         // to read the thread (asking on doesn't fold it), and a first question keeps
         // the pin set on the idle prompt — the only way one can be armed here, since
@@ -7067,10 +8043,17 @@ final class NotchModel: ObservableObject {
         let answerID = UUID()
         var answerTurn = Turn(id: answerID, role: "assistant", text: "", streaming: true)
         answerTurn.loopRound = loopRound
+        // A /loop round lands its bubbles without the reply tone, like its first.
+        if loopRound != nil { BubblePacer.shared.silence(answerID) }
         // Stamp the one-shot regenerate model (XII-135) so the answer shows which
         // model produced it; rides into the saved snapshot below.
         answerTurn.regenModel = overrideModel
         turns.append(answerTurn)
+        if !hideUserBubble, loopRound == nil {
+            let previous = turns.dropLast(2)
+                .last(where: { $0.role == "assistant" && !$0.isError })?.text ?? ""
+            requestReaction(to: q, previous: previous, questionID: questionID, answerID: answerID)
+        }
 
         // The history sent to the model: every completed turn, plus the new
         // question — but NOT the empty assistant placeholder we just appended,
@@ -7092,7 +8075,6 @@ final class NotchModel: ObservableObject {
             context[firstUser].images = parked.images
             imageAttached = true
         }
-
         // Fresh thinking word for this answer's pre-stream wait, rotating slowly
         // while we wait so a long search/compose round doesn't freeze on one word.
         // Light the thinking dots for this round (cleared on the first token or when
@@ -7128,7 +8110,7 @@ final class NotchModel: ObservableObject {
         // row their first turn already created. The same-id row is replaced in
         // place by `persistThread` on completion, or removed by `settlePending` if
         // the round yields nothing.
-        if firstTurn { parkPending(threadID: threadID, question: q) }
+        if firstTurn { parkPending(threadID: threadID, question: q, mainThread: joinsMainThread) }
 
         // Cancelling here only ever supersedes within the SAME on-screen round (a
         // follow-up sent while the previous answer streams): detached tasks have
@@ -7148,6 +8130,7 @@ final class NotchModel: ObservableObject {
             defer {
                 self.roundsInFlight -= 1
                 self.inFlightRounds.removeAll { $0.answerID == answerID }
+                self.touchMainThreadPeek(threadID)
                 self.compactRoundTasks[threadID] = nil
                 // Don't let the last round's tool label / write phase outlive
                 // it on the collapsed notch's busy ear.
@@ -7323,6 +8306,12 @@ final class NotchModel: ObservableObject {
                 // there the flush loop keeps itself alive until drained.
                 let appendChunk: @MainActor (String) -> Void = { [weak self] piece in
                     guard let self else { return }
+                    // The answer's first text plays the reply sound — once per
+                    // round, and not for a /loop round nobody is waiting on. The
+                    // bubbles after it play their own as they land (`BubblePacer`).
+                    if acc.isEmpty, loopRound == nil {
+                        MessageTone.play(MessageTone.received)
+                    }
                     acc += piece
                     // First real text for this round ends the thinking phase — clear the
                     // dots even if the panel folded away (the round is detached but still
@@ -7514,6 +8503,18 @@ final class NotchModel: ObservableObject {
                                let i = self.turns.firstIndex(where: { $0.id == answerID }) {
                                 self.turns[i].reasoning = full
                             }
+                        },
+                        onLinks: { [weak self] links in
+                            guard let self else { return }
+                            let shared = links.map(\.absoluteString)
+                            if let i = thread.firstIndex(where: { $0.id == answerID }) {
+                                thread[i].sharedLinks += shared
+                                self.syncInFlight(answerID, thread)
+                            }
+                            if self.isOnScreen(answerID: answerID),
+                               let i = self.turns.firstIndex(where: { $0.id == answerID }) {
+                                self.turns[i].sharedLinks += shared
+                            }
                         })
                 } else {
                     // A regenerate override (XII-135) streams from its pinned
@@ -7568,6 +8569,21 @@ final class NotchModel: ObservableObject {
                         if self.isOnScreen(answerID: answerID),
                            let i = self.turns.firstIndex(where: { $0.id == answerID }) {
                             self.turns[i].text = salvaged
+                        }
+                    }
+                    // The pages the reply wrote on lines of their own become
+                    // cards once they are found open, as on the harness path.
+                    let written = Array(LinkLine.urls(in: acc).prefix(LinkCheck.maxPerAnswer))
+                    let opened = written.isEmpty ? [] : await LinkCheck.opened(written)
+                    if !opened.isEmpty {
+                        let shared = opened.map(\.absoluteString)
+                        if let i = thread.firstIndex(where: { $0.id == answerID }) {
+                            thread[i].sharedLinks += shared
+                            self.syncInFlight(answerID, thread)
+                        }
+                        if self.isOnScreen(answerID: answerID),
+                           let i = self.turns.firstIndex(where: { $0.id == answerID }) {
+                            self.turns[i].sharedLinks += shared
                         }
                     }
                 }
@@ -7849,8 +8865,10 @@ final class NotchModel: ObservableObject {
         let question = lastUser.text
         if turns.last?.role == "assistant" { turns.removeLast() }
         if turns.last?.role == "user" { turns.removeLast() }
+        if turns.isEmpty, isMainThread(threadHistoryID) { nextSubmitMainThread = true }
         regenOverrideModel = model
         text = question
+        nextSubmitIsRegenerate = true
         submit()
     }
 
@@ -8147,6 +9165,68 @@ final class NotchModel: ObservableObject {
             }
     }
 
+    // MARK: - Reactions
+
+    /// Reactions Jev put on user turns whose round has not been persisted yet,
+    /// by turn id. The streaming task persists its own snapshot of the thread,
+    /// which was taken before the reaction arrived; `syncInFlight` and
+    /// `persistThread` merge these back into it.
+    private var turnReactions: [UUID: String] = [:]
+
+    /// The gateway's probability that a tapback fits, below which nothing is
+    /// shown. This is "should we react", not confidence in one emoji, so a
+    /// concrete subject (a car, a cake) can clear it.
+    private static let reactionMinProbability = 0.5
+
+    /// Ask Jev, in parallel with the answer, whether to react to the message
+    /// just sent. Paid accounts only (`NoNoAccount.react`). A message or
+    /// previous reply that looks like it holds a credential is not sent.
+    private func requestReaction(to text: String, previous: String,
+                                 questionID: UUID, answerID: UUID) {
+        let account = NoNoAccount.shared
+        guard account.canUseRemoteSense else { return }
+        let message = String(text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(1500))
+        guard !message.isEmpty, !ClipPrivacy.containsSecret(message) else { return }
+        let prior = ClipPrivacy.containsSecret(previous) ? "" : String(previous.suffix(1500))
+        Task { [weak self] in
+            guard let verdict = await account.react(to: message, previous: prior),
+                  verdict.probability >= Self.reactionMinProbability,
+                  let emoji = verdict.emoji else { return }
+            self?.applyReaction(emoji, questionID: questionID, answerID: answerID)
+        }
+    }
+
+    /// Put `emoji` on the user turn everywhere it is shown. Dropped once the
+    /// answer has finished: a reaction that lands after the reply reads as
+    /// unrelated to it.
+    private func applyReaction(_ emoji: String, questionID: UUID, answerID: UUID) {
+        guard let r = inFlightRounds.firstIndex(where: { $0.answerID == answerID }) else { return }
+        turnReactions[questionID] = emoji
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+            if let i = turns.firstIndex(where: { $0.id == questionID }) {
+                turns[i].reaction = emoji
+            }
+            if let i = inFlightRounds[r].thread.firstIndex(where: { $0.id == questionID }) {
+                inFlightRounds[r].thread[i].reaction = emoji
+            }
+            detachedThreadStores[inFlightRounds[r].threadID]?.turns = inFlightRounds[r].thread
+        }
+        // A tap on the trackpad as the reaction lands, when it is on screen,
+        // with the Messages tapback tone that matches the emoji.
+        if turns.contains(where: { $0.id == questionID })
+            || detachedThreadStores[inFlightRounds[r].threadID] != nil {
+            Haptics.alignment()
+            MessageTone.play(MessageTone.tapback(for: emoji))
+        }
+    }
+
+    private func mergeReactions(into thread: inout [Turn]) {
+        guard !turnReactions.isEmpty else { return }
+        for i in thread.indices where thread[i].reaction == nil {
+            thread[i].reaction = turnReactions[thread[i].id]
+        }
+    }
+
     /// Refresh a still-streaming round's reattach mirror with its task's current
     /// snapshot. No-op once the round has settled (its defer removed the entry).
     private func syncInFlight(_ answerID: UUID, _ incoming: [Turn]) {
@@ -8169,9 +9249,11 @@ final class NotchModel: ObservableObject {
                 thread[j].pendingQuestion = prior.pendingQuestion
             }
         }
+        mergeReactions(into: &thread)
         inFlightRounds[i].thread = thread
         // A detached window following this thread hears every snapshot too.
         detachedThreadStores[inFlightRounds[i].threadID]?.turns = thread
+        touchMainThreadPeek(inFlightRounds[i].threadID)
     }
 
     /// Put a still-streaming round back on screen: restore its live snapshot to
@@ -8309,15 +9391,17 @@ final class NotchModel: ObservableObject {
     /// the FIRST turn parks one — a follow-up streams into an already-present row.
     /// `persistThread` later replaces this same-id row in place with the finished
     /// item; `settlePending` removes it if the round produces nothing.
-    private func parkPending(threadID: UUID, question: String) {
-        // Already have a row for this thread (shouldn't happen on a first turn, but
-        // be safe): just flag it pending rather than inserting a duplicate.
+    private func parkPending(threadID: UUID, question: String, mainThread: Bool = false) {
+        // Already have a row for this thread (the main thread re-run by
+        // regenerate keeps its id): just flag it pending rather than inserting a
+        // duplicate.
         if let i = history.firstIndex(where: { $0.id == threadID }) {
             history[i].pending = true
             return
         }
         var item = HistoryItem(id: threadID, q: question, a: "", t: Date())
         item.pending = true
+        item.mainThread = mainThread
         history.insert(item, at: 0)
         // Not saved to disk — a pending row carries no answer and must never
         // survive a relaunch. `persistThread` is what writes the settled row.
@@ -8344,6 +9428,8 @@ final class NotchModel: ObservableObject {
     private func persistThread(_ thread: [Turn], threadID: UUID, answer ans: String,
                                outOfCredit: Bool = false) {
         var thread = thread
+        mergeReactions(into: &thread)
+        for turn in thread { turnReactions[turn.id] = nil }
         let trimmed = ans.trimmingCharacters(in: .whitespacesAndNewlines)
         // No answer came back — the model returned nothing (a leaked tool call the
         // harness couldn't recover, an empty completion) or the stream died before
@@ -8398,6 +9484,7 @@ final class NotchModel: ObservableObject {
             // A follow-up is typed from inside the thread — the run's result was
             // already read, so re-filing the row must not relight its bead.
             item.agentSeen = existing.agentSeen
+            item.mainThread = existing.mainThread
         }
         if let i = history.firstIndex(where: { $0.id == threadID }) {
             history.remove(at: i)
@@ -8466,7 +9553,7 @@ final class NotchModel: ObservableObject {
         var transcript = ""
         for turn in thread.suffix(6) {
             let body = turn.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if body.isEmpty || turn.isError { continue }
+            if body.isEmpty || turn.isError || turn.isLocal { continue }
             let label = turn.role == "user" ? "User" : "Assistant"
             transcript += "\(label): \(body)\n"
         }
@@ -8684,6 +9771,10 @@ final class NotchModel: ObservableObject {
     private static func parkedImages(for item: HistoryItem)
         -> (threadID: UUID, images: [ChatImage])?
     {
+        // The main thread's opening question is whatever was asked first, maybe
+        // weeks ago. Its pictures riding along would re-send them with every later
+        // question, and an image on the wire turns the tools off for the round.
+        guard !item.mainThread else { return nil }
         let files = item.conversation.first(where: { $0.role == "user" })?.imageFiles ?? []
         let images = files.compactMap { file -> ChatImage? in
             guard let jpeg = try? Data(contentsOf: historyImageURL(file)) else { return nil }
@@ -9366,13 +10457,20 @@ final class NotchModel: ObservableObject {
         // What's New is a reading surface — give it the same comfortable column
         // as the result view. Also shows only over idle, so it wins like settings.
         if showWhatsNew { return Tokens.openWidthWhatsNew }
+        // A thread pull (or a sent line's reveal) widens the idle page toward
+        // the result page's width with its progress.
+        if let pull = threadPullProgress {
+            let p = min(max(pull, 0), 1)
+            return Tokens.openWidthIdle + (Tokens.openWidthResult - Tokens.openWidthIdle) * p
+        }
         switch mode {
         case .result: return Tokens.openWidthResult
         // A follow-up loads with the thread already on screen (shown via the result
         // view), so it must keep the result width — only the first question, with
         // nothing on screen yet, uses the narrower load width.
         case .load:   return turns.isEmpty ? Tokens.openWidthLoad : Tokens.openWidthResult
-        case .idle:   return hasText ? Tokens.openWidthIdle : Tokens.openWidthIdle
+        case .idle:
+            return hasText ? Tokens.openWidthIdle : Tokens.openWidthIdle
         }
     }
 }
@@ -9386,13 +10484,98 @@ func relativeTime(_ date: Date) -> String {
     return L("time.daysAgo", s / 86400)
 }
 
-/// A settled record's wall-clock completion stamp for the answer footer — the
-/// time on its own when it finished today, month·day·time once it's older (year
-/// dropped either way). Locale-aware (24h vs AM/PM follows the system), kept short
-/// so it sits in the footer's quiet toolbar. The full date lives in the tooltip.
+/// A settled record's wall-clock completion stamp — the time on its own when it
+/// finished today, month·day·time once it's older (year dropped either way).
+/// Locale-aware (24h vs AM/PM follows the system), kept short so it sits in the
+/// answer's right-click menu. The full date lives in the tooltip.
 func completionStamp(_ date: Date) -> String {
     if Calendar.current.isDateInToday(date) {
         return date.formatted(date: .omitted, time: .shortened)
     }
     return date.formatted(.dateTime.month(.abbreviated).day().hour().minute())
+}
+
+/// Messages' own tones, played through the system sound service. None are
+/// bundled: each is a file macOS ships, registered once as a system sound. The
+/// service plays out of process, so a tone never costs the main thread — an
+/// `NSSound` here started Core Audio on the caller the first time it played,
+/// and that start-up landed inside the Enter that sent the line.
+/// A path macOS no longer ships just means that tone stays silent.
+@MainActor
+enum MessageTone {
+    typealias Tone = SystemSoundID
+
+    private static let alertTones =
+        "/System/Library/PrivateFrameworks/ToneLibrary.framework/Versions/A/Resources/AlertTones/"
+
+    /// An answer starting to arrive.
+    static let received = register(alertTones + "ReceivedMessage.caf")
+
+    /// A message going out.
+    static let sent = register(
+        "/System/Library/Components/CoreAudio.component/Contents/SharedSupport/SystemSounds/system/SentMessage.caf",
+        "/System/Library/PrivateFrameworks/IMDaemonCore.framework/Versions/A/Resources/Sent Message.aiff")
+
+    /// The tapback tone for a reaction: heart, ha-ha, !!, ?, thumbs down, or
+    /// thumbs up for every other emoji.
+    static func tapback(for emoji: String) -> Tone? {
+        let bare = String(String.UnicodeScalarView(emoji.unicodeScalars.filter { $0.value != 0xFE0F }))
+        let kind: String
+        if "❤♥💕💖💗💘💞💓😍🥰😘🫶".contains(bare) {
+            kind = "Heart"
+        } else if "😂🤣😆😹😅😁😄".contains(bare) {
+            kind = "HaHa"
+        } else if "‼❗❕😮😲😱🤯😳".contains(bare) {
+            kind = "Exclamation"
+        } else if "❓❔🤔🧐😕🤨".contains(bare) {
+            kind = "QuestionMark"
+        } else if bare == "👎" {
+            kind = "ThumbsDown"
+        } else {
+            kind = "ThumbsUp"
+        }
+        if let cached = tapbacks[kind] { return cached }
+        let tone = register(alertTones + "Text-Message-Acknowledgement-\(kind).caf")
+        tapbacks[kind] = tone
+        return tone
+    }
+
+    /// The message-sounds switch, off by default. Every tone here goes through
+    /// `play`, so off silences sending, replies and reactions alike.
+    static var isEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: enabledKey) as? Bool ?? false }
+        set { UserDefaults.standard.set(newValue, forKey: enabledKey) }
+    }
+    /// Kept from when the switch covered replies only, so the choice carries over.
+    private static let enabledKey = "replySoundEnabled"
+
+    static func play(_ tone: Tone?) {
+        guard let tone, isEnabled else { return }
+        AudioServicesPlaySystemSound(tone)
+    }
+
+    /// Register the send and receive tones ahead of the first message.
+    static func prepare() {
+        _ = received
+        _ = sent
+    }
+
+    private static var tapbacks: [String: Tone?] = [:]
+
+    private static func register(_ paths: String...) -> Tone? {
+        for path in paths where FileManager.default.fileExists(atPath: path) {
+            var tone: SystemSoundID = 0
+            if AudioServicesCreateSystemSoundID(URL(fileURLWithPath: path) as CFURL, &tone) == noErr {
+                return tone
+            }
+        }
+        return nil
+    }
+}
+
+/// A thread pull's progress (`NotchModel.threadPullProgress`), published on its
+/// own so a pull frame invalidates only the views that draw the pull.
+@MainActor
+final class ThreadPullLive: ObservableObject {
+    @Published var progress: CGFloat = 0
 }

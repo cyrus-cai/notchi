@@ -105,6 +105,27 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.0",
+            date: "2026-09-24",
+            headline: "Keep one conversation in the notch.",
+            heroAssetName: "WhatsNew090Promo",
+            blurb: "Turn on Unified threads in Settings → Lab, and everything you ask in the notch continues one conversation. The end of the last answer shows above the prompt; type to continue, or click it to open the whole thread.",
+            features: [
+                "Answers arrive as separate message bubbles, and pages they link to show as cards.",
+                "Jev can react to your messages with an emoji once you have added to your Notchi Balance.",
+                "Double-click the open panel to pin or unpin it.",
+            ],
+            improvements: [
+                "Blend1 is retired, and Auto (US) is the default Notchi model.",
+                "The Ask menu lists Notchi's Auto models first, with named models under More models.",
+                "Model cards show where each Notchi model is served, and free models are marked Free.",
+                "Message sounds now play when you send, when each reply arrives, and when a reaction appears.",
+                "The Notchi privacy page lists what is logged, what is sent, and where it goes.",
+                "Long conversations stay responsive as questions are added.",
+                "Opening a conversation in a separate window is no longer available.",
+            ]
+        ),
+        Entry(
             version: "0.8.6",
             date: "2026-09-21",
             features: [

@@ -241,6 +241,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Register the message tones before the first send needs them.
+        DispatchQueue.main.async { MessageTone.prepare() }
         // Single-instance guard — must run before anything else builds state.
         // Duplicate instances are real here: the relaunch in
         // `scripts/reinstall.sh` races LaunchServices (an `open` that reported
@@ -365,6 +367,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             for delay: UInt64 in [0, 30, 120, 600] {
                 try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
                 await NoNoAccount.shared.load()
+                // The unified threads guide is decided before the notch first
+                // opens, so the open never draws the plain prompt first.
+                model.maybeStartUnifiedIntro()
                 if NoNoAccount.shared.hasToken { break }
             }
         }
@@ -1665,7 +1670,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // A click on the open island claims the keyboard (see
         // `NotchPanel.onClickInside`).
-        panel.onClickInside = { [weak self] in self?.focusPanelForClick(on: id) }
+        panel.onClickInside = { [weak self] in
+            guard let self else { return }
+            self.panelOpenAtLastPress[id] = self.model.isOpen(on: id)
+            self.focusPanelForClick(on: id)
+        }
+        panel.onDoubleClickInside = { [weak self] in self?.pinPanelOnDoubleClick(on: id) }
 
         position(panel, on: screen, id: id)
         panel.orderFrontRegardless()
@@ -1694,6 +1704,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             appToRestoreOnClose = front
         }
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Whether each panel was open when its last press arrived. A double-click
+    /// that opened the notch on its first click is not a pin.
+    private var panelOpenAtLastPress: [CGDirectDisplayID: Bool] = [:]
+
+    /// Double-click on the open panel pins or unpins it. Same exclusions as ⌘P
+    /// (see `NotchModel.canTogglePin`).
+    private func pinPanelOnDoubleClick(on id: CGDirectDisplayID) {
+        guard panelOpenAtLastPress[id] == true, model.isOpen(on: id),
+              model.canTogglePin else { return }
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+            model.toggleAnswerPin()
+        }
     }
 
     /// The canvas, with one AppKit behaviour SwiftUI can't reach: a click that
@@ -2141,4 +2165,3 @@ private extension CGRect {
         return dx * dx + dy * dy
     }
 }
-

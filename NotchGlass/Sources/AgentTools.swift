@@ -118,6 +118,327 @@ struct OpenURLTool: NotchTool {
     }
 }
 
+/// A line of an answer that hands over pages and says nothing else: a bare
+/// URL, `<url>`, or `[label](url)` — or several of those separated by ` · `,
+/// ` | `, ` / `, `、` or a comma — optionally after a short lead-in such as
+/// `官网：`. The answer draws such a line as cards when its pages are trusted
+/// (`LinkCardSplitter`); the harness checks the pages of the ones the model
+/// wrote (`AgentHarness.run`).
+enum LinkLine {
+    /// The page a line hands over, and the link text when it had some.
+    /// Trailing sentence punctuation is dropped.
+    static func parse(_ line: String) -> (URL, String?)? {
+        if let hit = bare(line) { return hit }
+        guard let rest = droppingLeadIn(line) else { return nil }
+        return bare(rest)
+    }
+
+    /// Every page a line hands over when it holds nothing but links, in order.
+    static func parseAll(_ line: String) -> [(URL, String?)]? {
+        if let one = parse(line) { return [one] }
+        let pieces = split(droppingLeadIn(line) ?? line)
+        guard pieces.count > 1 else { return nil }
+        var out: [(URL, String?)] = []
+        for piece in pieces {
+            guard let hit = bare(piece) else { return nil }
+            out.append(hit)
+        }
+        return out
+    }
+
+    /// A line whose last sentence is followed by links on the same line —
+    /// `…打折。 [规定](url) · [对比](url)` — cut into the text up to that
+    /// sentence's end and the pages after it. `nil` when the line does not end
+    /// that way.
+    static func splitTrailing(_ line: String) -> (text: String, links: [(URL, String?)])? {
+        guard line.contains("http") else { return nil }
+        for i in line.indices where endsSentence(line, at: i) {
+            let tail = line[line.index(after: i)...].trimmingCharacters(in: .whitespaces)
+            guard !tail.isEmpty, let links = parseAll(tail) else { continue }
+            return (String(line[...i]), links)
+        }
+        return nil
+    }
+
+    /// The text of a line still being written, without a link group that may be
+    /// growing after its last sentence. `nil` when the line has no such tail.
+    static func headBeforeGrowingLinks(_ line: String) -> String? {
+        for i in line.indices where endsSentence(line, at: i) {
+            let tail = line[line.index(after: i)...].trimmingCharacters(in: .whitespaces)
+            guard !tail.isEmpty, parseAll(tail) != nil || couldBecome(tail) else { continue }
+            return String(line[...i])
+        }
+        return nil
+    }
+
+    private static let sentenceEnds: Set<Character> = ["。", "！", "？", "；", ".", "!", "?", ";"]
+
+    /// Whether the character at `i` ends a sentence. The `!` of an image,
+    /// `![alt](url)`, does not.
+    private static func endsSentence(_ line: String, at i: String.Index) -> Bool {
+        guard sentenceEnds.contains(line[i]) else { return false }
+        if line[i] == "!", line[line.index(after: i)...].hasPrefix("[") { return false }
+        return true
+    }
+
+    /// Whether a line still being written could end up as a link line.
+    static func couldBecome(_ line: String) -> Bool {
+        if couldBecomeBare(line) { return true }
+        let leadIn = droppingLeadIn(line)
+        var body = leadIn ?? line
+        if body.isEmpty { return leadIn != nil }
+        // A separator typed before the next link.
+        while let last = body.last, "·|/、，,".contains(last) || last == " " { body.removeLast() }
+        let pieces = split(body)
+        guard pieces.count > 1 || leadIn != nil || body != line else { return false }
+        for piece in pieces.dropLast() where bare(piece) == nil { return false }
+        let last = pieces.last ?? ""
+        return bare(last) != nil || couldBecomeBare(last)
+    }
+
+    private static let separators = [" · ", " | ", " / ", "、", "，", ", "]
+
+    private static func split(_ body: String) -> [String] {
+        var pieces = [body]
+        for separator in separators {
+            pieces = pieces.flatMap { $0.components(separatedBy: separator) }
+        }
+        return pieces.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+
+    /// The pages an answer's link lines hand over, in order, outside code
+    /// blocks, each page once.
+    static func urls(in text: String) -> [URL] {
+        var out: [URL] = []
+        var keys = Set<String>()
+        var inFence = false
+        for line in text.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
+                inFence.toggle()
+                continue
+            }
+            guard !inFence,
+                  let links = parseAll(trimmed) ?? splitTrailing(trimmed)?.links else { continue }
+            for (url, _) in links where keys.insert(key(url)).inserted {
+                out.append(url)
+            }
+        }
+        return out
+    }
+
+    /// The same page written two ways (`https://obsidian.md` and
+    /// `https://www.obsidian.md/`) has one key.
+    static func key(_ url: URL) -> String {
+        var path = url.path
+        while path.hasSuffix("/") { path.removeLast() }
+        return host(url) + path + (url.query.map { "?" + $0 } ?? "")
+    }
+
+    static func host(_ url: URL) -> String {
+        normalizedHost(url.host ?? "")
+    }
+
+    static func normalizedHost(_ host: String) -> String {
+        var h = host.lowercased()
+        if h.hasPrefix("www.") { h.removeFirst(4) }
+        return h
+    }
+
+    private static func bare(_ line: String) -> (URL, String?)? {
+        if let leaked = leakedCall(line) { return (leaked, nil) }
+        var s = line
+        for (open, close) in [("**", "**"), ("`", "`"), ("<", ">")] {
+            if s.hasPrefix(open), s.hasSuffix(close), s.count > open.count + close.count {
+                s = String(s.dropFirst(open.count).dropLast(close.count))
+            }
+        }
+        var label: String? = nil
+        if s.hasPrefix("["), s.hasSuffix(")"),
+           let mid = s.range(of: "](") {
+            let text = String(s[s.index(after: s.startIndex)..<mid.lowerBound])
+            guard !text.contains("]") else { return nil }
+            label = text.trimmingCharacters(in: .whitespaces)
+            s = String(s[mid.upperBound..<s.index(before: s.endIndex)])
+        }
+        while let last = s.last, ".,;:!?。，；：！？、".contains(last) { s.removeLast() }
+        guard !s.isEmpty, !s.contains(where: \.isWhitespace),
+              let url = URL(string: s),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = url.host, !host.isEmpty
+        else { return nil }
+        return (url, label?.isEmpty == false ? label : nil)
+    }
+
+    /// `share_link` written out as text instead of called — `share_link(url)`,
+    /// `[share_link](url)`, `[[share_link](url)]`, `share_link({"url": …})` —
+    /// read as the page it names.
+    private static func leakedCall(_ line: String) -> URL? {
+        guard namesShareLink(line),
+              let range = line.range(of: #"https?://[^\s"'<>()\[\]{}]+"#, options: .regularExpression)
+        else { return nil }
+        var s = String(line[range])
+        while let last = s.last, ".,;:!?。，；：！？、".contains(last) { s.removeLast() }
+        return URL(string: s)
+    }
+
+    /// Whether a line opens with the tool's name, in any spelling
+    /// (`share_link`, `share link`, `Share-Link`), after any brackets.
+    private static func namesShareLink(_ line: String) -> Bool {
+        let head = line.lowercased().drop(while: { "[({<`*".contains($0) })
+        return ["share_link", "share link", "share-link", "sharelink"].contains { head.hasPrefix($0) }
+    }
+
+    /// A placeholder the model wrote where the card goes instead of calling
+    /// `share_link` — `[[share link]]`, `[share_link]`, `share_link()` — which
+    /// names no page. The answer drops the line.
+    static func isCardStub(_ line: String) -> Bool {
+        guard namesShareLink(line) else { return false }
+        let letters = line.lowercased().filter { !"[](){}<>`*_- ".contains($0) }
+        return letters == "sharelink"
+    }
+
+    private static func couldBecomeBare(_ line: String) -> Bool {
+        if line.lowercased().hasPrefix("share_link")
+            || (line.first.map { "[({<`".contains($0) } == true && namesShareLink(line)) { return true }
+        var s = line
+        for opener in ["**", "`", "<"] where s.hasPrefix(opener) { s = String(s.dropFirst(opener.count)) }
+        guard !s.isEmpty else { return false }
+        if s.hasPrefix("[") {
+            // `[label` or `[label](partial-url`, not yet closed.
+            guard let close = s.firstIndex(of: "]") else { return !s.contains("\n") }
+            let after = s[s.index(after: close)...]
+            return after.isEmpty || (after.hasPrefix("(") && !after.contains(where: \.isWhitespace))
+        }
+        guard !s.contains(where: \.isWhitespace) else { return false }
+        let lower = s.lowercased()
+        if lower.hasPrefix("http://") || lower.hasPrefix("https://") { return true }
+        return lower.count >= 4 && ("https://".hasPrefix(lower) || "http://".hasPrefix(lower))
+    }
+
+    /// The line after a short lead-in ending in a colon (`官网：`, `Website:`),
+    /// or `nil` when the line has none. The colon in `https:` is the URL's own.
+    private static func droppingLeadIn(_ line: String) -> String? {
+        guard let colon = line.firstIndex(where: { $0 == ":" || $0 == "：" }) else { return nil }
+        let head = line[..<colon].trimmingCharacters(in: .whitespaces)
+        guard !head.isEmpty, head.count <= 12,
+              !head.contains(where: { "[(<`/".contains($0) }),
+              !head.lowercased().hasSuffix("http"), !head.lowercased().hasSuffix("https")
+        else { return nil }
+        return line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+    }
+}
+
+/// Checks the pages an answer hands over on lines of their own before they
+/// are drawn as cards. The model writes the page's URL on a line by itself
+/// after its reply (`notchSystemPromptLinkLine`); a page that does not open is
+/// dropped, so a made-up address never reaches the user.
+enum LinkCheck {
+    /// Pages one answer may hand over.
+    static let maxPerAnswer = LinkCardSplitter.maxCards
+
+    struct Refused: LocalizedError {
+        let reason: String
+        var errorDescription: String? { reason }
+    }
+
+    /// The pages among `urls` that open, in their order.
+    static func opened(_ urls: [URL]) async -> [URL] {
+        let checked = await withTaskGroup(of: (Int, Bool).self) { group -> [Int: Bool] in
+            for (i, url) in urls.enumerated() {
+                group.addTask { (i, (try? await check(url)) != nil) }
+            }
+            var out: [Int: Bool] = [:]
+            for await (i, ok) in group { out[i] = ok }
+            return out
+        }
+        return urls.enumerated().filter { checked[$0.offset] == true }.map(\.element)
+    }
+
+    /// The Wikipedia article among a search's results that is about the one
+    /// named thing the question asks about, for a reply that handed over no
+    /// page itself. "dario 的背景" → "Dario Amodei"; "苏北人民医院在哪里" →
+    /// "苏北人民医院". Taken only when the article names a proper noun: a
+    /// Chinese or Japanese title of three characters or more that the question
+    /// contains, or a title of two or more capitalised words one of which the
+    /// question uses. A one-word English title ("Laptop") is a topic, not a
+    /// name, and is passed over.
+    static func wikipediaArticle(about question: String, in sources: [WebSource]) -> URL? {
+        let asked = question.lowercased()
+        let words = Set(asked.split { !$0.isLetter && !$0.isNumber }
+            .map(String.init)
+            .filter { $0.count >= 3 && $0.allSatisfy(\.isASCII) })
+        for source in sources {
+            guard let url = URL(string: source.url),
+                  url.host?.lowercased().hasSuffix("wikipedia.org") == true,
+                  url.pathComponents.count == 3
+            else { continue }
+            let title = url.lastPathComponent.replacingOccurrences(of: "_", with: " ")
+            guard !title.contains(":"),
+                  !title.lowercased().contains("disambiguation")
+            else { continue }
+            let name = title.components(separatedBy: " (").first ?? title
+            let isCJK = name.unicodeScalars.contains {
+                (0x3040...0x30FF).contains($0.value) || (0x4E00...0x9FFF).contains($0.value)
+            }
+            if isCJK {
+                if name.count >= 3, asked.contains(name.lowercased()) { return url }
+                continue
+            }
+            let parts = name.split(separator: " ")
+            guard parts.count >= 2,
+                  parts.allSatisfy({ $0.first?.isUppercase == true })
+            else { continue }
+            if parts.contains(where: { words.contains($0.lowercased()) }) { return url }
+        }
+        return nil
+    }
+
+    private static let timeout: TimeInterval = 5
+
+    /// Whether the page is there, within `timeout` in all. Reads the response
+    /// head and stops; the card fetches the page's details itself. A site that
+    /// answers 401, 403, 429 or 503 exists and turns away scripts, not people,
+    /// so it passes.
+    static func check(_ url: URL) async throws {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { try await head(url) }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                throw Refused(reason: "\(url.host ?? url.absoluteString) did not answer within "
+                              + "\(Int(timeout)) seconds. No card will be shown")
+            }
+            defer { group.cancelAll() }
+            try await group.next()
+        }
+    }
+
+    private static func head(_ url: URL) async throws {
+        var req = URLRequest(url: url)
+        req.timeoutInterval = timeout
+        req.setValue(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+            + "(KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+            forHTTPHeaderField: "User-Agent")
+        req.setValue("text/html,application/xhtml+xml", forHTTPHeaderField: "Accept")
+        let response: URLResponse
+        do {
+            let (bytes, head) = try await ProxyConfig.urlSession.bytes(for: req)
+            bytes.task.cancel()
+            response = head
+        } catch {
+            throw Refused(reason: "\(url.host ?? url.absoluteString) did not open "
+                          + "(\(error.localizedDescription)). No card will be shown")
+        }
+        guard let http = response as? HTTPURLResponse else { return }
+        let code = http.statusCode
+        if (200..<400).contains(code) || [401, 403, 429, 503].contains(code) { return }
+        throw Refused(reason: "\(url.host ?? url.absoluteString) returned HTTP \(code). "
+                      + "No card will be shown")
+    }
+}
+
 /// Exact arithmetic. LLMs reliably mangle multi-step or large-number math
 /// (carry errors, dropped digits), so any numeric computation the user asks for
 /// should run through a deterministic evaluator rather than the model's "head".
