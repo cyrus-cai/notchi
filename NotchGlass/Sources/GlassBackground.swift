@@ -395,6 +395,13 @@ struct IslandRim: View {
                 )
                 .blendMode(.plusLighter)
         }
+        // Rendered as one GPU texture. Unflattened, the two gradient strokes were
+        // CoreGraphics layers the size of the panel, redrawn on the CPU on every
+        // frame the panel resized (open, thread pull, back). Adding the group
+        // back with `.plusLighter` gives the same result as adding the two
+        // strokes one by one.
+        .drawingGroup()
+        .blendMode(.plusLighter)
         .allowsHitTesting(false)
     }
 }

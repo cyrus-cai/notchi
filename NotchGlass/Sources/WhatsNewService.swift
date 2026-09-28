@@ -105,6 +105,17 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.1",
+            date: "2026-09-28",
+            improvements: [
+                "Opening the panel and moving between views use less CPU.",
+            ],
+            fixes: [
+                "A thread no longer jumps to its oldest messages when an answer finishes.",
+                "Switching from Chat to Capture no longer changes the panel's height.",
+            ]
+        ),
+        Entry(
             version: "0.9.0",
             date: "2026-09-24",
             headline: "Keep one conversation in the notch.",

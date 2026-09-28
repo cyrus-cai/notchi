@@ -1246,6 +1246,7 @@ struct NotchBody: View {
     private var loopIntervalChip: some View {
         let minutes = model.loopIntervalMinutes ?? LoopInterval.lastMinutes
         return AgentComposeChip(title: L("loop.every", LoopInterval.short(minutes)),
+                                flat: model.unifiedThreadsEnabled,
                                 action: { model.showLoopIntervalPicker.toggle() },
                                 icon: {
             LucideIcon(mark: LucideIcons.loop, size: 11)
@@ -1301,6 +1302,10 @@ struct NotchBody: View {
                             ? UnifiedComposeModeControl.fontSize
                             : Tokens.TypeSize.label,
                          fontWeight: model.unifiedThreadsEnabled ? .regular : .light,
+                         // Chat is the only mode that shows this chip. Its old
+                         // 6pt vertical padding sat above the 22pt mode word and
+                         // ⋯, so leaving Chat for Capture shortened the panel.
+                         flat: model.unifiedThreadsEnabled,
                          action: {
             if model.isConfigured || !availableCLIProviders.isEmpty {
                 // The menu pins our own models for a subscriber, and nothing else
@@ -7422,6 +7427,9 @@ private struct AgentChipFace<Icon: View>: View {
     var tint: Color? = nil
     var fontSize: CGFloat = Tokens.TypeSize.label
     var fontWeight: Font.Weight = .light
+    /// Unified-threads row: same 22pt box as the mode word and the ⋯ chip, so
+    /// showing or hiding this label cannot change the panel's height.
+    var flat: Bool = false
 
     var body: some View {
         HStack(spacing: 5) {
@@ -7432,8 +7440,9 @@ private struct AgentChipFace<Icon: View>: View {
                 .foregroundStyle(tint ?? (hovering ? Tokens.text2 : Tokens.text4))
                 .lineLimit(1)
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
+        .padding(.horizontal, flat ? 7 : 8)
+        .padding(.vertical, flat ? 3.5 : 6)
+        .frame(height: flat ? Tokens.Control.inline : nil)
         .contentShape(Capsule())
     }
 }
@@ -7444,6 +7453,7 @@ struct AgentComposeChip<Icon: View>: View {
     var tint: Color? = nil
     var fontSize: CGFloat = Tokens.TypeSize.label
     var fontWeight: Font.Weight = .light
+    var flat: Bool = false
     var action: () -> Void
     @ViewBuilder var icon: () -> Icon
 
@@ -7452,7 +7462,7 @@ struct AgentComposeChip<Icon: View>: View {
     var body: some View {
         Button(action: action) {
             AgentChipFace(icon: icon(), title: title, hovering: hovering, tint: tint,
-                          fontSize: fontSize, fontWeight: fontWeight)
+                          fontSize: fontSize, fontWeight: fontWeight, flat: flat)
         }
         // No press scale. These chips open a menu card that hangs off the chip's
         // own frame; a chip that shrinks and springs back under the click moves

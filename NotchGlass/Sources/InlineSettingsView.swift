@@ -3953,7 +3953,6 @@ struct InlineSettingsView: View {
     /// Same flag as the row in the result header's more menu.
     private var messageSoundsRow: some View {
         settingRow(label: L("messageSounds"),
-                   info: L("messageSounds.hint"),
                    aligned: true) {
             Toggle("", isOn: Binding(
                 get: { model.messageSoundsEnabled },

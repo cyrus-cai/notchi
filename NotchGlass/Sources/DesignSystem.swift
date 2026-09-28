@@ -754,22 +754,29 @@ struct ProgressiveEdgeBlur: ViewModifier {
     var bottomRadius: CGFloat = 7
 
     func body(content: Content) -> some View {
+        content.overlay(bands(content))
+    }
+
+    /// The blurred copies alone, to lay over `content`.
+    @ViewBuilder
+    func bands<V: View>(_ content: V) -> some View {
         if topRadius == bottomRadius {
-            content.overlay(band(content, top: true, bottom: true, radius: topRadius))
+            band(content, top: true, bottom: true, radius: topRadius)
         } else {
-            // Both overlays copy the ORIGINAL `content`, not each other's result.
+            // Both layers copy the ORIGINAL `content`, not each other's result.
             // (Blurring the top layer along with the content in the bottom band is
             // a no-op anyway: the top layer's own mask is already clear down there.)
-            content
-                .overlay(band(content, top: true, bottom: false, radius: topRadius))
-                .overlay(band(content, top: false, bottom: true, radius: bottomRadius))
+            ZStack {
+                band(content, top: true, bottom: false, radius: topRadius)
+                band(content, top: false, bottom: true, radius: bottomRadius)
+            }
         }
     }
 
     /// One flattened, blurred copy of the content, masked to the requested edge
     /// band(s) — opaque at the edge, tapering to clear at the band's inner lip.
-    private func band(_ content: Content, top: Bool, bottom: Bool,
-                      radius: CGFloat) -> some View {
+    private func band<V: View>(_ content: V, top: Bool, bottom: Bool,
+                               radius: CGFloat) -> some View {
         GeometryReader { geo in
             let h = max(geo.size.height, 1)
             // Clamp each band to under half the view so the two tapers can never
@@ -809,13 +816,19 @@ struct ConditionalEdgeBlur: ViewModifier {
     /// which is what lets the two bands ride one blurred copy.
     var bottomRadius: CGFloat? = nil
 
+    /// `content` keeps one position in the tree whether or not the bands are
+    /// up; only the overlay mounts and unmounts. Branching on `active` around
+    /// `content` gave it two identities, so a flip rebuilt everything inside:
+    /// the thread's ScrollView came back at offset 0 when a stream ended and
+    /// showed the oldest mounted turns before scrolling back to the bottom.
     func body(content: Content) -> some View {
-        if active {
-            content.progressiveEdgeBlur(top: topHeight, bottom: bottomHeight,
-                                        topRadius: topRadius,
-                                        bottomRadius: bottomRadius ?? topRadius)
-        } else {
-            content
+        content.overlay {
+            if active {
+                ProgressiveEdgeBlur(topHeight: topHeight, bottomHeight: bottomHeight,
+                                    topRadius: topRadius,
+                                    bottomRadius: bottomRadius ?? topRadius)
+                    .bands(content)
+            }
         }
     }
 }

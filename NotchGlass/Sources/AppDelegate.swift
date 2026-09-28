@@ -351,6 +351,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             UpdaterService.shared.checkIfDue()
+            // Versions the update policy names get the card from the resting
+            // notch (see `UpdatePrompt`).
+            UpdatePrompt.shared.start(model: self.model) { [weak self] in
+                self?.updatePromptDisplay()
+            }
             // Touch the What's New service so it resolves the "unseen version"
             // cue (and records the first-launch baseline) off the launch path.
             // Notes are bundled into the app — there's nothing to fetch.
@@ -611,6 +616,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     try? await Task.sleep(nanoseconds: 4_000_000_000)
                     UpdaterService.shared.update()
                 }
+            }
+        }
+        // NOTCH_DEMO_UPDATE_PROMPT=<version> pins that build as waiting and
+        // unfolds the update card right away, skipping the policy and every
+        // timing condition. With NOTCH_DEMO_UPDATE_FLOW set too, Restart plays
+        // the simulated install instead of a real one.
+        if let v = env["NOTCH_DEMO_UPDATE_PROMPT"], !v.isEmpty {
+            if env["NOTCH_DEMO_UPDATE_FLOW"] == nil {
+                UpdaterService.shared._debugPinAvailable(v)
+            }
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                guard let self,
+                      let id = self.updatePromptDisplay() ?? self.panels.keys.first else { return }
+                UpdatePrompt.shared._debugShow(on: id, version: v)
             }
         }
         // NOTCH_DEMO_UPDATE_FLOW=<version> plays the whole update story on a timer
@@ -1604,6 +1624,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         return false
+    }
+
+    /// The screen the update card unfolds on: the one under the pointer first,
+    /// then any other. Only a screen whose island is on screen and that no app
+    /// covers full-screen qualifies. Nil when none does.
+    private func updatePromptDisplay() -> CGDirectDisplayID? {
+        let mouse = NSEvent.mouseLocation
+        let screens = NSScreen.screens.sorted {
+            NSMouseInRect(mouse, $0.frame, false) && !NSMouseInRect(mouse, $1.frame, false)
+        }
+        for screen in screens {
+            guard let id = screen.displayID, let panel = panels[id], panel.isVisible,
+                  !Self.hasFullScreenWindow(on: screen) else { continue }
+            return id
+        }
+        return nil
     }
 
     /// Build the transparent canvas panel for one screen, injecting per-screen

@@ -614,6 +614,8 @@ struct NotchIsland: View {
     /// notch reports right alongside detached Ask rounds (same busy ears, same
     /// finished-count badge).
     @ObservedObject private var agentManager = AgentTaskManager.shared
+    /// The update card the resting notch unfolds into (`UpdatePrompt`).
+    @ObservedObject private var updatePrompt = UpdatePrompt.shared
     @Environment(\.notchMetrics) private var metrics
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -657,6 +659,15 @@ struct NotchIsland: View {
         model.isOpen(on: metrics.displayID)
     }
 
+    /// The update card, when it is up on THIS screen's resting notch.
+    private var promptShowing: UpdatePrompt.Showing? {
+        guard !isOpen, let showing = updatePrompt.showing,
+              showing.display == metrics.displayID else { return nil }
+        return showing
+    }
+
+    private var showsPrompt: Bool { promptShowing != nil }
+
     /// True when the panel is fully closed (on every display) but background
     /// work is still running — a detached Ask round streaming, or an agent
     /// Codex run working in its folder. The resting notch flexes into the busy
@@ -664,7 +675,7 @@ struct NotchIsland: View {
     /// this display's `isOpen`: while the panel is open anywhere the work is on
     /// screen there, and the other displays' resting notches shouldn't claim it.
     private var busy: Bool {
-        !model.open && model.liveActivityEnabled
+        !model.open && !showsPrompt && model.liveActivityEnabled
             && (model.roundsInFlight > 0 || agentRunning)
     }
 
@@ -726,7 +737,7 @@ struct NotchIsland: View {
     /// capture. Gated on the GLOBAL `open` like `busy`, and yields to the busy
     /// dots — an in-flight answer outranks a copy hint for the one strip.
     private var sensing: Bool {
-        !model.open && !busy && model.clipboardSense != .idle
+        !model.open && !showsPrompt && !busy && model.clipboardSense != .idle
     }
 
     /// The resting notch's LEFT flex — the busy verb, or the copy-sense left ear
@@ -786,7 +797,7 @@ struct NotchIsland: View {
     /// on every exposed edge instead: the island dilates, so the gesture has no
     /// direction of its own beyond "out".
     private var peekScaleX: CGFloat {
-        guard peeking, !isOpen else { return 1 }
+        guard peeking, !isOpen, !showsPrompt else { return 1 }
         // Measured at the body's STRAIGHT sides, not at its top edge. The peek
         // flare carves `topFlare` off each side of the drawn form, so the plain
         // `(width + out * 2) / width` scale landed those sides back exactly
@@ -800,7 +811,7 @@ struct NotchIsland: View {
     }
 
     private var peekScaleY: CGFloat {
-        guard peeking, !isOpen else { return 1 }
+        guard peeking, !isOpen, !showsPrompt else { return 1 }
         let h = max(metrics.restHeight, 1)
         return (h + NotchModel.hoverPeekOut) / h
     }
@@ -819,7 +830,7 @@ struct NotchIsland: View {
     /// notch swallow clicks on every level, and on a virtual notch (drawn over an
     /// external screen's menu bar) those clicks belong to the menu bar.
     private var clickToOpenArmed: Bool {
-        !isOpen && model.hoverSensitivity.opensOnClickOnly
+        !isOpen && !showsPrompt && model.hoverSensitivity.opensOnClickOnly
     }
 
     private var width: CGFloat {
@@ -827,6 +838,7 @@ struct NotchIsland: View {
         // flares on top of it, so the form's straight sides land exactly where
         // they always did and only the top edge reaches wider (see `topFlare`).
         if isOpen { return model.openWidth + topFlare * 2 }
+        if showsPrompt { return UpdatePromptCard.width + topFlare * 2 }
         return metrics.restWidth + earLeft + earRight
     }
 
@@ -836,7 +848,7 @@ struct NotchIsland: View {
     /// pre-shrunk by the mean of the two axes — the *rendered* corner then holds
     /// at `notchRestRadius` through the flex instead of fattening a point.
     private var bottomRadius: CGFloat {
-        if isOpen { return Tokens.Radius.shell }
+        if isOpen || showsPrompt { return Tokens.Radius.shell }
         return Tokens.notchRestRadius / ((peekScaleX + peekScaleY) / 2)
     }
 
@@ -850,7 +862,7 @@ struct NotchIsland: View {
     /// this Mac, a taller one on a 16", a 24pt menu bar on an external display).
     private var topFlare: CGFloat {
         let cap = metrics.restHeight / 2          // never eat the black zone
-        if isOpen { return min(Tokens.notchShoulderFlare, cap) }
+        if isOpen || showsPrompt { return min(Tokens.notchShoulderFlare, cap) }
         // No cutout on this screen (external display, non-notched Mac): the drawn
         // island IS the notch, so it has to carry the transition itself — always,
         // not just while dilating. There's no hardware curve here to inherit.
@@ -901,7 +913,7 @@ struct NotchIsland: View {
             ZStack {
                 // No camera dot on screens without a real camera housing — a
                 // fake lens on an external monitor reads as a smudge, not charm.
-                if !isOpen, metrics.hasHardwareNotch {
+                if !isOpen, !showsPrompt, metrics.hasHardwareNotch {
                     Circle()
                         .fill(
                             RadialGradient(
@@ -981,6 +993,16 @@ struct NotchIsland: View {
                     .opacity(model.detachDrag == nil ? 1 : 0.94)
                     .transition(.asymmetric(insertion: .opacity, removal: foldIntoNotch))
             }
+
+            // The update card, unfolded from the resting notch without opening
+            // the panel: no focus is taken and the app stays in the background.
+            if let showing = promptShowing {
+                UpdatePromptCard(showing: showing)
+                    .padding(.horizontal, topFlare)
+                    .transition(.asymmetric(
+                        insertion: .opacity,
+                        removal: .opacity.combined(with: .scale(scale: 0.92, anchor: .top))))
+            }
         }
         // During a thread pull the width comes from the pull's progress frame by
         // frame, as the reveal's heights do. Left to the implicit `openWidth`
@@ -993,7 +1015,7 @@ struct NotchIsland: View {
         .padding(.top, -topBleed)   // pull the form up so it bleeds off the top
         .background(GlassMaterial(bottomRadius: bottomRadius,
                                   topRadius: topFlare,
-                                  expanded: isOpen,
+                                  expanded: isOpen || showsPrompt,
                                   cameraZone: metrics.restHeight))
         // The destructive "Clear recent history?" confirmation floats centered over
         // the whole island (scrim + card), instead of a popover anchored under the

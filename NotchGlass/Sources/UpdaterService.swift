@@ -270,6 +270,18 @@ final class UpdaterService: ObservableObject {
         phase = .updating
         Task {
             do {
+                // A build the update prompt already fetched in the background
+                // goes straight to the swap: the download is what the prompt
+                // waited out before it showed.
+                if let zip = takePrefetchedZip(for: version) {
+                    stage = .installing
+                    let dest = Bundle.main.bundleURL
+                    try await Task.detached(priority: .userInitiated) {
+                        try Self.swapBundle(zip: zip, dest: dest)
+                    }.value
+                    await finishAndRelaunch(dest)
+                    return
+                }
                 let release = try await Self.fetchLatest()
                 guard let asset = release.assets.first(where: { $0.name.hasSuffix(".zip") }),
                       // Private repos only serve assets through the API URL
@@ -304,6 +316,68 @@ final class UpdaterService: ObservableObject {
                 phase = .failed
             }
         }
+    }
+
+    // MARK: - Prefetch
+
+    /// Where a build downloaded ahead of time waits for its install. Caches,
+    /// not the temp directory: the prompt can wait days to show, and the
+    /// system clears temp on its own schedule.
+    private static var prefetchDir: URL {
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        return caches
+            .appendingPathComponent(Bundle.main.bundleIdentifier ?? "com.notchglass.app")
+            .appendingPathComponent("Updates", isDirectory: true)
+    }
+
+    private static func prefetchURL(for version: String) -> URL {
+        prefetchDir.appendingPathComponent("Notchi-v\(version).zip")
+    }
+
+    private var prefetching = false
+
+    /// Whether `version`'s zip is already on disk.
+    func hasPrefetched(_ version: String) -> Bool {
+        FileManager.default.fileExists(atPath: Self.prefetchURL(for: version).path)
+    }
+
+    /// Download the waiting build without touching the phase or the chip, so
+    /// a later `update()` only has to swap it in. Silent like the checks: a
+    /// failure leaves nothing behind and the next call tries again. Any zip of
+    /// another version is removed first.
+    func prefetch() {
+        guard !prefetching, case .available(let version) = phase,
+              !hasPrefetched(version) else { return }
+        prefetching = true
+        Task {
+            defer { prefetching = false }
+            guard let release = try? await Self.fetchLatest(), release.version == version,
+                  let asset = release.assets.first(where: { $0.name.hasSuffix(".zip") }),
+                  let url = URL(string: Self.token != nil ? asset.url : asset.browser_download_url),
+                  let download = try? await Downloader.run(
+                      Self.request(url, accept: "application/octet-stream"), onFraction: { _ in })
+            else { return }
+            let (zip, resp) = download
+            let fm = FileManager.default
+            guard (resp as? HTTPURLResponse)?.statusCode == 200 else {
+                try? fm.removeItem(at: zip)
+                return
+            }
+            try? fm.removeItem(at: Self.prefetchDir)
+            do {
+                try fm.createDirectory(at: Self.prefetchDir, withIntermediateDirectories: true)
+                try fm.moveItem(at: zip, to: Self.prefetchURL(for: version))
+            } catch {
+                try? fm.removeItem(at: zip)
+            }
+        }
+    }
+
+    /// Hand the prefetched zip for `version` to the install, which deletes it
+    /// when done. Nil when there is none.
+    private func takePrefetchedZip(for version: String) -> URL? {
+        let url = Self.prefetchURL(for: version)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
     /// The updater's download, run as a classic `URLSessionDownloadTask` on a
