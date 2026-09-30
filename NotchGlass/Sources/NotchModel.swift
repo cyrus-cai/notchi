@@ -7183,7 +7183,12 @@ final class NotchModel: ObservableObject {
         if let selection = selectionContext {
             clearSelectionContext()
             let instruction = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if effectiveSubmitPanel == .chat, !instruction.isEmpty {
+            // A selection that is the typed line itself (the question was copied
+            // out of the app it was selected in) adds no context: the line goes
+            // out as an ordinary ask, with its bubble, on the main thread.
+            let repeatsLine = selection
+                .trimmingCharacters(in: .whitespacesAndNewlines) == instruction
+            if effectiveSubmitPanel == .chat, !instruction.isEmpty, !repeatsLine {
                 text = """
                 \(instruction)
 
@@ -7191,10 +7196,11 @@ final class NotchModel: ObservableObject {
                 \(selection)
                 </selected_text>
                 """
-                // Same shape as the prompt-shortcut path above: the wrapped
-                // payload is wire context, not something to render back at the
-                // user as their own bubble.
-                submit(hideUserBubble: true)
+                // Unified threads: the line joins the main thread, and its
+                // bubble draws the selection as a quote (`quoteEnvelope`).
+                // Separate threads keep the prompt-shortcut shape: the wrapped
+                // payload is wire context, with no bubble.
+                submit(hideUserBubble: !unifiedThreadsEnabled)
                 return
             }
         }
@@ -8090,9 +8096,10 @@ final class NotchModel: ObservableObject {
 
     func submit(hideUserBubble: Bool = false) {
         // Unified threads: whether a NEW thread started by this round joins the
-        // main thread. Only a line typed into the panel's own prompt does — a
-        // prompt shortcut, a selection ask, a detached window, Force Touch and
-        // /loop keep threads of their own. Read before the line below clears
+        // main thread. Only a line typed into the panel's own prompt does, with
+        // or without a selection carried in from the app the user came from — a
+        // prompt shortcut, a detached window, Force Touch and /loop keep threads
+        // of their own. Read before the line below clears
         // `fromPromptShortcut` and before `nextSubmitSurface` is consumed.
         let mainThreadOverride = nextSubmitMainThread
         nextSubmitMainThread = nil

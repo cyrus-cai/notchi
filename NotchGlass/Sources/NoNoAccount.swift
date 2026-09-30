@@ -71,6 +71,9 @@ final class NoNoAccount: ObservableObject {
     /// Dollars granted this process that the wallet card has not yet shown.
     /// Zero when this launch did not receive a gift, or after the notice is dismissed.
     @Published private(set) var justGrantedUSD: Double = 0
+    /// The newest gift counted in `justGrantedUSD`: the prompt's grant chip
+    /// shows its name and its own amount.
+    @Published private(set) var justGranted: BalanceLine?
 
     private static let seenGiftsKey = "NotchiSeenGiftIDs"
     /// Gifts dated before this are from an earlier launch, not this one.
@@ -259,7 +262,10 @@ final class NoNoAccount: ObservableObject {
             fresh = gifts.filter { !known.contains($0.id) }
         }
         let amount = fresh.reduce(0) { $0 + $1.amountUSD }
-        if amount > 0.0000005 { justGrantedUSD += amount }
+        if amount > 0.0000005 {
+            justGrantedUSD += amount
+            justGranted = fresh.max { $0.at < $1.at }
+        }
         for gift in gifts { known.insert(gift.id) }
         UserDefaults.standard.set(Array(known), forKey: Self.seenGiftsKey)
     }
@@ -273,6 +279,7 @@ final class NoNoAccount: ObservableObject {
             rollFromUSD = from < 0.01 ? 0 : from
         }
         justGrantedUSD = 0
+        justGranted = nil
     }
 
     /// The figure the wallet card starts from after `claimGrant`. Nil once the

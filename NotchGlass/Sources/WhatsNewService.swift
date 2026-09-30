@@ -105,6 +105,14 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.4",
+            date: "2026-09-30",
+            improvements: [
+                "The prompt shows a gift's name and amount when credit is added.",
+                "With unified threads on, a question about selected text joins the main thread and shows the selection as a quote.",
+            ]
+        ),
+        Entry(
             version: "0.9.3",
             date: "2026-09-30",
             improvements: [

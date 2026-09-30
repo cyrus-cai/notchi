@@ -5649,28 +5649,32 @@ struct NotchBody: View {
             card: { AnyView(SlashCommandMenu(model: model).menuCardBackground()) }))
     }
 
-    /// This launch's grant, on the bucket row's trailing edge. Same glass capsule
-    /// and ink as `updateCue`; in the unified-threads row it draws like the ⋯
-    /// chip beside it instead (`ClusterChipSurface`, flat). Tapping it opens the
-    /// wallet card, where the balance rolls up to include the grant.
+    /// This launch's grant, on the bucket row's trailing edge: its name, then
+    /// its amount, in one chip. Same glass capsule and ink as `updateCue`; in
+    /// the unified-threads row it draws like the ⋯ chip beside it instead
+    /// (`ClusterChipSurface`, flat). Tapping it opens the wallet card, where
+    /// the balance rolls up to include the grant.
     private var giftCue: some View {
         let flat = model.unifiedThreadsEnabled
+        let name = nono.justGranted?.title ?? L("nono.balances.name.welcome")
+        let amount = nono.justGranted?.amountUSD ?? nono.justGrantedUSD
         return Button {
             nono.claimGrant()
             withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                 model.openProviderSettings(.nono)
             }
         } label: {
-            (Text(L("nono.gift.got.pre"))
-                + Text(InlineSettingsView.moneyCharged(nono.justGrantedUSD))
-                + Text(L("nono.gift.got.post")))
-                .font(.sf(Tokens.TypeSize.meta, weight: flat ? .regular : .medium))
-                .lineLimit(1)
-                .foregroundStyle(giftCueHovered ? Tokens.text1 : Tokens.text2)
-                .padding(.horizontal, flat ? 7 : 10)
-                .frame(height: flat ? Tokens.Control.inline : Tokens.Control.chip)
-                .modifier(ClusterChipSurface(flat: flat, hovering: giftCueHovered,
-                                             shape: Capsule()))
+            HStack(spacing: 6) {
+                Text(name)
+                Text(InlineSettingsView.moneyCharged(amount))
+            }
+            .font(.sf(Tokens.TypeSize.meta, weight: flat ? .regular : .medium))
+            .lineLimit(1)
+            .foregroundStyle(giftCueHovered ? Tokens.text1 : Tokens.text2)
+            .padding(.horizontal, flat ? 7 : 10)
+            .frame(height: flat ? Tokens.Control.inline : Tokens.Control.chip)
+            .modifier(ClusterChipSurface(flat: flat, hovering: giftCueHovered,
+                                         shape: Capsule()))
         }
         .buttonStyle(GlassPressStyle())
         .onHover { giftCueHovered = $0 }
