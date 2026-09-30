@@ -27,14 +27,6 @@ struct ContentView: View {
             // gone. Removing the scrim also stops it swallowing the first click
             // on whatever sits under the canvas.
             NotchIsland(model: model)
-                // The answer's voice, injected once at the root so every mounted
-                // copy of a turn agrees — the visible thread, the hidden height
-                // probe, the progressive-blur overlays. Injecting it lower would
-                // let the probe measure a typeset answer while the thread renders
-                // a handwritten one, and the panel would settle to the wrong
-                // height. Only `MarkdownBlocks` reads it, and that view renders
-                // nothing but assistant output, so the reach is exactly the prose.
-                .environment(\.handwritten, HandwritingFeature.isEnabled && model.handwrittenAnswers)
                 // Rebuild the island's subtree on an App Language switch so every
                 // localized string re-evaluates at once. The island is collapsed
                 // (or being opened) when the user returns from a switch, so the
@@ -226,8 +218,8 @@ struct ContentView: View {
             // ← / → walk an opened image's pile (see `ImageLightbox`). Consumed
             // only while one is open, so the arrows stay the field editor's
             // everywhere else.
-            if event.keyCode == 123, ImageLightboxCenter.shared.step(-1) { return true }
-            if event.keyCode == 124, ImageLightboxCenter.shared.step(1) { return true }
+            if event.keyCode == 123, ImageLightboxCenter.shared.step(-1, in: event.window) { return true }
+            if event.keyCode == 124, ImageLightboxCenter.shared.step(1, in: event.window) { return true }
             // Esc: if the recent list is open, fold just that back to the input
             // first (one step "out"); only a second Esc closes the whole panel.
             // Works mid-request too — closing detaches the in-flight answer, which
@@ -235,12 +227,20 @@ struct ContentView: View {
             if event.keyCode == 53 {
                 // An opened image is the topmost thing on the glass → first Esc
                 // just puts it back down, before any panel-level step-out.
-                if ImageLightboxCenter.shared.dismiss() { return true }
+                if ImageLightboxCenter.shared.dismiss(in: event.window) { return true }
+                // A flagged link's confirmation is up → first Esc cancels it.
+                if LinkGate.shared.cancel(in: event.window) { return true }
                 // Clear confirmation armed → first Esc dismisses just the dialog,
                 // before any panel-level step-out / close.
                 if model.confirmingClear {
                     withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
                         model.confirmingClear = false
+                    }
+                    return true
+                }
+                if model.confirmingDisconnect {
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                        model.confirmingDisconnect = false
                     }
                     return true
                 }
@@ -256,7 +256,7 @@ struct ContentView: View {
                 // Esc walks the same floors as the header's back pill.
                 if model.showSettings {
                     if let parent = InlineSettingsView.Section(rawValue: model.settingsSection)?.parent {
-                        withAnimation(.easeOut(duration: 0.16)) {
+                        withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                             model.settingsSection = parent.rawValue
                         }
                         return true
@@ -1093,6 +1093,9 @@ struct NotchIsland: View {
             }
         }
         .animation(.easeOut(duration: 0.16), value: model.forceClickLookupConflict)
+        // Link clicks on this surface go through the pre-check, and its
+        // confirmation card is drawn here, inside the clip (see `LinkGate`).
+        .linkGateHost(active: isOpen)
         // Coming back from System Settings is the answer: if the lookup gesture is
         // off now, the held rung arms itself and the dialog leaves — nothing left
         // to confirm, so asking again would just be a second click.

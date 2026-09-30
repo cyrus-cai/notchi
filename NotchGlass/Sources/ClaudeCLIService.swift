@@ -184,13 +184,28 @@ struct ClaudeCLIService: AIService {
     /// display info the CLI stores about the signed-in user) — deliberately never
     /// the credentials file or Keychain, which hold the actual tokens Notch must
     /// never touch.
+    ///
+    /// The answer is kept per modification date: this runs inside `body`, once
+    /// per provider filter, and the file is the CLI's whole config — parsing it
+    /// on every call cost milliseconds each time Settings redrew.
     static func authExists() -> Bool {
         let configPath = "\(NSHomeDirectory())/.claude.json"
-        guard let data = FileManager.default.contents(atPath: configPath),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return false }
-        return json["oauthAccount"] != nil
+        let modified = (try? FileManager.default.attributesOfItem(atPath: configPath))?[.modificationDate] as? Date
+        authCacheLock.lock()
+        defer { authCacheLock.unlock() }
+        if let cached = authCache, cached.modified == modified { return cached.exists }
+        var exists = false
+        if modified != nil,
+           let data = FileManager.default.contents(atPath: configPath),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            exists = json["oauthAccount"] != nil
+        }
+        authCache = (modified, exists)
+        return exists
     }
+
+    private static let authCacheLock = NSLock()
+    nonisolated(unsafe) private static var authCache: (modified: Date?, exists: Bool)?
 
     /// Whether Claude Code can answer right now: binary resolves AND signed in.
     /// Reads the resolution non-blockingly (this runs inside `body`); until the

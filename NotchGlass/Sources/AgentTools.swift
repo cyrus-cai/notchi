@@ -7,13 +7,14 @@ import Carbon.HIToolbox
 // The deliberately small tool surface: read what the user already copied, tell
 // the time, do exact arithmetic, search the user's own Notch archive, ask the
 // user a clarifying question, run a web search, read a web page's text, manage
-// this app's own preferences, and file a note or a reminder. Those last three are
-// the only write surfaces, and each one has a mandatory in-app confirmation gate
-// — the model may decide to call them, but the user decides whether they commit;
-// there are still no shell or computer-use tools.
+// this app's own preferences, file a note or a reminder, and run a shell command.
+// Those last four are the only write surfaces. Settings have a mandatory in-app
+// confirmation gate; notes and reminders are written directly, the same way a
+// typed `:` capture is; `run_shell` runs directly except for the commands
+// `ShellRisk` flags, which ask first. There are still no computer-use tools.
 //
 // Most providers advertise the full set every turn. Blend1 does not: it keeps
-// the four Ask tools on every round and adds the rest only when the question
+// the Ask tools and `create_note` on every round and adds the rest only when the question
 // points at them (`AskToolIntent`). Growing the surface is a matter of adding a
 // `NotchTool` and registering it (see `ToolRegistry.standard(for:)`, or — for a
 // tool that needs the live model, like `search_history` / `ask_user` /
@@ -112,6 +113,12 @@ struct OpenURLTool: NotchTool {
               let scheme = url.scheme?.lowercased(),
               scheme == "http" || scheme == "https" else {
             return "Error: not a valid http(s) URL."
+        }
+        // The link pre-check (`LinkGate`) applies to the agent's opens too. A
+        // flagged address is not opened here; the agent hands it over as a link,
+        // and the click on that link is what asks the user.
+        if await LinkGate.shared.warns(url) {
+            return "Not opened: the link pre-check flagged \(url.absoluteString) as possibly unsafe. Give it to the user as a Markdown link and say it was flagged."
         }
         let ok = await MainActor.run { NSWorkspace.shared.open(url) }
         return ok ? "Opened \(url.absoluteString)." : "Couldn't open \(url.absoluteString)."
@@ -763,7 +770,7 @@ let appSettingsCatalog = """
 Supported setting ids and values:
 - app_language: system, english, chinese_simplified, chinese_traditional, japanese, korean, french, spanish
 - dock_icon / menu_bar_icon: shown or hidden
-- launch_at_login / hide_in_fullscreen / live_activity / copy_sense: true or false
+- launch_at_login / hide_in_fullscreen / live_activity / copy_sense / run_commands: true or false
 - display_placement: all or built_in
 - hover_sensitivity: low, balanced, or instant
 - note_destination: apple_notes or markdown_folder; notes_folder: absolute path
@@ -789,8 +796,8 @@ struct ManageAppSettingsTool: NotchTool {
     let description = """
     Reads, opens, or changes this Notch app's settings. action=list returns current \
     values and supported ids; action=shortcuts returns the live hotkey reference; \
-    action=open opens a Settings page (section: model, capture, general, appearance, \
-    shortcuts, stats, about); action=update applies changes[] after one Confirm card. \
+    action=open opens a Settings page (section: model, chat, general, appearance, shortcuts, \
+    stats, about); action=update applies changes[] after one Confirm card. \
     For a change, list first (shortcuts first when editing a hotkey) then update. \
     If a value is not supported, open that section instead of listing alternatives.
     """
@@ -804,7 +811,7 @@ struct ManageAppSettingsTool: NotchTool {
             ],
             "section": [
                 "type": "string",
-                "enum": ["model", "capture", "general", "appearance", "shortcuts", "stats", "about"],
+                "enum": ["model", "chat", "general", "appearance", "shortcuts", "stats", "about"],
                 "description": "The page to open when action=open.",
             ],
             "changes": [
@@ -897,11 +904,11 @@ struct ManageAppSettingsTool: NotchTool {
 // MARK: - Notes & Reminders (create_note / create_reminder)
 
 /// Provider-neutral request passed from `create_note` / `create_reminder` into
-/// the live `NotchModel`, which owns the confirmation card and the actual write.
+/// the live `NotchModel`, which owns the actual write.
 /// Mirrors `AppSettingsRequest`: the tool stays UI-agnostic and knows nothing
 /// about Apple Notes, EventKit, or the user's note destination.
 struct CaptureRequest: Sendable {
-    enum Kind: String, Sendable { case note, reminder }
+    enum Kind: String, Codable, Sendable { case note, reminder }
 
     let kind: Kind
     let text: String
@@ -911,17 +918,18 @@ struct CaptureRequest: Sendable {
     let due: String?
 }
 
-/// File a note from the chat composer. The second write surface after
-/// `manage_app_settings`, and gated the same way: the model may call it on its
-/// own judgment, but nothing is ever written until the user taps Confirm on the
-/// in-answer card.
+/// File a note from the chat composer. Advertised on every Ask round, so the
+/// model decides whether a line is a question to answer or something to keep.
+/// Unlike `manage_app_settings`, it has no Confirm card: the note is written as
+/// soon as the model calls it, like a typed `:` capture.
 struct CreateNoteTool: NotchTool {
     let name = "create_note"
     let description = """
-    Saves a note (Apple Notes or their Markdown folder). Call to note, save, jot, \
-    or keep something with no time attached. The tool shows its own Confirm card; \
-    never claim it was saved until the result says so. First line becomes the title. \
-    Use create_reminder when the request names a time.
+    Saves a note (Apple Notes or their Markdown folder). Call when the user's \
+    message is something to keep rather than a question or a request: a todo, an \
+    idea, a fact to remember, a snippet, or an explicit "note this". Pass their \
+    words as written. If it could be a question, answer instead. First line becomes \
+    the title. Use create_reminder when the request names a time.
     """
     let schema: [String: Any] = [
         "type": "object",
@@ -945,17 +953,17 @@ struct CreateNoteTool: NotchTool {
     }
 }
 
-/// File a time-bound reminder (Apple Reminders, with an alarm). Same
-/// confirmation gate as `create_note`; the due date is the one thing this tool
-/// adds, and it is deliberately explicit rather than re-parsed from prose.
+/// File a time-bound reminder (Apple Reminders, with an alarm). Written at once
+/// like `create_note`; the due date is the one thing this tool adds, and it is
+/// deliberately explicit rather than re-parsed from prose.
 struct CreateReminderTool: NotchTool {
     let name = "create_reminder"
     let description = """
     Creates a Reminders alarm. Call when the user asks to be reminded or to save \
     something that names a time. Pass an absolute local `due` (YYYY-MM-DDTHH:MM); \
     call current_datetime first if "now" is unclear. Keep a repeat phrase in title. \
-    The tool shows its own Confirm card; never claim it was created until the result \
-    says so. Use create_note when no time is involved.
+    Never claim it was created until the result says so. Use create_note when no \
+    time is involved.
     """
     let schema: [String: Any] = [
         "type": "object",
@@ -1951,10 +1959,264 @@ struct ReadPageTool: NotchTool {
     }
 }
 
+// MARK: - Shell (run_shell)
+
+/// Which commands ask the user before they run. Everything else runs directly.
+///
+/// This is a lexical check on the command text, not a security boundary: a
+/// command can hide a deletion inside `python -c` or a script file and pass.
+/// It catches the plain forms a model actually writes — `rm`, `sudo`, `kill`,
+/// `git push`, a pipe into `sh` — and anything that names a credential store.
+enum ShellRisk {
+    /// Commands that delete, stop processes, change ownership or permissions,
+    /// touch disks or boot state, or need administrator rights.
+    private static let guarded: Set<String> = [
+        "rm", "rmdir", "unlink", "srm", "shred", "truncate",
+        "sudo", "su", "dd", "mkfs", "newfs", "diskutil", "tmutil",
+        "shutdown", "reboot", "halt", "kill", "killall", "pkill",
+        "launchctl", "chmod", "chown", "chflags", "csrutil", "nvram", "security",
+    ]
+    /// A nested shell runs text this check never sees.
+    private static let shells: Set<String> = ["sh", "bash", "zsh", "eval"]
+    /// Prefixes that run the word after them.
+    private static let wrappers: Set<String> = [
+        "xargs", "env", "command", "builtin", "noglob", "nohup", "time", "exec", "nice",
+    ]
+    /// Credential stores. Reading one is as sensitive as deleting a file.
+    private static let credentialPaths = [
+        ".ssh", ".aws", ".gnupg", ".netrc", ".config/gh", "keychains",
+        "id_rsa", "id_ed25519",
+    ]
+
+    static func needsConfirmation(_ command: String) -> Bool {
+        let lowered = command.lowercased()
+        if credentialPaths.contains(where: { lowered.contains($0) }) { return true }
+        let separators = CharacterSet(charactersIn: ";|&\n(){}`")
+        for segment in command.components(separatedBy: separators) {
+            let words = segment.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(word)
+            guard let at = commandIndex(in: words) else { continue }
+            let name = words[at]
+            let rest = words[(at + 1)...]
+            if guarded.contains(name) || shells.contains(name) { return true }
+            if name == "git",
+               rest.contains("push") || rest.contains("clean")
+                || (rest.contains("reset") && rest.contains("--hard")) {
+                return true
+            }
+            if name == "find" {
+                if rest.contains("-delete") { return true }
+                for (i, w) in rest.enumerated() where ["-exec", "-execdir", "-ok"].contains(w) {
+                    let next = rest.index(rest.startIndex, offsetBy: i + 1)
+                    if next < rest.endIndex,
+                       guarded.contains(rest[next]) || shells.contains(rest[next]) {
+                        return true
+                    }
+                }
+            }
+        }
+        return false
+    }
+
+    /// The word a segment actually runs: past `VAR=value` assignments, and past
+    /// a wrapper and its flags.
+    private static func commandIndex(in words: [String]) -> Int? {
+        var i = 0
+        while i < words.count {
+            let w = words[i]
+            if w.contains("=") && !w.hasPrefix("-") { i += 1; continue }
+            if wrappers.contains(w) {
+                i += 1
+                while i < words.count, words[i].hasPrefix("-") { i += 1 }
+                continue
+            }
+            return i
+        }
+        return nil
+    }
+
+    /// A word without its quotes or directory: `"/bin/rm"` → `rm`.
+    private static func word(_ raw: Substring) -> String {
+        let bare = raw.trimmingCharacters(in: CharacterSet(charactersIn: "\"'\\"))
+        return bare.hasPrefix("-") ? bare : (bare as NSString).lastPathComponent
+    }
+}
+
+/// Runs one command in zsh and returns what the model reads: the exit code and
+/// the combined stdout/stderr.
+enum ShellRunner {
+    static let defaultTimeout: TimeInterval = 30
+    static let maxTimeout: TimeInterval = 120
+    /// Characters of output the model gets. Longer output keeps its start and end.
+    static let outputLimit = 8_000
+
+    private final class Output: @unchecked Sendable {
+        private let lock = NSLock()
+        private var data = Data()
+        private var timedOut = false
+        /// Bytes kept. A command that prints without end must not grow this
+        /// until the timeout stops it.
+        private static let cap = 1_000_000
+
+        func append(_ chunk: Data) {
+            lock.lock(); defer { lock.unlock() }
+            if data.count < Self.cap { data.append(chunk.prefix(Self.cap - data.count)) }
+        }
+        func markTimedOut() { lock.lock(); timedOut = true; lock.unlock() }
+        var snapshot: (text: String, timedOut: Bool) {
+            lock.lock(); defer { lock.unlock() }
+            return (String(decoding: data, as: UTF8.self), timedOut)
+        }
+    }
+
+    static func run(_ command: String, timeout: TimeInterval) async -> String {
+        // `-c`, not `-lc`: `makeProcess` already supplies the user's shell PATH,
+        // and a login shell would print their rc banners into the output.
+        let process = ShellEnvironment.makeProcess(
+            "/bin/zsh", ["-c", command],
+            cwd: URL(fileURLWithPath: NSHomeDirectory()))
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        // No terminal: a command that prompts reads EOF and fails instead of hanging.
+        process.standardInput = FileHandle.nullDevice
+        let output = Output()
+        let reader = pipe.fileHandleForReading
+        reader.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty { handle.readabilityHandler = nil } else { output.append(chunk) }
+        }
+
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (cont: CheckedContinuation<String, Never>) in
+                if Task.isCancelled {
+                    reader.readabilityHandler = nil
+                    cont.resume(returning: "Cancelled before the command ran.")
+                    return
+                }
+                process.terminationHandler = { finished in
+                    // Resume on exit, not on the pipe closing: a child the command
+                    // left running (`open`, `nohup … &`) holds the pipe open. The
+                    // short wait lets the last chunk land.
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) {
+                        reader.readabilityHandler = nil
+                        let (text, timedOut) = output.snapshot
+                        cont.resume(returning: render(text: text,
+                                                      status: finished.terminationStatus,
+                                                      timedOut: timedOut,
+                                                      timeout: timeout))
+                    }
+                }
+                do {
+                    try process.run()
+                } catch {
+                    process.terminationHandler = nil
+                    reader.readabilityHandler = nil
+                    cont.resume(returning: "Error: the shell could not start: \(error.localizedDescription)")
+                    return
+                }
+                DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+                    guard process.isRunning else { return }
+                    output.markTimedOut()
+                    stop(process)
+                }
+            }
+        } onCancel: {
+            stop(process)
+        }
+    }
+
+    /// Stop the shell and the children it started. `Process` puts the child in
+    /// no process group of its own, so the children are signalled by parent id.
+    private static func stop(_ process: Process) {
+        guard process.isRunning else { return }
+        let pid = process.processIdentifier
+        let pkill = Process()
+        pkill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        pkill.arguments = ["-TERM", "-P", "\(pid)"]
+        try? pkill.run()
+        process.terminate()
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+            if process.isRunning { kill(pid, SIGKILL) }
+        }
+    }
+
+    private static func render(text: String, status: Int32, timedOut: Bool,
+                               timeout: TimeInterval) -> String {
+        var body = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if body.count > outputLimit {
+            let head = outputLimit * 3 / 8, tail = outputLimit - head
+            let cut = body.count - outputLimit
+            body = body.prefix(head) + "\n[… \(cut) characters omitted …]\n" + body.suffix(tail)
+        }
+        if body.isEmpty { body = "(no output)" }
+        let header = timedOut
+            ? "Stopped after \(Int(timeout))s without finishing."
+            : "exit code: \(status)"
+        return header + "\n" + body
+    }
+}
+
+/// Run a shell command on the user's Mac. Runs directly unless `ShellRisk`
+/// flags the command, in which case `confirm` shows the in-answer card and the
+/// command runs only on the positive choice.
+struct RunShellTool: NotchTool {
+    static let toolName = "run_shell"
+    let name = RunShellTool.toolName
+    let description = """
+    Runs a zsh command on the user's Mac and returns its exit code and output. \
+    Use it to inspect or change things on this computer: files and folders, \
+    processes and ports, system state, apps (open -a, osascript), defaults, git, \
+    installed command-line tools — and to read the user's own data in Mac apps \
+    through osascript: Calendar events, Reminders, Contacts, Notes, Mail, Music. \
+    The working directory is the home folder. \
+    There is no terminal: nothing can prompt for input, so sudo and interactive \
+    programs fail. Output past 8000 characters is cut in the middle. Chain steps \
+    that belong together with && in one call.
+    """
+    let schema: [String: Any] = [
+        "type": "object",
+        "properties": [
+            "command": [
+                "type": "string",
+                "description": "The zsh command line to run.",
+            ],
+            "timeout_seconds": [
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 120,
+                "description": "Seconds before the command is stopped. Default 30. Above 30, tell the user it may take a moment before you call.",
+            ],
+        ],
+        "required": ["command"],
+    ]
+
+    /// Shows the confirmation card for a flagged command; true when the user
+    /// chose to run it.
+    let confirm: @Sendable (String) async throws -> Bool
+
+    func execute(_ input: [String: Any]) async throws -> String {
+        guard let command = (input["command"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !command.isEmpty else {
+            return "Error: command is required."
+        }
+        var timeout = ShellRunner.defaultTimeout
+        if let raw = input["timeout_seconds"] as? NSNumber {
+            timeout = min(max(raw.doubleValue, 1), ShellRunner.maxTimeout)
+        }
+        if ShellRisk.needsConfirmation(command) {
+            guard try await confirm(command) else {
+                return "The user did not approve this command. It was not run. Do not retry it."
+            }
+        }
+        return await ShellRunner.run(command, timeout: timeout)
+    }
+}
+
 // MARK: - Blend1 first-turn tool surface
 
-/// Which extra tools Blend1 advertises on this question. The core four
-/// (`read_clipboard`, `calculate`, `read_page`, `web_search`) are always on;
+/// Which extra tools Blend1 advertises on this question. The core set
+/// (`read_clipboard`, `calculate`, `read_page`, `web_search`, `create_note`) is
+/// always on — `create_note` so the model can file a plain line as a note;
 /// everything else is added only when the user's words point at it. Lexical
 /// on purpose — a second model call to classify would cost the latency this
 /// exists to save. Conservative: an extra tool on a rare question is fine; a
@@ -1962,6 +2224,7 @@ struct ReadPageTool: NotchTool {
 enum AskToolIntent {
     static let core: Set<String> = [
         "read_clipboard", "calculate", "read_page", WebSearchTool.toolName,
+        "create_note",
     ]
 
     static func extras(for question: String) -> Set<String> {
@@ -1969,7 +2232,7 @@ enum AskToolIntent {
         guard !q.isEmpty else { return [] }
         var extra = Set<String>()
         if matches(q, capture) {
-            extra.formUnion(["create_note", "create_reminder", "current_datetime"])
+            extra.formUnion(["create_reminder", "current_datetime"])
         }
         if matches(q, settings) { extra.insert("manage_app_settings") }
         if matches(q, history) { extra.insert("search_history") }

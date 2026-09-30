@@ -173,6 +173,14 @@ enum LucideIcons {
         "M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3",
     ], viewBox: 24)
 
+    /// lucide `circle-dollar-sign` — the Add credit button in Settings. The
+    /// source's `<circle cx="12" cy="12" r="10">` is spelled out as two arcs.
+    static let circleDollarSign = Mark(paths: [
+        "M22 12a10 10 0 1 1-20 0a10 10 0 1 1 20 0",
+        "M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8",
+        "M12 18V6",
+    ], viewBox: 24)
+
     /// lucide `shield-check` — the balance card's link to its Privacy page.
     static let shieldCheck = Mark(paths: [
         "M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z",

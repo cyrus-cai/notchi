@@ -1479,7 +1479,7 @@ struct ComposeImagesAttachedLine: View {
                                 .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
                         )
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.plain).exemptsDoubleClickPin()
                 .overlay(alignment: .topTrailing) {
                     Button { onRemove(index) } label: {
                         Image(systemName: "xmark")
@@ -1489,7 +1489,7 @@ struct ComposeImagesAttachedLine: View {
                             .background(Circle().fill(Color.black.opacity(0.66)))
                             .contentShape(Circle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.plain).exemptsDoubleClickPin()
                     .offset(x: 5, y: -5)
                     .opacity(hoveredIndex == index ? 1 : 0)
                     .allowsHitTesting(hoveredIndex == index)
@@ -1518,7 +1518,7 @@ struct ComposeImagesAttachedLine: View {
                                 .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
                         )
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.plain).exemptsDoubleClickPin()
             }
         }
         // The x badges overhang their thumbnails; give the row that room back.
@@ -1924,8 +1924,9 @@ struct PanelBackButton: View {
 struct GlassPressStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
+            .exemptsDoubleClickPin(pressed: configuration.isPressed)
             .scaleEffect(configuration.isPressed ? Tokens.chipPressScale : 1)
-            .animation(.spring(response: 0.25, dampingFraction: 0.6), value: configuration.isPressed)
+            .animation(Tokens.chipPressSpring, value: configuration.isPressed)
     }
 }
 
@@ -1933,8 +1934,40 @@ struct GlassPressStyle: ButtonStyle {
 struct PlatePressStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
+            .exemptsDoubleClickPin(pressed: configuration.isPressed)
             .scaleEffect(configuration.isPressed ? Tokens.platePressScale : 1)
             .animation(Tokens.platePressSpring, value: configuration.isPressed)
+    }
+}
+
+/// "Saved a note ↗" / "Created a reminder ↗" above an answer that filed one.
+/// The settled "Searched the web" headline's face, with `CaptureJumpButton`'s
+/// arrow and hover brightening.
+struct CaptureLineLink: View {
+    let capture: NotchModel.Turn.Capture
+    let font: CGFloat
+    let action: (() -> Void)?
+    @State private var hovering = false
+
+    var body: some View {
+        Button { action?() } label: {
+            HStack(spacing: 3) {
+                Text(capture.kind == .note
+                     ? L("agent.process.savedNote") : L("agent.process.createdReminder"))
+                    .font(.sf(font))
+                    .lineLimit(1)
+                if action != nil {
+                    Image(systemName: "arrow.up.right")
+                        .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                }
+            }
+            .foregroundStyle(hovering ? Tokens.text2 : Tokens.text3)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).exemptsDoubleClickPin()
+        .disabled(action == nil)
+        .onHover { hovering = $0 && action != nil }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
     }
 }
 
@@ -2166,6 +2199,7 @@ struct ConfirmationDialogOverlay<Content: View>: View {
             Color.black.opacity(0.45)
                 .contentShape(Rectangle())
                 .onTapGesture(perform: onDismiss)
+                .exemptsDoubleClickPin()
 
             content
                 .background {
@@ -2337,6 +2371,83 @@ struct ForceTouchDisableConfirm: View {
     }
 }
 
+/// The link pre-check's second confirmation: Jev flagged the address of a
+/// clicked link (`LinkGate`), so the app asks before handing it to the browser.
+///
+/// Same card as `ClearHistoryConfirm`'s two-button form, with the sides swapped:
+/// Cancel takes the trailing slot, where that card puts its main action, and
+/// the action that carries the risk sits on the leading side in red.
+struct LinkWarningConfirm: View {
+    /// The host of the flagged link, shown in the body.
+    var host: String
+    var onCancel: () -> Void
+    var onConfirm: () -> Void
+
+    var body: some View {
+        ConfirmationDialogOverlay(onDismiss: onCancel) {
+            VStack(spacing: 14) {
+                VStack(spacing: 6) {
+                    Text(L("linkCheck.warn.title"))
+                        .font(.sf(Tokens.TypeSize.reading, weight: .medium))
+                        .foregroundStyle(Tokens.text1)
+                    Text(L("linkCheck.warn.body", host))
+                        .font(.sf(Tokens.TypeSize.label))
+                        .foregroundStyle(Tokens.text3)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(4)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                HStack(spacing: 10) {
+                    ConfirmDialogButton(title: L("linkCheck.warn.open"),
+                                        kind: .destructive,
+                                        action: onConfirm)
+                    ConfirmDialogButton(title: L("clear.cancel"), kind: .neutral, action: onCancel)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 18)
+            .frame(maxWidth: 280)
+        }
+    }
+}
+
+/// "Disconnect OpenRouter?" — asked in Settings before a signed-in account is
+/// disconnected. Same card as `ClearHistoryConfirm`'s two-button form.
+struct AccountDisconnectConfirm: View {
+    /// The account's display name, shown in the title.
+    var account: String
+    var onCancel: () -> Void
+    var onConfirm: () -> Void
+
+    var body: some View {
+        ConfirmationDialogOverlay(onDismiss: onCancel) {
+            VStack(spacing: 14) {
+                VStack(spacing: 6) {
+                    Text(L("model.disconnect.confirm.title", account))
+                        .font(.sf(Tokens.TypeSize.reading, weight: .medium))
+                        .foregroundStyle(Tokens.text1)
+                    Text(L("model.disconnect.confirm.body"))
+                        .font(.sf(Tokens.TypeSize.label))
+                        .foregroundStyle(Tokens.text3)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                HStack(spacing: 10) {
+                    ConfirmDialogButton(title: L("clear.cancel"), kind: .neutral, action: onCancel)
+                    ConfirmDialogButton(title: L("model.disconnect"),
+                                        kind: .destructive,
+                                        action: onConfirm)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 18)
+            .frame(maxWidth: 280)
+        }
+    }
+}
+
 /// The Force Click gate: macOS's own "Look up & data detectors" is bound to the
 /// same press, so arming Notchi's gesture while that is on would put two panels
 /// on one click. Shown *instead of* applying the setting — the rung the user
@@ -2362,6 +2473,7 @@ struct ForceClickLookupDialog: View {
             Color.black.opacity(0.45)
                 .contentShape(Rectangle())
                 .onTapGesture(perform: onCancel)
+                .exemptsDoubleClickPin()
 
             VStack(spacing: 12) {
                 VStack(spacing: 6) {
@@ -2474,14 +2586,15 @@ private extension View {
     }
 }
 
-/// Liquid Glass gives under a press. A touch of squash on the whole capsule, on the
-/// panel's usual short spring — the material's own interactive highlight
+/// Liquid Glass gives under a press: the glass-chip squash, the same as
+/// `GlassPressStyle`. The material's own interactive highlight
 /// (`.glassEffect(.clear.interactive())` inside `glassCapsule`) does the rest.
 private struct ConfirmDialogPressStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .scaleEffect(configuration.isPressed ? Tokens.platePressScale : 1)
-            .animation(Tokens.platePressSpring, value: configuration.isPressed)
+            .exemptsDoubleClickPin(pressed: configuration.isPressed)
+            .scaleEffect(configuration.isPressed ? Tokens.chipPressScale : 1)
+            .animation(Tokens.chipPressSpring, value: configuration.isPressed)
     }
 }
 
@@ -3461,7 +3574,7 @@ private struct ReadingSourceRow: View {
 
     var body: some View {
         Button {
-            if let url = URL(string: source.url) { NSWorkspace.shared.open(url) }
+            if let url = URL(string: source.url) { LinkGate.shared.open(url) }
         } label: {
             HStack(alignment: .firstTextBaseline, spacing: 4) {
                 Text(source.host)
@@ -3477,7 +3590,7 @@ private struct ReadingSourceRow: View {
             }
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plain).exemptsDoubleClickPin()
         .onHover { hovering = $0 }
     }
 }
@@ -3627,6 +3740,10 @@ struct AssistantTurnView: View {
     var regenerateModels: [(model: String, label: String, isCurrent: Bool)] = []
     /// Regenerate this answer with a specific model, once (XII-135).
     var onRegenerateWith: ((String) -> Void)? = nil
+    /// Quote this answer in the next follow-up. Nil leaves Reply off the menu.
+    var onReply: (() -> Void)? = nil
+    /// Remove this answer from the thread. Nil leaves Delete off the menu.
+    var onDelete: (() -> Void)? = nil
     /// The model this answer was regenerated with, when it wasn't the default
     /// (XII-135) — shown as a small caption so the answer says which model made it.
     var regenModel: String? = nil
@@ -3649,6 +3766,14 @@ struct AssistantTurnView: View {
     /// Pages the answer handed over that were found open (`Turn.sharedLinks`),
     /// drawn as cards like a page the search found.
     var sharedLinks: [String] = []
+    /// Pages the answers just above already carded (`recentCards(before:)`).
+    /// They get no second card here.
+    var recentCards: Set<String> = []
+    /// Notes and reminders this answer filed (`Turn.captures`), drawn as a
+    /// line above it like "Searched the web".
+    var captures: [NotchModel.Turn.Capture] = []
+    /// Opens a filed note or reminder in its app. `nil` draws the line as text.
+    var onOpenCapture: ((NotchModel.Turn.Capture) -> Void)? = nil
     /// The turn this is, so the bubbles after the first land at a person's
     /// pace (`BubblePacer`). `nil` shows them all at once.
     var turnID: UUID? = nil
@@ -3779,7 +3904,7 @@ struct AssistantTurnView: View {
     private var linkLayout: LinkCardLayout {
         LinkCardSplitter.layout(renderedText, streaming: streaming,
                                 sources: sources, question: question,
-                                shared: sharedLinks)
+                                shared: sharedLinks, recent: recentCards)
     }
 
     /// Whether the first bubble has text of its own.
@@ -3979,7 +4104,7 @@ struct AssistantTurnView: View {
                 }
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.plain).exemptsDoubleClickPin()
             // Always mounted, opened by HEIGHT — an `if` would insert the list at
             // full size and only crossfade it, which is what made open and shut
             // read as a jump. Clipped so the rows slide out of view under the
@@ -4045,7 +4170,7 @@ struct AssistantTurnView: View {
     /// Whether the card has anything to hold. An `ask_user` card on its own is
     /// already a card; an empty answer card around nothing would be a blank box.
     private var cardHasContent: Bool {
-        hasLeadText || showWait || showsReadingBlock
+        hasLeadText || showWait || showsReadingBlock || !captures.isEmpty
             || !agentTrail.isEmpty || (showActivityRow && !linkLayout.hasMore)
     }
 
@@ -4191,6 +4316,18 @@ struct AssistantTurnView: View {
                 AgentWorkTrailView(entries: agentTrail, baseFont: cardFont)
                     .padding(.bottom, hasText ? 6 : 0)
             }
+            // What this answer filed, in the settled headline's face. Each
+            // entry opens its note or reminder, like a Recent capture row's jump.
+            if !captures.isEmpty {
+                HStack(spacing: 12) {
+                    ForEach(Array(captures.enumerated()), id: \.offset) { _, capture in
+                        CaptureLineLink(capture: capture, font: waitFont,
+                                        action: onOpenCapture.map { open in { open(capture) } })
+                    }
+                }
+                .padding(.bottom, hasLeadText ? 1 : 0)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
             // What this answer read (see `readingBlock`) — present from the first
             // result through the settled turn.
             if showsReadingBlock {
@@ -4329,6 +4466,12 @@ struct AssistantTurnView: View {
     @ViewBuilder
     private var answerTurnMenu: some View {
         if hasText {
+            if let onReply {
+                Button(action: onReply) {
+                    Label(L("message.reply"), systemImage: "arrowshape.turn.up.left")
+                }
+                Divider()
+            }
             Button {
                 copyAnswerMarkdown()
             } label: {
@@ -4381,6 +4524,33 @@ struct AssistantTurnView: View {
                     }
                     .disabled(true)
                 }
+            }
+        }
+        if let onDelete, !streaming {
+            if hasText { Divider() }
+            Button(role: .destructive, action: onDelete) {
+                Label(L("message.delete"), systemImage: "trash")
+            }
+        }
+    }
+}
+
+/// Right-click on a question bubble: reply to it, or remove it from the thread.
+/// A nil action leaves its item off the menu.
+struct QuestionTurnMenu: View {
+    var onReply: (() -> Void)?
+    var onDelete: (() -> Void)?
+
+    var body: some View {
+        if let onReply {
+            Button(action: onReply) {
+                Label(L("message.reply"), systemImage: "arrowshape.turn.up.left")
+            }
+        }
+        if let onDelete {
+            if onReply != nil { Divider() }
+            Button(role: .destructive, action: onDelete) {
+                Label(L("message.delete"), systemImage: "trash")
             }
         }
     }
@@ -4624,7 +4794,7 @@ private struct UserQuestionOptionRow: View {
                 )
                 .contentShape(RoundedRectangle.control)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plain).exemptsDoubleClickPin()
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
     }
@@ -4639,171 +4809,25 @@ struct InlineMarkdownText: View {
     /// blue is both illegible and off-palette, so links are styled as ink +
     /// underline (the underline, not a colour shift, is what marks them tappable).
     var linkColor: Color = Tokens.text1
-    /// Set only in handwriting mode, to the enclosing block's type size.
-    ///
-    /// Emphasis normally needs no help: SwiftUI reads `**bold**`/`*italic*`/
-    /// `code` off the parsed intents and promotes the environment font by trait.
-    /// That promotion silently fails on the handwriting face — it is pinned to
-    /// explicit variation coordinates, so asking it for a bold trait hands back
-    /// the same regular instance and every emphasis in the answer flattens into
-    /// body text. So in that mode each emphasised run gets an explicit font
-    /// instead (see `Handwriting`), which is what this carries the size for.
-    var hand: HandEmphasis? = nil
-
-    /// What a handwritten line needs to resolve its own emphasis faces, and to
-    /// write its Chinese by stroke.
-    struct HandEmphasis: Equatable {
-        /// Nominal prose size, for picking emphasis faces.
-        let size: CGFloat
-        /// The size CJK is actually set at — the em the stroke ink is scaled to.
-        let cjkEm: CGFloat
-        /// The ink colour, which the stroke renderer has to be told: it fills its
-        /// own paths rather than drawing glyphs, so it cannot inherit the text's
-        /// styling the way `GraphicsContext.draw(_:)` does.
-        let color: Color
-        /// True only on the growing tail of a streaming answer.
-        let streaming: Bool
-    }
-
-    init(_ raw: String, linkColor: Color = Tokens.text1, hand: HandEmphasis? = nil) {
+    init(_ raw: String, linkColor: Color = Tokens.text1) {
         self.raw = raw
         self.linkColor = linkColor
-        self.hand = hand
     }
 
     var body: some View {
         Text(attributed)
-            .modifier(InkWritingIfAvailable(
-                plan: hand,
-                // The laid-out characters, not the raw markdown: `**bold**` lays
-                // out as four glyphs, and the renderer maps glyph order onto this
-                // string to know which character it is about to write.
-                characters: hand == nil ? [] : Self.parsed(raw).plain,
-                weights: hand == nil ? [] : Self.parsed(raw).inkWeights))
-    }
-
-    /// The emphasis kinds worth re-facing by hand. Ordinary body text is `.plain`
-    /// — in the printed voice it inherits the block's `.font` modifier as it
-    /// always has, and in the hand it still needs a face of its own because the
-    /// two scripts are set at different sizes (see `Face.cjk`).
-    private enum Emphasis: Equatable {
-        case plain, bold, italic, boldItalic, code
-    }
-
-    /// One stretch of a line that wants a single font: an emphasis kind, and
-    /// which script it's in.
-    ///
-    /// Script matters because the two halves of the handwriting stack don't share
-    /// a size. 翩翩体 draws its glyphs small inside the em, so Chinese set at the
-    /// same nominal size as Shantell reads a full point smaller than the English
-    /// beside it — noticeably so in a mixed sentence, which is most of them here.
-    /// Core Text has no way to say "this cascade entry, one size up" (a `.size` on
-    /// a cascade descriptor is ignored), so the correction has to happen where the
-    /// text is, as an explicit per-run font.
-    private struct Face: Equatable {
-        let emphasis: Emphasis
-        let cjk: Bool
     }
 
     /// One line's parsed text, minus the caller's colour — the cacheable half.
     /// `spans` are the surviving links as (character offset, length) pairs rather
     /// than `AttributedString.Index` ranges, so they stay valid when re-applied to
-    /// a copy that's being mutated. `faces` records the font runs the same way,
-    /// for the same reason.
+    /// a copy that's being mutated.
     private final class Parsed {
         let text: AttributedString
         let spans: [(offset: Int, length: Int)]
-        let faces: [(offset: Int, length: Int, face: Face)]
-        /// The characters as laid out, cached alongside the parse because the
-        /// stroke renderer needs them on every frame of a streaming answer.
-        let plain: [Character]
-        /// Ink weight per character, parallel to `plain`.
-        ///
-        /// The stroke renderer draws its own paths, so it never sees the per-run
-        /// fonts that carry emphasis for type — a bold Chinese character would
-        /// come out exactly as heavy as body text, which is the same silent
-        /// flattening the explicit faces exist to prevent. Emphasis has to reach
-        /// the ink as a number, and this is it.
-        let inkWeights: [CGFloat]
-        init(text: AttributedString,
-             spans: [(offset: Int, length: Int)],
-             faces: [(offset: Int, length: Int, face: Face)]) {
+        init(text: AttributedString, spans: [(offset: Int, length: Int)]) {
             self.text = text
             self.spans = spans
-            self.faces = faces
-            let characters = Array(text.characters)
-            self.plain = characters
-            var weights = [CGFloat](repeating: 1, count: characters.count)
-            for run in faces where run.face.emphasis == .bold || run.face.emphasis == .boldItalic {
-                for i in run.offset..<min(run.offset + run.length, weights.count) {
-                    weights[i] = StrokeInk.boldWeight
-                }
-            }
-            self.inkWeights = weights
-        }
-    }
-
-    /// Split a parsed line into runs that each want one font: walk it character by
-    /// character, tag every character with (emphasis, script), then coalesce.
-    ///
-    /// Done once per distinct line and cached with the parse — the per-render path
-    /// only ever reads the result. A line with no CJK and no emphasis coalesces to
-    /// a single `.plain` run, which the renderer then skips entirely.
-    private static func faceRuns(of text: AttributedString)
-        -> [(offset: Int, length: Int, face: Face)] {
-        var out: [(offset: Int, length: Int, face: Face)] = []
-        var offset = 0
-        for run in text.runs {
-            let emphasis: Emphasis
-            if let intent = run.inlinePresentationIntent {
-                if intent.contains(.code) {
-                    emphasis = .code
-                } else {
-                    switch (intent.contains(.stronglyEmphasized), intent.contains(.emphasized)) {
-                    case (true, true):  emphasis = .boldItalic
-                    case (true, false): emphasis = .bold
-                    case (false, true): emphasis = .italic
-                    default:            emphasis = .plain
-                    }
-                }
-            } else {
-                emphasis = .plain
-            }
-            for character in text[run.range].characters {
-                let face = Face(emphasis: emphasis, cjk: isCJK(character))
-                if var last = out.last, last.face == face {
-                    last.length += 1
-                    out[out.count - 1] = last
-                } else {
-                    out.append((offset: offset, length: 1, face: face))
-                }
-                offset += 1
-            }
-        }
-        return out
-    }
-
-    /// Whether a character belongs to the CJK half of the type stack — Han, kana,
-    /// Hangul, and the full-width / ideographic punctuation that sets with them
-    /// (`，。、（）`). Latin punctuation and spaces deliberately stay on the Latin
-    /// side so a mixed sentence doesn't switch face at every comma.
-    private static func isCJK(_ character: Character) -> Bool {
-        guard let scalar = character.unicodeScalars.first else { return false }
-        switch scalar.value {
-        case 0x2E80...0x303F,   // radicals, Kangxi, CJK symbols & punctuation
-             0x3040...0x30FF,   // kana
-             0x3130...0x318F,   // Hangul compatibility jamo
-             0x3400...0x4DBF,   // unified ideographs extension A
-             0x4E00...0x9FFF,   // unified ideographs
-             0xA960...0xA97F,   // Hangul jamo extended-A
-             0xAC00...0xD7AF,   // Hangul syllables
-             0xF900...0xFAFF,   // compatibility ideographs
-             0xFE30...0xFE4F,   // CJK compatibility forms
-             0xFF01...0xFF60,   // full-width forms
-             0x20000...0x3FFFF: // extensions B and beyond
-            return true
-        default:
-            return false
         }
     }
 
@@ -4863,16 +4887,14 @@ struct InlineMarkdownText: View {
                     length: chars.distance(from: run.range.lowerBound, to: run.range.upperBound))
         }
 
-        let result = Parsed(text: text, spans: spans, faces: Self.faceRuns(of: text))
+        let result = Parsed(text: text, spans: spans)
         parseCache.setObject(result, forKey: key)
         return result
     }
 
     private var attributed: AttributedString {
-        // In the hand, the line arrives already faced — one cached pass, not one
-        // per frame (see `handFaced`). In the printed voice it's the raw parse.
         let hit = Self.parsed(raw)
-        let base = hand.map { Self.handFaced(raw, size: $0.size) } ?? hit.text
+        let base = hit.text
         let links = hit.spans
         // The overwhelmingly common case: no links, so the cached line is already
         // finished and nothing is copied or mutated.
@@ -4889,62 +4911,6 @@ struct InlineMarkdownText: View {
             out[start..<end].underlineStyle = .single
         }
         return out
-    }
-
-    /// A line with every run's handwriting face already applied, memoized per
-    /// (line, size).
-    ///
-    /// This has to be cached, not computed per render. Walking the runs costs an
-    /// `offsetByCharacters` seek per run, so facing a line is O(runs × length) —
-    /// and a streaming answer re-renders every ~33ms across several mounted copies
-    /// of the same turn. Doing it live would put that whole product on the main
-    /// thread at flush rate, for text that never changes once written. The set of
-    /// sizes in play is a handful (body plus the heading ladder), so keys stay
-    /// bounded the same way `parseCache`'s do.
-    private static let handCache: NSCache<NSString, HandFaced> = {
-        let cache = NSCache<NSString, HandFaced>()
-        cache.countLimit = 512
-        return cache
-    }()
-
-    private final class HandFaced {
-        let text: AttributedString
-        init(_ text: AttributedString) { self.text = text }
-    }
-
-    private static func handFaced(_ raw: String, size: CGFloat) -> AttributedString {
-        // Tenths of a point is finer than any size the answer renderer asks for,
-        // and keeps the key a short string rather than a float's full precision.
-        let key = "\(Int((size * 10).rounded()))|\(raw)" as NSString
-        if let hit = handCache.object(forKey: key) { return hit.text }
-
-        let parsed = Self.parsed(raw)
-        var out = parsed.text
-        for run in parsed.faces {
-            let start = out.index(out.startIndex, offsetByCharacters: run.offset)
-            let end = out.index(start, offsetByCharacters: run.length)
-            out[start..<end].font = handFont(run.face, size: size)
-        }
-        handCache.setObject(HandFaced(out), forKey: key)
-        return out
-    }
-
-    /// The concrete face for one run of a handwritten line.
-    ///
-    /// Inline code stays monospaced — a backticked identifier is machine text even
-    /// when the sentence around it is a hand — and so keeps the base size, since
-    /// SF Mono needs no correction.
-    private static func handFont(_ face: Face, size: CGFloat) -> Font {
-        guard face.emphasis != .code else { return Handwriting.codeFont(size) }
-        // The two scripts sit at different sizes to read level — that is the
-        // whole reason a line is split into runs at all.
-        let hand = face.cjk ? Handwriting.cjkFont : Handwriting.font
-        switch face.emphasis {
-        case .bold:       return hand(size, .bold, false)
-        case .italic:     return hand(size, .regular, true)
-        case .boldItalic: return hand(size, .bold, true)
-        default:          return hand(size, .regular, false)
-        }
     }
 
     private static let linkDetector = try? NSDataDetector(
@@ -6079,10 +6045,6 @@ struct MarkdownBlocks: View {
     var streamingTail: Bool = false
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// Injected by the surfaces that carry the assistant's own voice (the panel
-    /// thread, a detached thread). Everywhere else this stays false, so notes,
-    /// previews and settings copy are never re-faced.
-    @Environment(\.handwritten) private var handwritten
 
     // `parseCached`, not `parse`: this computed property re-runs on every body
     // evaluation, which during streaming happens for every ~33ms flush times
@@ -6110,8 +6072,7 @@ struct MarkdownBlocks: View {
                     // `.equatable()` — see the row's `Equatable` conformance for why.
                     MarkdownBlockRow(block: block, baseFont: baseFont, color: color,
                                      onInAppCopy: onInAppCopy,
-                                     fadeTail: streamingTail && !reduceMotion && i == parsed.count - 1,
-                                     hand: handwritten)
+                                     fadeTail: streamingTail && !reduceMotion && i == parsed.count - 1)
                         .equatable()
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -6142,8 +6103,6 @@ struct StreamingMarkdown: View {
     var color: Color = Tokens.text1
     var onInAppCopy: (() -> Void)? = nil
 
-    @Environment(\.handwritten) private var handwritten
-
     private var blocks: [MarkdownBlock] { MarkdownParser.parseCached(source) }
 
     var body: some View {
@@ -6169,7 +6128,7 @@ struct StreamingMarkdown: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                     case .block(_, let block):
                         MarkdownBlockRow(block: block, baseFont: baseFont, color: color,
-                                         onInAppCopy: onInAppCopy, hand: handwritten)
+                                         onInAppCopy: onInAppCopy)
                             .equatable()
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -6182,7 +6141,7 @@ struct StreamingMarkdown: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 case .block(_, let block):
                     MarkdownBlockRow(block: block, baseFont: baseFont, color: color,
-                                     onInAppCopy: onInAppCopy, hand: handwritten)
+                                     onInAppCopy: onInAppCopy)
                         .equatable()
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .modifier(TailFadeIn(token: tailToken(for: block)))
@@ -6335,219 +6294,14 @@ private struct StreamTailFade: ViewModifier {
     }
 }
 
-// MARK: - Stroke writing (handwriting mode, macOS 15+)
-
-/// Writes a handwritten line the way a hand does: Chinese stroke by stroke in
-/// stroke order, everything else swept under a travelling nib.
-///
-/// # What this replaces
-///
-/// The first attempt at "writing" swept a nib left to right across the whole
-/// line. That is right for joined Latin — a cursive word genuinely is one
-/// left-to-right movement — and wrong for Chinese, where 你 is written 亻 then
-/// 尔 and no part of that is a horizontal sweep. This renderer keeps the sweep
-/// for the scripts it suits and hands every character with stroke data over to
-/// `StrokeInk`.
-///
-/// # Why Chinese is drawn even when it isn't moving
-///
-/// A character mid-write is `StrokeInk`'s marker ink; if a finished character
-/// reverted to the font's glyph it would visibly pop the instant it completed.
-/// So in handwriting mode the ink *is* the typeface for Chinese — settled text
-/// included — and the renderer runs on every handwritten line, not only the
-/// streaming one. `front` is simply past the end when nothing is animating.
-@available(macOS 15.0, *)
-struct InkRenderer: TextRenderer {
-    /// How far writing has got, in glyphs. Fractional: the part after the point
-    /// is how far into the current character the hand has reached, which becomes
-    /// that character's stroke progress.
-    var front: CGFloat
-    /// The laid-out characters, indexed by glyph order.
-    var characters: [Character]
-    /// Ink weight multiplier per character, same indexing.
-    var weights: [CGFloat]
-    /// The size CJK is set at — the em the ink is scaled to.
-    var em: CGFloat
-    /// Ink colour. Filled paths carry no text styling of their own.
-    var color: Color
-
-    var animatableData: CGFloat {
-        get { front }
-        set { front = newValue }
-    }
-
-    /// Length of the wet edge behind the nib, for the scripts that sweep.
-    static let softness: CGFloat = 5
-
-    func draw(layout: Text.Layout, in ctx: inout GraphicsContext) {
-        let shading = GraphicsContext.Shading.color(color)
-        var index = 0
-        for line in layout {
-            var slices: [Text.Layout.RunSlice] = []
-            for run in line {
-                for slice in run { slices.append(slice) }
-            }
-            let first = index
-            index += slices.count
-
-            let lineDone = front >= CGFloat(index)
-            if !lineDone && front <= CGFloat(first) { break }   // nothing here yet, nor below
-
-            // Where the nib sits on this line, for the swept (non-stroke) glyphs.
-            var headX = CGFloat.greatestFiniteMagnitude
-            if !lineDone {
-                let local = min(max(Int(front) - first, 0), slices.count - 1)
-                let rect = slices[local].typographicBounds.rect
-                headX = rect.minX + rect.width * (front - CGFloat(first + local))
-            }
-
-            for (offset, slice) in slices.enumerated() {
-                let position = first + offset
-                let bounds = slice.typographicBounds
-
-                // Chinese with stroke data: draw the ink, written as far as the
-                // hand has got into this character.
-                if let strokes = strokeCount(at: position, advance: bounds.rect.width) {
-                    let written: CGFloat
-                    if front >= CGFloat(position + 1) { written = CGFloat(strokes) }
-                    else if front <= CGFloat(position) { continue }
-                    else { written = (front - CGFloat(position)) * CGFloat(strokes) }
-
-                    if let path = StrokeInk.path(for: characters[position],
-                                                 origin: bounds.origin,
-                                                 em: em,
-                                                 progress: written,
-                                                 weight: position < weights.count ? weights[position] : 1) {
-                        ctx.fill(Path(path), with: shading)
-                    }
-                    continue
-                }
-
-                // Everything else — Latin, punctuation, anything the dataset
-                // doesn't cover — keeps its glyph and passes under the nib.
-                if lineDone || bounds.rect.maxX <= headX - Self.softness {
-                    ctx.draw(slice)
-                } else if bounds.rect.minX >= headX {
-                    break
-                } else {
-                    var nib = ctx
-                    nib.clipToLayer { layer in
-                        layer.fill(Self.wetPath(to: headX), with: Self.wetShading(to: headX))
-                    }
-                    nib.draw(slice)
-                }
-            }
-        }
-    }
-
-    /// The stroke count for the character at `position`, or nil when it should be
-    /// drawn as type.
-    ///
-    /// The advance check is a desync guard. Mapping glyph order onto character
-    /// order is an assumption (true for the linear text these rows hold), and if
-    /// it ever slipped, a Chinese character would be drawn as *a different*
-    /// Chinese character — the one failure mode here that would look like
-    /// corruption rather than like a missing effect. A full-width glyph whose
-    /// advance doesn't match the em it should have is the cheap tell, and falling
-    /// back to the glyph costs nothing.
-    private func strokeCount(at position: Int, advance: CGFloat) -> Int? {
-        guard position < characters.count else { return nil }
-        guard abs(advance - em) < em * 0.2 else { return nil }
-        return StrokeInk.strokeCount(for: characters[position])
-    }
-
-    private static func wetPath(to headX: CGFloat) -> Path {
-        Path(CGRect(x: headX - reach, y: -reach, width: reach, height: reach * 2))
-    }
-
-    private static func wetShading(to headX: CGFloat) -> GraphicsContext.Shading {
-        let solid = (reach - softness) / reach
-        return .linearGradient(
-            Gradient(stops: [.init(color: .black, location: 0),
-                             .init(color: .black, location: solid),
-                             .init(color: .clear, location: 1)]),
-            startPoint: CGPoint(x: headX - reach, y: 0),
-            endPoint: CGPoint(x: headX, y: 0))
-    }
-
-    private static let reach: CGFloat = 4_000
-}
-
-/// Drives the hand across one handwritten line.
-///
-/// While the line is the streaming tail, `front` chases the text's length with a
-/// linear animation retargeted on every pacer tick — it never quite arrives, and
-/// that standing gap is the character currently being written. A settled line
-/// mounts with `front` already past the end, so its Chinese is fully inked
-/// without animating anything.
-@available(macOS 15.0, *)
-private struct InkWriting: ViewModifier {
-    let plan: InlineMarkdownText.HandEmphasis
-    let characters: [Character]
-    let weights: [CGFloat]
-
-    @State private var front: CGFloat = 0
-
-    private static let lag: TimeInterval = 0.16
-
-    func body(content: Content) -> some View {
-        content
-            .textRenderer(InkRenderer(front: front, characters: characters, weights: weights,
-                                      em: plan.cjkEm, color: plan.color))
-            .onAppear {
-                guard plan.streaming else { front = .greatestFiniteMagnitude; return }
-                advance(to: characters.count)
-            }
-            .onChange(of: characters.count) { _, newValue in
-                guard plan.streaming else { front = .greatestFiniteMagnitude; return }
-                advance(to: newValue)
-            }
-            .onChange(of: plan.streaming) { _, streaming in
-                // The block just graduated out of the tail: finish the line
-                // rather than leaving the last characters half-written.
-                if !streaming { front = .greatestFiniteMagnitude }
-            }
-    }
-
-    private func advance(to length: Int) {
-        // A shrink means the tail re-parsed into a different block shape. Snap —
-        // rewriting text the reader has already finished is worse than no
-        // animation at all.
-        guard CGFloat(length) >= front else { front = CGFloat(length); return }
-        withAnimation(.linear(duration: Self.lag)) { front = CGFloat(length) }
-    }
-}
-
-/// Availability shim: stroke writing needs macOS 15's `TextRenderer`. On the 14.0
-/// deployment floor a handwritten answer still gets its faces — it just arrives
-/// as text rather than being written.
-struct InkWritingIfAvailable: ViewModifier {
-    var plan: InlineMarkdownText.HandEmphasis?
-    var characters: [Character]
-    var weights: [CGFloat]
-
-    func body(content: Content) -> some View {
-        if let plan, StrokeInk.isAvailable, #available(macOS 15.0, *) {
-            content.modifier(InkWriting(plan: plan, characters: characters, weights: weights))
-        } else {
-            content
-        }
-    }
-}
-
 /// Availability shim for the printed voice's per-glyph fade (macOS 15+); on the
 /// 14.0 deployment floor the streaming text falls back to the paced reveal alone.
-///
-/// Only the printed voice is handled here. A handwritten line is written by
-/// `InkWriting`, which lives inside `InlineMarkdownText` — it needs the laid-out
-/// characters to know which one it is drawing, and that string only exists there.
 struct TailFadeIfAvailable: ViewModifier {
     var active: Bool
     var length: Int
-    var hand: Bool = false
 
     func body(content: Content) -> some View {
-        if active, !hand, #available(macOS 15.0, *) {
+        if active, #available(macOS 15.0, *) {
             content.modifier(StreamTailFade(textLength: length))
         } else {
             content
@@ -6569,14 +6323,6 @@ struct MarkdownBlockRow: View, Equatable {
     /// appends, the previous tail's content is unchanged but this flag flips,
     /// and the row must re-evaluate to drop the fade renderer.
     var fadeTail: Bool = false
-    /// Render this block's prose in the handwriting voice (Settings → Appearance).
-    /// A stored property rather than an `@Environment` read because the row is
-    /// wrapped in `.equatable()` — an environment change alone would not get past
-    /// that gate, so the setting could flip with the answer still typeset. The
-    /// containers above (`MarkdownBlocks` / `StreamingMarkdown`) do the environment
-    /// read and hand the value down.
-    var hand: Bool = false
-
     /// The row-level diff gate (used via `.equatable()` at every call site).
     /// `onInAppCopy` is a closure, and a closure field defeats SwiftUI's
     /// synthesized memberwise diff — without this, EVERY row of an answer
@@ -6587,34 +6333,7 @@ struct MarkdownBlockRow: View, Equatable {
     /// thread, so a row whose block/font/colour are unchanged renders identically.
     static func == (lhs: MarkdownBlockRow, rhs: MarkdownBlockRow) -> Bool {
         lhs.block == rhs.block && lhs.baseFont == rhs.baseFont && lhs.color == rhs.color
-            && lhs.fadeTail == rhs.fadeTail && lhs.hand == rhs.hand
-    }
-
-    /// This row's prose face at `size` — the printed one, or the hand.
-    private func face(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
-        proseFont(size, weight: weight, hand: hand)
-    }
-
-    /// What `InlineMarkdownText` needs to re-face emphasis inside this row and to
-    /// write its Chinese by stroke, or nil when the row is typeset and SwiftUI's
-    /// own trait promotion is correct.
-    ///
-    /// `opacity` folds the row's own dimming (a done task, a quote) into the ink
-    /// colour: the stroke renderer fills its own paths, so a `.foregroundStyle`
-    /// on the view above never reaches them.
-    private func emphasis(_ size: CGFloat, opacity: Double = 1) -> InlineMarkdownText.HandEmphasis? {
-        guard hand else { return nil }
-        return .init(size: size,
-                     cjkEm: Handwriting.cjkEm(size),
-                     color: color.opacity(opacity),
-                     streaming: fadeTail)
-    }
-
-    /// Leading for a line of this row's prose. A hand needs a touch more air:
-    /// 翩翩体's ascenders and Shantell's bounced baseline both reach past where SF
-    /// sits, so the typeset leading crowds them into the line above.
-    private func leading(_ factor: CGFloat) -> CGFloat {
-        baseFont * (factor + (hand ? Handwriting.extraLineSpacing : 0))
+            && lhs.fadeTail == rhs.fadeTail
     }
 
     /// Only linear text rows fade; code and tables render whole (fading a code
@@ -6645,8 +6364,7 @@ struct MarkdownBlockRow: View, Equatable {
         rowContent
             .modifier(TailFadeIfAvailable(
                 active: fadeTail && Self.fadeable(block),
-                length: Self.fadeLength(block),
-                hand: hand))
+                length: Self.fadeLength(block)))
     }
 
     @ViewBuilder
@@ -6654,79 +6372,50 @@ struct MarkdownBlockRow: View, Equatable {
         switch block {
         case .heading(let level, let text):
             let size = max(baseFont, baseFont + CGFloat(7 - min(level, 5)) * 1.5)
-            InlineMarkdownText(text, linkColor: color, hand: emphasis(size))
-                .font(face(size, weight: .semibold))
-                // Negative tracking tightens SF; the hand is already loosely
-                // spaced by design and pulling it in reads as cramped.
-                .tracking(hand ? 0 : -0.1)
+            InlineMarkdownText(text, linkColor: color)
+                .font(.sf(size, weight: .semibold))
+                .tracking(-0.1)
                 .foregroundStyle(color)
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
 
         case .bullet(let text, let indent):
             listRow(text: text, indent: indent) {
-                if hand {
-                    // A pen leaves a blob, not a disc. Sized off the type so it
-                    // tracks the answer's scale like the glyph it replaces.
-                    Ink.Dot(seed: seed &+ indent)
-                        .fill(color.opacity(0.7))
-                        .frame(width: baseFont * 0.3, height: baseFont * 0.3)
-                        // Nudged to sit on the text's x-height rather than its
-                        // baseline, where a round mark reads as having dropped.
-                        .offset(y: -baseFont * 0.18)
-                } else {
-                    markerText(bulletGlyph(for: indent))
-                }
+                markerText(bulletGlyph(for: indent))
             }
 
         case .ordered(let number, let text, let indent):
-            // The numeral follows the answer's voice — a hand-written list numbers
-            // itself in the same hand. Shantell's bounce puts each numeral at its
-            // own height in the gutter, which is the point.
             listRow(text: text, indent: indent) { markerText("\(number).") }
 
         case .task(let done, let text, let indent):
             // A checked-off item dims: the checkbox already says "done", the
             // fade just keeps open items visually in front.
             listRow(text: text, indent: indent, textOpacity: done ? 0.55 : 1) {
-                if hand {
-                    drawnCheckbox(done: done)
-                } else {
-                    markerText(Image(systemName: done ? "checkmark.square" : "square"))
-                }
+                markerText(Image(systemName: done ? "checkmark.square" : "square"))
             }
 
         case .quote(let text):
-            InlineMarkdownText(text, linkColor: color.opacity(0.8), hand: emphasis(baseFont, opacity: 0.8))
-                .font(face(baseFont))
-                .tracking(hand ? 0 : -0.05)
-                .lineSpacing(leading(0.45))
+            InlineMarkdownText(text, linkColor: color.opacity(0.8))
+                .font(.sf(baseFont))
+                .tracking(-0.05)
+                .lineSpacing(baseFont * 0.45)
                 .foregroundStyle(color.opacity(0.8))
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
                 .padding(.leading, 13)
                 .overlay(alignment: .leading) {
-                    // The accent bar that marks the island as quoted speech —
-                    // ruled, or drawn down the margin in the same 3pt footprint.
-                    Group {
-                        if hand {
-                            Ink.Stroke(seed: seed)
-                                .stroke(color.opacity(0.28),
-                                        style: StrokeStyle(lineWidth: 2.4, lineCap: .round))
-                        } else {
-                            RoundedRectangle(cornerRadius: 1.5)
-                                .fill(color.opacity(0.25))
-                        }
-                    }
-                    .frame(width: 3)
+                    // The accent bar that marks the island as quoted speech.
+                    RoundedRectangle(cornerRadius: 1.5)
+                        .fill(color.opacity(0.25))
+                        .frame(width: 3)
                 }
                 .padding(.vertical, 2)
 
         case .paragraph(let text):
-            InlineMarkdownText(text, linkColor: color, hand: emphasis(baseFont))
-                .font(face(baseFont))
-                .tracking(hand ? 0 : -0.05)
-                .lineSpacing(leading(0.6))
+            InlineMarkdownText(text, linkColor: color)
+                .font(.sf(baseFont))
+                .tracking(-0.05)
+                .lineSpacing(baseFont * 0.6)
                 .foregroundStyle(color)
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
@@ -6735,17 +6424,11 @@ struct MarkdownBlockRow: View, Equatable {
             CodeBlockView(text: text, baseFont: baseFont, color: color, onInAppCopy: onInAppCopy)
 
         case .table(let header, let rows):
-            MarkdownTableView(header: header, rows: rows, baseFont: baseFont, color: color, hand: hand)
+            MarkdownTableView(header: header, rows: rows, baseFont: baseFont, color: color)
 
         case .math(let text):
             // Display math: the Unicode rendering, centred like a typeset
             // formula, a shade larger than body so it reads as an island.
-            //
-            // Stays typeset in handwriting mode, deliberately. `MathTypeset`
-            // builds its formulas out of superscripts, radicals and Greek —
-            // glyphs the handwriting faces mostly don't carry, so a "handwritten"
-            // formula would in fact be a formula in three different faces at
-            // three different weights. Notation is machine text, like code.
             Text(MathTypeset.unicode(text))
                 .font(.sf(baseFont + 1))
                 .tracking(0.1)
@@ -6764,32 +6447,16 @@ struct MarkdownBlockRow: View, Equatable {
             AnswerPDFView(title: title, urlString: url, baseFont: baseFont, color: color)
 
         case .divider:
-            Group {
-                if hand {
-                    // Drawn at 1pt rather than the ruled 0.5: a wobbling
-                    // half-point line lands between pixels and stipples instead
-                    // of reading as a stroke. The extra weight is spread by the
-                    // wobble, so it still reads as the same quiet hairline.
-                    Ink.Rule(seed: seed)
-                        .stroke(Tokens.hairline,
-                                style: StrokeStyle(lineWidth: 1, lineCap: .round))
-                        .frame(height: 3)
-                } else {
-                    Rectangle()
-                        .fill(Tokens.hairline)
-                        .frame(height: 0.5)
-                }
-            }
-            .padding(.vertical, 4)
+            Rectangle()
+                .fill(Tokens.hairline)
+                .frame(height: 0.5)
+                .padding(.vertical, 4)
         }
     }
 
     /// A list item: a fixed-width gutter holds the marker so wrapped lines hang
     /// neatly under the text, not under the bullet. `indent` steps the whole row
     /// right for nested items; `textOpacity` lets done tasks read as settled.
-    ///
-    /// The marker is a view rather than a `Text` because in the hand two of the
-    /// three kinds aren't type at all — the bullet and the checkbox are drawn.
     private func listRow<Marker: View>(text: String,
                                        indent: Int = 0,
                                        textOpacity: Double = 1,
@@ -6797,10 +6464,10 @@ struct MarkdownBlockRow: View, Equatable {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             marker()
                 .frame(minWidth: 16, alignment: .trailing)
-            InlineMarkdownText(text, linkColor: color.opacity(textOpacity), hand: emphasis(baseFont, opacity: textOpacity))
-                .font(face(baseFont))
-                .tracking(hand ? 0 : -0.05)
-                .lineSpacing(leading(0.5))
+            InlineMarkdownText(text, linkColor: color.opacity(textOpacity))
+                .font(.sf(baseFont))
+                .tracking(-0.05)
+                .lineSpacing(baseFont * 0.5)
                 .foregroundStyle(color.opacity(textOpacity))
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
@@ -6809,11 +6476,10 @@ struct MarkdownBlockRow: View, Equatable {
         .padding(.leading, CGFloat(indent) * 16)
     }
 
-    /// A typeset marker in the gutter — the printed bullet, every ordered
-    /// numeral, the printed checkbox.
+    /// A marker in the gutter — the bullet, every ordered numeral.
     private func markerText(_ content: some StringProtocol) -> some View {
         Text(String(content))
-            .font(face(baseFont, weight: .medium).monospacedDigit())
+            .font(.sf(baseFont, weight: .medium).monospacedDigit())
             .foregroundStyle(color.opacity(0.7))
     }
 
@@ -6821,41 +6487,6 @@ struct MarkdownBlockRow: View, Equatable {
         Text(image)
             .font(.sf(baseFont, weight: .medium))
             .foregroundStyle(color.opacity(0.7))
-    }
-
-    /// A task's box, drawn: four not-quite-meeting strokes, plus a tick that
-    /// breaks out past the corner when it's done.
-    private func drawnCheckbox(done: Bool) -> some View {
-        let side = baseFont * 0.82
-        return ZStack {
-            Ink.Box(seed: seed)
-                .stroke(color.opacity(done ? 0.45 : 0.7),
-                        style: StrokeStyle(lineWidth: 1.3, lineCap: .round))
-            if done {
-                Ink.Tick(seed: seed &+ 1)
-                    .stroke(color.opacity(0.75),
-                            style: StrokeStyle(lineWidth: 1.7, lineCap: .round, lineJoin: .round))
-                    .padding(-1.5)
-            }
-        }
-        .frame(width: side, height: side)
-        .offset(y: -baseFont * 0.06)
-    }
-
-    /// A stable jitter seed for this row's drawn marks. Derived from the block's
-    /// own text so two rules in one answer wobble differently and the same rule
-    /// wobbles identically on every redraw — `hashValue` would do neither, being
-    /// re-salted per process.
-    private var seed: Int {
-        switch block {
-        case .heading(_, let text), .bullet(let text, _), .ordered(_, let text, _),
-             .task(_, let text, _), .quote(let text), .paragraph(let text), .math(let text):
-            return text.utf8.reduce(17) { $0 &* 31 &+ Int($1) }
-        case .code(_, let text):
-            return text.utf8.prefix(64).reduce(17) { $0 &* 31 &+ Int($1) }
-        case .table, .divider, .image, .pdf:
-            return 11
-        }
     }
 
     /// Bullet glyph by nesting depth — the standard •/◦/▪ ladder, so levels read
@@ -6880,8 +6511,6 @@ private struct MarkdownTableView: View {
     let rows: [[String]]
     let baseFont: CGFloat
     let color: Color
-    /// Cells follow the answer's voice — a table is still prose, just ruled.
-    var hand: Bool = false
 
     private var columnCount: Int { header.count }
 
@@ -6923,13 +6552,9 @@ private struct MarkdownTableView: View {
     }
 
     private func cellText(_ raw: String, weight: Font.Weight, opacity: Double) -> some View {
-        InlineMarkdownText(raw, linkColor: color.opacity(opacity),
-                           hand: hand ? .init(size: baseFont - 1,
-                                              cjkEm: Handwriting.cjkEm(baseFont - 1),
-                                              color: color.opacity(opacity),
-                                              streaming: false) : nil)
-            .font(proseFont(baseFont - 1, weight: weight, hand: hand))
-            .tracking(hand ? 0 : -0.05)
+        InlineMarkdownText(raw, linkColor: color.opacity(opacity))
+            .font(.sf(baseFont - 1, weight: weight))
+            .tracking(-0.05)
             .foregroundStyle(color.opacity(opacity))
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -7009,6 +6634,52 @@ final class AnswerMediaLoader {
         (base?.path ?? "") + "\u{1e}" + urlString
     }
 
+    /// What an earlier load of this reference produced, if it is still in memory.
+    func cached(_ urlString: String, base: URL?) -> Outcome? {
+        cache[memoryKey(urlString, base: base)] ?? cache[urlString]
+    }
+
+    /// Point sizes of images decoded before, by `durableName`, kept across
+    /// launches so a view can hold an image's room before its pixels are back.
+    private lazy var imageSizes: [String: CGSize] = {
+        guard let data = try? Data(contentsOf: Self.imageSizesURL),
+              let pairs = try? JSONDecoder().decode([String: [CGFloat]].self, from: data)
+        else { return [:] }
+        return pairs.compactMapValues { $0.count == 2 ? CGSize(width: $0[0], height: $0[1]) : nil }
+    }()
+
+    private nonisolated static var imageSizesURL: URL {
+        durableDirectory.appendingPathComponent("sizes.json")
+    }
+
+    private static let sizesQueue = DispatchQueue(label: "AnswerMediaLoader.sizes", qos: .utility)
+
+    /// An absolute reference names the same image under any base directory, so
+    /// its size is kept without one: a view can look it up before it can read
+    /// the base from its environment.
+    private nonisolated static func sizeName(_ urlString: String, base: URL?) -> String {
+        durableName(urlString, base: resolve(urlString, base: nil) == nil ? base : nil)
+    }
+
+    /// The size this image had the last time it was decoded.
+    func knownImageSize(_ urlString: String, base: URL?) -> CGSize? {
+        if case .image(let image)? = cached(urlString, base: base) { return image.size }
+        return imageSizes[Self.sizeName(urlString, base: base)]
+    }
+
+    private func rememberImageSize(_ size: CGSize, _ urlString: String, base: URL?) {
+        let name = Self.sizeName(urlString, base: base)
+        guard imageSizes[name] != size else { return }
+        imageSizes[name] = size
+        let pairs = imageSizes.mapValues { [$0.width, $0.height] }
+        Self.sizesQueue.async {
+            guard let data = try? JSONEncoder().encode(pairs) else { return }
+            try? FileManager.default.createDirectory(at: Self.durableDirectory,
+                                                     withIntermediateDirectories: true)
+            try? data.write(to: Self.imageSizesURL, options: .atomic)
+        }
+    }
+
     private func outcome(for urlString: String, as kind: Kind, base: URL?) async -> Outcome {
         let key = memoryKey(urlString, base: base)
         if let hit = cache[key] ?? cache[urlString] { return hit }
@@ -7019,6 +6690,9 @@ final class AnswerMediaLoader {
         inflight[key] = nil
         cache[key] = result
         cache[urlString] = result
+        if case .image(let image) = result {
+            rememberImageSize(image.size, urlString, base: base)
+        }
         order.append(key)
         if order.count > 64 {
             cache.removeValue(forKey: order.removeFirst())
@@ -7120,11 +6794,12 @@ final class AnswerMediaLoader {
 }
 
 /// Open a media reference in the default app — same scheme gate as the loader.
+@MainActor
 private func openAnswerMediaURL(_ urlString: String) {
     guard let url = AnswerMediaLoader.resolve(urlString, base: nil) else { return }
     let scheme = url.scheme?.lowercased()
     if scheme == "http" || scheme == "https" || url.isFileURL {
-        NSWorkspace.shared.open(url)
+        LinkGate.shared.open(url)
     }
 }
 
@@ -7179,7 +6854,7 @@ struct MediaLinkChip: View {
             .overlay(Capsule().strokeBorder(Tokens.hairline, lineWidth: 0.5))
             .contentShape(Capsule())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plain).exemptsDoubleClickPin()
     }
 }
 
@@ -7203,6 +6878,22 @@ private struct AnswerImageView: View {
     @Environment(\.answerMediaBaseDirectory) private var mediaBase
 
     @State private var outcome: AnswerMediaLoader.Outcome?
+    /// Set only while the pixels are not back yet: the size this image had when
+    /// it was last decoded, so the placeholder holds exactly its room.
+    @State private var knownSize: CGSize?
+
+    init(alt: String, urlString: String, baseFont: CGFloat = Tokens.TypeSize.reading,
+         color: Color = Tokens.text1) {
+        self.alt = alt
+        self.urlString = urlString
+        self.baseFont = baseFont
+        self.color = color
+        // The base directory is an environment value, not readable here; a
+        // relative path misses and waits for the task like before.
+        let loader = AnswerMediaLoader.shared
+        _outcome = State(initialValue: loader.cached(urlString, base: nil))
+        _knownSize = State(initialValue: loader.knownImageSize(urlString, base: nil))
+    }
 
     var body: some View {
         Group {
@@ -7232,7 +6923,7 @@ private struct AnswerImageView: View {
                                 .strokeBorder(Tokens.hairline, lineWidth: 0.5)
                         )
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.plain).exemptsDoubleClickPin()
                 .accessibilityLabel(alt.isEmpty ? "image" : alt)
             case .pdf, .failed:
                 MediaLinkChip(icon: "photo",
@@ -7241,12 +6932,24 @@ private struct AnswerImageView: View {
                     openAnswerMediaURL(urlString)
                 }
             case nil:
-                MediaLoadingPlaceholder()
+                if let knownSize {
+                    let ratio = knownSize.width / max(knownSize.height, 1)
+                    RoundedRectangle.control
+                        .fill(Color.white.opacity(0.04))
+                        .aspectRatio(ratio, contentMode: .fit)
+                        .frame(maxWidth: min(knownSize.width, Self.heightCap * ratio))
+                } else {
+                    MediaLoadingPlaceholder()
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .task(id: urlString + (mediaBase?.path ?? "")) {
-            outcome = await AnswerMediaLoader.shared.image(for: urlString, base: mediaBase)
+            let loader = AnswerMediaLoader.shared
+            if outcome == nil, knownSize == nil {
+                knownSize = loader.knownImageSize(urlString, base: mediaBase)
+            }
+            outcome = await loader.image(for: urlString, base: mediaBase)
         }
     }
 }
@@ -7303,7 +7006,7 @@ private struct AnswerPDFView: View {
                             .strokeBorder(Tokens.hairline, lineWidth: 0.5)
                     )
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.plain).exemptsDoubleClickPin()
                 .accessibilityLabel(displayTitle)
             case .image, .failed:
                 MediaLinkChip(icon: "doc.text", label: displayTitle,
@@ -7495,7 +7198,7 @@ struct SavedTurnImages: View {
                 Button { presentLightbox(at: index) } label: {
                     SavedImageThumb(file: file)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.plain).exemptsDoubleClickPin()
             }
             if files.count > Self.stripMax {
                 Button { presentLightbox(at: Self.stripMax) } label: {
@@ -7509,7 +7212,7 @@ struct SavedTurnImages: View {
                                 .fill(Color.white.opacity(0.06))
                         )
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.plain).exemptsDoubleClickPin()
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -7740,7 +7443,7 @@ private struct AgentTrailProse: View {
                         .foregroundStyle(Tokens.text4)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.plain).exemptsDoubleClickPin()
             }
         }
     }
@@ -7900,11 +7603,13 @@ struct ThinkingFoldRow: View {
     }
 }
 
-/// No press-scale: a `.plain` button on the island still picks up a squash
-/// from the surrounding glass spring. The fold only needs a click, not give.
+/// No press-scale: the row sits on glass that already moves on the panel's
+/// spring, so a squash here would stack on that. A press only dims the row.
 private struct ThinkingFoldPressStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
+            .exemptsDoubleClickPin(pressed: configuration.isPressed)
+            .opacity(configuration.isPressed ? 0.72 : 1)
     }
 }
 
@@ -7989,7 +7694,7 @@ private struct AgentTrailGroupRow: View {
                 }
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.plain).exemptsDoubleClickPin()
 
             if expanded {
                 VStack(alignment: .leading, spacing: 6) {
@@ -8069,7 +7774,7 @@ private struct AgentTrailToolRow: View {
                 }
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.plain).exemptsDoubleClickPin()
 
             if expanded, let detail = entry.detail {
                 Group {

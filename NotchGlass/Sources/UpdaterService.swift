@@ -122,9 +122,11 @@ final class UpdaterService: ObservableObject {
             // A check landing mid-update must not flip the phase under the swap.
             guard phase != .updating else { return }
             let latest = release.version
-            phase = Self.isNewer(latest, than: Self.currentVersion)
+            let next: Phase = Self.isNewer(latest, than: Self.currentVersion)
                 ? .available(latest)
                 : .upToDate
+            // Settings runs this on every open; publish only a real change.
+            if phase != next { phase = next }
         }
     }
 

@@ -686,10 +686,10 @@ struct LoopScheduleChip: View {
             .fixedSize()
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plain).exemptsDoubleClickPin()
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
-        .help(L("loop.change"))
+        .notchTooltip(L("loop.change"))
         .accessibilityLabel(L("loop.change"))
         .modifier(MenuCardWindow(
             open: open,
@@ -802,7 +802,7 @@ private struct LoopRoundSidebarRow: View {
     var body: some View {
         RailTick(selected: selected, hoverDistance: hoverDistance, alignment: .trailing,
                  onHover: onHover, action: action)
-            .help(item.title)
+            .notchTooltip(item.title)
             .accessibilityLabel(item.title)
             .accessibilityAddTraits(selected ? [.isSelected] : [])
             .accessibilityValue(item.running ? L("agent.thinking") : "")

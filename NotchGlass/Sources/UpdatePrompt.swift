@@ -209,7 +209,6 @@ struct UpdatePromptCard: View {
     @ObservedObject private var updater = UpdaterService.shared
     @ObservedObject private var prompt = UpdatePrompt.shared
     @State private var restartHovered = false
-    @State private var closeHovered = false
 
     static let width: CGFloat = 400
 
@@ -263,20 +262,16 @@ struct UpdatePromptCard: View {
     }
 
     private var closeButton: some View {
-        Button { prompt.dismiss() } label: {
-            Image(systemName: "xmark")
-                .font(.sf(Tokens.TypeSize.caption, weight: .semibold))
-                .foregroundStyle(closeHovered ? Tokens.text1 : Tokens.text4)
-                .frame(width: Tokens.Control.inline, height: Tokens.Control.inline)
-                .background(Circle().fill(Color.white.opacity(closeHovered ? 0.12 : 0)))
-                .contentShape(Circle())
+        // The same glass circle every other close control is, at the in-row size.
+        GlassIconButton(systemName: "xmark",
+                        help: L("updatePrompt.dismiss"),
+                        tipEdge: .bottom,
+                        size: Tokens.Control.inline,
+                        glyphSize: Tokens.TypeSize.caption) {
+            prompt.dismiss()
         }
-        .buttonStyle(GlassPressStyle())
-        .help(L("updatePrompt.dismiss"))
         .opacity(restarting ? 0 : 1)
         .allowsHitTesting(!restarting)
-        .onHover { closeHovered = $0 }
-        .animation(.easeOut(duration: Tokens.hoverFade), value: closeHovered)
         .padding(.top, 2)
         .padding(.trailing, 12)
     }

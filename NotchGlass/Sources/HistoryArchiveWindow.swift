@@ -31,6 +31,7 @@ final class HistoryArchiveWindowController: NSObject, NSWindowDelegate {
     static let shared = HistoryArchiveWindowController()
 
     private var window: NSWindow?
+    private let search = HistoryArchiveSearch()
 
     /// True while the History window is on screen. The notch-close path checks this
     /// before yielding activation back to the app the user came from: with the
@@ -46,8 +47,9 @@ final class HistoryArchiveWindowController: NSObject, NSWindowDelegate {
         if let window {
             // Re-scope even when the window is already open: moving from Agent to
             // Chat (or back) must not retain the previous bucket's rows.
+            search.query = ""
             window.contentView = NSHostingView(
-                rootView: HistoryArchiveView(model: model, scope: scope)
+                rootView: HistoryArchiveView(model: model, search: search, scope: scope)
                     .notchTooltipClipBox()
             )
             window.makeKeyAndOrderFront(nil)
@@ -55,7 +57,7 @@ final class HistoryArchiveWindowController: NSObject, NSWindowDelegate {
             return
         }
 
-        let window = NSWindow(
+        let window = HistoryArchiveNSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 860, height: 600),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
@@ -79,8 +81,21 @@ final class HistoryArchiveWindowController: NSObject, NSWindowDelegate {
         // glass instead of flipping to a light-mode treatment on a light desktop.
         window.appearance = NSAppearance(named: .darkAqua)
 
+        search.query = ""
+        window.onEscape = { [weak self, weak window] in
+            guard let self, let window else { return }
+            // Three steps out: clear the search text, leave the search field,
+            // then close the window.
+            if !self.search.query.isEmpty {
+                self.search.query = ""
+            } else if window.firstResponder is NSText {
+                window.makeFirstResponder(nil)
+            } else {
+                window.performClose(nil)
+            }
+        }
         window.contentView = NSHostingView(
-            rootView: HistoryArchiveView(model: model, scope: scope)
+            rootView: HistoryArchiveView(model: model, search: search, scope: scope)
                 // Same as the detached window: this window's edges are the wall
                 // its hover tooltips clamp to.
                 .notchTooltipClipBox())
@@ -97,6 +112,39 @@ final class HistoryArchiveWindowController: NSObject, NSWindowDelegate {
         // Drop the instance so the next open builds a fresh window bound to the
         // current model, rather than reviving a torn-down one.
         window = nil
+    }
+}
+
+/// The archive's search text, held outside the view so the window's Esc can
+/// read and clear it.
+@MainActor
+private final class HistoryArchiveSearch: ObservableObject {
+    @Published var query = ""
+}
+
+/// The archive window. It answers Esc and the image arrows itself: the panel's
+/// key catcher only acts while the panel is key.
+private final class HistoryArchiveNSWindow: NSWindow {
+    /// Runs when Esc is pressed with no image or link confirmation open.
+    var onEscape: (() -> Void)?
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        // Arrow keys carry `.numericPad` and `.function`; a key pressed while an
+        // input method is composing belongs to the input method.
+        let bare = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            .subtracting([.numericPad, .function]).isEmpty
+        let composing = (firstResponder as? NSTextView)?.hasMarkedText() ?? false
+        if event.type == .keyDown, bare, !composing {
+            if event.keyCode == 123, ImageLightboxCenter.shared.step(-1, in: self) { return true }
+            if event.keyCode == 124, ImageLightboxCenter.shared.step(1, in: self) { return true }
+            if event.keyCode == 53 {
+                if ImageLightboxCenter.shared.dismiss(in: self) { return true }
+                if LinkGate.shared.cancel(in: self) { return true }
+                onEscape?()
+                return true
+            }
+        }
+        return super.performKeyEquivalent(with: event)
     }
 }
 
@@ -157,17 +205,19 @@ private struct GlassHairline: View {
 /// shows through the whole window.
 private struct HistoryArchiveView: View {
     @ObservedObject var model: NotchModel
+    @ObservedObject var search: HistoryArchiveSearch
     let scope: HistoryArchiveScope
 
-    @State private var query = ""
+    private var query: String { search.query }
     @State private var sourceFilter: NotchModel.HistoryItem.Source?
     /// Whether the Ask bucket's children (Notes / Reminders) are unfurled. Ask is
     /// the parent; its two sub-filters only appear once Ask is tapped.
     @State private var askExpanded = false
     @State private var selection: UUID? = nil
 
-    init(model: NotchModel, scope: HistoryArchiveScope = .all) {
+    init(model: NotchModel, search: HistoryArchiveSearch, scope: HistoryArchiveScope = .all) {
         self.model = model
+        self.search = search
         self.scope = scope
         _sourceFilter = State(initialValue: scope == .agent ? .agent : nil)
         _askExpanded = State(initialValue: scope == .chat)
@@ -224,6 +274,9 @@ private struct HistoryArchiveView: View {
         )
         .ignoresSafeArea()
         .imageLightboxHost()
+        // Link clicks on this surface go through the pre-check, and its
+        // confirmation card is drawn here, inside the clip (see `LinkGate`).
+        .linkGateHost()
     }
 
     // MARK: - Master (list)
@@ -249,17 +302,17 @@ private struct HistoryArchiveView: View {
                 Image(systemName: "magnifyingglass")
                     .font(.sf(Tokens.TypeSize.label, weight: .medium))
                     .foregroundStyle(Tokens.text3)
-                TextField(L("history.window.search"), text: $query)
+                TextField(L("history.window.search"), text: $search.query)
                     .textFieldStyle(.plain)
                     .font(.sf(Tokens.TypeSize.form))
                     .foregroundStyle(Tokens.text1)
                 if !query.isEmpty {
-                    Button { query = "" } label: {
-                        Image(systemName: "xmark.circle")
-                            .font(.sf(Tokens.TypeSize.label))
+                    Button { search.query = "" } label: {
+                        Image(systemName: "xmark")
+                            .font(.sf(Tokens.TypeSize.caption, weight: .semibold))
                             .foregroundStyle(Tokens.text4)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.plain).exemptsDoubleClickPin()
                 }
             }
             .padding(.horizontal, 12)

@@ -33,11 +33,12 @@ struct AnswerImageRef: Equatable, Identifiable {
 
 /// Open a media reference in the default app. http(s) goes to the browser;
 /// a local file (Grok's `images/1.jpg`, a salvaged history JPEG) opens in Preview.
+@MainActor
 private func openImageURL(_ urlString: String) {
     guard let url = AnswerMediaLoader.resolve(urlString, base: nil) else { return }
     let scheme = url.scheme?.lowercased()
     if scheme == "http" || scheme == "https" || url.isFileURL {
-        NSWorkspace.shared.open(url)
+        LinkGate.shared.open(url)
     }
 }
 
@@ -170,6 +171,7 @@ struct ImageExpandStack: View {
                     .onTapGesture {
                         withAnimation(Self.spring) { expanded = false }
                     }
+                    .exemptsDoubleClickPin()
             }
 
             ForEach(Array(images.enumerated()), id: \.element.id) { index, _ in
@@ -292,20 +294,20 @@ private struct ImageStackCard: View {
 }
 
 /// The card's own scale ladder: 1.025 on hover in the pile, 1.04 in the fan, and
-/// 0.98 while held — the web component's `whileHover` / `whileTap`.
+/// the row press (0.97) while held.
 private struct ImageStackCardButtonStyle: ButtonStyle {
     let hovering: Bool
     let expanded: Bool
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
+            .exemptsDoubleClickPin(pressed: configuration.isPressed)
             .scaleEffect(scale(pressed: configuration.isPressed))
-            .animation(.interpolatingSpring(mass: 0.75, stiffness: 180, damping: 24),
-                       value: configuration.isPressed)
+            .animation(Tokens.platePressSpring, value: configuration.isPressed)
     }
 
     private func scale(pressed: Bool) -> CGFloat {
-        if pressed { return 0.98 }
+        if pressed { return Tokens.platePressScale }
         if hovering { return expanded ? 1.04 : 1.025 }
         return 1
     }
@@ -344,8 +346,32 @@ final class ImageLightboxCenter: ObservableObject {
 
     var isPresented: Bool { item != nil }
 
+    /// The window the open image was tapped in. The keys that act on it (Esc,
+    /// ← / →) are answered by that window only.
+    private var window: ObjectIdentifier?
+
     func present(_ item: Item) {
+        window = (NSApp.currentEvent?.window ?? NSApp.keyWindow).map(ObjectIdentifier.init)
         withAnimation(Self.viewTransition) { self.item = item }
+    }
+
+    /// Whether an image is open in `candidate`.
+    private func isOpen(in candidate: NSWindow?) -> Bool {
+        guard item != nil else { return false }
+        guard let window else { return true }
+        return candidate.map(ObjectIdentifier.init) == window
+    }
+
+    /// `step`, for a key pressed in `window`.
+    @discardableResult
+    func step(_ delta: Int, in window: NSWindow?) -> Bool {
+        isOpen(in: window) && step(delta)
+    }
+
+    /// `dismiss`, for a key pressed in `window`.
+    @discardableResult
+    func dismiss(in window: NSWindow?) -> Bool {
+        isOpen(in: window) && dismiss()
     }
 
     /// Installed by the presented lightbox: how a page turn should actually be
@@ -551,6 +577,7 @@ private struct ImageLightbox: View {
                 .overlay(Color.black.opacity(0.4))
                 .contentShape(Rectangle())
                 .onTapGesture { ImageLightboxCenter.shared.dismiss() }
+                .exemptsDoubleClickPin()
                 .transition(.opacity)
 
             VStack(spacing: 10) {

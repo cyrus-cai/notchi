@@ -66,10 +66,27 @@ final class NotchPanel: NSPanel {
     /// keyboard the way clicking any window does.
     var onClickInside: (() -> Void)?
 
-    /// A double-click landed inside the panel, anywhere but an editable text
-    /// field (there a double-click selects a word). The AppDelegate pins the
+    /// A double-click landed on the panel's blank glass: not on a button, a
+    /// menu, an input or selectable text. The AppDelegate pins the
     /// open panel in answer.
     var onDoubleClickInside: (() -> Void)?
+
+    /// When a control that should not pin on a double-click last fired. A
+    /// SwiftUI button has no AppKit view of its own for `sendEvent` to hit-test,
+    /// so the button records its own action here instead; the second press of
+    /// the pair, arriving within the double-click interval, then skips the pin.
+    private static var doubleClickExemptAt: TimeInterval = 0
+
+    /// Called from such a control's action.
+    static func exemptNextDoubleClick() {
+        doubleClickExemptAt = ProcessInfo.processInfo.systemUptime
+    }
+
+    /// Whether `event`, the second press of a double-click, follows a press on
+    /// such a control.
+    static func doubleClickIsExempt(_ event: NSEvent) -> Bool {
+        event.timestamp - doubleClickExemptAt <= NSEvent.doubleClickInterval
+    }
 
     init(contentRect: NSRect) {
         super.init(
@@ -162,7 +179,8 @@ final class NotchPanel: NSPanel {
         // Before `onClickInside`, so the handler still sees the state recorded
         // at the first click of the pair.
         if event.type == .leftMouseDown, event.clickCount == 2,
-           !isOverEditableText(event.locationInWindow) {
+           !Self.doubleClickIsExempt(event),
+           !isOverControlOrText(event.locationInWindow) {
             onDoubleClickInside?()
         }
         switch event.type {
@@ -229,6 +247,19 @@ extension NSWindow {
         while true {
             if let text = view as? NSText, text.isEditable { return true }
             if let field = view as? NSTextField, field.isEditable { return true }
+            guard let parent = view.superview else { return false }
+            view = parent
+        }
+    }
+
+    /// Whether this window point is on an AppKit control, a text view, or
+    /// SwiftUI's selectable text. A double-click there belongs to that view.
+    func isOverControlOrText(_ point: NSPoint) -> Bool {
+        if selectableTextView(at: point) != nil { return true }
+        guard let contentView,
+              var view = contentView.hitTest(contentView.convert(point, from: nil)) else { return false }
+        while true {
+            if view is NSControl || view is NSText { return true }
             guard let parent = view.superview else { return false }
             view = parent
         }

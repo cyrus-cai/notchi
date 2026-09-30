@@ -50,8 +50,11 @@ enum LinkCardSplitter {
         return cache
     }()
 
+    /// `recent` holds the `LinkLine.key` of pages the answers just above
+    /// already carded; those pages get no second card here.
     static func layout(_ text: String, streaming: Bool, sources: [WebSource],
-                       question: String, shared: [String] = []) -> LinkCardLayout {
+                       question: String, shared: [String] = [],
+                       recent: Set<String> = []) -> LinkCardLayout {
         let trust = allowed(sources: sources, question: question, shared: shared)
         let mayLink = text.contains("http") || text.contains("![")
             || (streaming && text.contains("["))
@@ -61,15 +64,16 @@ enum LinkCardSplitter {
             return LinkCardLayout(lead: text, rest: [])
         }
         let key = ("\(streaming ? 1 : 0)\u{1e}\(trust.pages.sorted().joined(separator: ","))"
-            + "\u{1e}\(trust.hosts.sorted().joined(separator: ","))\u{1e}\(text)") as NSString
+            + "\u{1e}\(trust.hosts.sorted().joined(separator: ","))"
+            + "\u{1e}\(recent.sorted().joined(separator: ","))\u{1e}\(text)") as NSString
         if let hit = cache.object(forKey: key) { return hit.value }
-        let result = compute(text, streaming: streaming, trust: trust)
+        let result = compute(text, streaming: streaming, trust: trust, recent: recent)
         cache.setObject(Box(result), forKey: key)
         return result
     }
 
     private static func compute(_ text: String, streaming: Bool,
-                                trust: Trust) -> LinkCardLayout {
+                                trust: Trust, recent: Set<String>) -> LinkCardLayout {
         let lines = text.components(separatedBy: "\n")
         // The line still being written. It is never a card yet: its URL may
         // still be growing.
@@ -79,7 +83,7 @@ enum LinkCardSplitter {
         var rest: [AnswerSegment] = []
         var buffer: [String] = []
         var cards = 0
-        var seen = Set<String>()
+        var seen = recent
         var inFence = false
         // The last line with text in `buffer`, whether it sits in a list, and
         // whether a blank line has come after it — a paragraph break the next
@@ -308,6 +312,30 @@ extension Array where Element == NotchModel.Turn {
         guard let i = firstIndex(where: { $0.id == answerID }) else { return "" }
         return self[..<i].last(where: { $0.role == "user" })?.text ?? ""
     }
+
+    /// The pages the `window` answers above `answerID` hand over as cards, by
+    /// `LinkLine.key`. Those answers are laid out on their own, without this
+    /// filter, so a page every answer repeats still stays hidden until it
+    /// leaves the window.
+    func recentCards(before answerID: UUID, window: Int = 3) -> Set<String> {
+        guard let i = firstIndex(where: { $0.id == answerID }) else { return [] }
+        var keys = Set<String>()
+        var counted = 0
+        for j in stride(from: i - 1, through: 0, by: -1) where counted < window {
+            let turn = self[j]
+            guard turn.role == "assistant", !turn.isError else { continue }
+            counted += 1
+            let text = CitationMarkup.rendered(
+                turn.text, sources: turn.sources,
+                stripUnresolved: CitationMarkup.shouldStripUnresolved(
+                    answerModel: turn.answerModel, regenModel: turn.regenModel))
+            let layout = LinkCardSplitter.layout(
+                text, streaming: false, sources: turn.sources,
+                question: question(before: turn.id), shared: turn.sharedLinks)
+            for case .link(let url, _) in layout.rest { keys.insert(LinkLine.key(url)) }
+        }
+        return keys
+    }
 }
 
 // MARK: - The card
@@ -329,19 +357,24 @@ struct LinkCardView: View {
     var large: Bool
 
     @State private var still: NSImage?
+    /// The size this card was last shown at, from an earlier mount or launch.
+    /// Until the still is ready the card holds this much room, so the thread
+    /// does not change height under the reader when it arrives.
+    private let knownSize: CGSize?
 
     init(url: URL, title: String?, large: Bool = false) {
         self.url = url
         self.title = title
         self.large = large
         _still = State(initialValue: LinkCardStore.cachedStill(url: url, title: title, large: large))
+        knownSize = LinkCardStore.knownSize(url: url, title: title, large: large)
     }
 
     var body: some View {
         FractionWidthLayout(fraction: AnswerCard<EmptyView>.widthFraction, hugs: true) {
             if let still {
                 Button {
-                    NSWorkspace.shared.open(url)
+                    LinkGate.shared.open(url)
                 } label: {
                     Image(nsImage: still)
                         .resizable()
@@ -350,9 +383,13 @@ struct LinkCardView: View {
                         .clipShape(RoundedRectangle(cornerRadius: ChatBubbleChrome.cardRadius,
                                                     style: .continuous))
                 }
-                .buttonStyle(.plain)
-                .help(url.absoluteString)
+                .buttonStyle(PlatePressStyle())
+                .notchTooltip(url.absoluteString)
                 .transition(.opacity)
+            } else if let knownSize {
+                Color.clear
+                    .aspectRatio(knownSize, contentMode: .fit)
+                    .frame(maxWidth: knownSize.width)
             }
         }
         .task(id: "\(large)\u{1e}\(url.absoluteString)\u{1e}\(title ?? "")") {
@@ -361,11 +398,23 @@ struct LinkCardView: View {
                 return
             }
             if still == nil,
-               let loading = await LinkCardStore.shared.loadingStill(url: url, title: title) {
+               let saved = await LinkCardStore.shared.savedStill(url: url, title: title, large: large) {
+                withAnimation(.easeOut(duration: 0.18)) { still = saved }
+                return
+            }
+            // The loading card is shorter than a large finished one. Shown in
+            // room kept for the finished card, it would change the height twice.
+            if still == nil,
+               let loading = await LinkCardStore.shared.loadingStill(url: url, title: title),
+               knownSize == nil || knownSize == loading.size {
                 withAnimation(.easeOut(duration: 0.18)) { still = loading }
             }
             if let final = await LinkCardStore.shared.still(url: url, title: title, large: large) {
                 withAnimation(.easeOut(duration: 0.18)) { still = final }
+            } else if still == nil,
+                      let loading = await LinkCardStore.shared.loadingStill(url: url, title: title) {
+                LinkCardStore.shared.remember(size: loading.size, url: url, title: title, large: large)
+                withAnimation(.easeOut(duration: 0.18)) { still = loading }
             }
         }
     }
@@ -414,7 +463,7 @@ final class LinkCardStore {
     /// still draws this first, and a thread mounts its cards again each time it
     /// is opened, pulled or closed.
     func loadingStill(url: URL, title: String?) async -> NSImage? {
-        let key = (url.absoluteString + "\u{1e}" + (title ?? "") + "\u{1e}P") as NSString
+        let key = Self.loadingKey(url, title)
         if let hit = Self.stills.object(forKey: key) { return hit }
         let image = await draw(placeholder(url: url, title: title))
         if let image { Self.stills.setObject(image, forKey: key) }
@@ -456,9 +505,106 @@ final class LinkCardStore {
         drawing[key as String] = nil
         if let image {
             Self.stills.setObject(image, forKey: key)
+            saveStill(image, key: key)
         } else {
             failed.insert(key as String)
+            if let loading = Self.stills.object(forKey: Self.loadingKey(url, title)) {
+                remember(size: loading.size, key: key)
+            }
         }
+        return image
+    }
+
+    // MARK: Finished cards on disk
+
+    /// Point sizes of cards drawn before, by `stillName`. Read once, small.
+    private lazy var sizes: [String: CGSize] = {
+        guard let data = try? Data(contentsOf: Self.sizesURL),
+              let pairs = try? JSONDecoder().decode([String: [CGFloat]].self, from: data)
+        else { return [:] }
+        return pairs.compactMapValues { $0.count == 2 ? CGSize(width: $0[0], height: $0[1]) : nil }
+    }()
+
+    private static let diskQueue = DispatchQueue(label: "LinkCardStore.disk", qos: .utility)
+
+    private nonisolated static var stillsDirectory: URL {
+        directory.appendingPathComponent("Stills", isDirectory: true)
+    }
+
+    private nonisolated static var sizesURL: URL {
+        stillsDirectory.appendingPathComponent("sizes.json")
+    }
+
+    private nonisolated static func stillName(_ key: NSString) -> String {
+        SHA256.hash(data: Data((key as String).utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private nonisolated static func stillURL(_ name: String) -> URL {
+        stillsDirectory.appendingPathComponent(name + ".png")
+    }
+
+    private nonisolated static func loadingKey(_ url: URL, _ title: String?) -> NSString {
+        (url.absoluteString + "\u{1e}" + (title ?? "") + "\u{1e}P") as NSString
+    }
+
+    /// The size this card was last shown at, if it has been drawn before.
+    static func knownSize(url: URL, title: String?, large: Bool) -> CGSize? {
+        if let hit = stills.object(forKey: key(url, title, large)) { return hit.size }
+        return shared.sizes[stillName(key(url, title, large))]
+    }
+
+    func remember(size: CGSize, url: URL, title: String?, large: Bool) {
+        remember(size: size, key: Self.key(url, title, large))
+    }
+
+    private func remember(size: CGSize, key: NSString) {
+        let name = Self.stillName(key)
+        guard sizes[name] != size else { return }
+        sizes[name] = size
+        let pairs = sizes.mapValues { [$0.width, $0.height] }
+        Self.diskQueue.async {
+            guard let data = try? JSONEncoder().encode(pairs) else { return }
+            try? FileManager.default.createDirectory(at: Self.stillsDirectory,
+                                                     withIntermediateDirectories: true)
+            try? data.write(to: Self.sizesURL, options: .atomic)
+        }
+    }
+
+    private func saveStill(_ image: NSImage, key: NSString) {
+        guard let cg = (image.representations.first as? NSBitmapImageRep)?.cgImage
+                ?? image.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        else { return }
+        remember(size: image.size, key: key)
+        let url = Self.stillURL(Self.stillName(key))
+        Self.diskQueue.async {
+            try? FileManager.default.createDirectory(at: Self.stillsDirectory,
+                                                     withIntermediateDirectories: true)
+            guard let destination = CGImageDestinationCreateWithURL(
+                url as CFURL, "public.png" as CFString, 1, nil) else { return }
+            CGImageDestinationAddImage(destination, cg, nil)
+            CGImageDestinationFinalize(destination)
+        }
+    }
+
+    /// A finished card saved by an earlier launch, drawn at the size it was
+    /// shown at.
+    func savedStill(url: URL, title: String?, large: Bool) async -> NSImage? {
+        let key = Self.key(url, title, large)
+        let name = Self.stillName(key)
+        guard let size = sizes[name] else { return nil }
+        let file = Self.stillURL(name)
+        let cg: CGImage? = await withCheckedContinuation { done in
+            Self.diskQueue.async {
+                guard let source = CGImageSourceCreateWithURL(file as CFURL, nil),
+                      let image = CGImageSourceCreateImageAtIndex(
+                        source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary)
+                else { return done.resume(returning: nil) }
+                done.resume(returning: image)
+            }
+        }
+        guard let cg else { return nil }
+        let image = NSImage(cgImage: cg, size: size)
+        Self.stills.setObject(image, forKey: key)
         return image
     }
 

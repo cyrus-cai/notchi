@@ -594,11 +594,11 @@ private struct StatsPagerButton: View {
                 .frame(width: Tokens.Control.inline, height: Tokens.Control.inline)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plain).exemptsDoubleClickPin()
         .disabled(!enabled)
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
-        .help(help)
+        .notchTooltip(help)
         .accessibilityLabel(help)
     }
 

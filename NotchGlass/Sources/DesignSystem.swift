@@ -64,8 +64,14 @@ enum Tokens {
     /// physical, damped enough that it never wobbles.
     static let stackSpring = Animation.spring(response: 0.34, dampingFraction: 0.86)
 
+    // Press feedback has three forms, and a new control takes one of them:
+    // glass capsules and circles squash to `chipPressScale` on `chipPressSpring`;
+    // rows, plates and image cards squash to `platePressScale` on
+    // `platePressSpring`; a text action with no shape of its own (Save, Test,
+    // Change) only changes ink and does not deform.
     /// Glass chips squash to this on press.
     static let chipPressScale: CGFloat = 0.92
+    static let chipPressSpring = Animation.spring(response: 0.25, dampingFraction: 0.6)
     /// Rows, plates, and recessed CTAs squash to this on press.
     static let platePressScale: CGFloat = 0.97
     static let platePressSpring = Animation.spring(response: 0.22, dampingFraction: 0.72)
@@ -283,21 +289,31 @@ struct FreeTag: View {
 }
 
 /// The Add credit button's face. Settings' wallet card and the model detail
-/// card draw this one view; the card draws it `compact`, one size down.
+/// card draw this one view, both `compact`, one size down. Settings adds the
+/// top-up icon before the title.
 struct AddCreditButtonFace: View {
     let title: String
     let lit: Bool
     var compact = false
+    var icon = false
+    var height: CGFloat? = nil
 
     var body: some View {
-        Text(title)
-            .font(.sf(compact ? Tokens.TypeSize.label : Tokens.TypeSize.form, weight: .medium))
-            .foregroundStyle(Tokens.text1)
-            .fixedSize()
-            .padding(.horizontal, compact ? 12 : 14)
-            .frame(height: compact ? 26 : 30)
-            .prominentSurface(in: Capsule(), lit: lit)
-            .contentShape(Capsule())
+        HStack(spacing: 5) {
+            if icon {
+                LucideIcon(mark: LucideIcons.circleDollarSign, size: compact ? 12 : 13)
+            }
+            if !title.isEmpty {
+                Text(title)
+                    .font(.sf(compact ? Tokens.TypeSize.label : Tokens.TypeSize.form, weight: .medium))
+            }
+        }
+        .foregroundStyle(Tokens.text1)
+        .fixedSize()
+        .padding(.horizontal, compact ? 12 : 14)
+        .frame(height: height ?? (compact ? 26 : 30))
+        .prominentSurface(in: Capsule(), lit: lit)
+        .contentShape(Capsule())
     }
 }
 
@@ -1600,5 +1616,24 @@ extension View {
     /// Keep the normal pointer over a control that lives on a `grabCursor()` strip.
     func arrowCursor() -> some View {
         modifier(ArrowCursor())
+    }
+}
+
+// MARK: - Double-click pin
+
+extension View {
+    /// A double-click on blank glass pins the panel or the window; on a control
+    /// it only runs the control. A SwiftUI control has no AppKit view for the
+    /// window to hit-test, so it reports its own press here
+    /// (see `NotchPanel.exemptNextDoubleClick`).
+    func exemptsDoubleClickPin() -> some View {
+        simultaneousGesture(TapGesture().onEnded { NotchPanel.exemptNextDoubleClick() })
+    }
+
+    /// The same report from inside a `ButtonStyle`.
+    func exemptsDoubleClickPin(pressed: Bool) -> some View {
+        onChange(of: pressed) { _, now in
+            if now { NotchPanel.exemptNextDoubleClick() }
+        }
     }
 }

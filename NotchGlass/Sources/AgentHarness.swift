@@ -490,6 +490,12 @@ struct AgentHarness {
     /// same turn id. No other provider sends it.
     var requestContext: NoNoRequestContext?
 
+    /// Asked after each tool round with that round's finished calls. `true` ends
+    /// the run there, without another model turn. The Ask round uses it to stop
+    /// once a line has been filed as a note, so the notch shows the saved cue
+    /// instead of waiting on a reply that only says so.
+    var endsRound: (@MainActor ([ToolInvocation]) -> Bool)?
+
     /// Minimum on-screen time for the tool-activity line, so a fast tool (clipboard
     /// and time return in milliseconds) still shows a full, readable cue instead of
     /// a one-frame flicker. The tools run *during* this window — it delays only the
@@ -917,6 +923,7 @@ struct AgentHarness {
                 try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
             }
             try Task.checkCancellation()
+            if let endsRound, endsRound(completed) { return }
 
             // Empty or failed search: tell the user that, now. Feeding the miss
             // back into another model round is what used to wait ~30s and then
@@ -1019,7 +1026,14 @@ struct AgentHarness {
     /// returned array (a `tool_result` must map back to its `tool_use` by id, and
     /// some providers also care about order).
     private func runConcurrently(_ calls: [ToolInvocation]) async -> [ToolInvocation] {
-        await withTaskGroup(of: (Int, ToolInvocation).self) { group in
+        // Shell commands run in the order the model wrote them, and one
+        // confirmation card is up at a time.
+        if calls.contains(where: { $0.name == RunShellTool.toolName }) {
+            var out: [ToolInvocation] = []
+            for call in calls { out.append(await registry.run(call)) }
+            return out
+        }
+        return await withTaskGroup(of: (Int, ToolInvocation).self) { group in
             for (i, call) in calls.enumerated() {
                 group.addTask { (i, await registry.run(call)) }
             }
@@ -1189,6 +1203,15 @@ struct AgentHarness {
             case "open_url": return L("agent.activity.open")
             case "calculate": return L("agent.activity.calc")
             case "search_history": return L("agent.activity.history")
+            case "create_note": return L("input.saving")
+            case RunShellTool.toolName:
+                // Name the command itself, cut to fit the one-line wait slot.
+                if let raw = first.input["command"] as? String {
+                    let line = raw.split(separator: "\n").first.map(String.init) ?? raw
+                    let shown = line.count > 48 ? line.prefix(48) + "…" : line
+                    return L("agent.activity.runningTool", shown)
+                }
+                return L("agent.activity.working")
             case "read_page":
                 // Read the host out of the url argument so it reads as an address
                 // ("Reading tmtpost.com"); fall back to the generic line if absent.

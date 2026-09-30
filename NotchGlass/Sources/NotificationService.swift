@@ -80,10 +80,12 @@ final class NotificationService: NSObject {
                 content.body = reply.isEmpty ? question : reply
             } else {
                 content.title = L("notify.answerReady.title")
-                // Prefer the generated title; fall back to the raw question so the
-                // banner always says *which* question is done, never a bare generic.
-                let line = (title?.isEmpty == false ? title! : question)
-                content.body = line
+                // The body is the reply itself; the title/question only fills in
+                // when there is no reply text.
+                let reply = MarkdownParser.plainText(answer ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                content.body = reply.isEmpty
+                    ? (title?.isEmpty == false ? title! : question) : reply
             }
             content.categoryIdentifier = Self.answerCategory
             content.userInfo = [Self.threadIDKey: threadID.uuidString]

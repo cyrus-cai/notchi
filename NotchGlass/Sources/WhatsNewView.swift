@@ -206,9 +206,9 @@ struct WhatsNewView: View {
 
                     if hasMoreEntries {
                         Button(L("whatsnew.viewAllReleaseNotes")) {
-                            NSWorkspace.shared.open(UpdaterService.releaseNotesPage)
+                            LinkGate.shared.open(UpdaterService.releaseNotesPage)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.plain).exemptsDoubleClickPin()
                         .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                         .foregroundStyle(Tokens.text2)
                         .frame(maxWidth: .infinity)
@@ -478,9 +478,9 @@ struct WhatsNewView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             Button(L("whatsnew.viewReleases")) {
-                NSWorkspace.shared.open(UpdaterService.releaseNotesPage)
+                LinkGate.shared.open(UpdaterService.releaseNotesPage)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.plain).exemptsDoubleClickPin()
             .font(.sf(Tokens.TypeSize.meta, weight: .medium))
             .foregroundStyle(Tokens.text2)
         }
@@ -503,7 +503,7 @@ struct WhatsNewView: View {
         var body: some View {
             RailTick(selected: selected, hoverDistance: hoverDistance, alignment: .leading,
                      onHover: onHover, action: action)
-                .help(version)
+                .notchTooltip(version)
                 .accessibilityLabel(version)
         }
     }
@@ -539,7 +539,7 @@ struct RailTick: View {
                 .frame(width: Self.hitWidth, height: Self.rowHeight, alignment: alignment)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plain).exemptsDoubleClickPin()
         .onHover(perform: onHover)
         .animation(.easeOut(duration: 0.14), value: hoverDistance)
         .animation(.easeOut(duration: 0.2), value: selected)
@@ -582,11 +582,12 @@ private struct WhatsNewActionStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
+            .exemptsDoubleClickPin(pressed: configuration.isPressed)
             .glassCapsule(in: Capsule(), brighter: hovering)
             .contentShape(Capsule())
-            .opacity(configuration.isPressed ? 0.72 : 1)
-            .scaleEffect(configuration.isPressed ? 0.985 : 1)
+            .scaleEffect(configuration.isPressed ? Tokens.chipPressScale : 1)
             .onHover { hovering = $0 }
             .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+            .animation(Tokens.chipPressSpring, value: configuration.isPressed)
     }
 }

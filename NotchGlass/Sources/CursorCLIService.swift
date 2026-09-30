@@ -533,7 +533,7 @@ struct CursorCLIService: AIService {
     private static func decode(_ line: String) -> CatalogEntry? {
         let parts = line.components(separatedBy: "\t")
         guard parts.count == 3, !parts[0].isEmpty else { return nil }
-        return CatalogEntry(id: parts[0], name: parts[1], isDefault: parts[2] == "1")
+        return CatalogEntry(id: parts[0], name: cleanName(parts[1]), isDefault: parts[2] == "1")
     }
 
     /// What one `--list-models` run established.
@@ -607,9 +607,19 @@ struct CursorCLIService: AIService {
             }
             // Anything with whitespace left in the id is prose, not a model row.
             guard !id.isEmpty, !id.contains(" ") else { continue }
-            out.append(CatalogEntry(id: id, name: name.isEmpty ? id : name, isDefault: isDefault))
+            let clean = cleanName(name)
+            out.append(CatalogEntry(id: id, name: clean.isEmpty ? id : clean, isDefault: isDefault))
         }
         return out
+    }
+
+    /// Some rows' names arrive with a double space ("Grok 4.7  High") and trailing
+    /// zero-width spaces. Drop the invisible characters and collapse whitespace
+    /// runs to one space.
+    static func cleanName(_ name: String) -> String {
+        let invisible: Set<Unicode.Scalar> = ["\u{200B}", "\u{200C}", "\u{200D}", "\u{2060}", "\u{FEFF}"]
+        let visible = String(String.UnicodeScalarView(name.unicodeScalars.filter { !invisible.contains($0) }))
+        return visible.split(whereSeparator: \.isWhitespace).joined(separator: " ")
     }
 
     // MARK: - Naming
@@ -618,21 +628,26 @@ struct CursorCLIService: AIService {
     ///
     /// Cursor is an aggregator, so its ids are meant to name their own vendor — and
     /// most do (`gpt-5.3-codex`, `claude-opus-5-thinking-high`, `gemini-3.7-flash`,
-    /// `glm-5.2-max`, `kimi-*`). Two shapes don't:
+    /// `glm-5.2-max`, `kimi-*`). Three shapes don't:
     ///
-    ///  · Cursor's own line — the `auto` router, `composer-*`, `cheetah`, and the
-    ///    `cursor-…` models. The prefix there is a brand, not routing: the catalog
-    ///    carries no bare `grok-*` at all, only `cursor-grok-4.6-*`, and Cursor's
-    ///    own display name for those rows is "Cursor Grok 4.6". They are its
-    ///    product, tuned and served under its name, so they wear its mark.
+    ///  · Cursor's own line — the `auto` router, `composer-*`, `cheetah`.
+    ///  · `cursor-<model>` — another lab's model served on Cursor's capacity
+    ///    (`cursor-grok-4.6-high` is xAI's Grok 4.6). The prefix is routing, so the
+    ///    vendor is read from the rest of the id; the catalog lists these next to
+    ///    the bare `grok-4.7-*` rows under the same "Grok" names. A `cursor-` id
+    ///    whose remainder names no known lab stays Cursor's.
     ///  · bare `sonnet-*` / `opus-*` / `haiku-*` — some builds print Anthropic's
     ///    families without the `claude-` prefix, which would read as no vendor at
     ///    all and land on a monogram tile.
     static func vendor(forID id: String) -> String {
         let l = id.lowercased()
-        if l.hasPrefix("cursor-") || l.hasPrefix("composer") || l.hasPrefix("cheetah")
+        if l.hasPrefix("composer") || l.hasPrefix("cheetah")
             || l == defaultSentinel || l == "auto" {
             return "Cursor"
+        }
+        if l.hasPrefix("cursor-") {
+            let lab = vendor(forID: String(id.dropFirst(7)))
+            return lab.isEmpty ? "Cursor" : lab
         }
         if l.hasPrefix("sonnet") || l.hasPrefix("opus") || l.hasPrefix("haiku") {
             return "Anthropic"

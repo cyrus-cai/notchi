@@ -375,6 +375,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // The unified threads guide is decided before the notch first
                 // opens, so the open never draws the plain prompt first.
                 model.maybeStartUnifiedIntro()
+                model.maybeStartReactionsIntro()
                 if NoNoAccount.shared.hasToken { break }
             }
         }

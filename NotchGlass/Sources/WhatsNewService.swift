@@ -105,6 +105,36 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.2",
+            date: "2026-09-30",
+            features: [
+                "Right-click a message to reply to it or delete it.",
+                "Emoji reactions are free for every account and can be turned on in Settings → Chat.",
+                "Link pre-check, in Settings → Chat, asks before opening a link that Jev flags as unsafe.",
+                "Run commands, in Settings → Lab, lets the chat model run shell commands on this Mac.",
+                "A line typed to keep, such as a todo or an idea, is saved as a note without a reply.",
+                "About has a 2-minute survey that adds credit after review.",
+            ],
+            improvements: [
+                "Notes and reminders filed from Ask are saved without a Confirm card, and a line above the answer opens them.",
+                "Jev in Copy Sense is free for every account.",
+                "Settings has a new Chat page; the note destination is in General and copy sensing is in Shortcuts.",
+                "Pricing, Usage, Balances and Privacy are listed on the balance card.",
+                "Double-click pins the panel only on blank glass, not on buttons or text.",
+                "Notifications show the reply text.",
+                "Disconnecting a signed-in provider asks for confirmation.",
+                "Esc in the history window clears the search before it closes the window.",
+                "Settings opens faster.",
+            ],
+            fixes: [
+                "Link cards and images keep their size while loading, so the thread no longer changes height.",
+                "A follow-up that wraps to several lines no longer covers the last message.",
+                "Opening a thread after sending a long line no longer overshoots and then drops.",
+                "An unpinned answer window left behind another app no longer comes back to the front.",
+                "Grok models served by Cursor show under xAI, and extra spaces in Cursor model names are removed.",
+            ]
+        ),
+        Entry(
             version: "0.9.1",
             date: "2026-09-28",
             improvements: [

@@ -49,7 +49,7 @@ private struct PermissionStatusPill: View {
                 pillLabel
             } else {
                 Button(action: action) { pillLabel }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.plain).exemptsDoubleClickPin()
                     .onHover { hovering = $0 }
             }
         }
@@ -305,31 +305,33 @@ struct InlineSettingsView: View {
     /// setting gets a home without redesigning the panel.
     enum Section: String, CaseIterable, Identifiable {
         case model = "Model"     // who answers: provider, API key, model override — and the search backend behind it
-        case capture = "Capture" // how a line gets in and where it lands: copy sensing, selected text, Force Click, note destination
+        case chat = "Chat"       // how a conversation behaves: emoji reactions, message sounds, custom instructions
         case appearance = "Appearance" // notch style, interaction, and display placement
-        case shortcuts = "Shortcuts" // editable keyboard controls, its own top-level settings category
-        case general = "General" // language, app presence, permissions, + Advanced (proxy)
+        case shortcuts = "Shortcuts" // editable keyboard controls + copy sensing, its own top-level settings category
+        case general = "General" // language, app presence, note destination, permissions, + Advanced (proxy)
         case stats = "Stats"     // what the archive adds up to — read-only
         case about = "About"     // version + self-update
         case lab = "Lab"         // experiments that change how the app behaves, off by default
         case licenses = "Licenses" // third-party attribution and licences
-        case usage = "Usage"     // Blend1 request list — reached from the wallet ⋯
-        case pricing = "Pricing" // Blend1 per-model rates — reached from the wallet ⋯
-        case balances = "Balances" // Blend1 gifts and purchases — reached from the wallet ⋯
-        case privacy = "Privacy" // what happens to a Blend1 request — reached from the wallet's shield
+        case survey = "Survey"   // the About pane's survey
+        case usage = "Usage"     // Blend1 request list — reached from the wallet's links
+        case pricing = "Pricing" // Blend1 per-model rates — reached from the wallet's links
+        case balances = "Balances" // Blend1 gifts and purchases — reached from the wallet's links
+        case privacy = "Privacy" // what happens to a Blend1 request — reached from the wallet's links
         var id: String { rawValue }
 
         /// A sub-page rather than a category: reached from a parent pane, drawn
         /// across the whole panel, and left through the header's back pill or Esc.
         var isDetail: Bool {
-            self == .licenses || self == .usage || self == .pricing || self == .balances || self == .privacy
+            self == .licenses || self == .survey || self == .usage || self == .pricing || self == .balances
+                || self == .privacy
         }
 
         /// The section a sub-page sits under — where back (and ⎋) returns to.
         /// `nil` for the top-level categories, whose back leaves settings.
         var parent: Section? {
             switch self {
-            case .licenses:        return .about
+            case .licenses, .survey: return .about
             case .usage, .pricing, .balances, .privacy: return .model
             default:               return nil
             }
@@ -349,7 +351,7 @@ struct InlineSettingsView: View {
         var title: String {
             switch self {
             case .model:      return L("sidebar.model")
-            case .capture:    return L("sidebar.capture")
+            case .chat:       return L("sidebar.chat")
             case .general:    return L("sidebar.general")
             case .lab:        return L("sidebar.lab")
             case .shortcuts:  return L("sidebar.shortcuts")
@@ -357,6 +359,7 @@ struct InlineSettingsView: View {
             case .stats:      return L("sidebar.stats")
             case .about:      return L("sidebar.about")
             case .licenses:   return L("about.licenses")
+            case .survey:     return L("survey.title")
             case .usage:      return L("model.usage")
             case .pricing:    return L("model.pricing")
             case .balances:   return L("nono.balances")
@@ -444,6 +447,8 @@ struct InlineSettingsView: View {
     /// seeded synchronously from the last manifest (or its bundled fallback),
     /// then refreshed through the manifest's existing request while visible.
     @State private var promptTemplatePickerOpen = false
+    /// The summon row's "Reset to" menu card.
+    @State private var summonResetMenuOpen = false
     @State private var promptTemplates = RemoteModelManifest.promptTemplates
     @State private var selectedPromptTemplateCategory = ""
     @State private var hoveredPromptTemplateID: String?
@@ -534,11 +539,20 @@ struct InlineSettingsView: View {
                     // The sidebar drops by the pane's runway too, so the first
                     // category stays level with the pane's first row — the runway
                     // moves BOTH columns down, it doesn't stagger them.
+                    // A hidden copy holds the sidebar's width and minimum height;
+                    // the visible one is an overlay so it spans the full column
+                    // height and Lab can sit at the bottom.
                     sidebar
                         .padding(.top, Self.paneTopRunway)
+                        .hidden()
+                        .accessibilityHidden(true)
 
                     paneContent
                         .padding(.leading, 14)
+                }
+                .overlay(alignment: .topLeading) {
+                    sidebar
+                        .padding(.top, Self.paneTopRunway)
                 }
                 // Take the columns' own height, nothing more: the pane already
                 // carries an exact height (content, capped at Recent's), so this
@@ -582,8 +596,28 @@ struct InlineSettingsView: View {
                 .padding(.top, -NotchBody.panelPadding)
                 .padding(.bottom, -NotchBody.panelPadding)
                 .transition(.opacity.combined(with: .scale(scale: 0.96)))
+            } else if model.confirmingDisconnect {
+                // Disconnecting drops the stored sign-in, and getting it back
+                // takes the browser flow again, so it asks first.
+                AccountDisconnectConfirm(
+                    account: Provider.openrouter.displayName,
+                    onCancel: {
+                        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                            model.confirmingDisconnect = false
+                        }
+                    },
+                    onConfirm: {
+                        model.confirmingDisconnect = false
+                        disconnectOpenRouter()
+                    }
+                )
+                .padding(.horizontal, -NotchBody.panelPadding)
+                .padding(.top, -NotchBody.panelPadding)
+                .padding(.bottom, -NotchBody.panelPadding)
+                .transition(.opacity.combined(with: .scale(scale: 0.96)))
             }
         }
+        .animation(.easeOut(duration: 0.16), value: model.confirmingDisconnect)
         .animation(.easeOut(duration: 0.16), value: promptTemplatePickerOpen)
         .animation(.easeOut(duration: 0.16), value: presentedPromptShortcutID)
         // The Force Click gate is NOT mounted here: its scrim has to cover the
@@ -803,7 +837,6 @@ struct InlineSettingsView: View {
                 providerRow
                 modelRow
                 keySection
-                customInstructionsRow
                 // Web search used to be a category of its own — a whole sidebar
                 // entry for two rows. It is the same question this pane already
                 // answers (which backend, and its key), so it rides here as a
@@ -824,29 +857,17 @@ struct InlineSettingsView: View {
                 case .exa:      exaKeyRow
                 case .anysearch: anySearchKeyRow
                 }
-            case .capture:
-                // The whole path a line takes into the notch, in the order it
-                // travels: where the text comes from, then where a jot finally
-                // files. These rows used to be split across Notes and General,
-                // which put "what gets captured" and "where it goes" on
-                // different pages; the two captions here name that split
-                // inside one page instead of relying on row order to imply it.
-                // Copy sensing is the feature; Jev is how that feature
-                // classifies, so the two share a tighter stack instead of
-                // sitting as peer rows among the other capture paths.
-                Text(L("capture.sources"))
-                    .captionLabel()
-                copySenseRow
-                Text(L("capture.destination"))
-                    .captionLabel()
-                    .padding(.top, 2)
-                noteDestinationRow
+            case .chat:
+                messageSoundsRow
+                emojiReactionsRow
+                linkPrecheckRow
+                customInstructionsRow
             case .general:
-                // What's left once the capture rows moved out is genuinely
-                // app-level: how it talks to you, where the app itself appears in
-                // macOS, what the system lets it touch, and the escape hatch.
-                // Dock and menu-bar presence belong beside launch-at-login rather
-                // than among the notch's own visual and interaction settings.
+                // App-level settings: how it talks to you, where the app itself
+                // appears in macOS, where notes are saved, what the system lets
+                // it touch, and the escape hatch. Dock and menu-bar presence
+                // belong beside launch-at-login rather than among the notch's
+                // own visual and interaction settings.
                 appLanguageRow
                 Text(L("general.appPresence"))
                     .captionLabel()
@@ -854,6 +875,10 @@ struct InlineSettingsView: View {
                 launchAtLoginRow
                 dockIconRow
                 menuBarIconRow
+                Text(L("capture.destination"))
+                    .captionLabel()
+                    .padding(.top, 2)
+                noteDestinationRow
                 permissionsSection
                 advancedSection
             case .lab:
@@ -867,6 +892,14 @@ struct InlineSettingsView: View {
                     .foregroundStyle(Tokens.text3)
                     .fixedSize(horizontal: false, vertical: true)
                 unifiedThreadsRow
+                Text(L("lab.commands"))
+                    .captionLabel()
+                    .padding(.top, 2)
+                Text(L("lab.commands.about"))
+                    .font(.sf(Tokens.TypeSize.meta))
+                    .foregroundStyle(Tokens.text3)
+                    .fixedSize(horizontal: false, vertical: true)
+                runCommandsRow
                 Text(L("lab.evaluationNotice"))
                     .font(.sf(Tokens.TypeSize.meta))
                     .foregroundStyle(Tokens.text3)
@@ -879,15 +912,10 @@ struct InlineSettingsView: View {
                 // and which displays carry it. App-level presence in macOS (launch,
                 // Dock, menu bar) lives together in General instead of diluting this
                 // page with a second meaning of "show".
-                if AppIconStyleFeature.isEnabled || HandwritingFeature.isEnabled {
+                if AppIconStyleFeature.isEnabled {
                     Text(L("appearance.style"))
                         .captionLabel()
-                    if AppIconStyleFeature.isEnabled {
-                        appIconStyleRow
-                    }
-                    if HandwritingFeature.isEnabled {
-                        handwrittenAnswersRow
-                    }
+                    appIconStyleRow
                 }
                 Text(L("appearance.behavior"))
                     .captionLabel()
@@ -900,7 +928,6 @@ struct InlineSettingsView: View {
                     }
                 }
                 liveActivityRow
-                messageSoundsRow
                 Text(L("appearance.displays"))
                     .captionLabel()
                     .padding(.top, 2)
@@ -912,6 +939,8 @@ struct InlineSettingsView: View {
                 aboutSection
             case .licenses:
                 licensesSection
+            case .survey:
+                surveySection
             case .usage:
                 usageSection
             case .pricing:
@@ -999,10 +1028,6 @@ struct InlineSettingsView: View {
                 showsRefreshedTag = !SettingsNewMarks.copySenseSeen
             }
             .onChange(of: section) {
-                if section == .capture, !captureTabSeen {
-                    captureTabSeen = true
-                    SettingsNewMarks.captureTabSeen = true
-                }
                 paneScrolledOffTop = false
                 statsHover = nil
                 // The new pane measures its own longest label; keeping the old
@@ -1017,29 +1042,29 @@ struct InlineSettingsView: View {
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 2) {
-            ForEach(Section.sidebarCases) { s in
-                SidebarItem(
-                    title: s.title,
-                    symbol: s == .lab ? "flask" : nil,
-                    selected: section == s,
-                    // The gear's update dot continues here: it leads to settings,
-                    // then the About entry carries it the rest of the way to the
-                    // update action — a quiet neutral dot, never a coloured one.
-                    // Capture wears the same dot until it has been opened once,
-                    // for the settings that are new inside it.
-                    badged: (s == .about && isUpdateAvailable)
-                        || (s == .capture && !captureTabSeen)
-                ) {
-                    withAnimation(.easeOut(duration: 0.16)) { section = s }
-                }
-                // Lab is experiments, not settings: a gap sets it apart
-                // from the categories above.
-                .padding(.top, s == .lab ? 10 : 0)
+            ForEach(Section.sidebarCases.filter { $0 != .lab }) { s in
+                sidebarItem(s)
             }
             Spacer(minLength: 0)
+            // Lab is experiments, not settings: it sits pinned at the bottom,
+            // apart from the categories above.
+            sidebarItem(.lab)
         }
         .frame(width: 104, alignment: .topLeading)
         .padding(.trailing, 12)
+    }
+
+    private func sidebarItem(_ s: Section) -> some View {
+        SidebarItem(
+            title: s.title,
+            selected: section == s,
+            // The gear's update dot continues here: it leads to settings,
+            // then the About entry carries it the rest of the way to the
+            // update action — a quiet neutral dot, never a coloured one.
+            badged: s == .about && isUpdateAvailable
+        ) {
+            withAnimation(.easeOut(duration: 0.16)) { section = s }
+        }
     }
 
     private var isUpdateAvailable: Bool {
@@ -1049,10 +1074,8 @@ struct InlineSettingsView: View {
 
     /// One category row: quiet text that brightens on hover, a faint fill when
     /// selected — same translucent-chip language as GlassMenu, minus the border.
-    /// Lab is the exception: a flask, with the word kept as the tooltip.
     private struct SidebarItem: View {
         var title: String
-        var symbol: String? = nil
         var selected: Bool
         var badged: Bool
         var action: () -> Void
@@ -1073,34 +1096,25 @@ struct InlineSettingsView: View {
                     )
                     .contentShape(Capsule())
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(title)
-            .notchTooltip(title, shows: symbol != nil)
+            .buttonStyle(.plain).exemptsDoubleClickPin()
             .onHover { hovering = $0 }
             .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
         }
 
-        @ViewBuilder
         private var content: some View {
-            if let symbol {
-                Image(systemName: symbol)
+            HStack(spacing: 6) {
+                Text(title)
                     .font(.sf(Tokens.TypeSize.label, weight: .medium))
-                    .frame(width: 28, height: 28)
-            } else {
-                HStack(spacing: 6) {
-                    Text(title)
-                        .font(.sf(Tokens.TypeSize.label, weight: .medium))
-                        .lineLimit(1)
-                    if badged {
-                        Circle()
-                            .fill(Tokens.text2)
-                            .frame(width: 5, height: 5)
-                    }
-                    Spacer(minLength: 0)
+                    .lineLimit(1)
+                if badged {
+                    Circle()
+                        .fill(Tokens.text2)
+                        .frame(width: 5, height: 5)
                 }
-                .padding(.horizontal, 10)
-                .frame(height: 28)
+                Spacer(minLength: 0)
             }
+            .padding(.horizontal, 10)
+            .frame(height: 28)
         }
     }
 
@@ -1118,7 +1132,7 @@ struct InlineSettingsView: View {
                     ?? L("settings.back")
             ) {
                 if let parent = section.parent {
-                    withAnimation(.easeOut(duration: 0.16)) { section = parent }
+                    withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) { section = parent }
                 } else {
                     withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                         model.closeSettings()
@@ -1275,7 +1289,7 @@ struct InlineSettingsView: View {
                 )
                 .contentShape(Capsule())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.plain).exemptsDoubleClickPin()
             .onHover { inside in
                 if inside { hoveredDisclosure = .keys }
                 else if hoveredDisclosure == .keys { hoveredDisclosure = nil }
@@ -1623,13 +1637,12 @@ struct InlineSettingsView: View {
     /// resolves to a concrete backend, and only that backend's key row shows below.
     private var searchBackendRow: some View {
         settingRow(label: L("search.backend")) {
-            GlassMenu(title: searchBackendLabel(selectedBackend)) {
-                ForEach(APIKeyStore.SearchBackend.allCases) { b in
-                    Button { selectSearchBackend(b) } label: {
-                        menuOption(searchBackendLabel(b), selected: b == selectedBackend)
-                    }
+            GlassMenu(title: searchBackendLabel(selectedBackend),
+                      items: APIKeyStore.SearchBackend.allCases.map { b in
+                GlassMenuItem(title: searchBackendLabel(b), selected: b == selectedBackend) {
+                    selectSearchBackend(b)
                 }
-            }
+            })
         }
     }
 
@@ -1953,120 +1966,115 @@ struct InlineSettingsView: View {
     /// the balance, a stepper and a button shoulder to shoulder at the same
     /// weight, with nothing telling the eye which of the three it came for.
     ///
-    /// So it is a block, in the shape every balance is written in — the label
-    /// small and quiet above, the figure large and alone, the actions under it.
-    /// Stripe, OpenAI and every bank statement put a balance this way for the
-    /// same reason: the number is the content, and a caption is a caption.
+    /// So it is a block: the credit as a labelled figure.
     @ViewBuilder
     private var nonoAccountRow: some View {
         let snapshot = nono.snapshot
         VStack(alignment: .leading, spacing: 0) {
-            // How this number is spent — prepaid, per token, no expiry — sits
-            // behind the ⓘ on the label rather than as a line under the figure.
             HStack(spacing: 2) {
-                Text(L("nono.balance"))
-                    .captionLabel()
-                SettingInfo(
-                    L(snapshot?.hasGift == true ? "nono.lineup.billing.gift" : "nono.lineup.billing"),
-                    glyph: 10, hit: 13)
-                Spacer(minLength: 0)
-                // What happens to a request paid from this balance, on a page of
-                // its own. Only this card: a key of your own sends requests
-                // straight to its vendor.
-                PrivacyShieldButton {
-                    withAnimation(.easeOut(duration: 0.16)) { section = .privacy }
+                Text(L("nono.credit"))
+                    .font(.sf(Tokens.TypeSize.form))
+                    .foregroundStyle(Tokens.text2)
+                // How this figure is spent — prepaid, per token, no expiry —
+                // sits behind the ⓘ rather than as a line under it.
+                if let snapshot {
+                    SettingInfo(
+                        L(snapshot.hasGift ? "nono.lineup.billing.gift" : "nono.lineup.billing"),
+                        glyph: 10, hit: 13)
                 }
             }
 
-            Group {
-                if case .working(.registering) = nono.phase {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text(L("nono.preparing"))
-                            .font(.sf(Tokens.TypeSize.label))
-                            .foregroundStyle(Tokens.text2)
-                    }
-                } else if let snapshot {
-                    // Prompt, the bundled wordmark face — the same one the Stats
-                    // pane sets its figures in, and for the same reason: this
-                    // number IS the content, not a label on it. Larger than
-                    // anything else in the card, because it is the thing the
-                    // pane is opened to check.
-                    HStack(alignment: .center, spacing: 8) {
-                        // Opened from the prompt's grant chip, the figure starts
-                        // at the balance before the grant and rolls up to the
-                        // current one (see `NoNoAccount.claimGrant`).
-                        let shownUSD = nono.rollFromUSD ?? snapshot.credit.remainingUSD
-                        Group {
-                            if Self.isSubCent(shownUSD) {
-                                Text("<").font(.brand(18)) + Text("$0.01").font(.brand(26))
-                            } else {
-                                // The animation has to ride the Text itself for
-                                // `numericText` to fire (see `StatsFigure`).
-                                Text(Self.money(shownUSD)).font(.brand(26))
-                                    .contentTransition(.numericText(value: shownUSD))
-                                    .animation(reduceMotion ? nil : .snappy(duration: 0.6),
-                                               value: shownUSD)
-                            }
-                        }
-                        .foregroundStyle(Tokens.text1)
-                        .lineLimit(1)
-                        .fixedSize()
-                        if snapshot.isEmpty {
-                            LowBalanceTag()
-                        }
-                    }
-                    .task(id: nono.rollFromUSD != nil) {
-                        guard nono.rollFromUSD != nil else { return }
-                        // Let the settings pane finish opening so the roll is seen.
-                        try? await Task.sleep(for: .milliseconds(450))
-                        nono.finishGrantRoll()
-                    }
-                } else if case .failed = nono.phase {
-                    // The error pill below says what happened; a figure here
-                    // would be a number we do not have.
-                    Color.clear
-                } else {
-                    // `/me` is still in flight — the first appearance after a
-                    // launch. A spinner, not a guess: drawing $0.00 tells
-                    // someone who has credit that they have none.
+            if case .working(.registering) = nono.phase {
+                HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
+                    Text(L("nono.preparing"))
+                        .font(.sf(Tokens.TypeSize.label))
+                        .foregroundStyle(Tokens.text2)
                 }
-            }
-            .frame(height: 34, alignment: .leading)
-            .padding(.top, 4)
-
-            if case .failed(let why) = nono.phase {
-                statusPill(ok: false, message: why)
-                    .padding(.top, 6)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                .frame(height: 34, alignment: .leading)
+                .padding(.top, 4)
             } else if let snapshot {
-                // Pricing, Usage and Billing history all live behind the ⋯
-                // beside Add — none of them belong on the face.
-                HStack(spacing: 10) {
-                    addCreditButton(bought: snapshot.credit.grantedUSD)
-                    nonoMoreMenu()
+                // The figure, under its label.
+                nonoCreditRow(snapshot)
+                    .padding(.top, 12)
+
+                // The first three open a sub-page. Privacy leaves the app, the
+                // same page About opens, so it carries the outbound arrow.
+                HStack(spacing: 14) {
                     Spacer(minLength: 0)
+                    UnderlineLink(title: L("model.pricing")) { open(.pricing) }
+                    UnderlineLink(title: L("model.usage")) { open(.usage) }
+                    UnderlineLink(title: L("nono.balances")) { open(.balances) }
+                    UnderlineLink(title: L("nono.privacy.link"), external: true) {
+                        LinkGate.shared.open(URL(string: "https://www.notch.website/privacy")!)
+                    }
                 }
                 .padding(.top, 10)
 
-                // The one state the figure cannot explain on its own: there is
-                // money in the account and it still will not spend. Nothing else
-                // earns a line here — "no credit yet" under a balance reading
-                // $0.00, beside a button offering to add some, is one fact
-                // written three times.
+                // The one state the figures cannot explain on their own: there
+                // is money in the account and it still will not spend.
                 if snapshot.cappedForToday {
                     Text(L("nono.dailyCap"))
                         .font(.sf(Tokens.TypeSize.meta))
                         .foregroundStyle(Tokens.text4)
                         .padding(.top, 6)
                 }
+            } else if case .failed(let why) = nono.phase {
+                statusPill(ok: false, message: why)
+                    .padding(.top, 6)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            } else {
+                // `/me` is still in flight — the first appearance after a
+                // launch. A spinner, not a guess: drawing $0.00 tells someone
+                // who has credit that they have none.
+                ProgressView().controlSize(.small)
+                    .frame(height: 34, alignment: .leading)
+                    .padding(.top, 4)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         // Rates are no longer on the face, so the card no longer fetches a
         // catalog to draw itself. `pricingSection` asks for them when it opens.
         .task { await nono.load() }
+    }
+
+    private func open(_ page: Section) {
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) { section = page }
+    }
+
+    /// What the account holds: gift and bought credit together.
+    private func nonoCreditRow(_ snapshot: NoNoAccount.Snapshot) -> some View {
+        HStack(alignment: .center, spacing: 8) {
+            // Opened from the prompt's grant chip, the figure starts at the
+            // balance before the grant and rolls up to the current one (see
+            // `NoNoAccount.claimGrant`). The animation has to ride the Text
+            // itself for `numericText` to fire (see `StatsFigure`).
+            let shownUSD = nono.rollFromUSD ?? snapshot.credit.remainingUSD
+            Text(Self.money(shownUSD))
+                .font(.brand(Tokens.TypeSize.prompt))
+                .foregroundStyle(Tokens.text2)
+                .monospacedDigit()
+                .contentTransition(.numericText(value: shownUSD))
+                .animation(reduceMotion ? nil : .snappy(duration: 0.6), value: shownUSD)
+                .lineLimit(1)
+                .fixedSize()
+            if snapshot.isEmpty {
+                LowBalanceTag()
+            }
+            if !showingAmount {
+                ChipLink(title: L("nono.add")) { showingAmount = true }
+                    .padding(.leading, 4)
+            }
+            addCreditButton(bought: snapshot.credit.grantedUSD)
+                .padding(.leading, 4)
+            Spacer(minLength: 0)
+        }
+        .task(id: nono.rollFromUSD != nil) {
+            guard nono.rollFromUSD != nil else { return }
+            // Let the settings pane finish opening so the roll is seen.
+            try? await Task.sleep(for: .milliseconds(450))
+            nono.finishGrantRoll()
+        }
     }
 
     /// One row of the wallet's lineup: the name the picker already uses, and
@@ -2253,7 +2261,7 @@ struct InlineSettingsView: View {
         Image(systemName: symbol)
             .font(.sf(Tokens.TypeSize.meta))
             .foregroundStyle(Tokens.text3)
-            .help(title)
+            .notchTooltip(title)
             .accessibilityLabel(title)
     }
 
@@ -2263,18 +2271,13 @@ struct InlineSettingsView: View {
     /// where Stripe's flat fee costs the most per dollar and a default should
     /// not steer people into it.
     @State private var topUpUSD: Double = 5
-    /// Set when the wallet was opened by picking Jev in Copy sensing: the
-    /// purchase that follows turns Jev on by itself.
-    @State private var armJevAfterTopUp = false
     /// Whether the sidebar still wears its dot on Capture. Mirrored in `@State`
     /// so the pane redraws the moment that pane is opened.
-    @State private var captureTabSeen = SettingsNewMarks.captureTabSeen
     /// Whether the Copy sensing row wears its tag. Read ONCE per appearance of
     /// Settings (see `onAppear`) rather than tracked live: opening the menu
     /// records the tag as read, and this visit keeps showing it anyway.
     @State private var showsRefreshedTag = false
     @State private var addCreditHovering = false
-    @State private var receiptsMenuHovering = false
     @State private var usageLines: [NoNoAccount.UsageLine] = []
     @State private var usageLoading = false
     @State private var usageFailed = false
@@ -2282,9 +2285,7 @@ struct InlineSettingsView: View {
     @State private var balancesLoading = false
     @State private var balancesFailed = false
     @State private var showingAmount = false
-    /// Whether the ⋯ menu card is up, and whether the rate fetch the Pricing
-    /// page started is still in flight.
-    @State private var showingMore = false
+    /// Whether the rate fetch the Pricing page started is still in flight.
     @State private var nonoRatesLoading = false
 
     /// The block's action. Collapsed it is one button; opened, the stepper
@@ -2303,6 +2304,7 @@ struct InlineSettingsView: View {
                     .transition(.scale(scale: 0.86, anchor: .trailing).combined(with: .opacity))
             }
 
+            if showingAmount {
             Button {
                 if showingAmount {
                     Task {
@@ -2313,110 +2315,23 @@ struct InlineSettingsView: View {
                         // not on the balance being non-zero, is what makes this
                         // work for a repeat purchase.
                         await nono.awaitCredit(boughtAbove: bought)
-                        // This purchase was started by asking for Jev in Copy
-                        // sensing. It is on now — unless the amount bought still
-                        // falls short of the bar, in which case the pick is
-                        // simply dropped rather than half-applied.
-                        if armJevAfterTopUp {
-                            armJevAfterTopUp = false
-                            if nono.canUseRemoteSense { selectCopySenseMode(.jev) }
-                        }
                     }
                     showingAmount = false
                 } else {
                     showingAmount = true
                 }
             } label: {
-                AddCreditButtonFace(title: showingAmount ? L("nono.addShort") : L("nono.add"),
-                                    lit: addCreditHovering)
+                AddCreditButtonFace(title: showingAmount ? L("nono.addShort") : "",
+                                    lit: addCreditHovering, compact: true, height: 30)
             }
+            .accessibilityLabel(showingAmount ? L("nono.addShort") : L("nono.add"))
             .buttonStyle(GlassPressStyle())
             .onHover { addCreditHovering = $0 }
             .animation(.easeOut(duration: Tokens.hoverFade), value: addCreditHovering)
+            }
         }
         .animation(reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 0.82),
                    value: showingAmount)
-    }
-
-    /// The card's secondary menu: what the models charge, this wallet's
-    /// request list, and its billing history. None of those is the
-    /// action this row is for — Add is — so they live in a trailing ⋯ rather
-    /// than sitting as peers of the purchase. Pricing, Usage and Balances each
-    /// open a sub-page.
-    ///
-    /// All three show whether or not the wallet has ever been paid into.
-    /// Receipts sit inside Billing history, under the table.
-    @ViewBuilder
-    private func nonoMoreMenu() -> some View {
-        Button {
-            showingMore.toggle()
-        } label: {
-            Image(systemName: "ellipsis")
-                .font(.sf(Tokens.TypeSize.form, weight: .medium))
-                .foregroundStyle(receiptsMenuHovering ? Tokens.text1 : Tokens.text3)
-                .frame(width: Tokens.Control.chip, height: Tokens.Control.chip)
-                // Bare at rest; on hover it wears the lit recessed surface, the
-                // same floor and rim as Add credit beside it.
-                .background {
-                    Color.clear
-                        .recessedSurface(in: Circle(), lit: true)
-                        .opacity(receiptsMenuHovering ? 1 : 0)
-                }
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .onHover { receiptsMenuHovering = $0 }
-        .animation(.easeOut(duration: Tokens.hoverFade), value: receiptsMenuHovering)
-        .accessibilityLabel(L("nono.more"))
-        // The same floating glass card as Recent's ⋯ menu — its own window, no
-        // popover arrow, same slab, row metrics and hover wash.
-        .modifier(MenuCardWindow(
-            open: showingMore,
-            onDismiss: { _ in showingMore = false },
-            card: {
-                AnyView(
-                    VStack(alignment: .leading, spacing: ManageMenuMetrics.rowSpacing) {
-                        nonoMoreRow(icon: LucideIcons.pricingBars, title: L("model.pricing")) {
-                            showingMore = false
-                            withAnimation(.easeOut(duration: 0.16)) { section = .pricing }
-                        }
-                        nonoMoreRow(icon: LucideIcons.activity, title: L("model.usage")) {
-                            showingMore = false
-                            withAnimation(.easeOut(duration: 0.16)) { section = .usage }
-                        }
-                        nonoMoreRow(icon: LucideIcons.receipt, title: L("nono.balances")) {
-                            showingMore = false
-                            withAnimation(.easeOut(duration: 0.16)) { section = .balances }
-                        }
-                    }
-                    .padding(ManageMenuMetrics.cardPadding)
-                    .frame(minWidth: 168, alignment: .leading)
-                    .fixedSize()
-                    .manageMenuCardBackground()
-                )
-            }))
-    }
-
-    /// One row of the ⋯ card, in Recent's manage-menu row style — icon, then label.
-    private func nonoMoreRow(icon: LucideIcons.Mark, title: String,
-                             action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: ManageMenuMetrics.rowContentSpacing) {
-                LucideIcon(mark: icon)
-                    .foregroundStyle(Tokens.text3)
-                Text(title)
-                    .font(.sf(ManageMenuMetrics.fontSize, weight: .medium))
-                    .foregroundStyle(Tokens.text2)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, ManageMenuMetrics.rowHorizontalPadding)
-            .padding(.vertical, ManageMenuMetrics.rowVerticalPadding)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(ManageMenuRowStyle())
-        .onHover { inside in
-            if inside { Haptics.alignment() }
-        }
     }
 
     /// Ask the gateway what it charges right now, bypassing every cache between
@@ -2523,7 +2438,11 @@ struct InlineSettingsView: View {
                     } else {
                         SettingActionButton(title: L("model.test")) { test() }
                     }
-                    SettingActionButton(title: L("model.disconnect")) { disconnectOpenRouter() }
+                    SettingActionButton(title: L("model.disconnect")) {
+                        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                            model.confirmingDisconnect = true
+                        }
+                    }
                 } else {
                     switch orAuth.phase {
                     case .waiting, .exchanging:
@@ -2581,7 +2500,7 @@ struct InlineSettingsView: View {
                 if !installed {
                     // No CLI yet → link to install docs (there's nothing to sign into).
                     codexPillButton(L("codex.status.getCodex")) {
-                        NSWorkspace.shared.open(Provider.codex.signupURL)
+                        LinkGate.shared.open(Provider.codex.signupURL)
                     }
                 } else if signedIn {
                     // Signed in → status + Re-authorize (re-run `codex login`), NOT a
@@ -2626,7 +2545,7 @@ struct InlineSettingsView: View {
                 if !installed {
                     // No CLI yet → link to the install docs.
                     codexPillButton(L("claudecode.status.get")) {
-                        NSWorkspace.shared.open(Provider.claudeCode.signupURL)
+                        LinkGate.shared.open(Provider.claudeCode.signupURL)
                     }
                 } else {
                     statusPill(ok: signedIn,
@@ -2665,7 +2584,7 @@ struct InlineSettingsView: View {
                 if !installed {
                     // No CLI yet → link to install docs (there's nothing to sign into).
                     codexPillButton(L("grok.status.get")) {
-                        NSWorkspace.shared.open(Provider.grokCode.signupURL)
+                        LinkGate.shared.open(Provider.grokCode.signupURL)
                     }
                 } else if signedIn {
                     // Signed in → status + Re-authorize (re-run `grok login`).
@@ -2708,7 +2627,7 @@ struct InlineSettingsView: View {
                 if !installed {
                     // No CLI yet → link to the install docs.
                     codexPillButton(L("commandcode.status.get")) {
-                        NSWorkspace.shared.open(Provider.commandCode.signupURL)
+                        LinkGate.shared.open(Provider.commandCode.signupURL)
                     }
                 } else {
                     statusPill(ok: signedIn,
@@ -2752,7 +2671,7 @@ struct InlineSettingsView: View {
                 if !installed {
                     // No CLI yet → link to the project's install docs.
                     codexPillButton(L("pi.status.get")) {
-                        NSWorkspace.shared.open(Provider.piCode.signupURL)
+                        LinkGate.shared.open(Provider.piCode.signupURL)
                     }
                 } else {
                     statusPill(ok: signedIn,
@@ -2807,7 +2726,7 @@ struct InlineSettingsView: View {
                 if !installed {
                     // No CLI yet → link to install docs (there's nothing to sign into).
                     codexPillButton(L("cursor.status.get")) {
-                        NSWorkspace.shared.open(Provider.cursorCode.signupURL)
+                        LinkGate.shared.open(Provider.cursorCode.signupURL)
                     }
                     cursorRecheckButton(rechecking)
                 } else if outdated {
@@ -2817,7 +2736,7 @@ struct InlineSettingsView: View {
                     statusPill(ok: false, message: L("cursor.status.outdated"))
                     Spacer(minLength: 8)
                     codexPillButton(L("cursor.action.update")) {
-                        NSWorkspace.shared.open(Provider.cursorCode.signupURL)
+                        LinkGate.shared.open(Provider.cursorCode.signupURL)
                     }
                     cursorRecheckButton(rechecking)
                 } else if signingIn {
@@ -2888,7 +2807,7 @@ struct InlineSettingsView: View {
     /// Re-authorize) — same chrome as the OpenRouter Connect button.
     private func codexPillButton(_ title: String, action: @escaping () -> Void) -> some View {
         Button(title, action: action)
-            .buttonStyle(.plain)
+            .buttonStyle(.plain).exemptsDoubleClickPin()
             .font(.sf(Tokens.TypeSize.form, weight: .medium))
             .foregroundStyle(Tokens.text1)
             .padding(.horizontal, 12)
@@ -2901,6 +2820,19 @@ struct InlineSettingsView: View {
     /// up, free) in the browser, and the key arrives by itself. Slightly brighter
     /// than the surrounding chips because it IS the setup.
     @State private var connectHovering = false
+    @State private var surveySource: String?
+    @State private var surveySourceDetail = ""
+    @State private var surveyRole: String?
+    @State private var surveyFrequency: String?
+    @State private var surveyUses: Set<String> = []
+    @State private var surveyRoleOther = ""
+    @State private var surveyUsesOther = ""
+    @State private var surveyAlternatives: Set<String> = []
+    @State private var surveyAlternativesOther = ""
+    @State private var surveyWish = ""
+    @State private var surveySending = false
+    @State private var surveyFailed = false
+    @State private var surveySubmitHovering = false
 
     private var connectButton: some View {
         Button {
@@ -3046,17 +2978,6 @@ struct InlineSettingsView: View {
         return modelID.isEmpty ? provider.defaultModel : modelID
     }
 
-    /// The closed trigger names the current value; once opened, every single-choice
-    /// menu keeps that context with the same native checkmark row.
-    @ViewBuilder
-    private func menuOption(_ title: String, selected: Bool) -> some View {
-        if selected {
-            Label(title, systemImage: "checkmark")
-        } else {
-            Text(title)
-        }
-    }
-
     /// The mark on a setting that changed since the user last looked. Same tag
     /// shape as the Jev row's, so a badge is one species on this pane.
     struct RefreshedBadge: View {
@@ -3106,16 +3027,6 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// The same row for a title carrying its own runs (the Jev row's tag).
-    @ViewBuilder
-    private func menuOption(_ title: AttributedString, selected: Bool) -> some View {
-        if selected {
-            Label { Text(title) } icon: { Image(systemName: "checkmark") }
-        } else {
-            Text(title)
-        }
-    }
-
     /// Step one: **which backend answers.** A menu of the backends you bring
     /// yourself, split into the ones that can answer right now and the ones that
     /// still need a key.
@@ -3139,46 +3050,28 @@ struct InlineSettingsView: View {
             GlassMenu(title: provider.displayName,
                       logoVendor: provider.brandVendor,
                       logoFallback: provider.displayName,
-                      logoSymbol: provider.brandSymbol) {
-                let theirs = Provider.offered.filter { !$0.isFirstParty }
-                let ready = theirs.filter(providerReady)
-                let unready = theirs.filter { !providerReady($0) }
-                if !ready.isEmpty {
-                    SwiftUI.Section(L("model.picker.configured")) {
-                        ForEach(ready) { p in providerOption(p) }
-                    }
-                }
-                if !unready.isEmpty {
-                    SwiftUI.Section(L("model.picker.unconfigured")) {
-                        ForEach(unready) { p in providerOption(p) }
-                    }
-                }
-            }
+                      logoSymbol: provider.brandSymbol,
+                      items: providerMenuItems)
         }
     }
 
-    /// One provider row in that menu: its brand mark, its name, and a native
-    /// checkmark on the backend in effect.
-    ///
-    /// A `Toggle` rather than the `Button` + `menuOption` pair the other menus
-    /// use, because a menu item has one image slot: the checkmark hack spends it
-    /// on the tick, leaving nowhere for the logo. A toggle puts the tick in the
-    /// state column where AppKit draws it, and the mark takes the image slot.
-    /// Switching off the current provider is meaningless, so only the on edge acts.
-    @ViewBuilder
-    private func providerOption(_ p: Provider) -> some View {
-        Toggle(isOn: Binding(get: { p == provider },
-                             set: { if $0 { selectProvider(p) } })) {
-            Label {
-                Text(p.displayName)
-            } icon: {
-                if let mark = VendorLogos.menuImage(vendor: p.brandVendor,
-                                                    fallback: p.displayName,
-                                                    symbol: p.brandSymbol) {
-                    Image(nsImage: mark).renderingMode(.template)
+    /// The provider menu's rows: the backends that can answer now, then the
+    /// ones that still need a key, each group under its own title.
+    private var providerMenuItems: [GlassMenuItem] {
+        let theirs = Provider.offered.filter { !$0.isFirstParty }
+        let ready = theirs.filter(providerReady)
+        let unready = theirs.filter { !providerReady($0) }
+        func rows(_ group: [Provider], header: String) -> [GlassMenuItem] {
+            group.enumerated().map { index, p in
+                GlassMenuItem(title: p.displayName,
+                              selected: p == provider,
+                              header: index == 0 ? header : nil) {
+                    selectProvider(p)
                 }
             }
         }
+        return rows(ready, header: L("model.picker.configured"))
+            + rows(unready, header: L("model.picker.unconfigured"))
     }
 
     /// Step two: **which of that provider's models.** The picker card is the same
@@ -3200,12 +3093,15 @@ struct InlineSettingsView: View {
                 } label: {
                     modelPickerLabel(provider: provider, modelID: effectiveModelID)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.plain).exemptsDoubleClickPin()
                 .fixedSize()
                 // The system's own menu, dropped from the chip — the provider is
                 // settled one row up, so it lists that provider's models flat.
+                // The rows are built only while the menu is up, as on the panel
+                // body: this pane's body re-runs on every account, catalog and
+                // updater publish, and `rows` walks every provider's catalog.
                 .modelMenu(isPresented: $modelPickerOpen,
-                           models: catalog.rows(selected: provider),
+                           models: modelPickerOpen ? catalog.rows(selected: provider) : [],
                            selectedProvider: provider,
                            selectedID: effectiveModelID,
                            lockedProvider: provider,
@@ -3257,7 +3153,7 @@ struct InlineSettingsView: View {
                 }
                 .buttonStyle(ShortcutChipStyle(rest: 0.055, restStroke: 0.1))
                 .disabled(modelsBusy)
-                .help(L("model.refresh"))
+                .notchTooltip(L("model.refresh"))
                 .opacity(refreshVisible ? 1 : 0)
                 .allowsHitTesting(refreshVisible)
             }
@@ -3430,9 +3326,7 @@ struct InlineSettingsView: View {
     /// stays — it carries the persisted value and the activation-policy mapping,
     /// which a raw Bool would throw away.
     private var dockIconRow: some View {
-        settingRow(label: L("general.dockIcon.toggle"),
-                   info: L("general.dockIcon.footer"),
-                   aligned: true) {
+        settingRow(label: L("general.dockIcon.toggle"), aligned: true) {
             Toggle("", isOn: Binding(
                 get: { dockIconVisibility == .shown },
                 set: { Haptics.levelChange(); selectDockIconVisibility($0 ? .shown : .hidden) }
@@ -3484,13 +3378,12 @@ struct InlineSettingsView: View {
             // Path sub-row lives in the row's content column so it left-aligns
             // with the menu above it — no guessed label-width offset.
             VStack(alignment: .leading, spacing: 8) {
-                GlassMenu(title: noteDestination.label) {
-                    ForEach(NoteDestination.allCases) { d in
-                        Button { selectNoteDestination(d) } label: {
-                            menuOption(d.label, selected: d == noteDestination)
-                        }
+                GlassMenu(title: noteDestination.label,
+                          items: NoteDestination.allCases.map { d in
+                    GlassMenuItem(title: d.label, selected: d == noteDestination) {
+                        selectNoteDestination(d)
                     }
-                }
+                })
                 if noteDestination == .markdownFolder {
                     HStack(spacing: 10) {
                         Text(notesFolderDisplay)
@@ -3543,6 +3436,8 @@ struct InlineSettingsView: View {
     private var customInstructionsRow: some View {
         VStack(alignment: .leading, spacing: 12) {
             Button {
+                // Opening and closing this in quick succession is not a pin.
+                NotchPanel.exemptNextDoubleClick()
                 withAnimation(.easeOut(duration: 0.16)) { instructionsSectionOpen.toggle() }
             } label: {
                 HStack(spacing: 5) {
@@ -3569,7 +3464,7 @@ struct InlineSettingsView: View {
                 )
                 .contentShape(Capsule())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.plain).exemptsDoubleClickPin()
             .onHover { inside in
                 if inside { hoveredDisclosure = .instructions }
                 else if hoveredDisclosure == .instructions { hoveredDisclosure = nil }
@@ -3652,7 +3547,7 @@ struct InlineSettingsView: View {
                 )
                 .contentShape(Capsule())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.plain).exemptsDoubleClickPin()
             .onHover { inside in
                 if inside { hoveredDisclosure = .permissions }
                 else if hoveredDisclosure == .permissions { hoveredDisclosure = nil }
@@ -3949,6 +3844,36 @@ struct InlineSettingsView: View {
         }
     }
 
+    /// Whether Jev reacts to a sent message with an emoji. Same flag as
+    /// `NotchModel.emojiReactionsEnabled`, read per message.
+    private var emojiReactionsRow: some View {
+        settingRow(label: L("chat.emojiReactions"),
+                   richInfo: emojiReactionsHint,
+                   aligned: true) {
+            Toggle("", isOn: Binding(
+                get: { model.emojiReactionsEnabled },
+                set: { Haptics.levelChange(); model.emojiReactionsEnabled = $0 }
+            ))
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .tint(Tokens.text2)
+        }
+    }
+
+    /// The reactions hint, with a Learn more link at the end of its last line,
+    /// the credential rule it explains. Underlined for the same reason as Stats' privacy
+    /// link: the popover body is already `text2`.
+    private var emojiReactionsHint: AttributedString {
+        var text = AttributedString(L("chat.emojiReactions.hint") + " ")
+        var link = AttributedString(L("model.detail.learnMore"))
+        link.link = URL(string: "https://notch.website/reactions")
+        link.foregroundColor = Tokens.text1
+        link.underlineStyle = .single
+        text.append(link)
+        return text
+    }
+
     /// The message tones: sending, each reply bubble landing, and a reaction.
     /// Same flag as the row in the result header's more menu.
     private var messageSoundsRow: some View {
@@ -3965,17 +3890,31 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// Whether the assistant's answers come out in a hand instead of typeset.
-    /// Prose only — your question, the interface and every code block stay as
-    /// they are, and nothing about the copied text changes. That scope is the
-    /// one thing the label can't say, so it's the whole of the hint.
-    private var handwrittenAnswersRow: some View {
-        settingRow(label: L("appearance.handwritten"),
-                   info: L("appearance.handwritten.hint"),
+    /// Whether Jev checks a clicked link before it opens. Same flag as
+    /// `NotchModel.linkPrecheckEnabled`, read per click by `LinkGate`.
+    private var linkPrecheckRow: some View {
+        settingRow(label: L("chat.linkPrecheck"),
+                   info: L("chat.linkPrecheck.hint"),
                    aligned: true) {
             Toggle("", isOn: Binding(
-                get: { model.handwrittenAnswers },
-                set: { Haptics.levelChange(); model.handwrittenAnswers = $0 }
+                get: { model.linkPrecheckEnabled },
+                set: { Haptics.levelChange(); model.linkPrecheckEnabled = $0 }
+            ))
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .tint(Tokens.text2)
+        }
+    }
+
+    /// Lab: whether the chat model gets `run_shell`. Same flag as
+    /// `NotchModel.shellToolEnabled`, read per question.
+    private var runCommandsRow: some View {
+        settingRow(label: L("lab.runCommands"),
+                   aligned: true) {
+            Toggle("", isOn: Binding(
+                get: { model.shellToolEnabled },
+                set: { Haptics.levelChange(); model.shellToolEnabled = $0 }
             ))
             .labelsHidden()
             .toggleStyle(.switch)
@@ -4017,7 +3956,7 @@ struct InlineSettingsView: View {
                 )
                 .contentShape(Capsule())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.plain).exemptsDoubleClickPin()
             .onHover { inside in
                 if inside { hoveredDisclosure = .advanced }
                 else if hoveredDisclosure == .advanced { hoveredDisclosure = nil }
@@ -4295,19 +4234,12 @@ struct InlineSettingsView: View {
     /// re-renders in the new language at once, no relaunch.
     private var appLanguageRow: some View {
         settingRow(label: L("general.appLanguage")) {
-            GlassMenu(title: appLanguage.label) {
-                ForEach(AppLanguage.allCases) { lang in
-                    Button {
-                        selectAppLanguage(lang)
-                    } label: {
-                        if lang == appLanguage {
-                            Label(lang.label, systemImage: "checkmark")
-                        } else {
-                            Text(lang.label)
-                        }
-                    }
+            GlassMenu(title: appLanguage.label,
+                      items: AppLanguage.allCases.map { lang in
+                GlassMenuItem(title: lang.label, selected: lang == appLanguage) {
+                    selectAppLanguage(lang)
                 }
-            }
+            })
         }
     }
 
@@ -4353,96 +4285,29 @@ struct InlineSettingsView: View {
             // the row: something disappearing under the cursor at the moment of
             // the click reads as a glitch, and the tag is still the label for
             // what is on screen. It is gone the next time Settings is opened.
-            NativeMenuChip(title: copySenseModeLabel, items: copySenseMenuItems) {
+            GlassMenu(title: copySenseModeLabel, items: copySenseMenuItems) {
                 SettingsNewMarks.copySenseSeen = true
             }
             Spacer(minLength: 0)
         }
-        // Whether Jev is on the table depends on the account, which this pane
-        // never had a reason to read. Stale-guarded, so reopening Settings is
-        // not a request per visit.
-        .task { await nono.refreshIfStale() }
     }
 
-    /// How far this account is from the bar, as money: what it has bought over
-    /// `NoNoAccount.senseMinPaidUSD`. A tag that says only what is required
-    /// leaves someone who has already put in $1 with no idea they are halfway;
-    /// the pair says both the bar and their own standing against it.
-    ///
-    /// Read off the one constant the gateway also holds, so raising the bar
-    /// never leaves a stale number in a menu row.
-    private var senseTopUpProgress: String {
-        let paid = nono.snapshot?.credit.grantedUSD ?? 0
-        return "$\(Self.plainMoney(paid))/$\(Self.plainMoney(NoNoAccount.senseMinPaidUSD))"
-    }
-
-    /// The bar as money, for the prose that names it. Same single source as the
-    /// tag, so the two can never disagree about the price.
-    static var senseMinPaidMoney: String { "$" + plainMoney(NoNoAccount.senseMinPaidUSD) }
-
-    /// A figure for that pair: whole dollars stay whole, so a fresh account
-    /// reads "$0/$1" rather than "$0.00/$1.00"; the sign is added by the
-    /// caller.
-    private static func plainMoney(_ amount: Double) -> String {
-        amount == amount.rounded()
-            ? String(format: "%.0f", amount)
-            : String(format: "%.2f", amount)
-    }
-
-    /// The three states as menu rows. Jev's row carries the tag when this
-    /// account cannot use it yet — what it takes, and how far it already is —
-    /// which is why this row's menu is an `NSMenu` (see `NativeMenuChip`).
-    private var copySenseMenuItems: [NativeMenuItem] {
+    /// The three states as menu rows.
+    private var copySenseMenuItems: [GlassMenuItem] {
         [
-            NativeMenuItem(title: L("senseMode.off"), selected: copySenseMode == nil) {
+            GlassMenuItem(title: L("senseMode.off"), selected: copySenseMode == nil) {
                 selectCopySenseMode(nil)
             },
-            NativeMenuItem(title: CopySenseEngine.onDevice.label,
+            GlassMenuItem(title: CopySenseEngine.onDevice.label,
                            selected: copySenseMode == .onDevice) {
                 selectCopySenseMode(.onDevice)
             },
-            // Tags are for the account that cannot use Jev yet: what it costs
-            // to use (nothing) and what it takes to reach. Once it is reached
-            // they have both been answered, and the row is just a row.
-            NativeMenuItem(title: CopySenseEngine.jev.label,
-                           tag: nono.canUseRemoteSense ? nil : Self.senseTagImage(
-                               free: L("senseEngine.tag.free"),
-                               gate: L("senseEngine.tag.paidOnly", senseTopUpProgress)),
+            GlassMenuItem(title: CopySenseEngine.jev.label,
                            selected: copySenseMode == .jev) {
                 selectCopySenseMode(.jev)
             },
         ]
     }
-
-    /// The row's tags as one image — the only thing an `NSMenuItem` will draw
-    /// after its words. Two of them, drawn only for an account that cannot use
-    /// Jev yet: what using it costs (nothing), and the gate with this account's
-    /// own standing against it. Not a template: the pills' ink is the point, exactly as
-    /// `LowBalanceTag.menuImage` keeps its rose. Cached per text, so the figure
-    /// changing re-renders and nothing else does.
-    @MainActor
-    private static func senseTagImage(free: String, gate: String) -> NSImage? {
-        let key = "\(free)|\(gate)" as NSString
-        if let hit = senseTagCache.object(forKey: key) { return hit }
-        let renderer = ImageRenderer(content:
-            HStack(spacing: 4) {
-                SenseTopUpTag(text: free, lit: false, tint: Tokens.accent)
-                SenseTopUpTag(text: gate, lit: false)
-            })
-        renderer.scale = 3
-        guard let cg = renderer.cgImage else { return nil }
-        let image = NSImage(cgImage: cg,
-                            size: NSSize(width: CGFloat(cg.width) / 3,
-                                         height: CGFloat(cg.height) / 3))
-        senseTagCache.setObject(image, forKey: key)
-        return image
-    }
-
-    private static let senseTagCache: NSCache<NSString, NSImage> = {
-        let cache = NSCache<NSString, NSImage>()
-        cache.countLimit = 8
-        return cache
-    }()
 
     /// What the menu reads right now: nil is off, otherwise the engine that
     /// would actually run.
@@ -4465,21 +4330,6 @@ struct InlineSettingsView: View {
             model.copySenseEnabled = false
             return
         }
-        // Asked for Jev without the credit for it: this is the one pick that
-        // cannot be granted here, so it takes them to the one place that can —
-        // the wallet card at the top of Model, with the amount already unfolded.
-        // The intent is remembered, so the purchase landing turns Jev on rather
-        // than leaving them to come back and pick it a second time.
-        if engine == .jev, !nono.canUseRemoteSense {
-            armJevAfterTopUp = true
-            // The smallest purchase, not the card's usual $5: arriving here is
-            // someone answering a price, so the amount in front of them starts
-            // at the least they can put in and steps up from there.
-            topUpUSD = max(1, NoNoAccount.minimumTopUpUSD)
-            showingAmount = true
-            withAnimation(.easeOut(duration: 0.16)) { section = .model }
-            return
-        }
         selectCopySenseEngine(engine)
         if !model.copySenseEnabled { model.copySenseEnabled = true }
     }
@@ -4487,7 +4337,7 @@ struct InlineSettingsView: View {
     /// The two engines side by side. Every line the answer is yes or no is a
     /// check or a cross, so the difference reads at a glance instead of being
     /// assembled out of two paragraphs; the facts that are not yes/no — where
-    /// Jev runs, how credentials are dropped, and who can pick it — sit under
+    /// Jev runs and how credentials are dropped — sit under
     /// the grid in one card. The credential line used to be a grid row with a
     /// check in both columns, which said it happens without ever saying how. It hangs off the row’s ⓘ, like every other note this
     /// pane keeps out of the way.
@@ -4569,7 +4419,6 @@ struct InlineSettingsView: View {
                     // needs to have read before turning any of this on.
                     Text(L("senseEngine.table.note.secrets"))
                         .foregroundStyle(Tokens.text2)
-                    Text(L("senseEngine.table.note.access", InlineSettingsView.senseMinPaidMoney))
                 }
                 .font(.sf(Tokens.TypeSize.meta))
                 .foregroundStyle(Tokens.text4)
@@ -4643,6 +4492,14 @@ struct InlineSettingsView: View {
     /// convention wouldn't.
     private var shortcutsSection: some View {
         VStack(alignment: .leading, spacing: 18) {
+            // Copy sensing opens the notch without a key, so it heads the pane
+            // as its own group.
+            VStack(alignment: .leading, spacing: 8) {
+                Text(L("capture.sources"))
+                    .font(.sf(Tokens.TypeSize.label, weight: .medium))
+                    .foregroundStyle(Tokens.text1)
+                copySenseRow
+            }
             promptShortcutsGroup
             ForEach(Array(AppShortcutReference.groups(
                 summonHotKey: summonHotKey,
@@ -4723,7 +4580,7 @@ struct InlineSettingsView: View {
                                    height: Self.promptAddChipSize)
                     }
                     .buttonStyle(ShortcutChipStyle())
-                    .help(L("shortcuts.promptAction.add"))
+                    .notchTooltip(L("shortcuts.promptAction.add"))
                 }
 
             // The header box already carries ~9pt of slack below the title text
@@ -4989,6 +4846,7 @@ struct InlineSettingsView: View {
 
         func makeBody(configuration: Configuration) -> some View {
             configuration.label
+                .exemptsDoubleClickPin(pressed: configuration.isPressed)
                 .glassCapsule(in: shape,
                               brighter: active || hovering,
                               tint: tint,
@@ -5198,6 +5056,7 @@ struct InlineSettingsView: View {
         .zIndex(active ? 999 : -Double(distance))
         .allowsHitTesting(distance <= 4)
         .onTapGesture { promptTemplateCoverflowTapped(template, at: index) }
+        .exemptsDoubleClickPin()
         .onHover { hovering in
             withAnimation(.easeOut(duration: Tokens.hoverFade)) {
                 if hovering {
@@ -5470,7 +5329,7 @@ struct InlineSettingsView: View {
                                                   shape: shape))
             .contentShape(shape)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plain).exemptsDoubleClickPin()
         .accessibilityLabel(L("shortcuts.promptAction.edit"))
         // The rail is ordered, scrolls, and has no drag handles: reordering is
         // one move — put this one first — and deleting no longer means opening
@@ -5616,8 +5475,8 @@ struct InlineSettingsView: View {
                             .foregroundStyle(recordingShortcut == target
                                 ? Tokens.text1 : Tokens.text3)
                     }
-                    .buttonStyle(.plain)
-                    .help(L("general.shortcut"))
+                    .buttonStyle(.plain).exemptsDoubleClickPin()
+                    .notchTooltip(L("general.shortcut"))
 
                     promptModelPicker(for: binding.id)
 
@@ -5733,11 +5592,12 @@ struct InlineSettingsView: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plain).exemptsDoubleClickPin()
         .frame(maxWidth: .infinity, alignment: .leading)
-        .help(L("shortcuts.promptAction.model"))
+        .notchTooltip(L("shortcuts.promptAction.model"))
         .modelMenu(isPresented: $promptModelPickerOpen,
-                   models: catalog.rows(selected: pin.provider).filter { $0.hasKey },
+                   models: promptModelPickerOpen
+                       ? catalog.rows(selected: pin.provider).filter { $0.hasKey } : [],
                    selectedProvider: pin.provider,
                    selectedID: pin.model,
                    onSelect: { provider, modelID in
@@ -5872,25 +5732,26 @@ struct InlineSettingsView: View {
             // chords keep the compact reset affordance when they differ from
             // their shipped value.
             if target == .summon {
-                Menu {
-                    Button(L("general.shortcut.doubleTapCommand")) {
-                        restoreSummonDoubleTap(UInt32(cmdKey))
-                    }
-                    Button(L("general.shortcut.doubleTapOption")) {
-                        restoreSummonDoubleTap(UInt32(optionKey))
-                    }
-                } label: {
+                Button { summonResetMenuOpen.toggle() } label: {
                     Text(L("general.shortcut.resetTo"))
                         .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                         .foregroundStyle(Tokens.text3)
                         .padding(.horizontal, 9)
                         .frame(minHeight: 24)
                 }
-                .menuStyle(.button)
                 .buttonStyle(ShortcutChipStyle(rest: 0.055, restStroke: 0.1))
-                .menuIndicator(.hidden)
-                .opacity(hoveredShortcutRow == target ? 1 : 0)
-                .allowsHitTesting(hoveredShortcutRow == target)
+                .glassMenuCard(open: $summonResetMenuOpen, items: [
+                    GlassMenuItem(title: L("general.shortcut.doubleTapCommand")) {
+                        restoreSummonDoubleTap(UInt32(cmdKey))
+                    },
+                    GlassMenuItem(title: L("general.shortcut.doubleTapOption")) {
+                        restoreSummonDoubleTap(UInt32(optionKey))
+                    },
+                ])
+                // Stays up while its menu is open: the pointer is on the card
+                // then, not on this row.
+                .opacity(hoveredShortcutRow == target || summonResetMenuOpen ? 1 : 0)
+                .allowsHitTesting(hoveredShortcutRow == target || summonResetMenuOpen)
             } else if shortcutIsModified(target) {
                 Button {
                     resetShortcut(target)
@@ -5901,7 +5762,7 @@ struct InlineSettingsView: View {
                         .frame(width: Tokens.Control.inline, height: Tokens.Control.inline)
                 }
                 .buttonStyle(ShortcutChipStyle(rest: 0.055, restStroke: 0.1))
-                .help(L("shortcuts.reset"))
+                .notchTooltip(L("shortcuts.reset"))
                 .opacity(hoveredShortcutRow == target ? 1 : 0)
                 .allowsHitTesting(hoveredShortcutRow == target)
                 .transition(.scale(scale: 0.72).combined(with: .opacity))
@@ -6359,21 +6220,23 @@ struct InlineSettingsView: View {
             HStack(spacing: 9) {
                 AboutSocialButton(kind: .github,
                                   title: L("about.starGithub")) {
-                    NSWorkspace.shared.open(URL(string: "https://github.com/\(UpdaterService.repo)")!)
+                    LinkGate.shared.open(URL(string: "https://github.com/\(UpdaterService.repo)")!)
                 }
                 AboutSocialButton(kind: .x,
                                   title: L("about.followX")) {
-                    NSWorkspace.shared.open(URL(string: "https://x.com/cyrusss_7")!)
+                    LinkGate.shared.open(URL(string: "https://x.com/cyrusss_7")!)
                 }
                 // Takes exactly the width its title needs; the two flexible
                 // buttons beside it divide what's left.
                 AboutSocialButton(kind: .coffee,
                                   title: L("about.buyCoffee")) {
-                    NSWorkspace.shared.open(URL(string: "https://buymeacoffee.com/cyrus007")!)
+                    LinkGate.shared.open(URL(string: "https://buymeacoffee.com/cyrus007")!)
                 }
                 .fixedSize(horizontal: true, vertical: false)
                 Spacer(minLength: 0)
             }
+
+            surveyEntry
 
             VStack(spacing: 0) {
                 AboutUtilityButton(title: L("about.whatsNew"), leaves: false) {
@@ -6391,19 +6254,41 @@ struct InlineSettingsView: View {
                 aboutUtilitySeparator
 
                 AboutUtilityButton(title: L("about.privacy"), leaves: true) {
-                    NSWorkspace.shared.open(URL(string: "https://www.notch.website/privacy")!)
+                    LinkGate.shared.open(URL(string: "https://www.notch.website/privacy")!)
                 }
 
                 aboutUtilitySeparator
 
                 AboutUtilityButton(title: L("about.feedback"), leaves: true) {
-                    NSWorkspace.shared.open(URL(string: "https://github.com/\(UpdaterService.repo)/issues")!)
+                    LinkGate.shared.open(URL(string: "https://github.com/\(UpdaterService.repo)/issues")!)
                 }
             }
             .recessedSurface(in: RoundedRectangle.control, lit: false)
             .clipShape(RoundedRectangle.control)
             .padding(.top, 12)
         }
+    }
+
+    /// The survey's row, between the social buttons and the utility list. Shown
+    /// while the gateway runs a survey this account has not had decided: open
+    /// before it answers, a status line while the answer waits for review.
+    /// Gone once approved; the credit then announces itself on the wallet.
+    @ViewBuilder
+    private var surveyEntry: some View {
+        if let survey = nono.snapshot?.survey, survey.status == "none" || survey.status == "pending" {
+            let open = survey.status == "none"
+            AboutSurveyRow(title: open ? L("survey.row") : L("survey.row.sent"),
+                           tag: open ? L("survey.row.credit", surveyAmount(survey.amountUSD))
+                                     : L("survey.row.review"),
+                           action: open ? {
+                               withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) { section = .survey }
+                           } : nil)
+                .padding(.top, 9)
+        }
+    }
+
+    private func surveyAmount(_ usd: Double) -> String {
+        usd.rounded() == usd ? String(Int(usd)) : String(format: "%.2f", usd)
     }
 
     private var aboutUtilitySeparator: some View {
@@ -6414,7 +6299,7 @@ struct InlineSettingsView: View {
     }
 
     /// Blend1 requests against this wallet: when, which model, tokens, and
-    /// what the balance was charged. Reached from the wallet ⋯, not the
+    /// what the balance was charged. Reached from the wallet's links, not the
     /// sidebar — it is a receipt pad for one account, not a settings category.
     private var usageSection: some View {
         let used = nono.snapshot?.credit.usedUSD
@@ -6534,7 +6419,7 @@ struct InlineSettingsView: View {
     }
 
     /// Each gift and purchase against this wallet: original dollars, a kind
-    /// tag, and when a gift lapses. Reached from the wallet ⋯, same as Usage.
+    /// tag, and when a gift lapses. Reached from the wallet's links, same as Usage.
     private var balancesSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             if balancesLoading && balanceLines.isEmpty {
@@ -6581,7 +6466,7 @@ struct InlineSettingsView: View {
                 .foregroundStyle(hovering ? Tokens.text1 : Tokens.text3)
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.plain).exemptsDoubleClickPin()
             .onHover { hovering = $0 }
             .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
         }
@@ -6662,6 +6547,256 @@ struct InlineSettingsView: View {
     /// Attribution stays on its own level instead of hiding behind the replay
     /// button's hover help. This makes the bundled recording's author, source,
     /// licence, and the fact that it was edited continuously visible.
+    // MARK: - Survey
+
+    /// Option ids, the same lists as `SURVEY_OPTIONS` in the gateway's
+    /// `survey.ts`. Brand names are not translated.
+    private static let surveySources: [(id: String, title: () -> String)] = [
+        ("x", { "X" }), ("github", { "GitHub" }), ("friend", { L("survey.source.friend") }),
+        ("search", { L("survey.source.search") }), ("other", { L("survey.other") }),
+    ]
+    private static let surveyRoles = ["engineer", "designer", "product", "student", "researcher", "creator", "other"]
+    private static let surveyFrequencies = ["daily", "weekly", "rarely"]
+    private static let surveyUses = ["assistant", "questions", "copied", "coding", "translation", "agent", "other"]
+    private static let surveyAlternatives: [(id: String, title: () -> String)] = [
+        ("muse", { "Muse" }), ("grokbot", { "GrokBot" }), ("instinct", { "Instinct" }),
+        ("other", { L("survey.other") }), ("none", { L("survey.alternatives.none") }),
+    ]
+    private static let surveyWishMin = 20
+
+    private var surveyWishReady: Bool {
+        surveyWish.trimmingCharacters(in: .whitespacesAndNewlines).count >= Self.surveyWishMin
+    }
+
+    private func surveyFilled(_ text: String) -> Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Picking Other asks for the answer in words, and that answer is required.
+    private var surveyReady: Bool {
+        guard let source = surveySource, let role = surveyRole, surveyFrequency != nil, !surveyUses.isEmpty,
+              surveyWishReady else { return false }
+        if source == "other" && !surveyFilled(surveySourceDetail) { return false }
+        if role == "other" && !surveyFilled(surveyRoleOther) { return false }
+        if surveyUses.contains("other") && !surveyFilled(surveyUsesOther) { return false }
+        if surveyAlternatives.isEmpty { return false }
+        if surveyAlternatives.contains("other") && !surveyFilled(surveyAlternativesOther) { return false }
+        return true
+    }
+
+    private var surveySection: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            surveyQuestion(L("survey.q.source")) {
+                FlowLayout(hSpacing: 6, vSpacing: 6) {
+                    ForEach(Self.surveySources, id: \.id) { option in
+                        SurveyChoicePill(title: option.title(), active: surveySource == option.id) {
+                            surveySource = option.id
+                        }
+                    }
+                }
+                if surveySource == "other" {
+                    surveyField(L("survey.source.otherPlaceholder"), text: $surveySourceDetail, lines: 1)
+                }
+            }
+            surveyQuestion(L("survey.q.role")) {
+                surveyPills(Self.surveyRoles, key: "survey.role", selected: surveyRole.map { [$0] } ?? []) {
+                    surveyRole = $0
+                }
+                if surveyRole == "other" {
+                    surveyField(L("survey.other.placeholder"), text: $surveyRoleOther, lines: 1)
+                }
+            }
+            surveyQuestion(L("survey.q.frequency")) {
+                surveyPills(Self.surveyFrequencies, key: "survey.frequency",
+                            selected: surveyFrequency.map { [$0] } ?? []) {
+                    surveyFrequency = $0
+                }
+            }
+            surveyQuestion(L("survey.q.alternatives")) {
+                FlowLayout(hSpacing: 6, vSpacing: 6) {
+                    ForEach(Self.surveyAlternatives, id: \.id) { option in
+                        SurveyChoicePill(title: option.title(), active: surveyAlternatives.contains(option.id)) {
+                            toggleSurveyAlternative(option.id)
+                        }
+                    }
+                }
+                if surveyAlternatives.contains("other") {
+                    surveyField(L("survey.other.placeholder"), text: $surveyAlternativesOther, lines: 1)
+                }
+            }
+            surveyQuestion(L("survey.q.uses")) {
+                surveyPills(Self.surveyUses, key: "survey.uses", selected: surveyUses) { id in
+                    if surveyUses.contains(id) { surveyUses.remove(id) } else { surveyUses.insert(id) }
+                }
+                if surveyUses.contains("other") {
+                    surveyField(L("survey.other.placeholder"), text: $surveyUsesOther, lines: 1)
+                }
+            }
+            surveyQuestion(L("survey.q.wish")) {
+                surveyField(L("survey.wish.placeholder", Self.surveyWishMin), text: $surveyWish, lines: 4)
+            }
+
+            HStack(spacing: 12) {
+                if surveyFailed {
+                    Text(L("survey.failed"))
+                        .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                        .foregroundStyle(Tokens.danger.opacity(0.92))
+                } else if let amount = nono.snapshot?.survey?.amountUSD {
+                    Text(L("survey.reviewNote", surveyAmount(amount)))
+                        .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                        .foregroundStyle(Tokens.text3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+                surveySubmitButton
+            }
+        }
+    }
+
+    /// Several may be picked, except None, which stands alone.
+    private func toggleSurveyAlternative(_ id: String) {
+        if surveyAlternatives.contains(id) {
+            surveyAlternatives.remove(id)
+        } else if id == "none" {
+            surveyAlternatives = ["none"]
+        } else {
+            surveyAlternatives.remove("none")
+            surveyAlternatives.insert(id)
+        }
+    }
+
+    private func surveyQuestion<Content: View>(_ title: String,
+                                               @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text(title)
+                .font(.sf(Tokens.TypeSize.form, weight: .medium))
+                .foregroundStyle(Tokens.text1)
+                .fixedSize(horizontal: false, vertical: true)
+            content()
+        }
+    }
+
+    private func surveyPills(_ ids: [String], key: String, selected: Set<String>,
+                             choose: @escaping (String) -> Void) -> some View {
+        FlowLayout(hSpacing: 6, vSpacing: 6) {
+            ForEach(ids, id: \.self) { id in
+                SurveyChoicePill(title: id == "other" ? L("survey.other") : L("\(key).\(id)"),
+                                 active: selected.contains(id)) { choose(id) }
+            }
+        }
+    }
+
+    /// The custom endpoint's field (`customField`) without its side label, on
+    /// the in-pane card radius.
+    private func surveyField(_ placeholder: String, text: Binding<String>, lines: Int) -> some View {
+        ZStack(alignment: .topLeading) {
+            if text.wrappedValue.isEmpty {
+                Text(placeholder)
+                    .font(.sf(Tokens.TypeSize.form))
+                    .foregroundStyle(Tokens.text3)
+                    .lineLimit(1)
+                    .allowsHitTesting(false)
+            }
+            TextField("", text: text, axis: .vertical)
+                .textFieldStyle(.plain)
+                .lineLimit(lines, reservesSpace: true)
+                .font(.sf(Tokens.TypeSize.form))
+                .foregroundStyle(Tokens.text1)
+                .onChange(of: text.wrappedValue) { model.noteUserTyping() }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .recessedSurface(in: RoundedRectangle.menu, lit: false)
+    }
+
+    /// Settings' `connectButton` face.
+    private var surveySubmitButton: some View {
+        Button {
+            submitSurvey()
+        } label: {
+            HStack(spacing: 7) {
+                if surveySending {
+                    ProgressView().controlSize(.small)
+                }
+                Text(L("survey.submit"))
+                    .font(.sf(Tokens.TypeSize.form, weight: .medium))
+            }
+            .foregroundStyle(Tokens.text1)
+            .padding(.horizontal, 14)
+            .frame(height: 30)
+            .prominentSurface(in: Capsule(), lit: surveySubmitHovering && surveyReady)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(GlassPressStyle())
+        .disabled(!surveyReady || surveySending)
+        .opacity(surveyReady ? 1 : 0.45)
+        .onHover { surveySubmitHovering = $0 }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: surveySubmitHovering)
+    }
+
+    private func submitSurvey() {
+        guard surveyReady, !surveySending,
+              let source = surveySource, let role = surveyRole, let frequency = surveyFrequency else { return }
+        let answers: [String: Any] = [
+            "source": source,
+            "sourceDetail": source == "other" ? surveySourceDetail.trimmingCharacters(in: .whitespacesAndNewlines) : "",
+            "role": role,
+            "roleOther": role == "other" ? surveyRoleOther.trimmingCharacters(in: .whitespacesAndNewlines) : "",
+            "usesOther": surveyUses.contains("other")
+                ? surveyUsesOther.trimmingCharacters(in: .whitespacesAndNewlines) : "",
+            "frequency": frequency,
+            "uses": Self.surveyUses.filter { surveyUses.contains($0) },
+            "alternatives": Self.surveyAlternatives.map(\.id).filter { surveyAlternatives.contains($0) },
+            "alternativesOther": surveyAlternatives.contains("other")
+                ? surveyAlternativesOther.trimmingCharacters(in: .whitespacesAndNewlines) : "",
+            "wish": surveyWish.trimmingCharacters(in: .whitespacesAndNewlines),
+        ]
+        surveySending = true
+        surveyFailed = false
+        Task {
+            do {
+                try await nono.submitSurvey(answers)
+                surveySending = false
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) { section = .about }
+            } catch {
+                surveySending = false
+                surveyFailed = true
+            }
+        }
+    }
+
+    /// History's filter pill (`HistoryFilterPill`); the chosen one takes the
+    /// accent wash, as an active History pill takes its source's colour. Two
+    /// quick clicks toggle it twice rather than pinning the panel.
+    private struct SurveyChoicePill: View {
+        let title: String
+        let active: Bool
+        let action: () -> Void
+
+        @State private var hovering = false
+
+        var body: some View {
+            Button {
+                NotchPanel.exemptNextDoubleClick()
+                action()
+            } label: {
+                Text(title)
+                    .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                    .foregroundStyle(active ? Tokens.text1 : (hovering ? Tokens.text2 : Tokens.text3))
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 5)
+                    .glassCapsule(in: Capsule(), brighter: active || hovering,
+                                  tint: active ? Tokens.accent : nil)
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(GlassPressStyle())
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+            .animation(.easeOut(duration: Tokens.hoverFade), value: active)
+        }
+    }
+
     private var licensesSection: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text(L("about.music"))
@@ -6671,10 +6806,10 @@ struct InlineSettingsView: View {
 
             HStack(spacing: 12) {
                 aboutLink("classicals.de") {
-                    NSWorkspace.shared.open(URL(string: "https://www.classicals.de")!)
+                    LinkGate.shared.open(URL(string: "https://www.classicals.de")!)
                 }
                 aboutLink("CC BY 4.0") {
-                    NSWorkspace.shared.open(URL(string: "https://creativecommons.org/licenses/by/4.0/")!)
+                    LinkGate.shared.open(URL(string: "https://creativecommons.org/licenses/by/4.0/")!)
                 }
             }
 
@@ -6685,10 +6820,10 @@ struct InlineSettingsView: View {
 
             HStack(spacing: 12) {
                 aboutLink("thinking-orbs") {
-                    NSWorkspace.shared.open(URL(string: "https://github.com/Jakubantalik/thinking-orbs")!)
+                    LinkGate.shared.open(URL(string: "https://github.com/Jakubantalik/thinking-orbs")!)
                 }
                 aboutLink("MIT License") {
-                    NSWorkspace.shared.open(URL(string: "https://opensource.org/license/mit")!)
+                    LinkGate.shared.open(URL(string: "https://opensource.org/license/mit")!)
                 }
             }
 
@@ -6702,30 +6837,10 @@ struct InlineSettingsView: View {
 
             HStack(spacing: 12) {
                 aboutLink("Interaction Kit") {
-                    NSWorkspace.shared.open(URL(string: "https://interactionkit.org")!)
+                    LinkGate.shared.open(URL(string: "https://interactionkit.org")!)
                 }
                 aboutLink("MIT License") {
-                    NSWorkspace.shared.open(URL(string: "https://opensource.org/license/mit")!)
-                }
-            }
-
-            // The bundled Latin handwriting face (Settings → Appearance,
-            // "Handwritten answers"). The OFL asks that the licence travel with
-            // the software that ships the font.
-            Text(L("about.handwritingFont"))
-                .font(.sf(Tokens.TypeSize.form, weight: .medium))
-                .foregroundStyle(Tokens.text1)
-                .fixedSize(horizontal: false, vertical: true)
-
-            HStack(spacing: 12) {
-                aboutLink("Caveat") {
-                    NSWorkspace.shared.open(URL(string: "https://github.com/googlefonts/caveat")!)
-                }
-                aboutLink("SIL OFL 1.1") {
-                    NSWorkspace.shared.open(URL(string: "https://openfontlicense.org")!)
-                }
-                aboutLink("hanzi-writer-data") {
-                    NSWorkspace.shared.open(URL(string: "https://github.com/chanind/hanzi-writer-data")!)
+                    LinkGate.shared.open(URL(string: "https://opensource.org/license/mit")!)
                 }
             }
         }
@@ -6950,9 +7065,9 @@ struct InlineSettingsView: View {
     private struct AboutSocialPressStyle: ButtonStyle {
         func makeBody(configuration: Configuration) -> some View {
             configuration.label
-                .scaleEffect(configuration.isPressed ? 0.96 : 1)
-                .animation(.spring(response: 0.22, dampingFraction: 0.68),
-                           value: configuration.isPressed)
+                .exemptsDoubleClickPin(pressed: configuration.isPressed)
+                .scaleEffect(configuration.isPressed ? Tokens.chipPressScale : 1)
+                .animation(Tokens.chipPressSpring, value: configuration.isPressed)
         }
     }
 
@@ -6983,9 +7098,51 @@ struct InlineSettingsView: View {
                 .background(Color.white.opacity(hovering ? 0.05 : 0))
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.plain).exemptsDoubleClickPin()
             .onHover { hovering = $0 }
             .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
+        }
+    }
+
+    /// The social buttons' capsule across the whole row, lit one step brighter
+    /// than they rest, with the credit it is worth as a `ModelDetailCard.Tag`.
+    /// Without an action it is a status line and does not answer the pointer.
+    private struct AboutSurveyRow: View {
+        let title: String
+        let tag: String
+        let action: (() -> Void)?
+
+        @State private var hovering = false
+
+        var body: some View {
+            Button { action?() } label: {
+                HStack(spacing: 9) {
+                    Image(systemName: "checklist")
+                        .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                        .foregroundStyle(Tokens.text1)
+                        .frame(width: 17, height: 17)
+                    Text(title)
+                        .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                        .foregroundStyle(Tokens.text1)
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    ModelDetailCard.Tag(text: tag, hovered: hovering)
+                }
+                .padding(.leading, 13)
+                .padding(.trailing, 9)
+                .frame(maxWidth: .infinity, minHeight: 36, maxHeight: 36)
+                .background(Capsule().fill(.white.opacity(hovering ? 0.11 : 0.075)))
+                .overlay(Capsule().strokeBorder(.white.opacity(hovering ? 0.22 : 0.16), lineWidth: 0.5))
+                .contentShape(Capsule())
+            }
+            .buttonStyle(AboutSocialPressStyle())
+            .disabled(action == nil)
+            .onHover { inside in
+                guard action != nil else { return }
+                hovering = inside
+                if inside { Haptics.alignment() }
+            }
+            .animation(.easeInOut(duration: 0.2), value: hovering)
         }
     }
 
@@ -7006,7 +7163,7 @@ struct InlineSettingsView: View {
                     .lineLimit(1)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.plain).exemptsDoubleClickPin()
             .onHover { hovering = $0 }
             .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
         }
@@ -7046,7 +7203,7 @@ struct InlineSettingsView: View {
 
         var body: some View {
             Button(title, action: action)
-                .buttonStyle(.plain)
+                .buttonStyle(.plain).exemptsDoubleClickPin()
                 .font(.sf(Tokens.TypeSize.label, weight: weight))
                 .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
                 .contentShape(Rectangle())
@@ -7119,12 +7276,13 @@ struct InlineSettingsView: View {
     private func settingRow<Content: View>(
         label: String,
         info: String? = nil,
+        richInfo: AttributedString? = nil,
         aligned: Bool = false,
         verticalAlignment: VerticalAlignment = .firstTextBaseline,
         @ViewBuilder _ content: () -> Content
     ) -> some View {
         HStack(alignment: verticalAlignment, spacing: 12) {
-            settingLabel(label, info: info, aligned: aligned)
+            settingLabel(label, info: info, richInfo: richInfo, aligned: aligned)
             content()
             Spacer(minLength: 0)
         }
@@ -7135,6 +7293,7 @@ struct InlineSettingsView: View {
     private func settingLabel(
         _ label: String,
         info: String? = nil,
+        richInfo: AttributedString? = nil,
         aligned: Bool = false
     ) -> some View {
         HStack(spacing: 3) {
@@ -7143,7 +7302,9 @@ struct InlineSettingsView: View {
                 .foregroundStyle(Tokens.text2)
                 .lineLimit(1)
                 .fixedSize()
-            if let info {
+            if let richInfo {
+                SettingInfo(richInfo)
+            } else if let info {
                 SettingInfo(info)
             }
         }
@@ -7284,18 +7445,21 @@ private struct PromptCardActionStyle: ButtonStyle {
             switch kind {
             case .primary:
                 configuration.label
+                    .exemptsDoubleClickPin(pressed: configuration.isPressed)
                     .glassCapsule(in: Capsule(), brighter: hovering)
             case .destructive:
                 configuration.label
+                    .exemptsDoubleClickPin(pressed: configuration.isPressed)
                     .background(Capsule().fill(
                         Tokens.danger.opacity(hovering ? 0.13 : 0)))
             }
         }
         .contentShape(Capsule())
-        .opacity(configuration.isPressed ? 0.72 : 1)
-        .scaleEffect(configuration.isPressed ? 0.985 : 1)
+        .opacity(kind == .destructive && configuration.isPressed ? 0.72 : 1)
+        .scaleEffect(kind == .primary && configuration.isPressed ? Tokens.chipPressScale : 1)
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+        .animation(Tokens.chipPressSpring, value: configuration.isPressed)
     }
 }
 
@@ -7315,6 +7479,7 @@ private struct ShortcutChipStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
+            .exemptsDoubleClickPin(pressed: configuration.isPressed)
             .background(
                 Capsule().fill(.white.opacity(
                     active ? 0.12 : (hovering ? rest + 0.055 : rest)))
@@ -7325,9 +7490,10 @@ private struct ShortcutChipStyle: ButtonStyle {
                     lineWidth: active ? 1 : 0.5)
             )
             .contentShape(Capsule())
-            .opacity(configuration.isPressed ? 0.72 : 1)
+            .scaleEffect(configuration.isPressed ? Tokens.chipPressScale : 1)
             .onHover { hovering = $0 }
             .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+            .animation(Tokens.chipPressSpring, value: configuration.isPressed)
     }
 }
 
@@ -7417,7 +7583,7 @@ struct SettingActionButton: View {
 
     var body: some View {
         Button(title, action: action)
-            .buttonStyle(.plain)
+            .buttonStyle(.plain).exemptsDoubleClickPin()
             .font(.sf(Tokens.TypeSize.meta, weight: .medium))
             .foregroundStyle(hovering ? Tokens.text1 : tone)
             .onHover { hovering = $0 }
@@ -7501,7 +7667,7 @@ struct AmountStepper: View {
                 .frame(width: Self.buttonWidth, height: 30)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plain).exemptsDoubleClickPin()
         .disabled(!enabled)
     }
 }
@@ -7535,7 +7701,7 @@ struct SettingInfo: View {
                 .frame(width: hit, height: hit)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plain).exemptsDoubleClickPin()
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
         .holdsPanelWhilePresented(showing)
@@ -7573,7 +7739,7 @@ struct SettingInfoPopover<Content: View>: View {
                 .frame(width: hit, height: hit)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plain).exemptsDoubleClickPin()
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
         .holdsPanelWhilePresented(showing)
@@ -7589,33 +7755,67 @@ struct SettingInfoPopover<Content: View>: View {
     }
 }
 
-/// The balance card's way into its privacy page: an outlined shield and a
-/// line naming the page, in the About footnote link's hover grammar — quiet
-/// ink that brightens to text1. Stroked Lucide, like the ⋯ menu's glyphs.
-private struct PrivacyShieldButton: View {
+/// The balance card's ways into its sub-pages: underlined meta text, quiet
+/// ink that brightens to text1 on hover. `external` adds the outbound arrow
+/// used wherever a control leaves the app.
+private struct UnderlineLink: View {
+    let title: String
+    var external: Bool = false
     let action: () -> Void
 
     @State private var hovering = false
 
+    /// One text run, so the underline is a single rule under the title and,
+    /// when present, the outbound arrow.
+    private var label: Text {
+        let words = Text(title).font(.sf(Tokens.TypeSize.meta))
+        guard external else { return words }
+        let arrow = Text(Image(systemName: "arrow.up.right"))
+            .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+        return words + Text("\u{00A0}") + arrow
+    }
+
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 5) {
-                LucideIcon(mark: LucideIcons.shieldCheck, size: 12)
-                Text(L("nono.privacy.link"))
-                    .font(.sf(Tokens.TypeSize.meta, weight: .medium))
-                    .lineLimit(1)
-            }
-            .foregroundStyle(hovering ? Tokens.text1 : Tokens.text3)
-            .contentShape(Rectangle())
+            label
+                .underline()
+                .lineLimit(1)
+                .foregroundStyle(hovering ? Tokens.text1 : Tokens.text3)
+                .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plain).exemptsDoubleClickPin()
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
     }
 }
 
+/// A text action on a small chip, drawn like the compose bar's Chat word.
+private struct ChipLink: View {
+    let title: String
+    let action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+        return Button(action: action) {
+            Text(title)
+                .font(.sf(Tokens.TypeSize.meta))
+                .foregroundStyle(Tokens.text1)
+                .lineLimit(1)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3.5)
+                .background(shape.fill(Color.white.opacity(hovering ? 0.12 : 0.07)))
+                .contentShape(shape)
+        }
+        .buttonStyle(.plain).exemptsDoubleClickPin()
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+    }
+}
+
 /// What happens to a request paid from Notchi Balance — the Privacy sub-page,
-/// behind the balance card's shield. Written the way What's New writes release
+/// behind the balance card's privacy link. Written the way What's New writes release
 /// notes — a caption heading over short bulleted lines — because it is the same
 /// kind of reading: separate facts, each scanned rather than read through.
 /// One column, top to bottom, at What's New's 18pt between groups.
@@ -7691,61 +7891,9 @@ private struct NonoPrivacyNote: View {
     }
 }
 
-/// A dropdown styled to match the panel instead of the stock `Picker`'s
-/// white-on-light `.menu` button (which read as a bright patch on the dark
-/// glass). The trigger is a translucent dark chip — faint fill, hairline border,
-/// light text, a up/down chevron — that brightens on hover; the popped-open list
-/// stays the system's native (dark) context menu. `content` supplies the rows as
-/// plain `Button`s that mutate the bound selection.
-struct GlassMenu<Content: View>: View {
-    var title: String
-    /// Tighter fitting for dense rows — the agent card's 25pt bottom bar. The
-    /// default is the settings pane's size, where these chips live in 34pt rows.
-    var compact: Bool = false
-    /// A brand mark drawn ahead of the title, for a chip whose value *is* a
-    /// vendor — the Provider row, which then reads as the same kind of control as
-    /// the Model chip one row below it. Nil (the default) leaves a text-only chip.
-    var logoVendor: String? = nil
-    /// Monogram source when `logoVendor` names no bundled mark — the displayed
-    /// value, so the tile is never blank.
-    var logoFallback: String = ""
-    /// An SF Symbol drawn instead of that monogram (the custom endpoint's).
-    var logoSymbol: String? = nil
-    /// Wear the first-party aura — nono's chip, and nothing else's.
-    var aura: Bool = false
-    @ViewBuilder var content: () -> Content
-
-    @State private var hovering = false
-
-    /// The width a compact chip needs for `title`, measured in the face SwiftUI
-    /// will draw it in. Callers that must size a rigid row around the chip (the
-    /// agent card's bottom bar) can then do arithmetic instead of a geometry read.
-    static func compactWidth(for title: String) -> CGFloat {
-        GlassChipFace.compactWidth(for: title)
-    }
-
-    var body: some View {
-        Menu {
-            content()
-        } label: {
-            GlassChipFace(title: title, compact: compact, logoVendor: logoVendor,
-                          logoFallback: logoFallback, logoSymbol: logoSymbol,
-                          aura: aura, hovering: hovering)
-        }
-        .menuStyle(.button)
-        .buttonStyle(.plain)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .onHover { hovering = $0 }
-        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
-    }
-}
-
-/// The face every picker chip on the pane wears. Its own view because two kinds
-/// of chip draw it: `GlassMenu`, whose menu is SwiftUI's, and `NativeMenuChip`,
-/// whose menu is an `NSMenu` — a row whose items need more than a title and a
-/// leading icon has to build its menu in AppKit, and it must not look like a
-/// different control for it.
+/// The face every picker chip on the pane wears: a recessed dark capsule with
+/// the current value and an up/down chevron, brighter under the pointer. Its
+/// menu is `GlassMenu`'s card.
 struct GlassChipFace: View {
     var title: String
     var compact: Bool = false
@@ -7807,124 +7955,157 @@ struct GlassChipFace: View {
     }
 }
 
-/// One row of a `NativeMenuChip`'s menu: a title, an optional tag drawn after it
-/// (an image, because that is the only thing an `NSMenuItem` will place there),
-/// and what picking it does.
-struct NativeMenuItem {
+/// One row of a `GlassMenu`: a title, an optional tag image drawn after it, and
+/// whether it is the value in effect. `header` starts a titled group above the
+/// row.
+struct GlassMenuItem {
     var title: String
     var tag: NSImage? = nil
     var selected: Bool = false
+    var header: String? = nil
+    /// Shown but not pickable.
+    var disabled: Bool = false
     var action: () -> Void
 }
 
-/// A picker chip whose menu is an `NSMenu`. Identical face to `GlassMenu` —
-/// only the menu differs, and it differs because SwiftUI's `Menu` renders a row
-/// as a title plus one LEADING image and silently drops anything else (an
-/// `Image(nsImage:)` row draws blank). An `NSMenuItem` takes an attributed
-/// title, so a tag can be attached after the words, the way `ModelPickerView`
-/// hangs `LowBalanceTag` off a model row.
-struct NativeMenuChip: View {
+extension View {
+    /// Hang the glass menu card of `items` under this view while `open` is
+    /// true. `title` is a caption above the rows.
+    func glassMenuCard(open: Binding<Bool>, title: String? = nil,
+                       items: [GlassMenuItem]) -> some View {
+        modifier(GlassMenuCardHost(open: open, title: title, items: items))
+    }
+}
+
+private struct GlassMenuCardHost: ViewModifier {
+    @Binding var open: Bool
+    var title: String?
+    var items: [GlassMenuItem]
+
+    func body(content: Content) -> some View {
+        content
+            .modifier(MenuCardWindow(
+                open: open,
+                onDismiss: { _ in open = false },
+                card: {
+                    AnyView(GlassMenuCard(title: title, items: items) { index in
+                        open = false
+                        guard items.indices.contains(index) else { return }
+                        items[index].action()
+                    })
+                }))
+            // The card hangs off the island in its own window, so the pointer
+            // reaching a lower row reads as leaving the panel — hold the panel
+            // for as long as the menu is up (see `InfoPopoverGate`).
+            .holdsPanelWhilePresented(open)
+    }
+}
+
+/// A picker chip in Settings. The chip is `GlassChipFace`; its menu is the
+/// panel's glass menu card (`MenuCardWindow`), the same one the ⋯ and loop
+/// menus use, in place of a system menu.
+struct GlassMenu: View {
     var title: String
-    var items: [NativeMenuItem]
+    var logoVendor: String? = nil
+    var logoFallback: String = ""
+    var logoSymbol: String? = nil
+    var items: [GlassMenuItem]
     /// Run when the menu is opened, whether or not a row is picked — what marks
     /// a "New" badge beside it as read.
     var onOpen: (() -> Void)? = nil
 
     @State private var hovering = false
-    @State private var presenting = false
+    @State private var open = false
 
     var body: some View {
-        Button { onOpen?(); presenting = true } label: {
-            GlassChipFace(title: title, hovering: hovering)
+        Button {
+            if !open { onOpen?() }
+            open.toggle()
+        } label: {
+            GlassChipFace(title: title, logoVendor: logoVendor,
+                          logoFallback: logoFallback, logoSymbol: logoSymbol,
+                          hovering: hovering || open)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plain).exemptsDoubleClickPin()
         .fixedSize()
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
-        .background(NativeMenuPresenter(isPresented: $presenting, items: items))
+        .glassMenuCard(open: $open, items: items)
     }
 }
 
-/// Pops `items` as a real menu under the chip. The anchor is an empty AppKit
-/// view behind the face; `popUp` runs its own event loop, so it is never called
-/// from inside a view update (same rule `ModelPickerView` follows).
-private struct NativeMenuPresenter: NSViewRepresentable {
-    @Binding var isPresented: Bool
-    var items: [NativeMenuItem]
+/// The rows of a `GlassMenu`, on the menu card's slab. A long list scrolls
+/// inside a fixed window of rows.
+private struct GlassMenuCard: View {
+    var title: String? = nil
+    let items: [GlassMenuItem]
+    let pick: (Int) -> Void
 
-    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    /// Rows shown before the list scrolls.
+    private static let maxRows = 10
 
-    func makeNSView(context: Context) -> NSView {
-        let v = NSView()
-        // Decoration only — the SwiftUI face in front of it takes every click.
-        v.setAccessibilityElement(false)
-        return v
+    private var width: CGFloat {
+        let rows: [(String, String?)] = items.map { item in
+            // A tag takes about this much of the trailing slot.
+            (item.title, item.tag == nil ? nil : "MMMMMM")
+        }
+        let headers: [(String, String?)] = (items.map(\.header) + [title]).compactMap { header in
+            header.map { ($0.uppercased(), nil) }
+        }
+        return MenuCard.width(titles: rows + headers, max: 300)
     }
 
-    func updateNSView(_ view: NSView, context: Context) {
-        context.coordinator.parent = self
-        guard isPresented, !context.coordinator.showing else { return }
-        context.coordinator.showing = true
-        DispatchQueue.main.async { context.coordinator.present(from: view) }
-    }
-
-    final class Coordinator: NSObject, NSMenuDelegate {
-        var parent: NativeMenuPresenter
-        var showing = false
-        private var picked: (() -> Void)?
-
-        init(_ parent: NativeMenuPresenter) { self.parent = parent }
-
-        func present(from view: NSView) {
-            guard view.window != nil else { finish(); return }
-            let menu = NSMenu()
-            menu.delegate = self
-            let font = NSFont.menuFont(ofSize: 0)
-            for (i, item) in parent.items.enumerated() {
-                let row = NSMenuItem(title: item.title, action: #selector(pick(_:)), keyEquivalent: "")
-                row.target = self
-                row.tag = i
-                row.state = item.selected ? .on : .off
-                if let tag = item.tag {
-                    let title = NSMutableAttributedString(string: item.title + "  ",
-                                                          attributes: [.font: font])
-                    let chip = NSTextAttachment()
-                    chip.image = tag
-                    // Centred on the menu font's cap height, like the model
-                    // picker's own tagged rows.
-                    chip.bounds = NSRect(x: 0, y: (font.capHeight - tag.size.height) / 2,
-                                         width: tag.size.width, height: tag.size.height)
-                    title.append(NSAttributedString(attachment: chip))
-                    row.attributedTitle = title
-                }
-                menu.addItem(row)
+    private var rows: some View {
+        VStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
+            if let title {
+                Text(title)
+                    .captionLabel(color: Tokens.text4)
+                    .lineLimit(1)
+                    .padding(.horizontal, MenuCard.rowPad)
+                    .padding(.top, 4)
+                    .padding(.bottom, 3)
             }
-            let bottom = view.isFlipped ? view.bounds.maxY : view.bounds.minY
-            // Blocks in a nested event loop until the menu closes.
-            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: bottom), in: view)
-            finish()
+            ForEach(Array(items.enumerated()), id: \.offset) { index, item in
+                if let header = item.header {
+                    Text(header)
+                        .captionLabel(color: Tokens.text4)
+                        .lineLimit(1)
+                        .padding(.horizontal, MenuCard.rowPad)
+                        .padding(.top, index == 0 ? 4 : 8)
+                        .padding(.bottom, 3)
+                }
+                MenuCardRow(title: item.title,
+                            emphasized: true,
+                            selected: item.selected,
+                            haptic: false,
+                            action: { pick(index) })
+                    .disabled(item.disabled)
+                    .opacity(item.disabled ? 0.5 : 1)
+                    .overlay(alignment: .trailing) {
+                        if let tag = item.tag {
+                            Image(nsImage: tag)
+                                .padding(.trailing, MenuCard.rowPad)
+                                .allowsHitTesting(false)
+                        }
+                    }
+            }
         }
+    }
 
-        /// The menu hangs off the island in its own window, so the pointer
-        /// reaching a lower row reads as leaving it — hold the panel for as long
-        /// as the menu is up (see `InfoPopoverGate`).
-        func menuWillOpen(_ menu: NSMenu) { InfoPopoverGate.enter() }
-        func menuDidClose(_ menu: NSMenu) { InfoPopoverGate.exit() }
-
-        @objc private func pick(_ sender: NSMenuItem) {
-            guard parent.items.indices.contains(sender.tag) else { return }
-            // Run the action after the nested loop has unwound, so the state it
-            // writes is not published from inside menu tracking.
-            picked = parent.items[sender.tag].action
+    var body: some View {
+        Group {
+            if items.count > Self.maxRows {
+                ScrollView { rows }
+                    .scrollIndicators(.never)
+                    .frame(height: CGFloat(Self.maxRows) * MenuCard.rowStride)
+            } else {
+                rows
+            }
         }
-
-        private func finish() {
-            showing = false
-            if parent.isPresented { parent.isPresented = false }
-            let action = picked
-            picked = nil
-            action?()
-        }
+        .padding(MenuCard.cardPad)
+        .frame(width: width, alignment: .leading)
+        .preferredColorScheme(.dark)
+        .menuCardBackground()
     }
 }
 
@@ -8429,17 +8610,8 @@ private struct HotKeyRecorder: NSViewRepresentable {
 }
 
 /// The "New" marks on the settings pane, and whether they have been answered.
-/// One flag per mark rather than one for the pair: the sidebar's dot is read by
-/// opening the pane, the badge inside it by opening the control, and a dot that
-/// took its badge with it would hide the very thing it was pointing at.
 enum SettingsNewMarks {
-    private static let captureKey = "settingsCaptureTabSeen"
     private static let copySenseKey = "settingsCopySenseSeen"
-
-    static var captureTabSeen: Bool {
-        get { UserDefaults.standard.bool(forKey: captureKey) }
-        set { UserDefaults.standard.set(newValue, forKey: captureKey) }
-    }
 
     static var copySenseSeen: Bool {
         get { UserDefaults.standard.bool(forKey: copySenseKey) }

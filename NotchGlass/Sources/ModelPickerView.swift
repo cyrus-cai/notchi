@@ -687,6 +687,9 @@ struct ModelDetailCard: View {
     /// two — see `walletWell`.
     private var isFirstParty: Bool { model.provider.isFirstParty }
 
+    private var supportsVision: Bool { Provider.modelSupportsVision(model.info.id) }
+    private var supportsTools: Bool { model.info.toolUse || model.provider.supportsTools }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
             header
@@ -705,41 +708,7 @@ struct ModelDetailCard: View {
                 Meter(title: L("model.detail.intelligence"), level: figures.intelligence)
             }
 
-            VStack(alignment: .leading, spacing: 7) {
-                // NOT `model.info.vision`. That field comes from
-                // `ModelRatings.looksVision`, a 2023-shaped allowlist that reads
-                // vision off the id ("claude", "gemini", "-vl") and therefore
-                // tells every GLM 5 model it can't see — the exact bug
-                // `Provider.modelSupportsVision` was written to replace, using the
-                // manifest's generated blocklist plus what a rejected image
-                // actually taught us.
-                Capability(symbol: "eye", title: L("model.detail.vision"),
-                           supported: Provider.modelSupportsVision(model.info.id))
-                // A vendor that publishes no `supported_parameters` leaves
-                // `info.toolUse` false, which is an absence of data being rendered
-                // as a "no". The provider gate is the real answer.
-                Capability(symbol: "wrench.and.screwdriver", title: L("model.detail.toolUse"),
-                           supported: model.info.toolUse || model.provider.supportsTools)
-                // Only ever stated in the positive. Reasoning has no authoritative
-                // source here — `looksReasoning` matches on "thinking"/"-r1"-ish
-                // ids and misses every hybrid model that reasons without saying so
-                // in its name — so a "Reasoning Unsupported" row would be a guess
-                // printed as a fact. No row means we don't know, which is true.
-                if model.info.reasoning {
-                    Capability(symbol: "brain", title: L("model.detail.reasoning"),
-                               supported: true)
-                }
-                if isFirstParty {
-                    switch ModelRatings.nonoHost(id: model.info.id, pricing: model.info.notchiPricing) {
-                    case .official:
-                        Note(symbol: "globe", title: L("model.detail.nono.host.official"))
-                    case .us:
-                        Note(symbol: "globe.americas", title: L("model.detail.nono.host"))
-                    case .anyRegion:
-                        Note(symbol: "globe", title: L("model.detail.nono.host.any"))
-                    }
-                }
-            }
+            capabilities
 
             if isFirstParty { walletWell }
         }
@@ -769,6 +738,44 @@ struct ModelDetailCard: View {
                        lineWidth: 1.2)
         }
         .environment(\.colorScheme, .dark)
+    }
+
+    private var capabilities: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            // NOT `model.info.vision`. That field comes from
+            // `ModelRatings.looksVision`, a 2023-shaped allowlist that reads
+            // vision off the id ("claude", "gemini", "-vl") and therefore
+            // tells every GLM 5 model it can't see — the exact bug
+            // `Provider.modelSupportsVision` was written to replace, using the
+            // manifest's generated blocklist plus what a rejected image
+            // actually taught us.
+            Capability(symbol: "eye", title: L("model.detail.vision"),
+                       supported: supportsVision)
+            // A vendor that publishes no `supported_parameters` leaves
+            // `info.toolUse` false, which is an absence of data being rendered
+            // as a "no". The provider gate is the real answer.
+            Capability(symbol: "wrench.and.screwdriver", title: L("model.detail.toolUse"),
+                       supported: supportsTools)
+            // Only ever stated in the positive. Reasoning has no authoritative
+            // source here — `looksReasoning` matches on "thinking"/"-r1"-ish
+            // ids and misses every hybrid model that reasons without saying so
+            // in its name — so a "Reasoning Unsupported" row would be a guess
+            // printed as a fact. No row means we don't know, which is true.
+            if model.info.reasoning {
+                Capability(symbol: "brain", title: L("model.detail.reasoning"),
+                           supported: true)
+            }
+            if isFirstParty {
+                switch ModelRatings.nonoHost(id: model.info.id, pricing: model.info.notchiPricing) {
+                case .official:
+                    Note(symbol: "globe", title: L("model.detail.nono.host.official"))
+                case .us:
+                    Note(symbol: "globe.americas", title: L("model.detail.nono.host"))
+                case .anyRegion:
+                    Note(symbol: "globe", title: L("model.detail.nono.host.any"))
+                }
+            }
+        }
     }
 
     /// The mark, the name, and — on a card whose name deliberately gives away no
@@ -808,7 +815,7 @@ struct ModelDetailCard: View {
         return Group {
             if tappable {
                 Button(action: onOpenProvider) { label }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.plain).exemptsDoubleClickPin()
                     .contentShape(Tag.shape)
                     .background(ScreenFrameProbe(onChange: onPillFrame))
             } else {
@@ -923,7 +930,7 @@ struct ModelDetailCard: View {
                 .padding(4)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plain).exemptsDoubleClickPin()
         .accessibilityLabel(L("model.detail.learnMore"))
         .background(ScreenFrameProbe(onChange: onLearnMoreFrame))
     }
@@ -2004,7 +2011,7 @@ final class ModelCatalogStore: ObservableObject {
             }.value
             guard let self else { return }
             self.claudeResolveInFlight = false
-            if !resolved.isEmpty { self.claudeResolved = resolved }
+            if !resolved.isEmpty, resolved != self.claudeResolved { self.claudeResolved = resolved }
         }
     }
 
@@ -2021,8 +2028,12 @@ final class ModelCatalogStore: ObservableObject {
     /// `live: false` is the launch seed from disk, which may be out of date.
     func adopt(_ result: ModelCatalog.Result, for p: Provider, live: Bool = true) {
         guard !result.infos.isEmpty else { return }
-        liveByProvider[p] = result.infos
-        featuredByProvider[p] = result.openRouterFeatured
+        // Settings adopts the cached list again on every open. An unchanged
+        // assignment would still publish and re-run the whole settings body.
+        if liveByProvider[p] != result.infos { liveByProvider[p] = result.infos }
+        if featuredByProvider[p] != result.openRouterFeatured {
+            featuredByProvider[p] = result.openRouterFeatured
+        }
         if live { seededFromDisk.remove(p) }
         if p == .nono {
             ModelRatings.nonoNames = Dictionary(result.infos.map { ($0.id, $0.name) },
@@ -2603,14 +2614,15 @@ struct AskRecentModelPickerView: View {
         }
     }
 
-    /// Notchi's top level holds only the Auto routers, as in Settings' model
-    /// menu; the named models sit in the More models submenu. With nothing on
-    /// one side there is no submenu and the whole lineup stays on the card.
+    /// Notchi's top level leads with the Auto routers, then named models up to
+    /// the BYOK row count so the list window has no empty rows; the rest sit in
+    /// the More models submenu. With nothing left over there is no submenu.
     private var notchiSplit: (main: [Row], more: [Row]) {
         let auto = pinned.filter { $0.id.hasPrefix("auto-") }
         let rest = pinned.filter { !$0.id.hasPrefix("auto-") }
         guard !auto.isEmpty, !rest.isEmpty else { return (pinned, []) }
-        return (auto, rest)
+        let fill = max(0, min(Self.listRows, rows.count) - auto.count)
+        return (auto + rest.prefix(fill), Array(rest.dropFirst(fill)))
     }
 
     /// On Notchi, More models is the submenu of named models. On BYOK it stays
@@ -2649,7 +2661,8 @@ struct AskRecentModelPickerView: View {
     @State private var snapScroll = false
 
     /// Sized by the longer of the two fleets, capped at four rows, so a flip
-    /// never resizes the card. The shorter fleet leaves air in the window.
+    /// never resizes the card. Notchi fills up to the BYOK count from its named
+    /// models; only a BYOK list shorter than the Auto routers leaves air.
     private var listHeight: CGFloat {
         let longest = max(1, rows.count, fleet(for: .notchi).count)
         return CGFloat(min(Self.listRows, longest)) * MenuCard.rowStride - MenuCard.rowSpacing
@@ -2981,7 +2994,7 @@ struct AskRecentModelPickerView: View {
                                 .frame(width: segment, height: height)
                                 .contentShape(Capsule())
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.plain).exemptsDoubleClickPin()
                     }
                 }
             }

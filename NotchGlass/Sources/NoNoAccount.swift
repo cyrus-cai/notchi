@@ -84,7 +84,7 @@ final class NoNoAccount: ObservableObject {
         case failed(String)
 
         enum Work: Equatable {
-            case registering, refreshing, checkout, portal
+            case registering, checkout, portal
             /// Stripe has the browser and the payment has not come back yet.
             /// Distinct from `checkout` because it outlasts the request that
             /// opened the page — and while it holds, the buy button must not be
@@ -122,6 +122,15 @@ final class NoNoAccount: ObservableObject {
         }
 
         var gift: Gift?
+
+        /// The About pane's survey. `null` on the wire while none runs.
+        /// `status` is `none`, `pending`, `approved` or `declined`.
+        struct Survey: Decodable, Equatable {
+            var status: String
+            var amountUSD: Double
+        }
+
+        var survey: Survey?
 
         struct Limits: Decodable, Equatable {
             /// The ceiling actually in force today, not the configured floor —
@@ -176,6 +185,7 @@ final class NoNoAccount: ObservableObject {
     /// no-op once a token exists and a refresh is not already running.
     func load() async {
         if case .working = phase { return }
+        if refreshInFlight { return }
         if !hasToken {
             await register()
             guard hasToken else { return }
@@ -201,17 +211,25 @@ final class NoNoAccount: ObservableObject {
     func refreshIfStale() async {
         guard hasToken else { return }
         if case .working = phase { return }
+        if refreshInFlight { return }
         if let last = lastRefreshAt, Date().timeIntervalSince(last) < 30 { return }
         await refresh()
     }
 
+    /// No view shows a refresh in progress, so it is tracked here rather than
+    /// in `phase`: a published change re-runs the whole settings body, and a
+    /// refresh starts on the frame Settings opens.
+    private var refreshInFlight = false
+
     func refresh() async {
         guard hasToken else { return }
         lastRefreshAt = Date()
-        phase = .working(.refreshing)
+        refreshInFlight = true
+        defer { refreshInFlight = false }
         do {
-            snapshot = try await get("/me")
-            phase = .idle
+            let fresh: Snapshot = try await get("/me")
+            if fresh != snapshot { snapshot = fresh }
+            if phase != .idle { phase = .idle }
         } catch {
             phase = .failed(message(for: error))
             return
@@ -418,19 +436,9 @@ final class NoNoAccount: ObservableObject {
         var saveProbability: Double
     }
 
-    /// What an account must have bought, over its life, before Jev is offered.
-    /// Mirrors the gateway's own `MIN_PAID_USD` (`backend/src/sense.ts`) — the
-    /// two have to agree, or the app offers a pick the route then refuses.
-    static let senseMinPaidUSD = 1.0
-
-    /// Whether this account may use Jev at all: a token, and at least
-    /// `senseMinPaidUSD` bought at some point — the same test `/v1/sense`
-    /// applies. What is left does not matter, only what was bought: someone who
-    /// bought $5 and spent it stays eligible. Nil snapshot (not read yet) counts
-    /// as no. Using Jev is $0 once that bar is met.
-    var canUseRemoteSense: Bool {
-        hasToken && (snapshot?.credit.grantedUSD ?? 0) >= Self.senseMinPaidUSD
-    }
+    /// Whether this account may use Jev at all: any account with a token. Free,
+    /// no purchase needed.
+    var canUseRemoteSense: Bool { hasToken }
 
     /// Whether Copy Sense should ask Jev for this copy: the account qualifies
     /// and the user picked Jev in Settings.
@@ -487,15 +495,46 @@ final class NoNoAccount: ObservableObject {
         }
     }
 
+    /// Send the survey answers (`POST /v1/survey`), then read the account so
+    /// the About row shows the review status. An account that already answered
+    /// gets 409, which is the same outcome.
+    func submitSurvey(_ answers: [String: Any]) async throws {
+        struct Accepted: Decodable {}
+        do {
+            let _: Accepted = try await post("/survey", body: answers, authorized: true)
+        } catch Failed.api(status: 409, _, _) {
+        }
+        await refresh()
+    }
+
     /// Ask the gateway for a reaction to `text`, with the assistant's previous
-    /// reply as context. Same gate as Copy Sense's Jev: accounts that bought
-    /// `senseMinPaidUSD` or more. Nil for everyone else and on any failure.
-    /// The caller must have run `ClipPrivacy` first.
+    /// reply as context. Free for every account with a token, no purchase
+    /// needed. Nil on any failure. The caller must have run `ClipPrivacy` first.
     func react(to text: String, previous: String) async -> ReactVerdict? {
-        guard canUseRemoteSense else { return nil }
+        guard hasToken else { return nil }
         guard var request = try? jsonRequest("/react", body: ["text": text, "previous": previous],
                                              authorized: true) else { return nil }
         request.timeoutInterval = 5
+        return try? await send(request)
+    }
+
+    // MARK: - Link pre-check
+
+    /// Jev's verdict on one web address (`POST /v1/linkcheck`). `verdict` is
+    /// `open` or `warn`.
+    struct LinkVerdict: Decodable, Equatable {
+        var verdict: String
+        var probability: Double
+    }
+
+    /// Ask the gateway whether `address` looks unsafe to open. Free for every
+    /// account with a token. Nil on any failure; the caller then opens the link.
+    func checkLink(_ address: String) async -> LinkVerdict? {
+        guard hasToken else { return nil }
+        guard var request = try? jsonRequest("/linkcheck", body: ["url": address],
+                                             authorized: true) else { return nil }
+        // The click is waiting on this.
+        request.timeoutInterval = 3
         return try? await send(request)
     }
 
