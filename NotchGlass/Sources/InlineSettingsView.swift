@@ -3326,7 +3326,7 @@ struct InlineSettingsView: View {
     /// stays — it carries the persisted value and the activation-policy mapping,
     /// which a raw Bool would throw away.
     private var dockIconRow: some View {
-        settingRow(label: L("general.dockIcon.toggle"), aligned: true) {
+        settingRow(label: L("general.dockIcon.toggle")) {
             Toggle("", isOn: Binding(
                 get: { dockIconVisibility == .shown },
                 set: { Haptics.levelChange(); selectDockIconVisibility($0 ? .shown : .hidden) }
@@ -3343,7 +3343,7 @@ struct InlineSettingsView: View {
     /// summon shortcut has been forgotten. The choice applies immediately
     /// (AppDelegate adds/removes the status item).
     private var menuBarIconRow: some View {
-        settingRow(label: L("general.menuBarIcon.toggle"), aligned: true) {
+        settingRow(label: L("general.menuBarIcon.toggle")) {
             Toggle("", isOn: Binding(
                 get: { menuBarIconVisibility == .shown },
                 set: { Haptics.levelChange(); selectMenuBarIconVisibility($0 ? .shown : .hidden) }

@@ -509,8 +509,8 @@ struct NotchBody: View {
                 if showsUnifiedIntroInvite {
                     UnifiedIntroInvite(model: model)
                         .transition(moduleTransition)
-                } else if showsReactionsIntroInvite {
-                    ReactionsIntroInvite(model: model)
+                } else if let nudge = featureNudgeInvite {
+                    FeatureNudgeInvite(model: model, nudge: nudge)
                         .transition(moduleTransition)
                 } else if showsMainThreadPeek, let peek = model.mainThreadPeek {
                     mainThreadReveal(peek.item, answer: peek.answer, live: peek.live)
@@ -552,7 +552,7 @@ struct NotchBody: View {
                 // `ThreadRevealBottom`); at rest the box adds nothing.
                 VStack(alignment: .leading, spacing: 0) {
                     // The invitation takes the prompt's place until Start or ×.
-                    if !showsUnifiedIntroInvite && !showsReactionsIntroInvite {
+                    if !showsUnifiedIntroInvite && featureNudgeInvite == nil {
                         idleInputRow
                     }
 
@@ -661,12 +661,12 @@ struct NotchBody: View {
         return intro.threadID == nil
     }
 
-    /// The emoji reactions guide's invitation, in the same slot, after the
-    /// unified threads guide's.
-    private var showsReactionsIntroInvite: Bool {
+    /// A feature nudge's invitation, in the same slot, after the unified
+    /// threads guide's.
+    private var featureNudgeInvite: NotchModel.FeatureNudge? {
         guard showsMainThreadPeek, !showsUnifiedIntroInvite,
-              let intro = model.reactionsIntro else { return false }
-        return intro.threadID == nil
+              let nudge = model.featureNudge, nudge.threadID == nil else { return nil }
+        return nudge
     }
 
     private var showsMainThreadPeek: Bool {
@@ -8789,19 +8789,21 @@ private struct UnifiedIntroInvite: View {
     }
 }
 
-/// The emoji reactions guide's invitation (`NotchModel.reactionsIntro`), drawn
-/// like `UnifiedIntroInvite`: a message from Notchi, Turn on, and × to dismiss.
-private struct ReactionsIntroInvite: View {
+/// A feature nudge's invitation (`NotchModel.featureNudge`), drawn like
+/// `UnifiedIntroInvite`: a message from Notchi, the confirm button, and × to
+/// decline.
+private struct FeatureNudgeInvite: View {
     @ObservedObject var model: NotchModel
+    let nudge: NotchModel.FeatureNudge
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            AssistantTurnView(text: L("reactionsIntro.invite"), showsFooterMetadata: false)
+            AssistantTurnView(text: nudge.invite, showsFooterMetadata: false)
             HStack(spacing: 6) {
-                GlassTextButton(title: L("reactionsIntro.start"),
+                GlassTextButton(title: nudge.confirm,
                                 tint: NotchModel.Panel.chat.intentTint) {
                     withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
-                        model.startReactionsIntro()
+                        model.startFeatureNudge()
                     }
                 }
                 GlassIconButton(systemName: "xmark", help: L("unifiedIntro.dismiss"),
@@ -8809,7 +8811,7 @@ private struct ReactionsIntroInvite: View {
                                 glyphSize: Tokens.TypeSize.caption,
                                 showsTooltip: false) {
                     withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) {
-                        model.dismissReactionsIntro()
+                        model.dismissFeatureNudge()
                     }
                 }
             }

@@ -375,7 +375,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // The unified threads guide is decided before the notch first
                 // opens, so the open never draws the plain prompt first.
                 model.maybeStartUnifiedIntro()
-                model.maybeStartReactionsIntro()
+                // Read the nudge policy now, so the first open can decide from it.
+                await FeatureNudges.shared.refreshIfDue()
+                model.maybeStartFeatureNudge()
                 if NoNoAccount.shared.hasToken { break }
             }
         }

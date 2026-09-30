@@ -5384,80 +5384,116 @@ final class NotchModel: ObservableObject {
         NotificationCenter.default.post(name: .aiBackendChanged, object: nil)
     }
 
-    // MARK: - Emoji reactions guide
+    // MARK: - Feature nudge
 
-    /// The one-time guide that turns on emoji reactions (`emojiReactionsEnabled`),
-    /// written like the unified threads guide. It starts as an invitation in the
-    /// peek's slot. Its Turn on button switches reactions on and writes the
+    /// An invitation to turn on a feature that is off, chosen by
+    /// `FeatureNudges` from the remote policy and written like the unified
+    /// threads guide. It starts in the peek's slot: a message from Notchi, the
+    /// confirm button and ×. Confirm switches the feature on and writes the
     /// guide into the main thread (a thread of its own when there is none): the
-    /// invitation, Turn on with Notchi's reaction on it, and an answer on what
-    /// is sent and where to turn it off. Nil when not showing; ends when that
-    /// answer has landed, on ×, or on the next question sent before Turn on.
-    struct ReactionsIntro: Equatable {
-        /// The thread the guide was written into and its answer, once Turn on
+    /// invitation, the confirm line, and the policy's messages landing bubble
+    /// by bubble. × declines the feature for good. Nil when not showing; the
+    /// next question sent before an answer also closes it, and the nudge comes
+    /// back after its interval.
+    struct FeatureNudge: Equatable {
+        let feature: NudgeFeature
+        let invite: String
+        let confirm: String
+        let title: String
+        let messages: [String]
+        let reaction: String?
+        /// The thread the guide was written into and its answer, once confirm
         /// was pressed.
         var threadID: UUID?
         var answerID: UUID?
     }
 
-    @Published private(set) var reactionsIntro: ReactionsIntro?
+    @Published private(set) var featureNudge: FeatureNudge?
 
-    private static let reactionsIntroDoneKey = "emojiReactionsIntroShown"
-
-    /// Show the invitation to an account with a token while reactions are off.
-    /// Waits for the unified threads guide. Shown once per install;
-    /// `NOTCH_DEMO_REACTIONS_INTRO=1` shows it on every launch, and `=thread`
-    /// also presses Turn on.
-    func maybeStartReactionsIntro() {
-        guard reactionsIntro == nil, unifiedIntro == nil else { return }
-        let demo = ProcessInfo.processInfo.environment["NOTCH_DEMO_REACTIONS_INTRO"]
-        let forced = demo == "1" || demo == "thread"
-        if !forced {
-            guard !UserDefaults.standard.bool(forKey: Self.reactionsIntroDoneKey),
-                  !emojiReactionsEnabled,
-                  !OnboardingService.shared.showIntro,
-                  Provider.offered.contains(.nono),
-                  NoNoAccount.shared.hasToken
+    /// Show the nudge that is due, on the idle prompt of the open notch. Waits
+    /// for the unified threads guide. `NOTCH_DEMO_NUDGE=<policy file>` shows
+    /// that file's first entry on every launch, and `NOTCH_DEMO_NUDGE_START=1`
+    /// also presses confirm.
+    func maybeStartFeatureNudge() {
+        guard featureNudge == nil, unifiedIntro == nil else { return }
+        let nudges = FeatureNudges.shared
+        if !nudges.forced {
+            guard open, mode == .idle, turns.isEmpty,
+                  !showSettings, !showWhatsNew, !showHistory,
+                  agentDetailTaskID == nil, !agentComposeActive,
+                  !OnboardingService.shared.showIntro
             else { return }
-            UserDefaults.standard.set(true, forKey: Self.reactionsIntroDoneKey)
         }
-        reactionsIntro = ReactionsIntro()
-        if demo == "thread" { startReactionsIntro() }
+        guard let pick = nudges.pick(usable: { [unowned self] feature, requires in
+            nudgeUsable(feature, requires: requires)
+        }) else { return }
+        nudges.noteShown(pick.nudge)
+        featureNudge = FeatureNudge(feature: pick.feature,
+                                    invite: pick.copy.invite,
+                                    confirm: pick.copy.confirm,
+                                    title: pick.copy.title ?? pick.copy.confirm,
+                                    messages: pick.copy.messages,
+                                    reaction: pick.nudge.reaction)
+        if ProcessInfo.processInfo.environment["NOTCH_DEMO_NUDGE_START"] == "1" {
+            startFeatureNudge()
+        }
+    }
+
+    /// Whether `feature` is off and can work: both features run on Jev, which
+    /// needs a nono account. `requires` are the policy entry's own conditions.
+    private func nudgeUsable(_ feature: NudgeFeature, requires: [String]) -> Bool {
+        let isOn: Bool
+        switch feature {
+        case .emojiReactions: isOn = emojiReactionsEnabled
+        case .linkPrecheck: isOn = linkPrecheckEnabled
+        }
+        guard !isOn, Provider.offered.contains(.nono), NoNoAccount.shared.hasToken
+        else { return false }
+        return requires.allSatisfy { condition in
+            switch condition {
+            case "gift": return NoNoAccount.shared.snapshot?.hasGift == true
+            case "unifiedThreads": return unifiedThreadsEnabled
+            default: return false
+            }
+        }
     }
 
     /// Whether the guide's thread is on screen with its answer still landing.
     /// The follow-up field is locked until then, as in the unified threads guide.
-    var reactionsIntroLocksInput: Bool {
-        guard let threadID = reactionsIntro?.threadID else { return false }
+    var featureNudgeLocksInput: Bool {
+        guard let threadID = featureNudge?.threadID else { return false }
         return threadHistoryID == threadID && mode == .result
     }
 
     /// Either guide is writing its thread on screen.
-    var guideLocksInput: Bool { unifiedIntroLocksInput || reactionsIntroLocksInput }
+    var guideLocksInput: Bool { unifiedIntroLocksInput || featureNudgeLocksInput }
 
-    /// The invitation's ×: close it. Reactions stay off.
-    func dismissReactionsIntro() {
-        guard reactionsIntro?.threadID == nil else { return }
-        reactionsIntro = nil
+    /// The invitation's ×: close it, and never offer this feature again.
+    func dismissFeatureNudge() {
+        guard let nudge = featureNudge, nudge.threadID == nil else { return }
+        FeatureNudges.shared.decline(nudge.feature)
+        featureNudge = nil
     }
 
-    /// The invitation's Turn on: switch reactions on, and write the guide at
+    /// The invitation's confirm: switch the feature on, and write the guide at
     /// the end of the main thread with its answer landing bubble by bubble.
-    func startReactionsIntro() {
-        guard var intro = reactionsIntro, intro.threadID == nil else { return }
-        emojiReactionsEnabled = true
+    func startFeatureNudge() {
+        guard var nudge = featureNudge, nudge.threadID == nil else { return }
+        switch nudge.feature {
+        case .emojiReactions: emojiReactionsEnabled = true
+        case .linkPrecheck: linkPrecheckEnabled = true
+        }
 
-        var invite = Turn(role: "assistant", text: L("reactionsIntro.invite"))
+        var invite = Turn(role: "assistant", text: nudge.invite)
         invite.isLocal = true
-        var start = Turn(role: "user", text: L("reactionsIntro.start"))
+        var start = Turn(role: "user", text: nudge.confirm)
         start.isLocal = true
-        let bubbles = [
-            L("reactionsIntro.b1"),
-            L("reactionsIntro.b2"),
-            L("reactionsIntro.b3"),
-        ]
-        var answer = Turn(role: "assistant", text: bubbles[..<2].joined(separator: "\n\n"),
-                          streaming: true)
+        let bubbles = nudge.messages
+        // A single message has nothing to land after it.
+        let paced = bubbles.count > 1
+        var answer = Turn(role: "assistant",
+                          text: bubbles.prefix(2).joined(separator: "\n\n"),
+                          streaming: paced)
         answer.isLocal = true
         var settled = answer
         settled.text = bubbles.joined(separator: "\n\n")
@@ -5482,7 +5518,7 @@ final class NotchModel: ObservableObject {
         } else {
             item = HistoryItem(q: start.text, a: settled.text, t: Date(),
                                turns: [invite, start, settled])
-            item.title = L("reactionsIntro.title")
+            item.title = nudge.title
             if unifiedThreadsEnabled
                 && !history.contains(where: { $0.mainThread && $0.source == .ask }) {
                 item.mainThread = true
@@ -5494,13 +5530,19 @@ final class NotchModel: ObservableObject {
         turns = prior + [invite, start, answer]
         threadHistoryID = item.id
         mode = .result
-        intro.threadID = item.id
-        intro.answerID = answer.id
-        reactionsIntro = intro
-        streamUnifiedIntro(answer.id, bubbles: bubbles, written: 2) { [weak self] in
-            self?.reactionsIntro = nil
+        if paced {
+            nudge.threadID = item.id
+            nudge.answerID = answer.id
+            featureNudge = nudge
+            streamUnifiedIntro(answer.id, bubbles: bubbles, written: 2) { [weak self] in
+                self?.featureNudge = nil
+            }
+        } else {
+            featureNudge = nil
         }
-        reactToGuideLine(start.id, threadID: item.id, emoji: "🎉")
+        if let emoji = nudge.reaction {
+            reactToGuideLine(start.id, threadID: item.id, emoji: emoji)
+        }
     }
 
     /// Overrides how the next `submit()` decides whether a new thread joins the
@@ -5609,7 +5651,7 @@ final class NotchModel: ObservableObject {
     /// The idle prompt with nothing else on the page. The unified threads
     /// guide's invitation holds the pull until Start or × answers it.
     private var threadPullPageClear: Bool {
-        open && mode == .idle && turns.isEmpty && unifiedIntro == nil && reactionsIntro == nil
+        open && mode == .idle && turns.isEmpty && unifiedIntro == nil && featureNudge == nil
             && !showSettings && !showWhatsNew && !showHistory
             && agentDetailTaskID == nil && !agentComposeActive
             && promptShortcutContext == nil && promptShortcutMode == nil
@@ -6425,11 +6467,11 @@ final class NotchModel: ObservableObject {
             // already shows the invitation; decided again after the refresh
             // for an account that was not read yet.
             maybeStartUnifiedIntro()
-            maybeStartReactionsIntro()
             Task {
                 await NoNoAccount.shared.refreshIfStale()
+                await FeatureNudges.shared.refreshIfDue()
                 maybeStartUnifiedIntro()
-                maybeStartReactionsIntro()
+                maybeStartFeatureNudge()
             }
             if mode == .idle, turns.isEmpty, let round = inFlightRounds.last {
                 // A round is still streaming in the background — the busy
@@ -8110,7 +8152,7 @@ final class NotchModel: ObservableObject {
         // the invitation unanswered, or the guide left from its thread. It also
         // closes the reactions guide's invitation, left unanswered.
         if unifiedIntro != nil, joinsMainThread { unifiedIntro = nil }
-        if reactionsIntro != nil, reactionsIntro?.threadID == nil, joinsMainThread { reactionsIntro = nil }
+        if featureNudge != nil, featureNudge?.threadID == nil, joinsMainThread { featureNudge = nil }
         // Clear any prior error state — this attempt replaces it (XII-85).
         askError = nil
         // One-shot regenerate-with-model override (XII-135): build a service pinned

@@ -105,6 +105,15 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.3",
+            date: "2026-09-30",
+            improvements: [
+                "Notchi can offer to turn on Link pre-check from the prompt.",
+                "Closing an offer to turn on a feature stops further offers for that feature.",
+                "The Dock icon and menu bar icon switches in Settings → General sit next to their labels.",
+            ]
+        ),
+        Entry(
             version: "0.9.2",
             date: "2026-09-30",
             features: [
