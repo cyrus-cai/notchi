@@ -1117,7 +1117,19 @@ struct NotchIsland: View {
         // the EDGES are defined by a lit beveled rim — bright along the bottom and
         // sides, brightest at the rounded corners. Stamped on top of the composited
         // island so the highlight traces the edge crisply instead of being clipped.
-        .overlay(IslandRim(shape: islandShape))
+        // Hidden at rest, shown on hover (the click level's peek) and when open:
+        // on the idle notch the rim showed as a white outline under the hardware
+        // cutout. Kept mounted (opacity, not `if`) so the open doesn't allocate
+        // its offscreen layer on the first frame.
+        //
+        // The fade has its own short ease, scoped to the opacity alone (the rim's
+        // shape still rides the open/close spring). On the underdamped close
+        // spring the opacity overshot below zero and came back, so the rim
+        // flashed in again as the shell settled; this fade is done in the first
+        // part of the motion.
+        .overlay(IslandRim(shape: islandShape).animation(.easeOut(duration: 0.14)) {
+            $0.opacity(isOpen || peeking ? 1 : 0)
+        })
         // The island's hover hints, drawn here — OUTSIDE the clip above, so the
         // `NotchShape` can never slice a capsule, and after the rim so nothing
         // paints over one. `inset` is the shoulder flare: the frame carries it,
@@ -1177,25 +1189,15 @@ struct NotchIsland: View {
         // same spring as the width.
         .offset(x: (earRight - earLeft) / 2)
         // Spring expand (eased by how hard the cursor arrived — see `openSpring`);
-        // the collapse settles on `closeSpring` (XII-108) so the shell drops back
-        // with a touch of gravity/rebound instead of a flat clamp — EXCEPT when
-        // the close lands on the extended busy rest. The rebound's undershoot
-        // briefly renders the island SMALLER than the hardware notch (shorter
-        // and narrower both); on a normal close that whole dip hides inside the
-        // black cutout, but the busy extension sits over visible screen, so the
-        // same dip reads as the "notch" shrinking away from the bezel. A busy
-        // close takes the overshoot-free settle instead.
-        .animation(isOpen ? openSpring : (earLeft + earRight > 0 ? busySettle : closeSpring), value: isOpen)
+        // the collapse settles on the overshoot-free `closeSpring`.
+        .animation(isOpen ? openSpring : closeSpring, value: isOpen)
         // The busy/sense extension's own grow/retract (no open/close involved —
         // e.g. the detached answer lands while the notch rests) must NOT bounce:
         // an underdamped settle undershoots the rest width, and for a beat the
         // drawn island is NARROWER than the hardware notch it's impersonating —
         // physically impossible, and exactly the tell that breaks the illusion.
         // A near-critically-damped, unhurried ease reads as the notch quietly
-        // relaxing back into the bezel. (A close that lands ON the extended
-        // rest still rides `closeSpring` via the isOpen animation above — its
-        // target there is wider than the notch, so its rebound never dips
-        // below the hardware width.)
+        // relaxing back into the bezel.
         .animation(busySettle, value: earLeft)
         .animation(busySettle, value: earRight)
         // The kick fires on the open *edge*, reading the entry vector the hover
@@ -1337,18 +1339,16 @@ struct NotchIsland: View {
         return .spring(response: 0.26, dampingFraction: 0.95)
     }
 
-    /// The retract animation (XII-108): instead of a flat ease-out, the shell
-    /// settles on a slightly-underdamped spring so it reads as an object dropping
-    /// back into the bezel with a touch of gravity/rebound, not a clean clamp.
-    /// Paced to breathe with the open (response 0.50): the original 0.34 retract
-    /// was nearly twice as fast as the unfurl, and with leave-to-fold making the
-    /// close a constant companion it read as a harsh clamp — too few frames for
-    /// the motion to be legible at all. The slower period also lets the rebound
-    /// actually READ as physics; damping comes up a touch so the longer spring
-    /// stays one soft settle, not a wobble. Reduce-motion keeps the flat ease.
+    /// The retract animation. Paced to breathe with the open (response 0.50):
+    /// the original 0.34 retract was nearly twice as fast as the unfurl, and with
+    /// leave-to-fold making the close a constant companion it read as a harsh
+    /// clamp. Critically damped: the earlier underdamped spring (0.76) dipped
+    /// the island below its resting height and climbed back — on a screen where
+    /// the resting island shows below the hardware cutout, that read as the
+    /// notch bouncing at the end of every fold. Reduce-motion keeps the flat ease.
     private var closeSpring: Animation {
         guard !reduceMotion else { return .easeOut(duration: 0.30) }
-        return .spring(response: 0.46, dampingFraction: 0.76)
+        return .spring(response: 0.46, dampingFraction: 1.0)
     }
 
     /// Seed the kick from the entry vector, then release it. Two writes on

@@ -66,8 +66,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         if let button = item.button {
             button.image = Self.statusIcon()
             button.imagePosition = .imageOnly
-            button.toolTip = "Notch"
-            button.setAccessibilityLabel("Notch")
+            button.toolTip = "Notchi"
+            button.setAccessibilityLabel("Notchi")
         }
         let menu = NSMenu()
         menu.delegate = self

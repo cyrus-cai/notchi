@@ -664,11 +664,11 @@ enum GrokSearchMCPServer {
                     box.text = try await backend.searchProvider.search(["query": query]).text
                 } else {
                     box.text = "Error: no search backend is configured; tell the user "
-                             + "to pick one in Notch's settings."
+                             + "to pick one in Notchi's settings."
                 }
             } catch let failure as SearchServiceError {
                 box.text = failure.modelText + " Tell the user they can switch the "
-                         + "search service in Notch's settings."
+                         + "search service in Notchi's settings."
             } catch {
                 box.text = "Search failed: \(error.localizedDescription)"
             }

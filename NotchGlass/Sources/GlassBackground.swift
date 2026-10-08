@@ -369,14 +369,14 @@ struct IslandRim: View {
                     LinearGradient(
                         stops: [
                             .init(color: .white.opacity(0.0),  location: 0.0),
-                            .init(color: .white.opacity(0.04), location: 0.5),
-                            .init(color: .white.opacity(0.13), location: 1.0),
+                            .init(color: .white.opacity(0.025), location: 0.5),
+                            .init(color: .white.opacity(0.08), location: 1.0),
                         ],
                         startPoint: .top, endPoint: .bottom
                     ),
-                    lineWidth: 2.5
+                    lineWidth: 1.2
                 )
-                .blur(radius: 2.5)
+                .blur(radius: 1.6)
                 .blendMode(.plusLighter)
 
             // Crisp outer hairline right on the perimeter — the bright edge of the
@@ -386,12 +386,12 @@ struct IslandRim: View {
                     LinearGradient(
                         stops: [
                             .init(color: .white.opacity(0.0),  location: 0.0),
-                            .init(color: .white.opacity(0.08), location: 0.5),
-                            .init(color: .white.opacity(0.26), location: 1.0),
+                            .init(color: .white.opacity(0.05), location: 0.5),
+                            .init(color: .white.opacity(0.16), location: 1.0),
                         ],
                         startPoint: .top, endPoint: .bottom
                     ),
-                    lineWidth: 0.9
+                    lineWidth: 0.4
                 )
                 .blendMode(.plusLighter)
         }

@@ -105,6 +105,17 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.5",
+            date: "2026-10-08",
+            improvements: [
+                "The notch's outline is thinner and appears only on hover or when the panel is open.",
+                "Menus, settings and messages use the name Notchi.",
+            ],
+            fixes: [
+                "The notch no longer bounces at the end of closing.",
+            ]
+        ),
+        Entry(
             version: "0.9.4",
             date: "2026-09-30",
             improvements: [
