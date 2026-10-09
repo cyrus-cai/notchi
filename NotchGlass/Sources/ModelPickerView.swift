@@ -2015,6 +2015,21 @@ final class ModelCatalogStore: ObservableObject {
         }
     }
 
+    /// Ask the gateway for Notchi's lineup now, past `ModelCatalog`'s hourly
+    /// cache. The Ask menu's More models submenu calls this when it opens, so
+    /// a model added to the gateway shows up without waiting out the cache.
+    func refreshNono() {
+        guard !nonoRefreshInFlight, let key = APIKeyStore.current(for: .nono) else { return }
+        nonoRefreshInFlight = true
+        Task { [weak self] in
+            let fresh = await ModelCatalog.fetch(for: .nono, apiKey: key, force: true)
+            guard let self else { return }
+            self.nonoRefreshInFlight = false
+            if let fresh { self.adopt(fresh, for: .nono) }
+        }
+    }
+    private var nonoRefreshInFlight = false
+
     /// Forget everything cached for `p`, session cache and catalog cache alike, so
     /// the next picker open refetches. Used when a provider's *endpoint* changes
     /// under it — only the custom one can (see `CustomProvider`).
@@ -2821,6 +2836,9 @@ struct AskRecentModelPickerView: View {
                         moreOpen = true
                     }) {
             moreOpen.toggle()
+        }
+        .onChange(of: moreOpen) { _, open in
+            if open { ModelCatalogStore.shared.refreshNono() }
         }
         .modifier(MenuCardWindow(
             open: moreOpen && showsMoreSubmenu,

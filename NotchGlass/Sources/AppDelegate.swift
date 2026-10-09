@@ -431,6 +431,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // menu bar stays with the front app even while we're active.) Keyed on
         // (open, activeDisplay) together so a display *switch* while open hands
         // the keyboard over with the island.
+        // An open that names no screen lands where the pointer is.
+        model.summonDisplay = { [weak self] in self?.displayForSummon() }
         openObserver = model.$open
             .combineLatest(model.$activeDisplay)
             .removeDuplicates(by: ==)
@@ -1459,14 +1461,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     model.openPanel(on: display)
                 }
             },
-            newChat: { [weak self] in
+            openHistory: { [weak self] in
+                // The recent list inside the panel, not the standalone window.
                 self?.summonFromMenuBar { model, display in
-                    model.newChat()
+                    model.mode = .idle
                     model.openPanel(on: display)
+                    model.showHistory = true
                 }
-            },
-            openHistory: {
-                NotificationCenter.default.post(name: .openHistoryArchiveRequested, object: nil)
             },
             openSettings: {
                 NotificationCenter.default.post(name: .openSettingsRequested, object: nil)
@@ -1485,7 +1486,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             },
             isForceTouchDisabled: { [weak self] in self?.model.isForceTouchDisabled ?? false },
             forceTouchResumesAt: { [weak self] in self?.model.forceTouchDisabledUntil },
-            disableForceTouch: { [weak self] scope in self?.model.disableForceTouch(scope) },
             resumeForceTouch: { [weak self] in self?.model.resumeForceTouch() }
         ))
         menuBar?.apply()

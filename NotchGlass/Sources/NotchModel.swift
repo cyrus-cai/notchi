@@ -524,6 +524,12 @@ final class NotchModel: ObservableObject {
     /// their resting notch. `nil` while closed (and in single-screen debug paths,
     /// where it means "any screen").
     @Published var activeDisplay: CGDirectDisplayID? = nil
+    /// The screen an open without a named display lands on. AppDelegate sets it
+    /// to the screen under the pointer. Without it, a resting-notch path that
+    /// opens with `activeDisplay` still nil (the clipboard Ask, a reattach, a
+    /// What's New link) unfurled every screen's island at once, each with its
+    /// own copy of any menu opened afterwards.
+    var summonDisplay: () -> CGDirectDisplayID? = { nil }
     @Published var mode: Mode = .idle
 
     /// The user pinned the current answer's card (the pin button in `resultHeader`).
@@ -6419,6 +6425,16 @@ final class NotchModel: ObservableObject {
         open && (activeDisplay == nil || display == nil || activeDisplay == display)
     }
 
+    /// Point the panel at `display`, or keep the current screen; a panel that
+    /// has none yet takes `summonDisplay`.
+    private func claimDisplay(_ display: CGDirectDisplayID?) {
+        if let display {
+            activeDisplay = display
+        } else if activeDisplay == nil {
+            activeDisplay = summonDisplay()
+        }
+    }
+
     /// Open (or migrate) the panel on the given screen. Hovering another screen's
     /// resting notch while the panel is open elsewhere moves the whole island —
     /// conversation and all — to where the user actually is. `activeDisplay` is
@@ -6427,7 +6443,7 @@ final class NotchModel: ObservableObject {
     /// it must land before `open` so the island's animation reads it fresh.
     func openPanel(on display: CGDirectDisplayID?, velocity: CGVector = .zero) {
         ClickOpenProbe.shared.note("openPanel edge=\(!open) display=\(display.map(String.init) ?? "nil")")
-        if let display { activeDisplay = display }
+        claimDisplay(display)
         // Only the *closed→open* edge sets the clipboard baseline. Hover fires
         // `openPanel` again on every re-enter and on display migration while already
         // open — re-baselining there would clobber a copy the user made mid-session.
@@ -6558,7 +6574,7 @@ final class NotchModel: ObservableObject {
         // Summoned by keyboard, not approached by mouse — a stale entry vector
         // from an earlier hover must not kick the settings unfurl sideways.
         entryVelocity = .zero
-        if let display { activeDisplay = display }
+        claimDisplay(display)
         // Same closed→open-edge rule as openPanel: adopt the pre-open resting
         // baseline so a copy-then-⌘, still leaves the clipboard eligible for the
         // first Ask, and a re-open while already open doesn't clobber it.
@@ -6621,7 +6637,7 @@ final class NotchModel: ObservableObject {
     /// Marks the running version as seen so the cue and auto-show don't re-fire.
     func openWhatsNew(on display: CGDirectDisplayID? = nil) {
         entryVelocity = .zero
-        if let display { activeDisplay = display }
+        claimDisplay(display)
         if !open {
             pasteboardChangeCountAtOpen = pasteboardChangeCountAtRest
         }

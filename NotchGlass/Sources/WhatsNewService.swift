@@ -105,6 +105,19 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.6",
+            date: "2026-10-09",
+            improvements: [
+                "Notchi answers “which is better” questions with a clear pick.",
+                "History in the menu bar opens recent chats in the notch.",
+                "Settings have clearer names, like Text actions.",
+            ],
+            fixes: [
+                "With several displays, Notchi opens only on the one under the pointer.",
+                "Scrolling up in long conversations is smoother.",
+            ]
+        ),
+        Entry(
             version: "0.9.5",
             date: "2026-10-08",
             improvements: [

@@ -65,6 +65,10 @@ struct NotchBody: View {
     /// stack a pull lays out, the result header it fades in, and the idle
     /// prompt + bucket row at rest, which the pull folds into the follow-up row.
     @State private var revealThreadHeight: CGFloat = 0
+    /// Whether the thread a pull lays out has older turns than the ones it
+    /// draws. The result page scrolls such a thread however short the drawn
+    /// turns are (see `isAnswerClipped`), so the pull opens to that layout.
+    @State private var revealThreadPartial = false
     @State private var revealHeaderHeight: CGFloat = 26
     @State private var idleBottomHeight: CGFloat = 0
     /// The idle prompt + bucket row's latest height, read during a pull too.
@@ -700,7 +704,7 @@ struct NotchBody: View {
     /// follow-up floats — with the top fade and frost under the header.
     private var revealTargets: ThreadRevealTargets {
         let height = revealThreadHeight
-        guard height > answerMaxHeight else {
+        guard height > answerMaxHeight || revealThreadPartial else {
             return ThreadRevealTargets(headerSlot: revealHeaderHeight + 18,
                                        viewport: height, gap: 24, fade: 0)
         }
@@ -772,6 +776,7 @@ struct NotchBody: View {
             // result page (a new question) must size itself from scratch.
             guard !isPulling, model.mode == .idle else { return }
             revealThreadHeight = 0
+            revealThreadPartial = false
             measuredAnswerHeight = 0
             model.lastMeasuredAnswerHeight = 0
         }
@@ -794,6 +799,7 @@ struct NotchBody: View {
         .fixedSize(horizontal: false, vertical: true)
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
             guard measures else { return }
+            revealThreadPartial = turns.count < thread.filter(\.isDrawn).count
             revealThreadHeight = height
             measuredAnswerHeight = height
             model.lastMeasuredAnswerHeight = height
@@ -4092,10 +4098,14 @@ struct NotchBody: View {
     /// two-thousand-point collapse right through the open. The estimate below
     /// costs no layout, so the first frame is already the final one.
     private var isAnswerClipped: Bool {
-        guard measuredAnswerHeight > 0 else {
-            return Self.estimatedThreadExceeds(model.turns, answerMaxHeight)
-        }
-        return measuredAnswerHeight > answerMaxHeight
+        let tall = measuredAnswerHeight > 0
+            ? measuredAnswerHeight > answerMaxHeight
+            : Self.estimatedThreadExceeds(model.turns, answerMaxHeight)
+        // Older turns not mounted yet mount from the scroller
+        // (`OlderTurnsLoader`), so a thread that has some scrolls even when the
+        // mounted turns are short — a long question folded behind Show more
+        // fills the window's character budget in a few lines.
+        return tall || hasOlderTurns
     }
 
     /// Whether a thread's natural height clears `ceiling`, estimated from its text
@@ -4537,6 +4547,11 @@ struct NotchBody: View {
     /// the result page), so its size is what each pull costs.
     private static let windowTurns = 10
     private static let windowCharacters = 3000
+    /// What a question counts toward `windowCharacters`: a long one folds to
+    /// six lines behind Show more (`UserQuestionBubble`), so a pasted wall of
+    /// text counted in full filled the window with two short turns and left
+    /// the scroller empty above them until the next page came in.
+    private static let foldedQuestionCharacters = 300
 
     /// The index in `turns` of the oldest turn of the page that ends just before
     /// `end`: turns are taken newest first until `windowTurns` of them, or
@@ -4546,7 +4561,8 @@ struct NotchBody: View {
         var characters = 0
         while start > 0 {
             start -= 1
-            characters += turns[start].text.count
+            let count = turns[start].text.count
+            characters += turns[start].role == "user" ? min(count, foldedQuestionCharacters) : count
             if end - start >= windowTurns || characters >= windowCharacters { break }
         }
         return start
@@ -4646,6 +4662,9 @@ struct NotchBody: View {
                 NotificationCenter.default.addObserver(
                     self, selector: #selector(documentResized),
                     name: NSView.frameDidChangeNotification, object: document)
+                // A window shorter than the viewport never scrolls, so no
+                // bounds change would ever ask for the page above it.
+                checkSoon()
             }
 
             func detach() {
@@ -4654,7 +4673,24 @@ struct NotchBody: View {
                 documentView = nil
             }
 
-            @objc private func boundsChanged() {
+            @objc private func boundsChanged() { checkSoon() }
+
+            /// Asks for the next page on the next turn of the run loop. The
+            /// bounds change often arrives inside SwiftUI's layout — the
+            /// scroll `documentResized` makes below is one — and a state
+            /// write made there is dropped, which left the reader at the top
+            /// with no page coming.
+            private func checkSoon() {
+                guard !checkQueued else { return }
+                checkQueued = true
+                DispatchQueue.main.async { [weak self] in
+                    self?.checkQueued = false
+                    self?.check()
+                }
+            }
+            private var checkQueued = false
+
+            private func check() {
                 guard let clipView, let documentView, distanceFromBottom == nil,
                       parent?.hasOlder == true,
                       clipView.bounds.origin.y < OlderTurnsLoader.reach else { return }
@@ -4675,6 +4711,9 @@ struct NotchBody: View {
                 clipView.scroll(to: NSPoint(x: clipView.bounds.origin.x,
                                             y: max(0, documentView.frame.height - distance)))
                 clipView.enclosingScrollView?.reflectScrolledClipView(clipView)
+                // The page may leave the reader within reach without moving
+                // the bounds (a page shorter than the viewport).
+                checkSoon()
             }
         }
     }
