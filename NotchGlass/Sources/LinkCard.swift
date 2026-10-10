@@ -487,7 +487,8 @@ final class LinkCardStore {
             let card = LPLinkMetadata()
             card.originalURL = url
             card.url = fetched?.url ?? url
-            card.title = fetched?.title ?? title ?? local?.title
+            card.title = Self.pageTitle(fetched?.title, url: url) ?? title ?? local?.title
+                ?? Self.pathTitle(url)
             // A preview image switches `LPLinkView` to its tall layout; the
             // compact form carries the icon only.
             if large, let image = fetched?.imageProvider,
@@ -519,6 +520,12 @@ final class LinkCardStore {
 
     /// Point sizes of cards drawn before, by `stillName`. Read once, small.
     private lazy var sizes: [String: CGSize] = {
+        // "Stills" held cards drawn before a card without a page title took
+        // the name in its link's path; they showed the host alone.
+        Self.diskQueue.async {
+            try? FileManager.default.removeItem(
+                at: Self.directory.appendingPathComponent("Stills", isDirectory: true))
+        }
         guard let data = try? Data(contentsOf: Self.sizesURL),
               let pairs = try? JSONDecoder().decode([String: [CGFloat]].self, from: data)
         else { return [:] }
@@ -528,7 +535,7 @@ final class LinkCardStore {
     private static let diskQueue = DispatchQueue(label: "LinkCardStore.disk", qos: .utility)
 
     private nonisolated static var stillsDirectory: URL {
-        directory.appendingPathComponent("Stills", isDirectory: true)
+        directory.appendingPathComponent("Stills2", isDirectory: true)
     }
 
     private nonisolated static var sizesURL: URL {
@@ -613,9 +620,45 @@ final class LinkCardStore {
         let card = LPLinkMetadata()
         card.originalURL = url
         card.url = url
-        card.title = title ?? local?.title
+        card.title = title ?? local?.title ?? Self.pathTitle(url)
         card.iconProvider = local?.icon
         return card
+    }
+
+    /// The page's own title, unless it leaves out the name the link carries in
+    /// its path. A site that turns scripts away (Baidu Baike answers 403) hands
+    /// back its block page, titled with the site's name only.
+    private static func pageTitle(_ fetched: String?, url: URL) -> String? {
+        guard let fetched else { return nil }
+        if let name = pathTitle(url), name.unicodeScalars.contains(where: { !$0.isASCII }),
+           !fetched.localizedCaseInsensitiveContains(name) {
+            return nil
+        }
+        return fetched
+    }
+
+    /// The name a link carries in its path, for a card with no other title:
+    /// `baike.baidu.com/item/胡辣汤/11170263` → "胡辣汤",
+    /// `en.wikipedia.org/wiki/Dario_Amodei` → "Dario Amodei". Taken only from a
+    /// segment that reads as words: one with letters outside ASCII, or ASCII
+    /// words split by spaces or underscores. A hyphenated slug or a bare word
+    /// ("detail.shtml") is passed over.
+    static func pathTitle(_ url: URL) -> String? {
+        for segment in url.pathComponents.reversed() where segment != "/" {
+            var name = segment.removingPercentEncoding ?? segment
+            if let dot = name.lastIndex(of: "."),
+               ["html", "htm", "shtml", "php", "aspx"].contains(name[name.index(after: dot)...].lowercased()) {
+                name = String(name[..<dot])
+            }
+            name = name.replacingOccurrences(of: "_", with: " ")
+                .trimmingCharacters(in: .whitespaces)
+            guard !name.isEmpty, name.count <= 60, name.contains(where: \.isLetter) else { continue }
+            if name.unicodeScalars.contains(where: { !$0.isASCII && CharacterSet.letters.contains($0) })
+                || name.contains(" ") {
+                return name
+            }
+        }
+        return nil
     }
 
     /// An Apple Maps link as a card without reading the page: the place it

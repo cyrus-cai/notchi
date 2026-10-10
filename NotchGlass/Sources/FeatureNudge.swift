@@ -9,6 +9,7 @@ import Foundation
 enum NudgeFeature: String, CaseIterable {
     case emojiReactions
     case linkPrecheck
+    case suggestFollowUp
 }
 
 // MARK: - Policy
@@ -27,7 +28,8 @@ enum NudgeFeature: String, CaseIterable {
 /// `text` is keyed by language (`en`, `zh-Hans`, `zh-Hant`, `ja`, `ko`, `fr`,
 /// `es`) and falls back to `en`. `invite` is the message shown with the
 /// confirm button; `messages` are the bubbles written into the thread once it
-/// is pressed.
+/// is pressed. `suggestion`, optional, is put in the follow-up field as the
+/// predicted next question once the last of them is in.
 ///
 /// An entry that does not decode is dropped alone. Every fetch failure
 /// (offline, 404, malformed JSON) reads as "no nudges".
@@ -37,6 +39,9 @@ struct NudgePolicy: Decodable {
         let confirm: String
         let title: String?
         let messages: [String]
+        /// Shown in the follow-up field as the predicted next question once the
+        /// last bubble is in.
+        let suggestion: String?
     }
 
     struct Nudge: Decodable {
@@ -218,6 +223,7 @@ final class FeatureNudges {
         switch feature {
         case .emojiReactions: return "emojiReactionsEnabled"
         case .linkPrecheck: return LinkGate.defaultsKey
+        case .suggestFollowUp: return "suggestFollowUpEnabled"
         }
     }
 

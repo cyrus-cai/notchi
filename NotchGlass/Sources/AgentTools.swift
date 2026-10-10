@@ -7,11 +7,12 @@ import Carbon.HIToolbox
 // The deliberately small tool surface: read what the user already copied, tell
 // the time, do exact arithmetic, search the user's own Notch archive, ask the
 // user a clarifying question, run a web search, read a web page's text, manage
-// this app's own preferences, file a note or a reminder, and run a shell command.
-// Those last four are the only write surfaces. Settings have a mandatory in-app
-// confirmation gate; notes and reminders are written directly, the same way a
-// typed `:` capture is; `run_shell` runs directly except for the commands
-// `ShellRisk` flags, which ask first. There are still no computer-use tools.
+// this app's own preferences, file a note or a reminder, start or stop an Ask
+// loop, and run a shell command. Those last five are the only write surfaces.
+// Settings and starting a loop have a mandatory in-app confirmation gate; notes
+// and reminders are written directly, the same way a typed `:` capture is;
+// `run_shell` runs directly except for the commands `ShellRisk` flags, which ask
+// first. There are still no computer-use tools.
 //
 // Most providers advertise the full set every turn. Blend1 does not: it keeps
 // the Ask tools and `create_note` on every round and adds the rest only when the question
@@ -991,6 +992,110 @@ struct CreateReminderTool: NotchTool {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return try await handle(CaptureRequest(kind: .reminder, text: title,
                                                due: due?.isEmpty == false ? due : nil))
+    }
+}
+
+// MARK: - Loops (manage_loop)
+
+/// Provider-neutral request passed from `manage_loop` into the live
+/// `NotchModel`, which owns `ChatLoopManager` and the Confirm card. Mirrors
+/// `AppSettingsRequest`.
+struct LoopRequest: Sendable {
+    enum Action: String, Sendable {
+        case list, start, stop
+        case setInterval = "set_interval"
+    }
+
+    let action: Action
+    /// The instruction each round runs. `start` only.
+    let prompt: String?
+    let minutes: Int?
+    /// From `list`; a unique prefix is enough. `stop` / `set_interval` only.
+    let loopID: String?
+}
+
+/// Start, list, stop or re-time an Ask loop from the chat — the same loop a
+/// typed `/loop` starts, in a thread of its own. Starting one, and shortening
+/// one's interval, wait on an in-answer Confirm card: each round is billed like
+/// a question, for up to a week, so the model never commits that spend alone.
+/// Never advertised on a loop round itself.
+struct ManageLoopTool: NotchTool {
+    static let toolName = "manage_loop"
+    let name = toolName
+    let description = """
+    Runs a prompt again on a schedule, in its own thread: every 1 minute to once \
+    a day, for up to 7 days. Each round is a full answer (it can search, read \
+    pages, compare with the last round) and is billed like a question. \
+    action=start when the user wants something done repeatedly or watched over \
+    time ("every hour check X", "tell me when Y happens"); write `prompt` as the \
+    self-contained instruction one round runs, including when the job is done. \
+    A plain alert at a set time, with no work to do, is create_reminder instead. \
+    start shows its own Confirm card. action=list returns the user's loops with \
+    ids; stop and set_interval take loop_id from list.
+    """
+    let schema: [String: Any] = [
+        "type": "object",
+        "properties": [
+            "action": [
+                "type": "string",
+                "enum": ["list", "start", "stop", "set_interval"],
+                "description": "List loops, start one after confirmation, stop one, or change one's interval.",
+            ],
+            "prompt": [
+                "type": "string",
+                "description": "start only: the instruction each round runs, in the user's language. Self-contained — a round sees this and the previous round, not this conversation.",
+            ],
+            "interval_minutes": [
+                "type": "integer",
+                "minimum": LoopInterval.typedRange.lowerBound,
+                "maximum": LoopInterval.typedRange.upperBound,
+                "description": "start / set_interval: minutes between rounds, 1 to 1440.",
+            ],
+            "loop_id": [
+                "type": "string",
+                "description": "stop / set_interval: the id from action=list.",
+            ],
+        ],
+        "required": ["action"],
+    ]
+
+    let handle: @Sendable (LoopRequest) async throws -> String
+
+    func execute(_ input: [String: Any]) async throws -> String {
+        guard let raw = input["action"] as? String,
+              let action = LoopRequest.Action(rawValue: raw) else {
+            return "Error: action must be list, start, stop, or set_interval."
+        }
+        let prompt = (input["prompt"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let minutes = (input["interval_minutes"] as? NSNumber)?.intValue
+            ?? (input["interval_minutes"] as? String).flatMap { Int($0) }
+        let loopID = (input["loop_id"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        switch action {
+        case .list:
+            break
+        case .start:
+            guard let prompt, !prompt.isEmpty else {
+                return "Error: action=start needs the prompt each round runs."
+            }
+            guard let minutes, LoopInterval.typedRange.contains(minutes) else {
+                return "Error: interval_minutes must be 1 to 1440."
+            }
+        case .stop, .setInterval:
+            guard let loopID, !loopID.isEmpty else {
+                return "Error: give loop_id from action=list."
+            }
+            if action == .setInterval {
+                guard let minutes, LoopInterval.typedRange.contains(minutes) else {
+                    return "Error: interval_minutes must be 1 to 1440."
+                }
+            }
+        }
+        return try await handle(LoopRequest(action: action,
+                                             prompt: prompt?.isEmpty == false ? prompt : nil,
+                                             minutes: minutes,
+                                             loopID: loopID?.isEmpty == false ? loopID : nil))
     }
 }
 
@@ -2238,6 +2343,7 @@ enum AskToolIntent {
         if matches(q, history) { extra.insert("search_history") }
         if matches(q, openURL) { extra.insert("open_url") }
         if matches(q, clock) { extra.insert("current_datetime") }
+        if matches(q, loop) { extra.insert(ManageLoopTool.toolName) }
         return extra
     }
 
@@ -2287,6 +2393,19 @@ enum AskToolIntent {
         "问过你", "問過你", "记过什么", "記過什麼",
         "今天做了什么", "今天做了什麼", "这周做了", "這周做了",
         "本周做了", "本週做了",
+    ]
+
+    /// Repeating work or a running loop. "every" alone fires on "every time I
+    /// run npm"; these name a period or a loop.
+    private static let loop = [
+        "every minute", "every hour", "every day", "every morning", "every evening",
+        "every night", "every few", "every 5", "every 10", "every 15", "every 30",
+        "hourly", "daily", "keep checking", "keep an eye", "keep watching",
+        "let me know when", "tell me when", "loop",
+        "每分钟", "每分鐘", "每小时", "每小時", "每个小时", "每個小時", "每隔",
+        "每天", "每早", "每晚", "定时", "定時", "盯着", "盯著", "盯一下",
+        "持续关注", "持續關注", "有变化", "有變化", "告诉我一声", "告訴我一聲",
+        "循环", "循環",
     ]
 
     private static let openURL = [

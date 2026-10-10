@@ -59,7 +59,7 @@ enum APIKeyStore {
         get {
             let raw = UserDefaults.standard.string(forKey: selectedProviderKey) ?? ""
             // A saved pick the app no longer offers still decodes — Command Code
-            // after its retirement (`CommandCodeCLIService.isRetired`), nono while
+            // while it is switched off (`CommandCodeCLIService.isRetired`), nono while
             // its gateway is gated off (`Provider.nonoIsLive`). Drop it here so it
             // resolves like "never picked one" instead of selecting a backend that
             // cannot answer and that no menu would let the user leave.

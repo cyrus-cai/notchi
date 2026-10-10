@@ -861,6 +861,7 @@ struct InlineSettingsView: View {
                 messageSoundsRow
                 emojiReactionsRow
                 linkPrecheckRow
+                suggestFollowUpRow
                 customInstructionsRow
             case .general:
                 // App-level settings: how it talks to you, where the app itself
@@ -3847,17 +3848,29 @@ struct InlineSettingsView: View {
     /// Whether Jev reacts to a sent message with an emoji. Same flag as
     /// `NotchModel.emojiReactionsEnabled`, read per message.
     private var emojiReactionsRow: some View {
-        settingRow(label: L("chat.emojiReactions"),
-                   richInfo: emojiReactionsHint,
-                   aligned: true) {
-            Toggle("", isOn: Binding(
-                get: { model.emojiReactionsEnabled },
-                set: { Haptics.levelChange(); model.emojiReactionsEnabled = $0 }
-            ))
-            .labelsHidden()
-            .toggleStyle(.switch)
-            .controlSize(.mini)
-            .tint(Tokens.text2)
+        VStack(alignment: .leading, spacing: 8) {
+            settingRow(label: L("chat.emojiReactions"),
+                       richInfo: emojiReactionsHint,
+                       aligned: true) {
+                Toggle("", isOn: Binding(
+                    get: { model.emojiReactionsEnabled },
+                    set: { Haptics.levelChange(); model.emojiReactionsEnabled = $0 }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .tint(Tokens.text2)
+            }
+            // The real question bubble with a sample message. The emoji is on
+            // its corner while the toggle is on and leaves with the bubble's
+            // own transition when it is turned off.
+            UserQuestionBubble(text: L("chat.emojiReactions.sample"),
+                               baseFont: Tokens.TypeSize.form,
+                               reaction: model.emojiReactionsEnabled ? "👍" : nil)
+                .allowsHitTesting(false)
+                .padding(.top, 9)
+                .animation(.spring(response: 0.3, dampingFraction: 0.7),
+                           value: model.emojiReactionsEnabled)
         }
     }
 
@@ -3899,6 +3912,23 @@ struct InlineSettingsView: View {
             Toggle("", isOn: Binding(
                 get: { model.linkPrecheckEnabled },
                 set: { Haptics.levelChange(); model.linkPrecheckEnabled = $0 }
+            ))
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .tint(Tokens.text2)
+        }
+    }
+
+    /// Whether a finished answer gets a predicted next question in the reply
+    /// field. Same flag as `NotchModel.suggestFollowUpEnabled`.
+    private var suggestFollowUpRow: some View {
+        settingRow(label: L("chat.suggestFollowUp"),
+                   info: L("chat.suggestFollowUp.hint"),
+                   aligned: true) {
+            Toggle("", isOn: Binding(
+                get: { model.suggestFollowUpEnabled },
+                set: { Haptics.levelChange(); model.suggestFollowUpEnabled = $0 }
             ))
             .labelsHidden()
             .toggleStyle(.switch)

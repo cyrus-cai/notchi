@@ -530,9 +530,15 @@ struct PromptField: NSViewRepresentable {
             (tv.window as? NotchPanel)?.setComposing(tv.hasMarkedText())
         }
 
+        /// A scroll only re-measures; it never chases the caret. Chasing from here
+        /// re-entered itself: `scrollRangeToVisible` scrolls, which posts this
+        /// notification, which chased again — and when the centred scroll never
+        /// settled on one offset, that recursed until the main thread's stack ran
+        /// out (the crash in 0.9.6). It also yanked a box the user had scrolled
+        /// by hand straight back to the caret.
         @objc private func clipBoundsDidChange() {
             guard let tv = textView else { return }
-            report(for: tv)
+            report(for: tv, chaseCaret: false)
         }
 
         // MARK: Measurement (row height + where the last line ends, IME-aware)
@@ -560,7 +566,7 @@ struct PromptField: NSViewRepresentable {
         /// width, and its vertical offset from the box's centre. Everything is read
         /// from the layout manager, so a wrapped line, a pasted paragraph and a
         /// half-composed pinyin syllable all measure the same way.
-        func report(for tv: PromptTextView) {
+        func report(for tv: PromptTextView, chaseCaret: Bool = true) {
             guard let layout = tv.layoutManager, let container = tv.textContainer else { return }
             layout.ensureLayout(for: container)
 
@@ -636,7 +642,7 @@ struct PromptField: NSViewRepresentable {
                 // stops changing at the cap), so it can only ever scroll content
                 // that genuinely doesn't fit.
                 if scrollable {
-                    tv.scrollRangeToVisible(tv.selectedRange())
+                    if chaseCaret { tv.scrollRangeToVisible(tv.selectedRange()) }
                 } else if scroll.contentView.bounds.origin.y != 0 {
                     // Re-entrant by design: this posts a bounds change, which calls
                     // back into `report`. It terminates on the next pass — the
@@ -2540,6 +2546,7 @@ struct ForceClickLookupDialog: View {
 private struct ConfirmDialogButton: View {
     var title: String
     var kind: Kind
+    var font: CGFloat = Tokens.TypeSize.form
     var action: () -> Void
 
     enum Kind { case neutral, destructive, quiet }
@@ -2557,7 +2564,7 @@ private struct ConfirmDialogButton: View {
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.sf(Tokens.TypeSize.form, weight: .medium))
+                .font(.sf(font, weight: .medium))
                 .foregroundStyle(label)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 10)
@@ -4230,7 +4237,7 @@ struct AssistantTurnView: View {
             // (or the wait times out). Only while streaming — a settled turn can't
             // be waiting on anyone.
             if streaming, let pendingQuestion {
-                UserQuestionCard(question: pendingQuestion) { option in
+                UserQuestionCard(question: pendingQuestion, font: cardFont) { option in
                     onChooseOption?(pendingQuestion.id, option)
                 }
                 .padding(.top, hasText ? 2 : 0)
@@ -4671,6 +4678,9 @@ struct FractionWidthLayout: Layout {
 /// step in the reply, not a modal demanding the whole island.
 struct UserQuestionCard: View {
     let question: NotchModel.PendingUserQuestion
+    /// The answer card's text size, so the card reads at the same size as the
+    /// reply it sits in.
+    var font: CGFloat = Tokens.TypeSize.stepDown(Tokens.TypeSize.reading)
     /// Called with the option's text when the user picks it.
     var choose: (String) -> Void
 
@@ -4693,7 +4703,7 @@ struct UserQuestionCard: View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 8) {
                 Text(title)
-                    .font(.sf(Tokens.TypeSize.form, weight: .medium))
+                    .font(.sf(font, weight: .medium))
                     .foregroundStyle(Tokens.text2)
                     .fixedSize(horizontal: false, vertical: true)
                 ForEach(changes, id: \.self) { changeRow($0) }
@@ -4708,7 +4718,8 @@ struct UserQuestionCard: View {
                     ForEach(Array(question.options.enumerated()), id: \.element) { index, option in
                         ConfirmDialogButton(
                             title: option,
-                            kind: index == question.options.count - 1 ? .neutral : .quiet
+                            kind: index == question.options.count - 1 ? .neutral : .quiet,
+                            font: font
                         ) { choose(option) }
                     }
                 }
@@ -4731,10 +4742,10 @@ struct UserQuestionCard: View {
 
     /// One pending change, already written as a whole sentence upstream ("Dock
     /// icon will change to Hidden") — so it renders as plain body text, the thing
-    /// actually being asked about, and carries the card's largest type.
+    /// actually being asked about, set at the answer's text size.
     private func changeRow(_ line: String) -> some View {
         Text(line)
-            .font(.sf(Tokens.TypeSize.reading))
+            .font(.sf(font))
             .foregroundStyle(Tokens.text1)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -4767,7 +4778,7 @@ struct UserQuestionCard: View {
     @ViewBuilder
     private func optionRows() -> some View {
         ForEach(question.options, id: \.self) { option in
-            UserQuestionOptionRow(title: option) { choose(option) }
+            UserQuestionOptionRow(title: option, font: font) { choose(option) }
         }
     }
 }
@@ -4776,13 +4787,14 @@ struct UserQuestionCard: View {
 /// the whole line is the target; brightens on hover like the other quiet controls.
 private struct UserQuestionOptionRow: View {
     var title: String
+    var font: CGFloat
     var action: () -> Void
     @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.sf(Tokens.TypeSize.label))
+                .font(.sf(font))
                 .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)

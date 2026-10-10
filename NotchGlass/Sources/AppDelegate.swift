@@ -322,16 +322,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // it costs an interactive login shell, so it must not land on the main
         // thread mid-render.
         ShellEnvironment.warmUp()
-        // Resolve the `codex` / `claude` / `grok` / `cursor-agent` / `pi` binaries
-        // off-main now, so the first time Settings asks `isAvailable` (a SwiftUI
-        // render) it reads a warm cache instead of paying the smoke-test spawn on
-        // the main thread.
-        // Command Code is not among them any more — it is retired, so `cmd` is never
-        // spawned at all (see `CommandCodeCLIService.isRetired`).
+        // Resolve the `codex` / `claude` / `grok` / `cursor-agent` / `cmd` / `pi`
+        // binaries off-main now, so the first time Settings asks `isAvailable` (a
+        // SwiftUI render) it reads a warm cache instead of paying the smoke-test
+        // spawn on the main thread.
         CodexCLIService.warmUp()
         ClaudeCLIService.warmUp()
         GrokCLIService.warmUp()
         CursorCLIService.warmUp()
+        CommandCodeCLIService.warmUp()
         PiCLIService.warmUp()
         // Same reason: resolving the proxy may spawn a login shell, and the first
         // agent run must not wait on it.

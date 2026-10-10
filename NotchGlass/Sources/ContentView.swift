@@ -112,6 +112,9 @@ struct ContentView: View {
                     return true
                 }
                 if model.mode == .result {
+                    // Empty follow-up field with a predicted next question:
+                    // Tab puts it in the field.
+                    if model.acceptFollowUpSuggestion() { return true }
                     if model.hasText { model.toggleSubmitPanel() }
                     return true
                 }

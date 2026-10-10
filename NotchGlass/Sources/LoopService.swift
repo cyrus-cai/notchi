@@ -39,6 +39,28 @@ enum LoopInterval {
             + "further runs are needed, end your reply with \(doneMarker).)"
     }
 
+    /// Appended on the wire to every Ask loop round's question, so the model can
+    /// end the loop once what it watches for has happened.
+    static let chatWireSuffix = "\n\n(This message repeats on a schedule. When what it asks for "
+        + "is done and no further rounds are needed, end your reply with \(doneMarker).)"
+
+    /// A loop round's answer as shown while it streams: the done marker
+    /// removed, including the part of it that has already arrived.
+    static func hidingDoneMarker(_ text: String) -> String {
+        var out = text.replacingOccurrences(of: doneMarker, with: "")
+        for n in stride(from: doneMarker.count - 1, through: 1, by: -1)
+            where out.hasSuffix(doneMarker.prefix(n)) {
+            out.removeLast(n)
+            break
+        }
+        return out
+    }
+
+    /// The most rounds a loop at this interval runs before its lifetime ends.
+    static func maxRounds(minutes: Int) -> Int {
+        max(1, Int(lifetime / 60) / max(minutes, 1))
+    }
+
     /// "45m" · "1h" · "1h 30m" · "6h" · "1d".
     static func short(_ minutes: Int) -> String {
         if minutes >= 1440, minutes % 1440 == 0 { return "\(minutes / 1440)d" }
@@ -257,8 +279,10 @@ final class ChatLoopManager: ObservableObject {
     /// answer carried — nil for a follow-up the user typed into the thread,
     /// which restarts the wait from now without counting as a round. `quietly`
     /// is a round superseded before it answered: the wait restarts, no banner.
+    /// `done` is a round whose answer carried `LoopInterval.doneMarker`: the
+    /// loop ends there.
     func roundFinished(threadID: UUID, loopRound: Int?, failed: Bool,
-                       quietly: Bool = false, answer: String = "") {
+                       quietly: Bool = false, done: Bool = false, answer: String = "") {
         guard let i = loops.firstIndex(where: { $0.id == threadID }), loops[i].active
         else { return }
         if loopRound != nil, let started = loops[i].roundStartedAt {
@@ -270,6 +294,12 @@ final class ChatLoopManager: ObservableObject {
             return
         }
         let loop = loops[i]
+        if done, loopRound != nil {
+            end(threadID, failed: false)
+            notify(loop, subtitle: L("notify.loop.ended", loop.rounds),
+                   silent: false, answer: answer)
+            return
+        }
         let pastLifetime = Date().addingTimeInterval(loop.interval)
             > loop.startedAt.addingTimeInterval(LoopInterval.lifetime)
         if pastLifetime {

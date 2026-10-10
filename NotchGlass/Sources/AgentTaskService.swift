@@ -87,10 +87,12 @@ enum AgentEngine: String, CaseIterable {
         }
     }
 
-    /// The engines the app offers — every case except the retired `.commandCode`
-    /// (see `CommandCodeCLIService.isRetired`). The case stays so past agent rows
-    /// still decode and draw their engine; it is simply never listed again.
-    static let offered: [AgentEngine] = allCases.filter { $0 != .commandCode }
+    /// The engines the app offers — every case except `.commandCode` while it is
+    /// switched off (see `CommandCodeCLIService.isRetired`). The case stays so past
+    /// agent rows still decode and draw their engine.
+    static let offered: [AgentEngine] = allCases.filter {
+        $0 != .commandCode || !CommandCodeCLIService.isRetired
+    }
 
     /// The engines that can actually run right now — drives the entry button
     /// (any) and the armed line's engine chip (a toggle only when both).

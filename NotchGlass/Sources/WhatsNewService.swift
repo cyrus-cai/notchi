@@ -105,6 +105,21 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.7",
+            date: "2026-10-10",
+            features: [
+                "Notchi can suggest your next question in the reply field. Press Tab to use it.",
+                "Command Code is back as an agent.",
+            ],
+            improvements: [
+                "Notchi reads dates in older messages correctly, like “tomorrow” said last week.",
+                "Link cards show the page name when a site blocks previews.",
+            ],
+            fixes: [
+                "Scrolling inside a long message you are typing no longer crashes Notchi.",
+            ]
+        ),
+        Entry(
             version: "0.9.6",
             date: "2026-10-09",
             improvements: [

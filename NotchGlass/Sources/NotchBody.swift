@@ -1336,10 +1336,8 @@ struct NotchBody: View {
                                                       provider: selectedProvider)
                             : L("model.choose"),
                          tint: model.isConfigured ? nil : Tokens.danger.opacity(0.62),
-                         fontSize: model.unifiedThreadsEnabled
-                            ? UnifiedComposeModeControl.fontSize
-                            : Tokens.TypeSize.label,
-                         fontWeight: model.unifiedThreadsEnabled ? .regular : .light,
+                         fontSize: composeChipFontSize,
+                         fontWeight: composeChipFontWeight,
                          // Chat is the only mode that shows this chip. Its old
                          // 6pt vertical padding sat above the 22pt mode word and
                          // ⋯, so leaving Chat for Capture shortened the panel.
@@ -1451,6 +1449,7 @@ struct NotchBody: View {
         if CodexCLIService.isAvailable { out.append(.codex) }
         if GrokCLIService.isAvailable { out.append(.grokCode) }
         if CursorCLIService.isAvailable { out.append(.cursorCode) }
+        if CommandCodeCLIService.isAvailable { out.append(.commandCode) }
         if PiCLIService.isAvailable { out.append(.piCode) }
         return out
     }
@@ -1471,11 +1470,24 @@ struct NotchBody: View {
     /// model (one menu mixing every engine's entries; picking a model picks its
     /// engine), and the reasoning effort. The way out is the pill's Ask half.
     /// The input above is composing the task description; Enter starts the run.
+    /// The compose chips' type, shared by Chat's model chip and Agent's
+    /// folder + model chips so switching modes keeps the row's text size.
+    private var composeChipFontSize: CGFloat {
+        model.unifiedThreadsEnabled ? UnifiedComposeModeControl.fontSize : Tokens.TypeSize.label
+    }
+
+    private var composeChipFontWeight: Font.Weight {
+        model.unifiedThreadsEnabled ? .regular : .light
+    }
+
     private var agentComposeChips: some View {
         HStack(spacing: 6) {
             AgentComposeChip(title: Self.compactFolderTitle(
                                         model.agentComposeFolder?.lastPathComponent)
                                     ?? L("agent.folder.choose"),
+                                fontSize: composeChipFontSize,
+                                fontWeight: composeChipFontWeight,
+                                flat: model.unifiedThreadsEnabled,
                                 action: {
                 // With projects to switch between, the chip is a menu like its
                 // model neighbours; with nothing to list (first-ever agent, or a
@@ -1512,7 +1524,11 @@ struct NotchBody: View {
             // card to close. The card itself stays exactly where it opened: it
             // doesn't hang off the chip (whose width moves with the title) but
             // off the frozen point below — see `agentChipAnchorX`.
-            AgentComposeChip(title: agentModelEffortTitle, action: {
+            AgentComposeChip(title: agentModelEffortTitle,
+                             fontSize: composeChipFontSize,
+                             fontWeight: composeChipFontWeight,
+                             flat: model.unifiedThreadsEnabled,
+                             action: {
                 model.showAgentPicker = true
             }, icon: { EmptyView() })
             .fixedSize()
@@ -5292,12 +5308,7 @@ struct NotchBody: View {
                             model.isResultMoreMenuOpen = false
                             model.openDetachedWindow()
                         }
-                        : nil as (() -> Void)?,
-                    messageSoundsEnabled: model.messageSoundsEnabled,
-                    toggleMessageSounds: {
-                        Haptics.levelChange()
-                        model.messageSoundsEnabled.toggle()
-                    }
+                        : nil as (() -> Void)?
                 )
             }
             // These are buttons sitting on the header's tear-off grip, which pushes
@@ -6016,6 +6027,8 @@ struct NotchBody: View {
                 }
             } else if threadLoopActive {
                 Text(L("loop.followUp"))
+            } else if !model.threadIsAgentRun, let suggestion = model.followUpSuggestion {
+                Text(suggestion)
             } else {
                 Text(L(model.threadIsAgentRun ? "result.followUp.agent" : "result.followUp"))
             }
@@ -7142,11 +7155,6 @@ struct ResultTrailingCluster: View {
     /// Tear-off action. When set, a more mark sits to the pin's right and this
     /// action is the row in the menu it opens.
     var detach: (() -> Void)? = nil
-    /// Global message tones (send, reply, reaction). The row stays in this
-    /// menu; the flag applies to every conversation, including ones already
-    /// split into their own window.
-    var messageSoundsEnabled: Bool = true
-    var toggleMessageSounds: () -> Void = {}
 
     var body: some View {
         GlassSegmentCluster(segments: {
@@ -7156,13 +7164,15 @@ struct ResultTrailingCluster: View {
                               action: togglePin) {
                 PinStateGlyph(pinned: pinned, size: 12, weight: .light)
             })
-            segs.append(.init(id: "more",
-                              engaged: moreOpen,
-                              tooltip: L("recent.manage"),
-                              action: { moreOpen.toggle() }) {
-                Image(systemName: "ellipsis")
-                    .font(.sf(15, weight: .bold))
-            })
+            if detach != nil {
+                segs.append(.init(id: "more",
+                                  engaged: moreOpen,
+                                  tooltip: L("recent.manage"),
+                                  action: { moreOpen.toggle() }) {
+                    Image(systemName: "ellipsis")
+                        .font(.sf(15, weight: .bold))
+                })
+            }
             return segs
         }(), showsTooltips: !moreOpen)
         .modifier(MenuCardWindow(
@@ -7176,26 +7186,14 @@ struct ResultTrailingCluster: View {
     private var moreMenu: some View {
         let title = Self.actionTitle("detached.open")
         let chord = AppShortcutStore.chord(for: .detach).displayString
-        let soundTitle = L("messageSounds.short")
-        let detachWidth = detach == nil
-            ? 0
-            : MenuCard.width(titles: [(title, chord)])
         return VStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
-            if detach != nil {
-                MenuCardRow(title: title, accessory: chord, selected: false) {
-                    moreOpen = false
-                    detach?()
-                }
-            }
-            MenuCardRow(title: soundTitle, symbol: "bell", isOn: messageSoundsEnabled, selected: false) {
-                toggleMessageSounds()
+            MenuCardRow(title: title, accessory: chord, selected: false) {
+                moreOpen = false
+                detach?()
             }
         }
         .padding(MenuCard.cardPad)
-        // Sized by the rows themselves: the mini switch draws wider than any
-        // constant measured for it, and a guessed width truncated the word.
-        .frame(minWidth: detachWidth)
-        .fixedSize(horizontal: true, vertical: false)
+        .frame(width: MenuCard.width(titles: [(title, chord)]))
         .manageMenuCardBackground()
     }
 

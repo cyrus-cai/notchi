@@ -62,18 +62,12 @@ struct CommandCodeCLIService: AIService {
 
     // MARK: - Availability
 
-    /// **Retired — the whole integration is blocked behind this.** Notch no longer
-    /// takes one-off third-party CLIs: the ~50 models Command Code fronted are all
-    /// reachable through pi, which aggregates them under the accounts the user
-    /// already has, so keeping a second aggregator only split the same catalog in
-    /// two. With this true, nothing lists Command Code, nothing spawns `cmd`, and
-    /// the engine reads as *resolved* unavailable — the difference that matters,
-    /// because a remembered pick only repoints itself off a resolved "no" (see
-    /// `AgentEngine.isKnownUnavailable`), never off a probe still in flight.
-    ///
-    /// The code below stays intact rather than being deleted so old persisted picks
-    /// and past agent rows still decode and draw; it is simply unreachable.
-    static let isRetired = true
+    /// Switch for the whole integration. With this true, nothing lists Command
+    /// Code, nothing spawns `cmd`, and the engine reads as *resolved* unavailable —
+    /// the difference that matters, because a remembered pick only repoints itself
+    /// off a resolved "no" (see `AgentEngine.isKnownUnavailable`), never off a
+    /// probe still in flight.
+    static let isRetired = false
 
     /// Absolute paths the CLI lives at, in priority order. `command-code` and
     /// `commandcode` come first because they name the product; the short `cmd`

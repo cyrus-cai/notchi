@@ -33,6 +33,8 @@ struct NoNoRequestContext: Sendable {
     static let naming = "naming"
     /// Background titling of a conversation thread.
     static let title = "title"
+    /// Background prediction of the user's next question in a thread.
+    static let suggest = "suggest"
 
     @TaskLocal static var current: NoNoRequestContext?
 
@@ -542,6 +544,27 @@ final class NoNoAccount: ObservableObject {
                                              authorized: true) else { return nil }
         // The click is waiting on this.
         request.timeoutInterval = 3
+        return try? await send(request)
+    }
+
+    // MARK: - Follow-up check
+
+    /// Jev's verdict on whether an exchange is worth a predicted next question
+    /// (`POST /v1/followup`). `verdict` is `suggest` or `skip`.
+    struct FollowUpVerdict: Decodable, Equatable {
+        var verdict: String
+        var probability: Double
+    }
+
+    /// Ask the gateway whether the user is likely to keep going after
+    /// `answer`. Free for every account with a token. Nil on any failure; the
+    /// caller then generates the prediction anyway. The caller must have run
+    /// `ClipPrivacy` first.
+    func checkFollowUp(question: String, answer: String) async -> FollowUpVerdict? {
+        guard hasToken else { return nil }
+        guard var request = try? jsonRequest("/followup", body: ["question": question, "answer": answer],
+                                             authorized: true) else { return nil }
+        request.timeoutInterval = 4
         return try? await send(request)
     }
 

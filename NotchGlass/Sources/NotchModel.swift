@@ -188,6 +188,11 @@ final class NotchModel: ObservableObject {
         /// above the answer, like "Searched the web", that opens the item in
         /// its app. Persisted.
         var captures: [Capture] = []
+        /// When the user sent this *user* turn. `wireContext` writes it on the
+        /// message, so a model reading a thread that spans days can tell an old
+        /// "明天" from today's. Nil on assistant turns and on turns saved before
+        /// it existed. Persisted.
+        var sentAt: Date? = nil
 
         struct Capture: Codable, Equatable, Hashable {
             var kind: CaptureRequest.Kind
@@ -223,7 +228,7 @@ final class NotchModel: ObservableObject {
         // it. `decodeIfPresent` + defaults is what keeps old saved conversations
         // loadable. `role`/`text` are required — every saved turn has them.
         // `toolActivity` is deliberately absent: it's runtime-only UI state.
-        enum CodingKeys: String, CodingKey { case id, role, text, streaming, hidesUserBubble, usedClipboard, sources, isError, regenModel, answerModel, imageFiles, isAgent, agentLog, reasoning, loopRound, reaction, sharedLinks, isLocal, captures }
+        enum CodingKeys: String, CodingKey { case id, role, text, streaming, hidesUserBubble, usedClipboard, sources, isError, regenModel, answerModel, imageFiles, isAgent, agentLog, reasoning, loopRound, reaction, sharedLinks, isLocal, captures, sentAt }
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -248,6 +253,7 @@ final class NotchModel: ObservableObject {
             // `try?`: a local build briefly stored bare kinds here; an unreadable
             // value drops the line rather than the whole history list.
             captures     = (try? c.decodeIfPresent([Capture].self, forKey: .captures)) ?? []
+            sentAt       = try c.decodeIfPresent(Date.self, forKey: .sentAt)
         }
     }
 
@@ -665,6 +671,17 @@ final class NotchModel: ObservableObject {
     @Published var emojiReactionsEnabled: Bool =
         UserDefaults.standard.object(forKey: "emojiReactionsEnabled") as? Bool ?? false {
         didSet { UserDefaults.standard.set(emojiReactionsEnabled, forKey: "emojiReactionsEnabled") }
+    }
+
+    /// Whether a finished answer gets a predicted next question in the reply
+    /// field (`predictNextQuestion`), billed to the Notchi Balance. Off by
+    /// default; the feature nudge offers it.
+    @Published var suggestFollowUpEnabled: Bool =
+        UserDefaults.standard.object(forKey: "suggestFollowUpEnabled") as? Bool ?? false {
+        didSet {
+            UserDefaults.standard.set(suggestFollowUpEnabled, forKey: "suggestFollowUpEnabled")
+            if !suggestFollowUpEnabled { nextQuestions = [:] }
+        }
     }
 
     /// Whether a clicked link is checked by Jev before it opens (`LinkGate`).
@@ -1987,10 +2004,18 @@ final class NotchModel: ObservableObject {
         if selectionContext != nil { clearSelectionContext() }
         askComposeImages = []
         text = ""
+        beginChatLoop(prompt: q, minutes: minutes)
+    }
+
+    /// Start a loop thread whose round one runs now, detached. Shared by `/loop`
+    /// and `manage_loop`. Nil when the round could not start.
+    @discardableResult
+    private func beginChatLoop(prompt: String, minutes: Int) -> UUID? {
         bindChatLoops()
-        guard let id = runChatLoopRound(threadID: nil, prompt: q, round: 1) else { return }
+        guard let id = runChatLoopRound(threadID: nil, prompt: prompt, round: 1) else { return nil }
         LoopInterval.remember(minutes)
-        ChatLoopManager.shared.register(id: id, prompt: q, minutes: minutes)
+        ChatLoopManager.shared.register(id: id, prompt: prompt, minutes: minutes)
+        return id
     }
 
     /// One loop round on the thread (`nil` for round one's new thread). From
@@ -3284,6 +3309,120 @@ final class NotchModel: ObservableObject {
             + effective.map(\.summary).joined(separator: "; ") + "."
     }
 
+    // MARK: - Loops (manage_loop)
+
+    /// Entry point injected into `ManageLoopTool` for this answer round.
+    /// `threadID` is the thread the question was asked on, so `list` can mark it.
+    /// Starting a loop and shortening one's interval wait on the same in-answer
+    /// Confirm card as a settings change; listing and stopping do not.
+    func handleLoopRequest(answerID: UUID, threadID: UUID,
+                           request: LoopRequest) async throws -> String {
+        let manager = ChatLoopManager.shared
+        switch request.action {
+        case .list:
+            let shown = manager.loops.filter { $0.active || !$0.dismissed }
+            guard !shown.isEmpty else { return "The user has no Ask loops." }
+            return shown.map { loop in
+                var line = "id \(loop.id.uuidString) · every \(LoopInterval.short(loop.intervalMinutes))"
+                    + " · \(loop.rounds) rounds so far"
+                if !loop.active {
+                    line += " · stopped"
+                } else if loop.isRunning {
+                    line += " · a round is running"
+                } else if let next = loop.nextRoundAt {
+                    line += " · next round in \(LoopInterval.countdown(next.timeIntervalSinceNow))"
+                }
+                if loop.id == threadID { line += " · this thread" }
+                return line + "\n  prompt: " + String(loop.prompt.prefix(200))
+            }.joined(separator: "\n")
+
+        case .start:
+            guard let prompt = request.prompt, let minutes = request.minutes else {
+                return "Error: action=start needs prompt and interval_minutes."
+            }
+            guard prompt.count <= 4000 else {
+                return "Error: the prompt is too long. Keep it under 4000 characters."
+            }
+            guard settingsConfirmationAnswers.insert(answerID).inserted else {
+                return "Error: another confirmation is already waiting in this answer."
+            }
+            defer { settingsConfirmationAnswers.remove(answerID) }
+            let copy = loopConfirmationCopy(minutes: minutes)
+            let choice = try await awaitUserChoice(
+                answerID: answerID,
+                question: copy.start + "\n" + prompt + "\n" + copy.schedule,
+                options: [copy.cancel, copy.confirmStart],
+                inlineOptions: true)
+            guard choice == "The user chose: \"\(copy.confirmStart)\"" else {
+                return "Cancelled. No loop was started."
+            }
+            guard beginChatLoop(prompt: prompt, minutes: minutes) != nil else {
+                return "Error: the loop could not start."
+            }
+            return "Started. Round one is running now in its own thread; then every "
+                + "\(LoopInterval.short(minutes)), for up to 7 days. The user can stop it "
+                + "from the task list."
+
+        case .stop, .setInterval:
+            let matches = manager.loops.filter {
+                $0.id.uuidString.lowercased().hasPrefix(request.loopID?.lowercased() ?? "-")
+            }
+            guard matches.count == 1, let loop = matches.first else {
+                return matches.isEmpty
+                    ? "Error: no loop has that id. Call action=list."
+                    : "Error: that id matches more than one loop. Give the full id."
+            }
+            guard loop.active else { return "That loop is already stopped." }
+            if request.action == .stop {
+                manager.stop(loop.id)
+                return "Stopped. A round already running finishes; no further round starts."
+            }
+            guard let minutes = request.minutes else {
+                return "Error: action=set_interval needs interval_minutes."
+            }
+            if minutes < loop.intervalMinutes {
+                guard settingsConfirmationAnswers.insert(answerID).inserted else {
+                    return "Error: another confirmation is already waiting in this answer."
+                }
+                defer { settingsConfirmationAnswers.remove(answerID) }
+                let copy = loopConfirmationCopy(minutes: minutes)
+                let choice = try await awaitUserChoice(
+                    answerID: answerID,
+                    question: copy.change + "\n" + loop.prompt + "\n" + copy.schedule,
+                    options: [copy.cancel, copy.confirmChange],
+                    inlineOptions: true)
+                guard choice == "The user chose: \"\(copy.confirmChange)\"" else {
+                    return "Cancelled. The interval was not changed."
+                }
+            }
+            manager.setInterval(loop.id, minutes: minutes)
+            return "The loop now runs every \(LoopInterval.short(minutes))."
+        }
+    }
+
+    private func loopConfirmationCopy(minutes: Int)
+        -> (start: String, change: String, schedule: String,
+            confirmStart: String, confirmChange: String, cancel: String) {
+        let every = LoopInterval.short(minutes)
+        let rounds = LoopInterval.maxRounds(minutes: minutes)
+        switch Localization.shared.language.resolved {
+        case .zhHans: return ("开始这个循环？", "更改这个循环的间隔？",
+                              "每 \(every) · 最多 \(rounds) 轮", "开始", "更改", "取消")
+        case .zhHant: return ("開始這個循環？", "更改這個循環的間隔？",
+                              "每 \(every) · 最多 \(rounds) 輪", "開始", "更改", "取消")
+        case .ja:     return ("このループを開始しますか？", "このループの間隔を変更しますか？",
+                              "\(every)ごと · 最大\(rounds)回", "開始", "変更", "キャンセル")
+        case .ko:     return ("이 반복을 시작할까요?", "이 반복의 간격을 변경할까요?",
+                              "\(every)마다 · 최대 \(rounds)회", "시작", "변경", "취소")
+        case .fr:     return ("Lancer cette boucle ?", "Changer l'intervalle de cette boucle ?",
+                              "Toutes les \(every) · \(rounds) tours au plus", "Lancer", "Changer", "Annuler")
+        case .es:     return ("¿Iniciar este bucle?", "¿Cambiar el intervalo de este bucle?",
+                              "Cada \(every) · hasta \(rounds) rondas", "Iniciar", "Cambiar", "Cancelar")
+        case .en:     return ("Start this loop?", "Change this loop's interval?",
+                              "Every \(every) · up to \(rounds) rounds", "Start", "Change", "Cancel")
+        }
+    }
+
     // MARK: - Notes & reminders (create_note / create_reminder)
 
     /// Entry point injected into `CreateNoteTool` / `CreateReminderTool` for this
@@ -4129,6 +4268,7 @@ final class NotchModel: ObservableObject {
         case "grokcode", "grok_code": return .grokCode
         case "pi", "picode", "pi_code": return .piCode
         case "cursor", "cursorcode", "cursor_code": return .cursorCode
+        case "commandcode", "command_code": return .commandCode
         case "anthropic", "claude": return .anthropic
         case "gemini", "google": return .gemini
         case "deepseek", "deep_seek": return .deepseek
@@ -4566,6 +4706,30 @@ final class NotchModel: ObservableObject {
     /// swaps the follow-up field for a "set up your model" call to action instead.
     /// Kept in sync by `AppDelegate` alongside `setService`.
     @Published var isConfigured = false
+
+    /// Predicted next questions (`predictNextQuestion`), keyed by the answer
+    /// turn each one follows. Kept whether or not the thread is on screen, so a
+    /// round that finishes while the panel is folded, or a thread reopened
+    /// later, still shows its suggestion. The follow-up field's placeholder
+    /// shows the entry for the last answer on screen; Tab or Enter takes it.
+    @Published private(set) var nextQuestions: [UUID: String] = [:]
+
+    /// The suggestion for the settled last answer on screen, if any.
+    var followUpSuggestion: String? {
+        guard let last = turns.last, last.role == "assistant",
+              !last.streaming, !last.isError else { return nil }
+        return nextQuestions[last.id]
+    }
+
+    /// Tab on an empty follow-up field: put the suggestion in the field to edit
+    /// or send. Returns false when there is none. Called from the window's key
+    /// monitor (`ContentView`), which takes Tab before the field sees it.
+    func acceptFollowUpSuggestion() -> Bool {
+        guard mode == .result, !hasText, let suggestion = followUpSuggestion else { return false }
+        text = suggestion
+        return true
+    }
+
 
     @Published var showHistory = false {
         // Closing the recent list (from ANY of its 11+ callsites — fullClose,
@@ -5092,13 +5256,13 @@ final class NotchModel: ObservableObject {
     /// Legacy key name, kept so the setting survives the agent-only → global move.
     private static let liveActivityKey = "agentNotchActivityEnabled"
 
-    /// Settings → Lab → Unified threads. Off by default, and off means the old
-    /// behavior exactly: every question from the idle prompt is a thread of its
-    /// own. On, each of those questions is a follow-up on one main thread — one
-    /// Recent row — and the idle prompt shows the end of its newest answer
+    /// Settings → Lab → Unified threads. On by default for a new install, off
+    /// for an existing one that never set it. Off means the old behavior
+    /// exactly: every question from the idle prompt is a thread of its own. On,
+    /// each of those questions is a follow-up on one main thread — one Recent
+    /// row — and the idle prompt shows the end of its newest answer
     /// (`mainThreadPeek`).
-    @Published var unifiedThreadsEnabled: Bool =
-        UserDefaults.standard.bool(forKey: NotchModel.unifiedThreadsKey)
+    @Published var unifiedThreadsEnabled: Bool = NotchModel.initialUnifiedThreads()
     {
         didSet {
             UserDefaults.standard.set(unifiedThreadsEnabled,
@@ -5109,6 +5273,19 @@ final class NotchModel: ObservableObject {
         }
     }
     private static let unifiedThreadsKey = "unifiedThreadsEnabled"
+
+    /// The stored setting, or for a new install with none stored, on — written
+    /// down along with the guide's done flag, since the guide only exists to
+    /// turn the setting on.
+    private static func initialUnifiedThreads() -> Bool {
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: unifiedThreadsKey) == nil,
+           !OnboardingService.hasRunBefore {
+            defaults.set(true, forKey: unifiedThreadsKey)
+            defaults.set(true, forKey: unifiedIntroDoneKey)
+        }
+        return defaults.bool(forKey: unifiedThreadsKey)
+    }
 
     // MARK: - Unified threads guide
 
@@ -5281,8 +5458,10 @@ final class NotchModel: ObservableObject {
     /// `onEnd` runs once the last bubble is in, or when the answer has left the
     /// screen.
     private func streamUnifiedIntro(_ id: UUID, bubbles: [String], written: Int,
+                                    pace: ((String) -> TimeInterval)? = nil,
                                     onEnd: (() -> Void)? = nil) {
-        let delay = Self.unifiedIntroReadingTime(bubbles[written - 2])
+        let bubble = bubbles[written - 2]
+        let delay = pace?(bubble) ?? Self.unifiedIntroReadingTime(bubble)
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, let i = self.turns.firstIndex(where: { $0.id == id }) else {
                 onEnd?()
@@ -5290,7 +5469,8 @@ final class NotchModel: ObservableObject {
             }
             if written < bubbles.count {
                 self.turns[i].text = bubbles[..<(written + 1)].joined(separator: "\n\n")
-                self.streamUnifiedIntro(id, bubbles: bubbles, written: written + 1, onEnd: onEnd)
+                self.streamUnifiedIntro(id, bubbles: bubbles, written: written + 1,
+                                        pace: pace, onEnd: onEnd)
             } else {
                 self.turns[i].streaming = false
                 onEnd?()
@@ -5408,6 +5588,9 @@ final class NotchModel: ObservableObject {
         let title: String
         let messages: [String]
         let reaction: String?
+        /// Put in the follow-up field as the predicted next question once the
+        /// last bubble is in.
+        let suggestion: String?
         /// The thread the guide was written into and its answer, once confirm
         /// was pressed.
         var threadID: UUID?
@@ -5439,22 +5622,29 @@ final class NotchModel: ObservableObject {
                                     confirm: pick.copy.confirm,
                                     title: pick.copy.title ?? pick.copy.confirm,
                                     messages: pick.copy.messages,
-                                    reaction: pick.nudge.reaction)
+                                    reaction: pick.nudge.reaction,
+                                    suggestion: pick.copy.suggestion)
         if ProcessInfo.processInfo.environment["NOTCH_DEMO_NUDGE_START"] == "1" {
             startFeatureNudge()
         }
     }
 
-    /// Whether `feature` is off and can work: both features run on Jev, which
-    /// needs a nono account. `requires` are the policy entry's own conditions.
+    /// Whether `feature` is off and can work: every feature runs on Jev, which
+    /// needs a nono account, and a suggested next question is billed to the
+    /// balance, so it also needs one not known to be empty. `requires` are the
+    /// policy entry's own conditions.
     private func nudgeUsable(_ feature: NudgeFeature, requires: [String]) -> Bool {
         let isOn: Bool
         switch feature {
         case .emojiReactions: isOn = emojiReactionsEnabled
         case .linkPrecheck: isOn = linkPrecheckEnabled
+        case .suggestFollowUp: isOn = suggestFollowUpEnabled
         }
         guard !isOn, Provider.offered.contains(.nono), NoNoAccount.shared.hasToken
         else { return false }
+        if feature == .suggestFollowUp, NoNoAccount.shared.snapshot?.isEmpty == true {
+            return false
+        }
         return requires.allSatisfy { condition in
             switch condition {
             case "gift": return NoNoAccount.shared.snapshot?.hasGift == true
@@ -5488,6 +5678,7 @@ final class NotchModel: ObservableObject {
         switch nudge.feature {
         case .emojiReactions: emojiReactionsEnabled = true
         case .linkPrecheck: linkPrecheckEnabled = true
+        case .suggestFollowUp: suggestFollowUpEnabled = true
         }
 
         var invite = Turn(role: "assistant", text: nudge.invite)
@@ -5536,20 +5727,28 @@ final class NotchModel: ObservableObject {
         turns = prior + [invite, start, answer]
         threadHistoryID = item.id
         mode = .result
+        let suggestion = nudge.suggestion
         if paced {
             nudge.threadID = item.id
             nudge.answerID = answer.id
             featureNudge = nudge
-            streamUnifiedIntro(answer.id, bubbles: bubbles, written: 2) { [weak self] in
+            streamUnifiedIntro(answer.id, bubbles: bubbles, written: 2,
+                               pace: { _ in Self.featureNudgeBubbleGap }) { [weak self] in
                 self?.featureNudge = nil
+                if let suggestion { self?.nextQuestions[answer.id] = suggestion }
             }
         } else {
             featureNudge = nil
+            if let suggestion { nextQuestions[answer.id] = suggestion }
         }
         if let emoji = nudge.reaction {
             reactToGuideLine(start.id, threadID: item.id, emoji: emoji)
         }
     }
+
+    /// The pause between a feature nudge's bubbles. Fixed, not a reading time:
+    /// its bubbles are long, and timed by length the guide took half a minute.
+    private static let featureNudgeBubbleGap: TimeInterval = 0.8
 
     /// Overrides how the next `submit()` decides whether a new thread joins the
     /// main thread. `nil`: decide from how the round started. `false`: never (a
@@ -7136,6 +7335,11 @@ final class NotchModel: ObservableObject {
     /// This matches `submitLabel` exactly, so the inline "Ask"/"Note"/"Remind" hint
     /// always names where the line actually went.
     func submitCurrent() {
+        // Enter on an empty follow-up field sends the predicted next question
+        // its placeholder shows.
+        if mode == .result, !hasText, let suggestion = followUpSuggestion {
+            text = suggestion
+        }
         // A thread on screen routes by the THREAD, not the armed bucket:
         // `submit()` continues the conversation (its agent session when
         // resumable, else the chat model), so a persisted Agent bucket can
@@ -8098,17 +8302,40 @@ final class NotchModel: ObservableObject {
         // window still starts on a user message.
         while kept.first?.role == "assistant" { kept.removeFirst() }
 
+        // Each user message carries its send time (`sentTimeStance` tells the
+        // model how to read it). The stamp is absolute, so an old turn's wire
+        // text never changes and the cached prefix still matches. Turns saved
+        // before `sentAt` existed get one note on the first of them instead.
+        var notedUndated = false
         var messages: [ChatMessage] = []
         for turn in kept {
+            var text = turn.text
+            if turn.role == "user" {
+                if let sent = turn.sentAt {
+                    text = "[sent \(sentStampFormatter.string(from: sent))]\n" + text
+                } else if !notedUndated {
+                    notedUndated = true
+                    text = "[sent earlier; time not recorded]\n" + text
+                }
+            }
             if let last = messages.last, last.role == turn.role {
                 messages[messages.count - 1] = ChatMessage(
-                    role: turn.role, content: last.content + "\n\n" + turn.text)
+                    role: turn.role, content: last.content + "\n\n" + text)
             } else {
-                messages.append(ChatMessage(role: turn.role, content: turn.text))
+                messages.append(ChatMessage(role: turn.role, content: text))
             }
         }
         return messages
     }
+
+    /// The `[sent …]` stamp. Fixed locale, same shape as `SearchHistoryTool`'s
+    /// rows, so the model reads one date format everywhere.
+    private static let sentStampFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Foundation.Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd (EEE) HH:mm"
+        return f
+    }()
 
     func submit(hideUserBubble: Bool = false) {
         // Unified threads: whether a NEW thread started by this round joins the
@@ -8262,6 +8489,7 @@ final class NotchModel: ObservableObject {
         var questionTurn = Turn(role: "user", text: q,
                                 hidesUserBubble: hideUserBubble)
         questionTurn.loopRound = loopRound
+        questionTurn.sentAt = Date()
         // Held so the deferred image encode below can find this exact turn again —
         // by id, never by index, since the thread on screen may have moved on (a new
         // chat, a reopened row) by the time the JPEG lands.
@@ -8288,6 +8516,12 @@ final class NotchModel: ObservableObject {
         // round's still-empty assistant turn and an error card's reason text, both
         // of which providers either reject outright or misread as model speech.
         var context: [ChatMessage] = Self.wireContext(from: turns, excluding: answerID)
+        // A loop round's question carries the done instruction on the wire only;
+        // the thread keeps the prompt as written.
+        if loopRound != nil, let last = context.last, last.role == "user" {
+            context[context.count - 1] = ChatMessage(
+                role: last.role, content: last.content + LoopInterval.chatWireSuffix)
+        }
 
         // Explicitly pasted images attach to the newest wire message. The encoded
         // set is also parked on the thread so follow-ups still see every image.
@@ -8494,7 +8728,8 @@ final class NotchModel: ObservableObject {
                             released += step
                         }
                     }
-                    let shown = released >= acc.count ? acc : String(acc.prefix(released))
+                    var shown = released >= acc.count ? acc : String(acc.prefix(released))
+                    if loopRound != nil { shown = LoopInterval.hidingDoneMarker(shown) }
                     if let i = thread.firstIndex(where: { $0.id == answerID }) {
                         thread[i].text = shown
                     }
@@ -8582,7 +8817,9 @@ final class NotchModel: ObservableObject {
                 //  · `create_note` / `create_reminder` — the second write surface,
                 //    filing their Recent row through the model that owns `history`;
                 //  · `run_shell` — a command `ShellRisk` flags waits on this
-                //    round's question card.
+                //    round's question card;
+                //  · `manage_loop` — starts loops through `ChatLoopManager`, after
+                //    a Confirm on this round's question card.
                 // Blend1 then drops the extras whose words are not in this
                 // question — a 26B thinking model spends the first seconds of
                 // every turn walking the tool list, and most Ask rounds never
@@ -8611,6 +8848,16 @@ final class NotchModel: ObservableObject {
                     return await self.handleCaptureRequest(answerID: answerID,
                                                            request: request)
                 })
+                // A loop round never starts or re-times loops itself; it ends its
+                // own loop with `LoopInterval.doneMarker`.
+                if loopRound == nil {
+                    agentTools.append(ManageLoopTool { [weak self] request in
+                        guard let self else { throw CancellationError() }
+                        return try await self.handleLoopRequest(answerID: answerID,
+                                                                threadID: threadID,
+                                                                request: request)
+                    })
+                }
                 if shellToolEnabled {
                     agentTools.append(RunShellTool { [weak self] command in
                         guard let self else { throw CancellationError() }
@@ -8871,6 +9118,14 @@ final class NotchModel: ObservableObject {
                     try? await Task.sleep(nanoseconds: 33_000_000)
                 }
                 if Task.isCancelled { return }
+                // A loop round can end its own loop: the model writes the done
+                // marker at the end of its answer. The marker never reaches the
+                // record.
+                let loopDone = loopRound != nil && acc.contains(LoopInterval.doneMarker)
+                if loopDone {
+                    acc = acc.replacingOccurrences(of: LoopInterval.doneMarker, with: "")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                }
                 // Final flush: the terminal writes below must see the complete
                 // text (pieces may still be buffered inside the throttle window,
                 // or left by the drain deadline), and settling the flag keeps a
@@ -8890,13 +9145,19 @@ final class NotchModel: ObservableObject {
                 let walkedAway = !self.isPresented(answerID: answerID)
                 self.markFinished(id: answerID)   // no-op when detached
                 self.persistThread(thread, threadID: threadID, answer: acc)
+                if self.suggestFollowUpEnabled, loopRound == nil,
+                   !acc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    self.predictNextQuestion(for: thread, answerID: answerID)
+                }
                 // A loop round's banner is the loop's own (`ChatLoopManager`).
                 if walkedAway, loopRound == nil {
                     self.notifyAnswerReady(threadID: threadID, question: q, answer: acc)
                 }
                 ChatLoopManager.shared.roundFinished(
                     threadID: threadID, loopRound: loopRound,
-                    failed: acc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                    failed: !loopDone
+                        && acc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                    done: loopDone,
                     answer: acc)
             } catch is CancellationError {
                 // superseded by a newer round on the same screen; nothing to persist
@@ -9985,6 +10246,76 @@ final class NotchModel: ObservableObject {
             return cleaned
         } catch {
             return nil
+        }
+    }
+
+    /// Predict the user's next question after a finished round and store it in
+    /// `nextQuestions` under that answer, on screen or not. Always billed to the Notchi Balance on its default model,
+    /// whatever model answered the round, so a BYOK user with a balance gets it
+    /// too and their own key's rate limit is never spent on it. Needs a token
+    /// and a balance not known to be empty. Jev (free) is asked first whether
+    /// the exchange is worth it, and a `skip` ends here without the billed
+    /// request; no verdict (failure, or a credential in the text) generates
+    /// anyway. Failure or an empty reply leaves the default placeholder.
+    private func predictNextQuestion(for thread: [Turn], answerID: UUID) {
+        let account = NoNoAccount.shared
+        guard account.hasToken, account.snapshot?.isEmpty != true else { return }
+        var transcript = ""
+        for turn in thread.suffix(6) {
+            let body = turn.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if body.isEmpty || turn.isError || turn.isLocal { continue }
+            let label = turn.role == "user" ? "User" : "Assistant"
+            transcript += "\(label): \(body)\n"
+        }
+        let prompt = String(transcript.suffix(4000))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else { return }
+        let asked = Set(thread.filter { $0.role == "user" }
+            .map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) })
+        let lastQuestion = thread.last(where: { $0.role == "user" && !$0.isLocal })?.text
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let lastAnswer = thread.last(where: { $0.id == answerID })?.text
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let jevQuestion = String(lastQuestion.prefix(1500))
+        let jevAnswer = String(lastAnswer.suffix(1500))
+        let askJev = !jevQuestion.isEmpty && !jevAnswer.isEmpty
+            && !ClipPrivacy.containsSecret(jevQuestion) && !ClipPrivacy.containsSecret(jevAnswer)
+
+        let service = AppDelegate.makeService(provider: .nono, apiKey: account.token,
+                                              model: Provider.nono.defaultModel)
+        Task { [weak self] in
+            if askJev, let verdict = await account.checkFollowUp(question: jevQuestion,
+                                                                 answer: jevAnswer),
+               verdict.verdict == "skip" {
+                return
+            }
+            var reply = ""
+            do {
+                let chunks = NoNoRequestContext.$current.withValue(
+                    NoNoRequestContext(surface: NoNoRequestContext.suggest)
+                ) {
+                    service.stream(
+                        system: nextQuestionSystemPrompt,
+                        messages: [ChatMessage(role: "user", content: prompt)])
+                }
+                for try await chunk in chunks { reply += chunk }
+            } catch {
+                return
+            }
+            // One line, no wrapping quotes. Anything long is not the short
+            // question the prompt asked for, so it is dropped, not truncated.
+            let line = reply
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .components(separatedBy: .newlines).first ?? ""
+            let cleaned = line
+                .replacingOccurrences(of: "^[\"'“”「」]+|[\"'“”「」]+$", with: "",
+                                      options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleaned.isEmpty, cleaned.count <= 60, !asked.contains(cleaned) else { return }
+            await MainActor.run {
+                guard let self, self.suggestFollowUpEnabled else { return }
+                self.nextQuestions[answerID] = cleaned
+            }
         }
     }
 

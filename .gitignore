@@ -31,6 +31,7 @@ Icon
 # Internal working docs — kept local only, never published
 AGENTS.md
 CLAUDE.md
+copy-rewrite.md
 
 # Local hosted-model gateway — contains nono's private upstream routing.
 backend/

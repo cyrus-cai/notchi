@@ -24,13 +24,22 @@ final class OnboardingService: ObservableObject {
     @Published private(set) var showIntro: Bool
 
     /// The key recording that the intro has played.
-    private let introDoneKey = "onboarding_intro_done"
+    private static let introDoneKey = "onboarding_intro_done"
 
     /// The keys the previous (guided, multi-step) first run wrote. Either one
     /// means this Mac has already used Notch, so an update must not greet a
     /// long-time user with a first-launch animation.
-    private let legacyOpenedKey = "onboarding_opened_once"
-    private let legacyGuideKey = "onboarding_guide_done"
+    private static let legacyOpenedKey = "onboarding_opened_once"
+    private static let legacyGuideKey = "onboarding_guide_done"
+
+    /// Whether this Mac has run Notch before: any first-run key is set. Ignores
+    /// the debug switch, so a forced intro still counts as an existing install.
+    nonisolated static var hasRunBefore: Bool {
+        let defaults = UserDefaults.standard
+        return defaults.bool(forKey: introDoneKey)
+            || defaults.bool(forKey: legacyOpenedKey)
+            || defaults.bool(forKey: legacyGuideKey)
+    }
 
     /// Debug switch: when on, the intro plays at every launch and never records
     /// "done", so it can be inspected any number of times. Off by default. Flip it
@@ -49,11 +58,7 @@ final class OnboardingService: ObservableObject {
     }
 
     private init() {
-        let defaults = UserDefaults.standard
-        let alreadyRun = defaults.bool(forKey: introDoneKey)
-            || defaults.bool(forKey: legacyOpenedKey)
-            || defaults.bool(forKey: legacyGuideKey)
-        showIntro = Self.alwaysShow || !alreadyRun
+        showIntro = Self.alwaysShow || !Self.hasRunBefore
     }
 
     /// Record that the intro has played (or been skipped), so it never leads
@@ -62,6 +67,6 @@ final class OnboardingService: ObservableObject {
     func markIntroDone() {
         showIntro = false
         guard !Self.alwaysShow else { return }
-        UserDefaults.standard.set(true, forKey: introDoneKey)
+        UserDefaults.standard.set(true, forKey: Self.introDoneKey)
     }
 }

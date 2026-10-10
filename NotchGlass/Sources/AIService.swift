@@ -423,6 +423,14 @@ instead. After a note is saved, reply with one short line and nothing else.
 local `due`. Never say it was saved until the tool result says so. After it is \
 saved, reply with one short line and nothing else.
 """),
+    (["manage_loop"], """
+- Work to do again on a schedule or to watch over time — "every hour check X", \
+"tell me when Y changes", "每天早上总结…" → manage_loop action=start with a \
+self-contained prompt and an interval. An alert at a set time with no work in \
+it is create_reminder. The tool shows its own Confirm card; never say a loop \
+started until the result says so, and then reply with one short line. To stop \
+or re-time one, action=list first.
+"""),
 ]
 
 /// The persona plus the stances for tools actually advertised this turn.
@@ -505,10 +513,25 @@ func notchSystemPromptDated(customInstructions: String? = nil,
     if provider == .nono, searchOnWire {
         prompt += "\n\n" + nonoChangingFactStance
     }
+    // A unified thread wires days of history. Without this, "明天" or "现在是假期"
+    // in a week-old turn reads as said today. `wireContext` puts the send time on
+    // each user message; this line says what to do with it. Same text every day,
+    // so it stays above the date and inside the cached prefix.
+    prompt += "\n\n" + sentTimeStance
     // Last, for the prefix-cache reason in this function's doc comment.
     prompt += "\n\nToday is \(fmt.string(from: Date()))."
     return prompt
 }
+
+/// How to read the `[sent …]` line `NotchModel.wireContext` puts on user
+/// messages — see `notchSystemPromptDated`.
+let sentTimeStance = """
+User messages may begin with a line like [sent 2026-10-03 (Sat) 17:12], the local \
+time they were sent; the newest one is now. Earlier messages and your earlier \
+answers may be days old: "today", "tomorrow", "now" or "this holiday" in them \
+refer to when they were said, not to today. Work out dates from the date below \
+and the newest message's time, not from what earlier turns said.
+"""
 
 /// Extra stance for Nono only — see `notchSystemPromptDated` and
 /// `AgentHarness.forceSearchOnChangingFacts`.
@@ -539,6 +562,29 @@ phrase; don't pad, but retain the most distinguishing detail.
 - Is in the same language as the conversation.
 
 Output only the title text — no quotes, numbering, or explanation.
+"""
+
+/// System prompt for predicting the user's next question, shown as the
+/// follow-up field's placeholder (`NotchModel.predictNextQuestion`).
+let nextQuestionSystemPrompt = """
+You predict the next message the user will type in a chat, given the end of the \
+conversation. Write it as the user, not as the assistant.
+
+The message:
+- Follows from the assistant's last answer: a point it raised but did not \
+expand, a claim the user is likely to doubt, or the practical next step.
+- Copies the user's own voice from their earlier messages: same language, \
+same register, same punctuation habits. Short and casual if they are.
+- Is at most 20 Chinese characters or 12 English words.
+- Does not repeat anything the user already asked, and does not ask for \
+something the answer already covered.
+- Is specific to this conversation. Never a generic line like "Tell me more" \
+or "详细说说".
+
+If the conversation reads as finished (the user thanked the assistant or \
+closed the topic), output nothing.
+
+Output only the message text — no quotes, labels, or explanation.
 """
 
 // MARK: - Providers
@@ -698,13 +744,13 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     static let nonoShipsLive = true
     static var nonoIsLive: Bool { nonoShipsLive || !nonoBaseURLOverride.isEmpty }
 
-    /// The providers the app actually OFFERS — every case except the retired
-    /// `.commandCode` (see `CommandCodeCLIService.isRetired`) and, until it is
-    /// deployed, `.nono`. Every list the user sees walks this, not `allCases`:
-    /// the case itself has to stay so a pick saved before the retirement still
-    /// decodes and can repoint itself, but it must never appear in a menu again.
+    /// The providers the app actually OFFERS — every case except `.commandCode`
+    /// while it is switched off (see `CommandCodeCLIService.isRetired`) and, until
+    /// it is deployed, `.nono`. Every list the user sees walks this, not
+    /// `allCases`: a case that is switched off still decodes from a saved pick so
+    /// it can repoint itself, but it must not appear in a menu.
     static let offered: [Provider] = allCases.filter {
-        $0 != .commandCode && ($0 != .nono || nonoIsLive)
+        ($0 != .commandCode || !CommandCodeCLIService.isRetired) && ($0 != .nono || nonoIsLive)
     }
 
     /// nono's chat endpoint: the production host, or the local gateway when one
@@ -4201,8 +4247,15 @@ enum ConnectivityTest {
 /// used by both agent clients.
 private enum AgentWire {
     /// Serialize a JSON object to request-body data.
+    ///
+    /// Keys are sorted. A Swift dictionary's iteration order changes from one
+    /// instance to the next, so without sorting the same tool list serializes in
+    /// a different key order on each request. Upstreams that render `tools` into
+    /// the start of the prompt (GLM on Isoquant) then see a different prefix every
+    /// time, and the prompt cache misses: measured 2026-10-10, the same request
+    /// with only the tool keys reordered went from 6144 cached tokens to 0.
     static func body(_ object: [String: Any]) throws -> Data {
-        try JSONSerialization.data(withJSONObject: object)
+        try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
     }
     /// Parse one decoded JSON-string argument blob into `[String: Any]`. Tool args
     /// always decode to an object; a malformed/empty blob yields an empty dict so a
@@ -4815,7 +4868,11 @@ extension OpenAICompatAIService: AgentCapableService {
                 out.append(["role": role, "content": text])
             case .assistantToolCalls(let text, let calls):
                 let toolCalls: [[String: Any]] = calls.map { c in
-                    let argsJSON = (try? String(data: JSONSerialization.data(withJSONObject: c.input),
+                    // Sorted for the same reason as `AgentWire.body`: an earlier
+                    // tool call is re-sent on every later round and has to come
+                    // out byte-identical for the prompt cache to hit.
+                    let argsJSON = (try? String(data: JSONSerialization.data(withJSONObject: c.input,
+                                                                             options: [.sortedKeys]),
                                                 encoding: .utf8)) ?? "{}"
                     return ["id": c.id,
                             "type": "function",
