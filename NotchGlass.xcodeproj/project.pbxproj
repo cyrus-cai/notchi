@@ -36,6 +36,13 @@
 		A1000750 /* FileNotesService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000751 /* FileNotesService.swift */; };
 		A1000064 /* IntentEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000065 /* IntentEngine.swift */; };
 		A1000068 /* RemindersService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000069 /* RemindersService.swift */; };
+		A1000A01 /* CalendarService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000A02 /* CalendarService.swift */; };
+		A1000A03 /* PersonalDataTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000A04 /* PersonalDataTools.swift */; };
+		A1000A05 /* UserMemory.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000A06 /* UserMemory.swift */; };
+		A1000A07 /* CurrentContextTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000A08 /* CurrentContextTool.swift */; };
+		A1000A09 /* LocalFilesTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000A0A /* LocalFilesTools.swift */; };
+		A1000A0B /* ClipboardHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000A0C /* ClipboardHistory.swift */; };
+		A1000A0D /* MailService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000A0E /* MailService.swift */; };
 		A10000AA /* DiagnosticsLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000BB /* DiagnosticsLog.swift */; };
 		A1000A10 /* MenuBarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000A11 /* MenuBarController.swift */; };
 		A1000072 /* UpdaterService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000073 /* UpdaterService.swift */; };
@@ -84,6 +91,13 @@
 		A1000751 /* FileNotesService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileNotesService.swift; sourceTree = "<group>"; };
 		A1000065 /* IntentEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntentEngine.swift; sourceTree = "<group>"; };
 		A1000069 /* RemindersService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemindersService.swift; sourceTree = "<group>"; };
+		A1000A02 /* CalendarService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CalendarService.swift; sourceTree = "<group>"; };
+		A1000A04 /* PersonalDataTools.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersonalDataTools.swift; sourceTree = "<group>"; };
+		A1000A06 /* UserMemory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserMemory.swift; sourceTree = "<group>"; };
+		A1000A08 /* CurrentContextTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurrentContextTool.swift; sourceTree = "<group>"; };
+		A1000A0A /* LocalFilesTools.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalFilesTools.swift; sourceTree = "<group>"; };
+		A1000A0C /* ClipboardHistory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardHistory.swift; sourceTree = "<group>"; };
+		A1000A0E /* MailService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailService.swift; sourceTree = "<group>"; };
 		A10000BB /* DiagnosticsLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsLog.swift; sourceTree = "<group>"; };
 		A1000A11 /* MenuBarController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarController.swift; sourceTree = "<group>"; };
 		A1000073 /* UpdaterService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdaterService.swift; sourceTree = "<group>"; };
@@ -181,6 +195,13 @@
 				A1000061 /* NotesService.swift */,
 				A1000751 /* FileNotesService.swift */,
 				A1000069 /* RemindersService.swift */,
+				A1000A02 /* CalendarService.swift */,
+				A1000A04 /* PersonalDataTools.swift */,
+				A1000A06 /* UserMemory.swift */,
+				A1000A08 /* CurrentContextTool.swift */,
+				A1000A0A /* LocalFilesTools.swift */,
+				A1000A0C /* ClipboardHistory.swift */,
+				A1000A0E /* MailService.swift */,
 				A10000BB /* DiagnosticsLog.swift */,
 				A1000073 /* UpdaterService.swift */,
 				A1000C91 /* UpdatePrompt.swift */,
@@ -336,6 +357,13 @@
 				A1000060 /* NotesService.swift in Sources */,
 				A1000750 /* FileNotesService.swift in Sources */,
 				A1000068 /* RemindersService.swift in Sources */,
+				A1000A01 /* CalendarService.swift in Sources */,
+				A1000A03 /* PersonalDataTools.swift in Sources */,
+				A1000A05 /* UserMemory.swift in Sources */,
+				A1000A07 /* CurrentContextTool.swift in Sources */,
+				A1000A09 /* LocalFilesTools.swift in Sources */,
+				A1000A0B /* ClipboardHistory.swift in Sources */,
+				A1000A0D /* MailService.swift in Sources */,
 				A10000AA /* DiagnosticsLog.swift in Sources */,
 				A1000072 /* UpdaterService.swift in Sources */,
 				A1000C90 /* UpdatePrompt.swift in Sources */,
@@ -453,7 +481,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.9.7;
+				MARKETING_VERSION = 0.9.8;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -476,7 +504,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.9.7;
+				MARKETING_VERSION = 0.9.8;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;
