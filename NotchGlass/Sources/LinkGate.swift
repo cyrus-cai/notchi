@@ -32,6 +32,8 @@ final class LinkGate: ObservableObject {
 
     /// Open a link the user clicked. Anything that is not http(s) skips the check.
     func open(_ url: URL) {
+        // A path or a date the app linked in an answer (`AnswerLinks`).
+        if AnswerLinks.open(url) { return }
         guard Self.applies(to: url) else {
             NSWorkspace.shared.open(url)
             return

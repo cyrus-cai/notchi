@@ -139,6 +139,90 @@ enum FileNotesService {
         NSWorkspace.shared.open(URL(fileURLWithPath: folder, isDirectory: true))
     }
 
+    /// One `## HH:MM` entry in a day file.
+    struct Entry: Sendable {
+        let file: URL
+        let day: String
+        let time: String
+        let text: String
+    }
+
+    /// Entries whose text contains `query`, newest first, across the last 60
+    /// day files.
+    static func findEntries(containing query: String) async -> [Entry] {
+        let folder = folderPath
+        return await withCheckedContinuation { cont in
+            queue.async {
+                let dir = URL(fileURLWithPath: folder, isDirectory: true)
+                let files = ((try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [])
+                    .filter { $0.pathExtension.lowercased() == "md" }
+                    .sorted { $0.lastPathComponent > $1.lastPathComponent }
+                    .prefix(60)
+                var found: [Entry] = []
+                for file in files {
+                    guard let content = try? String(contentsOf: file, encoding: .utf8) else { continue }
+                    let day = file.deletingPathExtension().lastPathComponent
+                    for entry in entries(in: content).reversed()
+                    where entry.text.localizedCaseInsensitiveContains(query) {
+                        found.append(Entry(file: file, day: day, time: entry.time, text: entry.text))
+                    }
+                }
+                cont.resume(returning: found)
+            }
+        }
+    }
+
+    /// Replace an entry's text, or remove the entry (`newText == nil`). A day
+    /// file left with no entries is removed.
+    static func edit(_ entry: Entry, newText: String?) async -> Result<Void, FileNotesError> {
+        await withCheckedContinuation { cont in
+            queue.async {
+                guard let content = try? String(contentsOf: entry.file, encoding: .utf8) else {
+                    return cont.resume(returning: .failure(.writeFailed("Couldn't read \(entry.file.lastPathComponent).")))
+                }
+                guard let match = entries(in: content).last(where: { $0.time == entry.time && $0.text == entry.text }) else {
+                    return cont.resume(returning: .failure(.writeFailed("That note changed since it was found.")))
+                }
+                var updated = content
+                if let newText {
+                    updated.replaceSubrange(match.range, with: "\n## \(entry.time)\n\n\(newText)\n")
+                } else {
+                    updated.removeSubrange(match.range)
+                }
+                do {
+                    if newText == nil, entries(in: updated).isEmpty {
+                        try FileManager.default.removeItem(at: entry.file)
+                    } else {
+                        try updated.write(to: entry.file, atomically: true, encoding: .utf8)
+                    }
+                    cont.resume(returning: .success(()))
+                } catch {
+                    cont.resume(returning: .failure(.writeFailed(error.localizedDescription)))
+                }
+            }
+        }
+    }
+
+    /// The `## HH:MM` entries of a day file (the format `appendOnQueue`
+    /// writes), each with its range from the newline before the heading to
+    /// the end of its text.
+    private static func entries(in content: String) -> [(time: String, text: String, range: Range<String.Index>)] {
+        var heads: [Range<String.Index>] = []
+        var cursor = content.startIndex
+        while let r = content.range(of: "\n## ", range: cursor..<content.endIndex) {
+            heads.append(r)
+            cursor = r.upperBound
+        }
+        return heads.enumerated().compactMap { i, head in
+            let end = i + 1 < heads.count ? heads[i + 1].lowerBound : content.endIndex
+            let block = content[head.upperBound..<end]
+            guard let lineEnd = block.firstIndex(of: "\n") else { return nil }
+            let time = String(block[..<lineEnd]).trimmingCharacters(in: .whitespaces)
+            let text = String(block[lineEnd...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            return (time, text, head.lowerBound..<end)
+        }
+    }
+
     /// The actual append. Runs on `queue`. Returns the day file's path on success.
     private static func appendOnQueue(_ text: String, folder: String) -> Result<String?, FileNotesError> {
         let fm = FileManager.default

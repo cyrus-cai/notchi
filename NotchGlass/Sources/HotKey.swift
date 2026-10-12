@@ -1961,8 +1961,18 @@ enum AppShortcutAction: String, CaseIterable, Identifiable, Hashable {
     case filter
     case picker
     case detach
+    /// Global, unlike the others: registered as a Carbon hot key by
+    /// `AppDelegate`, so it works from any app (`NotchModel.askAboutScreenArea`).
+    case askScreen
 
     var id: String { rawValue }
+
+    /// The actions the app offers now. `askScreen` is held back while
+    /// `NotchModel.screenAreaAskEnabled` is off: not registered, not listed,
+    /// and its chord free for another action.
+    static var live: [AppShortcutAction] {
+        allCases.filter { $0 != .askScreen || NotchModel.screenAreaAskEnabled }
+    }
 
     var label: String {
         switch self {
@@ -1972,6 +1982,7 @@ enum AppShortcutAction: String, CaseIterable, Identifiable, Hashable {
         case .filter:      return L("shortcuts.filter")
         case .picker:      return L("shortcuts.picker")
         case .detach:      return L("shortcuts.detach")
+        case .askScreen:   return L("shortcuts.askScreen")
         }
     }
 
@@ -1986,6 +1997,7 @@ enum AppShortcutAction: String, CaseIterable, Identifiable, Hashable {
         case .filter:     return "filter"
         case .picker:     return "picker"
         case .detach:     return "detach"
+        case .askScreen:  return "ask_screen"
         }
     }
 
@@ -2002,6 +2014,8 @@ enum AppShortcutAction: String, CaseIterable, Identifiable, Hashable {
         case "filter", "search": return .filter
         case "picker", "model_picker", "modelpicker": return .picker
         case "detach", "detached_window": return .detach
+        case "ask_screen", "screenshot", "screen_area":
+            return NotchModel.screenAreaAskEnabled ? .askScreen : nil
         default: return nil
         }
     }
@@ -2018,6 +2032,10 @@ enum AppShortcutAction: String, CaseIterable, Identifiable, Hashable {
         case .detach:
             return ShortcutChord(keyCode: UInt32(kVK_ANSI_Equal),
                                  modifiers: UInt32(controlKey) | UInt32(shiftKey))
+        // Beside macOS's own ⌘⇧3/4/5 screenshot chords.
+        case .askScreen:
+            return ShortcutChord(keyCode: UInt32(kVK_ANSI_2),
+                                 modifiers: UInt32(cmdKey) | UInt32(shiftKey))
         }
     }
 }
@@ -2115,7 +2133,7 @@ enum AppShortcutStore {
         ]
         if systemReserved.contains(proposed) { return L("shortcuts.reserved.system") }
 
-        for action in AppShortcutAction.allCases where action != editingAction {
+        for action in AppShortcutAction.live where action != editingAction {
             if chord(for: action) == proposed { return action.label }
         }
 
@@ -2217,7 +2235,8 @@ struct AppShortcutReference {
                 editable(.newChat),
                 Entry(L("shortcuts.back"), ["←"]),
             ]),
-            Group(title: L("shortcuts.group.panel"), entries: [
+            Group(title: L("shortcuts.group.panel"),
+                  entries: (NotchModel.screenAreaAskEnabled ? [editable(.askScreen)] : []) + [
                 editable(.filter),
                 editable(.picker),
             ] + (NotchModel.detachedWindowsEnabled ? [editable(.detach)] : [])),

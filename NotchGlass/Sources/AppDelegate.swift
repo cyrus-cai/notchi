@@ -163,6 +163,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// held strongly so they stay registered and rebuilt whenever the Settings →
     /// General recorder changes the config; both `nil` while disabled.
     private var summonHotKey: HotKey?
+    /// The global "ask about an area of the screen" chord (`AppShortcutAction.askScreen`).
+    private var askScreenHotKey: HotKey?
     private var summonDoubleTap: DoubleTapModifierMonitor?
     /// Every complete user-authored `[shortcut, prompt]` binding. The closure for
     /// each registration captures only its stable id and reads the current prompt
@@ -241,6 +243,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // `current_context` reads the app before Notchi; start watching now.
+        _ = FrontAppTracker.shared
         // Register the message tones before the first send needs them.
         DispatchQueue.main.async { MessageTone.prepare() }
         // Single-instance guard — must run before anything else builds state.
@@ -1051,6 +1055,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         registerPromptHotKeys()
+        registerAskScreenHotKey()
+        // A history read for Memory that failed last time is tried again.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            self?.model.scanHistoryForMemories()
+        }
+        NotificationCenter.default.addObserver(
+            forName: .appShortcutsChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.registerAskScreenHotKey()
+            }
+        }
         if ForceClickFeature.isEnabled {
             // The press draws itself while it is still being decided, so the gesture
             // stops being a coin flip (`ForceClickHerald`). The cue grows into exactly
@@ -1095,7 +1113,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in
                 self?.registerSummonHotKey()
                 self?.registerPromptHotKeys()
+                self?.registerAskScreenHotKey()
             }
+        }
+    }
+
+    /// (Re)register the global chord that selects an area of the screen and
+    /// attaches it to an ask.
+    private func registerAskScreenHotKey() {
+        askScreenHotKey = nil
+        guard NotchModel.screenAreaAskEnabled, !ShortcutRecording.isActive else { return }
+        let chord = AppShortcutStore.chord(for: .askScreen)
+        askScreenHotKey = HotKey(keyCode: chord.keyCode, modifiers: chord.modifiers) { [weak self] in
+            guard let self else { return }
+            self.model.askAboutScreenArea(on: self.displayForSummon())
         }
     }
 

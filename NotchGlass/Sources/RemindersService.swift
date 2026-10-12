@@ -237,7 +237,9 @@ enum RemindersService {
     /// (`x-apple-reminderkit://REMCDReminder/<externalID>`), so the record row can
     /// jump back to it; `nil` when EventKit gave back no external identifier
     /// (treated as a soft success — the reminder exists, we just can't link it).
-    static func createReminder(_ text: String, due: Date?,
+    /// `recurrence` overrides the repeat read from the words (`recurrenceKind`),
+    /// for a caller that was told the rule explicitly (`create_reminder`).
+    static func createReminder(_ text: String, due: Date?, recurrence: RecurrenceKind? = nil,
                                completion: @escaping @MainActor (Result<String?, RemindersError>) -> Void) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -250,7 +252,7 @@ enum RemindersService {
         let store = currentStore()
         store.requestFullAccessToReminders { granted, _ in
             let result: Result<String?, RemindersError> =
-                granted ? write(trimmed, due: due, store: store) : .failure(.permissionDenied)
+                granted ? write(trimmed, due: due, recurrence: recurrence, store: store) : .failure(.permissionDenied)
             Task { @MainActor in completion(result) }
         }
     }
@@ -271,7 +273,7 @@ enum RemindersService {
     /// than reading `currentStore()` again) so it writes through the exact
     /// connection the access was granted on — a concurrent revoke/regrant can't
     /// swap the store out between the grant and the save.
-    private static func write(_ text: String, due: Date?,
+    private static func write(_ text: String, due: Date?, recurrence: RecurrenceKind?,
                               store: EKEventStore) -> Result<String?, RemindersError> {
         guard let list = store.defaultCalendarForNewReminders() else {
             return .failure(.noList)
@@ -299,7 +301,7 @@ enum RemindersService {
             // of firing once and vanishing. Only when there IS a due date — a
             // dateless reminder with infinite recurrence reads as broken in the
             // Reminders app, so a Tab-forced dateless line stays one-shot.
-            if let kind = recurrenceKind(in: text) {
+            if let kind = recurrence ?? recurrenceKind(in: text) {
                 let rule: EKRecurrenceRule
                 switch kind {
                 case .daily:

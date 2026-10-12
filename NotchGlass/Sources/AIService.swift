@@ -392,10 +392,10 @@ alternatives in text.
 - Something on this Mac itself — files and folders, running processes and \
 ports, disk or battery state, installed tools, opening or quitting an app, a \
 git repository → run_shell. The same goes for what the user keeps in their Mac \
-apps — calendar events, reminders, contacts, notes, mail, the playing song: \
-read it with osascript (tell application "Calendar" …) and answer from the \
-result. Never reply that you cannot see their calendar or files while this \
-tool is available; run the command first, and give it a longer \
+apps — contacts, mail, the playing song, and calendar, reminders or notes when \
+read_calendar / read_reminders / read_notes are not available: read it with \
+osascript and answer from the result. Never reply that you cannot see their \
+calendar or files while this tool is available; run the command first, and give it a longer \
 timeout_seconds when an app is slow to answer. When a command is likely to take \
 more than a few seconds — osascript reading Calendar, Mail or Notes, a find \
 over a large folder, brew, a download, a build, or any call where you set \
@@ -421,7 +421,81 @@ instead. After a note is saved, reply with one short line and nothing else.
     (["create_reminder"], """
 - A named moment in time to be reminded of → create_reminder with an absolute \
 local `due`. Never say it was saved until the tool result says so. After it is \
-saved, reply with one short line and nothing else.
+saved, reply with one short line and nothing else. Several items to remind → \
+one create_reminder call per item, all of them, before you reply; then list \
+only the items whose result says Saved, and say plainly which ones failed. \
+Never say you added, saved or changed anything you did not call a tool for.
+"""),
+    (["create_event"], """
+- A meeting, appointment or anything else that takes up time at a set moment → \
+create_event with an absolute local `start`. Never say it was added until the \
+tool result says so. After it is added, reply with one short line and nothing \
+else.
+"""),
+    (["read_calendar", "read_reminders", "read_notes"], """
+- The user's own schedule, to-dos and notes → read_calendar, read_reminders, \
+read_notes, then answer from what they return. Never say you cannot see their \
+calendar, reminders or notes while these are available. "When am I free" is \
+the gaps between events, inside sensible waking hours. "What should I care about \
+today / 今天有什么要我关心的" → read both today's events and the open reminders \
+due today or overdue, then list them in time order; say so plainly when both \
+are empty.
+"""),
+    (["manage_event"], """
+- Moving, renaming or cancelling an existing calendar event → manage_event \
+(read_calendar first when you need its id). Never create a second event \
+instead of moving one.
+"""),
+    (["schedule_action"], """
+- Something to do or undo later on this Mac ("mute for an hour, then unmute") \
+→ do the first part with run_shell and schedule the second with \
+schedule_action. Say it runs only while the app stays open.
+"""),
+    (["read_mail", "draft_mail"], """
+- The user's email → read_mail (unread, search, read). A reply or new message \
+they want written → draft_mail; it only saves a draft, never sends — say so.
+"""),
+    (["account_usage"], """
+- What the user spent or has left on Notchi → account_usage, then answer with \
+the figures it returns.
+"""),
+    (["recent_projects"], """
+- "That project", "my last project" → recent_projects; pass `open` to open \
+one in Finder.
+"""),
+    (["travel_time"], """
+- How long a trip takes now → travel_time (Apple Maps with current traffic); \
+never guess a time from memory while it is available.
+"""),
+    (["read_photos"], """
+- Something in a photo the user took ("the whiteboard photo", "that receipt") \
+→ read_photos with the date range they mean, then answer from its text.
+"""),
+    (["edit_note"], """
+- Tagging, rewriting or deleting a note the user saved → edit_note (never \
+run_shell or AppleScript for notes). Deleting asks the user itself.
+"""),
+    (["manage_reminder"], """
+- Changing an existing reminder — done, moved, cancelled → manage_reminder \
+(read_reminders first when you need its id). Cancelling a reminder is \
+action=delete; the tool asks the user itself.
+"""),
+    (["clipboard_history"], """
+- Something they copied earlier, not what is on the clipboard now → \
+clipboard_history.
+"""),
+    (["list_files", "read_file"], """
+- A file in their Downloads, Desktop or Documents → list_files to find it, then \
+read_file, and answer from its text.
+"""),
+    (["current_context"], """
+- "This page / article / email", "这篇 / 这封 / 这个页面" with nothing pasted, \
+selected or attached → current_context first, then answer from what it returns.
+"""),
+    (["remember", "forget"], """
+- A lasting fact the user tells you about themselves → remember it, then answer \
+as usual. "Forget …" → forget. What they say now contradicts a remembered fact \
+(a new job, a move) → update_memory.
 """),
     (["manage_loop"], """
 - Work to do again on a schedule or to watch over time — "every hour check X", \
@@ -472,6 +546,7 @@ func notchSystemPrompt(advertisedTools: Set<String>? = nil) -> String {
 /// byte-identical from one day to the next. Nothing else here varies per
 /// request: the preferences and the stances are per-account settings.
 func notchSystemPromptDated(customInstructions: String? = nil,
+                            memories: String? = nil,
                             provider: Provider? = nil,
                             advertisedTools: Set<String>? = nil) -> String {
     let fmt = DateFormatter()
@@ -500,6 +575,12 @@ func notchSystemPromptDated(customInstructions: String? = nil,
         prompt += "\n\nThe user has set these standing preferences. Honour them where "
             + "they don't conflict with the rules above (search-first, honesty, and "
             + "concision still apply):\n\(custom)"
+    }
+    // What the model has remembered about the user (`UserMemory`). They change
+    // rarely, so they stay above the date line, inside the cached prefix.
+    if let memories, !memories.isEmpty {
+        prompt += "\n\nWhat you know about the user from earlier conversations "
+            + "(use it where it helps; do not recite it):\n\(memories)"
     }
     // Nono's model treats "default to answering directly" as license to skip
     // search on facts that have moved since training. This restates the split
@@ -547,6 +628,24 @@ after the search, not skipping it.
 /// System prompt for summarizing a conversation into a short recent-list title.
 /// The title is derived from the *actual* exchange (not the user's first message),
 /// so generic prompts like "总结一下" don't end up as the displayed title.
+/// For `NotchModel.scanHistoryForMemories`: lasting facts about the user, read
+/// from the messages they sent in past conversations.
+let memoryExtractSystemPrompt = """
+You read messages a user sent to their assistant over many past conversations \
+and list lasting facts about the user that would help future answers: what to \
+call them, their work or role, projects they work on, people they mention by \
+name and how they relate, tools they use, preferences and dislikes, where they \
+live if they said so.
+
+Rules:
+- One fact per line, starting with "- ", one short third-person sentence.
+- Write in the language the user mostly writes in.
+- Only facts the messages show; never guess. Skip one-off tasks and questions \
+about the world.
+- Never include passwords, account or ID numbers, health or financial details.
+- At most 20 lines. If there is nothing, reply NONE.
+"""
+
 let titleSystemPrompt = """
 You write short, *distinctive* titles for a list of past conversations. The \
 list shows many titles stacked together, so each one must be specific enough \
@@ -2525,15 +2624,14 @@ enum RemoteModelManifest {
         if !periods.isEmpty {
             req.setValue(periods.joined(separator: ","), forHTTPHeaderField: "X-Notchi-First-Request")
         }
-        // Two Lab settings, on the first request of the day only, so the website
-        // counts each machine once: whether threads are unified and whether the
-        // chat model may run commands. Read from `UserDefaults` under the keys
+        // Lab settings, on the first request of the day only, so the website
+        // counts each machine once. Threads are always unified; whether the
+        // chat model may run commands is read from `UserDefaults` under the key
         // `NotchModel` writes, because the model is @MainActor and this is not.
         if periods.contains("day") {
             let defaults = UserDefaults.standard
-            let threads = defaults.bool(forKey: "unifiedThreadsEnabled") ? "unified" : "separate"
             let commands = defaults.bool(forKey: "shellToolEnabled") ? "on" : "off"
-            req.setValue("threads=\(threads), commands=\(commands)",
+            req.setValue("threads=unified, commands=\(commands)",
                          forHTTPHeaderField: "X-Notchi-Settings")
         }
         // Lets the server break these fetches down by release. CFNetwork's default

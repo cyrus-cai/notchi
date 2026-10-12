@@ -3,6 +3,8 @@ import Combine
 import AppKit   // NSWorkspace — opening Notes/Reminders for a Recent capture
 import Carbon.HIToolbox
 import UniformTypeIdentifiers   // UTType — is a pasted file URL an image? (agent ⌘V)
+import PDFKit   // the text of a PDF dropped on the island
+import Vision   // the text of a screen area, for a model that cannot read images
 import AudioToolbox   // MessageTone — system sounds
 
 /// Images loaded back out of the history store (`NotchModel.historyImage(named:)`),
@@ -54,9 +56,41 @@ private struct LossyElement<T: Decodable>: Decodable {
 /// observing the model: the settings panel, onboarding, What's New, the History
 /// window, none of which render the conversation. The model still exposes a
 /// `turns` forwarder so its own logic reads/writes exactly as before.
+///
+/// A streaming flush goes one level further: its text is written here
+/// `silently` and published through `LiveAnswerText`, which only the streaming
+/// answer's own view observes, so a flush no longer re-evaluates the whole
+/// result page (header, composer, every other message).
 @MainActor
 final class ConversationStore: ObservableObject {
-    @Published var turns: [NotchModel.Turn] = []
+    var turns: [NotchModel.Turn] = [] {
+        willSet { if !quiet { objectWillChange.send() } }
+    }
+    private var quiet = false
+
+    /// Write without invalidating the views that observe the store.
+    func silently(_ write: () -> Void) {
+        quiet = true
+        write()
+        quiet = false
+    }
+}
+
+/// The text of the answer streaming on screen, for its own view to observe
+/// (`ConversationStore.silently`). `id` names the answer turn it belongs to.
+@MainActor
+final class LiveAnswerText: ObservableObject {
+    @Published private(set) var id: UUID?
+    @Published private(set) var text = ""
+
+    /// A store that never changes, for turns that are not streaming, so their
+    /// view keeps one type whether or not it streams.
+    static let inert = LiveAnswerText()
+
+    func set(id: UUID, text: String) {
+        if self.id != id { self.id = id }
+        self.text = text
+    }
 }
 
 /// The notch's interaction state. Mirrors the prototype's `mode` plus the
@@ -183,8 +217,8 @@ final class NotchModel: ObservableObject {
         /// threads guide), not one the user sent or a model answered. Drawn like
         /// any other turn, never sent to the model. Persisted.
         var isLocal: Bool = false
-        /// Notes and reminders this *assistant* answer filed through
-        /// `create_note` / `create_reminder`, in call order. Drawn as a line
+        /// Notes, reminders and events this *assistant* answer filed through
+        /// `create_note` / `create_reminder` / `create_event`, in call order. Drawn as a line
         /// above the answer, like "Searched the web", that opens the item in
         /// its app. Persisted.
         var captures: [Capture] = []
@@ -381,7 +415,7 @@ final class NotchModel: ObservableObject {
         /// names that cause instead of the generic failed badge. Persisted.
         var outOfCredit: Bool = false
 
-        /// Unified threads (Settings → Lab): this row is the main thread — the
+        /// Unified threads (Settings → Chat): this row is the main thread — the
         /// chat that questions from the panel's own prompt continue while the
         /// lab is on. The newest such row is the one continued, and the idle
         /// prompt shows the end of its answer. Rows saved before the lab, or
@@ -802,6 +836,15 @@ final class NotchModel: ObservableObject {
     /// A bucket switch into Agent moves them onto `agentComposeImages` (and
     /// back) so the same paste isn't dropped just because the destination changed.
     @Published var askComposeImages: [NSImage] = []
+    /// Files dropped on the island for the next ask, as text (`handleFileDrop`).
+    /// Sent inside an `<attached_file>` envelope; the question bubble shows
+    /// their names (`fileEnvelope`).
+    @Published private(set) var droppedFiles: [DroppedFile] = []
+
+    struct DroppedFile: Equatable {
+        let name: String
+        let text: String
+    }
 
     /// How many images one agent round may carry. Both CLIs take far more —
     /// codex's `-i` is variadic (OpenAI accepts 500 images / 50MB per request)
@@ -2003,6 +2046,7 @@ final class NotchModel: ObservableObject {
         guard !q.isEmpty else { return }
         if selectionContext != nil { clearSelectionContext() }
         askComposeImages = []
+        droppedFiles = []
         text = ""
         beginChatLoop(prompt: q, minutes: minutes)
     }
@@ -3437,9 +3481,18 @@ final class NotchModel: ObservableObject {
             return "Error: that is too long to file. Keep it under 4000 characters."
         }
         let result: (message: String, link: String??)
-        if request.kind == .note {
+        switch request.kind {
+        case .note:
             result = await commitNoteCapture(line)
-        } else {
+        case .memory, .reminderUpdate, .mailDraft:
+            // Memory, reminder changes and drafts have their own tools.
+            return "Error: use update_memory or manage_reminder."
+        case .event:
+            switch Self.eventDraft(line, request: request) {
+            case .failure(let error): return error.message
+            case .success(let draft): result = await commitEventCapture(draft)
+            }
+        case .reminder:
             // An explicit `due` wins; without one we fall back to the same parsers
             // a typed line goes through, so "每周一交周报" still repeats.
             let due: Date?
@@ -3455,12 +3508,48 @@ final class NotchModel: ObservableObject {
                 due = RemindersService.futureDate(in: line)
                     ?? RemindersService.recurrenceDate(in: line)
             }
-            result = await commitReminderCapture(line, due: due)
+            let explicit: RemindersService.RecurrenceKind? = switch request.repeatRule {
+            case "daily": .daily
+            case "weekly": .weekly(nil)
+            case "monthly": .monthly
+            default: nil
+            }
+            result = await commitReminderCapture(line, due: due, recurrence: explicit)
         }
         if let link = result.link {
             markCapture(Turn.Capture(kind: request.kind, link: link), answerID: answerID)
         }
         return result.message
+    }
+
+    /// `update_memory` for this answer round: rewrite the fact, and mark the
+    /// answer with "Updated memory", whose tap undoes it (`openTurnCapture`).
+    /// The capture's link carries the fact as it was.
+    func handleMemoryUpdate(answerID: UUID, old: String, fact: String) async -> String {
+        guard let before = UserMemory.shared.replace(matching: old, with: fact) else {
+            return "Nothing remembered contains \"\(old)\". Remembered facts:\n"
+                + UserMemory.shared.promptList
+        }
+        if let data = try? JSONEncoder().encode(before), let link = String(data: data, encoding: .utf8) {
+            markCapture(Turn.Capture(kind: .memory, link: link), answerID: answerID)
+        }
+        return "Updated. Was: \(before.text)"
+    }
+
+    /// Undo an "Updated memory" line: the fact goes back, and the line leaves
+    /// the answer it was on, on screen and in Recent.
+    private func undoMemoryUpdate(_ capture: Turn.Capture) {
+        guard let link = capture.link, let data = link.data(using: .utf8),
+              let before = try? JSONDecoder().decode(UserMemory.Entry.self, from: data) else { return }
+        UserMemory.shared.restore(before)
+        for i in turns.indices { turns[i].captures.removeAll { $0 == capture } }
+        for key in turnCaptures.keys { turnCaptures[key]?.removeAll { $0 == capture } }
+        for h in history.indices where history[h].conversation.contains(where: { $0.captures.contains(capture) }) {
+            var thread = history[h].conversation
+            for i in thread.indices { thread[i].captures.removeAll { $0 == capture } }
+            history[h].turns = thread
+        }
+        saveHistory()
     }
 
     /// Captures filed by a still-running round, keyed by its answer turn. Merged
@@ -3478,9 +3567,23 @@ final class NotchModel: ObservableObject {
         }
     }
 
-    /// Open the note or reminder an answer filed, from the line above it.
+    /// Open the note, reminder or event an answer filed, from the line above it.
     func openTurnCapture(_ capture: Turn.Capture) {
-        openCapture(source: capture.kind == .note ? .note : .reminder, link: capture.link)
+        switch capture.kind {
+        case .note:     openCapture(source: .note, link: capture.link)
+        case .reminder, .reminderUpdate: openCapture(source: .reminder, link: capture.link)
+        case .mailDraft: openApp(bundleID: "com.apple.mail")
+        case .event:
+            if let link = capture.link, let url = URL(string: link) {
+                NSWorkspace.shared.open(url)
+            } else {
+                openApp(bundleID: "com.apple.iCal")
+            }
+        case .memory:
+            // Undo stays on the page: nothing to open, nothing to close.
+            withAnimation(.spring(response: 0.36, dampingFraction: 1)) { undoMemoryUpdate(capture) }
+            return
+        }
         fullClose()
     }
 
@@ -3522,9 +3625,19 @@ final class NotchModel: ObservableObject {
 
     /// The reminder write. A `nil` due files a dateless reminder — it
     /// shows in the list without ringing, which is honest and better than refusing.
-    private func commitReminderCapture(_ line: String, due: Date?) async -> (message: String, link: String??) {
+    private func commitReminderCapture(_ line: String, due: Date?,
+                                       recurrence: RemindersService.RecurrenceKind? = nil) async -> (message: String, link: String??) {
         let result: Result<String?, RemindersError> = await withCheckedContinuation { cont in
-            RemindersService.createReminder(line, due: due) { cont.resume(returning: $0) }
+            RemindersService.createReminder(line, due: due, recurrence: recurrence) { cont.resume(returning: $0) }
+        }
+        // Say whether it repeats, so the answer never tells the user to set a
+        // repeat that is already set (only a dated reminder repeats).
+        let repeats: String
+        switch due == nil ? nil : (recurrence ?? RemindersService.recurrenceKind(in: line)) {
+        case .daily?: repeats = " It repeats every day."
+        case .weekly?: repeats = " It repeats every week on that weekday."
+        case .monthly?: repeats = " It repeats every month."
+        case nil: repeats = " It does not repeat."
         }
         switch result {
         case .success(let link):
@@ -3532,9 +3645,84 @@ final class NotchModel: ObservableObject {
             guard let due else {
                 return ("Saved. The reminder is in the user's Reminders app, with no alarm time.", .some(link))
             }
-            return ("Saved. The reminder is in the user's Reminders app, due \(Self.captureDueDescription(due)).", .some(link))
+            return ("Saved. The reminder is in the user's Reminders app, due \(Self.captureDueDescription(due)).\(repeats)", .some(link))
         case .failure(let err):
             return ("Error: \(err.errorDescription ?? "couldn't create the reminder.")", nil)
+        }
+    }
+
+    /// The event `create_event` asked for, or the error to hand back to the
+    /// model. A bare day is an all-day event; a missing end is one hour (or
+    /// one day) after the start. Unlike a reminder, a start earlier today is
+    /// accepted: "the meeting I had at 9" may be logged after the fact.
+    private static func eventDraft(_ title: String, request: CaptureRequest)
+        -> Result<CalendarService.Draft, EventDraftError> {
+        guard let raw = request.due else {
+            return .failure(EventDraftError("Error: give the start as YYYY-MM-DDTHH:MM in the user's local time."))
+        }
+        let allDay = isBareDay(raw)
+        guard var start = parseCaptureDue(raw) else {
+            return .failure(EventDraftError("Error: could not read start=\"\(raw)\". Give the user's local time as YYYY-MM-DDTHH:MM."))
+        }
+        let cal = Calendar.current
+        if allDay { start = cal.startOfDay(for: start) }
+        guard start > cal.startOfDay(for: Date()) else {
+            return .failure(EventDraftError("Error: that start is in the past. Call current_datetime and pass a local time from today on."))
+        }
+        var end = cal.date(byAdding: allDay ? .day : .hour, value: 1, to: start) ?? start
+        if let rawEnd = request.end {
+            guard let parsed = parseCaptureDue(rawEnd) else {
+                return .failure(EventDraftError("Error: could not read end=\"\(rawEnd)\". Use the same form as start."))
+            }
+            // An all-day range names its last day; the event ends after it.
+            let candidate = isBareDay(rawEnd)
+                ? (cal.date(byAdding: .day, value: 1, to: cal.startOfDay(for: parsed)) ?? parsed)
+                : parsed
+            guard candidate > start else {
+                return .failure(EventDraftError("Error: end must be after start."))
+            }
+            end = candidate
+        }
+        let alert = request.alertMinutes ?? 10
+        return .success(CalendarService.Draft(title: title, start: start, end: end, allDay: allDay,
+                                              location: request.location, notes: nil,
+                                              alertMinutes: alert > 0 ? alert : nil))
+    }
+
+    struct EventDraftError: Error {
+        let message: String
+        init(_ message: String) { self.message = message }
+    }
+
+    private static func isBareDay(_ raw: String) -> Bool {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .range(of: #"^\d{4}-\d{2}-\d{2}$"#, options: .regularExpression) != nil
+    }
+
+    /// The event write. No Recent row: the answer that filed it is already in
+    /// Recent, and its line above the answer opens the event.
+    private func commitEventCapture(_ draft: CalendarService.Draft) async -> (message: String, link: String??) {
+        let result: Result<String?, CalendarError> = await withCheckedContinuation { cont in
+            CalendarService.createEvent(draft) { cont.resume(returning: $0) }
+        }
+        switch result {
+        case .success(let link):
+            let when: String
+            if draft.allDay {
+                let fmt = DateFormatter()
+                fmt.dateStyle = .medium
+                fmt.timeStyle = .none
+                fmt.locale = Self.localeForInterfaceLanguage()
+                when = "all day on \(fmt.string(from: draft.start))"
+            } else {
+                when = "from \(Self.captureDueDescription(draft.start)) to \(Self.captureDueDescription(draft.end))"
+            }
+            let alert = draft.alertMinutes.map {
+                draft.allDay ? " It alerts at 9:00 that day." : " It alerts \($0) minutes before."
+            } ?? " It has no alert."
+            return ("Added. The event is in the user's Calendar, \(when).\(alert)", .some(link))
+        case .failure(let err):
+            return ("Error: \(err.errorDescription ?? "couldn't add the event.")", nil)
         }
     }
 
@@ -3658,7 +3846,7 @@ final class NotchModel: ObservableObject {
         let anySearchKey = APIKeyStore.currentAnySearchKey() == nil ? "not_configured" : "configured"
         // Both shortcut families are scoped lists rather than scalars, so they
         // read the same way api_key/ai_model do: one line per addressable target.
-        let actionShortcuts = AppShortcutAction.allCases.map {
+        let actionShortcuts = AppShortcutAction.live.map {
             "action_shortcut[\($0.token)]=\(AppShortcutStore.chord(for: $0).displayString)"
         }
         let promptShortcuts = PromptShortcutStore.current.map { binding in
@@ -4150,6 +4338,142 @@ final class NotchModel: ObservableObject {
             options: [copy.cancel, copy.run],
             inlineOptions: true)
         return choice == "The user chose: \"\(copy.run)\""
+    }
+
+    /// `manage_reminder` action=delete waits on this card.
+    func confirmReminderDelete(answerID: UUID, title: String) async throws -> Bool {
+        let copy: (question: String, delete: String, cancel: String)
+        switch Localization.shared.language.resolved {
+        case .zhHans: copy = ("删除这条提醒？", "删除", "取消")
+        case .zhHant: copy = ("刪除這則提醒？", "刪除", "取消")
+        case .ja:     copy = ("このリマインダーを削除しますか？", "削除", "キャンセル")
+        case .ko:     copy = ("이 미리 알림을 삭제할까요?", "삭제", "취소")
+        case .fr:     copy = ("Supprimer ce rappel ?", "Supprimer", "Annuler")
+        case .es:     copy = ("¿Eliminar este recordatorio?", "Eliminar", "Cancelar")
+        case .en:     copy = ("Delete this reminder?", "Delete", "Cancel")
+        }
+        let choice = try await awaitUserChoice(
+            answerID: answerID,
+            question: copy.question + "\n" + title,
+            options: [copy.cancel, copy.delete],
+            inlineOptions: true)
+        return choice == "The user chose: \"\(copy.delete)\""
+    }
+
+    /// `account_usage`: the wallet from `/v1/me` and this month's lines from
+    /// `/v1/usage`, summed by model.
+    func accountUsageReport() async -> String {
+        let account = NoNoAccount.shared
+        guard account.hasToken else { return "The user has no Notchi Balance account." }
+        await account.refresh()
+        var lines: [String] = []
+        if let s = account.snapshot {
+            lines.append(String(format: "Credit left: $%.2f (bought $%.2f in total, used $%.2f).",
+                                s.credit.remainingUSD + (s.gift?.remainingUSD ?? 0),
+                                s.credit.grantedUSD, s.credit.usedUSD))
+            if let gift = s.gift, gift.remainingUSD > 0 {
+                lines.append(String(format: "Of it, gift credit: $%.2f.", gift.remainingUSD))
+            }
+            lines.append(String(format: "Today: $%.2f spent of a $%.2f daily cap.",
+                                s.limits.daySpentUSD, s.limits.dailySpendCapUSD))
+        }
+        if let usage = try? await account.loadUsage(limit: 500) {
+            let month = Calendar.current.dateInterval(of: .month, for: Date())
+            let inMonth = usage.filter { month?.contains($0.date) ?? false }
+            let total = inMonth.reduce(0) { $0 + ($1.billedUSD ?? 0) }
+            var byModel: [String: (Double, Int)] = [:]
+            for line in inMonth {
+                let prior = byModel[line.model] ?? (0, 0)
+                byModel[line.model] = (prior.0 + (line.billedUSD ?? 0), prior.1 + 1)
+            }
+            lines.append(String(format: "This month: $%.4f over %d requests%@.", total, inMonth.count,
+                                usage.count >= 500 ? " (the last 500 requests; older ones not counted)" : ""))
+            for (model, sum) in byModel.sorted(by: { $0.value.0 > $1.value.0 }).prefix(8) {
+                lines.append(String(format: "- %@: $%.4f, %d requests", model, sum.0, sum.1))
+            }
+        }
+        return lines.isEmpty ? "The Notchi Balance could not be read just now." : lines.joined(separator: "\n")
+    }
+
+    /// `manage_event` action=delete waits on this card.
+    func confirmEventDelete(answerID: UUID, title: String) async throws -> Bool {
+        let copy: (question: String, delete: String, cancel: String)
+        switch Localization.shared.language.resolved {
+        case .zhHans: copy = ("删除这个日程？", "删除", "取消")
+        case .zhHant: copy = ("刪除這個行程？", "刪除", "取消")
+        case .ja:     copy = ("この予定を削除しますか？", "削除", "キャンセル")
+        case .ko:     copy = ("이 일정을 삭제할까요?", "삭제", "취소")
+        case .fr:     copy = ("Supprimer cet événement ?", "Supprimer", "Annuler")
+        case .es:     copy = ("¿Eliminar este evento?", "Eliminar", "Cancelar")
+        case .en:     copy = ("Delete this event?", "Delete", "Cancel")
+        }
+        let choice = try await awaitUserChoice(
+            answerID: answerID,
+            question: copy.question + "\n" + title,
+            options: [copy.cancel, copy.delete],
+            inlineOptions: true)
+        return choice == "The user chose: \"\(copy.delete)\""
+    }
+
+    /// Commands `schedule_action` is waiting to run, so they can be counted
+    /// and end with the app.
+    private var scheduledActions: [UUID: Task<Void, Never>] = [:]
+
+    /// Confirm the command on the answer's card now, then run it once after
+    /// `minutes`. The run's output is not shown anywhere; a failure is logged.
+    func scheduleAction(answerID: UUID, command: String, minutes: Int) async throws -> String {
+        let when = Date().addingTimeInterval(TimeInterval(minutes * 60))
+        let fmt = DateFormatter()
+        fmt.dateFormat = "HH:mm"
+        let label: String
+        switch Localization.shared.language.resolved {
+        case .zhHans, .zhHant: label = "\(fmt.string(from: when)) 运行：\(command)"
+        case .ja:              label = "\(fmt.string(from: when)) に実行：\(command)"
+        case .ko:              label = "\(fmt.string(from: when))에 실행: \(command)"
+        default:               label = "At \(fmt.string(from: when)): \(command)"
+        }
+        guard try await confirmShellCommand(answerID: answerID, command: label) else {
+            return "The user did not approve. Nothing was scheduled. Do not retry."
+        }
+        let id = UUID()
+        scheduledActions[id] = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(minutes) * 60 * 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            let output = await ShellRunner.run(command, timeout: ShellRunner.defaultTimeout)
+            NSLog("schedule_action ran: %@ → %@", String(command.prefix(80)), String(output.prefix(200)))
+            self?.scheduledActions[id] = nil
+        }
+        return "Scheduled. It will run at \(fmt.string(from: when)) if the app is still open."
+    }
+
+    /// `edit_note` action=delete waits on this card.
+    func confirmNoteDelete(answerID: UUID, title: String) async throws -> Bool {
+        let copy: (question: String, delete: String, cancel: String)
+        switch Localization.shared.language.resolved {
+        case .zhHans: copy = ("删除这条笔记？", "删除", "取消")
+        case .zhHant: copy = ("刪除這則筆記？", "刪除", "取消")
+        case .ja:     copy = ("このメモを削除しますか？", "削除", "キャンセル")
+        case .ko:     copy = ("이 메모를 삭제할까요?", "삭제", "취소")
+        case .fr:     copy = ("Supprimer cette note ?", "Supprimer", "Annuler")
+        case .es:     copy = ("¿Eliminar esta nota?", "Eliminar", "Cancelar")
+        case .en:     copy = ("Delete this note?", "Delete", "Cancel")
+        }
+        let choice = try await awaitUserChoice(
+            answerID: answerID,
+            question: copy.question + "\n" + title,
+            options: [copy.cancel, copy.delete],
+            inlineOptions: true)
+        return choice == "The user chose: \"\(copy.delete)\""
+    }
+
+    /// A line above the answer for something filed without a link.
+    func markCaptureLine(_ kind: CaptureRequest.Kind, answerID: UUID) {
+        markCapture(Turn.Capture(kind: kind, link: nil), answerID: answerID)
+    }
+
+    /// A completed or rescheduled reminder gets the answer's line, like a filed one.
+    func markReminderChange(answerID: UUID, link: String?) {
+        markCapture(Turn.Capture(kind: .reminderUpdate, link: link), answerID: answerID)
     }
 
     private func shellConfirmationCopy() -> (question: String, run: String, cancel: String) {
@@ -4690,6 +5014,8 @@ final class NotchModel: ObservableObject {
     /// publish through the store, never through the model's `objectWillChange`,
     /// so surfaces that don't render the thread are never invalidated by a chunk.
     let conversation = ConversationStore()
+    /// The streaming answer's text (`LiveAnswerText`).
+    let liveAnswer = LiveAnswerText()
     var turns: [Turn] {
         get { conversation.turns }
         set { conversation.turns = newValue }
@@ -5070,8 +5396,11 @@ final class NotchModel: ObservableObject {
     ///    it back as a past activity.
     ///  • **the thread on screen** — already in the wire context verbatim; the tool
     ///    exists for what's *outside* the current conversation.
-    func searchArchive(_ query: HistoryQuery) -> HistoryDigest {
-        Self.archiveDigest(query, in: history, currentThread: threadHistoryID)
+    /// `offWire` is the main thread's own earlier exchanges that this round did
+    /// not send (see `sittingStart`). The thread's row is withheld as the current
+    /// thread, so without them those turns could not be found at all.
+    func searchArchive(_ query: HistoryQuery, offWire: [HistoryItem] = []) -> HistoryDigest {
+        Self.archiveDigest(query, in: history + offWire, currentThread: threadHistoryID)
     }
 
     /// The query itself, as a pure function of (request, rows) — so it can be
@@ -5218,6 +5547,16 @@ final class NotchModel: ObservableObject {
     enum ClipboardSense: Equatable {
         case idle
         case hinting(panel: Panel)
+        /// The copy is a street address; ⌘C again opens it in Maps.
+        case mapHint
+
+        /// An offer is up and waits for the confirming ⌘C.
+        var isOffer: Bool {
+            switch self {
+            case .hinting, .mapHint: return true
+            default: return false
+            }
+        }
         case saving(panel: Panel)
         case saved(panel: Panel)
         case failed
@@ -5256,36 +5595,10 @@ final class NotchModel: ObservableObject {
     /// Legacy key name, kept so the setting survives the agent-only → global move.
     private static let liveActivityKey = "agentNotchActivityEnabled"
 
-    /// Settings → Lab → Unified threads. On by default for a new install, off
-    /// for an existing one that never set it. Off means the old behavior
-    /// exactly: every question from the idle prompt is a thread of its own. On,
-    /// each of those questions is a follow-up on one main thread — one Recent
-    /// row — and the idle prompt shows the end of its newest answer
-    /// (`mainThreadPeek`).
-    @Published var unifiedThreadsEnabled: Bool = NotchModel.initialUnifiedThreads()
-    {
-        didSet {
-            UserDefaults.standard.set(unifiedThreadsEnabled,
-                                      forKey: NotchModel.unifiedThreadsKey)
-            // The invitation lives in the peek, which only unified threads has.
-            // The guide's thread stays: its options answer whatever is left.
-            if !unifiedThreadsEnabled, unifiedIntro?.threadID == nil { unifiedIntro = nil }
-        }
-    }
-    private static let unifiedThreadsKey = "unifiedThreadsEnabled"
-
-    /// The stored setting, or for a new install with none stored, on — written
-    /// down along with the guide's done flag, since the guide only exists to
-    /// turn the setting on.
-    private static func initialUnifiedThreads() -> Bool {
-        let defaults = UserDefaults.standard
-        if defaults.object(forKey: unifiedThreadsKey) == nil,
-           !OnboardingService.hasRunBefore {
-            defaults.set(true, forKey: unifiedThreadsKey)
-            defaults.set(true, forKey: unifiedIntroDoneKey)
-        }
-        return defaults.bool(forKey: unifiedThreadsKey)
-    }
+    /// Unified threads, always on: each question from the idle prompt is a
+    /// follow-up on one main thread — one Recent row — and the idle prompt
+    /// shows the end of its newest answer (`mainThreadPeek`).
+    @Published var unifiedThreadsEnabled = true
 
     // MARK: - Unified threads guide
 
@@ -5861,7 +6174,7 @@ final class NotchModel: ObservableObject {
             && agentDetailTaskID == nil && !agentComposeActive
             && promptShortcutContext == nil && promptShortcutMode == nil
             && selectionContext == nil && loopIntervalMinutes == nil
-            && askComposeImages.isEmpty && recallPosition == nil
+            && askComposeImages.isEmpty && droppedFiles.isEmpty && recallPosition == nil
             && !noteSaving && lastSavedNote == nil && noteError == nil
     }
 
@@ -6361,20 +6674,28 @@ final class NotchModel: ObservableObject {
             senseLastChangeCount = pb.changeCount
             return
         }
+        let count = pb.changeCount
+        // One privacy-gated read decision per copy, shared by the history and
+        // Copy Sense: under macOS's ask mode a second check in the same tick
+        // would read as a second attempt and be refused.
+        var accessAllowed: Bool?
+        if count != senseLastChangeCount, ClipboardHistory.available, ClipboardHistory.shared.enabled {
+            accessAllowed = senseClipboardAccessAllowed()
+            if accessAllowed == true { recordClipboardHistory() }
+        }
         // Disabled still tracks the count, so re-enabling can't hint on some
         // long-stale copy made while the switch was off.
         guard copySenseEnabled else {
-            senseLastChangeCount = pb.changeCount
+            senseLastChangeCount = count
             return
         }
-        let count = pb.changeCount
         guard count != senseLastChangeCount else {
             senseExpireHintIfStale()
             return
         }
         senseLastChangeCount = count
 
-        guard let clip = senseReadClipboard() else {
+        guard let clip = senseReadClipboard(accessAllowed: accessAllowed) else {
             // The clipboard moved to something we won't touch (empty, oversized,
             // concealed, denied…) — any hint about the previous clip is stale.
             senseCancelHint()
@@ -6394,6 +6715,13 @@ final class NotchModel: ObservableObject {
             } else {
                 senseHintShownAt = Date()
             }
+        case .mapHint where clip == senseClip:
+            if let shown = senseHintShownAt,
+               Date().timeIntervalSince(shown) >= Self.senseMinReaction {
+                senseOpenInMaps(clip)
+            } else {
+                senseHintShownAt = Date()
+            }
         default:
             senseClassify(clip)
         }
@@ -6404,8 +6732,8 @@ final class NotchModel: ObservableObject {
     /// plain string (a bare URL or file path is never a note), never anything a
     /// password manager marked concealed/transient, and never while the system's
     /// pasteboard-privacy setting denies programmatic reads.
-    private func senseReadClipboard() -> String? {
-        guard senseClipboardAccessAllowed() else { return nil }
+    private func senseReadClipboard(accessAllowed: Bool? = nil) -> String? {
+        guard accessAllowed ?? senseClipboardAccessAllowed() else { return nil }
         let pb = NSPasteboard.general
         let types = pb.types ?? []
         let offLimits = ["org.nspasteboard.ConcealedType",
@@ -6423,6 +6751,23 @@ final class NotchModel: ObservableObject {
         // sent to the gateway. Runs before either classifier.
         guard !ClipPrivacy.containsSecret(clip) else { return nil }
         return clip
+    }
+
+    /// Add the copy that just landed to `ClipboardHistory`, under Copy Sense's
+    /// exclusions (concealed or transient types, credentials, Notchi's own text)
+    /// but with a longer length cap.
+    private func recordClipboardHistory() {
+        let pb = NSPasteboard.general
+        let types = pb.types ?? []
+        let offLimits = ["org.nspasteboard.ConcealedType",
+                         "org.nspasteboard.TransientType",
+                         "org.nspasteboard.AutoGeneratedType"]
+        guard !offLimits.contains(where: { types.contains(NSPasteboard.PasteboardType($0)) }),
+              let raw = pb.string(forType: .string) else { return }
+        let clip = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard clip.count >= 2, !isCurrentSessionText(clip), !ClipPrivacy.containsSecret(clip) else { return }
+        let app = NSWorkspace.shared.frontmostApplication?.localizedName
+        ClipboardHistory.shared.add(clip, app: app)
     }
 
     /// Gate content reads on the system pasteboard-privacy state (macOS 15.4+).
@@ -6458,6 +6803,13 @@ final class NotchModel: ObservableObject {
         // top would be two voices in one mouth. The copy simply goes unsensed.
         guard roundsInFlight == 0, !noteSaving else { return }
         senseClassifyTask?.cancel()
+        // A street address is offered to Maps, not filed. Read on this Mac.
+        if Self.looksLikeAddress(clip) {
+            senseClip = clip
+            senseHintShownAt = Date()
+            clipboardSense = .mapHint
+            return
+        }
         senseClassifyTask = Task { [weak self] in
             let shouldOffer: Bool
             // Only Jev reads a copy as a question; the on-device engine's `ask`
@@ -6589,9 +6941,38 @@ final class NotchModel: ObservableObject {
         }
     }
 
+    /// The map offer's confirm: open the copied address in Maps.
+    private func senseOpenInMaps(_ clip: String) {
+        senseCancelHint()
+        let query = clip.split(whereSeparator: \.isNewline).joined(separator: " ")
+        guard let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "maps://?q=\(encoded)") else { return }
+        Haptics.confirm()
+        NSWorkspace.shared.open(url)
+    }
+
+    /// Whether a copy is a street address and nothing else: the system's
+    /// address detector covering most of it, or, for Chinese addresses it
+    /// misses, administrative and street words around a house number.
+    static func looksLikeAddress(_ clip: String) -> Bool {
+        let text = clip.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (6...200).contains(text.count), text.split(whereSeparator: \.isNewline).count <= 3 else { return false }
+        if let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.address.rawValue) {
+            let ns = text as NSString
+            let covered = detector.matches(in: text, range: NSRange(location: 0, length: ns.length))
+                .reduce(0) { $0 + $1.range.length }
+            if Double(covered) >= Double(ns.length) * 0.6 { return true }
+        }
+        guard text.count <= 80, !text.contains("?"), !text.contains("？") else { return false }
+        let units = ["省", "市", "区", "區", "县", "縣", "镇", "鎮", "路", "街", "道", "巷", "弄", "大厦", "大廈", "广场", "廣場", "小区", "社区"]
+        let hits = units.filter { text.contains($0) }.count
+        let numbered = text.range(of: #"\d+\s*(号|號|弄|栋|棟|楼|樓|室)"#, options: .regularExpression) != nil
+        return hits >= 2 && numbered
+    }
+
     /// Fade an unanswered hint once it has outstayed `senseHintTimeout`.
     private func senseExpireHintIfStale() {
-        guard case .hinting = clipboardSense, let shown = senseHintShownAt,
+        guard clipboardSense.isOffer, let shown = senseHintShownAt,
               Date().timeIntervalSince(shown) > Self.senseHintTimeout else { return }
         senseCancelHint()
     }
@@ -6600,7 +6981,7 @@ final class NotchModel: ObservableObject {
     /// their own via `senseDismiss`).
     private func senseCancelHint() {
         senseClassifyTask?.cancel()
-        if case .hinting = clipboardSense { clipboardSense = .idle }
+        if clipboardSense.isOffer { clipboardSense = .idle }
         senseClip = nil
         senseHintShownAt = nil
     }
@@ -6737,7 +7118,7 @@ final class NotchModel: ObservableObject {
         open = true
         // An open retires a visible sense hint (the panel takes over the screen),
         // while a saving/saved narration settles on its own timer, just unseen.
-        if case .hinting = clipboardSense { senseCancelHint() }
+        if clipboardSense.isOffer { senseCancelHint() }
     }
 
     /// Toggle the panel from a global hot key: open it on `display` if resting,
@@ -7088,6 +7469,9 @@ final class NotchModel: ObservableObject {
         isResultMoreMenuOpen = false
         text = ""; turns = []
         replyTarget = nil
+        editTarget = nil
+        threadSearch = nil
+        quoteOffer = nil
         showHistory = false
         showSettings = false
         showWhatsNew = false
@@ -7139,9 +7523,13 @@ final class NotchModel: ObservableObject {
         fromPromptShortcut = false
         promptShortcutContext = nil
         clearSelectionContext()
+        droppedFiles = []
         agentDetailTaskID = nil
         text = ""; turns = []
         replyTarget = nil
+        editTarget = nil
+        threadSearch = nil
+        quoteOffer = nil
         showHistory = false
         showSettings = false
         highlightedHistoryIndex = nil
@@ -7344,6 +7732,10 @@ final class NotchModel: ObservableObject {
         // `submit()` continues the conversation (its agent session when
         // resumable, else the chat model), so a persisted Agent bucket can
         // never hijack an ask thread's follow-up into a fresh agent task.
+        if let target = editTarget, !turns.isEmpty {
+            submitEdit(target)
+            return
+        }
         if !turns.isEmpty { submit(); return }
         // An empty prompt shortcut has already supplied the object of the ask.
         // Whatever is typed now is the one-off instruction, regardless of intent
@@ -7400,6 +7792,19 @@ final class NotchModel: ObservableObject {
         // still selected in another window, is a reminder and nothing else), so
         // there the context is dropped rather than folded in. Either way it is
         // consumed here: it belonged to this line.
+        // Dropped files ride along with an ask, and a dropped file with no
+        // line is a request to read it. A drop is deliberate, so it takes the
+        // place of a carried selection rather than sharing the message with it.
+        if !droppedFiles.isEmpty, effectiveSubmitPanel == .chat {
+            let files = droppedFiles
+            droppedFiles = []
+            clearSelectionContext()
+            var instruction = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if instruction.isEmpty { instruction = L("file.drop.defaultQuestion") }
+            text = Self.fileEnvelope(line: instruction, files: files)
+            submit()
+            return
+        }
         if let selection = selectionContext {
             clearSelectionContext()
             let instruction = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -7428,9 +7833,11 @@ final class NotchModel: ObservableObject {
         case .chat:     submit()
         case .note:
             askComposeImages = []
+            droppedFiles = []
             submitNote()
         case .reminder:
             askComposeImages = []
+            droppedFiles = []
             submitReminder()
         }
     }
@@ -7448,8 +7855,9 @@ final class NotchModel: ObservableObject {
         // A task for the agent is written against a project on disk, not against
         // whatever was highlighted in another window — and `submitAgent` never
         // reads the carried selection, so leaving the chip up would be the panel
-        // claiming a context it isn't going to send.
+        // claiming a context it isn't going to send. Dropped files likewise.
         clearSelectionContext()
+        droppedFiles = []
         withAnimation(.smooth(duration: 0.3)) {
             if let folder {
                 lastAgentFolder = folder
@@ -7638,6 +8046,200 @@ final class NotchModel: ObservableObject {
             if mode != .idle { newChat() }
         }
         enterAgentCompose(folder: url)
+    }
+
+    // MARK: - Files dropped on the island
+
+    /// Files other than a project folder attach to the next ask
+    /// (`handleFileDrop`). Off for now: a drop only takes a single folder.
+    static let fileDropAskEnabled = false
+    /// The `askScreen` chord (`askAboutScreenArea`). Off for now: the chord is
+    /// not registered and Settings does not list it.
+    static let screenAreaAskEnabled = false
+
+    /// ⌘F search in the conversation on screen (`openThreadSearch`). Off until
+    /// it is tested.
+    static let threadSearchEnabled = false
+
+    /// The text all dropped files may add to one message, together. Past it a
+    /// file is cut, and says so.
+    static let droppedFileTextLimit = 60_000
+    /// A text file larger than this is not read at all.
+    private static let droppedFileByteLimit = 4 * 1024 * 1024
+
+    /// Files dropped on the island. A single folder starts an agent task in it
+    /// (`handleAgentFolderDrop`); anything else attaches to the next ask on the
+    /// idle prompt: an image as a pasted image (when the model takes images),
+    /// a PDF or text file as its text. Files that are neither are ignored.
+    func handleFileDrop(_ urls: [URL]) {
+        if urls.count == 1, isDirectory(urls[0]) {
+            handleAgentFolderDrop(urls[0])
+            return
+        }
+        guard Self.fileDropAskEnabled else { return }
+        let files = urls.filter { !isDirectory($0) }
+        guard !files.isEmpty else { return }
+        let takesImages = activeModelSupportsVision
+        let budget = Self.droppedFileTextLimit - droppedFiles.reduce(0) { $0 + $1.text.count }
+        Task.detached(priority: .userInitiated) {
+            var images: [NSImage] = []
+            var texts: [DroppedFile] = []
+            var left = budget
+            for url in files {
+                let type = UTType(filenameExtension: url.pathExtension)
+                if type?.conforms(to: .image) == true {
+                    if takesImages, let image = NSImage(contentsOf: url), image.isValid {
+                        images.append(image)
+                    }
+                    continue
+                }
+                guard left > 0, var body = Self.droppedFileText(url, type: type) else { continue }
+                if body.count > left {
+                    body = String(body.prefix(left)) + "\n[… the rest of this file was cut]"
+                }
+                left -= body.count
+                texts.append(DroppedFile(name: url.lastPathComponent, text: body))
+            }
+            await MainActor.run { [images, texts] in
+                self.attachDropped(images: images, files: texts)
+            }
+        }
+    }
+
+    private func attachDropped(images: [NSImage], files: [DroppedFile]) {
+        guard !images.isEmpty || !files.isEmpty else { return }
+        Haptics.alignment()
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+            if showSettings { showSettings = false }
+            if showWhatsNew { showWhatsNew = false }
+            if mode != .idle || !turns.isEmpty { newChat() }
+            if agentComposeActive { exitAgentCompose() }
+        }
+        collapseHistory()
+        noteUserTyping()
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+            // A file is something to ask about, never a line to file as a note.
+            manualPanelOverride = .chat
+            let room = max(0, Self.composeImageLimit - askComposeImages.count)
+            askComposeImages.append(contentsOf: images.prefix(room))
+            droppedFiles.append(contentsOf: files)
+        }
+    }
+
+    // MARK: - Ask about an area of the screen
+
+    private var screenAreaCaptureRunning = false
+
+    /// The `askScreen` chord: macOS's own area selection (`screencapture -i`),
+    /// then the area attaches to an ask on the idle prompt — as an image when
+    /// the model reads images, otherwise as the text in it, read on this Mac.
+    /// Esc during the selection cancels with nothing attached.
+    func askAboutScreenArea(on display: CGDirectDisplayID?) {
+        guard Self.screenAreaAskEnabled, !screenAreaCaptureRunning else { return }
+        screenAreaCaptureRunning = true
+        let takesImages = activeModelSupportsVision
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("notchi-area-\(UUID().uuidString).png")
+        Task.detached(priority: .userInitiated) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+            // Interactive area, no shutter sound, no window shadow.
+            process.arguments = ["-i", "-x", "-o", url.path]
+            do {
+                try process.run()
+                process.waitUntilExit()
+            } catch {}
+            defer { try? FileManager.default.removeItem(at: url) }
+            let image = NSImage(contentsOf: url)
+            let text = (image != nil && !takesImages) ? Self.recognizedText(at: url) : nil
+            await MainActor.run { [image, text] in
+                self.screenAreaCaptureRunning = false
+                guard let image, image.isValid else { return }
+                self.openPanel(on: display)
+                if takesImages {
+                    self.attachDropped(images: [image], files: [])
+                } else if let text {
+                    self.attachDropped(images: [], files: [DroppedFile(name: L("screenArea.name"), text: text)])
+                }
+            }
+        }
+    }
+
+    /// The text in an image, read with the Vision framework on this Mac.
+    nonisolated static func recognizedText(at url: URL) -> String? {
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = true
+        request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US", "ja-JP", "ko-KR"]
+        let handler = VNImageRequestHandler(url: url)
+        guard (try? handler.perform([request])) != nil else { return nil }
+        let lines = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
+        let text = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
+    }
+
+    func removeDroppedFile(at index: Int) {
+        guard droppedFiles.indices.contains(index) else { return }
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+            droppedFiles.remove(at: index)
+        }
+    }
+
+    /// A PDF's text, or a text file's contents. Nil for anything else, a PDF
+    /// with no text layer, or a file that is too large or not UTF-8.
+    /// Also `read_file`'s reader.
+    nonisolated static func droppedFileText(_ url: URL, type: UTType?) -> String? {
+        let body: String?
+        if type?.conforms(to: .pdf) == true {
+            body = PDFDocument(url: url)?.string
+        } else {
+            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+            guard size <= droppedFileByteLimit,
+                  let data = try? Data(contentsOf: url) else { return nil }
+            // Files with no known type (a Makefile, a .env) are read when they
+            // decode as UTF-8 text with no NUL bytes; known non-text types are not.
+            if let type, !type.isDynamic,
+               ![UTType.text, .sourceCode, .json, .xml].contains(where: { type.conforms(to: $0) }) {
+                return nil
+            }
+            guard !data.contains(0) else { return nil }
+            body = String(data: data, encoding: .utf8)
+        }
+        let trimmed = body?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func isDirectory(_ url: URL) -> Bool {
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+            && isDirectory.boolValue
+    }
+
+    /// The message an ask with dropped files sends: the line, then each file's
+    /// text in an envelope naming it.
+    static func fileEnvelope(line: String, files: [DroppedFile]) -> String {
+        let blocks = files.map { file in
+            let name = file.name.replacingOccurrences(of: "\"", with: "'")
+            return "<attached_file name=\"\(name)\">\n\(file.text)\n</attached_file>"
+        }
+        return ([line] + blocks).joined(separator: "\n\n")
+    }
+
+    /// Split a message built by `fileEnvelope` into its line and the files'
+    /// names, one per line, for the question bubble to show in place of their
+    /// text.
+    static func fileEnvelopeQuote(in text: String) -> (instruction: String, selection: String)? {
+        guard let first = text.range(of: "\n\n<attached_file name=\""),
+              text.hasSuffix("</attached_file>") else { return nil }
+        let pattern = #"<attached_file name="([^"\n]*)">"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let ns = text as NSString
+        let names = regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
+            .map { ns.substring(with: $0.range(at: 1)) }
+        guard !names.isEmpty else { return nil }
+        return (instruction: String(text[..<first.lowerBound])
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                selection: names.joined(separator: "\n"))
     }
 
     /// Pick (or change) the compose's folder. The picker is a separate window,
@@ -8328,6 +8930,56 @@ final class NotchModel: ObservableObject {
         return messages
     }
 
+    /// The gap between two of the user's messages that starts a new sitting.
+    private static let sittingGap: TimeInterval = 6 * 60 * 60
+
+    /// Where the current sitting of a main thread begins, as an index into `turns`.
+    ///
+    /// The main thread runs for days, and wiring all of it let the model read old
+    /// turns as current. Replayed on a real thread on a Monday afternoon, about a
+    /// third of the answers to "anything I should keep an eye on" treated
+    /// Saturday's "明天去南京, 朋友刚做完医美" as tomorrow's plan, or the National
+    /// Day holiday as still on. The `[sent …]` stamps were on every message and
+    /// did not prevent it, and neither did telling the model which message was
+    /// now. Sending only the current sitting did: no such answer in 24 runs.
+    ///
+    /// A sitting ends at a gap of `sittingGap` between two of the user's messages,
+    /// or at a message saved before `sentAt` existed, whose age is unknown. The
+    /// cut only moves when a new sitting starts, so the wired prefix stays stable
+    /// for the prompt cache within one.
+    static func sittingStart(in turns: [Turn]) -> Int {
+        var start = 0
+        var later: Date? = nil
+        for i in turns.indices.reversed() {
+            let turn = turns[i]
+            guard turn.role == "user", !turn.isLocal else { continue }
+            guard let sent = turn.sentAt else { return later == nil ? 0 : start }
+            if let later, later.timeIntervalSince(sent) >= sittingGap { return start }
+            later = sent
+            start = i
+        }
+        return 0
+    }
+
+    /// The exchanges before a sitting's start, one archive row per dated
+    /// question, so `search_history` can still reach them. Undated turns have no
+    /// time to file them under and are left out.
+    static func offWireExchanges(_ turns: ArraySlice<Turn>) -> [HistoryItem] {
+        var rows: [HistoryItem] = []
+        var i = turns.startIndex
+        while i < turns.endIndex {
+            let turn = turns[i]
+            i += 1
+            guard turn.role == "user", !turn.isLocal, let sent = turn.sentAt else { continue }
+            var answer = ""
+            if i < turns.endIndex, turns[i].role == "assistant", !turns[i].isError {
+                answer = turns[i].text
+            }
+            rows.append(HistoryItem(q: turn.text, a: answer, t: sent))
+        }
+        return rows
+    }
+
     /// The `[sent …]` stamp. Fixed locale, same shape as `SearchHistoryTool`'s
     /// rows, so the model reads one date format everywhere.
     private static let sentStampFormatter: DateFormatter = {
@@ -8382,6 +9034,7 @@ final class NotchModel: ObservableObject {
             q = Self.replyEnvelope(line: q, quote: quote)
             replyTarget = nil
         }
+        quoteOffer = nil
         // Messages' send tone for a line that actually goes out — not for a
         // regenerate re-running the same question, or a /loop round.
         if !isRegenerate, loopRound == nil { MessageTone.play(MessageTone.sent) }
@@ -8515,7 +9168,11 @@ final class NotchModel: ObservableObject {
         // and minus the hygiene cases `wireContext` filters (XII-88): a superseded
         // round's still-empty assistant turn and an error card's reason text, both
         // of which providers either reject outright or misread as model speech.
-        var context: [ChatMessage] = Self.wireContext(from: turns, excluding: answerID)
+        // A main thread sends only its current sitting; see `sittingStart`.
+        let sitting = isMainThread(threadHistoryID) ? Self.sittingStart(in: turns) : 0
+        var context: [ChatMessage] = Self.wireContext(from: Array(turns[sitting...]),
+                                                      excluding: answerID)
+        let offWire = Self.offWireExchanges(turns[..<sitting])
         // A loop round's question carries the done instruction on the wire only;
         // the thread keeps the prompt as written.
         if loopRound != nil, let last = context.last, last.role == "user" {
@@ -8751,7 +9408,15 @@ final class NotchModel: ObservableObject {
                         // First chunk: flip to the result view so the answer appears
                         // to grow in place out of the thinking state.
                         if self.mode == .load { self.mode = .result }
-                        self.updateAnswer(id: answerID, text: shown)
+                        // The first flush publishes, so the page swaps the thinking
+                        // state for the answer; later ones redraw only the answer.
+                        let following = self.liveAnswer.id == answerID
+                        self.liveAnswer.set(id: answerID, text: shown)
+                        if following {
+                            self.conversation.silently { self.updateAnswer(id: answerID, text: shown) }
+                        } else {
+                            self.updateAnswer(id: answerID, text: shown)
+                        }
                     }
                     // Keep draining: while revealed text still trails what has
                     // arrived, the loop schedules its own next tick — a stall in
@@ -8848,6 +9513,61 @@ final class NotchModel: ObservableObject {
                     return await self.handleCaptureRequest(answerID: answerID,
                                                            request: request)
                 })
+                agentTools.append(CreateEventTool { [weak self] request in
+                    guard let self else { throw CancellationError() }
+                    return await self.handleCaptureRequest(answerID: answerID,
+                                                           request: request)
+                })
+                agentTools.append(CurrentContextTool())
+                if ClipboardHistory.available { agentTools.append(ClipboardHistoryTool()) }
+                agentTools.append(ListFilesTool())
+                agentTools.append(ReadFileTool())
+                if UserMemory.shared.enabled {
+                    agentTools.append(RememberTool())
+                    agentTools.append(ForgetTool())
+                    agentTools.append(UpdateMemoryTool { [weak self] old, fact in
+                        guard let self else { return "Error: the conversation closed." }
+                        return await self.handleMemoryUpdate(answerID: answerID, old: old, fact: fact)
+                    })
+                }
+                agentTools.append(ManageReminderTool(
+                    confirm: { [weak self] title in
+                        guard let self else { throw CancellationError() }
+                        return try await self.confirmReminderDelete(answerID: answerID, title: title)
+                    },
+                    mark: { [weak self] link in
+                        await self?.markReminderChange(answerID: answerID, link: link)
+                    }))
+                agentTools.append(ManageEventTool { [weak self] title in
+                    guard let self else { throw CancellationError() }
+                    return try await self.confirmEventDelete(answerID: answerID, title: title)
+                })
+                if shellToolEnabled {
+                    agentTools.append(ScheduleActionTool { [weak self] command, minutes in
+                        guard let self else { throw CancellationError() }
+                        return try await self.scheduleAction(answerID: answerID, command: command, minutes: minutes)
+                    })
+                }
+                if runProvider == .nono || NoNoAccount.shared.hasToken {
+                    agentTools.append(AccountUsageTool { [weak self] in
+                        await self?.accountUsageReport() ?? "Unavailable."
+                    })
+                }
+                agentTools.append(RecentProjectsTool { await MainActor.run { AgentFolderMRU.entries } })
+                agentTools.append(TravelTimeTool())
+                agentTools.append(ReadMailTool())
+                agentTools.append(DraftMailTool { [weak self] in
+                    await self?.markCaptureLine(.mailDraft, answerID: answerID)
+                })
+                agentTools.append(ReadPhotosTool())
+                agentTools.append(EditNoteTool { [weak self] title in
+                    guard let self else { throw CancellationError() }
+                    return try await self.confirmNoteDelete(answerID: answerID, title: title)
+                })
+                // Read-only: the user's Calendar, Reminders and notes.
+                agentTools.append(ReadCalendarTool())
+                agentTools.append(ReadRemindersTool())
+                agentTools.append(ReadNotesTool())
                 // A loop round never starts or re-times loops itself; it ends its
                 // own loop with `LoopInterval.doneMarker`.
                 if loopRound == nil {
@@ -8869,7 +9589,7 @@ final class NotchModel: ObservableObject {
                     // A round whose model went away has no archive to read; an empty
                     // digest renders as "nothing recorded", which is honest.
                     guard let self else { return .empty }
-                    return await MainActor.run { self.searchArchive(query) }
+                    return await MainActor.run { self.searchArchive(query, offWire: offWire) }
                 })
                 // Blend1 only, and deliberately not the whole nono provider.
                 // The filter keeps a 26B thinking model from walking a long tool
@@ -8890,7 +9610,10 @@ final class NotchModel: ObservableObject {
                 let advertised: Set<String> =
                     (!imageAttached && runProvider.supportsTools && !registry.isEmpty)
                     ? Set(registry.tools.map(\.name)) : []
+                let memories = !UserMemory.shared.enabled || UserMemory.shared.entries.isEmpty
+                    ? nil : UserMemory.shared.promptList
                 let system = notchSystemPromptDated(customInstructions: customInstructions,
+                                                    memories: memories,
                                                     provider: runProvider,
                                                     advertisedTools: advertised)
                 // The service for THIS turn: a one-shot regenerate override (XII-135)
@@ -9731,10 +10454,148 @@ final class NotchModel: ObservableObject {
     func beginReply(to turn: Turn) {
         let quote = Self.replyQuote(for: turn)
         guard !quote.isEmpty else { return }
+        if editTarget != nil { cancelEdit() }
         replyTarget = ReplyTarget(threadID: threadHistoryID, turnID: turn.id, quote: quote)
     }
 
     func cancelReply() { replyTarget = nil }
+
+    // MARK: - Following up on a copied passage
+
+    /// Text the user just copied out of an answer on screen (⌘C), offered as
+    /// a quote for the next follow-up (`acceptQuoteOffer`).
+    @Published private(set) var quoteOffer: String?
+
+    /// Offer `copied` when it is a passage of an answer in the thread on screen.
+    func offerQuote(_ copied: String) {
+        let text = copied.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (2...2000).contains(text.count), mode == .result,
+              turns.contains(where: { $0.role == "assistant" && MarkdownParser.plainText($0.text).contains(text) || $0.text.contains(text) })
+        else { return }
+        withAnimation(.easeOut(duration: Tokens.hoverFade)) { quoteOffer = text }
+    }
+
+    /// The passage becomes the quote the next follow-up replies to.
+    func acceptQuoteOffer() {
+        guard let text = quoteOffer else { return }
+        let answer = turns.last { $0.role == "assistant" && ($0.text.contains(text) || MarkdownParser.plainText($0.text).contains(text)) }
+        if editTarget != nil { cancelEdit() }
+        let quote = text.count > 500 ? String(text.prefix(500)) + "…" : text
+        replyTarget = ReplyTarget(threadID: threadHistoryID, turnID: answer?.id ?? UUID(), quote: quote)
+        quoteOffer = nil
+    }
+
+    func dropQuoteOffer() { quoteOffer = nil }
+
+    // MARK: - Searching the thread on screen (⌘F)
+
+    struct ThreadSearch: Equatable {
+        var query = ""
+        /// Index into `threadSearchMatches`.
+        var current = 0
+    }
+
+    @Published var threadSearch: ThreadSearch?
+
+    /// The drawn turns whose text contains the query, oldest first.
+    var threadSearchMatches: [UUID] {
+        guard let query = threadSearch?.query.trimmingCharacters(in: .whitespaces), !query.isEmpty else { return [] }
+        return turns.filter { $0.isDrawn && $0.text.localizedCaseInsensitiveContains(query) }.map(\.id)
+    }
+
+    var threadSearchTarget: UUID? {
+        let matches = threadSearchMatches
+        guard let search = threadSearch, !matches.isEmpty else { return nil }
+        return matches[min(max(search.current, 0), matches.count - 1)]
+    }
+
+    func openThreadSearch() {
+        if threadSearch == nil { threadSearch = ThreadSearch() }
+    }
+
+    /// A new query starts at the newest match, nearest the reader.
+    func setThreadSearchQuery(_ query: String) {
+        guard threadSearch != nil else { return }
+        threadSearch?.query = query
+        threadSearch?.current = max(threadSearchMatches.count - 1, 0)
+    }
+
+    /// Move to the next (1) or previous (-1) match, wrapping around.
+    func stepThreadSearch(_ delta: Int) {
+        let count = threadSearchMatches.count
+        guard var search = threadSearch, count > 0 else { return }
+        search.current = ((search.current + delta) % count + count) % count
+        threadSearch = search
+    }
+
+    func closeThreadSearch() { threadSearch = nil }
+
+    // MARK: - Editing a sent question
+
+    /// The question being rewritten (right-click → Edit). Sending replaces it
+    /// and everything after it. `suffix` is the quote or attachment envelope
+    /// the question carried, put back after the edited line.
+    struct EditTarget: Equatable {
+        var threadID: UUID
+        var turnID: UUID
+        var original: String
+        var suffix: String
+    }
+
+    @Published private(set) var editTarget: EditTarget?
+
+    /// The question shown in the edit chip, while its thread is on screen.
+    var activeEditOriginal: String? {
+        guard let target = editTarget, target.threadID == threadHistoryID,
+              !turns.isEmpty else { return nil }
+        return target.original
+    }
+
+    /// Whether a question can be edited: a settled chat thread on screen, and a
+    /// question that carried no images (those are not re-sent).
+    func canEdit(_ turn: Turn) -> Bool {
+        turn.role == "user" && !turn.hidesUserBubble && !turn.isLocal && turn.imageFiles.isEmpty
+            && !threadIsAgentRun && !isStreaming && canDeleteTurns(in: threadHistoryID)
+            && turns.contains { $0.id == turn.id }
+    }
+
+    /// Put the question's own line in the follow-up field for rewriting.
+    func beginEdit(of turn: Turn) {
+        guard canEdit(turn) else { return }
+        var line = turn.text
+        var suffix = ""
+        if let quote = Self.quoteEnvelope(in: line) ?? Self.fileEnvelopeQuote(in: line),
+           let cut = line.range(of: quote.instruction, options: .anchored) {
+            suffix = String(line[cut.upperBound...])
+            line = quote.instruction
+        }
+        replyTarget = nil
+        editTarget = EditTarget(threadID: threadHistoryID, turnID: turn.id,
+                                original: line, suffix: suffix)
+        text = line
+    }
+
+    func cancelEdit() {
+        guard editTarget != nil else { return }
+        editTarget = nil
+        text = ""
+    }
+
+    /// Send the edited question: the thread is cut back to just before the
+    /// original, and the new line goes out as the next question in its place.
+    private func submitEdit(_ target: EditTarget) {
+        editTarget = nil
+        let line = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !line.isEmpty, target.threadID == threadHistoryID,
+              let index = turns.firstIndex(where: { $0.id == target.turnID }),
+              !isStreaming else { return }
+        let removed = turns[index...]
+        Self.deleteHistoryImages(removed.flatMap(\.imageFiles))
+        turns.removeSubrange(index...)
+        if turns.isEmpty, isMainThread(threadHistoryID) { nextSubmitMainThread = true }
+        text = line + target.suffix
+        submit()
+    }
 
     private static let replyQuoteLimit = 500
 
@@ -9744,7 +10605,7 @@ final class NotchModel: ObservableObject {
         var body = turn.text
         if turn.role == "assistant" {
             body = MarkdownParser.plainText(body)
-        } else if let quote = quoteEnvelope(in: body) {
+        } else if let quote = quoteEnvelope(in: body) ?? fileEnvelopeQuote(in: body) {
             body = quote.instruction.isEmpty ? quote.selection : quote.instruction
         }
         body = body.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -10203,6 +11064,60 @@ final class NotchModel: ObservableObject {
             threadID: threadID, title: title, question: question, answer: answer)
     }
 
+    /// When Memory is turned on: read the user's own lines from past Ask
+    /// conversations and save the lasting facts in them. Runs once; a failed
+    /// request is tried again on the next launch or the next time it is
+    /// turned on.
+    func scanHistoryForMemories() {
+        let memory = UserMemory.shared
+        guard memory.enabled, !memory.historyScanDone, !memory.scanning, !(ai is StubAIService) else { return }
+        var lines: [String] = []
+        var total = 0
+        scan: for item in history where item.source == .ask {
+            for turn in item.conversation where turn.role == "user" && !turn.isLocal && !turn.hidesUserBubble {
+                var text = turn.text
+                if let quote = Self.quoteEnvelope(in: text) ?? Self.fileEnvelopeQuote(in: text) {
+                    text = quote.instruction
+                }
+                text = text.split(whereSeparator: \.isNewline).joined(separator: " ")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard text.count >= 4 else { continue }
+                let line = "- " + String(text.prefix(300))
+                total += line.count
+                if total > 12_000 { break scan }
+                lines.append(line)
+            }
+        }
+        guard !lines.isEmpty else {
+            memory.finishScan([])
+            return
+        }
+        memory.beginScan()
+        let service = ai
+        let prompt = lines.joined(separator: "\n")
+        Task {
+            var reply = ""
+            var failed = false
+            do {
+                let chunks = NoNoRequestContext.$current.withValue(
+                    NoNoRequestContext(surface: NoNoRequestContext.memory)
+                ) {
+                    service.stream(system: memoryExtractSystemPrompt,
+                                   messages: [ChatMessage(role: "user", content: prompt)])
+                }
+                for try await chunk in chunks { reply += chunk }
+            } catch {
+                failed = true
+            }
+            let facts = reply.split(whereSeparator: \.isNewline).compactMap { raw -> String? in
+                let line = raw.trimmingCharacters(in: .whitespaces)
+                guard line.hasPrefix("- ") else { return nil }
+                return String(line.dropFirst(2))
+            }
+            await MainActor.run { memory.finishScan(failed ? nil : facts) }
+        }
+    }
+
     /// Ask the configured model to summarize the conversation into a short title.
     /// Returns `nil` when offline (stub), unconfigured, or the request fails, so
     /// the UI can always fall back to the first user message.
@@ -10446,6 +11361,7 @@ final class NotchModel: ObservableObject {
         // Opening a saved thread replaces the idle draft; its unsent attachments
         // must not hide off-screen and ride the next follow-up by surprise.
         askComposeImages = []
+        droppedFiles = []
         // Still answering: this row is a placeholder whose live stream runs
         // detached — reattach the stream to the screen (the same move as
         // hovering the busy notch) so tapping the row lands on the answer as

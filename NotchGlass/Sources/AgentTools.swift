@@ -909,7 +909,7 @@ struct ManageAppSettingsTool: NotchTool {
 /// Mirrors `AppSettingsRequest`: the tool stays UI-agnostic and knows nothing
 /// about Apple Notes, EventKit, or the user's note destination.
 struct CaptureRequest: Sendable {
-    enum Kind: String, Codable, Sendable { case note, reminder }
+    enum Kind: String, Codable, Sendable { case note, reminder, event, memory, reminderUpdate, mailDraft }
 
     let kind: Kind
     let text: String
@@ -917,6 +917,13 @@ struct CaptureRequest: Sendable {
     /// `2026-08-20T15:00` (local) or a full ISO-8601 stamp. `nil` lets the model
     /// layer fall back to parsing the text itself, exactly as a typed capture does.
     let due: String?
+    /// For an event: when it ends, in the same forms as `due` (its start).
+    var end: String? = nil
+    var location: String? = nil
+    /// For an event: minutes before the start to alert; 0 for none.
+    var alertMinutes: Int? = nil
+    /// For a reminder: `daily`, `weekly` or `monthly`, when the user asked for a repeat.
+    var repeatRule: String? = nil
 }
 
 /// File a note from the chat composer. Advertised on every Ask round, so the
@@ -930,7 +937,8 @@ struct CreateNoteTool: NotchTool {
     message is something to keep rather than a question or a request: a todo, an \
     idea, a fact to remember, a snippet, or an explicit "note this". Pass their \
     words as written. If it could be a question, answer instead. First line becomes \
-    the title. Use create_reminder when the request names a time.
+    the title. Use create_reminder when the request names a time, and \
+    create_event for a meeting or appointment.
     """
     let schema: [String: Any] = [
         "type": "object",
@@ -964,7 +972,7 @@ struct CreateReminderTool: NotchTool {
     something that names a time. Pass an absolute local `due` (YYYY-MM-DDTHH:MM); \
     call current_datetime first if "now" is unclear. Keep a repeat phrase in title. \
     Never claim it was created until the result says so. Use create_note when no \
-    time is involved.
+    time is involved, and create_event for a meeting or appointment that takes up time.
     """
     let schema: [String: Any] = [
         "type": "object",
@@ -976,6 +984,11 @@ struct CreateReminderTool: NotchTool {
             "due": [
                 "type": "string",
                 "description": "When it should fire, in the user's local time as YYYY-MM-DDTHH:MM (for example 2026-08-20T15:00). Must be in the future. Omit only for a reminder with genuinely no time.",
+            ],
+            "repeat": [
+                "type": "string",
+                "enum": ["daily", "weekly", "monthly"],
+                "description": "When the user asks for it to repeat. Weekly repeats on the due date's weekday.",
             ],
         ],
         "required": ["title"],
@@ -990,8 +1003,70 @@ struct CreateReminderTool: NotchTool {
         }
         let due = (input["due"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        let rule = (input["repeat"] as? String).flatMap { ["daily", "weekly", "monthly"].contains($0) ? $0 : nil }
         return try await handle(CaptureRequest(kind: .reminder, text: title,
-                                               due: due?.isEmpty == false ? due : nil))
+                                               due: due?.isEmpty == false ? due : nil,
+                                               repeatRule: rule))
+    }
+}
+
+/// File an event in Apple Calendar. Written at once like `create_reminder`,
+/// with no Confirm card; the answer shows a line that opens the event.
+struct CreateEventTool: NotchTool {
+    static let toolName = "create_event"
+    let name = toolName
+    let description = """
+    Adds an event to the user's Apple Calendar. Call when the user names a \
+    meeting, appointment, call, trip or anything else that takes up time at a set \
+    moment ("周五下午三点和 Amy 开会", "dentist Tuesday 10am"). Pass an absolute \
+    local `start` (YYYY-MM-DDTHH:MM, or YYYY-MM-DD for an all-day event); call \
+    current_datetime first if "now" is unclear. Omit `end` unless the user gave \
+    one or a length. Never claim it was added until the result says so. A bare \
+    alert with nothing scheduled is create_reminder.
+    """
+    let schema: [String: Any] = [
+        "type": "object",
+        "properties": [
+            "title": [
+                "type": "string",
+                "description": "What the event is, in the user's language — a short line such as \"和 Amy 开会\". Leave the time out of it.",
+            ],
+            "start": [
+                "type": "string",
+                "description": "When it starts, in the user's local time as YYYY-MM-DDTHH:MM (for example 2026-10-16T15:00), or YYYY-MM-DD for an all-day event.",
+            ],
+            "end": [
+                "type": "string",
+                "description": "When it ends, in the same form as start. Omit for one hour (or one day, all-day).",
+            ],
+            "location": [
+                "type": "string",
+                "description": "Where, if the user said.",
+            ],
+            "alert_minutes": [
+                "type": "integer",
+                "minimum": 0,
+                "description": "Minutes before the start to notify. Default 10; 0 when the user wants no alert.",
+            ],
+        ],
+        "required": ["title", "start"],
+    ]
+
+    let handle: @Sendable (CaptureRequest) async throws -> String
+
+    func execute(_ input: [String: Any]) async throws -> String {
+        func field(_ key: String) -> String? {
+            let value = (input[key] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return value?.isEmpty == false ? value : nil
+        }
+        guard let title = field("title") else { return "Error: give the event title." }
+        guard let start = field("start") else {
+            return "Error: give the start as YYYY-MM-DDTHH:MM in the user's local time."
+        }
+        let alert = (input["alert_minutes"] as? NSNumber)?.intValue
+        return try await handle(CaptureRequest(kind: .event, text: title, due: start,
+                                               end: field("end"), location: field("location"),
+                                               alertMinutes: alert))
     }
 }
 
@@ -1178,8 +1253,9 @@ struct SearchHistoryTool: NotchTool {
     let description = """
     Searches the user's own history in this app (questions, notes, reminders, \
     agent tasks). Call for their past activity, not the world. Use since/until \
-    or days for "today / this week"; query for "did I ever mention X". The current \
-    conversation is already visible — only call this for things outside it. \
+    or days for "today / this week"; query for "did I ever mention X". Only the \
+    current sitting of this conversation is visible; its earlier days are searchable \
+    here, like everything outside it. \
     If it returns nothing, say so; never invent entries.
     """
     let schema: [String: Any] = [
@@ -2336,8 +2412,36 @@ enum AskToolIntent {
         let q = question.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !q.isEmpty else { return [] }
         var extra = Set<String>()
+        // Capture words bring the event tool too: a list of to-dos often holds
+        // a meeting, and a model without the tool claimed it had added one.
         if matches(q, capture) {
-            extra.formUnion(["create_reminder", "current_datetime"])
+            extra.formUnion(["create_reminder", CreateEventTool.toolName, "current_datetime"])
+        }
+        if matches(q, event) {
+            extra.formUnion([CreateEventTool.toolName, "current_datetime"])
+        }
+        if matches(q, schedule) {
+            extra.formUnion([ReadCalendarTool.toolName, ReadRemindersTool.toolName, "current_datetime"])
+        }
+        if matches(q, changeReminder) || matches(q, changeEvent) {
+            extra.formUnion([ReadCalendarTool.toolName, ManageEventTool.toolName, "current_datetime"])
+        }
+        if matches(q, spending) { extra.insert(AccountUsageTool.toolName) }
+        if matches(q, mail) { extra.formUnion([ReadMailTool.toolName, DraftMailTool.toolName, CurrentContextTool.toolName]) }
+        if matches(q, projects) { extra.insert(RecentProjectsTool.toolName) }
+        if matches(q, travel) { extra.formUnion([TravelTimeTool.toolName, "current_datetime"]) }
+        if matches(q, photos) { extra.formUnion([ReadPhotosTool.toolName, "current_datetime"]) }
+        if matches(q, later) { extra.formUnion(["schedule_action", RunShellTool.toolName, "current_datetime"]) }
+        if matches(q, changeReminder) {
+            extra.formUnion([ReadRemindersTool.toolName, ManageReminderTool.toolName, "current_datetime"])
+        }
+        if matches(q, notes) { extra.insert(ReadNotesTool.toolName) }
+        if matches(q, changeNote) { extra.formUnion([ReadNotesTool.toolName, EditNoteTool.toolName]) }
+        if matches(q, onScreen) { extra.insert(CurrentContextTool.toolName) }
+        if matches(q, copiedBefore) { extra.insert(ClipboardHistoryTool.toolName) }
+        if matches(q, localFiles) { extra.formUnion([ListFilesTool.toolName, ReadFileTool.toolName]) }
+        if matches(q, aboutMe) {
+            extra.formUnion([RememberTool.toolName, ForgetTool.toolName, UpdateMemoryTool.toolName])
         }
         if matches(q, settings) { extra.insert("manage_app_settings") }
         if matches(q, history) { extra.insert("search_history") }
@@ -2366,6 +2470,129 @@ enum AskToolIntent {
         "jot this", "jot that", "write this down", "write that down",
         "提醒", "提醒我", "记一下", "記一下", "记下", "記下", "记下来", "記下來",
         "写下来", "寫下來", "帮我记", "幫我記", "闹钟", "鬧鐘",
+    ]
+
+    /// Calendar events. Words for a scheduled meeting or appointment, and the
+    /// calendar itself; a time alone ("3pm") is left to the capture words.
+    private static let event = [
+        "meeting", "appointment", "calendar", "schedule a", "add an event",
+        "add to my calendar", "book a", "call with", "lunch with", "dinner with",
+        "开会", "会议", "會議", "约了", "約了", "日程", "日历", "日曆", "行事曆",
+        "面试", "面試", "预约", "預約", "约饭", "約飯", "见面", "見面",
+    ]
+
+    /// Questions about the user's own schedule and to-dos (`read_calendar`,
+    /// `read_reminders`). Wider than `event`: "free", "busy", "todo".
+    private static let schedule = [
+        "my calendar", "my schedule", "am i free", "am i busy", "free time",
+        "what's on", "whats on", "agenda", "my reminders", "to do", "todo",
+        "to-do", "due this", "due today", "due tomorrow", "overdue",
+        "meeting", "appointment", "calendar", "schedule",
+        "日程", "日历", "日曆", "行事曆", "有空", "空闲", "空閒", "安排",
+        "会议", "會議", "开会", "開會", "提醒事项", "提醒事項", "待办", "待辦",
+        "还有什么要做", "還有什麼要做", "没完成", "沒完成", "到期", "截止",
+        // "What should I care about today": asked as often as by name.
+        "今天有什么", "今天有什麼", "明天有什么", "明天有什麼", "这周有什么", "這週有什麼",
+        "要我关心", "要我關心", "需要我关心", "需要我關心", "可以提醒我", "提醒我的",
+        "今天要做", "今天的安排", "明天的安排", "我今天", "我明天", "今天忙",
+        "what do i have", "what's on my", "whats on my", "anything i should",
+        "what should i do today", "my day",
+    ]
+
+    /// Something copied earlier (`clipboard_history`).
+    private static let copiedBefore = [
+        "copied", "clipboard history", "i copied", "复制过", "複製過", "复制的", "複製的",
+        "刚复制", "剛複製", "之前复制", "之前複製", "剪贴板", "剪貼簿", "粘贴板",
+    ]
+
+    /// Files in Downloads, Desktop or Documents (`list_files`, `read_file`).
+    private static let localFiles = [
+        "downloads", "download folder", "desktop", "documents folder", "my documents",
+        "pdf", ".docx", ".txt", ".md", "file on my", "files on my", "the file",
+        "下载", "下載", "桌面", "文稿", "文件夹", "資料夾", "文件里", "文件裡",
+        "那份", "那个文件", "那個檔案", "这个文件", "這個檔案",
+    ]
+
+    /// The question points at something on screen (`current_context`).
+    private static let onScreen = [
+        "this page", "this article", "this email", "this mail", "this message",
+        "this tab", "this window", "this doc", "this site", "this website",
+        "what am i looking at", "on my screen", "on screen",
+        "这篇", "這篇", "这封", "這封", "这个页面", "這個頁面", "这个网页", "這個網頁",
+        "这页", "這頁", "这个网站", "這個網站", "这个文档", "這個文件", "这个窗口",
+        "這個視窗", "屏幕上", "螢幕上", "我在看", "当前页面", "當前頁面",
+    ]
+
+    /// The user saying something about themselves, or asking to be remembered
+    /// or forgotten (`remember`, `forget`).
+    private static let aboutMe = [
+        "remember", "forget", "my name", "call me", "i am ", "i'm ", "i work",
+        "i live", "i like", "i love", "i hate", "i prefer", "my wife", "my husband",
+        "my girlfriend", "my boyfriend", "my kid", "my son", "my daughter", "my boss",
+        "记住", "記住", "忘掉", "忘记", "忘記", "我叫", "叫我", "我是", "我在做",
+        "我住", "我喜欢", "我喜歡", "我不喜欢", "我不喜歡", "我讨厌", "我討厭",
+        "我老婆", "我老公", "我女朋友", "我男朋友", "我儿子", "我兒子", "我女儿",
+        "我女兒", "我老板", "我老闆", "我同事", "我在用",
+    ]
+
+    /// Changing a calendar event (`manage_event`).
+    private static let changeEvent = [
+        "日程", "会议", "會議", "约会", "牙医", "改到", "挪到", "推迟", "取消",
+        "reschedule", "move the meeting", "cancel the meeting", "move my",
+    ]
+
+    /// Email (`read_mail`, `draft_mail`).
+    private static let mail = [
+        "邮件", "郵件", "邮箱", "郵箱", "回信", "回复他", "回覆", "草稿", "mail", "email", "inbox", "draft",
+    ]
+
+    /// The Notchi Balance (`account_usage`).
+    private static let spending = [
+        "花了多少", "花多少", "余额", "餘額", "用了多少钱", "用量", "账单", "帳單", "消费", "消費",
+        "how much have i spent", "my balance", "credit left", "how much is left", "spend", "spent",
+    ]
+
+    /// Project folders (`recent_projects`).
+    private static let projects = [
+        "项目", "專案", "项目文件夹", "仓库", "倉庫", "project", "repo",
+    ]
+
+    /// Trip times (`travel_time`).
+    private static let travel = [
+        "多久", "多长时间", "多長時間", "打车", "打車", "开车", "開車", "步行", "地铁", "地鐵", "路况", "路況",
+        "how long", "drive to", "commute", "traffic", "how far",
+    ]
+
+    /// The Photos library (`read_photos`).
+    private static let photos = [
+        "照片", "相片", "拍的", "截图", "截圖", "图片", "圖片", "photo", "picture", "screenshot",
+    ]
+
+    /// Doing something later (`schedule_action`).
+    private static let later = [
+        "小时后", "小時後", "分钟后", "分鐘後", "到时间", "到時間", "之后恢复", "之後恢復",
+        "in an hour", "in 30 minutes", "minutes later", "then turn", "for an hour",
+    ]
+
+    /// Changing a saved note (`edit_note`).
+    private static let changeNote = [
+        "笔记", "筆記", "标签", "標籤", "那条记", "那條記", "刚才记", "剛才記",
+        "note", "tag",
+    ]
+
+    /// Changing an existing reminder (`manage_reminder`).
+    private static let changeReminder = [
+        "取消", "删掉", "刪掉", "删除", "刪除", "推迟", "推遲", "改到", "改成", "延后", "延後",
+        "完成了", "标成完成", "標成完成", "做完了", "提前到",
+        "cancel", "delete the reminder", "remove the reminder", "mark as done",
+        "mark it done", "reschedule", "move the reminder", "push back",
+    ]
+
+    /// Questions about what the user wrote down (`read_notes`).
+    private static let notes = [
+        "my notes", "my note", "i noted", "i wrote down", "in notes",
+        "我的笔记", "我的筆記", "备忘录", "備忘錄", "笔记里", "筆記裡",
+        "我记过", "我記過", "记了什么", "記了什麼", "我写过", "我寫過",
     ]
 
     /// This app's own preferences. Bare "设置" / "settings" is too broad
@@ -2468,6 +2695,12 @@ extension ToolRegistry {
             }
             if provider == .kimi {
                 tools.append(WebSearchTool(provider: KimiSearchProvider()))
+            }
+            // A provider with no search of its own (Notchi's models, DeepSeek,
+            // Gemini, …) gets the keyless AnySearch, so a question about today
+            // is not answered from training data alone.
+            if !provider.supportsWebSearch {
+                tools.append(WebSearchTool(provider: AnySearchProvider()))
             }
         }
         return ToolRegistry(tools)

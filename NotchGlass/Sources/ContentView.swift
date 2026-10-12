@@ -35,24 +35,35 @@ struct ContentView: View {
                 // Drop a project folder on the island to start composing a
                 // agent task in it (XII: agent-to-Codex) — the folder is
                 // exactly the argument the mode needs, so one drop enters the
-                // compose with it in place. Dragging over the resting notch
+                // compose with it in place. Any other files attach to the next
+                // ask (`handleFileDrop`). Dragging over the resting notch
                 // unfurls the panel (via `agentDropTargeted` below); the drop
-                // itself routes through the model, which validates it's really a
-                // directory and an agent CLI is signed in.
+                // itself routes through the model, which validates what it got.
                 .onDrop(of: [.fileURL], isTargeted: $agentDropTargeted) { providers in
-                    guard let provider = providers.first else { return false }
-                    provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier,
-                                      options: nil) { item, _ in
-                        let url: URL? = switch item {
-                        case let data as Data: URL(dataRepresentation: data, relativeTo: nil)
-                        case let u as URL:     u
-                        default:               nil
+                    guard !providers.isEmpty else { return false }
+                    let group = DispatchGroup()
+                    let lock = NSLock()
+                    var urls: [(Int, URL)] = []
+                    for (index, provider) in providers.enumerated() {
+                        group.enter()
+                        provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier,
+                                          options: nil) { item, _ in
+                            let url: URL? = switch item {
+                            case let data as Data: URL(dataRepresentation: data, relativeTo: nil)
+                            case let u as URL:     u
+                            default:               nil
+                            }
+                            if let url {
+                                lock.lock(); urls.append((index, url)); lock.unlock()
+                            }
+                            group.leave()
                         }
-                        guard let url else { return }
-                        Task { @MainActor in
-                            model.openPanel(on: metrics.displayID)
-                            model.handleAgentFolderDrop(url)
-                        }
+                    }
+                    group.notify(queue: .main) {
+                        let dropped = urls.sorted { $0.0 < $1.0 }.map(\.1)
+                        guard !dropped.isEmpty else { return }
+                        model.openPanel(on: metrics.displayID)
+                        model.handleFileDrop(dropped)
                     }
                     return true
                 }
@@ -80,6 +91,35 @@ struct ContentView: View {
             // ignores the keyboard entirely — including Esc, which the recorder
             // uses to cancel.
             if ShortcutRecording.isActive { return false }
+            // The thread search (⌘F on a conversation) owns Esc and ↑/↓ while
+            // it is open; Return in its field steps forward on its own.
+            if model.threadSearch != nil {
+                switch event.keyCode {
+                case 53: withAnimation(.easeOut(duration: Tokens.hoverFade)) { model.closeThreadSearch() }; return true
+                case 126: model.stepThreadSearch(-1); return true
+                case 125: model.stepThreadSearch(1); return true
+                default: break
+                }
+            }
+            // ⌘C on text selected in an answer: let the copy happen, then offer
+            // the passage as a quote for the follow-up (`NotchModel.offerQuote`).
+            if event.keyCode == 8, event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+               model.mode == .result, !fieldEditorIsFirstResponder() {
+                let before = NSPasteboard.general.changeCount
+                DispatchQueue.main.async {
+                    let pb = NSPasteboard.general
+                    guard pb.changeCount != before, let copied = pb.string(forType: .string) else { return }
+                    model.offerQuote(copied)
+                }
+                return false
+            }
+            if NotchModel.threadSearchEnabled,
+               AppShortcutStore.matches(.filter, event: event),
+               model.mode == .result, !model.turns.isEmpty,
+               !model.showSettings, !model.showHistory, !model.showWhatsNew {
+                withAnimation(.easeOut(duration: Tokens.hoverFade)) { model.openThreadSearch() }
+                return true
+            }
             // In Agent, ⌘↵ starts this task and opens its live detail page.
             // Outside Agent it keeps its original meaning: submit the current line
             // to the *other family* — Ask ⇄ Capture (Note/Remind) — as the
@@ -396,10 +436,7 @@ private struct ClipboardSenseEars: View {
     let earLeft: CGFloat
     let earRight: CGFloat
 
-    private var isHinting: Bool {
-        if case .hinting = sense { return true }
-        return false
-    }
+    private var isHinting: Bool { sense.isOffer }
 
     /// A stable identity per visual stage, so SwiftUI transitions between stages
     /// (and not between, say, a note hint and a reminder hint's shared text).
@@ -407,6 +444,7 @@ private struct ClipboardSenseEars: View {
         switch sense {
         case .idle: return "idle"
         case .hinting(let p): return "hint-\(p.rawValue)"
+        case .mapHint: return "hint-map"
         case .saving: return "saving"
         case .saved: return "saved"
         case .failed: return "failed"
@@ -464,6 +502,8 @@ private struct ClipboardSenseEars: View {
                 earText(panel == .chat ? L("sense.ask")
                         : panel == .reminder ? L("sense.reminder") : L("sense.note"),
                         color: ink)
+            case .mapHint:
+                earText(L("sense.map"), color: ink)
             case .saving:
                 ThinkingDots(dot: 4, spacing: 5)
                     .fixedSize()

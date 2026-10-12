@@ -29,11 +29,17 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>Notchi saves the lines you type in record mode into the Notes app.</string>
+	<string>Notchi saves your notes into the Notes app and reads the page or message you ask about.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 Lofi-Lab</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Notchi reads the photos you ask about to answer questions about them.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Notchi reads your calendar to answer questions about your schedule.</string>
+	<key>NSCalendarsWriteOnlyAccessUsageDescription</key>
+	<string>Notchi adds the meetings and appointments you ask for to the Calendar app.</string>
 	<key>NSRemindersFullAccessUsageDescription</key>
 	<string>Notchi files time-bound lines you type as reminders in the Reminders app.</string>
 </dict>

@@ -106,6 +106,42 @@ enum NotesService {
                 show (note id noteID)
             end tell
         end notchShowNote
+
+        on notchNoteIndex(query)
+            tell application "Notes"
+                if query is "" then
+                    return {id of every note, name of every note, modification date of every note}
+                end if
+                set found to (every note whose name contains query or plaintext contains query)
+                set theIDs to {}
+                set theNames to {}
+                set theDates to {}
+                repeat with n in found
+                    set end of theIDs to id of n
+                    set end of theNames to name of n
+                    set end of theDates to modification date of n
+                end repeat
+                return {theIDs, theNames, theDates}
+            end tell
+        end notchNoteIndex
+
+        on notchNoteText(noteID)
+            tell application "Notes"
+                return plaintext of note id noteID
+            end tell
+        end notchNoteText
+
+        on notchAppendToNote(noteID, html)
+            tell application "Notes"
+                set body of note id noteID to (body of note id noteID) & html
+            end tell
+        end notchAppendToNote
+
+        on notchDeleteNote(noteID)
+            tell application "Notes"
+                delete note id noteID
+            end tell
+        end notchDeleteNote
         """
         let s = NSAppleScript(source: source)
         s?.compileAndReturnError(nil)
@@ -165,6 +201,98 @@ enum NotesService {
         }
     }
 
+    /// One note as `read_notes` returns it.
+    struct NoteText: Sendable {
+        let title: String
+        let modified: Date?
+        let text: String
+    }
+
+    /// The most recently edited notes, or those whose title or text contains
+    /// `query`, newest first, with their plain text. Runs on `queue` like the
+    /// writes; the first call may raise the Automation prompt for Notes.
+    static func readNotes(query: String, limit: Int) async -> Result<[NoteText], NotesError> {
+        await withCheckedContinuation { cont in
+            queue.async { cont.resume(returning: readOnQueue(query: query, limit: limit)) }
+        }
+    }
+
+    private static func readOnQueue(query: String, limit: Int) -> Result<[NoteText], NotesError> {
+        guard let script = scriptOnQueue() else {
+            return .failure(.scriptError("Couldn't prepare the Notes script."))
+        }
+        var error: NSDictionary?
+        let index = script.executeAppleEvent(subroutineEvent(named: "notchnoteindex", arg: query),
+                                             error: &error)
+        if let error { return .failure(mapError(error)) }
+        guard index.numberOfItems == 3,
+              let ids = index.atIndex(1), let names = index.atIndex(2),
+              let dates = index.atIndex(3) else { return .success([]) }
+        var rows: [(id: String, title: String, modified: Date?)] = []
+        let count = ids.numberOfItems
+        if count > 0 {
+            for i in 1...count {
+                guard let id = ids.atIndex(i)?.stringValue else { continue }
+                rows.append((id, names.atIndex(i)?.stringValue ?? "", dates.atIndex(i)?.dateValue))
+            }
+        }
+        rows.sort { ($0.modified ?? .distantPast) > ($1.modified ?? .distantPast) }
+        var out: [NoteText] = []
+        for row in rows.prefix(limit) {
+            var textError: NSDictionary?
+            let text = script.executeAppleEvent(subroutineEvent(named: "notchnotetext", arg: row.id),
+                                                error: &textError).stringValue ?? ""
+            out.append(NoteText(title: row.title, modified: row.modified, text: text))
+        }
+        return .success(out)
+    }
+
+    /// Notes whose title or text contains `query`, newest first, with ids,
+    /// for `edit_note` to pick one.
+    static func findNotes(query: String) async -> Result<[(id: String, title: String)], NotesError> {
+        await withCheckedContinuation { cont in
+            queue.async {
+                guard let script = scriptOnQueue() else {
+                    return cont.resume(returning: .failure(.scriptError("Couldn't prepare the Notes script.")))
+                }
+                var error: NSDictionary?
+                let index = script.executeAppleEvent(subroutineEvent(named: "notchnoteindex", arg: query),
+                                                     error: &error)
+                if let error { return cont.resume(returning: .failure(mapError(error))) }
+                guard index.numberOfItems == 3, let ids = index.atIndex(1), let names = index.atIndex(2),
+                      let dates = index.atIndex(3), ids.numberOfItems > 0 else {
+                    return cont.resume(returning: .success([]))
+                }
+                var rows: [(id: String, title: String, date: Date)] = []
+                for i in 1...ids.numberOfItems {
+                    guard let id = ids.atIndex(i)?.stringValue else { continue }
+                    rows.append((id, names.atIndex(i)?.stringValue ?? "",
+                                 dates.atIndex(i)?.dateValue ?? .distantPast))
+                }
+                rows.sort { $0.date > $1.date }
+                cont.resume(returning: .success(rows.map { ($0.id, $0.title) }))
+            }
+        }
+    }
+
+    /// Append a line (e.g. `#工作`) to a note, or delete the note.
+    static func edit(noteID: String, appendLine line: String?) async -> Result<Void, NotesError> {
+        await withCheckedContinuation { cont in
+            queue.async {
+                guard let script = scriptOnQueue() else {
+                    return cont.resume(returning: .failure(.scriptError("Couldn't prepare the Notes script.")))
+                }
+                let event = line.map {
+                    subroutineEvent(named: "notchappendtonote",
+                                    args: [noteID, "<div>\(htmlBody(from: $0))</div>"])
+                } ?? subroutineEvent(named: "notchdeletenote", arg: noteID)
+                var error: NSDictionary?
+                script.executeAppleEvent(event, error: &error)
+                cont.resume(returning: error.map { .failure(mapError($0)) } ?? .success(()))
+            }
+        }
+    }
+
     /// The actual Apple Event send for note creation. Runs on `queue`. Returns the
     /// new note's id on success (or `nil` if Notes returned no usable id string —
     /// treated as a soft success: the note exists, we just can't deep-link it).
@@ -203,6 +331,10 @@ enum NotesService {
     /// must be lowercase for the subroutine-call convention; user/data text rides
     /// as a structured string parameter, never interpolated into script source.
     private static func subroutineEvent(named handler: String, arg: String) -> NSAppleEventDescriptor {
+        subroutineEvent(named: handler, args: [arg])
+    }
+
+    private static func subroutineEvent(named handler: String, args values: [String]) -> NSAppleEventDescriptor {
         let event = NSAppleEventDescriptor.appleEvent(
             withEventClass: AEEventClass(kASAppleScriptSuite),
             eventID: AEEventID(kASSubroutineEvent),
@@ -213,7 +345,9 @@ enum NotesService {
         event.setParam(NSAppleEventDescriptor(string: handler),
                        forKeyword: AEKeyword(keyASSubroutineName))
         let args = NSAppleEventDescriptor.list()
-        args.insert(NSAppleEventDescriptor(string: arg), at: 1)
+        for (i, value) in values.enumerated() {
+            args.insert(NSAppleEventDescriptor(string: value), at: i + 1)
+        }
         event.setParam(args, forKeyword: keyDirectObject)
         return event
     }

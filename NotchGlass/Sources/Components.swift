@@ -1946,7 +1946,8 @@ struct PlatePressStyle: ButtonStyle {
     }
 }
 
-/// "Saved a note ↗" / "Created a reminder ↗" above an answer that filed one.
+/// "Saved a note ↗" / "Created a reminder ↗" / "Added to Calendar ↗" above an
+/// answer that filed one.
 /// The settled "Searched the web" headline's face, with `CaptureJumpButton`'s
 /// arrow and hover brightening.
 struct CaptureLineLink: View {
@@ -1955,14 +1956,27 @@ struct CaptureLineLink: View {
     let action: (() -> Void)?
     @State private var hovering = false
 
+    private var label: String {
+        switch capture.kind {
+        case .note:     return L("agent.process.savedNote")
+        case .reminder: return L("agent.process.createdReminder")
+        case .event:    return L("agent.process.addedEvent")
+        case .memory:   return L("agent.process.updatedMemory")
+        case .reminderUpdate: return L("agent.process.updatedReminder")
+        case .mailDraft: return L("agent.process.savedDraft")
+        }
+    }
+
     var body: some View {
         Button { action?() } label: {
             HStack(spacing: 3) {
-                Text(capture.kind == .note
-                     ? L("agent.process.savedNote") : L("agent.process.createdReminder"))
+                Text(label)
                     .font(.sf(font))
                     .lineLimit(1)
-                if action != nil {
+                if action != nil, capture.kind == .memory {
+                    Text("· " + L("agent.process.undo"))
+                        .font(.sf(font))
+                } else if action != nil {
                     Image(systemName: "arrow.up.right")
                         .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                 }
@@ -4546,6 +4560,7 @@ struct AssistantTurnView: View {
 /// A nil action leaves its item off the menu.
 struct QuestionTurnMenu: View {
     var onReply: (() -> Void)?
+    var onEdit: (() -> Void)? = nil
     var onDelete: (() -> Void)?
 
     var body: some View {
@@ -4554,8 +4569,13 @@ struct QuestionTurnMenu: View {
                 Label(L("message.reply"), systemImage: "arrowshape.turn.up.left")
             }
         }
+        if let onEdit {
+            Button(action: onEdit) {
+                Label(L("message.edit"), systemImage: "pencil")
+            }
+        }
         if let onDelete {
-            if onReply != nil { Divider() }
+            if onReply != nil || onEdit != nil { Divider() }
             Button(role: .destructive, action: onDelete) {
                 Label(L("message.delete"), systemImage: "trash")
             }
@@ -4814,6 +4834,18 @@ private struct UserQuestionOptionRow: View {
 
 /// Renders inline `**bold**` markdown into styled text — the same lightweight
 /// transform the prototype applied to AI answers.
+private struct ThreadSearchHighlightKey: EnvironmentKey {
+    static let defaultValue: String? = nil
+}
+
+extension EnvironmentValues {
+    /// The ⌘F query on the conversation, highlighted wherever text shows it.
+    var threadSearchHighlight: String? {
+        get { self[ThreadSearchHighlightKey.self] }
+        set { self[ThreadSearchHighlightKey.self] = newValue }
+    }
+}
+
 struct InlineMarkdownText: View {
     let raw: String
     /// Colour for surviving links. Defaults to primary ink so links read in the
@@ -4821,6 +4853,7 @@ struct InlineMarkdownText: View {
     /// blue is both illegible and off-palette, so links are styled as ink +
     /// underline (the underline, not a colour shift, is what marks them tappable).
     var linkColor: Color = Tokens.text1
+    @Environment(\.threadSearchHighlight) private var highlight
     init(_ raw: String, linkColor: Color = Tokens.text1) {
         self.raw = raw
         self.linkColor = linkColor
@@ -4884,10 +4917,14 @@ struct InlineMarkdownText: View {
                 }
             }
             autolink(&parsed)
+            AnswerLinks.link(&parsed)
+            AnswerLinks.colorSwatches(&parsed)
             text = parsed
         } else {
             var plain = AttributedString(source)
             autolink(&plain)
+            AnswerLinks.link(&plain)
+            AnswerLinks.colorSwatches(&plain)
             text = plain
         }
 
@@ -4908,9 +4945,10 @@ struct InlineMarkdownText: View {
         let hit = Self.parsed(raw)
         let base = hit.text
         let links = hit.spans
-        // The overwhelmingly common case: no links, so the cached line is already
-        // finished and nothing is copied or mutated.
-        guard !links.isEmpty else { return base }
+        let query = highlight?.trimmingCharacters(in: .whitespaces) ?? ""
+        // The overwhelmingly common case: no links and no search, so the
+        // cached line is already finished and nothing is copied or mutated.
+        guard !links.isEmpty || !query.isEmpty else { return base }
         // Links get our ink colour + an underline instead of the stock blue, which
         // is illegible on the dark glass. Offsets are recomputed against the copy
         // each time: setting attributes never changes the character count, so they
@@ -4921,6 +4959,18 @@ struct InlineMarkdownText: View {
             let end = out.index(start, offsetByCharacters: span.length)
             out[start..<end].foregroundColor = linkColor
             out[start..<end].underlineStyle = .single
+        }
+        if !query.isEmpty {
+            let plain = String(out.characters)
+            var from = plain.startIndex
+            while let found = plain.range(of: query, options: .caseInsensitive, range: from..<plain.endIndex) {
+                let offset = plain.distance(from: plain.startIndex, to: found.lowerBound)
+                let length = plain.distance(from: found.lowerBound, to: found.upperBound)
+                let start = out.index(out.startIndex, offsetByCharacters: offset)
+                let end = out.index(start, offsetByCharacters: length)
+                out[start..<end].backgroundColor = Color.yellow.opacity(0.35)
+                from = found.upperBound
+            }
         }
         return out
     }
@@ -4961,6 +5011,171 @@ struct InlineMarkdownText: View {
             attributed[range].link = url
         }
     }
+}
+
+// MARK: - Local paths and dates in answers
+
+/// Links the app adds to an answer's text itself (never taken from the
+/// model's markdown, whose non-web links are stripped): a path to a file or
+/// folder that exists on this Mac (`notchi-reveal:`, shown in Finder) and a
+/// date from today on (`notchi-date:`, a menu to file it as a reminder or an
+/// event). `LinkGate.open` routes both here.
+enum AnswerLinks {
+    static let revealScheme = "notchi-reveal"
+    static let dateScheme = "notchi-date"
+
+    private static let pathPattern = try? NSRegularExpression(
+        pattern: #"(?<![\w/.])(~|/(?:Users|Applications|Volumes|private|tmp|opt|Library))(/[^\s`'"<>()（）,，。；;、]+)+/?"#)
+    private static let dateDetector = try? NSDataDetector(
+        types: NSTextCheckingResult.CheckingType.date.rawValue)
+    /// Words that say a matched date carries a time of day.
+    private static let timeWords = #"\d[:：]\d|点|點|am\b|pm\b|上午|下午|晚上|中午|早上|凌晨|noon|o'clock"#
+
+    static func link(_ text: inout AttributedString) {
+        let plain = String(text.characters)
+        guard !plain.isEmpty else { return }
+        let full = NSRange(plain.startIndex..<plain.endIndex, in: plain)
+        func mark(_ range: NSRange, _ url: URL, allowCode: Bool) {
+            guard let found = Range(range, in: plain) else { return }
+            let offset = plain.distance(from: plain.startIndex, to: found.lowerBound)
+            let length = plain.distance(from: found.lowerBound, to: found.upperBound)
+            let start = text.index(text.startIndex, offsetByCharacters: offset)
+            let end = text.index(start, offsetByCharacters: length)
+            let claimed = text[start..<end].runs.contains {
+                $0.link != nil || (!allowCode && $0.inlinePresentationIntent?.contains(.code) == true)
+            }
+            guard !claimed else { return }
+            text[start..<end].link = url
+        }
+        // Paths are often written in `code`; they are still the user's files.
+        if plain.contains("/") {
+            for match in pathPattern?.matches(in: plain, range: full) ?? [] {
+                let raw = (plain as NSString).substring(with: match.range)
+                let path = (raw as NSString).expandingTildeInPath
+                guard FileManager.default.fileExists(atPath: path) else { continue }
+                var parts = URLComponents()
+                parts.scheme = revealScheme
+                parts.path = path
+                if let url = parts.url { mark(match.range, url, allowCode: true) }
+            }
+        }
+        let startOfToday = Calendar.current.startOfDay(for: Date())
+        for match in dateDetector?.matches(in: plain, range: full) ?? [] {
+            guard let date = match.date, date >= startOfToday, match.range.length >= 2 else { continue }
+            let said = (plain as NSString).substring(with: match.range)
+            // "明天 15:00", "10 月 20 日" — not a bare "明天" or "tomorrow",
+            // which answers say all the time.
+            guard said.rangeOfCharacter(from: .decimalDigits) != nil else { continue }
+            let timed = said.range(of: timeWords, options: [.regularExpression, .caseInsensitive]) != nil
+            let line = plain.count > 120 ? String(plain.prefix(120)) : plain
+            var parts = URLComponents()
+            parts.scheme = dateScheme
+            parts.path = "/"
+            parts.queryItems = [URLQueryItem(name: "t", value: String(Int(date.timeIntervalSince1970))),
+                                URLQueryItem(name: "timed", value: timed ? "1" : "0"),
+                                URLQueryItem(name: "line", value: line)]
+            if let url = parts.url { mark(match.range, url, allowCode: false) }
+        }
+    }
+
+    private static let colorPattern = try? NSRegularExpression(
+        pattern: #"(?<![\w&#])#(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{3})(?![\w])|rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*(?:,\s*[\d.]+\s*)?\)"#)
+
+    /// A small square in the colour before each colour value an answer
+    /// writes — `#FF6600`, `#F60`, `rgb(255, 102, 0)`. A three-digit value
+    /// made only of digits reads as a number (`#123`), so it gets none.
+    static func colorSwatches(_ text: inout AttributedString) {
+        let plain = String(text.characters)
+        guard plain.contains("#") || plain.contains("rgb") else { return }
+        let ns = plain as NSString
+        let matches = colorPattern?.matches(in: plain, range: NSRange(location: 0, length: ns.length)) ?? []
+        for match in matches.reversed() {
+            let raw = ns.substring(with: match.range)
+            guard let color = parseColor(raw), let found = Range(match.range, in: plain) else { continue }
+            let offset = plain.distance(from: plain.startIndex, to: found.lowerBound)
+            var swatch = AttributedString("■ ")
+            swatch.foregroundColor = color
+            text.insert(swatch, at: text.index(text.startIndex, offsetByCharacters: offset))
+        }
+    }
+
+    private static func parseColor(_ raw: String) -> Color? {
+        if raw.hasPrefix("#") {
+            var hex = String(raw.dropFirst())
+            if hex.count == 3 {
+                guard hex.contains(where: { $0.isLetter }) else { return nil }
+                hex = hex.map { "\($0)\($0)" }.joined()
+            }
+            guard let value = UInt32(hex, radix: 16) else { return nil }
+            return Color(red: Double((value >> 16) & 0xFF) / 255,
+                         green: Double((value >> 8) & 0xFF) / 255,
+                         blue: Double(value & 0xFF) / 255)
+        }
+        let numbers = raw.split(whereSeparator: { !"0123456789.".contains($0) }).compactMap { Double($0) }
+        guard numbers.count >= 3, numbers[0...2].allSatisfy({ $0 <= 255 }) else { return nil }
+        return Color(red: numbers[0] / 255, green: numbers[1] / 255, blue: numbers[2] / 255,
+                     opacity: numbers.count > 3 ? min(numbers[3], 1) : 1)
+    }
+
+    /// Handles one of the links above; false for any other URL.
+    @MainActor
+    static func open(_ url: URL) -> Bool {
+        switch url.scheme {
+        case revealScheme:
+            let path = url.path
+            if FileManager.default.fileExists(atPath: path) {
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+            }
+            return true
+        case dateScheme:
+            showDateMenu(url)
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// File the clicked date: a reminder at that moment, or a one-hour event
+    /// (all day when no time was said). The title is the line it came from.
+    @MainActor
+    private static func showDateMenu(_ url: URL) {
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        func value(_ name: String) -> String? { items.first { $0.name == name }?.value }
+        guard let seconds = value("t").flatMap(Double.init) else { return }
+        let date = Date(timeIntervalSince1970: seconds)
+        let timed = value("timed") == "1"
+        let title = MarkdownParser.plainText(value("line") ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let menu = NSMenu()
+        let reminder = ClosureMenuItem(title: L("answerDate.reminder")) {
+            RemindersService.createReminder(title, due: timed ? date : nil) { result in
+                if case .success = result { Haptics.confirm() }
+            }
+        }
+        let event = ClosureMenuItem(title: L("answerDate.event")) {
+            let start = timed ? date : Calendar.current.startOfDay(for: date)
+            let end = Calendar.current.date(byAdding: timed ? .hour : .day, value: 1, to: start) ?? start
+            CalendarService.createEvent(CalendarService.Draft(title: title, start: start, end: end,
+                                                              allDay: !timed, location: nil, notes: nil)) { result in
+                if case .success = result { Haptics.confirm() }
+            }
+        }
+        menu.addItem(reminder)
+        menu.addItem(event)
+        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    }
+}
+
+/// An NSMenuItem that runs a closure.
+private final class ClosureMenuItem: NSMenuItem {
+    private let run: () -> Void
+    init(title: String, run: @escaping () -> Void) {
+        self.run = run
+        super.init(title: title, action: #selector(fire), keyEquivalent: "")
+        target = self
+    }
+    required init(coder: NSCoder) { fatalError("init(coder:) is not used") }
+    @objc private func fire() { run() }
 }
 
 // MARK: - Block-level markdown
@@ -5047,14 +5262,85 @@ enum MarkdownParser {
     static func parseCached(_ source: String) -> [MarkdownBlock] {
         let key = source as NSString
         if let hit = parseCache.object(forKey: key) { return hit.blocks }
-        let blocks = parse(source)
+        let blocks = parseStreaming(source)
         parseCache.setObject(ParsedBlocks(blocks), forKey: key)
         return blocks
     }
 
+    // MARK: Streaming: parse only what changed
+
+    /// A parse kept for the next, longer version of the same text. `safeOffset`
+    /// is the UTF-8 offset of a line where parsing can restart, and
+    /// `safeBlockCount` how many blocks lie before it.
+    private struct Checkpoint {
+        let source: String
+        let blocks: [MarkdownBlock]
+        let safeOffset: Int
+        let safeBlockCount: Int
+    }
+
+    /// A few at once, so two answers streaming side by side (the panel and a
+    /// detached window) don't evict each other.
+    nonisolated(unsafe) private static var checkpoints: [Checkpoint] = []
+    private static let checkpointLock = NSLock()
+
+    /// While an answer streams, each flush is the previous text plus a chunk,
+    /// and re-parsing it from the first line made every flush cost more than
+    /// the last (about 2 ms a flush at 20k characters, O(n²) over the answer).
+    /// Blocks before the last blank line outside any fence, quote, table or
+    /// math island cannot change when text is appended, so they are reused
+    /// and only the text after that line is parsed again. The result is the
+    /// same as `parse(source)`.
+    static func parseStreaming(_ source: String) -> [MarkdownBlock] {
+        checkpointLock.lock()
+        let base = checkpoints.filter { source.hasPrefix($0.source) }
+            .max { $0.safeOffset < $1.safeOffset }
+        checkpointLock.unlock()
+
+        let result: (blocks: [MarkdownBlock], safeOffset: Int, safeBlockCount: Int)
+        if let base, base.safeOffset > 0 {
+            let utf8 = source.utf8
+            let start = utf8.index(utf8.startIndex, offsetBy: base.safeOffset)
+            let tail = parseTracking(String(source[start...]))
+            let kept = base.blocks.prefix(base.safeBlockCount)
+            result = (Array(kept) + tail.blocks,
+                      tail.safeOffset > 0 ? base.safeOffset + tail.safeOffset : base.safeOffset,
+                      tail.safeOffset > 0 ? base.safeBlockCount + tail.safeBlockCount : base.safeBlockCount)
+        } else {
+            result = parseTracking(source)
+        }
+
+        checkpointLock.lock()
+        checkpoints.removeAll { source.hasPrefix($0.source) }
+        checkpoints.append(Checkpoint(source: source, blocks: result.blocks,
+                                      safeOffset: result.safeOffset,
+                                      safeBlockCount: result.safeBlockCount))
+        if checkpoints.count > 4 { checkpoints.removeFirst(checkpoints.count - 4) }
+        checkpointLock.unlock()
+        return result.blocks
+    }
+
     static func parse(_ source: String) -> [MarkdownBlock] {
+        parseTracking(source).blocks
+    }
+
+    /// The parse, plus the last point it can restart from: the line after a
+    /// blank line met at the top of the loop (so outside every multi-line
+    /// block), never the final line, which may still be growing.
+    private static func parseTracking(_ source: String)
+        -> (blocks: [MarkdownBlock], safeOffset: Int, safeBlockCount: Int) {
         var blocks: [MarkdownBlock] = []
         let lines = source.components(separatedBy: "\n")
+        // UTF-8 offset of each line's start.
+        var lineStart: [Int] = []
+        lineStart.reserveCapacity(lines.count)
+        var offset = 0
+        for line in lines {
+            lineStart.append(offset)
+            offset += line.utf8.count + 1
+        }
+        var safeOffset = 0
+        var safeBlockCount = 0
         var i = 0
         while i < lines.count {
             let rawLine = lines[i]
@@ -5085,6 +5371,10 @@ enum MarkdownParser {
             }
 
             if line.isEmpty {
+                if i < lines.count - 1 {
+                    safeOffset = lineStart[i + 1]
+                    safeBlockCount = blocks.count
+                }
                 i += 1
                 continue
             }
@@ -5187,7 +5477,7 @@ enum MarkdownParser {
             }
             i += 1
         }
-        return blocks
+        return (blocks, safeOffset, safeBlockCount)
     }
 
     /// `` ``` `` or `` ```swift `` → optional language tag (empty string if bare).
@@ -6432,8 +6722,9 @@ struct MarkdownBlockRow: View, Equatable {
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
 
-        case .code(_, let text):
-            CodeBlockView(text: text, baseFont: baseFont, color: color, onInAppCopy: onInAppCopy)
+        case .code(let language, let text):
+            CodeBlockView(text: text, language: language, baseFont: baseFont, color: color,
+                          onInAppCopy: onInAppCopy)
 
         case .table(let header, let rows):
             MarkdownTableView(header: header, rows: rows, baseFont: baseFont, color: color)
@@ -6524,9 +6815,39 @@ private struct MarkdownTableView: View {
     let baseFont: CGFloat
     let color: Color
 
+    @State private var hovering = false
+    @State private var copied = false
+
     private var columnCount: Int { header.count }
 
+    /// Four or more columns don't fit the panel's width without squeezing each
+    /// into a sliver of wrapped words: such a table keeps a readable width per
+    /// column and scrolls sideways instead.
+    private var scrolls: Bool { columnCount >= 4 }
+
     var body: some View {
+        Group {
+            if scrolls {
+                ScrollView(.horizontal, showsIndicators: false) { grid }
+            } else {
+                grid
+            }
+        }
+        .background(
+            RoundedRectangle.control
+                .fill(Color.white.opacity(0.04))
+        )
+        .overlay(
+            RoundedRectangle.control
+                .strokeBorder(Tokens.hairline, lineWidth: 0.5)
+        )
+        .overlay(alignment: .topTrailing) {
+            if hovering || copied { copyButton.padding(6).transition(.opacity) }
+        }
+        .onHover { inside in withAnimation(.easeOut(duration: Tokens.hoverFade)) { hovering = inside } }
+    }
+
+    private var grid: some View {
         Grid(alignment: .topLeading, horizontalSpacing: 14, verticalSpacing: 0) {
             GridRow {
                 ForEach(Array(header.enumerated()), id: \.offset) { _, cell in
@@ -6553,24 +6874,56 @@ private struct MarkdownTableView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 2)
-        .background(
-            RoundedRectangle.control
-                .fill(Color.white.opacity(0.04))
-        )
-        .overlay(
-            RoundedRectangle.control
-                .strokeBorder(Tokens.hairline, lineWidth: 0.5)
-        )
     }
 
+    /// The code block's copy chip, copying the table back as Markdown.
+    private var copyButton: some View {
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(markdown, forType: .string)
+            Haptics.confirm()
+            withAnimation(.easeOut(duration: 0.15)) { copied = true }
+            Task {
+                try? await Task.sleep(for: .seconds(1.5))
+                withAnimation(.easeOut(duration: 0.25)) { copied = false }
+            }
+        } label: {
+            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                .font(.sf(Tokens.TypeSize.label, weight: .regular))
+                .foregroundStyle(Tokens.text1)
+                .contentTransition(.symbolEffect(.replace))
+                .frame(width: 26, height: 26)
+                .glassCapsule(in: Circle(), brighter: true)
+                .contentShape(Circle())
+        }
+        .buttonStyle(GlassPressStyle())
+        .accessibilityLabel(L("table.copyMarkdown"))
+    }
+
+    private var markdown: String {
+        func line(_ cells: [String]) -> String {
+            "| " + cells.map { $0.replacingOccurrences(of: "|", with: "\\|") }.joined(separator: " | ") + " |"
+        }
+        return ([line(header), "|" + Array(repeating: " --- |", count: max(columnCount, 1)).joined()]
+            + rows.map(line)).joined(separator: "\n")
+    }
+
+    @ViewBuilder
     private func cellText(_ raw: String, weight: Font.Weight, opacity: Double) -> some View {
-        InlineMarkdownText(raw, linkColor: color.opacity(opacity))
+        let text = InlineMarkdownText(raw, linkColor: color.opacity(opacity))
             .font(.sf(baseFont - 1, weight: weight))
             .tracking(-0.05)
             .foregroundStyle(color.opacity(opacity))
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
             .textSelection(.enabled)
+        if scrolls {
+            // A sideways scroller offers unlimited width: cap each cell so a
+            // long one wraps instead of running out of sight.
+            text.fixedSize(horizontal: false, vertical: true)
+                .frame(minWidth: 56, maxWidth: 220, alignment: .leading)
+        } else {
+            text.fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 }
 
@@ -7056,6 +7409,8 @@ private struct AnswerPDFView: View {
 /// See `stickyOffset(in:)`.
 private struct CodeBlockView: View {
     let text: String
+    /// The fence's language tag, which picks the colours (`CodeHighlighter`).
+    var language: String? = nil
     let baseFont: CGFloat
     let color: Color
     /// Fired after the in-app pasteboard write so the owner can re-baseline the
@@ -7066,6 +7421,21 @@ private struct CodeBlockView: View {
 
     @State private var hovering = false
     @State private var copied = false
+    /// A block longer than `foldOver` lines shows its first `foldTo` until the
+    /// toggle under it is pressed. Copy always takes the whole block.
+    @State private var unfolded = false
+    private static let foldOver = 30
+    private static let foldTo = 12
+
+    private var lineCount: Int { text.reduce(1) { $1 == "\n" ? $0 + 1 : $0 } }
+    private var folds: Bool { lineCount > Self.foldOver }
+
+    /// What the island shows: the whole block, or its first `foldTo` lines.
+    private var shownText: String {
+        guard folds, !unfolded else { return text }
+        return text.split(separator: "\n", maxSplits: Self.foldTo, omittingEmptySubsequences: false)
+            .prefix(Self.foldTo).joined(separator: "\n")
+    }
 
     /// The button's own box, and its inset off the island's corner — the SAME on
     /// both edges, so the glass circle reads as concentric inside the island's 8pt
@@ -7082,12 +7452,26 @@ private struct CodeBlockView: View {
         // `.textSelection(.enabled)` here is only effective post-stream. The copy
         // button below works in BOTH states; don't remove the parent wrapper without
         // auditing this.
-        Text(text)
-            .font(.system(size: baseFont - 1, weight: .regular, design: .monospaced))
-            .foregroundStyle(color)
-            .textSelection(.enabled)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 6) {
+            Text(CodeHighlighter.highlighted(shownText, language: language))
+                .font(.system(size: baseFont - 1, weight: .regular, design: .monospaced))
+                .foregroundStyle(color)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+            // The question bubble's Show more toggle, in its quiet text4.
+            if folds {
+                Button {
+                    withAnimation(.easeOut(duration: Tokens.hoverFade)) { unfolded.toggle() }
+                } label: {
+                    Text(unfolded ? L("bubble.showLess") : L("code.showAllLines", lineCount))
+                        .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                        .tracking(0.2)
+                        .foregroundStyle(Tokens.text4)
+                }
+                .buttonStyle(.plain).exemptsDoubleClickPin()
+            }
+        }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
             .background(
@@ -7160,6 +7544,244 @@ private struct CodeBlockView: View {
         guard let visible = geo.bounds(of: .scrollView) else { return 0 }
         let travel = max(geo.size.height - Self.side - Self.inset * 2, 0)
         return min(max(visible.minY + stickyTopInset, 0), travel)
+    }
+}
+
+/// Colours a code island by its fence's language: keywords, strings, comments,
+/// numbers and type names, in Xcode's dark-theme hues so they read on the
+/// panel's dark glass. Swift, Python, JavaScript/TypeScript, shell, JSON and
+/// SQL; any other tag, or none, stays plain. Regex passes in priority order
+/// (comments and strings first, so a keyword inside them stays their colour),
+/// cached per text because a settled answer's body re-evaluates often and a
+/// streaming one asks again on every flush.
+enum CodeHighlighter {
+    private enum Kind { case comment, string, keyword, number, type }
+
+    private static func color(_ kind: Kind) -> Color {
+        switch kind {
+        case .comment: return Color(red: 0.49, green: 0.55, blue: 0.62)
+        case .string:  return Color(red: 0.99, green: 0.47, blue: 0.40)
+        case .keyword: return Color(red: 0.99, green: 0.43, blue: 0.66)
+        case .number:  return Color(red: 0.85, green: 0.79, blue: 0.47)
+        case .type:    return Color(red: 0.45, green: 0.85, blue: 0.95)
+        }
+    }
+
+    private struct Grammar {
+        var comments: [String]
+        var strings: [String]
+        var keywords: Set<String>
+        var types: Bool
+    }
+
+    private static let cStyleComments = [#"//[^\n]*"#, #"/\*[\s\S]*?(?:\*/|\z)"#]
+    private static let quoted = [#""(\\.|[^"\\\n])*"?"#, #"'(\\.|[^'\\\n])*'?"#]
+
+    private static func grammar(for language: String?) -> Grammar? {
+        switch language?.lowercased() {
+        case "swift":
+            return Grammar(comments: cStyleComments,
+                           strings: [#""{3}[\s\S]*?(?:"{3}|\z)"#, quoted[0]],
+                           keywords: ["let", "var", "func", "if", "else", "guard", "return", "for", "in",
+                                      "while", "switch", "case", "default", "break", "continue", "struct",
+                                      "class", "enum", "protocol", "extension", "import", "init", "self",
+                                      "Self", "nil", "true", "false", "try", "catch", "throw", "throws",
+                                      "async", "await", "private", "public", "internal", "fileprivate",
+                                      "static", "final", "override", "mutating", "where", "some", "any",
+                                      "do", "repeat", "defer", "inout", "typealias", "lazy", "weak"],
+                           types: true)
+        case "python", "py":
+            return Grammar(comments: [#"#[^\n]*"#],
+                           strings: [#""{3}[\s\S]*?(?:"{3}|\z)"#, #"'{3}[\s\S]*?(?:'{3}|\z)"#] + quoted,
+                           keywords: ["def", "class", "return", "if", "elif", "else", "for", "while", "in",
+                                      "import", "from", "as", "with", "try", "except", "finally", "raise",
+                                      "lambda", "yield", "pass", "break", "continue", "and", "or", "not",
+                                      "is", "None", "True", "False", "async", "await", "global", "self"],
+                           types: true)
+        case "javascript", "js", "jsx", "typescript", "ts", "tsx", "mjs", "cjs":
+            return Grammar(comments: cStyleComments,
+                           strings: quoted + [#"`(\\.|[^`\\])*`?"#],
+                           keywords: ["const", "let", "var", "function", "return", "if", "else", "for",
+                                      "while", "of", "in", "switch", "case", "default", "break", "continue",
+                                      "class", "extends", "new", "this", "import", "export", "from", "as",
+                                      "async", "await", "try", "catch", "finally", "throw", "typeof",
+                                      "instanceof", "null", "undefined", "true", "false", "interface",
+                                      "type", "enum", "implements", "public", "private", "readonly"],
+                           types: true)
+        case "shell", "sh", "bash", "zsh", "console":
+            return Grammar(comments: [#"(?:^|(?<=\s))#[^\n]*"#],
+                           strings: quoted,
+                           keywords: ["if", "then", "else", "elif", "fi", "for", "do", "done", "while",
+                                      "case", "esac", "in", "function", "export", "local", "return",
+                                      "echo", "cd", "sudo", "set"],
+                           types: false)
+        case "json", "jsonc":
+            return Grammar(comments: cStyleComments, strings: [quoted[0]],
+                           keywords: ["true", "false", "null"], types: false)
+        case "sql":
+            return Grammar(comments: [#"--[^\n]*"#, cStyleComments[1]],
+                           strings: [quoted[1]],
+                           keywords: Set(["select", "from", "where", "and", "or", "not", "insert", "into",
+                                          "values", "update", "set", "delete", "create", "table", "drop",
+                                          "alter", "join", "left", "right", "inner", "outer", "on", "as",
+                                          "group", "by", "order", "having", "limit", "offset", "distinct",
+                                          "null", "is", "in", "like", "case", "when", "then", "else", "end",
+                                          "primary", "key", "index", "with", "union", "all", "count", "asc", "desc"]
+                                .flatMap { [$0, $0.uppercased()] }),
+                           types: false)
+        default:
+            return nil
+        }
+    }
+
+    private static let cache: NSCache<NSString, Box> = {
+        let cache = NSCache<NSString, Box>()
+        cache.countLimit = 64
+        return cache
+    }()
+
+    private final class Box {
+        let value: AttributedString
+        init(_ value: AttributedString) { self.value = value }
+    }
+
+    private static let regexCache = NSCache<NSString, NSRegularExpression>()
+
+    private static func regex(_ pattern: String) -> NSRegularExpression? {
+        if let hit = regexCache.object(forKey: pattern as NSString) { return hit }
+        guard let made = try? NSRegularExpression(pattern: pattern, options: [.anchorsMatchLines]) else { return nil }
+        regexCache.setObject(made, forKey: pattern as NSString)
+        return made
+    }
+
+    private static let wordPattern = #"\b[A-Za-z_][A-Za-z0-9_]*\b"#
+    private static let numberPattern = #"\b(0x[0-9A-Fa-f_]+|\d[\d_]*(\.\d+)?([eE][+-]?\d+)?)\b"#
+
+    /// `text` with colour runs, or plain when the language is not one of ours.
+    /// Past 20 000 characters it stays plain: colouring is not worth the time.
+    static func highlighted(_ text: String, language: String?) -> AttributedString {
+        guard let grammar = grammar(for: language), text.utf16.count <= 20_000 else {
+            return AttributedString(text)
+        }
+        let lang = language?.lowercased() ?? ""
+        let key = "\(lang)\u{1e}\(text)" as NSString
+        if let hit = cache.object(forKey: key) { return hit.value }
+
+        // A streaming block arrives one chunk longer each flush. Everything
+        // before the last line break of the previous text that no span runs
+        // across scans and colours the same way again, so that part — its
+        // spans and its finished AttributedString — is reused, and only the
+        // text after it is scanned and joined anew.
+        checkpointLock.lock()
+        let base = checkpoint.flatMap { $0.language == lang && text.hasPrefix($0.text) ? $0 : nil }
+        checkpointLock.unlock()
+        let ns = text as NSString
+        let start = base?.cut ?? 0
+        let head = base?.head ?? AttributedString()
+        let headSpans = base?.spans.filter { $0.0.upperBound <= start } ?? []
+        let tail = ns.substring(from: start)
+        let tailSpans = scan(tail, grammar)
+        let spans = headSpans + tailSpans.map { (NSRange(location: $0.0.location + start, length: $0.0.length), $0.1) }
+
+        // The next flush starts from this text's own last safe line break.
+        let cut = max(safeCut(in: text, spans: spans) ?? start, start)
+        let local = cut - start
+        let newHead = head + build((tail as NSString).substring(to: local),
+                                   tailSpans.filter { $0.0.upperBound <= local })
+        checkpointLock.lock()
+        checkpoint = Checkpoint(language: lang, text: text, spans: spans, cut: cut, head: newHead)
+        checkpointLock.unlock()
+
+        let rest = (tail as NSString).substring(from: local)
+        let restSpans = tailSpans.filter { $0.0.location >= local }
+            .map { (NSRange(location: $0.0.location - local, length: $0.0.length), $0.1) }
+        let out = newHead + build(rest, restSpans)
+        cache.setObject(Box(out), forKey: key)
+        return out
+    }
+
+    private struct Checkpoint {
+        let language: String
+        let text: String
+        let spans: [(NSRange, Kind)]
+        /// UTF-16 offset of the last safe line break; `head` is the coloured
+        /// text before it.
+        let cut: Int
+        let head: AttributedString
+    }
+    nonisolated(unsafe) private static var checkpoint: Checkpoint?
+    private static let checkpointLock = NSLock()
+
+    /// The UTF-16 offset just after the last line break of `text` that no span
+    /// runs across, or nil when there is none.
+    private static func safeCut(in text: String, spans: [(NSRange, Kind)]) -> Int? {
+        let ns = text as NSString
+        var search = NSRange(location: 0, length: ns.length)
+        while true {
+            let found = ns.range(of: "\n", options: .backwards, range: search)
+            guard found.location != NSNotFound else { return nil }
+            let cut = found.location + 1
+            if !spans.contains(where: { $0.0.location < cut && $0.0.upperBound > found.location }) { return cut }
+            search = NSRange(location: 0, length: found.location)
+        }
+    }
+
+    /// The colour spans of `text`: comments and strings in one left-to-right
+    /// scan, so whichever opens first wins and the scan resumes after it (a
+    /// `//` or `#` inside a string stays string, a quote inside a comment stays
+    /// comment), then numbers, keywords and type names in what is left.
+    private static func scan(_ text: String, _ grammar: Grammar) -> [(NSRange, Kind)] {
+        let ns = text as NSString
+        let whole = NSRange(location: 0, length: ns.length)
+        var taken = IndexSet()
+        var spans: [(NSRange, Kind)] = []
+        func claim(_ range: NSRange, _ kind: Kind) {
+            guard range.length > 0,
+                  !taken.intersects(integersIn: range.location..<(range.location + range.length)) else { return }
+            taken.insert(integersIn: range.location..<(range.location + range.length))
+            spans.append((range, kind))
+        }
+        let comments = grammar.comments.enumerated().map { "(?<c\($0.offset)>\($0.element))" }
+        let strings = grammar.strings.enumerated().map { "(?<s\($0.offset)>\($0.element))" }
+        if let scan = regex((comments + strings).joined(separator: "|")) {
+            for match in scan.matches(in: text, range: whole) {
+                let isComment = grammar.comments.indices.contains {
+                    match.range(withName: "c\($0)").location != NSNotFound
+                }
+                claim(match.range, isComment ? .comment : .string)
+            }
+        }
+        regex(numberPattern)?.matches(in: text, range: whole).forEach { claim($0.range, .number) }
+        regex(wordPattern)?.matches(in: text, range: whole).forEach { match in
+            let word = ns.substring(with: match.range)
+            if grammar.keywords.contains(word) {
+                claim(match.range, .keyword)
+            } else if grammar.types, let first = word.unicodeScalars.first,
+                      CharacterSet.uppercaseLetters.contains(first), word.count > 1 {
+                claim(match.range, .type)
+            }
+        }
+        return spans
+    }
+
+    /// Joins plain and coloured pieces in order. Indexing into one big
+    /// AttributedString per span cost a walk from its start each time, which
+    /// made a long block's colouring grow with the square of its length.
+    private static func build(_ text: String, _ spans: [(NSRange, Kind)]) -> AttributedString {
+        let ns = text as NSString
+        var out = AttributedString()
+        var cursor = 0
+        for (range, kind) in spans.sorted(by: { $0.0.location < $1.0.location }) where range.location >= cursor {
+            if range.location > cursor {
+                out += AttributedString(ns.substring(with: NSRange(location: cursor, length: range.location - cursor)))
+            }
+            var piece = AttributedString(ns.substring(with: range))
+            piece.foregroundColor = color(kind)
+            out += piece
+            cursor = range.upperBound
+        }
+        if cursor < ns.length { out += AttributedString(ns.substring(from: cursor)) }
+        return out
     }
 }
 

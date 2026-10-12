@@ -160,6 +160,11 @@ struct InlineSettingsView: View {
     /// the key section above it — it opens by itself only when there is already an
     /// instruction stored, so an existing preference is never hidden.
     @State private var instructionsSectionOpen = false
+    /// What Notchi remembers about the user (`UserMemory`), folded like the
+    /// instructions above it.
+    @ObservedObject private var memory = UserMemory.shared
+    @State private var memorySectionOpen = false
+    @ObservedObject private var clipboardHistory = ClipboardHistory.shared
 
     /// The model catalog behind the picker — live lists, the fold, and which providers
     /// are callable. Session-wide (the panel's ⌘⇧I picker reads the same store), so a
@@ -311,7 +316,6 @@ struct InlineSettingsView: View {
         case general = "General" // language, app presence, note destination, permissions, + Advanced (proxy)
         case stats = "Stats"     // what the archive adds up to — read-only
         case about = "About"     // version + self-update
-        case lab = "Lab"         // experiments that change how the app behaves, off by default
         case licenses = "Licenses" // third-party attribution and licences
         case survey = "Survey"   // the About pane's survey
         case usage = "Usage"     // Blend1 request list — reached from the wallet's links
@@ -343,7 +347,7 @@ struct InlineSettingsView: View {
         /// an inserted gap reads as a layout slip rather than a boundary. So the
         /// bands live in the ORDER and nowhere else — what answers and what it
         /// takes in, then how the app presents and behaves, then the two pages
-        /// that only report, then Lab last.
+        /// that only report.
         static var sidebarCases: [Section] { allCases.filter { !$0.isDetail } }
 
         /// The sidebar label, localized. The raw value stays English (a stable
@@ -353,7 +357,6 @@ struct InlineSettingsView: View {
             case .model:      return L("sidebar.model")
             case .chat:       return L("sidebar.chat")
             case .general:    return L("sidebar.general")
-            case .lab:        return L("sidebar.lab")
             case .shortcuts:  return L("sidebar.shortcuts")
             case .appearance: return L("sidebar.appearance")
             case .stats:      return L("sidebar.stats")
@@ -491,7 +494,7 @@ struct InlineSettingsView: View {
 
     /// Which disclosure chip owns the pointer. Permissions and Advanced can share
     /// one pane, so a single Bool would brighten both at once.
-    private enum DisclosureHover { case keys, instructions, permissions, advanced }
+    private enum DisclosureHover { case keys, instructions, memory, permissions, advanced }
     @State private var hoveredDisclosure: DisclosureHover?
 
     /// What the proxy field resolves to right now — filled in asynchronously by
@@ -541,7 +544,7 @@ struct InlineSettingsView: View {
                     // moves BOTH columns down, it doesn't stagger them.
                     // A hidden copy holds the sidebar's width and minimum height;
                     // the visible one is an overlay so it spans the full column
-                    // height and Lab can sit at the bottom.
+                    // height.
                     sidebar
                         .padding(.top, Self.paneTopRunway)
                         .hidden()
@@ -858,11 +861,23 @@ struct InlineSettingsView: View {
                 case .anysearch: anySearchKeyRow
                 }
             case .chat:
+                // Three groups: what the answers say and do, the sounds and
+                // reactions, and what is checked before a link opens.
+                Text(L("chat.group.answers"))
+                    .captionLabel()
+                customInstructionsRow
+                memoryRow
+                suggestFollowUpRow
+                runCommandsRow
+                Text(L("chat.group.effects"))
+                    .captionLabel()
+                    .padding(.top, 2)
                 messageSoundsRow
                 emojiReactionsRow
+                Text(L("chat.group.safety"))
+                    .captionLabel()
+                    .padding(.top, 2)
                 linkPrecheckRow
-                suggestFollowUpRow
-                customInstructionsRow
             case .general:
                 // App-level settings: how it talks to you, where the app itself
                 // appears in macOS, where notes are saved, what the system lets
@@ -882,30 +897,6 @@ struct InlineSettingsView: View {
                 noteDestinationRow
                 permissionsSection
                 advancedSection
-            case .lab:
-                HStack(spacing: 3) {
-                    Text(L("lab.threads"))
-                        .captionLabel()
-                    SettingInfo(L("lab.unifiedThreads.hint"), glyph: Tokens.TypeSize.caption)
-                }
-                Text(L("lab.threads.about"))
-                    .font(.sf(Tokens.TypeSize.meta))
-                    .foregroundStyle(Tokens.text3)
-                    .fixedSize(horizontal: false, vertical: true)
-                unifiedThreadsRow
-                Text(L("lab.commands"))
-                    .captionLabel()
-                    .padding(.top, 2)
-                Text(L("lab.commands.about"))
-                    .font(.sf(Tokens.TypeSize.meta))
-                    .foregroundStyle(Tokens.text3)
-                    .fixedSize(horizontal: false, vertical: true)
-                runCommandsRow
-                Text(L("lab.evaluationNotice"))
-                    .font(.sf(Tokens.TypeSize.meta))
-                    .foregroundStyle(Tokens.text3)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.top, 2)
             case .shortcuts:
                 shortcutsSection
             case .appearance:
@@ -1043,13 +1034,10 @@ struct InlineSettingsView: View {
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 2) {
-            ForEach(Section.sidebarCases.filter { $0 != .lab }) { s in
+            ForEach(Section.sidebarCases) { s in
                 sidebarItem(s)
             }
             Spacer(minLength: 0)
-            // Lab is experiments, not settings: it sits pinned at the bottom,
-            // apart from the categories above.
-            sidebarItem(.lab)
         }
         .frame(width: 104, alignment: .topLeading)
         .padding(.trailing, 12)
@@ -3501,6 +3489,150 @@ struct InlineSettingsView: View {
         }
     }
 
+    /// Memory's master switch (`UserMemory.enabled`), off by default, beside
+    /// the Memory disclosure chip.
+    private var memoryToggle: some View {
+        Toggle("", isOn: Binding(
+            get: { memory.enabled },
+            set: { on in
+                Haptics.levelChange()
+                memory.enabled = on
+                if on {
+                    model.scanHistoryForMemories()
+                    withAnimation(.easeOut(duration: 0.16)) { memorySectionOpen = true }
+                }
+            }
+        ))
+        .labelsHidden()
+        .toggleStyle(.switch)
+        .controlSize(.mini)
+        .tint(Tokens.text2)
+        .accessibilityLabel(L("memory.toggle"))
+    }
+
+    /// The facts `remember` saved, each with its own ×, and Forget all. Same
+    /// disclosure chip as `customInstructionsRow`; the × is the prompt
+    /// template picker's.
+    private var memoryRow: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Button {
+                    NotchPanel.exemptNextDoubleClick()
+                    withAnimation(.easeOut(duration: 0.16)) { memorySectionOpen.toggle() }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "chevron.right")
+                            .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                            .rotationEffect(.degrees(memorySectionOpen ? 90 : 0))
+                        Text(L("memory.title"))
+                            .font(.sf(Tokens.TypeSize.label, weight: .medium))
+                        if !memory.entries.isEmpty {
+                            Text("\(memory.entries.count)")
+                                .font(.sf(Tokens.TypeSize.label, weight: .medium))
+                                .foregroundStyle(Tokens.text3)
+                                .monospacedDigit()
+                        }
+                    }
+                    .foregroundStyle(Tokens.text1)
+                    .padding(.horizontal, 10)
+                    .frame(height: 26)
+                    .background(
+                        Capsule()
+                            .fill(.white.opacity(hoveredDisclosure == .memory ? 0.12 : 0.06))
+                    )
+                    .overlay(
+                        Capsule()
+                            .strokeBorder(.white.opacity(hoveredDisclosure == .memory ? 0.22 : 0.12),
+                                          lineWidth: 0.5)
+                    )
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(.plain).exemptsDoubleClickPin()
+                .onHover { inside in
+                    if inside { hoveredDisclosure = .memory }
+                    else if hoveredDisclosure == .memory { hoveredDisclosure = nil }
+                }
+                .animation(.easeOut(duration: Tokens.hoverFade), value: hoveredDisclosure)
+                .onChange(of: memorySectionOpen) { _, open in
+                    if open { model.scanHistoryForMemories() }
+                }
+                memoryToggle
+            }
+
+            if memorySectionOpen, memory.enabled, memory.scanning {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(L("memory.scanning"))
+                        .font(.sf(Tokens.TypeSize.label))
+                        .foregroundStyle(Tokens.text2)
+                }
+            }
+            if memorySectionOpen, memory.enabled, !memory.scanning {
+                VStack(alignment: .leading, spacing: 0) {
+                    if memory.entries.isEmpty {
+                        Text(L("memory.empty"))
+                            .font(.sf(Tokens.TypeSize.form))
+                            .foregroundStyle(Tokens.text3)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                    }
+                    ForEach(memory.entries) { entry in
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(entry.text)
+                                .font(.sf(Tokens.TypeSize.form))
+                                .foregroundStyle(Tokens.text1)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            Button {
+                                withAnimation(.easeOut(duration: Tokens.hoverFade)) {
+                                    memory.delete(entry.id)
+                                }
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                                    .foregroundStyle(Tokens.text2)
+                                    .frame(width: Tokens.Control.inline, height: Tokens.Control.inline)
+                            }
+                            .buttonStyle(PromptTemplateChipStyle(shape: Circle()))
+                            .accessibilityLabel(L("memory.delete"))
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                    }
+                }
+                .padding(.vertical, 2)
+                .recessedSurface(in: RoundedRectangle.control, lit: false)
+
+                if !memory.entries.isEmpty {
+                    Button {
+                        withAnimation(.easeOut(duration: Tokens.hoverFade)) { memory.deleteAll() }
+                    } label: {
+                        Text(L("memory.clearAll"))
+                            .font(.sf(Tokens.TypeSize.label, weight: .medium))
+                            .foregroundStyle(Tokens.text2)
+                            .padding(.horizontal, 12)
+                            .frame(minHeight: 28)
+                    }
+                    .buttonStyle(PromptTemplateChipStyle(shape: Capsule()))
+                }
+            }
+        }
+    }
+
+    /// Recent copies kept for Ask (`ClipboardHistory`). Turning it off clears it.
+    private var clipboardHistoryRow: some View {
+        settingRow(label: L("clipboardHistory.toggle"), info: L("clipboardHistory.info")) {
+            Toggle("", isOn: Binding(
+                get: { clipboardHistory.enabled },
+                set: { Haptics.levelChange(); clipboardHistory.enabled = $0 }
+            ))
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .tint(Tokens.text2)
+        }
+    }
+
     private var launchAtLoginRow: some View {
         settingRow(label: L("general.launchAtLogin")) {
             Toggle("", isOn: Binding(
@@ -3796,36 +3928,6 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// Lab: unified threads. Off, every question from the idle prompt starts a
-    /// thread of its own; on, they continue one main thread (see
-    /// `NotchModel.unifiedThreadsEnabled`). Two cards in the placement row's
-    /// grammar, each drawing what the history looks like under that choice.
-    private var unifiedThreadsRow: some View {
-        HStack(alignment: .top, spacing: 12) {
-            unifiedThreadsCard(unified: false)
-            unifiedThreadsCard(unified: true)
-            Spacer(minLength: 0)
-        }
-    }
-
-    private func unifiedThreadsCard(unified: Bool) -> some View {
-        let selected = model.unifiedThreadsEnabled == unified
-        return PickerCard(selected: selected) {
-            guard !selected else { return }
-            Haptics.levelChange()
-            model.unifiedThreadsEnabled = unified
-        } content: {
-            VStack(spacing: 7) {
-                MiniThreads(unified: unified)
-                    .opacity(selected ? 1 : 0.55)
-                Text(L(unified ? "lab.threads.unified" : "lab.threads.separate"))
-                    .font(.sf(Tokens.TypeSize.meta, weight: selected ? .medium : .regular))
-                    .foregroundStyle(selected ? Tokens.text1 : Tokens.text3)
-                    .lineLimit(1)
-            }
-        }
-    }
-
     /// Whether background work flexes the resting notch's busy ears (the verb on
     /// the left shoulder, the elapsed clock on the right). One global switch:
     /// off keeps the closed notch flat for agent runs and detached Ask rounds
@@ -3937,10 +4039,11 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// Lab: whether the chat model gets `run_shell`. Same flag as
+    /// Chat: whether the chat model gets `run_shell`. Same flag as
     /// `NotchModel.shellToolEnabled`, read per question.
     private var runCommandsRow: some View {
         settingRow(label: L("lab.runCommands"),
+                   info: L("lab.commands.about"),
                    aligned: true) {
             Toggle("", isOn: Binding(
                 get: { model.shellToolEnabled },
@@ -4529,6 +4632,7 @@ struct InlineSettingsView: View {
                     .font(.sf(Tokens.TypeSize.label, weight: .medium))
                     .foregroundStyle(Tokens.text1)
                 copySenseRow
+                if ClipboardHistory.available { clipboardHistoryRow }
             }
             promptShortcutsGroup
             ForEach(Array(AppShortcutReference.groups(
@@ -5908,6 +6012,8 @@ struct InlineSettingsView: View {
         case .action(let action):
             AppShortcutStore.set(chord, for: action)
             appShortcuts[action] = chord
+            // The ask-about-screen chord is global; AppDelegate re-registers it.
+            NotificationCenter.default.post(name: .appShortcutsChanged, object: nil)
         case .prompt(let id):
             guard let index = promptShortcuts.firstIndex(where: { $0.id == id }) else { return }
             promptShortcuts[index].shortcut = chord
@@ -5958,6 +6064,8 @@ struct InlineSettingsView: View {
         case .action(let action):
             AppShortcutStore.reset(action)
             appShortcuts[action] = action.defaultChord
+            // The ask-about-screen chord is global; AppDelegate re-registers it.
+            NotificationCenter.default.post(name: .appShortcutsChanged, object: nil)
         case .prompt:
             break
         }
@@ -8363,51 +8471,6 @@ private struct MiniDisplay: View {
                     .frame(width: 12, height: 2)
             }
         }
-    }
-}
-
-/// A miniature thread glyph for the Lab's thread picker. Separate: two short
-/// threads side by side, one question and answer each. Unified: one thread
-/// holding both exchanges in order. Same strokes and fills as `MiniDisplay`.
-private struct MiniThreads: View {
-    let unified: Bool
-
-    var body: some View {
-        if unified {
-            thread(exchanges: 2, width: 66)
-        } else {
-            HStack(spacing: 6) {
-                thread(exchanges: 1, width: 30)
-                thread(exchanges: 1, width: 30)
-            }
-        }
-    }
-
-    private func thread(exchanges: Int, width: CGFloat) -> some View {
-        VStack(spacing: 3) {
-            ForEach(0..<exchanges, id: \.self) { _ in
-                // The question: a bright bubble on the right.
-                Capsule()
-                    .fill(.white.opacity(0.9))
-                    .frame(width: 11, height: 3)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                // The answer: a dimmer line on the left.
-                Capsule()
-                    .fill(.white.opacity(0.4))
-                    .frame(width: width * 0.55, height: 3)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-        }
-        .padding(.horizontal, 4)
-        .frame(width: width, height: 26)
-        .background(
-            RoundedRectangle(cornerRadius: 3)
-                .fill(.white.opacity(0.10))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 3)
-                .strokeBorder(.white.opacity(0.45), lineWidth: 1)
-        )
     }
 }
 

@@ -35,6 +35,8 @@ struct NoNoRequestContext: Sendable {
     static let title = "title"
     /// Background prediction of the user's next question in a thread.
     static let suggest = "suggest"
+    /// The one-time read of past conversations for facts to remember.
+    static let memory = "memory"
 
     @TaskLocal static var current: NoNoRequestContext?
 

@@ -504,7 +504,7 @@ struct NotchBody: View {
                 // row of its own rather than a turn in the slot below: an image
                 // pasted onto the same prompt must not hide the fact that a
                 // selection is riding along too.
-                // Unified threads (Settings → Lab): the end of the main thread's
+                // Unified threads (Settings → Chat): the end of the main thread's
                 // newest answer, above the prompt, while Enter would continue it.
                 // A two-finger pull (or a click) opens it into the thread's
                 // result page — see `mainThreadReveal`.
@@ -522,6 +522,11 @@ struct NotchBody: View {
                 }
                 if let selection = model.selectionContext {
                     selectionContextLine(selection)
+                        .padding(.bottom, 8)
+                        .transition(moduleTransition)
+                }
+                if !model.droppedFiles.isEmpty {
+                    droppedFilesLine
                         .padding(.bottom, 8)
                         .transition(moduleTransition)
                 }
@@ -680,6 +685,7 @@ struct NotchBody: View {
             && model.selectionContext == nil
             && model.loopIntervalMinutes == nil
             && model.askComposeImages.isEmpty
+            && model.droppedFiles.isEmpty
     }
 
     // MARK: - Main-thread reveal (Unified threads)
@@ -989,6 +995,10 @@ struct NotchBody: View {
                         selectionContextLine(selection)
                             .padding(.bottom, 8)
                     }
+                    if !model.droppedFiles.isEmpty {
+                        droppedFilesLine
+                            .padding(.bottom, 8)
+                    }
                     if model.agentComposeActive {
                         if !model.agentComposeImages.isEmpty {
                             ComposeImagesAttachedLine(images: model.agentComposeImages) {
@@ -1114,6 +1124,20 @@ struct NotchBody: View {
         SelectionContextChip(source: model.selectionContextSource,
                              selection: selection) {
             withAnimation(.easeOut(duration: Tokens.hoverFade)) { model.dropSelectionContext() }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// One chip per file dropped on the island (`NotchModel.handleFileDrop`),
+    /// in the selection chip's slot and face, each with its own ×.
+    private var droppedFilesLine: some View {
+        HStack(spacing: 6) {
+            ForEach(Array(model.droppedFiles.enumerated()), id: \.offset) { index, file in
+                SelectionContextChip(selection: file.text, icon: "doc.text",
+                                     label: file.name) {
+                    model.removeDroppedFile(at: index)
+                }
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -4516,6 +4540,15 @@ struct NotchBody: View {
         // layout there's no `.frame(height:)` to animate, so day-to-day streaming
         // growth carries no animation here at all — it just reflows.
         .animation(.spring(response: 0.3, dampingFraction: 1.0), value: clipped)
+        // ⌘F: the thread search bar, and its query highlighted in the text.
+        .environment(\.threadSearchHighlight, model.threadSearch?.query)
+        .overlay(alignment: .top) {
+            if model.threadSearch != nil {
+                ThreadSearchBar(model: model)
+                    .padding(.top, 4)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
         // The page mounts the newest turns of the thread it opens on and keeps
         // that window while it is up (see `threadWindowStart`).
         .onAppear { pinThreadWindow() }
@@ -5019,6 +5052,27 @@ struct NotchBody: View {
                     proxy.scrollTo(scrollBottomID, anchor: .bottom)
                 }
             }
+            // Streaming flushes write the turn silently (`LiveAnswerText`), so
+            // the follow above no longer hears them; this does.
+            .onReceive(model.liveAnswer.$text.dropFirst()) { _ in
+                guard model.turns.last?.streaming == true else { return }
+                withAnimation(.easeOut(duration: 0.2)) {
+                    proxy.scrollTo(scrollBottomID, anchor: .bottom)
+                }
+            }
+            // ⌘F: bring the current match into view, mounting older turns
+            // first when it lies above the window.
+            .onChange(of: model.threadSearchTarget) { _, target in
+                guard let target else { return }
+                let visible = model.turns.filter(\.isDrawn)
+                if let index = visible.firstIndex(where: { $0.id == target }),
+                   index < mountedStart(of: visible) {
+                    threadWindowStartID = target
+                }
+                DispatchQueue.main.async {
+                    withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo(target, anchor: .center) }
+                }
+            }
             // An agent turn grows its work trail with the answer text still empty,
             // so the text-keyed follow above never fires for it — the trail would
             // extend down behind the composer unseen. Same tail, keyed on the log.
@@ -5133,6 +5187,7 @@ struct NotchBody: View {
         let onReply: (() -> Void)? = thread != nil ? nil : { replyToTurn(turn) }
         let onDelete: (() -> Void)? = thread != nil || model.threadIsAgentRun
             || model.isStreaming ? nil : { deleteTurn(turn) }
+        let onEdit: (() -> Void)? = thread == nil && model.canEdit(turn) ? { editTurn(turn) } : nil
         let thread = thread ?? model.turns
         if turn.role == "user" {
             VStack(alignment: .leading, spacing: 5) {
@@ -5163,7 +5218,7 @@ struct NotchBody: View {
                 // left-aligns with the answer below. Regenerate lives on the
                 // answer's right-click menu.
                 UserQuestionBubble(text: turn.text, isAgent: turn.isAgent, reaction: turn.reaction)
-                    .contextMenu { QuestionTurnMenu(onReply: onReply, onDelete: onDelete) }
+                    .contextMenu { QuestionTurnMenu(onReply: onReply, onEdit: onEdit, onDelete: onDelete) }
             }
         } else {
             // Assistant turn — streaming AND settled share ONE view tree, so the
@@ -5190,8 +5245,10 @@ struct NotchBody: View {
             // model — so a second regenerate control on the answer would be the
             // same action twice.
             VStack(alignment: .leading, spacing: 14) {
+              LiveTurnText(live: turn.streaming ? model.liveAnswer : .inert,
+                           id: turn.id, fallback: turn.text) { text in
                 AssistantTurnView(
-                    text: turn.text,
+                    text: text,
                     streaming: turn.streaming,
                     activity: turn.streaming
                         ? (turn.toolActivity ?? model.currentActivity) : nil,
@@ -5224,7 +5281,7 @@ struct NotchBody: View {
                     // card — the record's copy of the live detail page, so a
                     // reopened run reads the way the run looked while it worked.
                     agentTrail: turn.isAgent
-                        ? (turn.agentLog?.droppingTrailingAnswer(turn.text) ?? []) : [],
+                        ? (turn.agentLog?.droppingTrailingAnswer(text) ?? []) : [],
                     // The `ask_user` question card, when the model has paused this
                     // still-streaming answer on a choice only the user can make.
                     pendingQuestion: turn.streaming
@@ -5239,7 +5296,22 @@ struct NotchBody: View {
                     onOpenCapture: { model.openTurnCapture($0) },
                     turnID: turn.id
                 )
+              }
             }
+        }
+    }
+
+    /// An answer's text: the live store's while it streams (so a flush redraws
+    /// this answer only), else the turn's own. One view type either way, so the
+    /// end of the stream swaps nothing.
+    private struct LiveTurnText<Content: View>: View {
+        @ObservedObject var live: LiveAnswerText
+        let id: UUID
+        let fallback: String
+        @ViewBuilder let content: (String) -> Content
+
+        var body: some View {
+            content(live.id == id ? live.text : fallback)
         }
     }
 
@@ -5248,6 +5320,16 @@ struct NotchBody: View {
     private func replyToTurn(_ turn: NotchModel.Turn) {
         withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
             model.beginReply(to: turn)
+            followUpExpanded = true
+        }
+        refocusInput()
+    }
+
+    /// Right-click → Edit: the question's line goes into the follow-up field,
+    /// with the edit chip above it and the caret in it.
+    private func editTurn(_ turn: NotchModel.Turn) {
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+            model.beginEdit(of: turn)
             followUpExpanded = true
         }
         refocusInput()
@@ -5373,7 +5455,9 @@ struct NotchBody: View {
     /// finishes detached and lands in Recent (see `NotchModel.newChat`). Also bound
     /// to the ← arrow key (see ContentView's key handler), so a glance-and-go feels
     /// keyboard-native.
-    private func backButton(size: CGFloat = Tokens.Control.header) -> some View {
+    /// Default size matches the glass trailing cluster opposite it: a 26pt
+    /// segment plus the cluster's 3pt glass padding on each side.
+    private func backButton(size: CGFloat = Tokens.Control.header + 6) -> some View {
         GlassBackButton(size: size) {
             withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                 model.newChat()
@@ -5830,6 +5914,21 @@ struct NotchBody: View {
             if let quote = model.activeReplyQuote {
                 SelectionContextChip(selection: quote, isReply: true) {
                     withAnimation(.easeOut(duration: Tokens.hoverFade)) { model.cancelReply() }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if let offer = model.quoteOffer, model.activeReplyQuote == nil {
+                QuoteOfferChip(text: offer, accept: {
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) { model.acceptQuoteOffer() }
+                    refocusInput()
+                }, dismiss: {
+                    withAnimation(.easeOut(duration: Tokens.hoverFade)) { model.dropQuoteOffer() }
+                })
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if let original = model.activeEditOriginal {
+                SelectionContextChip(selection: original, icon: "pencil", label: L("message.editing")) {
+                    withAnimation(.easeOut(duration: Tokens.hoverFade)) { model.cancelEdit() }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -6477,7 +6576,7 @@ extension NotchModel.ClipboardSense {
         switch self {
         case .hinting(let panel), .saving(let panel), .saved(let panel):
             return panel.leafInk
-        case .idle, .failed:
+        case .idle, .failed, .mapHint:
             return nil
         }
     }
@@ -6604,6 +6703,10 @@ struct SelectionContextChip: View {
     /// The reply chip: the quoted message stands in for the source line, under
     /// the reply glyph.
     var isReply: Bool = false
+    /// A dropped file's chip: its own glyph, and its name in place of the
+    /// source line.
+    var icon: String? = nil
+    var label: String? = nil
     var drop: () -> Void
 
     @State private var hovering = false
@@ -6611,11 +6714,11 @@ struct SelectionContextChip: View {
 
     var body: some View {
         HStack(spacing: 5) {
-            Image(systemName: isReply ? "arrowshape.turn.up.left" : "text.quote")
+            Image(systemName: icon ?? (isReply ? "arrowshape.turn.up.left" : "text.quote"))
                 .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                 .foregroundStyle(Tokens.text4)
-            Text(isReply ? preview
-                 : source.map { L("selection.context.from", $0) } ?? L("selection.context"))
+            Text(label ?? (isReply ? preview
+                 : source.map { L("selection.context.from", $0) } ?? L("selection.context")))
                 .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                 .foregroundStyle(hovering ? Tokens.text2 : Tokens.text3)
                 .lineLimit(1)
@@ -6629,7 +6732,8 @@ struct SelectionContextChip: View {
             }
             .buttonStyle(GlassPressStyle())
             .onHover { hoveringDrop = $0 }
-            .accessibilityLabel(L(isReply ? "message.reply.cancel" : "selection.context.drop"))
+            .accessibilityLabel(label.map { L("file.drop.remove", $0) }
+                                ?? L(isReply ? "message.reply.cancel" : "selection.context.drop"))
         }
         .padding(.leading, 10)
         .padding(.trailing, 5)
@@ -6655,6 +6759,107 @@ struct SelectionContextChip: View {
             .joined(separator: " ")
             .trimmingCharacters(in: .whitespaces)
         return flat.count > 140 ? String(flat.prefix(140)) + "…" : flat
+    }
+}
+
+/// "Follow up on this" for a passage copied out of an answer: the chip that
+/// turns it into the follow-up's quote, in the selection chip's glass.
+private struct QuoteOfferChip: View {
+    let text: String
+    let accept: () -> Void
+    let dismiss: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Button(action: accept) {
+                HStack(spacing: 5) {
+                    Image(systemName: "text.quote")
+                        .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                        .foregroundStyle(Tokens.text4)
+                    Text(L("quote.followUp"))
+                        .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                        .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
+                        .lineLimit(1)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            Button(action: dismiss) {
+                Image(systemName: "xmark")
+                    .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                    .foregroundStyle(Tokens.text4)
+                    .frame(width: 14, height: 14)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(GlassPressStyle())
+        }
+        .padding(.leading, 10)
+        .padding(.trailing, 5)
+        .frame(height: 24)
+        .glassCapsule(in: Capsule(), brighter: hovering)
+        .notchTooltip(String(text.prefix(140)))
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+    }
+}
+
+/// The ⌘F bar over a conversation: the query, where the current match is in
+/// the count, steps up and down, and ×. The selection chip's glass capsule.
+private struct ThreadSearchBar: View {
+    @ObservedObject var model: NotchModel
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        let matches = model.threadSearchMatches
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                .foregroundStyle(Tokens.text4)
+            TextField(L("threadSearch.placeholder"), text: Binding(
+                get: { model.threadSearch?.query ?? "" },
+                set: { model.setThreadSearchQuery($0) }
+            ))
+            .textFieldStyle(.plain)
+            .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+            .foregroundStyle(Tokens.text1)
+            .frame(width: 150)
+            .focused($focused)
+            .onSubmit { model.stepThreadSearch(1); focused = true }
+            if !(model.threadSearch?.query ?? "").isEmpty {
+                Text(matches.isEmpty ? "0/0" : "\((model.threadSearch?.current ?? 0) + 1)/\(matches.count)")
+                    .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                    .monospacedDigit()
+                    .foregroundStyle(Tokens.text3)
+            }
+            ForEach([("chevron.up", -1), ("chevron.down", 1)], id: \.0) { icon, step in
+                Button { model.stepThreadSearch(step) } label: {
+                    Image(systemName: icon)
+                        .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                        .foregroundStyle(matches.isEmpty ? Tokens.text4 : Tokens.text2)
+                        .frame(width: 14, height: 14)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(GlassPressStyle())
+                .disabled(matches.isEmpty)
+            }
+            Button {
+                withAnimation(.easeOut(duration: Tokens.hoverFade)) { model.closeThreadSearch() }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                    .foregroundStyle(Tokens.text4)
+                    .frame(width: 14, height: 14)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(GlassPressStyle())
+            .accessibilityLabel(L("threadSearch.close"))
+        }
+        .padding(.leading, 10)
+        .padding(.trailing, 6)
+        .frame(height: 26)
+        .glassCapsule(in: Capsule(), brighter: true)
+        .onAppear { focused = true }
     }
 }
 
@@ -7290,7 +7495,7 @@ struct UserQuestionBubble: View {
     /// syntax, not user-facing copy: when it reaches a visible question bubble,
     /// present the captured body as a real quote instead of exposing the tags.
     private var selectedTextQuote: (instruction: String, selection: String)? {
-        NotchModel.quoteEnvelope(in: text)
+        NotchModel.quoteEnvelope(in: text) ?? NotchModel.fileEnvelopeQuote(in: text)
     }
 
     /// What the bubble visibly lays out (the transport tags do not consume lines or
@@ -8912,9 +9117,6 @@ private struct UnifiedIntroEnd: View {
                     GlassTextButton(title: L("unifiedIntro.endKeeping", previousName),
                                     fontSize: Tokens.TypeSize.form) { finish(.previous) }
                 }
-            }
-            if offersSeparate {
-                UnifiedIntroOption(title: L("unifiedIntro.separate")) { finish(.separate) }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

@@ -105,6 +105,25 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.8",
+            date: "2026-10-12",
+            features: [
+                "Notchi can remember things about you. Turn on Memory in Settings → Chat.",
+                "Notchi can read your Calendar, Reminders, Notes, Mail and Photos when you ask.",
+                "Notchi can add events to Calendar and save reply drafts in Mail.",
+                "Ask about files in Downloads, Desktop and Documents, or drop a file on the notch.",
+                "Edit a question you already sent.",
+            ],
+            improvements: [
+                "Dates in answers can be added to Reminders or Calendar.",
+                "File paths in answers open in Finder.",
+                "Code blocks are colored, and long ones fold.",
+                "Wide tables scroll sideways and copy as Markdown.",
+                "Long answers stream more smoothly.",
+                "Lab settings moved to Settings → Chat.",
+            ]
+        ),
+        Entry(
             version: "0.9.7",
             date: "2026-10-10",
             features: [

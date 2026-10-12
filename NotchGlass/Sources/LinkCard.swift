@@ -63,34 +63,71 @@ enum LinkCardSplitter {
         guard mayLink || mayBreak else {
             return LinkCardLayout(lead: text, rest: [])
         }
-        let key = ("\(streaming ? 1 : 0)\u{1e}\(trust.pages.sorted().joined(separator: ","))"
+        let params = "\(streaming ? 1 : 0)\u{1e}\(trust.pages.sorted().joined(separator: ","))"
             + "\u{1e}\(trust.hosts.sorted().joined(separator: ","))"
-            + "\u{1e}\(recent.sorted().joined(separator: ","))\u{1e}\(text)") as NSString
+            + "\u{1e}\(recent.sorted().joined(separator: ","))"
+        let key = (params + "\u{1e}" + text) as NSString
         if let hit = cache.object(forKey: key) { return hit.value }
-        let result = compute(text, streaming: streaming, trust: trust, recent: recent)
+        let result = compute(text, streaming: streaming, trust: trust, recent: recent, params: params)
         cache.setObject(Box(result), forKey: key)
         return result
     }
 
+    // MARK: Streaming: split only what changed
+
+    /// Everything `compute` carries from one line to the next.
+    private struct SplitState {
+        var lead: String? = nil
+        var rest: [AnswerSegment] = []
+        var buffer: [String] = []
+        var cards = 0
+        var seen: Set<String>
+        var inFence = false
+        var lastLine: String? = nil
+        var inList = false
+        var pendingBreak = false
+    }
+
+    /// The state before the last line of a text that was split, so the next,
+    /// longer version of that text resumes there. Every line before the last
+    /// one is whole and splits the same way when more text arrives; only the
+    /// last line, still being written, is split again.
+    private struct Checkpoint {
+        let params: String
+        let prefix: String
+        let lineIndex: Int
+        let state: SplitState
+    }
+
+    nonisolated(unsafe) private static var checkpoints: [Checkpoint] = []
+    private static let checkpointLock = NSLock()
+
     private static func compute(_ text: String, streaming: Bool,
-                                trust: Trust, recent: Set<String>) -> LinkCardLayout {
+                                trust: Trust, recent: Set<String>,
+                                params: String) -> LinkCardLayout {
         let lines = text.components(separatedBy: "\n")
         // The line still being written. It is never a card yet: its URL may
         // still be growing.
         let open = streaming ? lines.count - 1 : nil
 
-        var lead: String? = nil
-        var rest: [AnswerSegment] = []
-        var buffer: [String] = []
-        var cards = 0
-        var seen = recent
-        var inFence = false
+        checkpointLock.lock()
+        let resume = checkpoints.last { $0.params == params && text.hasPrefix($0.prefix) }
+        checkpointLock.unlock()
+        let start = resume.map { min($0.lineIndex, lines.count) } ?? 0
+        let initial = resume?.state ?? SplitState(seen: recent)
+
+        var lead = initial.lead
+        var rest = initial.rest
+        var buffer = initial.buffer
+        var cards = initial.cards
+        var seen = initial.seen
+        var inFence = initial.inFence
         // The last line with text in `buffer`, whether it sits in a list, and
         // whether a blank line has come after it — a paragraph break the next
         // line may turn into a new bubble.
-        var lastLine: String? = nil
-        var inList = false
-        var pendingBreak = false
+        var lastLine = initial.lastLine
+        var inList = initial.inList
+        var pendingBreak = initial.pendingBreak
 
         func flush() {
             let body = buffer.joined(separator: "\n")
@@ -146,7 +183,21 @@ enum LinkCardSplitter {
             return true
         }
 
-        for (i, line) in lines.enumerated() {
+        for i in start..<lines.count {
+            let line = lines[i]
+            if i == lines.count - 1, i > start {
+                let cut = text.range(of: "\n", options: .backwards)?.upperBound ?? text.startIndex
+                let checkpoint = Checkpoint(
+                    params: params, prefix: String(text[..<cut]), lineIndex: i,
+                    state: SplitState(lead: lead, rest: rest, buffer: buffer, cards: cards,
+                                      seen: seen, inFence: inFence, lastLine: lastLine,
+                                      inList: inList, pendingBreak: pendingBreak))
+                checkpointLock.lock()
+                checkpoints.removeAll { $0.params == params && checkpoint.prefix.hasPrefix($0.prefix) }
+                checkpoints.append(checkpoint)
+                if checkpoints.count > 4 { checkpoints.removeFirst(checkpoints.count - 4) }
+                checkpointLock.unlock()
+            }
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
                 if !inFence { breakBefore(line) }

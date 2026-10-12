@@ -14,5 +14,8 @@
 	     Notes, text from NSRemindersFullAccessUsageDescription in Info.plist. -->
 	<key>com.apple.security.personal-information.calendars</key>
 	<true/>
+	<!-- read_photos (PersonalDataTools) reads the Photos library on request. -->
+	<key>com.apple.security.personal-information.photos-library</key>
+	<true/>
 </dict>
 </plist>

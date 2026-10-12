@@ -1204,6 +1204,16 @@ struct AgentHarness {
             case "calculate": return L("agent.activity.calc")
             case "search_history": return L("agent.activity.history")
             case "create_note": return L("input.saving")
+            case ReadCalendarTool.toolName, ManageEventTool.toolName: return L("agent.activity.calendar")
+            case ReadRemindersTool.toolName, ManageReminderTool.toolName: return L("agent.activity.reminders")
+            case ReadNotesTool.toolName, EditNoteTool.toolName: return L("agent.activity.notes")
+            case RememberTool.toolName, ForgetTool.toolName, UpdateMemoryTool.toolName:
+                return L("agent.activity.memory")
+            case CurrentContextTool.toolName: return L("agent.activity.screen")
+            case ListFilesTool.toolName, RecentProjectsTool.toolName: return L("agent.activity.listFiles")
+            case ReadPhotosTool.toolName, ReadMailTool.toolName, DraftMailTool.toolName: return L("agent.activity.readFile")
+            case ClipboardHistoryTool.toolName: return L("agent.activity.clipboardHistory")
+            case ReadFileTool.toolName: return L("agent.activity.readFile")
             case RunShellTool.toolName:
                 // Name the command itself, cut to fit the one-line wait slot.
                 if let raw = first.input["command"] as? String {
