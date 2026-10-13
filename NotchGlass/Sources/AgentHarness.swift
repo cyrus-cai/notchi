@@ -583,6 +583,8 @@ struct AgentHarness {
         // model isn't going to speak, and looping on it would only trade a blank
         // answer for a hang. See the empty-close guard below.
         var emptyCloseRetried = false
+        // One round to replace images that do not load (`brokenImagesNote`).
+        var imageRetryDone = false
         // Set by that guard. The next turn must be a plain spoken answer, so it runs
         // with no tools at all — regardless of where the iteration count stands, and
         // regardless of which ceilings would otherwise still allow one.
@@ -851,6 +853,26 @@ struct AgentHarness {
                     continue
                 }
 
+                // Images that do not load: the answer hides them, and the model
+                // gets one more round to replace them — a model asked for
+                // pictures writes plausible Wikimedia paths that 404.
+                if !imageRetryDone, !truncated, iteration < maxIterations {
+                    let images = Self.imageURLs(in: assistantText)
+                    if !images.isEmpty {
+                        let opened = Set(await LinkCheck.opened(images))
+                        let broken = images.filter { !opened.contains($0) }
+                        if !broken.isEmpty {
+                            imageRetryDone = true
+                            convo.append(AgentMessage(kind: .text(role: "assistant", text: assistantText)))
+                            convo.append(AgentMessage(kind: .text(role: "user",
+                                                                  text: Self.brokenImagesNote(broken))))
+                            onText("\n\n")
+                            iteration += 1
+                            continue
+                        }
+                    }
+                }
+
                 // A clean stop → done. But if the model ran out of budget mid-answer,
                 // the visible text is cut off mid-sentence with no sign to the user.
                 // Append a short marker so the reply doesn't just trail off as if
@@ -990,6 +1012,13 @@ struct AgentHarness {
                 }
             }
 
+            // The next turn is the capped one, with no tools. Say so on the last
+            // result, or the model reaches for another call it can only write as
+            // text — the `<tool_call>…` that once ended an answer.
+            if iteration + 1 >= maxIterations, !resultsToSend.isEmpty {
+                resultsToSend[resultsToSend.count - 1].result += Self.stepCapNote
+            }
+
             convo.append(AgentMessage(kind: .assistantToolCalls(text: assistantText,
                                                                 calls: pendingCalls)))
             convo.append(AgentMessage(kind: .toolResults(resultsToSend)))
@@ -1065,6 +1094,31 @@ struct AgentHarness {
     /// found nothing will sometimes rather say nothing than admit the miss, and
     /// silence is precisely the failure we're closing. So "I couldn't find it" is
     /// named explicitly as an acceptable answer.
+    /// The `![alt](url)` images in an answer, in order, without repeats.
+    static func imageURLs(in text: String) -> [URL] {
+        guard let regex = try? NSRegularExpression(pattern: #"!\[[^\]]*\]\((https?://[^)\s]+)\)"#) else { return [] }
+        var seen = Set<String>()
+        return regex.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap { m in
+            guard let r = Range(m.range(at: 1), in: text), seen.insert(String(text[r])).inserted else { return nil }
+            return URL(string: String(text[r]))
+        }
+    }
+
+    /// What the model reads when images it linked do not load.
+    private static func brokenImagesNote(_ urls: [URL]) -> String {
+        "[System note] These images in your answer do not load, and the user cannot see them:\n"
+            + urls.map { "- \($0.absoluteString)" }.joined(separator: "\n")
+            + "\nThe user has already read the rest of your answer. Reply with working images "
+            + "only: use image addresses that appear in search results or in pages you read with "
+            + "read_page, never ones you put together yourself. If you cannot find any, say so in "
+            + "one short line. Do not repeat the rest of the answer."
+    }
+
+    /// Appended to the last tool result before the capped turn (`maxIterations`).
+    private static let stepCapNote = "\n\n[System note] This was the last tool call this round allows. "
+        + "Next, reply to the user without calling tools: what you did, what you found, "
+        + "and what is still left for them to do or to ask you for."
+
     private static func emptyTurnNote(leaked name: String?) -> String {
         let seen: String
         if let name {
@@ -1213,6 +1267,9 @@ struct AgentHarness {
             case ListFilesTool.toolName, RecentProjectsTool.toolName: return L("agent.activity.listFiles")
             case ReadPhotosTool.toolName, ReadMailTool.toolName, DraftMailTool.toolName: return L("agent.activity.readFile")
             case ClipboardHistoryTool.toolName: return L("agent.activity.clipboardHistory")
+            case WeatherTool.toolName: return L("agent.activity.weather")
+            case WiFiStatusTool.toolName: return L("agent.activity.wifi")
+            case RecentSongsTool.toolName: return L("agent.activity.music")
             case ReadFileTool.toolName: return L("agent.activity.readFile")
             case RunShellTool.toolName:
                 // Name the command itself, cut to fit the one-line wait slot.
@@ -1310,11 +1367,36 @@ enum ChangingFactSearch {
     ]
 }
 
+/// A model's reasoning, when it leaks into the answer as `<think>…</think>`.
+/// Only the text outside the tags is the answer: a stray `</think>` means
+/// everything before it was reasoning, and an unclosed `<think>` hides what
+/// follows until it closes.
+enum ReasoningTags {
+    static func visible(_ text: String) -> String {
+        guard text.contains("think>") else { return text }
+        var rest = text
+        if let close = rest.range(of: "</think>", options: .backwards),
+           rest[..<close.lowerBound].range(of: "<think>") == nil {
+            rest = String(rest[close.upperBound...])
+        }
+        var out = ""
+        while let open = rest.range(of: "<think>") {
+            out += rest[..<open.lowerBound]
+            guard let close = rest.range(of: "</think>", range: open.upperBound..<rest.endIndex) else {
+                return out.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            rest = String(rest[close.upperBound...])
+        }
+        out += rest
+        return out.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 /// Strips tool-call DSL markup that some models occasionally leak into their
 /// *text* output instead of returning a structured tool_call. The tell-tale is a
 /// `<|…|>` opener (e.g. MiniMax's `<|DSML|tool_calls>` / `<|DSML|invoke name=…>`);
 /// normal answer prose never contains the `<` + pipe sequence, so it's a safe
-/// sentinel. The pipe comes in two flavors: the ASCII `|` (U+007C) and the
+/// sentinel. GLM also writes `<tool_call>name<arg_key>…`, the second opener. The pipe comes in two flavors: the ASCII `|` (U+007C) and the
 /// **fullwidth** `｜` (U+FF5C). Chinese-trained tokenizers (MiniMax, DeepSeek,
 /// GLM, Kimi, Qwen) emit their special control tokens with the fullwidth bar —
 /// the real leaked token is `<｜tool▁calls｜>`, not `<|...|>` — so both must be
@@ -1333,8 +1415,10 @@ enum ChangingFactSearch {
 /// see `recoveredCalls`. Hiding the soup from the user is right; losing the call
 /// inside it is what turned a leaked turn into a blank answer.
 private struct ToolMarkupFilter {
-    private var suppressing = false   // saw `<|` — swallow the rest of the turn
-    private var heldBracket = false   // last char was a bare `<`, decision pending
+    private var suppressing = false   // saw an opener — swallow the rest of the turn
+    /// Text from a `<` whose meaning is still open: the bare `<`, or a prefix
+    /// of `<tool_call>`. Released as ordinary text once it can no longer be one.
+    private var held = ""
     /// Everything swallowed from the opener onward, verbatim, for `recoveredCalls`.
     private var captured = ""
 
@@ -1343,49 +1427,50 @@ private struct ToolMarkupFilter {
     /// markup (`<｜…｜>`) and not just the half-width `<|…|>`.
     private static func isPipe(_ c: Character) -> Bool { c == "|" || c == "\u{FF5C}" }
 
+    /// GLM's other spelling: `<tool_call>name<arg_key>…</arg_key><arg_value>…`.
+    private static let tagOpener = "<tool_call>"
+
     /// Feed one streamed chunk; returns the portion safe to show the user.
     mutating func feed(_ piece: String) -> String {
         if suppressing { captured += piece; return "" }
         var out = ""
-        // A `<` carried over from the previous chunk: decide it now.
-        var s = Substring(piece)
-        if heldBracket {
-            heldBracket = false
-            if let first = s.first {
-                if Self.isPipe(first) {                 // `<|` → leak begins
+        var rest = Substring(piece)
+        while let c = rest.first {
+            if held.isEmpty {
+                guard let lt = rest.firstIndex(of: "<") else { out += rest; break }
+                out += rest[..<lt]
+                held = "<"
+                rest = rest[rest.index(after: lt)...]
+                continue
+            }
+            if held == "<", Self.isPipe(c) {            // `<|` → leak begins
+                suppressing = true
+                captured += held + rest
+                held = ""
+                return out
+            }
+            let next = held + String(c)
+            if Self.tagOpener.hasPrefix(next) {
+                rest = rest.dropFirst()
+                if next == Self.tagOpener {             // `<tool_call>` → leak begins
                     suppressing = true
-                    captured += "<" + piece             // the held `<` opened it
+                    captured += next + rest
+                    held = ""
                     return out
                 }
-                out.append("<")                                          // stray `<`, keep it
-            } else {
-                heldBracket = true                                  // still nothing after `<`
-                return out
+                held = next
+                continue
             }
+            out += held                                 // a `<` that opened nothing
+            held = ""
         }
-        while let lt = s.firstIndex(of: "<") {
-            out += s[s.startIndex..<lt]
-            let after = s.index(after: lt)
-            if after == s.endIndex {        // chunk ends exactly on `<` — hold it
-                heldBracket = true
-                return out
-            }
-            if Self.isPipe(s[after]) {      // `<|` → start of leaked markup
-                suppressing = true
-                captured += s[lt...]
-                return out
-            }
-            out.append("<")                 // a `<` not followed by `|` is real text
-            s = s[after...]
-        }
-        out += s
         return out
     }
 
-    /// Stream ended: release a held bare `<` (it never became an opener).
+    /// Stream ended: release held text (it never became an opener).
     mutating func flush() -> String? {
-        defer { heldBracket = false }
-        return heldBracket ? "<" : nil
+        defer { held = "" }
+        return held.isEmpty ? nil : held
     }
 
     /// The tool calls hiding inside the markup this turn swallowed, decoded into
@@ -1418,6 +1503,9 @@ private enum LeakedToolCall {
     static func parse(_ markup: String,
                       isKnownTool: (String) -> Bool) -> [(name: String, input: [String: Any])] {
         guard !markup.isEmpty else { return [] }
+        if markup.contains("<arg_key>") || markup.hasPrefix("<tool_call>") {
+            return parseTagged(markup, isKnownTool: isKnownTool)
+        }
         let payload = strippingMarkers(markup)
         var out: [(name: String, input: [String: Any])] = []
         var cursor = payload.startIndex
@@ -1434,6 +1522,33 @@ private enum LeakedToolCall {
     }
 
     private static func isPipe(_ c: Character) -> Bool { c == "|" || c == "\u{FF5C}" }
+
+    /// GLM's tagged form: `<tool_call>name<arg_key>k</arg_key><arg_value>v</arg_value>…</tool_call>`.
+    /// A value that parses as JSON (a number, a bool, an object) keeps that type;
+    /// anything else is a string. A block cut off before `</tool_call>` is dropped.
+    private static func parseTagged(_ markup: String,
+                                    isKnownTool: (String) -> Bool) -> [(name: String, input: [String: Any])] {
+        guard let pair = try? NSRegularExpression(
+            pattern: #"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>"#,
+            options: [.dotMatchesLineSeparators]) else { return [] }
+        var out: [(name: String, input: [String: Any])] = []
+        for block in markup.components(separatedBy: "<tool_call>").dropFirst() {
+            guard let close = block.range(of: "</tool_call>") else { continue }
+            let body = String(block[..<close.lowerBound])
+            let name = String(body.prefix { $0 != "<" }).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard isKnownTool(name) else { continue }
+            var input: [String: Any] = [:]
+            for m in pair.matches(in: body, range: NSRange(body.startIndex..., in: body)) {
+                guard let k = Range(m.range(at: 1), in: body), let v = Range(m.range(at: 2), in: body) else { continue }
+                let raw = String(body[v])
+                input[String(body[k]).trimmingCharacters(in: .whitespaces)] =
+                    (try? JSONSerialization.jsonObject(with: Data(raw.utf8), options: [.fragmentsAllowed]))
+                    .flatMap { $0 is String ? nil : $0 } ?? raw
+            }
+            out.append((name: name, input: input))
+        }
+        return out
+    }
 
     /// Drop every `<｜…｜>` control marker, leaving a space in its place so the
     /// words on either side can't glue into one token. An unterminated marker means

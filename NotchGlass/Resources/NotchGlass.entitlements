@@ -17,5 +17,12 @@
 	<!-- read_photos (PersonalDataTools) reads the Photos library on request. -->
 	<key>com.apple.security.personal-information.photos-library</key>
 	<true/>
+	<!-- weather and wifi_status (WeatherTools) read this Mac's location; macOS
+	     also hides the Wi-Fi network name from apps without it. -->
+	<key>com.apple.security.personal-information.location</key>
+	<true/>
+	<!-- travel_time reads the home and work address on the user's own card. -->
+	<key>com.apple.security.personal-information.addressbook</key>
+	<true/>
 </dict>
 </plist>

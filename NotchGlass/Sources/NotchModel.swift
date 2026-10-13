@@ -65,8 +65,64 @@ private struct LossyElement<T: Decodable>: Decodable {
 final class ConversationStore: ObservableObject {
     var turns: [NotchModel.Turn] = [] {
         willSet { if !quiet { objectWillChange.send() } }
+        didSet {
+            drawnCache = nil
+            streamingCache = nil
+            agentCache = nil
+            loopCache = nil
+            indexCache = nil
+        }
     }
     private var quiet = false
+
+    // What the thread's views read off the turns, worked out once per write.
+    // Each was a pass over the whole thread, and every mounted turn ran
+    // several of them on each redraw.
+    private var drawnCache: [NotchModel.Turn]?
+    private var streamingCache: Bool?
+    private var agentCache: Bool?
+    private var loopCache: Bool?
+    private var indexCache: [UUID: Int]?
+
+    /// The turns the thread draws (`Turn.isDrawn`).
+    var drawnTurns: [NotchModel.Turn] {
+        if let drawnCache { return drawnCache }
+        let drawn = turns.filter(\.isDrawn)
+        drawnCache = drawn
+        return drawn
+    }
+
+    var isStreaming: Bool {
+        if let streamingCache { return streamingCache }
+        let streaming = turns.contains { $0.streaming }
+        streamingCache = streaming
+        return streaming
+    }
+
+    var hasAgentTurn: Bool {
+        if let agentCache { return agentCache }
+        let agent = turns.contains { $0.isAgent }
+        agentCache = agent
+        return agent
+    }
+
+    /// Whether the thread is a chat loop's (`Turn.loopRound`).
+    var hasLoopRound: Bool {
+        if let loopCache { return loopCache }
+        let loop = turns.contains { $0.loopRound != nil }
+        loopCache = loop
+        return loop
+    }
+
+    /// The position of a turn in `turns`.
+    func index(of id: UUID) -> Int? {
+        if let indexCache { return indexCache[id] }
+        var map: [UUID: Int] = [:]
+        map.reserveCapacity(turns.count)
+        for (i, turn) in turns.enumerated() { map[turn.id] = i }
+        indexCache = map
+        return map[id]
+    }
 
     /// Write without invalidating the views that observe the store.
     func silently(_ write: () -> Void) {
@@ -227,6 +283,10 @@ final class NotchModel: ObservableObject {
         /// "明天" from today's. Nil on assistant turns and on turns saved before
         /// it existed. Persisted.
         var sentAt: Date? = nil
+        /// An *assistant* answer cut off before it finished — the connection
+        /// dropped or the user pressed stop with text already written. Draws
+        /// "Continue" under it (`continueAnswer`). Persisted.
+        var interrupted: Bool = false
 
         struct Capture: Codable, Equatable, Hashable {
             var kind: CaptureRequest.Kind
@@ -262,7 +322,7 @@ final class NotchModel: ObservableObject {
         // it. `decodeIfPresent` + defaults is what keeps old saved conversations
         // loadable. `role`/`text` are required — every saved turn has them.
         // `toolActivity` is deliberately absent: it's runtime-only UI state.
-        enum CodingKeys: String, CodingKey { case id, role, text, streaming, hidesUserBubble, usedClipboard, sources, isError, regenModel, answerModel, imageFiles, isAgent, agentLog, reasoning, loopRound, reaction, sharedLinks, isLocal, captures, sentAt }
+        enum CodingKeys: String, CodingKey { case id, role, text, streaming, hidesUserBubble, usedClipboard, sources, isError, regenModel, answerModel, imageFiles, isAgent, agentLog, reasoning, loopRound, reaction, sharedLinks, isLocal, captures, sentAt, interrupted }
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -288,6 +348,7 @@ final class NotchModel: ObservableObject {
             // value drops the line rather than the whole history list.
             captures     = (try? c.decodeIfPresent([Capture].self, forKey: .captures)) ?? []
             sentAt       = try c.decodeIfPresent(Date.self, forKey: .sentAt)
+            interrupted  = try c.decodeIfPresent(Bool.self, forKey: .interrupted) ?? false
         }
     }
 
@@ -639,6 +700,13 @@ final class NotchModel: ObservableObject {
     /// The app that selection came from ("Safari"), for the badge. `nil` when the
     /// name is unavailable — the badge then just says a selection is in use.
     @Published private(set) var selectionContextSource: String?
+    /// The running app the selection is in, so an answer can be pasted back
+    /// over it (`replaceOriginal`).
+    private var selectionContextApp: NSRunningApplication?
+    /// Answers whose question was asked over a selection, and the app that
+    /// selection is in. Lives for the session only: after a relaunch the
+    /// selection is long gone.
+    private(set) var replaceTargets: [UUID: NSRunningApplication] = [:]
     /// The last selection dropped with the badge's ×. Kept across closes so the
     /// same still-highlighted paragraph doesn't march back in on the next summon:
     /// the × means "not this text", and it holds until the user highlights
@@ -2062,6 +2130,15 @@ final class NotchModel: ObservableObject {
         return id
     }
 
+    /// A loop whose round one waits for a time of day. Its thread is created
+    /// when that round runs, under the id the loop is registered with now.
+    private func beginScheduledChatLoop(prompt: String, minutes: Int, firstRunAt: Date) {
+        bindChatLoops()
+        LoopInterval.remember(minutes)
+        ChatLoopManager.shared.register(id: UUID(), prompt: prompt, minutes: minutes,
+                                        firstRoundAt: firstRunAt)
+    }
+
     /// One loop round on the thread (`nil` for round one's new thread). From
     /// round two on the question bubble is hidden — it is the loop's own prompt,
     /// already at the top of the record. Runs in the panel when the thread is
@@ -3147,6 +3224,7 @@ final class NotchModel: ObservableObject {
             case promptShortcutRemoval(UUID)
             case customInstructions(String)
             case proxy(String)
+            case weatherCity(String)
             case aiProvider(Provider)
             case aiModel(Provider, String)
             case apiKey(Provider, String)
@@ -3155,6 +3233,18 @@ final class NotchModel: ObservableObject {
             case customProviderName(String)
             case customProviderURL(String)
             case customProviderModel(String)
+
+            /// Changes that move a key, where requests are sent, what every
+            /// request is told, whether commands run, or delete a binding.
+            var needsConfirmation: Bool {
+                switch self {
+                case .apiKey, .searchAPIKey, .proxy, .customProviderURL,
+                     .customInstructions, .runCommands, .promptShortcutRemoval:
+                    return true
+                default:
+                    return false
+                }
+            }
         }
 
         let key: String
@@ -3177,9 +3267,10 @@ final class NotchModel: ObservableObject {
     private var settingsConfirmationAnswers: Set<UUID> = []
 
     /// Entry point injected into `ManageAppSettingsTool` for this answer round.
-    /// Listing is read-only and returns immediately. Every update — including a
-    /// multi-setting batch — suspends on the same in-answer choice card used by
-    /// `ask_user`, then commits only when the positive option is tapped.
+    /// Listing is read-only and returns immediately. An update applies at once,
+    /// unless the batch holds a change in `Payload.needsConfirmation`: then the
+    /// whole batch suspends on the in-answer choice card used by `ask_user` and
+    /// commits only when the positive option is tapped.
     func handleAppSettingsRequest(answerID: UUID,
                                   request: AppSettingsRequest) async throws -> String {
         if request.action == .list { return appSettingsSnapshot() }
@@ -3230,15 +3321,20 @@ final class NotchModel: ObservableObject {
             return "No change was needed; those settings already have the requested values."
         }
 
-        let copy = appSettingsConfirmationCopy()
-        let lines = effective.map(\.summary).joined(separator: "\n")
-        let choice = try await awaitUserChoice(
-            answerID: answerID,
-            question: copy.question + "\n" + lines,
-            options: [copy.cancel, copy.confirm],
-            inlineOptions: true)
-        guard choice == "The user chose: \"\(copy.confirm)\"" else {
-            return "Cancelled. No settings were changed."
+        // Ordinary preferences apply at once; the user can flip them back.
+        // A batch that touches a key, where requests go, what the model is
+        // always told, shell access, or deletes a shortcut waits on the card.
+        if effective.contains(where: { $0.payload.needsConfirmation }) {
+            let copy = appSettingsConfirmationCopy()
+            let lines = effective.map(\.summary).joined(separator: "\n")
+            let choice = try await awaitUserChoice(
+                answerID: answerID,
+                question: copy.question + "\n" + lines,
+                options: [copy.cancel, copy.confirm],
+                inlineOptions: true)
+            guard choice == "The user chose: \"\(copy.confirm)\"" else {
+                return "Cancelled. No settings were changed."
+            }
         }
 
         // Login-item registration is the only commit that can fail. Do it before
@@ -3315,6 +3411,8 @@ final class NotchModel: ObservableObject {
                 customInstructions = value
             case .proxy(let value):
                 proxyURL = value
+            case .weatherCity(let value):
+                WeatherCity.value = value
             case .aiProvider(let provider):
                 APIKeyStore.selectedProvider = provider
                 refreshAI = true
@@ -3387,18 +3485,29 @@ final class NotchModel: ObservableObject {
             guard prompt.count <= 4000 else {
                 return "Error: the prompt is too long. Keep it under 4000 characters."
             }
-            guard settingsConfirmationAnswers.insert(answerID).inserted else {
-                return "Error: another confirmation is already waiting in this answer."
+            // Hourly or slower is at most 168 billed rounds over the loop's
+            // week, and the user asked for it in this message: start it. A
+            // faster loop bills up to 60 times as many rounds and still asks.
+            if Self.loopNeedsConfirmation(minutes: minutes) {
+                guard settingsConfirmationAnswers.insert(answerID).inserted else {
+                    return "Error: another confirmation is already waiting in this answer."
+                }
+                defer { settingsConfirmationAnswers.remove(answerID) }
+                let copy = loopConfirmationCopy(minutes: minutes, firstRunAt: request.firstRunAt)
+                let choice = try await awaitUserChoice(
+                    answerID: answerID,
+                    question: copy.start + "\n" + prompt + "\n" + copy.schedule,
+                    options: [copy.cancel, copy.confirmStart],
+                    inlineOptions: true)
+                guard choice == "The user chose: \"\(copy.confirmStart)\"" else {
+                    return "Cancelled. No loop was started."
+                }
             }
-            defer { settingsConfirmationAnswers.remove(answerID) }
-            let copy = loopConfirmationCopy(minutes: minutes)
-            let choice = try await awaitUserChoice(
-                answerID: answerID,
-                question: copy.start + "\n" + prompt + "\n" + copy.schedule,
-                options: [copy.cancel, copy.confirmStart],
-                inlineOptions: true)
-            guard choice == "The user chose: \"\(copy.confirmStart)\"" else {
-                return "Cancelled. No loop was started."
+            if let first = request.firstRunAt {
+                beginScheduledChatLoop(prompt: prompt, minutes: minutes, firstRunAt: first)
+                return "Started. Round one runs at \(Self.captureDueDescription(first)) in its own "
+                    + "thread; then every \(LoopInterval.short(minutes)), for up to 7 days, while "
+                    + "Notchi is open. The user can stop it from the task list."
             }
             guard beginChatLoop(prompt: prompt, minutes: minutes) != nil else {
                 return "Error: the loop could not start."
@@ -3424,7 +3533,7 @@ final class NotchModel: ObservableObject {
             guard let minutes = request.minutes else {
                 return "Error: action=set_interval needs interval_minutes."
             }
-            if minutes < loop.intervalMinutes {
+            if minutes < loop.intervalMinutes, Self.loopNeedsConfirmation(minutes: minutes) {
                 guard settingsConfirmationAnswers.insert(answerID).inserted else {
                     return "Error: another confirmation is already waiting in this answer."
                 }
@@ -3444,26 +3553,30 @@ final class NotchModel: ObservableObject {
         }
     }
 
-    private func loopConfirmationCopy(minutes: Int)
+    /// A loop that runs more often than hourly waits on the Confirm card.
+    static func loopNeedsConfirmation(minutes: Int) -> Bool { minutes < 60 }
+
+    private func loopConfirmationCopy(minutes: Int, firstRunAt: Date? = nil)
         -> (start: String, change: String, schedule: String,
             confirmStart: String, confirmChange: String, cancel: String) {
         let every = LoopInterval.short(minutes)
         let rounds = LoopInterval.maxRounds(minutes: minutes)
+        let first = firstRunAt.map(Self.captureDueDescription) ?? ""
         switch Localization.shared.language.resolved {
         case .zhHans: return ("开始这个循环？", "更改这个循环的间隔？",
-                              "每 \(every) · 最多 \(rounds) 轮", "开始", "更改", "取消")
+                              (first.isEmpty ? "" : "首次 \(first) · ") + "每 \(every) · 最多 \(rounds) 轮", "开始", "更改", "取消")
         case .zhHant: return ("開始這個循環？", "更改這個循環的間隔？",
-                              "每 \(every) · 最多 \(rounds) 輪", "開始", "更改", "取消")
+                              (first.isEmpty ? "" : "首次 \(first) · ") + "每 \(every) · 最多 \(rounds) 輪", "開始", "更改", "取消")
         case .ja:     return ("このループを開始しますか？", "このループの間隔を変更しますか？",
-                              "\(every)ごと · 最大\(rounds)回", "開始", "変更", "キャンセル")
+                              (first.isEmpty ? "" : "初回 \(first) · ") + "\(every)ごと · 最大\(rounds)回", "開始", "変更", "キャンセル")
         case .ko:     return ("이 반복을 시작할까요?", "이 반복의 간격을 변경할까요?",
-                              "\(every)마다 · 최대 \(rounds)회", "시작", "변경", "취소")
+                              (first.isEmpty ? "" : "첫 실행 \(first) · ") + "\(every)마다 · 최대 \(rounds)회", "시작", "변경", "취소")
         case .fr:     return ("Lancer cette boucle ?", "Changer l'intervalle de cette boucle ?",
-                              "Toutes les \(every) · \(rounds) tours au plus", "Lancer", "Changer", "Annuler")
+                              (first.isEmpty ? "" : "Premier tour \(first) · ") + "Toutes les \(every) · \(rounds) tours au plus", "Lancer", "Changer", "Annuler")
         case .es:     return ("¿Iniciar este bucle?", "¿Cambiar el intervalo de este bucle?",
-                              "Cada \(every) · hasta \(rounds) rondas", "Iniciar", "Cambiar", "Cancelar")
+                              (first.isEmpty ? "" : "Primera ronda \(first) · ") + "Cada \(every) · hasta \(rounds) rondas", "Iniciar", "Cambiar", "Cancelar")
         case .en:     return ("Start this loop?", "Change this loop's interval?",
-                              "Every \(every) · up to \(rounds) rounds", "Start", "Change", "Cancel")
+                              (first.isEmpty ? "" : "First round \(first) · ") + "Every \(every) · up to \(rounds) rounds", "Start", "Change", "Cancel")
         }
     }
 
@@ -3484,8 +3597,8 @@ final class NotchModel: ObservableObject {
         switch request.kind {
         case .note:
             result = await commitNoteCapture(line)
-        case .memory, .reminderUpdate, .mailDraft:
-            // Memory, reminder changes and drafts have their own tools.
+        case .memory, .reminderUpdate, .mailDraft, .copied:
+            // Memory, reminder changes, drafts and copies have their own tools.
             return "Error: use update_memory or manage_reminder."
         case .event:
             switch Self.eventDraft(line, request: request) {
@@ -3514,7 +3627,19 @@ final class NotchModel: ObservableObject {
             case "monthly": .monthly
             default: nil
             }
-            result = await commitReminderCapture(line, due: due, recurrence: explicit)
+            var until: Date?
+            if let raw = request.repeatUntil {
+                guard let day = Self.parseCaptureDue(raw) else {
+                    return "Error: could not read repeat_until=\"\(raw)\". Give the last day as YYYY-MM-DD."
+                }
+                // The whole last day counts.
+                until = Calendar.current.date(bySettingHour: 23, minute: 59, second: 0, of: day)
+                if let due, let end = until, end < due {
+                    return "Error: repeat_until is before the first time it fires."
+                }
+            }
+            result = await commitReminderCapture(line, due: due, recurrence: explicit, until: until,
+                                                 list: request.list)
         }
         if let link = result.link {
             markCapture(Turn.Capture(kind: request.kind, link: link), answerID: answerID)
@@ -3573,6 +3698,7 @@ final class NotchModel: ObservableObject {
         case .note:     openCapture(source: .note, link: capture.link)
         case .reminder, .reminderUpdate: openCapture(source: .reminder, link: capture.link)
         case .mailDraft: openApp(bundleID: "com.apple.mail")
+        case .copied: break
         case .event:
             if let link = capture.link, let url = URL(string: link) {
                 NSWorkspace.shared.open(url)
@@ -3626,26 +3752,35 @@ final class NotchModel: ObservableObject {
     /// The reminder write. A `nil` due files a dateless reminder — it
     /// shows in the list without ringing, which is honest and better than refusing.
     private func commitReminderCapture(_ line: String, due: Date?,
-                                       recurrence: RemindersService.RecurrenceKind? = nil) async -> (message: String, link: String??) {
+                                       recurrence: RemindersService.RecurrenceKind? = nil,
+                                       until: Date? = nil, list: String? = nil) async -> (message: String, link: String??) {
         let result: Result<String?, RemindersError> = await withCheckedContinuation { cont in
-            RemindersService.createReminder(line, due: due, recurrence: recurrence) { cont.resume(returning: $0) }
+            RemindersService.createReminder(line, due: due, recurrence: recurrence, until: until,
+                                            listName: list) { cont.resume(returning: $0) }
         }
         // Say whether it repeats, so the answer never tells the user to set a
         // repeat that is already set (only a dated reminder repeats).
-        let repeats: String
+        var repeats: String
         switch due == nil ? nil : (recurrence ?? RemindersService.recurrenceKind(in: line)) {
         case .daily?: repeats = " It repeats every day."
         case .weekly?: repeats = " It repeats every week on that weekday."
         case .monthly?: repeats = " It repeats every month."
         case nil: repeats = " It does not repeat."
         }
+        if let until, due != nil, repeats != " It does not repeat." {
+            let day = DateFormatter()
+            day.locale = Foundation.Locale(identifier: "en_US_POSIX")
+            day.dateFormat = "yyyy-MM-dd"
+            repeats = String(repeats.dropLast()) + ", until \(day.string(from: until)) (its last day)."
+        }
         switch result {
         case .success(let link):
             persistCapture(line, source: .reminder, link: link)
+            let inList = list.flatMap(RemindersService.listTitle(named:)).map { " It is in their \"\($0)\" list." } ?? ""
             guard let due else {
-                return ("Saved. The reminder is in the user's Reminders app, with no alarm time.", .some(link))
+                return ("Saved. The reminder is in the user's Reminders app, with no alarm time.\(inList)", .some(link))
             }
-            return ("Saved. The reminder is in the user's Reminders app, due \(Self.captureDueDescription(due)).\(repeats)", .some(link))
+            return ("Saved. The reminder is in the user's Reminders app, due \(Self.captureDueDescription(due)).\(repeats)\(inList)", .some(link))
         case .failure(let err):
             return ("Error: \(err.errorDescription ?? "couldn't create the reminder.")", nil)
         }
@@ -3791,7 +3926,7 @@ final class NotchModel: ObservableObject {
             // Search lives inside Model now — its rows are a group on that pane.
             return "model"
         case "general", "app_language", "launch_at_login", "dock_icon", "menu_bar_icon",
-             "proxy", "capture", "notes", "note_destination", "notes_folder":
+             "proxy", "weather_city", "capture", "notes", "note_destination", "notes_folder":
             return "general"
         case "chat", "emoji_reactions", "message_sounds", "custom_instructions":
             return "chat"
@@ -3869,6 +4004,7 @@ final class NotchModel: ObservableObject {
             "summon_shortcut=\(shortcut.enabled ? shortcut.displayString : "disabled")",
             "custom_instructions=\(customInstructions.isEmpty ? "(empty)" : customInstructions)",
             "proxy=\(proxyURL.isEmpty ? "auto" : proxyURL)",
+            "weather_city=\(WeatherCity.value.isEmpty ? "(empty)" : WeatherCity.value)",
             "ai_provider=\(Self.providerToken(provider))",
             "ai_model=\(modelID.isEmpty ? "default" : modelID)",
             "api_key[\(Self.providerToken(provider))]=\(providerKey)",
@@ -4065,6 +4201,11 @@ final class NotchModel: ObservableObject {
             let proxy = cleared ? "" : value
             return made(setting, L("network.proxy"), proxy.isEmpty ? "Auto" : proxy,
                         .proxy(proxy), noOp: proxy == proxyURL)
+
+        case "weather_city":
+            let city = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return made(setting, L("weather.city"), city.isEmpty ? nil : city,
+                        .weatherCity(city), noOp: city == WeatherCity.value)
 
         case "ai_provider":
             guard let provider = Self.parseProvider(value) else {
@@ -4327,17 +4468,52 @@ final class NotchModel: ObservableObject {
         }
     }
 
-    /// The card a command flagged by `ShellRisk` waits on: the command as
-    /// written, then Cancel / Run. Anything but Run — Cancel, or the card timing
+    /// The card a command flagged by `ShellRisk` waits on: what an `osascript`
+    /// send or delete will do (`scriptActionCopy`), the command as written,
+    /// then Cancel / Run. Anything but Run — Cancel, or the card timing
     /// out unanswered — leaves the command unrun.
     func confirmShellCommand(answerID: UUID, command: String) async throws -> Bool {
-        let copy = shellConfirmationCopy()
+        let copy = ShellRisk.scriptAction(command).map(scriptActionCopy) ?? shellConfirmationCopy()
         let choice = try await awaitUserChoice(
             answerID: answerID,
             question: copy.question + "\n" + command,
             options: [copy.cancel, copy.run],
             inlineOptions: true)
         return choice == "The user chose: \"\(copy.run)\""
+    }
+
+    /// The card for an `osascript` that sends or deletes: what it will do, in
+    /// words, above the script — for a message, who gets it and what it says.
+    private func scriptActionCopy(_ action: ShellRisk.ScriptAction) -> (question: String, run: String, cancel: String) {
+        // message, to, text, send, mail, emptyTrash, emptyTrashRun, delete
+        let t: [String]
+        switch Localization.shared.language.resolved {
+        case .zhHans: t = ["发送这条信息？", "收件人：", "内容：", "发送", "发送这封邮件？",
+                           "清空废纸篓？里面的文件会被永久删除。", "清空", "运行这段会删除内容的脚本？"]
+        case .zhHant: t = ["傳送這則訊息？", "收件人：", "內容：", "傳送", "傳送這封郵件？",
+                           "清空垃圾桶？裡面的檔案會被永久刪除。", "清空", "執行這段會刪除內容的腳本？"]
+        case .ja:     t = ["このメッセージを送信しますか？", "宛先：", "内容：", "送信", "このメールを送信しますか？",
+                           "ゴミ箱を空にしますか？中のファイルは完全に削除されます。", "空にする", "削除を含むこのスクリプトを実行しますか？"]
+        case .ko:     t = ["이 메시지를 보낼까요?", "받는 사람: ", "내용: ", "보내기", "이 이메일을 보낼까요?",
+                           "휴지통을 비울까요? 안의 파일은 영구적으로 삭제됩니다.", "비우기", "삭제가 포함된 이 스크립트를 실행할까요?"]
+        case .fr:     t = ["Envoyer ce message ?", "À : ", "Texte : ", "Envoyer", "Envoyer cet e-mail ?",
+                           "Vider la corbeille ? Ses fichiers seront supprimés définitivement.", "Vider", "Exécuter ce script ? Il supprime quelque chose."]
+        case .es:     t = ["¿Enviar este mensaje?", "Para: ", "Texto: ", "Enviar", "¿Enviar este correo?",
+                           "¿Vaciar la papelera? Sus archivos se eliminarán de forma permanente.", "Vaciar", "¿Ejecutar este script? Elimina algo."]
+        case .en:     t = ["Send this message?", "To: ", "Text: ", "Send", "Send this email?",
+                           "Empty the Trash? Its files will be deleted permanently.", "Empty Trash", "Run this script? It deletes something."]
+        }
+        let shell = shellConfirmationCopy()
+        switch action {
+        case .message(let to, let text):
+            var lines = [t[0]]
+            if let to { lines.append(t[1] + to) }
+            if let text { lines.append(t[2] + text) }
+            return (lines.joined(separator: "\n"), t[3], shell.cancel)
+        case .mail: return (t[4], t[3], shell.cancel)
+        case .emptyTrash: return (t[5], t[6], shell.cancel)
+        case .delete: return (t[7], shell.run, shell.cancel)
+        }
     }
 
     /// `manage_reminder` action=delete waits on this card.
@@ -4419,8 +4595,8 @@ final class NotchModel: ObservableObject {
     /// and end with the app.
     private var scheduledActions: [UUID: Task<Void, Never>] = [:]
 
-    /// Confirm the command on the answer's card now, then run it once after
-    /// `minutes`. The run's output is not shown anywhere; a failure is logged.
+    /// Confirm the command on the answer's card now when `ShellRisk` flags it,
+    /// then run it once after `minutes`. The run's output is not shown anywhere; a failure is logged.
     func scheduleAction(answerID: UUID, command: String, minutes: Int) async throws -> String {
         let when = Date().addingTimeInterval(TimeInterval(minutes * 60))
         let fmt = DateFormatter()
@@ -4432,8 +4608,10 @@ final class NotchModel: ObservableObject {
         case .ko:              label = "\(fmt.string(from: when))에 실행: \(command)"
         default:               label = "At \(fmt.string(from: when)): \(command)"
         }
-        guard try await confirmShellCommand(answerID: answerID, command: label) else {
-            return "The user did not approve. Nothing was scheduled. Do not retry."
+        if ShellRisk.needsConfirmation(command) {
+            guard try await confirmShellCommand(answerID: answerID, command: label) else {
+                return "The user did not approve. Nothing was scheduled. Do not retry."
+            }
         }
         let id = UUID()
         scheduledActions[id] = Task { [weak self] in
@@ -6121,6 +6299,10 @@ final class NotchModel: ObservableObject {
     /// The main thread's result page scroller, reported by NotchBody while the
     /// long layout is mounted. A collapse starts only from its bottom.
     weak var threadScrollView: NSScrollView?
+    /// Whether the result page's window ends before the thread's newest turn
+    /// (after ⌘F jumped far up), so the bottom of its scroller is not the
+    /// bottom of the thread.
+    var threadWindowStopsShort = false
 
     /// The idle prompt + bucket row's height at rest, kept across panel
     /// closes: a collapse can start on a panel that opened straight onto the
@@ -6201,7 +6383,8 @@ final class NotchModel: ObservableObject {
     private var threadScrolledToBottom: Bool {
         guard let scroll = threadScrollView, scroll.window != nil,
               let document = scroll.documentView else { return true }
-        return scroll.contentView.bounds.maxY >= document.frame.height - 2
+        return !threadWindowStopsShort
+            && scroll.contentView.bounds.maxY >= document.frame.height - 2
     }
 
     /// Scroll events reach the pull through one app-wide monitor, installed the
@@ -7470,7 +7653,7 @@ final class NotchModel: ObservableObject {
         text = ""; turns = []
         replyTarget = nil
         editTarget = nil
-        threadSearch = nil
+        closeThreadSearch()
         quoteOffer = nil
         showHistory = false
         showSettings = false
@@ -7528,7 +7711,7 @@ final class NotchModel: ObservableObject {
         text = ""; turns = []
         replyTarget = nil
         editTarget = nil
-        threadSearch = nil
+        closeThreadSearch()
         quoteOffer = nil
         showHistory = false
         showSettings = false
@@ -7628,11 +7811,12 @@ final class NotchModel: ObservableObject {
     /// Carry the selection read at the open edge into the idle prompt. Silent
     /// no-op for everything that isn't worth carrying — an empty read, a surface
     /// that doesn't accept one, or the exact text the user already said no to.
-    func attachSelectionContext(_ selected: String, from app: String?) {
+    func attachSelectionContext(_ selected: String, from app: NSRunningApplication?) {
         let body = selected.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !body.isEmpty, acceptsSelectionContext, body != dismissedSelection else { return }
         selectionContext = selected
-        selectionContextSource = app
+        selectionContextSource = app?.localizedName
+        selectionContextApp = app
     }
 
     /// The × on the badge: this answer is not about that. Remembered, so the next
@@ -7642,6 +7826,7 @@ final class NotchModel: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         selectionContext = nil
         selectionContextSource = nil
+        selectionContextApp = nil
     }
 
     /// Drop the carried selection because the page changed under it (a new chat,
@@ -7651,6 +7836,19 @@ final class NotchModel: ObservableObject {
     private func clearSelectionContext() {
         selectionContext = nil
         selectionContextSource = nil
+        selectionContextApp = nil
+    }
+
+    /// The "Replace original text" under an answer: close the panel and paste
+    /// the answer, as plain text, over the selection its question was about.
+    func replaceOriginal(turnID: UUID) {
+        guard let app = replaceTargets[turnID],
+              let answer = turns.first(where: { $0.id == turnID }) else { return }
+        let text = MarkdownParser.plainText(answer.text).trimmingCharacters(in: .whitespacesAndNewlines)
+        fullClose()
+        _ = SelectionReplacer.paste(text, into: app) { [weak self] in
+            self?.rebaselineClipboardAfterInAppWrite()
+        }
     }
 
     /// A prompt shortcut whose presentation is a compact pointer-side window.
@@ -7806,6 +8004,7 @@ final class NotchModel: ObservableObject {
             return
         }
         if let selection = selectionContext {
+            let sourceApp = selectionContextApp
             clearSelectionContext()
             let instruction = text.trimmingCharacters(in: .whitespacesAndNewlines)
             // A selection that is the typed line itself (the question was copied
@@ -7826,6 +8025,9 @@ final class NotchModel: ObservableObject {
                 // Separate threads keep the prompt-shortcut shape: the wrapped
                 // payload is wire context, with no bubble.
                 submit(hideUserBubble: !unifiedThreadsEnabled)
+                if let sourceApp, let answer = turns.last, answer.role == "assistant" {
+                    replaceTargets[answer.id] = sourceApp
+                }
                 return
             }
         }
@@ -7949,6 +8151,13 @@ final class NotchModel: ObservableObject {
     /// append, cap, and delete interaction. Text-only clipboards fall through to
     /// the editor's ordinary paste behavior.
     func handleComposePasteImage() -> Bool {
+        if !agentComposeActive, agentThreadContinuation == nil {
+            let pdfs = Self.pasteboardPDFs()
+            if !pdfs.isEmpty {
+                readAndAttach(pdfs, fromPaste: true)
+                return true
+            }
+        }
         guard let image = Self.pasteboardImage() else { return false }
         if agentComposeActive {
             guard agentComposeImages.count < Self.composeImageLimit else { return true }
@@ -8013,6 +8222,13 @@ final class NotchModel: ObservableObject {
         return nil
     }
 
+    /// PDF files copied in Finder.
+    static func pasteboardPDFs() -> [URL] {
+        let urls = NSPasteboard.general.readObjects(
+            forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        return urls.filter { UTType(filenameExtension: $0.pathExtension)?.conforms(to: .pdf) == true }
+    }
+
     /// A thumbnail's × in the attached-images strip — drop that one, keep the
     /// rest and keep composing.
     func removeAgentComposeImage(at index: Int) {
@@ -8051,15 +8267,14 @@ final class NotchModel: ObservableObject {
     // MARK: - Files dropped on the island
 
     /// Files other than a project folder attach to the next ask
-    /// (`handleFileDrop`). Off for now: a drop only takes a single folder.
+    /// (`handleFileDrop`). Off for now: a drop takes a single folder or PDFs.
     static let fileDropAskEnabled = false
     /// The `askScreen` chord (`askAboutScreenArea`). Off for now: the chord is
     /// not registered and Settings does not list it.
     static let screenAreaAskEnabled = false
 
-    /// ⌘F search in the conversation on screen (`openThreadSearch`). Off until
-    /// it is tested.
-    static let threadSearchEnabled = false
+    /// ⌘F search in the conversation on screen (`openThreadSearch`).
+    static let threadSearchEnabled = true
 
     /// The text all dropped files may add to one message, together. Past it a
     /// file is cut, and says so.
@@ -8071,14 +8286,24 @@ final class NotchModel: ObservableObject {
     /// (`handleAgentFolderDrop`); anything else attaches to the next ask on the
     /// idle prompt: an image as a pasted image (when the model takes images),
     /// a PDF or text file as its text. Files that are neither are ignored.
+    /// While `fileDropAskEnabled` is off, only PDFs attach.
     func handleFileDrop(_ urls: [URL]) {
         if urls.count == 1, isDirectory(urls[0]) {
             handleAgentFolderDrop(urls[0])
             return
         }
-        guard Self.fileDropAskEnabled else { return }
-        let files = urls.filter { !isDirectory($0) }
+        var files = urls.filter { !isDirectory($0) }
+        if !Self.fileDropAskEnabled {
+            files = files.filter { UTType(filenameExtension: $0.pathExtension)?.conforms(to: .pdf) == true }
+        }
         guard !files.isEmpty else { return }
+        readAndAttach(files, fromPaste: false)
+    }
+
+    /// Read `files` off the main thread and attach them to the next ask:
+    /// images as compose images, the rest as text. A drop starts a fresh ask
+    /// (`attachDropped`); a paste joins the line being typed.
+    private func readAndAttach(_ files: [URL], fromPaste: Bool) {
         let takesImages = activeModelSupportsVision
         let budget = Self.droppedFileTextLimit - droppedFiles.reduce(0) { $0 + $1.text.count }
         Task.detached(priority: .userInitiated) {
@@ -8101,8 +8326,22 @@ final class NotchModel: ObservableObject {
                 texts.append(DroppedFile(name: url.lastPathComponent, text: body))
             }
             await MainActor.run { [images, texts] in
-                self.attachDropped(images: images, files: texts)
+                if fromPaste {
+                    self.attachPasted(files: texts)
+                } else {
+                    self.attachDropped(images: images, files: texts)
+                }
             }
+        }
+    }
+
+    private func attachPasted(files: [DroppedFile]) {
+        guard !files.isEmpty else { return }
+        collapseHistory()
+        noteUserTyping()
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+            manualPanelOverride = .chat
+            droppedFiles.append(contentsOf: files)
         }
     }
 
@@ -8167,11 +8406,18 @@ final class NotchModel: ObservableObject {
 
     /// The text in an image, read with the Vision framework on this Mac.
     nonisolated static func recognizedText(at url: URL) -> String? {
+        recognizedText(with: VNImageRequestHandler(url: url))
+    }
+
+    nonisolated static func recognizedText(in image: CGImage) -> String? {
+        recognizedText(with: VNImageRequestHandler(cgImage: image))
+    }
+
+    private nonisolated static func recognizedText(with handler: VNImageRequestHandler) -> String? {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = true
         request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US", "ja-JP", "ko-KR"]
-        let handler = VNImageRequestHandler(url: url)
         guard (try? handler.perform([request])) != nil else { return nil }
         let lines = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
         let text = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -8185,13 +8431,12 @@ final class NotchModel: ObservableObject {
         }
     }
 
-    /// A PDF's text, or a text file's contents. Nil for anything else, a PDF
-    /// with no text layer, or a file that is too large or not UTF-8.
-    /// Also `read_file`'s reader.
+    /// A PDF's text, or a text file's contents. Nil for anything else, or a
+    /// file that is too large or not UTF-8. Also `read_file`'s reader.
     nonisolated static func droppedFileText(_ url: URL, type: UTType?) -> String? {
         let body: String?
         if type?.conforms(to: .pdf) == true {
-            body = PDFDocument(url: url)?.string
+            body = pdfText(url)
         } else {
             let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
             guard size <= droppedFileByteLimit,
@@ -8207,6 +8452,34 @@ final class NotchModel: ObservableObject {
         }
         let trimmed = body?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// How many pages of a scanned PDF are read with OCR.
+    private static let pdfOCRPageLimit = 20
+
+    /// A PDF's text layer. A scanned PDF has none; its first pages are read
+    /// with the Vision framework on this Mac instead.
+    nonisolated static func pdfText(_ url: URL) -> String? {
+        guard let document = PDFDocument(url: url) else { return nil }
+        if let text = document.string?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !text.isEmpty {
+            return text
+        }
+        var pages: [String] = []
+        for index in 0..<min(document.pageCount, pdfOCRPageLimit) {
+            guard let page = document.page(at: index) else { continue }
+            let bounds = page.bounds(for: .mediaBox)
+            let image = page.thumbnail(of: CGSize(width: bounds.width * 2, height: bounds.height * 2),
+                                       for: .mediaBox)
+            guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+                  let text = recognizedText(in: cgImage) else { continue }
+            pages.append(text)
+        }
+        guard !pages.isEmpty else { return nil }
+        if document.pageCount > pdfOCRPageLimit {
+            pages.append("[… pages after \(pdfOCRPageLimit) were not read]")
+        }
+        return pages.joined(separator: "\n\n")
     }
 
     private func isDirectory(_ url: URL) -> Bool {
@@ -8476,7 +8749,7 @@ final class NotchModel: ObservableObject {
     /// Drives the affordances that must read differently there: the follow-up
     /// placeholder names the chat model as the answerer, and the result header
     /// grows an open-folder button.
-    var threadIsAgentRun: Bool { turns.contains { $0.isAgent } }
+    var threadIsAgentRun: Bool { conversation.hasAgentTurn }
 
     /// The working folder of the agent run behind the on-screen thread — non-nil
     /// only for a reopened `.agent` row that kept its folder path. Drives the
@@ -9555,7 +9828,14 @@ final class NotchModel: ObservableObject {
                 }
                 agentTools.append(RecentProjectsTool { await MainActor.run { AgentFolderMRU.entries } })
                 agentTools.append(TravelTimeTool())
+                agentTools.append(WeatherTool())
+                agentTools.append(WiFiStatusTool())
+                agentTools.append(RecentSongsTool())
                 agentTools.append(ReadMailTool())
+                agentTools.append(CopyToClipboardTool { [weak self] in
+                    await self?.rebaselineClipboardAfterInAppWrite()
+                    await self?.markCaptureLine(.copied, answerID: answerID)
+                })
                 agentTools.append(DraftMailTool { [weak self] in
                     await self?.markCaptureLine(.mailDraft, answerID: answerID)
                 })
@@ -9914,6 +10194,7 @@ final class NotchModel: ObservableObject {
                     if let i = thread.firstIndex(where: { $0.id == answerID }) {
                         thread[i].text = saved
                         thread[i].streaming = false
+                        thread[i].interrupted = true
                     }
                     let walkedAway = !self.isPresented(answerID: answerID)
                     self.persistThread(thread, threadID: threadID, answer: saved)
@@ -9924,6 +10205,9 @@ final class NotchModel: ObservableObject {
                     if self.isOnScreen(answerID: answerID) {
                         self.updateAnswer(id: answerID, text: saved)
                         self.markFinished(id: answerID)
+                        if let j = self.turns.firstIndex(where: { $0.id == answerID }) {
+                            self.turns[j].interrupted = true
+                        }
                         self.mode = .result
                     } else if walkedAway, loopRound == nil {
                         // Interrupted but salvaged a partial answer, and the user had
@@ -9996,7 +10280,7 @@ final class NotchModel: ObservableObject {
     /// affordance's gate (XII-122). A round detached by `newChat`/`fullClose`
     /// keeps streaming into its snapshot but is no longer on-screen, so it
     /// doesn't count (there's nothing visible to stop).
-    var isStreaming: Bool { turns.contains { $0.streaming } }
+    var isStreaming: Bool { conversation.isStreaming }
 
     /// Stop the in-flight ask (XII-122) — the streaming answer's stop button and
     /// Esc both land here. Cancels the current task but KEEPS whatever already
@@ -10019,7 +10303,10 @@ final class NotchModel: ObservableObject {
         var partial = ""
         for i in turns.indices where turns[i].streaming {
             turns[i].streaming = false
-            if turns[i].role == "assistant" { partial = turns[i].text }
+            if turns[i].role == "assistant" {
+                partial = turns[i].text
+                turns[i].interrupted = !partial.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
         }
         if partial.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             // Nothing streamed yet: an empty assistant bubble is dead weight —
@@ -10038,6 +10325,29 @@ final class NotchModel: ObservableObject {
             persistThread(turns, threadID: threadHistoryID, answer: partial)
         }
     }
+
+    /// "Continue" under an answer that was cut off: drop its "connection lost"
+    /// line and ask the model, in a hidden line, to carry on from the last word.
+    /// The rest arrives as the next answer, directly under the partial one.
+    func continueAnswer(turnID: UUID) {
+        guard !isStreaming, let i = turns.firstIndex(where: { $0.id == turnID }),
+              turns[i].interrupted, turns.last?.id == turnID else { return }
+        let suffix = L("error.interrupted")
+        if turns[i].text.hasSuffix(suffix) { turns[i].text.removeLast(suffix.count) }
+        turns[i].interrupted = false
+        let saved = (text: text, images: askComposeImages)
+        text = Self.continueInstruction
+        askComposeImages = []
+        submit(hideUserBubble: true)
+        text = saved.text
+        askComposeImages = saved.images
+    }
+
+    /// The hidden line `continueAnswer` sends. English: the model reads it, the
+    /// user never sees it.
+    static let continueInstruction = "[Continue] Your previous answer was cut off. Continue it "
+        + "from exactly where it stopped. Do not repeat anything you already wrote and do not "
+        + "start over; begin with the next words, in the same language and format."
 
     /// Retry the Ask that just failed (XII-85). The failed turn pair (the question
     /// plus its empty/error assistant turn) is still on screen; drop the assistant
@@ -10489,46 +10799,32 @@ final class NotchModel: ObservableObject {
 
     // MARK: - Searching the thread on screen (⌘F)
 
-    struct ThreadSearch: Equatable {
-        var query = ""
-        /// Index into `threadSearchMatches`.
-        var current = 0
-    }
-
-    @Published var threadSearch: ThreadSearch?
-
-    /// The drawn turns whose text contains the query, oldest first.
-    var threadSearchMatches: [UUID] {
-        guard let query = threadSearch?.query.trimmingCharacters(in: .whitespaces), !query.isEmpty else { return [] }
-        return turns.filter { $0.isDrawn && $0.text.localizedCaseInsensitiveContains(query) }.map(\.id)
-    }
-
-    var threadSearchTarget: UUID? {
-        let matches = threadSearchMatches
-        guard let search = threadSearch, !matches.isEmpty else { return nil }
-        return matches[min(max(search.current, 0), matches.count - 1)]
-    }
+    /// The ⌘F state. Its query, matches and position publish on their own
+    /// object, so typing in the bar redraws the bar and the matching turns
+    /// only, not every view that observes the model.
+    private(set) lazy var threadSearch = ThreadSearchState { [unowned self] in self.turns }
+    /// Whether the ⌘F bar is up.
+    @Published private(set) var threadSearchOpen = false
+    private var threadSearchTurnsWatch: AnyCancellable?
 
     func openThreadSearch() {
-        if threadSearch == nil { threadSearch = ThreadSearch() }
+        guard !threadSearchOpen else { return }
+        threadSearch.reset()
+        threadSearchOpen = true
+        // Turns that change under an open search (an answer streams in, a
+        // turn is deleted) are matched again once they settle.
+        threadSearchTurnsWatch = conversation.objectWillChange
+            .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
+            .sink { [weak self] _ in self?.threadSearch.refresh() }
     }
 
-    /// A new query starts at the newest match, nearest the reader.
-    func setThreadSearchQuery(_ query: String) {
-        guard threadSearch != nil else { return }
-        threadSearch?.query = query
-        threadSearch?.current = max(threadSearchMatches.count - 1, 0)
-    }
+    func stepThreadSearch(_ delta: Int) { threadSearch.step(delta) }
 
-    /// Move to the next (1) or previous (-1) match, wrapping around.
-    func stepThreadSearch(_ delta: Int) {
-        let count = threadSearchMatches.count
-        guard var search = threadSearch, count > 0 else { return }
-        search.current = ((search.current + delta) % count + count) % count
-        threadSearch = search
+    func closeThreadSearch() {
+        threadSearchTurnsWatch = nil
+        threadSearch.reset()
+        if threadSearchOpen { threadSearchOpen = false }
     }
-
-    func closeThreadSearch() { threadSearch = nil }
 
     // MARK: - Editing a sent question
 
@@ -10556,7 +10852,7 @@ final class NotchModel: ObservableObject {
     func canEdit(_ turn: Turn) -> Bool {
         turn.role == "user" && !turn.hidesUserBubble && !turn.isLocal && turn.imageFiles.isEmpty
             && !threadIsAgentRun && !isStreaming && canDeleteTurns(in: threadHistoryID)
-            && turns.contains { $0.id == turn.id }
+            && conversation.index(of: turn.id) != nil
     }
 
     /// Put the question's own line in the follow-up field for rewriting.
@@ -12232,4 +12528,117 @@ enum MessageTone {
 @MainActor
 final class ThreadPullLive: ObservableObject {
     @Published var progress: CGFloat = 0
+}
+
+/// The ⌘F search over the conversation on screen (`NotchModel.threadSearch`).
+/// `draft` is the field as typed; matching runs off the main thread once
+/// typing pauses, and `query`, `matches` and `target` change together when it
+/// lands.
+@MainActor
+final class ThreadSearchState: ObservableObject {
+    /// The field's text. Not published: the bar keeps its own copy, and a
+    /// keystroke redraws nothing else.
+    private var draft = ""
+    /// The query the matches and highlights are for.
+    @Published private(set) var query = ""
+    /// Turns whose text contains `query`, oldest first.
+    @Published private(set) var matches: [UUID] = []
+    @Published private(set) var matchSet: Set<UUID> = []
+    /// Which match is on screen. Its own object: every mounted turn observes
+    /// this one for its highlight, and a step must not redraw them.
+    let position = Position()
+
+    @MainActor
+    final class Position: ObservableObject {
+        /// Index into `matches`.
+        @Published fileprivate(set) var current = 0
+        /// The match on screen.
+        @Published fileprivate(set) var target: UUID?
+    }
+
+    var current: Int { position.current }
+    var target: UUID? { position.target }
+
+    /// How long typing has to pause before the thread is searched.
+    private static let settle: Duration = .milliseconds(120)
+
+    private let turns: () -> [NotchModel.Turn]
+    private var pending: Task<Void, Never>?
+    private var generation = 0
+
+    init(turns: @escaping () -> [NotchModel.Turn]) {
+        self.turns = turns
+    }
+
+    func reset() {
+        pending?.cancel()
+        generation += 1
+        draft = ""
+        apply(query: "", matches: [], keep: nil)
+    }
+
+    /// Move to the next (1) or previous (-1) match, wrapping around.
+    func step(_ delta: Int) {
+        let count = matches.count
+        guard count > 0 else { return }
+        let index = ((current + delta) % count + count) % count
+        position.current = index
+        position.target = matches[index]
+    }
+
+    /// Match again over the turns as they are now, keeping the current match
+    /// when it is still there.
+    func refresh() {
+        let query = draft.trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty else { return }
+        let keep = query == self.query ? target : nil
+        pending?.cancel()
+        pending = Task { [weak self] in await self?.run(query, keep: keep) }
+    }
+
+    /// The field changed.
+    func type(_ text: String) {
+        guard text != draft else { return }
+        draft = text
+        pending?.cancel()
+        let query = draft.trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty else {
+            generation += 1
+            apply(query: "", matches: [], keep: nil)
+            return
+        }
+        pending = Task { [weak self] in
+            try? await Task.sleep(for: Self.settle)
+            guard !Task.isCancelled else { return }
+            await self?.run(query, keep: nil)
+        }
+    }
+
+    private func run(_ query: String, keep: UUID?) async {
+        generation += 1
+        let generation = generation
+        // Hidden questions are skipped. Any other undrawn turn has no text
+        // to match.
+        let haystack = turns().compactMap { $0.hidesUserBubble ? nil : ($0.id, $0.text) }
+        let found = await Task.detached(priority: .userInitiated) {
+            haystack.compactMap { id, text in
+                text.range(of: query, options: .caseInsensitive) == nil ? nil : id
+            }
+        }.value
+        guard generation == self.generation, !Task.isCancelled else { return }
+        apply(query: query, matches: found, keep: keep)
+    }
+
+    /// A new query starts at the newest match, nearest the reader.
+    private func apply(query: String, matches: [UUID], keep: UUID?) {
+        if self.query != query { self.query = query }
+        if self.matches != matches {
+            self.matches = matches
+            matchSet = Set(matches)
+        }
+        let index = keep.flatMap { matches.firstIndex(of: $0) } ?? max(matches.count - 1, 0)
+        if current != index { position.current = index }
+        let target = matches.isEmpty ? nil : matches[index]
+        if self.target != target { position.target = target }
+    }
 }

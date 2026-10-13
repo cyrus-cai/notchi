@@ -163,7 +163,6 @@ struct InlineSettingsView: View {
     /// What Notchi remembers about the user (`UserMemory`), folded like the
     /// instructions above it.
     @ObservedObject private var memory = UserMemory.shared
-    @State private var memorySectionOpen = false
     @ObservedObject private var clipboardHistory = ClipboardHistory.shared
 
     /// The model catalog behind the picker — live lists, the fold, and which providers
@@ -322,13 +321,15 @@ struct InlineSettingsView: View {
         case pricing = "Pricing" // Blend1 per-model rates — reached from the wallet's links
         case balances = "Balances" // Blend1 gifts and purchases — reached from the wallet's links
         case privacy = "Privacy" // what happens to a Blend1 request — reached from the wallet's links
+        case memory = "Memory"   // the saved facts — reached from Chat
+        case clipboardHistory = "ClipboardHistory" // recent copies — reached from Chat
         var id: String { rawValue }
 
         /// A sub-page rather than a category: reached from a parent pane, drawn
         /// across the whole panel, and left through the header's back pill or Esc.
         var isDetail: Bool {
             self == .licenses || self == .survey || self == .usage || self == .pricing || self == .balances
-                || self == .privacy
+                || self == .privacy || self == .memory || self == .clipboardHistory
         }
 
         /// The section a sub-page sits under — where back (and ⎋) returns to.
@@ -337,6 +338,7 @@ struct InlineSettingsView: View {
             switch self {
             case .licenses, .survey: return .about
             case .usage, .pricing, .balances, .privacy: return .model
+            case .memory, .clipboardHistory: return .chat
             default:               return nil
             }
         }
@@ -367,6 +369,8 @@ struct InlineSettingsView: View {
             case .pricing:    return L("model.pricing")
             case .balances:   return L("nono.balances")
             case .privacy:    return L("nono.privacy.title")
+            case .memory:     return L("memory.title")
+            case .clipboardHistory: return L("clipboardHistory.toggle")
             }
         }
     }
@@ -494,12 +498,14 @@ struct InlineSettingsView: View {
 
     /// Which disclosure chip owns the pointer. Permissions and Advanced can share
     /// one pane, so a single Bool would brighten both at once.
-    private enum DisclosureHover { case keys, instructions, memory, permissions, advanced }
+    private enum DisclosureHover { case keys, instructions, memory, clipboard, permissions, advanced }
     @State private var hoveredDisclosure: DisclosureHover?
 
     /// What the proxy field resolves to right now — filled in asynchronously by
     /// `refreshProxyStatus` because detection may spawn a login shell.
     @State private var proxyStatus: String = ""
+    /// `WeatherCity`'s storage; the row edits it in place.
+    @AppStorage("weather.city") private var weatherCity: String = ""
 
     /// Live macOS authorization state for the three protected capabilities the
     /// app actually uses. These are refreshed whenever General appears and when
@@ -867,6 +873,7 @@ struct InlineSettingsView: View {
                     .captionLabel()
                 customInstructionsRow
                 memoryRow
+                if ClipboardHistory.available { clipboardHistoryRow }
                 suggestFollowUpRow
                 runCommandsRow
                 Text(L("chat.group.effects"))
@@ -941,6 +948,10 @@ struct InlineSettingsView: View {
                 balancesSection
             case .privacy:
                 NonoPrivacyNote()
+            case .memory:
+                memoryPage
+            case .clipboardHistory:
+                clipboardHistoryPage
             }
             }
             .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -3497,10 +3508,7 @@ struct InlineSettingsView: View {
             set: { on in
                 Haptics.levelChange()
                 memory.enabled = on
-                if on {
-                    model.scanHistoryForMemories()
-                    withAnimation(.easeOut(duration: 0.16)) { memorySectionOpen = true }
-                }
+                if on { model.scanHistoryForMemories() }
             }
         ))
         .labelsHidden()
@@ -3510,56 +3518,55 @@ struct InlineSettingsView: View {
         .accessibilityLabel(L("memory.toggle"))
     }
 
-    /// The facts `remember` saved, each with its own ×, and Forget all. Same
-    /// disclosure chip as `customInstructionsRow`; the × is the prompt
-    /// template picker's.
+    /// Memory's chip, opening `memoryPage`, with the master switch beside it.
     private var memoryRow: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Button {
-                    NotchPanel.exemptNextDoubleClick()
-                    withAnimation(.easeOut(duration: 0.16)) { memorySectionOpen.toggle() }
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "chevron.right")
-                            .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
-                            .rotationEffect(.degrees(memorySectionOpen ? 90 : 0))
-                        Text(L("memory.title"))
+        HStack(spacing: 8) {
+            Button {
+                NotchPanel.exemptNextDoubleClick()
+                open(.memory)
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "chevron.right")
+                        .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                    Text(L("memory.title"))
+                        .font(.sf(Tokens.TypeSize.label, weight: .medium))
+                    if !memory.entries.isEmpty {
+                        Text("\(memory.entries.count)")
                             .font(.sf(Tokens.TypeSize.label, weight: .medium))
-                        if !memory.entries.isEmpty {
-                            Text("\(memory.entries.count)")
-                                .font(.sf(Tokens.TypeSize.label, weight: .medium))
-                                .foregroundStyle(Tokens.text3)
-                                .monospacedDigit()
-                        }
+                            .foregroundStyle(Tokens.text3)
+                            .monospacedDigit()
                     }
-                    .foregroundStyle(Tokens.text1)
-                    .padding(.horizontal, 10)
-                    .frame(height: 26)
-                    .background(
-                        Capsule()
-                            .fill(.white.opacity(hoveredDisclosure == .memory ? 0.12 : 0.06))
-                    )
-                    .overlay(
-                        Capsule()
-                            .strokeBorder(.white.opacity(hoveredDisclosure == .memory ? 0.22 : 0.12),
-                                          lineWidth: 0.5)
-                    )
-                    .contentShape(Capsule())
                 }
-                .buttonStyle(.plain).exemptsDoubleClickPin()
-                .onHover { inside in
-                    if inside { hoveredDisclosure = .memory }
-                    else if hoveredDisclosure == .memory { hoveredDisclosure = nil }
-                }
-                .animation(.easeOut(duration: Tokens.hoverFade), value: hoveredDisclosure)
-                .onChange(of: memorySectionOpen) { _, open in
-                    if open { model.scanHistoryForMemories() }
-                }
-                memoryToggle
+                .foregroundStyle(Tokens.text1)
+                .padding(.horizontal, 10)
+                .frame(height: 26)
+                .background(
+                    Capsule()
+                        .fill(.white.opacity(hoveredDisclosure == .memory ? 0.12 : 0.06))
+                )
+                .overlay(
+                    Capsule()
+                        .strokeBorder(.white.opacity(hoveredDisclosure == .memory ? 0.22 : 0.12),
+                                      lineWidth: 0.5)
+                )
+                .contentShape(Capsule())
             }
+            .buttonStyle(.plain).exemptsDoubleClickPin()
+            .onHover { inside in
+                if inside { hoveredDisclosure = .memory }
+                else if hoveredDisclosure == .memory { hoveredDisclosure = nil }
+            }
+            .animation(.easeOut(duration: Tokens.hoverFade), value: hoveredDisclosure)
+            SettingInfo(L("memory.info"))
+            memoryToggle
+        }
+    }
 
-            if memorySectionOpen, memory.enabled, memory.scanning {
+    /// The Memory sub-page: the facts `remember` saved, each with its own ×,
+    /// and Forget all.
+    private var memoryPage: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if memory.enabled, memory.scanning {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
                     Text(L("memory.scanning"))
@@ -3567,7 +3574,7 @@ struct InlineSettingsView: View {
                         .foregroundStyle(Tokens.text2)
                 }
             }
-            if memorySectionOpen, memory.enabled, !memory.scanning {
+            if !memory.scanning {
                 VStack(alignment: .leading, spacing: 0) {
                     if memory.entries.isEmpty {
                         Text(L("memory.empty"))
@@ -3583,18 +3590,11 @@ struct InlineSettingsView: View {
                                 .foregroundStyle(Tokens.text1)
                                 .fixedSize(horizontal: false, vertical: true)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                            Button {
+                            ListRowRemoveButton(label: L("memory.delete")) {
                                 withAnimation(.easeOut(duration: Tokens.hoverFade)) {
                                     memory.delete(entry.id)
                                 }
-                            } label: {
-                                Image(systemName: "xmark")
-                                    .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
-                                    .foregroundStyle(Tokens.text2)
-                                    .frame(width: Tokens.Control.inline, height: Tokens.Control.inline)
                             }
-                            .buttonStyle(PromptTemplateChipStyle(shape: Circle()))
-                            .accessibilityLabel(L("memory.delete"))
                         }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
@@ -3617,11 +3617,50 @@ struct InlineSettingsView: View {
                 }
             }
         }
+        .onAppear { model.scanHistoryForMemories() }
     }
 
-    /// Recent copies kept for Ask (`ClipboardHistory`). Turning it off clears it.
+    /// Clipboard history's chip, opening `clipboardHistoryPage`, with the
+    /// switch beside it. Laid out like `memoryRow`. Turning it off clears it.
     private var clipboardHistoryRow: some View {
-        settingRow(label: L("clipboardHistory.toggle"), info: L("clipboardHistory.info")) {
+        HStack(spacing: 8) {
+            Button {
+                NotchPanel.exemptNextDoubleClick()
+                open(.clipboardHistory)
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "chevron.right")
+                        .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                    Text(L("clipboardHistory.toggle"))
+                        .font(.sf(Tokens.TypeSize.label, weight: .medium))
+                    if !clipboardHistory.entries.isEmpty {
+                        Text("\(clipboardHistory.entries.count)")
+                            .font(.sf(Tokens.TypeSize.label, weight: .medium))
+                            .foregroundStyle(Tokens.text3)
+                            .monospacedDigit()
+                    }
+                }
+                .foregroundStyle(Tokens.text1)
+                .padding(.horizontal, 10)
+                .frame(height: 26)
+                .background(
+                    Capsule()
+                        .fill(.white.opacity(hoveredDisclosure == .clipboard ? 0.12 : 0.06))
+                )
+                .overlay(
+                    Capsule()
+                        .strokeBorder(.white.opacity(hoveredDisclosure == .clipboard ? 0.22 : 0.12),
+                                      lineWidth: 0.5)
+                )
+                .contentShape(Capsule())
+            }
+            .buttonStyle(.plain).exemptsDoubleClickPin()
+            .onHover { inside in
+                if inside { hoveredDisclosure = .clipboard }
+                else if hoveredDisclosure == .clipboard { hoveredDisclosure = nil }
+            }
+            .animation(.easeOut(duration: Tokens.hoverFade), value: hoveredDisclosure)
+            SettingInfo(L("clipboardHistory.info"))
             Toggle("", isOn: Binding(
                 get: { clipboardHistory.enabled },
                 set: { Haptics.levelChange(); clipboardHistory.enabled = $0 }
@@ -3630,6 +3669,55 @@ struct InlineSettingsView: View {
             .toggleStyle(.switch)
             .controlSize(.mini)
             .tint(Tokens.text2)
+            .accessibilityLabel(L("clipboardHistory.toggle"))
+        }
+    }
+
+    /// The Clipboard history sub-page: recent copies, newest first, each with
+    /// a ×, and Clear all.
+    private var clipboardHistoryPage: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 0) {
+                if clipboardHistory.entries.isEmpty {
+                    Text(L("clipboardHistory.empty"))
+                        .font(.sf(Tokens.TypeSize.form))
+                        .foregroundStyle(Tokens.text3)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                }
+                ForEach(clipboardHistory.entries, id: \.text) { entry in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(entry.text)
+                            .font(.sf(Tokens.TypeSize.form))
+                            .foregroundStyle(Tokens.text1)
+                            .lineLimit(3)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        ListRowRemoveButton(label: L("clipboardHistory.delete")) {
+                            withAnimation(.easeOut(duration: Tokens.hoverFade)) {
+                                clipboardHistory.delete(entry.text)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                }
+            }
+            .padding(.vertical, 2)
+            .recessedSurface(in: RoundedRectangle.control, lit: false)
+
+            if !clipboardHistory.entries.isEmpty {
+                Button {
+                    withAnimation(.easeOut(duration: Tokens.hoverFade)) { clipboardHistory.clear() }
+                } label: {
+                    Text(L("clipboardHistory.clearAll"))
+                        .font(.sf(Tokens.TypeSize.label, weight: .medium))
+                        .foregroundStyle(Tokens.text2)
+                        .padding(.horizontal, 12)
+                        .frame(minHeight: 28)
+                }
+                .buttonStyle(PromptTemplateChipStyle(shape: Capsule()))
+            }
         }
     }
 
@@ -4097,10 +4185,13 @@ struct InlineSettingsView: View {
             .animation(.easeOut(duration: Tokens.hoverFade), value: hoveredDisclosure)
 
             if advancedSectionOpen {
-                proxyRow
-                    // Unfolds downward out of the disclosure line rather than
-                    // popping in at full height.
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                VStack(alignment: .leading, spacing: 12) {
+                    proxyRow
+                    weatherCityRow
+                }
+                // Unfolds downward out of the disclosure line rather than
+                // popping in at full height.
+                .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
         .clipped()
@@ -4154,6 +4245,37 @@ struct InlineSettingsView: View {
                 .truncationMode(.middle)
         }
         .onAppear { refreshProxyStatus() }
+    }
+
+    /// The city `weather` falls back to when Location access is off. Same field
+    /// shape as the proxy row above it.
+    private var weatherCityRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 3) {
+                Text(L("weather.city"))
+                    .font(.sf(Tokens.TypeSize.form))
+                    .foregroundStyle(Tokens.text1)
+                SettingInfo(L("weather.city.hint"))
+            }
+            ZStack(alignment: .topLeading) {
+                if weatherCity.isEmpty {
+                    Text(L("weather.city.placeholder"))
+                        .font(.sf(Tokens.TypeSize.form))
+                        .foregroundStyle(Tokens.text3)
+                        .allowsHitTesting(false)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                }
+                TextField("", text: $weatherCity)
+                    .textFieldStyle(.plain)
+                    .font(.sf(Tokens.TypeSize.form))
+                    .foregroundStyle(Tokens.text1)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .onChange(of: weatherCity) { model.noteUserTyping() }
+            }
+            .recessedSurface(in: RoundedRectangle.control, lit: false)
+        }
     }
 
     /// Resolving can spawn a login shell (the ".zshrc-only proxy" case), so it never
@@ -4632,7 +4754,6 @@ struct InlineSettingsView: View {
                     .font(.sf(Tokens.TypeSize.label, weight: .medium))
                     .foregroundStyle(Tokens.text1)
                 copySenseRow
-                if ClipboardHistory.available { clipboardHistoryRow }
             }
             promptShortcutsGroup
             ForEach(Array(AppShortcutReference.groups(
@@ -8709,5 +8830,29 @@ enum SettingsNewMarks {
     static var copySenseSeen: Bool {
         get { UserDefaults.standard.bool(forKey: copySenseKey) }
         set { UserDefaults.standard.set(newValue, forKey: copySenseKey) }
+    }
+}
+
+/// The × on a Memory or Clipboard history row: a bare glyph that lights up with
+/// a faint circle on hover, as the selection context chip's × does
+/// (`NotchBody`), with no glass of its own.
+private struct ListRowRemoveButton: View {
+    let label: String
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "xmark")
+                .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                .foregroundStyle(hovering ? Tokens.text1 : Tokens.text4)
+                .frame(width: Tokens.Control.inline, height: Tokens.Control.inline)
+                .background(Circle().fill(.white.opacity(hovering ? 0.14 : 0)))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain).exemptsDoubleClickPin()
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+        .accessibilityLabel(label)
     }
 }

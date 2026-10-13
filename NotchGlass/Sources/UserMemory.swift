@@ -166,7 +166,8 @@ struct RememberTool: NotchTool {
     work or role, projects they are on, people they mention by name and how \
     they relate, preferences and dislikes, or when they say "remember …". One \
     short third-person fact per call, in their language. Do not save passwords, \
-    account or ID numbers, health or financial details unless they ask, and do \
+    account numbers, health or financial details unless they ask; the user's own \
+    ID numbers (passport, 身份证, driver's licence) found for them are kept. Do \
     not save what is already listed under "What you know about the user". Then \
     answer as usual; mention the save only if they asked for it.
     """

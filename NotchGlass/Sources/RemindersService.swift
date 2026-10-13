@@ -11,6 +11,9 @@ enum RemindersError: LocalizedError {
     case noList
     /// Anything else, carrying the EventKit message for debugging.
     case saveFailed(String)
+    /// `create_reminder` named a list the user does not have; carries the ones
+    /// they do. Only the model reads it.
+    case noSuchList(String, [String])
 
     var errorDescription: String? {
         switch self {
@@ -20,6 +23,8 @@ enum RemindersError: LocalizedError {
             return L("reminders.error.noList")
         case .saveFailed(let msg):
             return msg
+        case .noSuchList(let name, let lists):
+            return "There is no reminder list called \"\(name)\". The user's lists: \(lists.joined(separator: ", "))."
         }
     }
 }
@@ -239,7 +244,41 @@ enum RemindersService {
     /// (treated as a soft success — the reminder exists, we just can't link it).
     /// `recurrence` overrides the repeat read from the words (`recurrenceKind`),
     /// for a caller that was told the rule explicitly (`create_reminder`).
+    /// The user's reminder list `name` names: the same name in any case, then
+    /// one name inside the other, then a common word for the same list
+    /// ("买菜" → Groceries). Nil when none matches.
+    static func list(named name: String, in store: EKEventStore) -> EKCalendar? {
+        let lists = store.calendars(for: .reminder)
+        let wanted = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !wanted.isEmpty else { return nil }
+        if let exact = lists.first(where: { $0.title.lowercased() == wanted }) { return exact }
+        if let partial = lists.first(where: { $0.title.lowercased().contains(wanted) || wanted.contains($0.title.lowercased()) }) {
+            return partial
+        }
+        for words in listSynonyms where words.contains(where: wanted.contains) {
+            if let hit = lists.first(where: { list in words.contains { list.title.lowercased().contains($0) } }) { return hit }
+        }
+        return nil
+    }
+
+    /// The title of the list `name` matches in the user's Reminders, for the
+    /// result to name where a reminder went.
+    static func listTitle(named name: String) -> String? {
+        list(named: name, in: currentStore())?.title
+    }
+
+    /// Names one list goes by, across the app's languages.
+    private static let listSynonyms: [[String]] = [
+        ["grocer", "groceries", "shopping", "买菜", "買菜", "购物", "購物", "采购", "採購", "买的", "要买", "超市",
+         "買い物", "장보기", "쇼핑", "courses", "compras", "súper"],
+        ["work", "工作", "仕事", "업무", "travail", "trabajo"],
+        ["home", "family", "家里", "家裡", "家庭", "家事", "집", "maison", "casa"],
+    ]
+
+    /// `until` is the last day a repeat runs; nil repeats with no end. `listName`
+    /// files it in that list (`list(named:in:)`) instead of the default one.
     static func createReminder(_ text: String, due: Date?, recurrence: RecurrenceKind? = nil,
+                               until: Date? = nil, listName: String? = nil,
                                completion: @escaping @MainActor (Result<String?, RemindersError>) -> Void) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -252,7 +291,8 @@ enum RemindersService {
         let store = currentStore()
         store.requestFullAccessToReminders { granted, _ in
             let result: Result<String?, RemindersError> =
-                granted ? write(trimmed, due: due, recurrence: recurrence, store: store) : .failure(.permissionDenied)
+                granted ? write(trimmed, due: due, recurrence: recurrence, until: until, listName: listName, store: store)
+                    : .failure(.permissionDenied)
             Task { @MainActor in completion(result) }
         }
     }
@@ -274,8 +314,11 @@ enum RemindersService {
     /// connection the access was granted on — a concurrent revoke/regrant can't
     /// swap the store out between the grant and the save.
     private static func write(_ text: String, due: Date?, recurrence: RecurrenceKind?,
-                              store: EKEventStore) -> Result<String?, RemindersError> {
-        guard let list = store.defaultCalendarForNewReminders() else {
+                              until: Date?, listName: String?, store: EKEventStore) -> Result<String?, RemindersError> {
+        if let listName, list(named: listName, in: store) == nil {
+            return .failure(.noSuchList(listName, store.calendars(for: .reminder).map(\.title)))
+        }
+        guard let list = listName.flatMap({ list(named: $0, in: store) }) ?? store.defaultCalendarForNewReminders() else {
             return .failure(.noList)
         }
         let reminder = EKReminder(eventStore: store)
@@ -302,10 +345,11 @@ enum RemindersService {
             // dateless reminder with infinite recurrence reads as broken in the
             // Reminders app, so a Tab-forced dateless line stays one-shot.
             if let kind = recurrence ?? recurrenceKind(in: text) {
+                let end = until.map { EKRecurrenceEnd(end: $0) }
                 let rule: EKRecurrenceRule
                 switch kind {
                 case .daily:
-                    rule = EKRecurrenceRule(recurrenceWith: .daily, interval: 1, end: nil)
+                    rule = EKRecurrenceRule(recurrenceWith: .daily, interval: 1, end: end)
                 case .weekly(let day):
                     // A named weekday repeats on that day; a bare "weekly" repeats on
                     // the due date's own weekday (least surprise).
@@ -316,9 +360,9 @@ enum RemindersService {
                         daysOfTheWeek: [EKRecurrenceDayOfWeek(weekday)],
                         daysOfTheMonth: nil, monthsOfTheYear: nil,
                         weeksOfTheYear: nil, daysOfTheYear: nil,
-                        setPositions: nil, end: nil)
+                        setPositions: nil, end: end)
                 case .monthly:
-                    rule = EKRecurrenceRule(recurrenceWith: .monthly, interval: 1, end: nil)
+                    rule = EKRecurrenceRule(recurrenceWith: .monthly, interval: 1, end: end)
                 }
                 reminder.addRecurrenceRule(rule)
             }

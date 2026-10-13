@@ -6,14 +6,14 @@ import Foundation
 /// Recorded by the resting clipboard watcher (`NotchModel.senseTick`) with the
 /// same exclusions Copy Sense uses: nothing a password manager marks concealed
 /// or transient, nothing that looks like a credential, nothing Notchi wrote.
-/// Settings → Shortcuts turns it off and clears it.
+/// Settings → Chat turns it off and clears it.
 @MainActor
 final class ClipboardHistory: ObservableObject {
     static let shared = ClipboardHistory()
 
-    /// Off until the feature is tested: nothing is recorded, the setting is
-    /// hidden and Ask gets no `clipboard_history` tool.
-    static let available = false
+    /// Off hides the setting, records nothing and gives Ask no
+    /// `clipboard_history` tool.
+    static let available = true
 
     struct Entry: Codable, Equatable {
         var text: String
@@ -22,7 +22,7 @@ final class ClipboardHistory: ObservableObject {
     }
 
     @Published private(set) var entries: [Entry] = []
-    @Published var enabled: Bool = UserDefaults.standard.object(forKey: ClipboardHistory.enabledKey) as? Bool ?? true {
+    @Published var enabled: Bool = UserDefaults.standard.object(forKey: ClipboardHistory.enabledKey) as? Bool ?? false {
         didSet {
             UserDefaults.standard.set(enabled, forKey: Self.enabledKey)
             if !enabled { clear() }
@@ -53,6 +53,11 @@ final class ClipboardHistory: ObservableObject {
         entries.removeAll { $0.text == text }
         entries.insert(Entry(text: String(text.prefix(Self.textLimit)), copiedAt: Date(), app: app), at: 0)
         if entries.count > Self.entryLimit { entries.removeLast(entries.count - Self.entryLimit) }
+        save()
+    }
+
+    func delete(_ text: String) {
+        entries.removeAll { $0.text == text }
         save()
     }
 
@@ -92,7 +97,7 @@ struct ClipboardHistoryTool: NotchTool {
         let (enabled, entries) = await MainActor.run {
             (ClipboardHistory.shared.enabled, ClipboardHistory.shared.entries)
         }
-        guard enabled else { return "Clipboard history is off in Settings → Shortcuts." }
+        guard enabled else { return "Clipboard history is off in Settings → Chat." }
         let found = query.isEmpty ? entries
             : entries.filter { $0.text.localizedCaseInsensitiveContains(query) }
         guard !found.isEmpty else {

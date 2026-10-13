@@ -16,6 +16,8 @@ enum MailService {
         let date: String
         let sender: String
         let subject: String
+        /// For a message found by its body: the text around the match.
+        var snippet: String = ""
     }
 
     struct Message: Sendable {
@@ -51,15 +53,38 @@ enum MailService {
                     set found to (messages of inbox whose (sender contains query) or (subject contains query))
                 end if
                 set out to {}
+                set seen to {}
                 set n to 0
                 repeat with m in found
                     set n to n + 1
                     if n > maxCount then exit repeat
-                    set end of out to {(id of m) as string, (date received of m) as string, sender of m, subject of m}
+                    set end of seen to (id of m)
+                    set end of out to {(id of m) as string, (date received of m) as string, sender of m, subject of m, ""}
                 end repeat
+                if mode is "search" and n < maxCount then
+                    set cutoff to (current date) - (30 * days)
+                    set inBody to (messages of inbox whose date received > cutoff and content contains query)
+                    repeat with m in inBody
+                        if n ≥ maxCount then exit repeat
+                        if (id of m) is not in seen then
+                            set n to n + 1
+                            set end of out to {(id of m) as string, (date received of m) as string, sender of m, subject of m, my snippet(content of m, query)}
+                        end if
+                    end repeat
+                end if
                 return out
             end tell
         end notchMailList
+
+        on snippet(body, query)
+            set o to offset of query in body
+            if o is 0 then return ""
+            set a to o - 80
+            if a < 1 then set a to 1
+            set b to o + (length of query) + 80
+            if b > (length of body) then set b to length of body
+            return text a thru b of body
+        end snippet
 
         on notchMailRead(messageID)
             tell application "Mail"
@@ -120,16 +145,18 @@ enum MailService {
         }
     }
 
-    /// Unread inbox messages, or those whose sender or subject contains `query`.
+    /// Unread inbox messages, or those whose sender or subject contains
+    /// `query`, then the last 30 days' messages whose body does.
     static func list(unread: Bool, query: String, limit: Int) async -> Result<[Header], MailError> {
         switch await call("notchMailList", [unread ? "unread" : "search", query, String(limit)]) {
         case .failure(let error): return .failure(error)
         case .success(let list):
             guard list.numberOfItems > 0 else { return .success([]) }
             return .success((1...list.numberOfItems).compactMap { i in
-                guard let row = list.atIndex(i), row.numberOfItems == 4 else { return nil }
+                guard let row = list.atIndex(i), row.numberOfItems >= 4 else { return nil }
                 return Header(id: row.atIndex(1)?.stringValue ?? "", date: row.atIndex(2)?.stringValue ?? "",
-                              sender: row.atIndex(3)?.stringValue ?? "", subject: row.atIndex(4)?.stringValue ?? "")
+                              sender: row.atIndex(3)?.stringValue ?? "", subject: row.atIndex(4)?.stringValue ?? "",
+                              snippet: row.numberOfItems >= 5 ? row.atIndex(5)?.stringValue ?? "" : "")
             })
         }
     }

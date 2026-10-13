@@ -1389,11 +1389,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func carryInOutsideSelection() {
         guard model.acceptsSelectionContext else { return }
         let front = NSWorkspace.shared.frontmostApplication
-        let name = front?.localizedName
         SelectedTextCapture.ambient(front: front) { [weak self] selected in
             guard let self, let selected else { return }
             withAnimation(.easeOut(duration: Tokens.hoverFade)) {
-                self.model.attachSelectionContext(selected, from: name)
+                self.model.attachSelectionContext(selected, from: front)
             }
         }
     }

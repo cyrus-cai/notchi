@@ -227,8 +227,15 @@ struct PromptField: NSViewRepresentable {
     /// One line of `fontSize` text, in the same metrics the layout manager lays the
     /// box out with — the unit the row heights and the line cap are counted in.
     static func lineHeight(for fontSize: CGFloat) -> CGFloat {
-        NSLayoutManager().defaultLineHeight(for: .systemFont(ofSize: fontSize))
+        if let cached = lineHeights[fontSize] { return cached }
+        let height = NSLayoutManager().defaultLineHeight(for: .systemFont(ofSize: fontSize))
+        lineHeights[fontSize] = height
+        return height
     }
+    /// `report` runs on every scroll-bounds change, which the open animation
+    /// posts each frame; a layout manager built per call showed up in the open's
+    /// main-thread time.
+    @MainActor private static var lineHeights: [CGFloat: CGFloat] = [:]
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -1964,6 +1971,7 @@ struct CaptureLineLink: View {
         case .memory:   return L("agent.process.updatedMemory")
         case .reminderUpdate: return L("agent.process.updatedReminder")
         case .mailDraft: return L("agent.process.savedDraft")
+        case .copied:    return L("agent.process.copied")
         }
     }
 
@@ -1973,7 +1981,8 @@ struct CaptureLineLink: View {
                 Text(label)
                     .font(.sf(font))
                     .lineLimit(1)
-                if action != nil, capture.kind == .memory {
+                if action != nil, capture.kind == .copied {
+                } else if action != nil, capture.kind == .memory {
                     Text("· " + L("agent.process.undo"))
                         .font(.sf(font))
                 } else if action != nil {
@@ -1985,8 +1994,35 @@ struct CaptureLineLink: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain).exemptsDoubleClickPin()
-        .disabled(action == nil)
-        .onHover { hovering = $0 && action != nil }
+        .disabled(action == nil || capture.kind == .copied)
+        .onHover { hovering = $0 && action != nil && capture.kind != .copied }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+    }
+}
+
+/// The action line under an answer: "Continue" on a cut-off answer. The capture
+/// line's face, below the answer instead of above it.
+struct AnswerLineButton: View {
+    let title: String
+    var systemImage: String = "arrow.up.right"
+    let font: CGFloat
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 3) {
+                Text(title)
+                    .font(.sf(font))
+                    .lineLimit(1)
+                Image(systemName: systemImage)
+                    .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+            }
+            .foregroundStyle(hovering ? Tokens.text2 : Tokens.text3)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).exemptsDoubleClickPin()
+        .onHover { hovering = $0 }
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
     }
 }
@@ -3781,6 +3817,12 @@ struct AssistantTurnView: View {
     var pendingQuestion: NotchModel.PendingUserQuestion? = nil
     /// The user tapped an option on the question card: (question id, option text).
     var onChooseOption: ((UUID, String) -> Void)? = nil
+    /// Pastes this answer over the selection its question was asked about.
+    /// `nil` when there is none to go back to.
+    var onReplaceOriginal: (() -> Void)? = nil
+    /// Carries on a cut-off answer (`NotchModel.continueAnswer`). `nil` unless
+    /// this is the last answer and it was interrupted.
+    var onContinue: (() -> Void)? = nil
     /// The user's words this answer replies to. An address they wrote may come
     /// back as a link card, like a page the search found (`LinkCardSplitter`).
     var question: String = ""
@@ -3939,7 +3981,7 @@ struct AssistantTurnView: View {
     /// markers — the prose remains unchanged and no fake citation is presented.
     private var renderedText: String {
         CitationMarkup.rendered(
-            text,
+            ReasoningTags.visible(text),
             sources: sources,
             stripUnresolved: CitationMarkup.shouldStripUnresolved(
                 answerModel: answerModel, regenModel: regenModel))
@@ -4209,7 +4251,10 @@ struct AssistantTurnView: View {
             // An answer that opens with a card has no first bubble unless the
             // reading block or the work trail needs one.
             if cardHasContent || !layout.hasMore {
-                AnswerCard(visible: cardHasContent) { cardContent }
+                AnswerCard(visible: cardHasContent,
+                           idealAtLeast: FractionWidthLayout.minimumLineWidth(layout.lead, fontSize: cardFont)) {
+                    cardContent
+                }
                     .contextMenu { answerTurnMenu }
             }
 
@@ -4224,7 +4269,7 @@ struct AssistantTurnView: View {
                                  large: cardCount == 1)
                         .transition(Self.landing)
                 case .text(let body):
-                    AnswerCard {
+                    AnswerCard(idealAtLeast: FractionWidthLayout.minimumLineWidth(body, fontSize: cardFont)) {
                         MarkdownBlocks(source: body, baseFont: cardFont, color: color,
                                        onInAppCopy: onInAppCopy)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -4256,6 +4301,13 @@ struct AssistantTurnView: View {
                 }
                 .padding(.top, hasText ? 2 : 0)
                 .transition(.opacity)
+            }
+
+            if !streaming, hasText, !typing, let onContinue {
+                AnswerLineButton(title: L("result.continue"), systemImage: "arrow.down",
+                                 font: waitFont, action: onContinue)
+                    .padding(.leading, ChatBubbleChrome.horizontalPad)
+                    .transition(.opacity)
             }
         }
         .animation(.easeInOut(duration: Self.fade), value: showWait)
@@ -4409,7 +4461,11 @@ struct AssistantTurnView: View {
                     // the three dots (the chat-app typing indicator) instead of
                     // the orb and mood word; a tool's line still names the tool.
                     Group {
-                        if !toolRunning {
+                        // Settled answers mount none of it: the dots repeat forever,
+                        // and a long thread kept one set per answer animating at
+                        // opacity 0 — every frame, scrolling or not.
+                        if !streaming {
+                        } else if !toolRunning {
                             ThinkingDots(minHeight: Self.lineHeight(cardFont))
                                 .fixedSize()
                                 .onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
@@ -4503,6 +4559,11 @@ struct AssistantTurnView: View {
                     copyAnswerPlainText()
                 } label: {
                     Label(L("result.copyPlainText"), systemImage: "text.alignleft")
+                }
+            }
+            if let onReplaceOriginal, !streaming {
+                Button(action: onReplaceOriginal) {
+                    Label(L("result.replaceOriginal"), systemImage: "arrow.uturn.left")
                 }
             }
             if let onRegenerate {
@@ -4614,6 +4675,9 @@ struct AnswerCard<Content: View>: View {
     /// narrower. The agent record needs this: its lazy trail reports the fold
     /// header as its width, and a hugging card then wraps the paragraph there.
     var hugs: Bool = true
+    /// A width the content's ideal width is known to reach
+    /// (`FractionWidthLayout.idealAtLeast`).
+    var idealAtLeast: CGFloat = 0
     @ViewBuilder let content: Content
     @State private var cardHeight: CGFloat = 0
 
@@ -4626,7 +4690,7 @@ struct AnswerCard<Content: View>: View {
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
         FractionWidthLayout(fraction: visible ? Self.widthFraction : 1,
-                            hugs: visible && hugs) {
+                            hugs: visible && hugs, idealAtLeast: idealAtLeast) {
             content
                 .padding(.horizontal, visible ? ChatBubbleChrome.horizontalPad : 0)
                 .padding(.vertical, visible ? ChatBubbleChrome.verticalPad : 0)
@@ -4652,38 +4716,88 @@ struct AnswerCard<Content: View>: View {
 struct FractionWidthLayout: Layout {
     let fraction: CGFloat
     var hugs: Bool = false
+    /// A width the child's ideal width is known to reach. Once it reaches the
+    /// limit the child gets the limit and its ideal width is never measured.
+    var idealAtLeast: CGFloat = 0
 
-    /// The child's ideal width, measured once per change of the child rather
-    /// than on every sizing and placing pass: an answer card's text measured
-    /// at an unlimited width is the costliest layout in a long thread.
-    func makeCache(subviews: Subviews) -> CGFloat? {
-        guard hugs, let child = subviews.first else { return nil }
-        return child.sizeThatFits(.unspecified).width
+    /// The child's ideal width, measured at most once per change of the child
+    /// rather than on every sizing and placing pass, and only when it can be
+    /// narrower than the limit: an answer card's text measured at an unlimited
+    /// width is the costliest layout in a long thread.
+    final class Ideal {
+        var width: CGFloat?
+        var measured = false
     }
 
-    func updateCache(_ cache: inout CGFloat?, subviews: Subviews) {
-        cache = makeCache(subviews: subviews)
+    func makeCache(subviews: Subviews) -> Ideal { Ideal() }
+
+    func updateCache(_ cache: inout Ideal, subviews: Subviews) {
+        cache = Ideal()
     }
 
-    private func childWidth(ideal: CGFloat?, available: CGFloat?) -> CGFloat? {
+    private func childWidth(available: CGFloat?, subviews: Subviews, cache: Ideal) -> CGFloat? {
         guard let available else { return nil }
         let limit = available * fraction
-        guard let ideal else { return limit }
+        guard hugs, idealAtLeast < limit, let child = subviews.first else { return limit }
+        if !cache.measured {
+            cache.width = child.sizeThatFits(.unspecified).width
+            cache.measured = true
+        }
+        guard let ideal = cache.width else { return limit }
         return min(ideal, limit)
     }
 
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout CGFloat?) -> CGSize {
+    /// A width `source`'s longest line is sure to reach when laid out on one
+    /// line at `fontSize`: wide (CJK) characters at 0.9em and other letters and
+    /// digits at 0.2em, below the narrowest system glyphs. Link targets and
+    /// math, which render shorter than they are written, are not counted.
+    static func minimumLineWidth(_ source: String, fontSize: CGFloat) -> CGFloat {
+        var widest: CGFloat = 0
+        for line in source.split(separator: "\n", omittingEmptySubsequences: true) {
+            var width: CGFloat = 0
+            var skip: Character?
+            var previous: Character?
+            for character in line {
+                defer { previous = character }
+                if let end = skip {
+                    if character == end { skip = nil }
+                    continue
+                }
+                if character == "(" && previous == "]" { skip = ")"; continue }
+                if character == "$" { skip = "$"; continue }
+                guard let scalar = character.unicodeScalars.first else { continue }
+                if Self.isWide(scalar.value) {
+                    width += 0.9
+                } else if character.isLetter || character.isNumber {
+                    width += 0.2
+                }
+            }
+            widest = max(widest, width)
+        }
+        return widest * fontSize
+    }
+
+    private static func isWide(_ v: UInt32) -> Bool {
+        (0x1100...0x115F).contains(v) || (0x2E80...0xA4CF).contains(v)
+            || (0xAC00...0xD7A3).contains(v) || (0xF900...0xFAFF).contains(v)
+            || (0xFE30...0xFE4F).contains(v) || (0xFF00...0xFF60).contains(v)
+            || (0xFFE0...0xFFE6).contains(v) || (0x20000...0x3FFFD).contains(v)
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Ideal) -> CGSize {
         guard let child = subviews.first else { return .zero }
-        let size = child.sizeThatFits(ProposedViewSize(width: childWidth(ideal: cache, available: proposal.width),
+        let size = child.sizeThatFits(ProposedViewSize(width: childWidth(available: proposal.width,
+                                                                         subviews: subviews, cache: cache),
                                                        height: proposal.height))
         return CGSize(width: proposal.width ?? size.width, height: size.height)
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize,
-                       subviews: Subviews, cache: inout CGFloat?) {
+                       subviews: Subviews, cache: inout Ideal) {
         guard let child = subviews.first else { return }
         child.place(at: bounds.origin, anchor: .topLeading,
-                    proposal: ProposedViewSize(width: childWidth(ideal: cache, available: bounds.width),
+                    proposal: ProposedViewSize(width: childWidth(available: bounds.width,
+                                                                 subviews: subviews, cache: cache),
                                                height: bounds.height))
     }
 }
@@ -4961,14 +5075,10 @@ struct InlineMarkdownText: View {
             out[start..<end].underlineStyle = .single
         }
         if !query.isEmpty {
-            let plain = String(out.characters)
-            var from = plain.startIndex
-            while let found = plain.range(of: query, options: .caseInsensitive, range: from..<plain.endIndex) {
-                let offset = plain.distance(from: plain.startIndex, to: found.lowerBound)
-                let length = plain.distance(from: found.lowerBound, to: found.upperBound)
-                let start = out.index(out.startIndex, offsetByCharacters: offset)
-                let end = out.index(start, offsetByCharacters: length)
-                out[start..<end].backgroundColor = Color.yellow.opacity(0.35)
+            var from = out.startIndex
+            while from < out.endIndex,
+                  let found = out[from..<out.endIndex].range(of: query, options: .caseInsensitive) {
+                out[found].backgroundColor = Color.yellow.opacity(0.35)
                 from = found.upperBound
             }
         }
@@ -6529,6 +6639,14 @@ struct GlyphBirths: Equatable {
         }
     }
 
+    /// Every glyph seen so far draws at full ink. Called once the text has
+    /// stopped growing for longer than the fade.
+    mutating func settleAll() {
+        guard let last = fresh.last else { return }
+        settled = max(settled, last.count)
+        fresh.removeAll()
+    }
+
     func opacity(forGlyph index: Int, at now: TimeInterval, fade: TimeInterval) -> Double {
         if index < settled { return 1 }
         guard let birth = fresh.first(where: { index < $0.count })?.at else {
@@ -6592,6 +6710,13 @@ private struct StreamTailFade: ViewModifier {
             }
             .onChange(of: textLength) { _, newValue in
                 births.note(length: newValue, at: ProcessInfo.processInfo.systemUptime)
+            }
+            // The renderer only redraws when the text changes. If the text stops
+            // growing (a preface, then a tool call), the last frame would keep
+            // its half-faded glyphs, so settle them after the fade window.
+            .task(id: textLength) {
+                try? await Task.sleep(for: .seconds(StreamTailRenderer.fade + 0.05))
+                if !Task.isCancelled { births.settleAll() }
             }
     }
 }
@@ -7290,7 +7415,11 @@ private struct AnswerImageView: View {
                 }
                 .buttonStyle(.plain).exemptsDoubleClickPin()
                 .accessibilityLabel(alt.isEmpty ? "image" : alt)
-            case .pdf, .failed:
+            case .failed:
+                // An image that does not load is not shown: a chip to the same
+                // dead address only sends the reader to a 404.
+                EmptyView()
+            case .pdf:
                 MediaLinkChip(icon: "photo",
                               label: alt.isEmpty ? (URL(string: urlString)?.host ?? urlString) : alt,
                               baseFont: baseFont, color: color) {
@@ -7421,6 +7550,8 @@ private struct CodeBlockView: View {
 
     @State private var hovering = false
     @State private var copied = false
+    /// The copy button's sticky drop (`stickyOffset(in:)`).
+    @State private var stickyY: CGFloat = 0
     /// A block longer than `foldOver` lines shows its first `foldTo` until the
     /// toggle under it is pressed. Copy always takes the whole block.
     @State private var unfolded = false
@@ -7483,14 +7614,16 @@ private struct CodeBlockView: View {
                     .strokeBorder(Tokens.hairline, lineWidth: 0.5)
             )
             .overlay(alignment: .topTrailing) {
-                GeometryReader { geo in
-                    copyButton
-                        .padding(Self.inset)
-                        .offset(y: stickyOffset(in: geo))
-                        .frame(maxWidth: .infinity, maxHeight: .infinity,
-                               alignment: .topTrailing)
-                }
+                copyButton
+                    .padding(Self.inset)
+                    .offset(y: stickyY)
             }
+            // Read on every scroll frame, but the button only redraws when the
+            // clamped offset changes — a block fully in view or off screen keeps
+            // the same value, so a long thread's other blocks stay put while one
+            // scrolls past (a GeometryReader here rebuilt every block's button
+            // on every frame).
+            .onGeometryChange(for: CGFloat.self) { stickyOffset(in: $0) } action: { stickyY = $0 }
             .onHover { hovering = $0 }
     }
 

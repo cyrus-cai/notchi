@@ -9,7 +9,8 @@ import Carbon.HIToolbox
 // user a clarifying question, run a web search, read a web page's text, manage
 // this app's own preferences, file a note or a reminder, start or stop an Ask
 // loop, and run a shell command. Those last five are the only write surfaces.
-// Settings and starting a loop have a mandatory in-app confirmation gate; notes
+// Settings that touch keys, endpoints, instructions or shell access, and loops
+// faster than hourly, ask first; other settings and loops apply directly. Notes
 // and reminders are written directly, the same way a typed `:` capture is;
 // `run_shell` runs directly except for the commands `ShellRisk` flags, which ask
 // first. There are still no computer-use tools.
@@ -689,8 +690,10 @@ struct AskUserTool: NotchTool {
     let name = "ask_user"
     let description = """
     Shows one multiple-choice question and returns the option they pick. Call \
-    only when a choice the user must make changes the answer; at most once per \
-    reply. 2-4 short options. If they do not pick, proceed with your best judgment.
+    only when a wrong guess would send, delete, spend, or change something that \
+    cannot be undone; otherwise go with the most likely option yourself. At most \
+    once per reply. 2-4 short options. If they do not pick, proceed with your \
+    best judgment.
     """
     let schema: [String: Any] = [
         "type": "object",
@@ -777,8 +780,9 @@ Supported setting ids and values:
 - note_destination: apple_notes or markdown_folder; notes_folder: absolute path
 - summon_shortcut: disabled, default, double_option, double_command, double_control, double_shift, or a chord such as command+shift+k
 - action_shortcut: a chord such as command+shift+c, or default to restore the shipped one. scope is required: regenerate, pin, new_chat, filter, picker, or detach
-- prompt_shortcut: a global chord, or remove to delete, or keep to edit only its text. prompt is required when creating one. scope picks an existing binding by chord or prompt text; omit scope to create.
+- prompt_shortcut: value is the key chord itself (e.g. option+a), or remove to delete, or keep to edit only its text — never a name. prompt is the instruction it runs on the selected text, required when creating one. scope picks an existing binding by chord or prompt text; omit scope to create. Example, "Option+A 做语句优化": {"setting":"prompt_shortcut","value":"option+a","prompt":"Polish the selected text: clearer and shorter, same meaning, same language. Output only the result."}
 - custom_instructions: text (empty clears it); proxy: URL/host, or auto to clear
+- weather_city: city the weather uses when Location access is off (empty clears it)
 - ai_provider: openrouter, vercel, openai, codex, claude_code, grok_code, pi_code, anthropic, gemini, deepseek, qwen, glm, kimi, minimax, mimo, custom
 - ai_model: model id or default; optional scope is a provider
 - api_key: key text or empty to remove; scope is the provider. Never read keys back.
@@ -788,17 +792,18 @@ Supported setting ids and values:
 """
 
 /// Read or change Notch's own preferences from the chat composer. Reads are
-/// immediate; writes are deliberately routed through `NotchModel`, which shows
-/// one in-answer Confirm/Cancel card and only commits after Confirm is tapped.
-/// A batch is one request and therefore one confirmation — "hide both icons and
-/// don't launch at login" should never make the user approve three times.
+/// immediate; writes are routed through `NotchModel`, which applies ordinary
+/// preferences at once and shows one in-answer Confirm/Cancel card for a batch
+/// that changes a key, an endpoint, the custom instructions or shell access.
+/// A batch is one request and therefore at most one confirmation.
 struct ManageAppSettingsTool: NotchTool {
     let name = "manage_app_settings"
     let description = """
     Reads, opens, or changes this Notch app's settings. action=list returns current \
     values and supported ids; action=shortcuts returns the live hotkey reference; \
     action=open opens a Settings page (section: model, chat, general, appearance, shortcuts, \
-    stats, about); action=update applies changes[] after one Confirm card. \
+    stats, about); action=update applies changes[] (keys, proxy, custom URL, instructions and \
+    command access wait on a Confirm card the tool shows itself). \
     For a change, list first (shortcuts first when editing a hotkey) then update. \
     If a value is not supported, open that section instead of listing alternatives.
     """
@@ -808,7 +813,7 @@ struct ManageAppSettingsTool: NotchTool {
             "action": [
                 "type": "string",
                 "enum": ["list", "shortcuts", "update", "open"],
-                "description": "List current settings, return the shortcut reference, open a settings page, or request a confirmed update.",
+                "description": "List current settings, return the shortcut reference, open a settings page, or apply an update.",
             ],
             "section": [
                 "type": "string",
@@ -909,7 +914,7 @@ struct ManageAppSettingsTool: NotchTool {
 /// Mirrors `AppSettingsRequest`: the tool stays UI-agnostic and knows nothing
 /// about Apple Notes, EventKit, or the user's note destination.
 struct CaptureRequest: Sendable {
-    enum Kind: String, Codable, Sendable { case note, reminder, event, memory, reminderUpdate, mailDraft }
+    enum Kind: String, Codable, Sendable { case note, reminder, event, memory, reminderUpdate, mailDraft, copied }
 
     let kind: Kind
     let text: String
@@ -924,6 +929,41 @@ struct CaptureRequest: Sendable {
     var alertMinutes: Int? = nil
     /// For a reminder: `daily`, `weekly` or `monthly`, when the user asked for a repeat.
     var repeatRule: String? = nil
+    /// For a repeating reminder: the last day it repeats, `YYYY-MM-DD`.
+    var repeatUntil: String? = nil
+    /// For a reminder: the Reminders list to file it in, as the user named it.
+    var list: String? = nil
+}
+
+/// `copy_to_clipboard`: put text on the user's clipboard so they can paste it.
+/// `wrote` runs after the write, on the main actor: it marks the answer
+/// "Copied" and keeps Copy Sense from treating the text as the user's copy.
+struct CopyToClipboardTool: NotchTool {
+    static let toolName = "copy_to_clipboard"
+    let name = toolName
+    let description = """
+    Puts text on the user's clipboard, replacing what is there, so they can \
+    paste it. Call when they ask to copy something ("copy the failing job's \
+    name", "复制到剪贴板", "put the first line on my clipboard"). Pass exactly \
+    the text to paste, nothing around it.
+    """
+    let schema: [String: Any] = [
+        "type": "object",
+        "properties": ["text": ["type": "string", "description": "Exactly what to paste."]],
+        "required": ["text"],
+    ]
+
+    let wrote: @Sendable () async -> Void
+
+    func execute(_ input: [String: Any]) async throws -> String {
+        guard let text = input["text"] as? String, !text.isEmpty else { return "Error: give the text to copy." }
+        await MainActor.run {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+        }
+        await wrote()
+        return "Copied \(text.count) characters to the clipboard."
+    }
 }
 
 /// File a note from the chat composer. Advertised on every Ask round, so the
@@ -990,6 +1030,14 @@ struct CreateReminderTool: NotchTool {
                 "enum": ["daily", "weekly", "monthly"],
                 "description": "When the user asks for it to repeat. Weekly repeats on the due date's weekday.",
             ],
+            "repeat_until": [
+                "type": "string",
+                "description": "With repeat, when the user says until when (\"到年底为止\", \"until June\"): the last day it repeats, YYYY-MM-DD.",
+            ],
+            "list": [
+                "type": "string",
+                "description": "The Reminders list it goes in when the user names one (\"groceries\", \"买菜清单\", \"Work\"). Omit for their default list.",
+            ],
         ],
         "required": ["title"],
     ]
@@ -1004,9 +1052,13 @@ struct CreateReminderTool: NotchTool {
         let due = (input["due"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let rule = (input["repeat"] as? String).flatMap { ["daily", "weekly", "monthly"].contains($0) ? $0 : nil }
+        let until = (input["repeat_until"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let list = (input["list"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         return try await handle(CaptureRequest(kind: .reminder, text: title,
                                                due: due?.isEmpty == false ? due : nil,
-                                               repeatRule: rule))
+                                               repeatRule: rule,
+                                               repeatUntil: rule == nil || until?.isEmpty != false ? nil : until,
+                                               list: list?.isEmpty == false ? list : nil))
     }
 }
 
@@ -1087,12 +1139,15 @@ struct LoopRequest: Sendable {
     let minutes: Int?
     /// From `list`; a unique prefix is enough. `stop` / `set_interval` only.
     let loopID: String?
+    /// When round one runs. `start` only; nil runs it now.
+    var firstRunAt: Date? = nil
 }
 
 /// Start, list, stop or re-time an Ask loop from the chat — the same loop a
-/// typed `/loop` starts, in a thread of its own. Starting one, and shortening
-/// one's interval, wait on an in-answer Confirm card: each round is billed like
-/// a question, for up to a week, so the model never commits that spend alone.
+/// typed `/loop` starts, in a thread of its own. Each round is billed like a
+/// question, for up to a week: a loop that runs more often than hourly (up to
+/// 60 times the rounds) waits on an in-answer Confirm card; hourly or slower
+/// starts at once.
 /// Never advertised on a loop round itself.
 struct ManageLoopTool: NotchTool {
     static let toolName = "manage_loop"
@@ -1104,8 +1159,11 @@ struct ManageLoopTool: NotchTool {
     action=start when the user wants something done repeatedly or watched over \
     time ("every hour check X", "tell me when Y happens"); write `prompt` as the \
     self-contained instruction one round runs, including when the job is done. \
+    When the user names a time of day ("every morning at 9"), set first_run_at \
+    to the next such time and interval_minutes to 1440; without it round one \
+    runs now. \
     A plain alert at a set time, with no work to do, is create_reminder instead. \
-    start shows its own Confirm card. action=list returns the user's loops with \
+    A start faster than hourly shows its own Confirm card. action=list returns the user's loops with \
     ids; stop and set_interval take loop_id from list.
     """
     let schema: [String: Any] = [
@@ -1114,7 +1172,7 @@ struct ManageLoopTool: NotchTool {
             "action": [
                 "type": "string",
                 "enum": ["list", "start", "stop", "set_interval"],
-                "description": "List loops, start one after confirmation, stop one, or change one's interval.",
+                "description": "List loops, start one, stop one, or change one's interval.",
             ],
             "prompt": [
                 "type": "string",
@@ -1129,6 +1187,10 @@ struct ManageLoopTool: NotchTool {
             "loop_id": [
                 "type": "string",
                 "description": "stop / set_interval: the id from action=list.",
+            ],
+            "first_run_at": [
+                "type": "string",
+                "description": "start only: local time of round one, YYYY-MM-DDTHH:MM, within 7 days. Omit to run round one now.",
             ],
         ],
         "required": ["action"],
@@ -1167,10 +1229,35 @@ struct ManageLoopTool: NotchTool {
                 }
             }
         }
+        var firstRunAt: Date?
+        if action == .start, let raw = (input["first_run_at"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
+            guard let date = Self.parseLocal(raw) else {
+                return "Error: first_run_at must be local time as YYYY-MM-DDTHH:MM."
+            }
+            guard date > Date(), date < Date().addingTimeInterval(LoopInterval.lifetime) else {
+                return "Error: first_run_at must be in the future and within 7 days. Call current_datetime if unsure of today's date."
+            }
+            firstRunAt = date
+        }
         return try await handle(LoopRequest(action: action,
                                              prompt: prompt?.isEmpty == false ? prompt : nil,
                                              minutes: minutes,
-                                             loopID: loopID?.isEmpty == false ? loopID : nil))
+                                             loopID: loopID?.isEmpty == false ? loopID : nil,
+                                             firstRunAt: firstRunAt))
+    }
+
+    /// Local wall-clock `YYYY-MM-DDTHH:MM` (or with a space), or a full ISO
+    /// stamp.
+    private static func parseLocal(_ raw: String) -> Date? {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = .current
+        for format in ["yyyy-MM-dd'T'HH:mm", "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd HH:mm"] {
+            f.dateFormat = format
+            if let date = f.date(from: raw) { return date }
+        }
+        return ISO8601DateFormatter().date(from: raw)
     }
 }
 
@@ -2147,7 +2234,8 @@ struct ReadPageTool: NotchTool {
 /// This is a lexical check on the command text, not a security boundary: a
 /// command can hide a deletion inside `python -c` or a script file and pass.
 /// It catches the plain forms a model actually writes — `rm`, `sudo`, `kill`,
-/// `git push`, a pipe into `sh` — and anything that names a credential store.
+/// `git push`, a pipe into `sh` — and anything that names a credential store,
+/// plus `osascript` that sends a message or mail, empties the Trash or deletes.
 enum ShellRisk {
     /// Commands that delete, stop processes, change ownership or permissions,
     /// touch disks or boot state, or need administrator rights.
@@ -2169,9 +2257,50 @@ enum ShellRisk {
         "id_rsa", "id_ed25519",
     ]
 
+    /// What an `osascript` command does to the world outside this Mac, when it
+    /// does something that cannot be taken back: a message or mail sent, the
+    /// Trash emptied, an item deleted.
+    enum ScriptAction: Equatable {
+        case message(to: String?, text: String?)
+        case mail
+        case emptyTrash
+        case delete
+    }
+
+    /// Lexical, like the rest of this check: an AppleScript line that sends,
+    /// empties the Trash or deletes. `do shell script` runs a shell command this
+    /// check never sees, so it counts as `.delete`-grade too.
+    static func scriptAction(_ command: String) -> ScriptAction? {
+        let lowered = command.lowercased()
+        guard lowered.contains("osascript") else { return nil }
+        if lowered.contains("empty trash") || lowered.contains("empty the trash") { return .emptyTrash }
+        if lowered.contains("send ") {
+            if lowered.contains("\"messages\"") || lowered.contains("buddy") || lowered.contains("participant") {
+                return messageAction(command)
+            }
+            return .mail
+        }
+        if lowered.contains("delete ") || lowered.contains("do shell script") { return .delete }
+        return nil
+    }
+
+    /// Recipient and text from `send "…" to buddy|participant "…"`, when the
+    /// script names them inline. The quotes inside `-e "…"` arrive escaped.
+    private static func messageAction(_ command: String) -> ScriptAction {
+        let plain = command.replacingOccurrences(of: "\\\"", with: "\"")
+        let pattern = #"send\s+"((?:[^"\\]|\\.)*)"\s+to\s+(?:buddy|participant)\s+"([^"]*)""#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+              let m = regex.firstMatch(in: plain, range: NSRange(plain.startIndex..., in: plain)),
+              let text = Range(m.range(at: 1), in: plain), let to = Range(m.range(at: 2), in: plain) else {
+            return .message(to: nil, text: nil)
+        }
+        return .message(to: String(plain[to]), text: String(plain[text]))
+    }
+
     static func needsConfirmation(_ command: String) -> Bool {
         let lowered = command.lowercased()
         if credentialPaths.contains(where: { lowered.contains($0) }) { return true }
+        if scriptAction(command) != nil { return true }
         let separators = CharacterSet(charactersIn: ";|&\n(){}`")
         for segment in command.components(separatedBy: separators) {
             let words = segment.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(word)
@@ -2226,7 +2355,8 @@ enum ShellRisk {
 /// the combined stdout/stderr.
 enum ShellRunner {
     static let defaultTimeout: TimeInterval = 30
-    static let maxTimeout: TimeInterval = 120
+    /// Long enough for a full build, a test suite or a dependency install.
+    static let maxTimeout: TimeInterval = 600
     /// Characters of output the model gets. Longer output keeps its start and end.
     static let outputLimit = 8_000
 
@@ -2364,8 +2494,8 @@ struct RunShellTool: NotchTool {
             "timeout_seconds": [
                 "type": "integer",
                 "minimum": 1,
-                "maximum": 120,
-                "description": "Seconds before the command is stopped. Default 30. Above 30, tell the user it may take a moment before you call.",
+                "maximum": 600,
+                "description": "Seconds before the command is stopped. Default 30. Builds, test suites and installs can take minutes: give them up to 600. Above 30, tell the user it is running and may take a while before you call.",
             ],
         ],
         "required": ["command"],
@@ -2430,6 +2560,9 @@ enum AskToolIntent {
         if matches(q, mail) { extra.formUnion([ReadMailTool.toolName, DraftMailTool.toolName, CurrentContextTool.toolName]) }
         if matches(q, projects) { extra.insert(RecentProjectsTool.toolName) }
         if matches(q, travel) { extra.formUnion([TravelTimeTool.toolName, "current_datetime"]) }
+        if matches(q, weather) { extra.formUnion([WeatherTool.toolName, "current_datetime"]) }
+        if matches(q, wifi) { extra.insert(WiFiStatusTool.toolName) }
+        if matches(q, songs) { extra.insert(RecentSongsTool.toolName) }
         if matches(q, photos) { extra.formUnion([ReadPhotosTool.toolName, "current_datetime"]) }
         if matches(q, later) { extra.formUnion(["schedule_action", RunShellTool.toolName, "current_datetime"]) }
         if matches(q, changeReminder) {
@@ -2562,6 +2695,19 @@ enum AskToolIntent {
         "多久", "多长时间", "多長時間", "打车", "打車", "开车", "開車", "步行", "地铁", "地鐵", "路况", "路況",
         "how long", "drive to", "commute", "traffic", "how far",
     ]
+
+    /// Weather (`weather`).
+    private static let weather = [
+        "天气", "天氣", "下雨", "下雪", "带伞", "帶傘", "气温", "氣溫", "温度", "溫度", "冷不冷", "热不热", "熱不熱",
+        "穿外套", "降温", "降溫", "台风", "颱風", "雾霾", "霧霾",
+        "weather", "forecast", "rain", "umbrella", "temperature", "snow",
+    ]
+
+    /// What the user played lately (`recent_songs`).
+    private static let songs = ["听了什么歌", "听过什么歌", "听的歌", "播放过", "最近听", "listened to", "songs i played", "recently played"]
+
+    /// Wi-Fi status (`wifi_status`).
+    private static let wifi = ["wi-fi", "wifi", "无线网", "無線網", "网络名", "網路名"]
 
     /// The Photos library (`read_photos`).
     private static let photos = [

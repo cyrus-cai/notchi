@@ -28,6 +28,64 @@ private struct PasteboardSnapshot {
     }
 }
 
+/// Puts an answer in place of the text the user had selected in another app.
+/// Paste is used instead of AX assignment because it works across native,
+/// browser and Electron editors. The user's clipboard is restored after the
+/// target has consumed it, unless somebody else changed it during that short
+/// interval. `onPasteboardWrite` runs after each of Notchi's own writes, so the
+/// clipboard watcher does not treat them as the user's copy.
+@MainActor
+enum SelectionReplacer {
+    static func paste(_ text: String, into application: NSRunningApplication,
+                      onPasteboardWrite: @escaping () -> Void) -> Bool {
+        guard !text.isEmpty, !application.isTerminated else { return false }
+
+        let pasteboard = NSPasteboard.general
+        let snapshot = PasteboardSnapshot(pasteboard)
+        pasteboard.clearContents()
+        guard pasteboard.setString(text, forType: .string) else {
+            snapshot.restore(to: pasteboard)
+            return false
+        }
+        let replacementChangeCount = pasteboard.changeCount
+        onPasteboardWrite()
+
+        // Let the button render its confirmation before Notchi yields focus
+        // back to the source app.
+        DispatchQueue.main.async {
+            guard application.activate() else {
+                if pasteboard.changeCount == replacementChangeCount {
+                    snapshot.restore(to: pasteboard)
+                    onPasteboardWrite()
+                }
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                postPasteShortcut()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+                    guard pasteboard.changeCount == replacementChangeCount else { return }
+                    snapshot.restore(to: pasteboard)
+                    onPasteboardWrite()
+                }
+            }
+        }
+        return true
+    }
+
+    private static func postPasteShortcut() {
+        guard let source = CGEventSource(stateID: .combinedSessionState),
+              let down = CGEvent(keyboardEventSource: source,
+                                 virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: true),
+              let up = CGEvent(keyboardEventSource: source,
+                               virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: false)
+        else { return }
+        down.flags = .maskCommand
+        up.flags = .maskCommand
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
+    }
+}
+
 // MARK: - What a detached window holds
 
 /// One session torn out of the notch into its own window: a chat thread (Ask, or
@@ -1544,9 +1602,10 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
             onInAppCopy: { [weak self] in
                 self?.model?.rebaselineClipboardAfterInAppWrite()
             },
-            onReplaceOriginal: { [weak self] text in
+            // Only a shortcut over a selection has text to replace.
+            onReplaceOriginal: compactShortcut ? { [weak self] text in
                 self?.replaceOriginalText(with: text) ?? false
-            },
+            } : nil,
             onFollowUp: { [weak self] line, images in
                 guard let self, let id = self.threadStore?.threadID else { return }
                 self.model?.submitDetachedFollowUp(threadID: id, question: line,
@@ -1643,60 +1702,13 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
         w.orderFrontRegardless()
     }
 
-    /// Replace the selection that launched this compact shortcut. Paste is used
-    /// instead of AX assignment because it works across native, browser and
-    /// Electron editors. The user's clipboard is restored after the target has
-    /// consumed it, unless somebody else changed it during that short interval.
+    /// Replace the selection that launched this compact shortcut
+    /// (`SelectionReplacer`).
     private func replaceOriginalText(with text: String) -> Bool {
-        guard compactShortcut,
-              !text.isEmpty,
-              let application = replacementApplication,
-              !application.isTerminated
-        else { return false }
-
-        let pasteboard = NSPasteboard.general
-        let snapshot = PasteboardSnapshot(pasteboard)
-        pasteboard.clearContents()
-        guard pasteboard.setString(text, forType: .string) else {
-            snapshot.restore(to: pasteboard)
-            return false
+        guard compactShortcut, let application = replacementApplication else { return false }
+        return SelectionReplacer.paste(text, into: application) { [weak self] in
+            self?.model?.rebaselineClipboardAfterInAppWrite()
         }
-        let replacementChangeCount = pasteboard.changeCount
-        model?.rebaselineClipboardAfterInAppWrite()
-
-        // Let the button render its confirmation before this unpinned utility
-        // window yields focus back to the source app.
-        DispatchQueue.main.async { [weak self] in
-            guard application.activate() else {
-                if pasteboard.changeCount == replacementChangeCount {
-                    snapshot.restore(to: pasteboard)
-                    self?.model?.rebaselineClipboardAfterInAppWrite()
-                }
-                return
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-                Self.postPasteShortcut()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
-                    guard pasteboard.changeCount == replacementChangeCount else { return }
-                    snapshot.restore(to: pasteboard)
-                    self?.model?.rebaselineClipboardAfterInAppWrite()
-                }
-            }
-        }
-        return true
-    }
-
-    private static func postPasteShortcut() {
-        guard let source = CGEventSource(stateID: .combinedSessionState),
-              let down = CGEvent(keyboardEventSource: source,
-                                 virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: true),
-              let up = CGEvent(keyboardEventSource: source,
-                               virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: false)
-        else { return }
-        down.flags = .maskCommand
-        up.flags = .maskCommand
-        down.post(tap: .cghidEventTap)
-        up.post(tap: .cghidEventTap)
     }
 
     private func centeredDefaultRect() -> NSRect {
@@ -2471,7 +2483,7 @@ struct DetachedSessionRootView: View {
     // Thread-window actions (unused by the agent-task face, which talks to
     // `AgentTaskManager` directly).
     var onInAppCopy: () -> Void = {}
-    var onReplaceOriginal: (String) -> Bool = { _ in false }
+    var onReplaceOriginal: ((String) -> Bool)? = nil
     var onFollowUp: (String, [NSImage]) -> Void = { _, _ in }
     var onRegenerate: () -> Void = {}
     var onRegenerateWith: (String) -> Void = { _ in }
@@ -4218,7 +4230,7 @@ struct DetachedThreadView: View {
     var onTogglePin: () -> Void
     var onClose: () -> Void
     var onInAppCopy: () -> Void
-    var onReplaceOriginal: (String) -> Bool
+    var onReplaceOriginal: ((String) -> Bool)?
     var onFollowUp: (String, [NSImage]) -> Void
     var onRegenerate: () -> Void
     var onRegenerateWith: (String) -> Void
@@ -4932,8 +4944,9 @@ struct DetachedThreadView: View {
     }
 
     private func replaceLatestAnswer() -> Bool {
-        let answer = latestAnswerText
-        guard !answer.isEmpty else { return false }
+        let answer = MarkdownParser.plainText(latestAnswerText)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !answer.isEmpty, let onReplaceOriginal else { return false }
         return onReplaceOriginal(answer)
     }
 
@@ -4991,6 +5004,7 @@ struct DetachedThreadView: View {
             agentTrail: turn.agentLog?.droppingTrailingAnswer(turn.text) ?? [],
             pendingQuestion: turn.streaming ? turn.pendingQuestion : nil,
             onChooseOption: onChooseOption,
+            onReplaceOriginal: onReplaceOriginal != nil && isLastTurn ? { _ = replaceLatestAnswer() } : nil,
             question: store.turns.question(before: turn.id),
             sharedLinks: turn.sharedLinks,
             recentCards: store.turns.recentCards(before: turn.id),

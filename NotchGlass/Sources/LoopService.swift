@@ -275,6 +275,16 @@ final class ChatLoopManager: ObservableObject {
         persist()
     }
 
+    /// A loop whose round one waits for `firstRoundAt` ("every morning at 9").
+    /// Nothing has run yet, so the thread `id` does not exist until then, and
+    /// the 7-day lifetime counts from that first round.
+    func register(id: UUID, prompt: String, minutes: Int, firstRoundAt: Date) {
+        loops.removeAll { $0.id == id }
+        loops.append(ChatLoop(id: id, prompt: prompt, intervalMinutes: minutes,
+                              startedAt: firstRoundAt, rounds: 0, roundStartedAt: nil))
+        schedule(id, at: firstRoundAt)
+    }
+
     /// A round on a loop's thread finished. `loopRound` is the round number its
     /// answer carried — nil for a follow-up the user typed into the thread,
     /// which restarts the wait from now without counting as a round. `quietly`

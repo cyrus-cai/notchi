@@ -67,6 +67,14 @@ tmp/
 # Local dev seeding tool — writes fake history into Application Support.
 scripts/seed-history.py
 
+# Operator tooling — kept local only, never published.
+# Discord plan-approval worker (Cloudflare).
+ops/
+# Use-case eval run against the app's harness.
+scripts/usecase_eval/
+# Posts each release to the private Discord channel.
+scripts/notify-discord.mjs
+
 # Misc
 *.moved-aside
 *.pbxuser

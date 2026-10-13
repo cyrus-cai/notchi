@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import Darwin
 import Foundation
 
 /// The last app other than Notchi that was frontmost. Opening the panel and
@@ -38,14 +39,17 @@ final class FrontAppTracker {
 
 /// `current_context`: what the user has in front of them — the app, its window
 /// title, and for a browser the page (address and text), for Mail the selected
-/// message. Lets "这篇文章讲了什么" or "帮我回这封邮件" work without copying.
+/// message, for Terminal or iTerm the tab's folder and recent output. Lets
+/// "这篇文章讲了什么", "帮我回这封邮件" or "这个报错怎么修" work without copying.
 struct CurrentContextTool: NotchTool {
     static let toolName = "current_context"
     let name = toolName
     let description = """
     Reads what the user is looking at on this Mac: the app in front, its window \
     title, the open web page (address and text) when it is a browser, the \
-    selected message when it is Mail, and the selected files when it is Finder. Call only when the question points at \
+    selected message when it is Mail, the selected files when it is Finder, and \
+    the working directory and recent output when it is Terminal or iTerm (run \
+    fixes in that directory). Call only when the question points at \
     something on screen that they did not paste or select — "this article", \
     "this page", "this email", "这篇", "这封", "这个页面" — and answer from the result.
     """
@@ -105,6 +109,11 @@ struct CurrentContextTool: NotchTool {
         } else if bundleID == "com.apple.mail" {
             switch Self.selectedMail() {
             case .success(let mail): lines.append(mail)
+            case .failure(let failure): lines.append(failure.message)
+            }
+        } else if let terminal = Self.terminals[bundleID] {
+            switch Self.terminalTab(terminal) {
+            case .success(let tab): lines.append(tab)
             case .failure(let failure): lines.append(failure.message)
             }
         } else if let text = Self.focusedText(pid: app.processIdentifier) {
@@ -222,6 +231,78 @@ struct CurrentContextTool: NotchTool {
             let shown = paths.prefix(50).map { "- \($0)" }.joined(separator: "\n")
             return .success("Selected in Finder:\n\(shown)" + (paths.count > 50 ? "\n…and \(paths.count - 50) more." : ""))
         }
+    }
+
+    private enum Terminal { case terminal, iterm }
+
+    private static let terminals: [String: Terminal] = [
+        "com.apple.Terminal": .terminal,
+        "com.googlecode.iterm2": .iterm,
+    ]
+
+    /// The front tab's working directory (of the job running in it, else its
+    /// shell) and the end of its scrollback — where an error usually is.
+    private static func terminalTab(_ terminal: Terminal) -> Result<String, Failure> {
+        let source: String
+        switch terminal {
+        case .terminal:
+            source = """
+            tell application "Terminal" to tell selected tab of front window to return {tty, history}
+            """
+        case .iterm:
+            source = """
+            tell application "iTerm2" to tell current session of current window to return {tty, contents}
+            """
+        }
+        switch run(source) {
+        case .failure(let failure): return .failure(failure)
+        case .success(let list):
+            guard list.numberOfItems == 2, let tty = list.atIndex(1)?.stringValue, !tty.isEmpty else {
+                return .failure(Failure("No terminal window is open."))
+            }
+            var lines: [String] = []
+            if let job = foregroundJob(tty: tty) {
+                if let dir = job.cwd { lines.append("Working directory: \((dir as NSString).abbreviatingWithTildeInPath)") }
+                lines.append("Running in the tab: \(job.command)")
+            }
+            let text = (list.atIndex(2)?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty {
+                let tail = text.count > textLimit ? "…" + String(text.suffix(textLimit)) : text
+                lines.append("Recent output in the tab:\n" + tail)
+            }
+            return .success(lines.joined(separator: "\n"))
+        }
+    }
+
+    /// The process in the tty's foreground (`+` in its ps state): a command
+    /// still running, else the shell itself.
+    private static func foregroundJob(tty: String) -> (command: String, cwd: String?)? {
+        let ps = Process()
+        ps.executableURL = URL(fileURLWithPath: "/bin/ps")
+        ps.arguments = ["-t", (tty as NSString).lastPathComponent, "-o", "pid=,stat=,comm="]
+        let pipe = Pipe()
+        ps.standardOutput = pipe
+        ps.standardError = FileHandle.nullDevice
+        guard (try? ps.run()) != nil else { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        ps.waitUntilExit()
+        let rows = String(decoding: data, as: UTF8.self).split(separator: "\n").compactMap { line -> (pid_t, String, String)? in
+            let parts = line.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
+            guard parts.count == 3, let pid = pid_t(parts[0]) else { return nil }
+            return (pid, String(parts[1]), String(parts[2]))
+        }
+        guard let row = rows.last(where: { $0.1.contains("+") }) ?? rows.first else { return nil }
+        return ((row.2 as NSString).lastPathComponent, workingDirectory(of: row.0))
+    }
+
+    private static func workingDirectory(of pid: pid_t) -> String? {
+        var info = proc_vnodepathinfo()
+        let size = Int32(MemoryLayout<proc_vnodepathinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &info, size) == size else { return nil }
+        let path = withUnsafeBytes(of: info.pvi_cdir.vip_path) { raw in
+            String(cString: raw.bindMemory(to: CChar.self).baseAddress!)
+        }
+        return path.isEmpty ? nil : path
     }
 
     private static func selectedMail() -> Result<String, Failure> {

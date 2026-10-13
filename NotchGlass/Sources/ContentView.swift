@@ -93,7 +93,7 @@ struct ContentView: View {
             if ShortcutRecording.isActive { return false }
             // The thread search (⌘F on a conversation) owns Esc and ↑/↓ while
             // it is open; Return in its field steps forward on its own.
-            if model.threadSearch != nil {
+            if model.threadSearchOpen {
                 switch event.keyCode {
                 case 53: withAnimation(.easeOut(duration: Tokens.hoverFade)) { model.closeThreadSearch() }; return true
                 case 126: model.stepThreadSearch(-1); return true

@@ -105,6 +105,28 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.9",
+            date: "2026-10-13",
+            features: [
+                "The notch looks closer to Liquid Glass.",
+                "Ask about the weather, your Wi-Fi, or songs you played in Music.",
+                "Find a screenshot by the text in it.",
+                "An answer about selected text can replace that text.",
+                "Continue an answer that was cut off.",
+                "Notchi can read the open Terminal or iTerm tab.",
+                "Notchi can find text you copied earlier. Turn on Clipboard history in Settings → Chat.",
+            ],
+            improvements: [
+                "Mail and file searches also look inside messages and files.",
+                "Reminders can go to a chosen list and repeat until a set date.",
+                "Memory in Settings → Chat lists what Notchi saved.",
+                "Long conversations scroll more smoothly.",
+            ],
+            fixes: [
+                "Some models no longer show raw tool calls or their reasoning in answers.",
+            ]
+        ),
+        Entry(
             version: "0.9.8",
             date: "2026-10-12",
             features: [

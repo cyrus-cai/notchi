@@ -77,9 +77,9 @@ struct NotchShape: InsettableShape {
 /// Layers, back to front:
 ///  1. High-transparency native `.glassEffect(.clear)` over the whole shape —
 ///     real, strong refraction so the background bleeds through everywhere.
-///  2. A single **even** dark veil (no top-to-bottom gradient) that tints the
-///     whole slab so it reads as dark smoked glass and keeps text legible —
-///     plus a faint top-edge sheen for a touch of depth, like the reference.
+///  2. A near-solid dark veil that keeps text legible, plus a faint top-edge
+///     sheen. Open, the whole material fades to fully clear over the bottom
+///     band (`bottomFade`), as in the iOS Siri card.
 ///  3. A thin camera-zone darkening at the very top so the hardware notch /
 ///     lens area stays discreet without going to a hard black band.
 ///  4. A continuous, soft **edge rim** all the way around — the signature look:
@@ -109,6 +109,12 @@ struct GlassMaterial: View {
     /// composite target unchanged.
     static let bakedTint: Double = 0.34
 
+    /// Wider than any panel the island opens to (see `expandShimmer`).
+    private static let bandWidth: CGFloat = 1600
+    /// The size `diagonalGloss` is drawn at before it is stretched to the panel:
+    /// the idle panel's open size, so the common case is drawn 1:1.
+    private static let glossReference = CGSize(width: 580, height: 320)
+
     /// Whether the macOS 26 native glass (and therefore the baked tint) is in
     /// play; the legacy backdrop keeps the original full-strength veil.
     private var tintBaked: Bool {
@@ -131,8 +137,8 @@ struct GlassMaterial: View {
         // than letting the system glass draw its own soft luminous edge) removes
         // the "outer ring of glass": no refraction or glow bleeds past the
         // rounded corners, so the edge is crisp and the corner reads as solid.
-        // `.clipShape` alone does the hard cut — a second same-shape `.mask` was
-        // a redundant offscreen pass per animation frame and is gone.
+        // One shape mask does both the hard cut and the open bottom fade; a
+        // separate `.clipShape` on top of it would be a second offscreen pass.
         ZStack {
             shape.fill(.clear).nativeGlass(in: shape)
             darkVeil
@@ -153,9 +159,22 @@ struct GlassMaterial: View {
             // lived inside this masked group it would dissolve along with the fill.
         }
         .compositingGroup()
-        .clipShape(shape)
+        // The shape cut and the open panel's bottom fade in one mask. Open, the
+        // whole material (glass, veil, tint) fades to fully clear over the
+        // bottom band, so the wallpaper there shows unrefracted, as in the iOS
+        // Siri card. At rest the plain shape fill covers the fade.
+        .mask {
+            GeometryReader { geo in
+                ZStack {
+                    shape.fill(.black).opacity(expanded ? 0 : 1)
+                    shape.fill(bottomFade(height: geo.size.height))
+                }
+            }
+        }
         // A tight, downward-only drop shadow for separation — small radius so it
         // doesn't smear into a halo around the corners on a bright wallpaper.
+        // Resting only: under the open panel it would show through the clear
+        // bottom band as a dark smudge.
         .background(
             shape
                 .fill(.black.opacity(0.30))
@@ -167,6 +186,7 @@ struct GlassMaterial: View {
                 // frame just scales the cached texture. Pixel-identical.
                 .drawingGroup()
                 .offset(y: 5)
+                .opacity(expanded ? 0 : 1)
                 .allowsHitTesting(false)
         )
         .onChange(of: expanded) { _, isOpen in
@@ -181,6 +201,31 @@ struct GlassMaterial: View {
                 sweep = false
             }
         }
+    }
+
+    /// Height of the open panel's bottom fade.
+    static let bottomFadeBand: CGFloat = 40
+    /// How much of the material the fade keeps at the bottom edge. Fully clear
+    /// read too bright there and flickered with the wallpaper behind.
+    static let bottomFadeFloor: CGFloat = 0.3
+
+    /// The open panel's bottom fade, as a mask: opaque down to the band, then
+    /// eased across it to `bottomFadeFloor` at the bottom edge. Ease-in, as in the
+    /// reference — the body stays dark into the band and clears fast near the
+    /// edge, where a linear ramp would leave a grey film over the whole band.
+    /// Capped at 36% of the height (the reference's share) so the short frames
+    /// of the open spring don't fade from the top.
+    private func bottomFade(height: CGFloat) -> LinearGradient {
+        let h = max(height, 1)
+        let start = 1 - min(Self.bottomFadeBand, h * 0.36) / h
+        let samples: [CGFloat] = [0, 0.2, 0.4, 0.6, 0.8, 1]
+        return LinearGradient(
+            stops: [.init(color: .black, location: 0)] + samples.map { t in
+                .init(color: .black.opacity(Double(1 - (1 - Self.bottomFadeFloor) * t * t)),
+                      location: start + (1 - start) * t)
+            },
+            startPoint: .top, endPoint: .bottom
+        )
     }
 
     /// A one-shot specular highlight that glides down the glass as it opens — a
@@ -202,7 +247,11 @@ struct GlassMaterial: View {
                 ],
                 startPoint: .top, endPoint: .bottom
             )
-            .frame(height: 110)
+            // A fixed width, wider than any panel: the band's raster no longer
+            // depends on the panel's width, so the open spring, which resizes
+            // the panel every frame, moves a cached texture instead of
+            // re-rasterizing it. The parent clip cuts it to the shape.
+            .frame(width: Self.bandWidth, height: 110)
             .blur(radius: 6)
             // Flatten the blurred band to one offscreen texture (same trick as
             // the drop shadow below): its content is fixed — a 110pt gradient,
@@ -210,6 +259,7 @@ struct GlassMaterial: View {
             // via the offset transform instead of re-running the radius-6 blur
             // on every frame of the travel. Pixel-identical.
             .drawingGroup()
+            .frame(width: geo.size.width)
             .offset(y: sweep ? travel - 55 : -110)
             .blendMode(.plusLighter)
         }
@@ -238,15 +288,17 @@ struct GlassMaterial: View {
             )
             // Oversize + rotate so the band sweeps the lower-right corner area at a
             // shallow diagonal, like raking light, then blur it to a soft gloss.
-            .frame(width: w * 1.8, height: h * 1.8)
-            // Blur BEFORE the rotation (a gaussian is isotropic, so blur∘rotate
-            // and rotate∘blur are the same picture) and flatten to one offscreen
-            // texture — the drop-shadow trick. The radius-14 blur over a 1.8×
-            // oversized band was the panel's biggest filter pass, re-run on every
-            // frame of the open/close spring; flattened, the rotation and offset
-            // ride the cached raster as plain transforms.
+            // Drawn once at a fixed reference size and stretched to the panel
+            // with a scale transform. A linear gradient between unit points
+            // stretches to exactly the gradient it would draw at the new size,
+            // so only the radius-14 blur is stretched with it, which on a band
+            // this soft does not show. Sized from the panel, the raster changed
+            // on every frame of the open spring and was redrawn on the main
+            // thread each time; at a fixed size it is drawn once.
+            .frame(width: Self.glossReference.width * 1.8, height: Self.glossReference.height * 1.8)
             .blur(radius: 14)
             .drawingGroup()
+            .scaleEffect(x: w / Self.glossReference.width, y: h / Self.glossReference.height)
             .rotationEffect(.degrees(-18))
             .offset(x: w * 0.12, y: h * 0.30)
             .blendMode(.plusLighter)
@@ -297,15 +349,12 @@ struct GlassMaterial: View {
             // glass tint.
             let solidEnd = min(cameraZone / h, 0.985)
             let meltEnd = min(solidEnd + 60 / h, 0.999)   // ~60pt melt band
-            // The glass is darkest just under the black notch lip and eases more
-            // translucent toward the bottom — matching real dark Liquid Glass, where
-            // the top reads near-solid and the lower body lets more of the
-            // background warmth bleed through. Two values: the tint right after the
-            // melt (`glassTop`) and the lighter tint at the very bottom edge
-            // (`glassBottom`), ramped between so the panel grows clearer downward
-            // without ever going fully clear (text keeps a dark backing throughout).
-            let glassTop = 0.62
-            let glassBottom = 0.34
+            // One even body tint under the melt — lighter than the iOS Siri
+            // card's ~0.97, so the panel still reads as glass. The clearing
+            // toward the bottom is not here: the material's mask fades glass
+            // and veil together to fully clear (`bottomFade`), which a veil
+            // alone can't do over the baked tint.
+            let glassBody = 0.82
 
             ZStack {
                 if expanded {
@@ -316,8 +365,8 @@ struct GlassMaterial: View {
                         stops: [
                             .init(color: .black,                                  location: 0.0),
                             .init(color: .black,                                  location: solidEnd),
-                            .init(color: .black.opacity(veilAlpha(glassTop)),     location: meltEnd),
-                            .init(color: .black.opacity(veilAlpha(glassBottom)),  location: 1.0),
+                            .init(color: .black.opacity(veilAlpha(glassBody)),    location: meltEnd),
+                            .init(color: .black.opacity(veilAlpha(glassBody)),    location: 1.0),
                         ],
                         startPoint: .top, endPoint: .bottom
                     )
@@ -387,7 +436,7 @@ struct IslandRim: View {
                         stops: [
                             .init(color: .white.opacity(0.0),  location: 0.0),
                             .init(color: .white.opacity(0.05), location: 0.5),
-                            .init(color: .white.opacity(0.16), location: 1.0),
+                            .init(color: .white.opacity(0.38), location: 1.0),
                         ],
                         startPoint: .top, endPoint: .bottom
                     ),

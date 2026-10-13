@@ -94,7 +94,7 @@ function scalar(entryBody, key) {
   return m ? decodeSwiftString(m[1]) : null;
 }
 
-function parseEntries(src) {
+export function parseEntries(src) {
   return entryChunks(extractBundled(src)).map((body) => ({
     version: scalar(body, 'version'),
     date: scalar(body, 'date'),
@@ -123,7 +123,7 @@ function esc(s) {
 }
 
 // Compare version strings descending (newest first), numeric-segment aware.
-function cmpVer(a, b) {
+export function cmpVer(a, b) {
   const pa = a.split('.').map(Number), pb = b.split('.').map(Number);
   for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
     const d = (pb[i] || 0) - (pa[i] || 0);
@@ -184,19 +184,22 @@ function build() {
   return { block, entries };
 }
 
-const check = process.argv.includes('--check');
-const { block, entries } = build();
-const current = readFileSync(PAGE, 'utf8');
+// Run only when invoked directly; scripts/notify-discord.mjs imports the parser.
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  const check = process.argv.includes('--check');
+  const { block, entries } = build();
+  const current = readFileSync(PAGE, 'utf8');
 
-if (block === current) {
-  console.log(`releases.html is up to date (${entries.length} releases, newest ${entries[0].version}).`);
-  process.exit(0);
+  if (block === current) {
+    console.log(`releases.html is up to date (${entries.length} releases, newest ${entries[0].version}).`);
+    process.exit(0);
+  }
+
+  if (check) {
+    console.error('releases.html is STALE — run: node scripts/gen-releases.mjs');
+    process.exit(1);
+  }
+
+  writeFileSync(PAGE, block);
+  console.log(`Wrote releases.html: ${entries.length} releases, newest ${entries[0].version}.`);
 }
-
-if (check) {
-  console.error('releases.html is STALE — run: node scripts/gen-releases.mjs');
-  process.exit(1);
-}
-
-writeFileSync(PAGE, block);
-console.log(`Wrote releases.html: ${entries.length} releases, newest ${entries[0].version}.`);

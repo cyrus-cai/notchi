@@ -50,12 +50,43 @@ enum LinkCardSplitter {
         return cache
     }()
 
+    /// The last few layouts handed out, checked before `cache`. One body
+    /// evaluation asks for the same answer's layout a dozen times (`hasText`,
+    /// `hasLeadText`, …), and the `cache` key copies the whole text and hashes
+    /// it as an NSString each time — on a long streaming answer that was most
+    /// of each flush. Comparing against the same text is a length check or an
+    /// identity check.
+    private struct Recent {
+        let params: String
+        let text: String
+        let value: LinkCardLayout
+    }
+    nonisolated(unsafe) private static var recentLayouts: [Recent] = []
+    private static let recentLock = NSLock()
+
     /// `recent` holds the `LinkLine.key` of pages the answers just above
     /// already carded; those pages get no second card here.
     static func layout(_ text: String, streaming: Bool, sources: [WebSource],
                        question: String, shared: [String] = [],
                        recent: Set<String> = []) -> LinkCardLayout {
         let trust = allowed(sources: sources, question: question, shared: shared)
+        let params = "\(streaming ? 1 : 0)\u{1e}\(trust.pages.sorted().joined(separator: ","))"
+            + "\u{1e}\(trust.hosts.sorted().joined(separator: ","))"
+            + "\u{1e}\(recent.sorted().joined(separator: ","))"
+        recentLock.lock()
+        let hit = recentLayouts.first { $0.text == text && $0.params == params }
+        recentLock.unlock()
+        if let hit { return hit.value }
+        let value = layoutUncached(text, streaming: streaming, trust: trust, recent: recent, params: params)
+        recentLock.lock()
+        recentLayouts.insert(Recent(params: params, text: text, value: value), at: 0)
+        if recentLayouts.count > 8 { recentLayouts.removeLast() }
+        recentLock.unlock()
+        return value
+    }
+
+    private static func layoutUncached(_ text: String, streaming: Bool, trust: Trust,
+                                       recent: Set<String>, params: String) -> LinkCardLayout {
         let mayLink = text.contains("http") || text.contains("![")
             || (streaming && text.contains("["))
             || text.range(of: "share", options: .caseInsensitive) != nil
@@ -63,9 +94,6 @@ enum LinkCardSplitter {
         guard mayLink || mayBreak else {
             return LinkCardLayout(lead: text, rest: [])
         }
-        let params = "\(streaming ? 1 : 0)\u{1e}\(trust.pages.sorted().joined(separator: ","))"
-            + "\u{1e}\(trust.hosts.sorted().joined(separator: ","))"
-            + "\u{1e}\(recent.sorted().joined(separator: ","))"
         let key = (params + "\u{1e}" + text) as NSString
         if let hit = cache.object(forKey: key) { return hit.value }
         let result = compute(text, streaming: streaming, trust: trust, recent: recent, params: params)
@@ -360,8 +388,13 @@ extension Array where Element == NotchModel.Turn {
     /// The user's words the answer `answerID` replies to: the nearest user turn
     /// above it.
     func question(before answerID: UUID) -> String {
-        guard let i = firstIndex(where: { $0.id == answerID }) else { return "" }
-        return self[..<i].last(where: { $0.role == "user" })?.text ?? ""
+        guard let i = lastIndex(where: { $0.id == answerID }) else { return "" }
+        return question(at: i)
+    }
+
+    /// `question(before:)` for the answer at index `i`.
+    func question(at i: Int) -> String {
+        self[..<i].last(where: { $0.role == "user" })?.text ?? ""
     }
 
     /// The pages the `window` answers above `answerID` hand over as cards, by
@@ -369,7 +402,12 @@ extension Array where Element == NotchModel.Turn {
     /// filter, so a page every answer repeats still stays hidden until it
     /// leaves the window.
     func recentCards(before answerID: UUID, window: Int = 3) -> Set<String> {
-        guard let i = firstIndex(where: { $0.id == answerID }) else { return [] }
+        guard let i = lastIndex(where: { $0.id == answerID }) else { return [] }
+        return recentCards(at: i, window: window)
+    }
+
+    /// `recentCards(before:)` for the answer at index `i`.
+    func recentCards(at i: Int, window: Int = 3) -> Set<String> {
         var keys = Set<String>()
         var counted = 0
         for j in stride(from: i - 1, through: 0, by: -1) where counted < window {
@@ -382,7 +420,7 @@ extension Array where Element == NotchModel.Turn {
                     answerModel: turn.answerModel, regenModel: turn.regenModel))
             let layout = LinkCardSplitter.layout(
                 text, streaming: false, sources: turn.sources,
-                question: question(before: turn.id), shared: turn.sharedLinks)
+                question: question(at: j), shared: turn.sharedLinks)
             for case .link(let url, _) in layout.rest { keys.insert(LinkLine.key(url)) }
         }
         return keys
@@ -435,7 +473,6 @@ struct LinkCardView: View {
                                                     style: .continuous))
                 }
                 .buttonStyle(PlatePressStyle())
-                .notchTooltip(url.absoluteString)
                 .transition(.opacity)
             } else if let knownSize {
                 Color.clear

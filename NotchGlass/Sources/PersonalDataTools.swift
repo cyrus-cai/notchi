@@ -1,4 +1,5 @@
 import AppKit
+import Contacts
 import EventKit
 import Foundation
 import MapKit
@@ -123,8 +124,10 @@ struct ReadRemindersTool: NotchTool {
     Lists the user's Apple Reminders, read on this Mac. By default the open \
     (not completed) ones, overdue included; `due_within_days` keeps only those \
     due within that many days from now; `completed_days` instead lists what \
-    they completed in that many past days. Call for "what's left to do", \
-    "what's due this week", "what did I finish".
+    they completed in that many past days; `list` keeps one Reminders list \
+    ("groceries", "买菜", "Work"). Each line names its list, and the result ends \
+    with the user's list names. Call for "what's left to do", "what's due this \
+    week", "what did I finish", "what's on my shopping list".
     """
     let schema: [String: Any] = [
         "type": "object",
@@ -134,6 +137,7 @@ struct ReadRemindersTool: NotchTool {
             "completed_days": ["type": "integer", "minimum": 1, "maximum": 90,
                                "description": "List reminders completed in this many past days instead of open ones."],
             "query": ["type": "string", "description": "Only reminders whose title or notes contain this text."],
+            "list": ["type": "string", "description": "Only this Reminders list, as the user names it."],
         ],
     ]
 
@@ -141,6 +145,14 @@ struct ReadRemindersTool: NotchTool {
         let store = EKEventStore()
         let granted = (try? await store.requestFullAccessToReminders()) ?? false
         guard granted else { return "Error: \(L("reminders.error.permission"))" }
+        let listNames = "Lists: " + store.calendars(for: .reminder).map(\.title).joined(separator: ", ")
+        var lists: [EKCalendar]? = nil
+        if let name = PersonalDataFormat.string(input["list"]) {
+            guard let list = RemindersService.list(named: name, in: store) else {
+                return "There is no reminder list called \"\(name)\". \(listNames)"
+            }
+            lists = [list]
+        }
         let cal = Calendar.current
         let now = Date()
         let query = PersonalDataFormat.string(input["query"])?.lowercased()
@@ -151,17 +163,17 @@ struct ReadRemindersTool: NotchTool {
         if let completedDays {
             let since = cal.date(byAdding: .day, value: -min(max(completedDays, 1), 90), to: now) ?? now
             predicate = store.predicateForCompletedReminders(withCompletionDateStarting: since,
-                                                             ending: now, calendars: nil)
+                                                             ending: now, calendars: lists)
             heading = "Completed in the last \(completedDays) days:"
         } else if let within = PersonalDataFormat.int(input["due_within_days"]) {
             let endDay = cal.date(byAdding: .day, value: min(max(within, 0), 365) + 1,
                                   to: cal.startOfDay(for: now)) ?? now
             predicate = store.predicateForIncompleteReminders(withDueDateStarting: nil,
-                                                              ending: endDay, calendars: nil)
+                                                              ending: endDay, calendars: lists)
             heading = within == 0 ? "Open, due today or overdue:" : "Open, due within \(within) days or overdue:"
         } else {
             predicate = store.predicateForIncompleteReminders(withDueDateStarting: nil,
-                                                              ending: nil, calendars: nil)
+                                                              ending: nil, calendars: lists)
             heading = "Open reminders:"
         }
 
@@ -174,7 +186,8 @@ struct ReadRemindersTool: NotchTool {
                 [$0.title, $0.notes].compactMap { $0?.lowercased() }.contains { $0.contains(query) }
             }
         }
-        guard !reminders.isEmpty else { return String(heading.dropLast()) + ": none." }
+        if let list = lists?.first { heading = "\(list.title) — " + heading }
+        guard !reminders.isEmpty else { return String(heading.dropLast()) + ": none.\n" + listNames }
 
         func due(_ r: EKReminder) -> Date? { r.dueDateComponents.flatMap { cal.date(from: $0) } }
         if completedDays != nil {
@@ -198,6 +211,7 @@ struct ReadRemindersTool: NotchTool {
             lines.append(line)
         }
         if reminders.count > 200 { lines.append("…and \(reminders.count - 200) more.") }
+        lines.append(listNames)
         return lines.joined(separator: "\n")
     }
 }
@@ -211,7 +225,8 @@ struct ManageReminderTool: NotchTool {
     let description = """
     Changes one of the user's existing Apple Reminders: action=complete marks it \
     done, action=reschedule moves it to a new local `due` (YYYY-MM-DDTHH:MM), \
-    action=delete removes it after the user confirms. Identify it by `id` from \
+    action=delete removes it after the user confirms, action=move puts it in \
+    another Reminders `list`. Identify it by `id` from \
     read_reminders, or by `query` (text in its title). If several match, the \
     result lists them with ids; call again with the right id. For "cancel the \
     reminder" use delete. Never say it changed until the result says so.
@@ -219,8 +234,9 @@ struct ManageReminderTool: NotchTool {
     let schema: [String: Any] = [
         "type": "object",
         "properties": [
-            "action": ["type": "string", "enum": ["complete", "reschedule", "delete"],
+            "action": ["type": "string", "enum": ["complete", "reschedule", "delete", "move"],
                        "description": "What to do with the reminder."],
+            "list": ["type": "string", "description": "move only: the list it goes to, as the user names it."],
             "id": ["type": "string", "description": "The reminder's id from read_reminders."],
             "query": ["type": "string", "description": "Text in the reminder's title, when there is no id."],
             "due": ["type": "string", "description": "reschedule only: the new local time, YYYY-MM-DDTHH:MM."],
@@ -233,8 +249,8 @@ struct ManageReminderTool: NotchTool {
 
     func execute(_ input: [String: Any]) async throws -> String {
         guard let action = PersonalDataFormat.string(input["action"]),
-              ["complete", "reschedule", "delete"].contains(action) else {
-            return "Error: action must be complete, reschedule or delete."
+              ["complete", "reschedule", "delete", "move"].contains(action) else {
+            return "Error: action must be complete, reschedule, delete or move."
         }
         let store = EKEventStore()
         let granted = (try? await store.requestFullAccessToReminders()) ?? false
@@ -267,6 +283,13 @@ struct ManageReminderTool: NotchTool {
         switch action {
         case "complete":
             reminder.isCompleted = true
+        case "move":
+            guard let name = PersonalDataFormat.string(input["list"]) else { return "Error: give the list to move it to." }
+            guard let list = RemindersService.list(named: name, in: store) else {
+                return "There is no reminder list called \"\(name)\". Lists: "
+                    + store.calendars(for: .reminder).map(\.title).joined(separator: ", ")
+            }
+            reminder.calendar = list
         case "reschedule":
             guard let raw = PersonalDataFormat.string(input["due"]),
                   let due = Self.parseDue(raw) else {
@@ -296,6 +319,7 @@ struct ManageReminderTool: NotchTool {
         let external = reminder.calendarItemExternalIdentifier
         await mark(external.map(RemindersService.deepLink(externalID:)))
         if action == "complete" { return "Marked \"\(title)\" as done." }
+        if action == "move" { return "Moved \"\(title)\" to the \"\(reminder.calendar?.title ?? "")\" list." }
         let due = reminder.dueDateComponents.flatMap { Calendar.current.date(from: $0) }
         return "Moved \"\(title)\" to \(due.map(PersonalDataFormat.dayAndTime) ?? "the new time")."
     }
@@ -418,15 +442,15 @@ struct ManageEventTool: NotchTool {
 }
 
 /// `schedule_action`: run a shell command once, some minutes from now — "mute
-/// for an hour, then unmute". The command is confirmed when it is scheduled;
-/// the wait lives in the app and ends with it.
+/// for an hour, then unmute". A command `ShellRisk` flags is confirmed when
+/// it is scheduled; the wait lives in the app and ends with it.
 struct ScheduleActionTool: NotchTool {
     static let toolName = "schedule_action"
     let name = toolName
     let description = """
     Runs one shell command on this Mac once, `minutes` from now (1 to 1440) — \
     to undo something later ("mute for an hour, then unmute") or do it at a set \
-    time. The user confirms the command now. It runs only while the app stays \
+    time. A risky command is confirmed by the user now. It runs only while the app stays \
     open. Use run_shell for anything to do right away.
     """
     let schema: [String: Any] = [
@@ -507,7 +531,11 @@ struct TravelTimeTool: NotchTool {
     Estimates how long a trip takes right now between two named places, with \
     current traffic, using Apple Maps: distance and minutes by car, on foot or \
     by public transit. Pass place names or addresses as the user wrote them; \
-    add the city when it is clear from the conversation.
+    add the city when it is clear from the conversation. For the user's own \
+    places write just home, work or here ("家", "公司", "这里" work too): \
+    home and work come from their contact card or an address they gave \
+    before, here from this Mac's location. If the result says an address is \
+    unknown, ask for it, then call again with that address and save_as.
     """
     let schema: [String: Any] = [
         "type": "object",
@@ -516,6 +544,8 @@ struct TravelTimeTool: NotchTool {
             "to": ["type": "string", "description": "Destination place or address."],
             "mode": ["type": "string", "enum": ["driving", "walking", "transit"],
                      "description": "Default driving (also right for a taxi)."],
+            "save_as": ["type": "string", "enum": ["home", "work"],
+                        "description": "When the user just told you their home or work address: keep the `from` address under this name for next time."],
         ],
         "required": ["from", "to"],
     ]
@@ -524,8 +554,20 @@ struct TravelTimeTool: NotchTool {
         guard let from = PersonalDataFormat.string(input["from"]),
               let to = PersonalDataFormat.string(input["to"]) else { return "Error: give from and to." }
         let mode = PersonalDataFormat.string(input["mode"]) ?? "driving"
-        guard let start = await Self.place(from) else { return "Apple Maps could not find \"\(from)\"." }
-        guard let end = await Self.place(to) else { return "Apple Maps could not find \"\(to)\"." }
+        if let kind = PersonalDataFormat.string(input["save_as"]).flatMap(UserPlaces.Kind.init(rawValue:)),
+           UserPlaces.kind(of: from) == nil {
+            UserPlaces.save(from, as: kind)
+        }
+        let start: MKMapItem
+        switch await Self.resolve(from) {
+        case .found(let item): start = item
+        case .unknown(let message): return message
+        }
+        let end: MKMapItem
+        switch await Self.resolve(to) {
+        case .found(let item): end = item
+        case .unknown(let message): return message
+        }
         let request = MKDirections.Request()
         request.source = start
         request.destination = end
@@ -542,10 +584,88 @@ struct TravelTimeTool: NotchTool {
         }
     }
 
+    private enum Resolved {
+        case found(MKMapItem)
+        case unknown(String)
+    }
+
+    /// A place name for Apple Maps, or the user's own home, work or current
+    /// location. Never searches Maps for "home": that finds a business
+    /// called Home, or a hotel, and the trip is timed from there.
+    private static func resolve(_ query: String) async -> Resolved {
+        guard let kind = UserPlaces.kind(of: query) else {
+            if let item = await place(query) { return .found(item) }
+            return .unknown("Apple Maps could not find \"\(query)\".")
+        }
+        if kind == .here {
+            guard let location = await LocationService.shared.current() else {
+                return .unknown("This Mac's location is unknown (Location access for Notchi is off). Ask the user where they are.")
+            }
+            let item = MKMapItem(placemark: MKPlacemark(coordinate: location.coordinate))
+            item.name = "current location"
+            return .found(item)
+        }
+        guard let address = await UserPlaces.address(for: kind) else {
+            return .unknown("The user's \(kind.rawValue) address is unknown: not on their own contact card and not given before. "
+                + "Ask them for it, then call travel_time again with that address and save_as=\(kind.rawValue).")
+        }
+        guard let item = await place(address) else {
+            return .unknown("Apple Maps could not find the saved \(kind.rawValue) address \"\(address)\". Ask the user for it again.")
+        }
+        item.name = "\(kind.rawValue) (\(address))"
+        return .found(item)
+    }
+
     private static func place(_ query: String) async -> MKMapItem? {
         let request = MKLocalSearch.Request()
         request.naturalLanguageQuery = query
         return try? await MKLocalSearch(request: request).start().mapItems.first
+    }
+}
+
+/// The user's own places for `travel_time`: home and work from the "me" card
+/// in Contacts, else an address they gave before (kept on this Mac); here is
+/// this Mac's location.
+enum UserPlaces {
+    enum Kind: String { case home, work, here }
+
+    private static let words: [Kind: Set<String>] = [
+        .home: ["home", "my home", "my place", "my house", "my apartment", "家", "家里", "家裡", "我家", "回家",
+                "自宅", "家から", "집", "우리 집", "casa", "mi casa", "maison", "chez moi"],
+        .work: ["work", "office", "my office", "公司", "单位", "單位", "办公室", "辦公室", "会社", "オフィス",
+                "회사", "직장", "trabajo", "oficina", "bureau", "travail"],
+        .here: ["here", "current location", "my location", "where i am", "这里", "這裡", "这儿", "当前位置", "目前位置",
+                "ここ", "現在地", "여기", "aquí", "ici"],
+    ]
+
+    static func kind(of query: String) -> Kind? {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return words.first { $0.value.contains(q) }?.key
+    }
+
+    private static func key(_ kind: Kind) -> String { "places.\(kind.rawValue)" }
+
+    static func save(_ address: String, as kind: Kind) {
+        UserDefaults.standard.set(address.trimmingCharacters(in: .whitespacesAndNewlines), forKey: key(kind))
+    }
+
+    /// The contact card's address first: it is what the user keeps current.
+    static func address(for kind: Kind) async -> String? {
+        if let card = await contactCardAddress(kind) { return card }
+        let saved = UserDefaults.standard.string(forKey: key(kind)) ?? ""
+        return saved.isEmpty ? nil : saved
+    }
+
+    private static func contactCardAddress(_ kind: Kind) async -> String? {
+        let store = CNContactStore()
+        guard (try? await store.requestAccess(for: .contacts)) == true else { return nil }
+        let keys = [CNContactPostalAddressesKey as CNKeyDescriptor]
+        guard let me = try? store.unifiedMeContactWithKeys(toFetch: keys) else { return nil }
+        let label = kind == .home ? CNLabelHome : CNLabelWork
+        guard let postal = me.postalAddresses.first(where: { $0.label == label })?.value else { return nil }
+        let line = CNPostalAddressFormatter.string(from: postal, style: .mailingAddress)
+            .replacingOccurrences(of: "\n", with: ", ")
+        return line.isEmpty ? nil : line
     }
 }
 
@@ -560,7 +680,11 @@ struct ReadPhotosTool: NotchTool {
     and the text in it, recognised on this Mac. Call for "the whiteboard photo \
     from last week", "the receipt I photographed". Give `from` (local \
     YYYY-MM-DD) and `days`; `query` keeps only photos whose labels or text \
-    contain it.
+    contain it. For a screenshot the user describes by what it says ("the \
+    同程 screenshot with the 快充 times"), pass `query` WITHOUT `from`: that \
+    searches the text of every screenshot from the last 12 months; several \
+    words must all appear. Add scope=all to search ordinary photos too (a \
+    passport or ID card photographed with the camera).
     """
     let schema: [String: Any] = [
         "type": "object",
@@ -569,6 +693,8 @@ struct ReadPhotosTool: NotchTool {
             "days": ["type": "integer", "minimum": 1, "maximum": 31, "description": "Days from `from`. Default 7."],
             "query": ["type": "string", "description": "Keep photos whose labels or text contain this (e.g. whiteboard, 白板, receipt)."],
             "limit": ["type": "integer", "minimum": 1, "maximum": 8, "description": "Photos to read, 1 to 8. Default 4."],
+            "scope": ["type": "string", "enum": ["screenshots", "all"],
+                      "description": "Text search without `from`: screenshots only (default) or every photo."],
         ],
     ]
 
@@ -576,6 +702,11 @@ struct ReadPhotosTool: NotchTool {
         let status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
         guard status == .authorized || status == .limited else {
             return "Error: Photos access is off for Notchi. The user can allow it in System Settings → Privacy & Security → Photos."
+        }
+        if input["from"] == nil, let query = PersonalDataFormat.string(input["query"]) {
+            return await Self.searchScreenshots(query,
+                                                limit: min(max(PersonalDataFormat.int(input["limit"]) ?? 4, 1), 8),
+                                                everyPhoto: PersonalDataFormat.string(input["scope"]) == "all")
         }
         let cal = Calendar.current
         let start = cal.startOfDay(for: PersonalDataFormat.parseDay(input["from"] as? String)
@@ -629,6 +760,63 @@ struct ReadPhotosTool: NotchTool {
         }
     }
 
+    /// Screenshots from the last 12 months whose text holds every word of
+    /// `query`, newest first. Each screenshot's text is recognised once and
+    /// kept in `ScreenshotTextCache`; a call spends at most a minute on new
+    /// ones and says when it stopped early, so asking again picks up there.
+    private static func searchScreenshots(_ query: String, limit: Int, everyPhoto: Bool) async -> String {
+        let words = query.lowercased().split(whereSeparator: \.isWhitespace).map(String.init)
+        let options = PHFetchOptions()
+        let since = (Calendar.current.date(byAdding: .month, value: -12, to: Date()) ?? Date()) as NSDate
+        options.predicate = everyPhoto
+            ? NSPredicate(format: "mediaType == %d AND creationDate >= %@", PHAssetMediaType.image.rawValue, since)
+            : NSPredicate(format: "mediaType == %d AND (mediaSubtypes & %d) != 0 AND creationDate >= %@",
+                          PHAssetMediaType.image.rawValue, PHAssetMediaSubtype.photoScreenshot.rawValue, since)
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        let assets = PHAsset.fetchAssets(with: options)
+        let noun = everyPhoto ? "photos" : "screenshots"
+        guard assets.count > 0 else { return "There are no \(noun) in Photos from the last 12 months." }
+        let cache = ScreenshotTextCache.shared
+        let deadline = Date().addingTimeInterval(60)
+        var out: [String] = []
+        var checked = 0
+        var stoppedEarly = false
+        for i in 0..<assets.count where out.count < limit {
+            let asset = assets.object(at: i)
+            let stamp = asset.modificationDate ?? asset.creationDate ?? .distantPast
+            var text = cache.text(for: asset.localIdentifier, modified: stamp)
+            if text == nil {
+                guard Date() < deadline else { stoppedEarly = true; break }
+                guard let image = await image(for: asset) else { continue }
+                text = recognizeText(image)
+                cache.store(text ?? "", for: asset.localIdentifier, modified: stamp)
+            }
+            checked += 1
+            guard let found = text, !found.isEmpty else { continue }
+            let lowered = found.lowercased()
+            guard words.allSatisfy(lowered.contains) else { continue }
+            let when = asset.creationDate.map(PersonalDataFormat.dayAndTime) ?? "?"
+            out.append("## \(everyPhoto ? "Photo" : "Screenshot") \(when)\nText:\n\(String(found.prefix(2000)))")
+        }
+        cache.save()
+        var reply = out.isEmpty
+            ? "None contains \"\(query)\" among the \(checked) of \(assets.count) \(noun) from the last 12 months checked so far."
+            : out.joined(separator: "\n\n")
+        if stoppedEarly {
+            reply += "\n\n(Stopped after \(checked) of \(assets.count) \(noun) to answer in time; call again with the same query to continue from there.)"
+        }
+        return reply
+    }
+
+    /// The recognised text alone — what a screenshot search needs.
+    private static func recognizeText(_ image: CGImage) -> String {
+        let recognize = VNRecognizeTextRequest()
+        recognize.recognitionLevel = .accurate
+        recognize.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US", "ja-JP", "ko-KR"]
+        try? VNImageRequestHandler(cgImage: image).perform([recognize])
+        return (recognize.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
+    }
+
     /// Vision's top scene labels and the recognised text.
     private static func read(_ image: CGImage) -> (labels: [String], text: String) {
         let classify = VNClassifyImageRequest()
@@ -650,13 +838,16 @@ struct ReadMailTool: NotchTool {
     let description = """
     Reads the user's Apple Mail inbox: action=unread lists unread messages, \
     action=search lists messages whose sender or subject contains `query`, \
+    then messages from the last 30 days whose text contains it (an order or \
+    tracking number, an error message, an invoice number), with the line it \
+    was found in, \
     action=read returns one message's text by `id` from a list. Newest first.
     """
     let schema: [String: Any] = [
         "type": "object",
         "properties": [
             "action": ["type": "string", "enum": ["unread", "search", "read"]],
-            "query": ["type": "string", "description": "search: text in the sender or subject."],
+            "query": ["type": "string", "description": "search: text in the sender, subject or (last 30 days) message body."],
             "id": ["type": "string", "description": "read: the message id from a list."],
             "limit": ["type": "integer", "minimum": 1, "maximum": 30, "description": "unread/search: how many, default 10."],
         ],
@@ -681,7 +872,11 @@ struct ReadMailTool: NotchTool {
         case .failure(let error): return "Error: \(error.errorDescription ?? "")"
         case .success(let rows):
             guard !rows.isEmpty else { return action == "unread" ? "No unread messages in the inbox." : "No message matches \"\(query)\"." }
-            return rows.map { "- \($0.date) · \($0.sender) · \($0.subject) · id \($0.id)" }.joined(separator: "\n")
+            return rows.map { row in
+                let found = row.snippet.isEmpty ? ""
+                    : "\n  found in the text: …\(row.snippet.replacingOccurrences(of: "\n", with: " "))…"
+                return "- \(row.date) · \(row.sender) · \(row.subject) · id \(row.id)\(found)"
+            }.joined(separator: "\n")
         }
     }
 }
@@ -891,5 +1086,137 @@ struct ReadNotesTool: NotchTool {
             if out.count >= limit { break }
         }
         return out
+    }
+}
+
+/// `recent_songs`: what the user played lately in the Music app, read through
+/// AppleScript — each library track keeps its last played date and play count.
+/// The first call raises the Automation prompt for Music; asking Music also
+/// opens it when it is not running. Other players (NetEase, QQ Music) keep
+/// their history to themselves.
+struct RecentSongsTool: NotchTool {
+    static let toolName = "recent_songs"
+    let name = toolName
+    let description = """
+    Songs the user played recently in Apple's Music app, newest first, with \
+    when each was last played and its play count. Call for "我最近听了什么歌", \
+    "what was that song I played yesterday". Only the Music app's library; say \
+    so when they use another player.
+    """
+    let schema: [String: Any] = [
+        "type": "object",
+        "properties": [
+            "days": ["type": "integer", "minimum": 1, "maximum": 90, "description": "How many days back. Default 7."],
+            "limit": ["type": "integer", "minimum": 1, "maximum": 50, "description": "How many songs. Default 20."],
+        ],
+    ]
+
+    private static let queue = DispatchQueue(label: "com.notchglass.music-applescript")
+
+    private struct Failure: Error {
+        let message: String
+    }
+
+    func execute(_ input: [String: Any]) async throws -> String {
+        let days = min(max((input["days"] as? NSNumber)?.intValue ?? 7, 1), 90)
+        let limit = min(max((input["limit"] as? NSNumber)?.intValue ?? 20, 1), 50)
+        let source = """
+        tell application "Music"
+            set cutoff to (current date) - (\(days) * days)
+            set found to (every track of library playlist 1 whose played date > cutoff)
+            set out to {}
+            repeat with t in found
+                set end of out to {name of t, artist of t, played date of t, played count of t}
+            end repeat
+            return out
+        end tell
+        """
+        let result: Result<NSAppleEventDescriptor, Failure> = await withCheckedContinuation { cont in
+            Self.queue.async {
+                var error: NSDictionary?
+                guard let script = NSAppleScript(source: source) else {
+                    return cont.resume(returning: .failure(Failure(message: "Could not prepare the Music script.")))
+                }
+                let value = script.executeAndReturnError(&error)
+                if let error {
+                    let number = error[NSAppleScript.errorNumber] as? Int ?? 0
+                    if number == -1743 || number == -1744 {
+                        return cont.resume(returning: .failure(Failure(message: "Notchi is not allowed to read Music. The user can allow it in System Settings → Privacy & Security → Automation.")))
+                    }
+                    return cont.resume(returning: .failure(Failure(message: error[NSAppleScript.errorMessage] as? String ?? "Music did not answer.")))
+                }
+                cont.resume(returning: .success(value))
+            }
+        }
+        let list: NSAppleEventDescriptor
+        switch result {
+        case .failure(let failure): return failure.message
+        case .success(let value): list = value
+        }
+        var songs: [(title: String, artist: String, played: Date, count: Int)] = []
+        if list.numberOfItems > 0 {
+            for i in 1...list.numberOfItems {
+                guard let row = list.atIndex(i), row.numberOfItems == 4,
+                      let played = row.atIndex(3)?.dateValue else { continue }
+                songs.append((row.atIndex(1)?.stringValue ?? "", row.atIndex(2)?.stringValue ?? "",
+                              played, Int(row.atIndex(4)?.int32Value ?? 0)))
+            }
+        }
+        guard !songs.isEmpty else {
+            return "No song in the Music library was played in the last \(days) days. Songs played in other apps (NetEase, QQ Music, Spotify) are not recorded here."
+        }
+        songs.sort { $0.played > $1.played }
+        var lines = ["Played in the Music app in the last \(days) days, newest first:"]
+        for song in songs.prefix(limit) {
+            lines.append("- \(PersonalDataFormat.dayAndTime(song.played)) · \(song.title) — \(song.artist) · played \(song.count) times")
+        }
+        if songs.count > limit { lines.append("…and \(songs.count - limit) more.") }
+        return lines.joined(separator: "\n")
+    }
+}
+
+/// The text recognised in each screenshot, kept on this Mac so a later search
+/// does not read the same screenshots again. Keyed by the Photos asset id and
+/// dropped for an asset edited since. Never leaves the Mac.
+final class ScreenshotTextCache: @unchecked Sendable {
+    static let shared = ScreenshotTextCache()
+
+    private struct Entry: Codable {
+        var modified: Date
+        var text: String
+    }
+
+    private let lock = NSLock()
+    private var entries: [String: Entry]
+    private var dirty = false
+    private let fileURL: URL = {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Notchi", isDirectory: true)
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        return base.appendingPathComponent("screenshot-text.json")
+    }()
+
+    private init() {
+        entries = (try? Data(contentsOf: fileURL)).flatMap { try? JSONDecoder().decode([String: Entry].self, from: $0) } ?? [:]
+    }
+
+    func text(for id: String, modified: Date) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        guard let entry = entries[id], abs(entry.modified.timeIntervalSince(modified)) < 1 else { return nil }
+        return entry.text
+    }
+
+    func store(_ text: String, for id: String, modified: Date) {
+        lock.lock(); defer { lock.unlock() }
+        entries[id] = Entry(modified: modified, text: text)
+        dirty = true
+    }
+
+    func save() {
+        lock.lock()
+        guard dirty, let data = try? JSONEncoder().encode(entries) else { lock.unlock(); return }
+        dirty = false
+        lock.unlock()
+        try? data.write(to: fileURL, options: .atomic)
     }
 }

@@ -61,6 +61,11 @@ struct NotchBody: View {
     /// Pinned when the page opens, so a streaming answer can't move it; moved
     /// earlier by `loadOlderTurns`. Nil: not pinned yet.
     @State private var threadWindowStartID: UUID? = nil
+    /// The newest turn the result page mounts. Nil: the thread's newest. Set
+    /// only when ⌘F jumps to a match far above the window
+    /// (`mountSearchMatch`); newer turns then mount as the reader scrolls
+    /// down to them (`loadNewerTurns`).
+    @State private var threadWindowEndID: UUID? = nil
     /// The main-thread reveal's measurements (see `mainThreadReveal`): the turn
     /// stack a pull lays out, the result header it fades in, and the idle
     /// prompt + bucket row at rest, which the pull folds into the follow-up row.
@@ -4145,7 +4150,7 @@ struct NotchBody: View {
         // (`OlderTurnsLoader`), so a thread that has some scrolls even when the
         // mounted turns are short — a long question folded behind Show more
         // fills the window's character budget in a few lines.
-        return tall || hasOlderTurns
+        return tall || hasOlderTurns || hasNewerTurns
     }
 
     /// Whether a thread's natural height clears `ceiling`, estimated from its text
@@ -4540,11 +4545,13 @@ struct NotchBody: View {
         // layout there's no `.frame(height:)` to animate, so day-to-day streaming
         // growth carries no animation here at all — it just reflows.
         .animation(.spring(response: 0.3, dampingFraction: 1.0), value: clipped)
-        // ⌘F: the thread search bar, and its query highlighted in the text.
-        .environment(\.threadSearchHighlight, model.threadSearch?.query)
+        // ⌘F: the thread search bar. Matches are highlighted per turn
+        // (`ThreadSearchMark`).
         .overlay(alignment: .top) {
-            if model.threadSearch != nil {
-                ThreadSearchBar(model: model)
+            if model.threadSearchOpen {
+                ThreadSearchBar(search: model.threadSearch, position: model.threadSearch.position) {
+                    model.closeThreadSearch()
+                }
                     .padding(.top, 4)
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
@@ -4553,7 +4560,18 @@ struct NotchBody: View {
         // that window while it is up (see `threadWindowStart`).
         .onAppear { pinThreadWindow() }
         .onChange(of: model.threadHistoryID) { _, _ in pinThreadWindow() }
-        .onDisappear { threadWindowStartID = nil }
+        // A new turn while the window stops short of the newest: the page
+        // follows the new turn to the bottom, so it goes back to the newest
+        // window.
+        .onChange(of: model.turns.last?.id) { _, _ in
+            if threadWindowEndID != nil { pinThreadWindow() }
+        }
+        .onChange(of: threadWindowEndID) { _, end in model.threadWindowStopsShort = end != nil }
+        .onDisappear {
+            threadWindowStartID = nil
+            threadWindowEndID = nil
+            model.threadWindowStopsShort = false
+        }
     }
 
     /// The thread's turns, as both conversation layouts stack them. A loop
@@ -4564,12 +4582,18 @@ struct NotchBody: View {
             loopConversation(segments)
         } else {
             let lastID = model.turns.last?.id
-            let visible = model.turns.filter(\.isDrawn)
-            ForEach(visible[mountedStart(of: visible)...]) { turn in
-                SettledTurn(turn: turn, live: turn.streaming || turn.id == lastID) {
-                    turnView(turn)
+            let visible = model.conversation.drawnTurns
+            let end = mountedEnd(of: visible)
+            ForEach(visible[min(mountedStart(of: visible), end)..<end]) { turn in
+                let live = turn.streaming || turn.id == lastID
+                FarTurnStandIn(id: turn.id, keepsContent: live,
+                               heights: turnHeights) {
+                    SettledTurn(turn: turn, live: live) {
+                        turnView(turn)
+                    }
+                    .equatable()
+                    .modifier(ThreadSearchMark(search: model.threadSearch, turnID: turn.id))
                 }
-                .equatable()
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .id(turn.id)
             }
@@ -4595,6 +4619,9 @@ struct NotchBody: View {
     /// (`loadOlderTurns`). A pull mounts this window twice (the reveal, then
     /// the result page), so its size is what each pull costs.
     private static let windowTurns = 10
+    /// See `FarTurnStandIn`. Kept for the page's life; a turn's id never
+    /// names another turn.
+    @State private var turnHeights = TurnHeights()
     private static let windowCharacters = 3000
     /// What a question counts toward `windowCharacters`: a long one folds to
     /// six lines behind Show more (`UserQuestionBubble`), so a pasted wall of
@@ -4617,10 +4644,32 @@ struct NotchBody: View {
         return start
     }
 
+    /// The index just past the end of the page that starts at `start`: turns are
+    /// taken oldest first, with the budget of `threadWindowStart`.
+    private static func threadWindowEnd(of turns: [NotchModel.Turn], from start: Int) -> Int {
+        var end = start
+        var characters = 0
+        while end < turns.endIndex {
+            let count = turns[end].text.count
+            characters += turns[end].role == "user" ? min(count, foldedQuestionCharacters) : count
+            end += 1
+            if end - start >= windowTurns || characters >= windowCharacters { break }
+        }
+        return end
+    }
+
+    /// The index just past the newest mounted turn in `visible`.
+    private func mountedEnd(of visible: [NotchModel.Turn]) -> Int {
+        if let id = threadWindowEndID, let i = visible.lastIndex(where: { $0.id == id }) {
+            return i + 1
+        }
+        return visible.endIndex
+    }
+
     /// The index of the oldest mounted turn in `visible`: the pinned one, or,
     /// before the page has pinned one (its first frame), the opening window.
     private func mountedStart(of visible: [NotchModel.Turn]) -> Int {
-        if let id = threadWindowStartID, let i = visible.firstIndex(where: { $0.id == id }) {
+        if let id = threadWindowStartID, let i = visible.lastIndex(where: { $0.id == id }) {
             return i
         }
         return Self.threadWindowStart(of: visible, before: visible.endIndex)
@@ -4629,34 +4678,91 @@ struct NotchBody: View {
     /// Pin the window the page opened on. Called when the page mounts and when
     /// another thread replaces the one on screen.
     private func pinThreadWindow() {
-        let visible = model.turns.filter(\.isDrawn)
+        let visible = model.conversation.drawnTurns
+        threadWindowEndID = nil
         guard !visible.isEmpty else { threadWindowStartID = nil; return }
         threadWindowStartID = visible[Self.threadWindowStart(of: visible, before: visible.endIndex)].id
     }
 
     /// Mount the next page of older turns above the window.
     private func loadOlderTurns() {
-        let visible = model.turns.filter(\.isDrawn)
+        let visible = model.conversation.drawnTurns
         let current = mountedStart(of: visible)
         guard current > 0 else { return }
         threadWindowStartID = visible[Self.threadWindowStart(of: visible, before: current)].id
     }
 
+    /// Mount the next page of newer turns below the window.
+    private func loadNewerTurns() {
+        let visible = model.conversation.drawnTurns
+        let current = mountedEnd(of: visible)
+        guard current < visible.endIndex else { threadWindowEndID = nil; return }
+        let end = Self.threadWindowEnd(of: visible, from: current)
+        threadWindowEndID = end >= visible.endIndex ? nil : visible[end - 1].id
+    }
+
+    /// Whether turns newer than the window are still unmounted.
+    private var hasNewerTurns: Bool {
+        guard threadWindowEndID != nil, loopSegments == nil else { return false }
+        let visible = model.conversation.drawnTurns
+        return mountedEnd(of: visible) < visible.endIndex
+    }
+
+    /// Mount the turns around a ⌘F match. A match inside the window, or just
+    /// below it, grows the window to a page above it, so centring it never
+    /// meets the top of the window, where `OlderTurnsLoader` would mount a
+    /// page in the middle of the scroll; below it the window keeps at most
+    /// three pages, so stepping up a long thread does not keep every turn it
+    /// passed mounted. A match farther off replaces the window with those two pages:
+    /// growing it there would mount every turn in between (the first Return
+    /// after typing goes from the newest match to the oldest). Returns whether
+    /// the window was replaced.
+    private func mountSearchMatch(_ target: UUID) -> Bool {
+        let visible = model.conversation.drawnTurns
+        guard let index = visible.lastIndex(where: { $0.id == target }) else { return false }
+        let start = mountedStart(of: visible)
+        let end = mountedEnd(of: visible)
+        let pageStart = Self.threadWindowStart(of: visible, before: index)
+        let pageEnd = Self.threadWindowEnd(of: visible, from: index + 1)
+        let newEndID = pageEnd >= visible.endIndex ? nil : visible[pageEnd - 1].id
+        if index >= start, index < end + Self.windowTurns {
+            if pageStart < start { threadWindowStartID = visible[pageStart].id }
+            if pageEnd > end {
+                threadWindowEndID = newEndID
+            } else {
+                // Cut back to two pages below once three are mounted. One
+                // page can be shorter than the reach of the loader, which
+                // would mount the cut turns again.
+                let keep = Self.threadWindowEnd(of: visible, from: pageEnd)
+                if end > Self.threadWindowEnd(of: visible, from: keep) {
+                    threadWindowEndID = visible[keep - 1].id
+                }
+            }
+            return false
+        }
+        threadWindowStartID = visible[pageStart].id
+        threadWindowEndID = newEndID
+        return true
+    }
+
     /// Whether turns older than the window are still unmounted.
     private var hasOlderTurns: Bool {
         guard loopSegments == nil else { return false }
-        return mountedStart(of: model.turns.filter(\.isDrawn)) > 0
+        return mountedStart(of: model.conversation.drawnTurns) > 0
     }
 
     /// Mounts older turns when the reader scrolls near the top of the thread,
     /// and keeps the text they are reading where it is while those turns are
-    /// inserted above it. Works on the real clip view, like
+    /// inserted above it. Newer turns, when the window stops short of them
+    /// (`threadWindowEndID`), mount the same way near the bottom. Works on the real clip view, like
     /// `ScrollOffsetObserver`: on macOS 14 SwiftUI reports no reliable scroll
     /// offset, and inserting content above the viewport moves what is on
     /// screen unless the offset grows by the inserted height.
     private struct OlderTurnsLoader: NSViewRepresentable {
         var hasOlder: Bool
+        var hasNewer = false
         var load: () -> Void
+        var loadNewer: () -> Void = {}
 
         /// How close to the top, in points, the viewport gets before the next
         /// page mounts — about one screen, so the page is in before the top is
@@ -4696,6 +4802,10 @@ struct NotchBody: View {
             /// Distance from the viewport's top to the content's bottom when a
             /// page was asked for. Nil while no page is on its way.
             var distanceFromBottom: CGFloat?
+            /// The viewport's top when a page of newer turns was asked for.
+            /// Turns added below move nothing on screen; this puts the
+            /// viewport back if the scroller moves it anyway.
+            var keptTop: CGFloat?
             private var request = 0
 
             func attach(from view: NSView) {
@@ -4740,22 +4850,41 @@ struct NotchBody: View {
             private var checkQueued = false
 
             private func check() {
-                guard let clipView, let documentView, distanceFromBottom == nil,
-                      parent?.hasOlder == true,
-                      clipView.bounds.origin.y < OlderTurnsLoader.reach else { return }
-                distanceFromBottom = documentView.frame.height - clipView.bounds.origin.y
+                guard let clipView, let documentView,
+                      distanceFromBottom == nil, keptTop == nil else { return }
+                let top = clipView.bounds.origin.y
+                if parent?.hasOlder == true, top < OlderTurnsLoader.reach {
+                    distanceFromBottom = documentView.frame.height - top
+                    parent?.load()
+                } else if parent?.hasNewer == true,
+                          documentView.frame.height - clipView.bounds.maxY < OlderTurnsLoader.reach {
+                    keptTop = top
+                    parent?.loadNewer()
+                } else {
+                    return
+                }
                 request += 1
                 let sent = request
-                parent?.load()
                 // A page that changed nothing never resizes the content.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
                     guard let self, self.request == sent else { return }
                     self.distanceFromBottom = nil
+                    self.keptTop = nil
                 }
             }
 
             @objc private func documentResized() {
-                guard let clipView, let documentView, let distance = distanceFromBottom else { return }
+                guard let clipView, let documentView else { return }
+                if let top = keptTop {
+                    keptTop = nil
+                    if clipView.bounds.origin.y != top {
+                        clipView.scroll(to: NSPoint(x: clipView.bounds.origin.x, y: top))
+                        clipView.enclosingScrollView?.reflectScrolledClipView(clipView)
+                    }
+                    checkSoon()
+                    return
+                }
+                guard let distance = distanceFromBottom else { return }
                 distanceFromBottom = nil
                 clipView.scroll(to: NSPoint(x: clipView.bounds.origin.x,
                                             y: max(0, documentView.frame.height - distance)))
@@ -4775,6 +4904,73 @@ struct NotchBody: View {
     /// reads nothing but the turn; the last turn (regenerate, the error row,
     /// the completion stamp) and a streaming turn (the wait line, activity)
     /// also read model state, so those two always redraw.
+    /// Measured heights of the thread's turns, for `FarTurnStandIn`. A class,
+    /// so recording a height redraws nothing.
+    final class TurnHeights {
+        private var heights: [UUID: CGFloat] = [:]
+        subscript(id: UUID) -> CGFloat? {
+            get { heights[id] }
+            set { heights[id] = newValue }
+        }
+    }
+
+    /// `.defaultScrollAnchor(.bottom)`, except that while the window stops
+    /// short of the newest turn a size change keeps the top of the viewport
+    /// where it is. Anchored at the bottom, a reader at the bottom of the
+    /// window was carried down with every page `OlderTurnsLoader` mounted
+    /// below, which left them at the bottom again for the next one.
+    private struct ThreadScrollAnchor: ViewModifier {
+        let pinsBottom: Bool
+
+        func body(content: Content) -> some View {
+            if #available(macOS 15.0, *) {
+                content
+                    .defaultScrollAnchor(.bottom, for: .initialOffset)
+                    .defaultScrollAnchor(.bottom, for: .alignment)
+                    .defaultScrollAnchor(pinsBottom ? .bottom : nil, for: .sizeChanges)
+            } else {
+                content.defaultScrollAnchor(.bottom)
+            }
+        }
+    }
+
+    /// One turn of the thread. Far outside the scroller's viewport (more than
+    /// `reach` above or below it) it is drawn as empty space of the height it
+    /// last measured, so a long thread lays out and updates only the turns
+    /// near what is on screen; the content height, and so the scroll position,
+    /// stay the same. Whether the turn is near is re-decided as it scrolls,
+    /// but only a crossing redraws this row. Outside a scroller (the short
+    /// unclipped thread) every turn is near.
+    private struct FarTurnStandIn<Content: View>: View {
+        let id: UUID
+        /// The streaming answer and the thread's last turn always keep theirs.
+        let keepsContent: Bool
+        let heights: TurnHeights
+        @ViewBuilder let content: () -> Content
+        @State private var near = true
+
+        /// How far past the viewport's top and bottom edges a turn still counts
+        /// as near, in viewport heights.
+        private var reach: CGFloat { 1.5 }
+
+        var body: some View {
+            Group {
+                if near || keepsContent || heights[id] == nil {
+                    content()
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { heights[id] = $0 }
+                } else {
+                    Color.clear.frame(height: heights[id] ?? 0)
+                }
+            }
+            .onGeometryChange(for: Bool.self) { geo in
+                guard let viewport = geo.bounds(of: .scrollView) else { return true }
+                let margin = max(viewport.height, 300) * reach
+                return viewport.insetBy(dx: 0, dy: -margin)
+                    .intersects(CGRect(origin: .zero, size: geo.size))
+            } action: { near = $0 }
+        }
+    }
+
     private struct SettledTurn<Content: View>: View, Equatable {
         let turn: NotchModel.Turn
         let live: Bool
@@ -4799,8 +4995,8 @@ struct NotchBody: View {
     /// loop. The first question (the loop's prompt) heads the record and is in
     /// no segment; a later round's question is hidden, a typed follow-up's shows.
     private var loopSegments: [LoopSegment]? {
+        guard model.conversation.hasLoopRound else { return nil }
         let turns = model.turns
-        guard turns.contains(where: { $0.loopRound != nil }) else { return nil }
         var segments: [LoopSegment] = []
         var title = ""
         var followUp = false
@@ -4836,6 +5032,7 @@ struct NotchBody: View {
         return VStack(alignment: .leading, spacing: 16) {
             if let first = model.turns.first(where: { $0.role == "user" }) {
                 turnView(first)
+                    .modifier(ThreadSearchMark(search: model.threadSearch, turnID: first.id))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .id(first.id)
             }
@@ -4845,6 +5042,7 @@ struct NotchBody: View {
                 if segments.indices.contains(selected) {
                     ForEach(segments[selected].turns) { turn in
                         turnView(turn)
+                            .modifier(ThreadSearchMark(search: model.threadSearch, turnID: turn.id))
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .id(turn.id)
                     }
@@ -5002,7 +5200,9 @@ struct NotchBody: View {
                 .padding(.top, resultHeaderReach)
                 // A long thread mounts only its newest turns; older ones mount as
                 // the reader scrolls up to them (see `OlderTurnsLoader`).
-                .background(OlderTurnsLoader(hasOlder: hasOlderTurns) { loadOlderTurns() })
+                .background(OlderTurnsLoader(hasOlder: hasOlderTurns, hasNewer: hasNewerTurns,
+                                             load: { loadOlderTurns() },
+                                             loadNewer: { loadNewerTurns() }))
                 // The model asks this scroller whether the thread is at its
                 // bottom before an upward swipe folds it into the peek.
                 .background(EnclosingScrollViewReporter { model.threadScrollView = $0 })
@@ -5017,7 +5217,7 @@ struct NotchBody: View {
             // its window, link cards and all, for a frame before that scroll —
             // and the top of the window is within `OlderTurnsLoader`'s reach,
             // so it also mounted a page of older turns nobody asked for.
-            .defaultScrollAnchor(.bottom)
+            .modifier(ThreadScrollAnchor(pinsBottom: !hasNewerTurns))
             .frame(height: clippedAnswerMaxHeight + resultHeaderReach)
             // Sticky affordances inside the thread (a code block's copy button)
             // park below the floating header block instead of at the bare viewport
@@ -5062,15 +5262,17 @@ struct NotchBody: View {
             }
             // ⌘F: bring the current match into view, mounting older turns
             // first when it lies above the window.
-            .onChange(of: model.threadSearchTarget) { _, target in
+            .onReceive(model.threadSearch.position.$target.removeDuplicates()) { target in
                 guard let target else { return }
-                let visible = model.turns.filter(\.isDrawn)
-                if let index = visible.firstIndex(where: { $0.id == target }),
-                   index < mountedStart(of: visible) {
-                    threadWindowStartID = target
-                }
+                // A replaced window has nothing on screen to travel through,
+                // so the scroll lands on the match without the animation.
+                let replaced = mountSearchMatch(target)
                 DispatchQueue.main.async {
-                    withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo(target, anchor: .center) }
+                    if replaced {
+                        proxy.scrollTo(target, anchor: .center)
+                    } else {
+                        withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo(target, anchor: .center) }
+                    }
                 }
             }
             // An agent turn grows its work trail with the answer text still empty,
@@ -5188,6 +5390,10 @@ struct NotchBody: View {
         let onDelete: (() -> Void)? = thread != nil || model.threadIsAgentRun
             || model.isStreaming ? nil : { deleteTurn(turn) }
         let onEdit: (() -> Void)? = thread == nil && model.canEdit(turn) ? { editTurn(turn) } : nil
+        // The turn's place in its thread, for the lookups below that walk back
+        // from it.
+        let index = thread == nil ? model.conversation.index(of: turn.id)
+            : thread?.lastIndex(where: { $0.id == turn.id })
         let thread = thread ?? model.turns
         if turn.role == "user" {
             VStack(alignment: .leading, spacing: 5) {
@@ -5289,9 +5495,13 @@ struct NotchBody: View {
                     onChooseOption: { questionID, option in
                         model.chooseUserOption(option, questionID: questionID)
                     },
-                    question: thread.question(before: turn.id),
+                    onReplaceOriginal: model.replaceTargets[turn.id] == nil ? nil
+                        : { model.replaceOriginal(turnID: turn.id) },
+                    onContinue: turn.interrupted && isLastTurn && !model.isStreaming
+                        ? { model.continueAnswer(turnID: turn.id) } : nil,
+                    question: index.map { thread.question(at: $0) } ?? "",
                     sharedLinks: turn.sharedLinks,
-                    recentCards: thread.recentCards(before: turn.id),
+                    recentCards: index.map { thread.recentCards(at: $0) } ?? [],
                     captures: turn.captures,
                     onOpenCapture: { model.openTurnCapture($0) },
                     turnID: turn.id
@@ -6804,36 +7014,49 @@ private struct QuoteOfferChip: View {
     }
 }
 
+/// The ⌘F query on one turn, for its text to highlight — nil unless the turn
+/// matches, so a new query redraws the matching turns only.
+private struct ThreadSearchMark: ViewModifier {
+    @ObservedObject var search: ThreadSearchState
+    let turnID: UUID
+
+    func body(content: Content) -> some View {
+        content.environment(\.threadSearchHighlight,
+                            search.matchSet.contains(turnID) ? search.query : nil)
+    }
+}
+
 /// The ⌘F bar over a conversation: the query, where the current match is in
 /// the count, steps up and down, and ×. The selection chip's glass capsule.
 private struct ThreadSearchBar: View {
-    @ObservedObject var model: NotchModel
+    @ObservedObject var search: ThreadSearchState
+    @ObservedObject var position: ThreadSearchState.Position
+    let close: () -> Void
+    @State private var text = ""
     @FocusState private var focused: Bool
 
     var body: some View {
-        let matches = model.threadSearchMatches
+        let matches = search.matches
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
                 .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                 .foregroundStyle(Tokens.text4)
-            TextField(L("threadSearch.placeholder"), text: Binding(
-                get: { model.threadSearch?.query ?? "" },
-                set: { model.setThreadSearchQuery($0) }
-            ))
+            TextField(L("threadSearch.placeholder"), text: $text)
             .textFieldStyle(.plain)
             .font(.sf(Tokens.TypeSize.meta, weight: .medium))
             .foregroundStyle(Tokens.text1)
             .frame(width: 150)
             .focused($focused)
-            .onSubmit { model.stepThreadSearch(1); focused = true }
-            if !(model.threadSearch?.query ?? "").isEmpty {
-                Text(matches.isEmpty ? "0/0" : "\((model.threadSearch?.current ?? 0) + 1)/\(matches.count)")
+            .onChange(of: text) { _, text in search.type(text) }
+            .onSubmit { search.step(1); focused = true }
+            if !search.query.isEmpty {
+                Text(matches.isEmpty ? "0/0" : "\(position.current + 1)/\(matches.count)")
                     .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                     .monospacedDigit()
                     .foregroundStyle(Tokens.text3)
             }
             ForEach([("chevron.up", -1), ("chevron.down", 1)], id: \.0) { icon, step in
-                Button { model.stepThreadSearch(step) } label: {
+                Button { search.step(step) } label: {
                     Image(systemName: icon)
                         .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                         .foregroundStyle(matches.isEmpty ? Tokens.text4 : Tokens.text2)
@@ -6844,7 +7067,7 @@ private struct ThreadSearchBar: View {
                 .disabled(matches.isEmpty)
             }
             Button {
-                withAnimation(.easeOut(duration: Tokens.hoverFade)) { model.closeThreadSearch() }
+                withAnimation(.easeOut(duration: Tokens.hoverFade)) { close() }
             } label: {
                 Image(systemName: "xmark")
                     .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
