@@ -3885,7 +3885,8 @@ private struct CompactShortcutPromptView: View {
                 },
                 onTab: { true },
                 onCaretWidth: { caretWidth = $0 },
-                onHeightChange: { inputHeight = $0 }
+                onHeightChange: { if inputHeight != $0 { inputHeight = $0 } },
+                currentHeight: inputHeight
             )
             .frame(height: fieldHeight)
 
@@ -4097,7 +4098,8 @@ struct DetachedComposeView: View {
                     },
                     onCaretWidth: { caretWidth = $0 },
                     onCaretY: { caretY = $0 },
-                    onHeightChange: { inputHeight = $0 }
+                    onHeightChange: { if inputHeight != $0 { inputHeight = $0 } },
+                    currentHeight: inputHeight
                 )
                 .frame(height: inputHeight)
                 .padding(.trailing,

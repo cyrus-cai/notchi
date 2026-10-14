@@ -11,6 +11,7 @@ enum AgentEngine: String, CaseIterable {
     case cursor
     case commandCode
     case pi
+    case dsh
 
     var displayName: String {
         switch self {
@@ -20,6 +21,7 @@ enum AgentEngine: String, CaseIterable {
         case .cursor: return "Cursor"
         case .commandCode: return "Command Code"
         case .pi:     return "PI"
+        case .dsh:    return "DSH"
         }
     }
 
@@ -32,6 +34,7 @@ enum AgentEngine: String, CaseIterable {
         case .cursor: return CursorCLIService.isAvailable
         case .commandCode: return CommandCodeCLIService.isAvailable
         case .pi:     return PiCLIService.isAvailable
+        case .dsh:    return DshCLIService.isAvailable
         }
     }
 
@@ -48,6 +51,7 @@ enum AgentEngine: String, CaseIterable {
         case .cursor: return CursorCLIService.isAvailabilityResolved
         case .commandCode: return CommandCodeCLIService.isAvailabilityResolved
         case .pi:     return PiCLIService.isAvailabilityResolved
+        case .dsh:    return DshCLIService.isAvailabilityResolved
         }
     }
 
@@ -84,6 +88,8 @@ enum AgentEngine: String, CaseIterable {
         // pi looks a session up by id within the folder it ran in, so this line is
         // only exact when the user runs it from that folder — same as the others.
         case .pi:     return "pi --session \(session)"
+        // Headless adopts a session only from the folder it recorded, like pi.
+        case .dsh:    return "dsh headless --session-id \(session) -"
         }
     }
 
@@ -196,6 +202,13 @@ enum AgentEngine: String, CaseIterable {
             }
             return listed.map {
                 AgentModelChoice(engine: self, id: $0.id, label: $0.displayName)
+            }
+        case .dsh:
+            // dsh's DeepSeek catalog; the pick rides a patch overlay
+            // (`DshCLIService.modelArgs`).
+            return DshCLIService.models.map {
+                AgentModelChoice(engine: self, id: $0,
+                                 label: ModelRatings.prettyName(for: $0, provider: .dshCode))
             }
         }
     }
@@ -323,6 +336,9 @@ enum AgentEffortCatalog {
             // here would send a flag the CLI would reject. Still routed through the
             // manifest first, so if that ever changes it is a website edit.
             return manifest(engine: engine, model: modelID ?? "") ?? []
+        case .dsh:
+            // No effort flag in headless; the effort is part of the saved default.
+            return []
         case .claude, .grok:
             // Single-vendor CLIs with a documented, stable ladder (claude's
             // `--effort`, grok's `--reasoning-effort`). Left as the documented set,
@@ -653,6 +669,9 @@ final class AgentTaskManager: ObservableObject {
         var rounds = 1
         var nextRoundAt: Date? = nil
         var active = true
+        /// Set while the Routines switch has the loop off: when its next round
+        /// was due, so switching it back on keeps the same schedule.
+        var pausedSlot: Date? = nil
     }
 
     /// One agent task, live or finished. The manager keeps every undismissed
@@ -1088,6 +1107,7 @@ final class AgentTaskManager: ObservableObject {
             // signed in" for a perfectly signed-in install.
             guard let binary = PiCLIService.resolveBinary() else { return nil }
             return PiCLIService.authExists() ? binary : nil
+        case .dsh:    return DshCLIService.resolveBinary()
         }
     }
 
@@ -1100,6 +1120,7 @@ final class AgentTaskManager: ObservableObject {
         case .cursor: return CursorAgentStreamState()
         case .commandCode: return CommandCodeAgentStreamState()
         case .pi:     return PiAgentStreamState()
+        case .dsh:    return DshAgentStreamState()
         }
     }
 
@@ -1112,6 +1133,7 @@ final class AgentTaskManager: ObservableObject {
         case .cursor: return CursorError.spawnFailed(detail).errorDescription
         case .commandCode: return CommandCodeError.spawnFailed(detail).errorDescription
         case .pi:     return PiError.spawnFailed(detail).errorDescription
+        case .dsh:    return DshError.spawnFailed(detail).errorDescription
         }
     }
 
@@ -1296,6 +1318,17 @@ final class AgentTaskManager: ObservableObject {
             if let resumeSession { args += ["--session", resumeSession] }
             args += PiCLIService.modelArgs(for: model)
             if let effort { args += ["--thinking", effort.rawValue] }
+        case .dsh:
+            // `--json` streams the run as NDJSON events. With no positional task,
+            // headless reads it from stdin. Approval stays on dsh's own default
+            // (workspace-write sandbox, anything beyond it fails closed), the twin
+            // of codex's workspace-write. A follow-up adopts the persisted session
+            // by the id the opening `session` event carried. No image input:
+            // pasted images ride the prompt as file paths for its `read` tool.
+            args = ["--profile", "headless", "--json"] + DshCLIService.modelArgs(for: model)
+            if let resumeSession { args += ["--session-id", resumeSession] }
+            stdinPrompt = Self.promptWithImageFiles(
+                prompt, paths: Self.writeTempImages(imagesJPEG, run: run))
         }
 
         let p = ShellEnvironment.makeProcess(binary, args, cwd: folder)
@@ -1864,6 +1897,9 @@ final class AgentTaskManager: ObservableObject {
         if engine == .pi, PiError.isAuthFailure(reason) {
             return L("pi.error.authExpired")
         }
+        if engine == .dsh, DshError.isAuthFailure(reason) {
+            return L("dsh.error.auth")
+        }
         if engine == .cursor, CursorError.isAuthFailure(reason) {
             return L("cursor.error.authExpired")
         }
@@ -2401,6 +2437,31 @@ final class AgentTaskManager: ObservableObject {
         tasks[i].loop?.startedAt = Date()
         persistActiveLoops()
         if !tasks[i].isRunning { scheduleLoopRound(taskID, at: Date()) }
+    }
+
+    /// The Routines switch's off. Unlike Stop, a round in flight finishes, and
+    /// the slot the next round was due in is kept for `unpauseLoop`.
+    func pauseLoop(taskID: UUID) {
+        guard let i = taskIndex(taskID), let loop = tasks[i].loop, loop.active else { return }
+        loopTimers[taskID]?.cancel()
+        loopTimers[taskID] = nil
+        tasks[i].loop?.pausedSlot = loop.nextRoundAt
+            ?? tasks[i].startedAt.addingTimeInterval(TimeInterval(loop.intervalMinutes * 60))
+        tasks[i].loop?.active = false
+        tasks[i].loop?.nextRoundAt = nil
+        persistActiveLoops()
+    }
+
+    /// The Routines switch's on. Unlike Continue, nothing runs now: the next
+    /// round is the paused schedule's next slot.
+    func unpauseLoop(taskID: UUID) {
+        guard let i = taskIndex(taskID), let loop = tasks[i].loop, !loop.active else { return }
+        let next = LoopInterval.nextSlot(from: loop.pausedSlot, minutes: loop.intervalMinutes)
+        tasks[i].loop?.active = true
+        tasks[i].loop?.pausedSlot = nil
+        tasks[i].loop?.startedAt = Date()
+        persistActiveLoops()
+        if !tasks[i].isRunning { scheduleLoopRound(taskID, at: next) }
     }
 
     /// Continue a stopped loop whose task is gone from the tray (dismissed, or
@@ -4314,6 +4375,265 @@ private final class PiAgentStreamState: AgentEventParser {
         }
         // A run cut short before its terminal pair still has whatever it streamed.
         if finalMessage.isEmpty { finalMessage = streamedText }
+        let tail = stderrTail
+            .split(separator: "\n")
+            .map(String.init)
+            .last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })
+            ?? ""
+        return AgentSnapshot(finalMessage: finalMessage, failure: failure,
+                             stderrTail: tail, sawTerminal: sawTerminal)
+    }
+}
+
+/// The **dsh** dialect (`dsh --profile headless --json`, DeepSeek Harness). One
+/// JSON object per line: `session` opens the stream with the id `--session-id`
+/// adopts; `status` frames mark turn/step boundaries, with each `step_end`
+/// carrying that step's usage; `text` / `thinking` carry whole blocks at the point
+/// the step commits (dsh streams no token deltas); `tool_call` / `tool_result`
+/// bracket each call by `callId`; `final` closes a run with the answer. A failure
+/// outside a turn writes `error` and no `final`; a failed turn still ends with
+/// `final`, so the last `turn_end` reason decides success.
+private final class DshAgentStreamState: AgentEventParser {
+    private let lock = NSLock()
+    private var buffer = Data()
+    private var stderrTail = ""
+    private var finalMessage = ""
+    private var lastText = ""
+    private var failure: String?
+    private var sawTerminal = false
+    /// The last `turn_end` reason: `{kind: completed|aborted|error, error?}`.
+    private var turnFailure: String?
+    private var openEntries: [String: UUID] = [:]
+    private var openTools: [String: (name: String, input: [String: Any]?)] = [:]
+    private var planEntry: UUID?
+
+    func ingest(_ data: Data) -> AgentProgress? {
+        lock.lock(); defer { lock.unlock() }
+        buffer.append(data)
+        var progress = AgentProgress()
+        return drainLines(into: &progress) ? progress : nil
+    }
+
+    private func drainLines(into progress: inout AgentProgress) -> Bool {
+        var any = false
+        while let nl = buffer.firstIndex(of: 0x0A) {
+            let line = buffer.subdata(in: buffer.startIndex..<nl)
+            buffer.removeSubrange(buffer.startIndex...nl)
+            guard !line.isEmpty,
+                  let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+                  let type = obj["type"] as? String
+            else { continue }
+            switch type {
+            case "session":
+                guard let sid = obj["sessionId"] as? String, !sid.isEmpty else { continue }
+                progress.sessionID = sid
+                any = true
+            case "status":
+                switch obj["phase"] as? String {
+                case "step_start":
+                    progress.activity = L("agent.thinking")
+                    any = true
+                case "step_end":
+                    // Counts are disjoint: uncached input plus cache reads is what
+                    // the request occupied of the context window.
+                    guard let usage = obj["usage"] as? [String: Any] else { continue }
+                    let input = usage["inputTokens"] as? Int ?? 0
+                    let cacheRead = usage["cacheReadTokens"] as? Int ?? 0
+                    let cacheWrite = usage["cacheWriteTokens"] as? Int ?? 0
+                    if input + cacheRead + cacheWrite > 0 {
+                        progress.contextUsed = input + cacheRead + cacheWrite
+                        any = true
+                    }
+                    TokenMeter.shared.record(input: input + cacheRead + cacheWrite,
+                                             output: usage["outputTokens"] as? Int ?? 0)
+                case "turn_end":
+                    let reason = obj["reason"] as? [String: Any]
+                    switch reason?["kind"] as? String {
+                    case "completed":
+                        turnFailure = nil
+                    case "error":
+                        let err = reason?["error"] as? [String: Any]
+                        turnFailure = (err?["message"] as? String)
+                            .flatMap { $0.isEmpty ? nil : $0 } ?? "unknown error"
+                    default:
+                        turnFailure = (reason?["kind"] as? String) ?? "unknown error"
+                    }
+                default:
+                    continue
+                }
+            case "text":
+                guard let text = obj["text"] as? String,
+                      !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                else { continue }
+                lastText = text
+                progress.entries.append(AgentLogEntry(id: UUID(), title: text,
+                                                      mono: false, kind: .plain))
+                let flat = text.replacingOccurrences(of: "\n", with: " ")
+                    .trimmingCharacters(in: .whitespaces)
+                progress.activity = String(flat.suffix(80))
+                any = true
+            case "thinking":
+                guard let text = obj["text"] as? String,
+                      !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                else { continue }
+                progress.entries.append(AgentLogEntry(id: UUID(), title: text,
+                                                      mono: false, kind: .thinking))
+                any = true
+            case "tool_call":
+                guard let id = obj["callId"] as? String,
+                      let name = obj["tool"] as? String else { continue }
+                let input = obj["input"] as? [String: Any]
+                openTools[id] = (name, input)
+                if name == "todo_write" {
+                    let items = Self.todos(in: input)
+                    guard !items.isEmpty else { continue }
+                    let encoded = AgentTodo.encode(items)
+                    if let planEntry {
+                        progress.rewrites.append((planEntry, AgentTodo.title(items), encoded))
+                    } else {
+                        let entry = AgentLogEntry(id: UUID(), title: AgentTodo.title(items),
+                                                  mono: false, detail: encoded, kind: .todo)
+                        planEntry = entry.id
+                        progress.entries.append(entry)
+                    }
+                    any = true
+                    continue
+                }
+                let title = Self.title(tool: name, input: input)
+                progress.activity = String(title.prefix(80))
+                if openEntries[id] == nil {
+                    let patch = Self.patch(tool: name, input: input)
+                    let entry = AgentLogEntry(
+                        id: UUID(),
+                        title: AgentDiff.title(String(title.prefix(200)), patch: patch),
+                        mono: true,
+                        detail: patch.isEmpty ? nil : patch,
+                        kind: patch.isEmpty ? .plain : .diff)
+                    openEntries[id] = entry.id
+                    progress.entries.append(entry)
+                }
+                any = true
+            case "tool_result":
+                guard let id = obj["callId"] as? String else { continue }
+                let call = openTools.removeValue(forKey: id)
+                let isError = obj["status"] as? String == "error"
+                if !isError, let call, ["write", "edit", "str_replace_editor"].contains(call.name),
+                   let path = Self.path(in: call.input) {
+                    progress.changedFiles.append((path as NSString).lastPathComponent)
+                }
+                any = true
+                guard let entryID = openEntries.removeValue(forKey: id) else { continue }
+                let output = ((obj["result"] as? String) ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !output.isEmpty || isError {
+                    progress.details.append((entryID, String(output.suffix(2000)), isError))
+                }
+            case "final":
+                sawTerminal = true
+                if let text = obj["text"] as? String, !text.isEmpty { finalMessage = text }
+            case "error":
+                sawTerminal = true
+                failure = (obj["message"] as? String)
+                    .flatMap { $0.isEmpty ? nil : $0 } ?? "unknown error"
+            default:
+                break
+            }
+        }
+        return any
+    }
+
+    /// The work-trail title for a tool call, from the argument that names what the
+    /// call does. dsh's file tools take Claude-style `file_path` / `old_string` /
+    /// `new_string` (docs/tool-catalog.md).
+    private static func title(tool: String, input: [String: Any]?) -> String {
+        func arg(_ keys: [String]) -> String? {
+            for k in keys {
+                if let v = input?[k] as? String,
+                   !v.trimmingCharacters(in: .whitespaces).isEmpty { return v }
+            }
+            return nil
+        }
+        switch tool {
+        case "bash", "pwsh":
+            return "$ " + (arg(["command"]) ?? "")
+        case "read", "write", "edit", "read_image":
+            return [tool, arg(["file_path", "path"])].compactMap { $0 }.joined(separator: " ")
+        case "str_replace_editor":
+            return [arg(["command"]) ?? tool, arg(["path"])].compactMap { $0 }
+                .joined(separator: " ")
+        case "grep", "glob":
+            return [tool, arg(["pattern"])].compactMap { $0 }.joined(separator: " ")
+        case "web_fetch":
+            return [tool, arg(["url"])].compactMap { $0 }.joined(separator: " ")
+        case "web_search":
+            return [tool, arg(["query"])].compactMap { $0 }.joined(separator: " ")
+        default:
+            return tool
+        }
+    }
+
+    private static func patch(tool: String, input: [String: Any]?) -> String {
+        guard let input else { return "" }
+        func str(_ keys: [String]) -> String {
+            for k in keys { if let v = input[k] as? String, !v.isEmpty { return v } }
+            return ""
+        }
+        switch tool {
+        case "edit":
+            return AgentDiff.replacement(old: str(["old_string"]), new: str(["new_string"]))
+        case "write":
+            return AgentDiff.addition(str(["content"]))
+        case "str_replace_editor":
+            switch str(["command"]) {
+            case "str_replace":
+                return AgentDiff.replacement(old: str(["old_str"]), new: str(["new_str"]))
+            case "create":
+                return AgentDiff.addition(str(["file_text", "content"]))
+            default:
+                return ""
+            }
+        default:
+            return ""
+        }
+    }
+
+    private static func path(in input: [String: Any]?) -> String? {
+        guard let p = (input?["file_path"] as? String) ?? (input?["path"] as? String),
+              !p.isEmpty
+        else { return nil }
+        return p
+    }
+
+    private static func todos(in input: [String: Any]?) -> [(text: String, status: AgentTodo.Status)] {
+        let raw = input?["todos"] as? [[String: Any]] ?? []
+        return raw.compactMap { item in
+            guard let text = item["content"] as? String, !text.isEmpty else { return nil }
+            switch item["status"] as? String {
+            case "completed":   return (text, .done)
+            case "in_progress": return (text, .active)
+            default:            return (text, .pending)
+            }
+        }
+    }
+
+    func appendStderr(_ data: Data) {
+        guard let s = String(data: data, encoding: .utf8) else { return }
+        lock.lock(); defer { lock.unlock() }
+        stderrTail += s
+        if stderrTail.count > 2000 { stderrTail = String(stderrTail.suffix(2000)) }
+    }
+
+    func finish() -> AgentSnapshot {
+        lock.lock(); defer { lock.unlock() }
+        if !buffer.isEmpty {
+            buffer.append(0x0A)
+            var residue = AgentProgress()
+            _ = drainLines(into: &residue)
+        }
+        if finalMessage.isEmpty { finalMessage = lastText }
+        if failure == nil, sawTerminal { failure = turnFailure }
+        // Stderr keeps only `dsh:` diagnostics; reasoning never goes there in
+        // `--json` mode, so its last line is the error when there is one.
         let tail = stderrTail
             .split(separator: "\n")
             .map(String.init)

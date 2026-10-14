@@ -54,6 +54,7 @@
 		A1000900 /* GrokCLIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000901 /* GrokCLIService.swift */; };
 		A1000920 /* CommandCodeCLIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000921 /* CommandCodeCLIService.swift */; };
 		A1000B10 /* PiCLIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000B11 /* PiCLIService.swift */; };
+		A1000D20 /* DshCLIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000D21 /* DshCLIService.swift */; };
 		A1000B12 /* CursorCLIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000B13 /* CursorCLIService.swift */; };
 		A1000922 /* ShellEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000923 /* ShellEnvironment.swift */; };
 		A10007A0 /* AgentTaskService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10007A1 /* AgentTaskService.swift */; };
@@ -110,6 +111,7 @@
 		A1000901 /* GrokCLIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GrokCLIService.swift; sourceTree = "<group>"; };
 		A1000921 /* CommandCodeCLIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandCodeCLIService.swift; sourceTree = "<group>"; };
 		A1000B11 /* PiCLIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PiCLIService.swift; sourceTree = "<group>"; };
+		A1000D21 /* DshCLIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DshCLIService.swift; sourceTree = "<group>"; };
 		A1000B13 /* CursorCLIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CursorCLIService.swift; sourceTree = "<group>"; };
 		A1000923 /* ShellEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellEnvironment.swift; sourceTree = "<group>"; };
 		A10007A1 /* AgentTaskService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentTaskService.swift; sourceTree = "<group>"; };
@@ -214,6 +216,7 @@
 				A1000901 /* GrokCLIService.swift */,
 				A1000921 /* CommandCodeCLIService.swift */,
 				A1000B11 /* PiCLIService.swift */,
+				A1000D21 /* DshCLIService.swift */,
 				A1000B13 /* CursorCLIService.swift */,
 				A1000923 /* ShellEnvironment.swift */,
 				A10007A1 /* AgentTaskService.swift */,
@@ -377,6 +380,7 @@
 				A1000900 /* GrokCLIService.swift in Sources */,
 				A1000920 /* CommandCodeCLIService.swift in Sources */,
 				A1000B10 /* PiCLIService.swift in Sources */,
+				A1000D20 /* DshCLIService.swift in Sources */,
 				A1000B12 /* CursorCLIService.swift in Sources */,
 				A1000922 /* ShellEnvironment.swift in Sources */,
 				A10007A0 /* AgentTaskService.swift in Sources */,
@@ -477,7 +481,7 @@
 				CODE_SIGN_ENTITLEMENTS = NotchGlass/Resources/NotchGlass.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 9;
+				CURRENT_PROJECT_VERSION = 10;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = NotchGlass/Resources/Info.plist;
@@ -485,7 +489,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.9.9;
+				MARKETING_VERSION = 0.9.10;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -500,7 +504,7 @@
 				CODE_SIGN_ENTITLEMENTS = NotchGlass/Resources/NotchGlass.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 9;
+				CURRENT_PROJECT_VERSION = 10;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = NotchGlass/Resources/Info.plist;
@@ -508,7 +512,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.9.9;
+				MARKETING_VERSION = 0.9.10;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;

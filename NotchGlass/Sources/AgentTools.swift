@@ -933,6 +933,11 @@ struct CaptureRequest: Sendable {
     var repeatUntil: String? = nil
     /// For a reminder: the Reminders list to file it in, as the user named it.
     var list: String? = nil
+    /// For a repeating event: how many times in all.
+    var repeatCount: Int? = nil
+    /// For an event: the IANA time zone its `due` / `end` are written in
+    /// ("America/Los_Angeles"); nil for this Mac's.
+    var timeZone: String? = nil
 }
 
 /// `copy_to_clipboard`: put text on the user's clipboard so they can paste it.
@@ -1100,6 +1105,25 @@ struct CreateEventTool: NotchTool {
                 "minimum": 0,
                 "description": "Minutes before the start to notify. Default 10; 0 when the user wants no alert.",
             ],
+            "repeat": [
+                "type": "string",
+                "enum": ["daily", "weekdays", "weekly", "monthly"],
+                "description": "When it repeats (\"every Tuesday\", \"weekly, three times\", \"每个工作日\"). Weekly repeats on the start's weekday.",
+            ],
+            "repeat_count": [
+                "type": "integer",
+                "minimum": 2,
+                "maximum": 366,
+                "description": "With repeat: how many times in all, when the user gave a number.",
+            ],
+            "repeat_until": [
+                "type": "string",
+                "description": "With repeat: the last day it happens, YYYY-MM-DD, when the user gave an end.",
+            ],
+            "time_zone": [
+                "type": "string",
+                "description": "IANA time zone that start and end are written in, when the user gives a time in another zone or where they will be (\"9am PT\" → America/Los_Angeles, \"21h en Barcelona\" → Europe/Madrid). Omit for this Mac's own time zone.",
+            ],
         ],
         "required": ["title", "start"],
     ]
@@ -1116,9 +1140,13 @@ struct CreateEventTool: NotchTool {
             return "Error: give the start as YYYY-MM-DDTHH:MM in the user's local time."
         }
         let alert = (input["alert_minutes"] as? NSNumber)?.intValue
+        let rule = field("repeat").flatMap { ["daily", "weekdays", "weekly", "monthly"].contains($0) ? $0 : nil }
         return try await handle(CaptureRequest(kind: .event, text: title, due: start,
                                                end: field("end"), location: field("location"),
-                                               alertMinutes: alert))
+                                               alertMinutes: alert, repeatRule: rule,
+                                               repeatUntil: rule == nil ? nil : field("repeat_until"),
+                                               repeatCount: rule == nil ? nil : (input["repeat_count"] as? NSNumber)?.intValue,
+                                               timeZone: field("time_zone")))
     }
 }
 
@@ -1129,7 +1157,7 @@ struct CreateEventTool: NotchTool {
 /// `AppSettingsRequest`.
 struct LoopRequest: Sendable {
     enum Action: String, Sendable {
-        case list, start, stop
+        case list, start, stop, delete
         case setInterval = "set_interval"
     }
 
@@ -1137,10 +1165,14 @@ struct LoopRequest: Sendable {
     /// The instruction each round runs. `start` only.
     let prompt: String?
     let minutes: Int?
-    /// From `list`; a unique prefix is enough. `stop` / `set_interval` only.
+    /// From `list`; a unique prefix is enough. `stop` / `delete` / `set_interval` only.
     let loopID: String?
     /// When round one runs. `start` only; nil runs it now.
     var firstRunAt: Date? = nil
+    /// The last day rounds run (end of that day). `start` only; nil runs a week.
+    var endsOn: Date? = nil
+    /// Rounds skip Saturday and Sunday. `start` only.
+    var weekdaysOnly = false
 }
 
 /// Start, list, stop or re-time an Ask loop from the chat — the same loop a
@@ -1154,7 +1186,9 @@ struct ManageLoopTool: NotchTool {
     let name = toolName
     let description = """
     Runs a prompt again on a schedule, in its own thread: every 1 minute to once \
-    a day, for up to 7 days. Each round is a full answer (it can search, read \
+    a day, for a week, or until `ends_on` (up to 90 days) when the user names an \
+    end ("until Dec 18", "到月底"); `weekdays_only` skips weekends. Each round is \
+    a full answer (it can search, read \
     pages, compare with the last round) and is billed like a question. \
     action=start when the user wants something done repeatedly or watched over \
     time ("every hour check X", "tell me when Y happens"); write `prompt` as the \
@@ -1164,15 +1198,16 @@ struct ManageLoopTool: NotchTool {
     runs now. \
     A plain alert at a set time, with no work to do, is create_reminder instead. \
     A start faster than hourly shows its own Confirm card. action=list returns the user's loops with \
-    ids; stop and set_interval take loop_id from list.
+    ids; stop, delete and set_interval take loop_id from list. delete removes a loop, \
+    stopped or not.
     """
     let schema: [String: Any] = [
         "type": "object",
         "properties": [
             "action": [
                 "type": "string",
-                "enum": ["list", "start", "stop", "set_interval"],
-                "description": "List loops, start one, stop one, or change one's interval.",
+                "enum": ["list", "start", "stop", "delete", "set_interval"],
+                "description": "List loops, start one, stop one, delete one (stopped or not), or change one's interval.",
             ],
             "prompt": [
                 "type": "string",
@@ -1186,11 +1221,19 @@ struct ManageLoopTool: NotchTool {
             ],
             "loop_id": [
                 "type": "string",
-                "description": "stop / set_interval: the id from action=list.",
+                "description": "stop / delete / set_interval: the id from action=list.",
             ],
             "first_run_at": [
                 "type": "string",
                 "description": "start only: local time of round one, YYYY-MM-DDTHH:MM, within 7 days. Omit to run round one now.",
+            ],
+            "ends_on": [
+                "type": "string",
+                "description": "start only: the last day it runs, YYYY-MM-DD, at most 90 days ahead. Omit to run for a week.",
+            ],
+            "weekdays_only": [
+                "type": "boolean",
+                "description": "start only: skip Saturdays and Sundays (\"weekdays at 6pm\", \"工作日每天\").",
             ],
         ],
         "required": ["action"],
@@ -1201,7 +1244,7 @@ struct ManageLoopTool: NotchTool {
     func execute(_ input: [String: Any]) async throws -> String {
         guard let raw = input["action"] as? String,
               let action = LoopRequest.Action(rawValue: raw) else {
-            return "Error: action must be list, start, stop, or set_interval."
+            return "Error: action must be list, start, stop, delete, or set_interval."
         }
         let prompt = (input["prompt"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1219,7 +1262,7 @@ struct ManageLoopTool: NotchTool {
             guard let minutes, LoopInterval.typedRange.contains(minutes) else {
                 return "Error: interval_minutes must be 1 to 1440."
             }
-        case .stop, .setInterval:
+        case .stop, .delete, .setInterval:
             guard let loopID, !loopID.isEmpty else {
                 return "Error: give loop_id from action=list."
             }
@@ -1240,11 +1283,32 @@ struct ManageLoopTool: NotchTool {
             }
             firstRunAt = date
         }
+        var endsOn: Date?
+        if action == .start, let raw = (input["ends_on"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
+            guard let day = Self.parseLocal(raw + (raw.count == 10 ? "T23:59" : "")) else {
+                return "Error: ends_on must be a local day as YYYY-MM-DD."
+            }
+            guard day > (firstRunAt ?? Date()) else { return "Error: ends_on is before the first round." }
+            guard day <= Date().addingTimeInterval(LoopInterval.longestRun) else {
+                return "Error: a loop can run at most 90 days. The latest ends_on is "
+                    + Self.dayString(Date().addingTimeInterval(LoopInterval.longestRun)) + "; tell the user it stops then."
+            }
+            endsOn = day
+        }
         return try await handle(LoopRequest(action: action,
                                              prompt: prompt?.isEmpty == false ? prompt : nil,
                                              minutes: minutes,
                                              loopID: loopID?.isEmpty == false ? loopID : nil,
-                                             firstRunAt: firstRunAt))
+                                             firstRunAt: firstRunAt, endsOn: endsOn,
+                                             weekdaysOnly: action == .start && (input["weekdays_only"] as? Bool) == true))
+    }
+
+    private static func dayString(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: date)
     }
 
     /// Local wall-clock `YYYY-MM-DDTHH:MM` (or with a space), or a full ISO

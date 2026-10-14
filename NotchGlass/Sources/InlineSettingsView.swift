@@ -1,17 +1,68 @@
 import AppKit
 import Carbon.HIToolbox
 import Carbon.OpenScripting
+import Contacts
+import CoreLocation
 import EventKit
+import Photos
 import SwiftUI
 import UserNotifications
 
+/// The protected capabilities Notchi's tools use, as listed in General.
+private enum SystemPermission: CaseIterable, Hashable {
+    case accessibility, notifications, location, calendar, reminders, contacts, photos
+    case notes, mail, music
+
+    var labelKey: String {
+        switch self {
+        case .accessibility: return "permissions.accessibility"
+        case .notifications: return "permissions.notifications"
+        case .location:      return "permissions.location"
+        case .calendar:      return "permissions.calendar"
+        case .reminders:     return "permissions.reminders"
+        case .contacts:      return "permissions.contacts"
+        case .photos:        return "permissions.photos"
+        case .notes:         return "permissions.notes"
+        case .mail:          return "permissions.mail"
+        case .music:         return "permissions.music"
+        }
+    }
+
+    /// The app an Automation (Apple Events) permission is granted for.
+    var automationTarget: String? {
+        switch self {
+        case .notes: return "com.apple.Notes"
+        case .mail:  return "com.apple.mail"
+        case .music: return "com.apple.Music"
+        default:     return nil
+        }
+    }
+
+    /// The Privacy & Security pane anchor. Notifications has its own pane.
+    var privacyAnchor: String {
+        switch self {
+        case .accessibility:         return "Privacy_Accessibility"
+        case .notifications:         return ""
+        case .location:              return "Privacy_LocationServices"
+        case .calendar:              return "Privacy_Calendars"
+        case .reminders:             return "Privacy_Reminders"
+        case .contacts:              return "Privacy_Contacts"
+        case .photos:                return "Privacy_Photos"
+        case .notes, .mail, .music:  return "Privacy_Automation"
+        }
+    }
+}
+
 /// A common vocabulary for the TCC-backed capabilities shown in General. Some
 /// frameworks use different native enums, but the settings UI only needs these
-/// four user-facing states.
+/// user-facing states.
 private enum SettingsPermissionStatus: Equatable {
     case checking
     case notDetermined
     case denied
+    /// Partly granted: Calendar write-only, Photos or Contacts limited to a
+    /// selection.
+    case limited
     case granted
     case unavailable
 
@@ -20,6 +71,7 @@ private enum SettingsPermissionStatus: Equatable {
         case .checking:      return L("permissions.status.checking")
         case .notDetermined: return L("permissions.status.notGranted")
         case .denied:        return L("permissions.status.denied")
+        case .limited:       return L("permissions.status.limited")
         case .granted:       return L("permissions.status.granted")
         case .unavailable:   return L("permissions.status.unavailable")
         }
@@ -29,7 +81,7 @@ private enum SettingsPermissionStatus: Equatable {
         switch self {
         case .notDetermined, .unavailable: return L("permissions.action.allow")
         case .denied:                      return L("permissions.action.settings")
-        case .checking, .granted:           return label
+        case .checking, .granted, .limited: return label
         }
     }
 }
@@ -507,13 +559,10 @@ struct InlineSettingsView: View {
     /// `WeatherCity`'s storage; the row edits it in place.
     @AppStorage("weather.city") private var weatherCity: String = ""
 
-    /// Live macOS authorization state for the three protected capabilities the
-    /// app actually uses. These are refreshed whenever General appears and when
-    /// Notchi becomes active again, so a change made in System Settings is
-    /// reflected without relaunching.
-    @State private var remindersPermission: SettingsPermissionStatus = .checking
-    @State private var notesPermission: SettingsPermissionStatus = .checking
-    @State private var notificationsPermission: SettingsPermissionStatus = .checking
+    /// Live macOS authorization state for each protected capability the app
+    /// uses. Missing entries read as `.checking`. Re-read while the permissions
+    /// list is open, so a change made in System Settings shows without a relaunch.
+    @State private var permissionStatus: [SystemPermission: SettingsPermissionStatus] = [:]
 
     /// The day the Stats grid's pointer is on. Lives here, not in the pane,
     /// because the readout naming it is drawn in the panel header — the pane's
@@ -844,7 +893,11 @@ struct InlineSettingsView: View {
                     .captionLabel()
                     .padding(.top, 2)
                 providerRow
-                modelRow
+                // A model list for a provider that cannot answer yet is a choice
+                // with nothing behind it; it appears once the key or sign-in lands.
+                if providerReady(provider) {
+                    modelRow
+                }
                 keySection
                 // Web search used to be a category of its own — a whole sidebar
                 // entry for two rows. It is the same question this pane already
@@ -1245,9 +1298,34 @@ struct InlineSettingsView: View {
         // button that is the only thing making the provider usable. Its row
         // leads the pane instead, and carries the anchor, so the scroll-into-view
         // on a required setup still lands.
-        if keyScope != .nono {
-            foldedKeySection
+        //
+        // The fold is for a key or sign-in that already works. A provider that
+        // cannot answer yet shows its key or sign-in row directly.
+        Group {
+            if keyScope == .nono {
+                EmptyView()
+            } else if !providerReady(keyScope) {
+                VStack(alignment: .leading, spacing: 12) {
+                    keySectionBody
+                }
+                .id(Self.keySectionAnchor)
+            } else {
+                foldedKeySection
+            }
         }
+        // The same provider became ready while its key field was in use (a key
+        // just saved): open the fold, so the field doesn't vanish under the
+        // cursor. A CLI sign-in finishes elsewhere, so its row folds away.
+        .onChange(of: KeyReadiness(scope: keyScope, ready: providerReady(keyScope))) { old, new in
+            if old.scope == new.scope, !old.ready, new.ready, !new.scope.isCLI {
+                keySectionOpen = true
+            }
+        }
+    }
+
+    private struct KeyReadiness: Equatable {
+        let scope: Provider
+        let ready: Bool
     }
 
     @ViewBuilder
@@ -1297,78 +1375,88 @@ struct InlineSettingsView: View {
             .animation(.easeOut(duration: Tokens.hoverFade), value: hoveredDisclosure)
 
             if expanded {
-                // Why the section opened by itself, when it did.
-                if let pending = pendingModel {
-                    Text(L("model.pending.hint", pending.provider.displayName,
-                           ModelRatings.prettyName(for: pending.id,
-                                                   provider: pending.provider)))
-                        .font(.sf(Tokens.TypeSize.label))
-                        .foregroundStyle(Tokens.text2)
-                        .fixedSize(horizontal: false, vertical: true)
-                } else if !providerReady(provider) {
-                    Text(L("model.setup.needed", provider.displayName))
-                        .font(.sf(Tokens.TypeSize.label))
-                        .foregroundStyle(Tokens.text2)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                // Whose key this section is editing — shown only when that isn't the
-                // active provider (the ⌘⇧I picker's "Add key" aims it elsewhere).
-                // For the ordinary case the Provider row above already says it, and
-                // repeating it here would read as a second, contradicting control.
-                if keyScope != provider {
-                    settingRow(label: L("model.provider")) {
-                        Text(keyScope.displayName)
-                            .font(.sf(Tokens.TypeSize.form))
-                            .foregroundStyle(Tokens.text1)
-                            .lineLimit(1)
-                            .frame(height: 30)
-                    }
-                }
-
-                // A custom endpoint is more than a key: name, URL and model id come
-                // first, because without them there's nothing for a key to unlock.
-                if keyScope == .custom {
-                    customEndpointRows
-                }
-
-                // Codex has no key to paste — it shows a sign-in status row. OpenRouter
-                // gets the one-click Connect row (unless the user asked to paste by
-                // hand, or an env var forces a key). Everyone else gets the key field.
-                if keyScope == .codex {
-                    codexAccountRow
-                } else if keyScope == .claudeCode {
-                    claudeAccountRow
-                } else if keyScope == .grokCode {
-                    grokAccountRow
-                } else if keyScope == .commandCode {
-                    commandCodeAccountRow
-                } else if keyScope == .cursorCode {
-                    cursorAccountRow
-                } else if keyScope == .piCode {
-                    piAccountRow
-                } else if keyScope == .nono && !manualKeyEntry && !envOverride {
-                    nonoAccountRow
-                } else if keyScope == .openrouter && !manualKeyEntry && !envOverride {
-                    openRouterAccountRow
-                } else {
-                    keyRow
-                }
-
-                // The CLI backends have no key to fetch — their own rows carry the
-                // sign-in copy, so the generic "get a key at …" footer is wrong for
-                // them and suppressed. nono is the same case for a different
-                // reason: its token is issued by the gateway and never seen, so
-                // there is no key for the user to go and get.
-                if !keyScope.isCLI && keyScope != .nono {
-                    footer
-                }
+                keySectionBody
             }
         }
         // The scroller's anchor (see `paneContent`): a required setup unfolding
         // this block past the pane's height cap snaps it into view.
         .id(Self.keySectionAnchor)
         .animation(.easeOut(duration: 0.16), value: expanded)
+    }
+
+    /// The key section's contents: why it is asking (when it is), whose key, the
+    /// custom endpoint fields, the provider's key or account row, and the
+    /// where-to-get-a-key footer.
+    @ViewBuilder
+    private var keySectionBody: some View {
+        // Why the section opened by itself, when it did.
+        if let pending = pendingModel {
+            Text(L("model.pending.hint", pending.provider.displayName,
+                   ModelRatings.prettyName(for: pending.id,
+                                           provider: pending.provider)))
+                .font(.sf(Tokens.TypeSize.label))
+                .foregroundStyle(Tokens.text2)
+                .fixedSize(horizontal: false, vertical: true)
+        } else if !providerReady(provider) {
+            Text(L("model.setup.needed", provider.displayName))
+                .font(.sf(Tokens.TypeSize.label))
+                .foregroundStyle(Tokens.text2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+
+        // Whose key this section is editing — shown only when that isn't the
+        // active provider (the ⌘⇧I picker's "Add key" aims it elsewhere).
+        // For the ordinary case the Provider row above already says it, and
+        // repeating it here would read as a second, contradicting control.
+        if keyScope != provider {
+            settingRow(label: L("model.provider")) {
+                Text(keyScope.displayName)
+                    .font(.sf(Tokens.TypeSize.form))
+                    .foregroundStyle(Tokens.text1)
+                    .lineLimit(1)
+                    .frame(height: 30)
+            }
+        }
+
+        // A custom endpoint is more than a key: name, URL and model id come
+        // first, because without them there's nothing for a key to unlock.
+        if keyScope == .custom {
+            customEndpointRows
+        }
+
+        // Codex has no key to paste — it shows a sign-in status row. OpenRouter
+        // gets the one-click Connect row (unless the user asked to paste by
+        // hand, or an env var forces a key). Everyone else gets the key field.
+        if keyScope == .codex {
+            codexAccountRow
+        } else if keyScope == .claudeCode {
+            claudeAccountRow
+        } else if keyScope == .grokCode {
+            grokAccountRow
+        } else if keyScope == .commandCode {
+            commandCodeAccountRow
+        } else if keyScope == .cursorCode {
+            cursorAccountRow
+        } else if keyScope == .piCode {
+            piAccountRow
+        } else if keyScope == .dshCode {
+            dshAccountRow
+        } else if keyScope == .nono && !manualKeyEntry && !envOverride {
+            nonoAccountRow
+        } else if keyScope == .openrouter && !manualKeyEntry && !envOverride {
+            openRouterAccountRow
+        } else {
+            keyRow
+        }
+
+        // The CLI backends have no key to fetch — their own rows carry the
+        // sign-in copy, so the generic "get a key at …" footer is wrong for
+        // them and suppressed. nono is the same case for a different
+        // reason: its token is issued by the gateway and never seen, so
+        // there is no key for the user to go and get.
+        if !keyScope.isCLI && keyScope != .nono {
+            footer
+        }
     }
 
     /// The custom endpoint's own fields: what to call it, where to send requests,
@@ -2690,6 +2778,50 @@ struct InlineSettingsView: View {
         }
     }
 
+    // MARK: - dsh status
+
+    /// dsh keeps its provider and API key in its own settings. The row reports
+    /// whether the CLI is installed and whether dsh holds a model key
+    /// (`DshCLIService.authExists`); the button opens dsh's Web UI, where the
+    /// Models page sets the key.
+    @ViewBuilder
+    private var dshAccountRow: some View {
+        let installed = DshCLIService.isInstalled
+        let signedIn = DshCLIService.authExists()
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Text(L("model.account"))
+                    .font(.sf(Tokens.TypeSize.form, weight: .medium))
+                    .foregroundStyle(Tokens.text2)
+                    .frame(width: 64, alignment: .leading)
+
+                if !installed {
+                    codexPillButton(L("dsh.status.get")) {
+                        LinkGate.shared.open(Provider.dshCode.signupURL)
+                    }
+                } else if signedIn {
+                    statusPill(ok: true, message: L("dsh.status.connected"))
+                    Spacer(minLength: 8)
+                    codexPillButton(L("dsh.status.openSettings")) {
+                        DshCLIService.openSettings()
+                    }
+                } else {
+                    codexPillButton(L("dsh.status.openSettings")) {
+                        DshCLIService.openSettings()
+                    }
+                }
+            }
+
+            Text(installed
+                 ? (signedIn ? L("dsh.status.hint.ready") : L("dsh.status.hint.login"))
+                 : L("dsh.status.hint.install"))
+                .font(.sf(Tokens.TypeSize.label))
+                .foregroundStyle(Tokens.text3)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.leading, 76)
+        }
+    }
+
     // MARK: - Cursor CLI sign-in status
 
     /// Cursor is keyless like the rest, and — like Grok, unlike Claude — offers an
@@ -3777,26 +3909,30 @@ struct InlineSettingsView: View {
 
             if permissionsSectionOpen {
                 VStack(alignment: .leading, spacing: 9) {
-                    permissionRow(label: L("permissions.reminders"),
-                                  status: remindersPermission) {
-                        requestRemindersPermission()
-                    }
-                    permissionRow(label: L("permissions.notes"),
-                                  status: notesPermission) {
-                        requestNotesPermission()
-                    }
-                    permissionRow(label: L("permissions.notifications"),
-                                  status: notificationsPermission) {
-                        requestNotificationsPermission()
+                    ForEach(SystemPermission.allCases, id: \.self) { permission in
+                        permissionRow(label: L(permission.labelKey),
+                                      status: permissionStatus[permission] ?? .checking) {
+                            requestPermission(permission)
+                        }
                     }
                 }
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
         .clipped()
-        .onAppear { refreshPermissions() }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            refreshPermissions()
+        // Probes only while the list is open. The first pass may launch Notes,
+        // Mail and Music in the background, since the Apple Events check needs
+        // a running target; later passes re-read every status every two
+        // seconds, so a switch flipped in System Settings shows here without
+        // Notchi having to become the active app (it rarely does).
+        .task(id: permissionsSectionOpen) {
+            guard permissionsSectionOpen else { return }
+            refreshPermissions(launchingApps: true)
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                guard !Task.isCancelled else { return }
+                refreshPermissions(launchingApps: false)
+            }
         }
     }
 
@@ -3813,50 +3949,108 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// None of this may run on the render path. It is called from
-    /// `permissionsSection`'s `onAppear`, which fires *inside* the 0.16s section
-    /// swap — and every probe in here is a blocking round-trip to a system
-    /// daemon, not a property read:
+    /// Writes only a changed value, so the two-second poll does not redraw the
+    /// pane when nothing moved.
+    private func setPermission(_ permission: SystemPermission, _ status: SettingsPermissionStatus) {
+        if permissionStatus[permission] != status { permissionStatus[permission] = status }
+    }
+
+    /// None of this may run on the render path: every TCC probe is a blocking
+    /// round-trip to a system daemon, not a property read.
     ///
-    /// - `EKEventStore.authorizationStatus` is a TCC lookup that measured
-    ///   **50–70 ms** whenever its in-process cache is cold (it warms after two
-    ///   calls and drops again on any TCC change) — three to four dropped frames
-    ///   of an animation that only lasts ten, which is the visible hitch on
-    ///   landing on General;
+    /// - `EKEventStore.authorizationStatus` measured **50–70 ms** whenever its
+    ///   in-process cache is cold (it warms after two calls and drops again on
+    ///   any TCC change);
     /// - `UNUserNotificationCenter.current()` opens its XPC connection on first
     ///   touch;
-    /// - the Notes probe walks LaunchServices and may launch Notes.app.
+    /// - the Apple Events probes walk LaunchServices and may launch the target.
     ///
     /// Same rule `refreshProxyStatus` already follows: resolve off the main
     /// thread, let the pills fill in a beat later. They start on `.checking`, so
-    /// there is nothing to flash.
-    private func refreshPermissions() {
+    /// there is nothing to flash. Location is the exception: its status lives
+    /// on `LocationService`'s manager, which belongs to the main thread.
+    private func refreshPermissions(launchingApps: Bool) {
+        setPermission(.location, Self.locationStatus(LocationService.shared.authorizationStatus))
         Task.detached(priority: .userInitiated) {
-            let reminders = Self.remindersStatus()
-            await MainActor.run { remindersPermission = reminders }
-
-            UNUserNotificationCenter.current().getNotificationSettings { settings in
-                let status = Self.notificationsStatus(settings.authorizationStatus)
-                Task { @MainActor in notificationsPermission = status }
+            for permission in SystemPermission.allCases {
+                guard let status = Self.queryStatus(permission) else { continue }
+                await MainActor.run { setPermission(permission, status) }
             }
-
-            await MainActor.run { refreshNotesPermission() }
+            let settings = await UNUserNotificationCenter.current().notificationSettings()
+            let notifications = Self.notificationsStatus(settings.authorizationStatus)
+            await MainActor.run { setPermission(.notifications, notifications) }
+        }
+        for permission in SystemPermission.allCases {
+            guard let bundleID = permission.automationTarget else { continue }
+            withRunningApp(bundleID, launching: launchingApps) { pid in
+                guard let pid else {
+                    // Not running and not launched this pass: keep what the
+                    // last probe found.
+                    if launchingApps { setPermission(permission, .unavailable) }
+                    return
+                }
+                determineAutomationPermission(permission, pid: pid, ask: false)
+            }
         }
     }
 
-    /// `nonisolated` on purpose: it touches no view state, and `refreshPermissions`
-    /// deliberately runs it off the main thread (the TCC lookup blocks).
-    nonisolated private static func remindersStatus() -> SettingsPermissionStatus {
-        switch EKEventStore.authorizationStatus(for: .reminder) {
-        case .authorized, .fullAccess: return .granted
+    /// The live state of the permissions with a synchronous status query; nil
+    /// for the ones read elsewhere (notifications, location, Apple Events).
+    /// `nonisolated` on purpose: it touches no view state, and
+    /// `refreshPermissions` runs it off the main thread.
+    nonisolated private static func queryStatus(_ permission: SystemPermission) -> SettingsPermissionStatus? {
+        switch permission {
+        case .accessibility:
+            return AXIsProcessTrusted() ? .granted : .notDetermined
+        case .calendar:
+            switch EKEventStore.authorizationStatus(for: .event) {
+            case .authorized, .fullAccess: return .granted
+            // Write-only adds events but cannot read the schedule.
+            case .writeOnly:               return .limited
+            case .notDetermined:           return .notDetermined
+            case .denied, .restricted:     return .denied
+            @unknown default:              return .unavailable
+            }
+        case .reminders:
+            switch EKEventStore.authorizationStatus(for: .reminder) {
+            case .authorized, .fullAccess: return .granted
+            case .writeOnly:               return .limited
+            case .notDetermined:           return .notDetermined
+            case .denied, .restricted:     return .denied
+            @unknown default:              return .unavailable
+            }
+        case .contacts:
+            switch CNContactStore.authorizationStatus(for: .contacts) {
+            case .authorized:              return .granted
+            case .limited:                 return .limited
+            case .notDetermined:           return .notDetermined
+            case .denied, .restricted:     return .denied
+            @unknown default:              return .unavailable
+            }
+        case .photos:
+            switch PHPhotoLibrary.authorizationStatus(for: .readWrite) {
+            case .authorized:              return .granted
+            case .limited:                 return .limited
+            case .notDetermined:           return .notDetermined
+            case .denied, .restricted:     return .denied
+            @unknown default:              return .unavailable
+            }
+        case .notifications, .location, .notes, .mail, .music:
+            return nil
+        }
+    }
+
+    private static func locationStatus(_ status: CLAuthorizationStatus) -> SettingsPermissionStatus {
+        switch status {
+        case .authorizedAlways:        return .granted
         case .notDetermined:           return .notDetermined
+        // Also what macOS reports while Location Services is off system-wide.
         case .denied, .restricted:     return .denied
-        case .writeOnly:               return .denied
         @unknown default:              return .unavailable
         }
     }
 
-    private static func notificationsStatus(
+    nonisolated private static func notificationsStatus(
         _ status: UNAuthorizationStatus
     ) -> SettingsPermissionStatus {
         switch status {
@@ -3867,80 +4061,90 @@ struct InlineSettingsView: View {
         }
     }
 
-    private func requestRemindersPermission() {
-        guard remindersPermission != .denied else {
-            openPrivacySettings("Privacy_Reminders")
+    /// A row's action. A refused or partial grant can only be changed in System
+    /// Settings, and so can Accessibility, which has no in-app prompt that
+    /// grants it; the rest raise the system prompt and re-read the state after.
+    private func requestPermission(_ permission: SystemPermission) {
+        let current = permissionStatus[permission] ?? .checking
+        if current == .denied || current == .limited || permission == .accessibility {
+            openSettings(for: permission)
             return
         }
-        remindersPermission = .checking
-        EKEventStore().requestFullAccessToReminders { _, _ in
-            Task { @MainActor in remindersPermission = Self.remindersStatus() }
+        setPermission(permission, .checking)
+        // The system prompt sits outside the island; the panel stays open
+        // until it is answered (`PermissionPromptGate`).
+        PermissionPromptGate.enter()
+        let reread: @Sendable () -> Void = {
+            PermissionPromptGate.exit()
+            Task { @MainActor in refreshPermissions(launchingApps: false) }
+        }
+        switch permission {
+        case .accessibility:
+            PermissionPromptGate.exit()
+        case .notifications:
+            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in reread() }
+        case .location:
+            Task { @MainActor in
+                await LocationService.shared.requestAccess()
+                PermissionPromptGate.exit()
+                refreshPermissions(launchingApps: false)
+            }
+        case .calendar:
+            EKEventStore().requestFullAccessToEvents { _, _ in reread() }
+        case .reminders:
+            EKEventStore().requestFullAccessToReminders { _, _ in reread() }
+        case .contacts:
+            CNContactStore().requestAccess(for: .contacts) { _, _ in reread() }
+        case .photos:
+            PHPhotoLibrary.requestAuthorization(for: .readWrite) { _ in reread() }
+        case .notes, .mail, .music:
+            guard let bundleID = permission.automationTarget else {
+                PermissionPromptGate.exit()
+                return
+            }
+            withRunningApp(bundleID, launching: true) { pid in
+                guard let pid else {
+                    PermissionPromptGate.exit()
+                    setPermission(permission, .unavailable)
+                    return
+                }
+                determineAutomationPermission(permission, pid: pid, ask: true) {
+                    PermissionPromptGate.exit()
+                }
+            }
         }
     }
 
-    private func requestNotificationsPermission() {
-        guard notificationsPermission != .denied else {
+    private func openSettings(for permission: SystemPermission) {
+        if permission == .notifications {
             openSystemSettings("com.apple.Notifications-Settings.extension")
-            return
-        }
-        notificationsPermission = .checking
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in
-            UNUserNotificationCenter.current().getNotificationSettings { settings in
-                let status = Self.notificationsStatus(settings.authorizationStatus)
-                Task { @MainActor in notificationsPermission = status }
-            }
+        } else {
+            openPrivacySettings(permission.privacyAnchor)
         }
     }
 
-    /// Apple Events is the one protected API without a public status query for a
-    /// dormant target. `AEDeterminePermission…` requires Notes to be running, so
-    /// launch it quietly (never activate it or open a window), then ask TCC for
-    /// the live state without prompting.
-    private func refreshNotesPermission() {
-        notesPermission = .checking
-        withRunningNotes { pid in
-            guard let pid else {
-                notesPermission = .unavailable
-                return
-            }
-            determineNotesPermission(pid: pid, ask: false)
-        }
-    }
-
-    private func requestNotesPermission() {
-        guard notesPermission != .denied else {
-            openPrivacySettings("Privacy_Automation")
-            return
-        }
-        notesPermission = .checking
-        withRunningNotes { pid in
-            guard let pid else {
-                notesPermission = .unavailable
-                return
-            }
-            determineNotesPermission(pid: pid, ask: true)
-        }
-    }
-
-    /// Supply a running Notes process without bringing it to the foreground.
-    /// Existing instances are reused; otherwise the app is launched without
-    /// activation because the AE permission API only accepts a live target.
+    /// Supply a running process of `bundleID` without bringing it to the
+    /// foreground. Apple Events is the one protected API without a public status
+    /// query for a dormant target: `AEDeterminePermission…` requires a live
+    /// process, so an app that is not running is launched without activation
+    /// when `launching` is set, and reported as nil otherwise.
     ///
     /// Both lookups are LaunchServices round-trips (`urlForApplication` measured
-    /// ~7 ms cold), and this is reached from `permissionsSection`'s `onAppear` —
-    /// mid-section-swap. They run off the main thread; only the launch and the
+    /// ~7 ms cold). They run off the main thread; only the launch and the
     /// completion come back to it. A `pid` crosses the boundary rather than the
     /// `NSRunningApplication`, since the pid is all the AE probe wants.
-    private func withRunningNotes(_ completion: @escaping @MainActor (pid_t?) -> Void) {
+    private func withRunningApp(_ bundleID: String,
+                                launching: Bool,
+                                _ completion: @escaping @MainActor (pid_t?) -> Void) {
         Task.detached(priority: .userInitiated) {
             if let running = NSRunningApplication.runningApplications(
-                withBundleIdentifier: "com.apple.Notes").first {
+                withBundleIdentifier: bundleID).first {
                 let pid = running.processIdentifier
                 await MainActor.run { completion(pid) }
                 return
             }
-            guard let url = NSWorkspace.shared.urlForApplication(
-                withBundleIdentifier: "com.apple.Notes") else {
+            guard launching,
+                  let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
                 await MainActor.run { completion(nil) }
                 return
             }
@@ -3958,7 +4162,8 @@ struct InlineSettingsView: View {
 
     /// This call can block behind the secure consent sheet, so it always runs off
     /// the main thread. The result is then translated back onto the view state.
-    private func determineNotesPermission(pid: pid_t, ask: Bool) {
+    private func determineAutomationPermission(_ permission: SystemPermission, pid: pid_t, ask: Bool,
+                                               answered: @escaping @Sendable () -> Void = {}) {
         DispatchQueue.global(qos: .userInitiated).async {
             let target = NSAppleEventDescriptor(processIdentifier: pid)
             let result = AEDeterminePermissionToAutomateTarget(
@@ -3973,7 +4178,8 @@ struct InlineSettingsView: View {
             case OSStatus(errAEEventWouldRequireUserConsent): status = .notDetermined
             default:                                 status = .unavailable
             }
-            Task { @MainActor in notesPermission = status }
+            answered()
+            Task { @MainActor in setPermission(permission, status) }
         }
     }
 

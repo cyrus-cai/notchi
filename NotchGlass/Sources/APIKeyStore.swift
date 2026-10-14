@@ -373,6 +373,11 @@ enum APIKeyStore {
         if provider == .piCode, stored.isEmpty || stored == PiCLIService.defaultSentinel {
             return provider.defaultModel
         }
+        // dsh: an empty override, the old "dsh" sentinel, or an id that left the
+        // catalog all mean the catalog's default.
+        if provider == .dshCode, !DshCLIService.models.contains(stored) {
+            return provider.defaultModel
+        }
         // Cursor: same shape again — an empty override or the "cursor" sentinel both
         // mean "whatever the CLI itself is configured to run" (the row its own
         // catalog marks as default).

@@ -631,7 +631,11 @@ final class NotchModel: ObservableObject {
     /// What's New link) unfurled every screen's island at once, each with its
     /// own copy of any menu opened afterwards.
     var summonDisplay: () -> CGDirectDisplayID? = { nil }
-    @Published var mode: Mode = .idle
+    @Published var mode: Mode = .idle {
+        // Leaving the thread (swipe up, back, a close) folds the Routines card,
+        // so the next thread opens without it.
+        didSet { if mode == .idle, showRoutines { showRoutines = false } }
+    }
 
     /// The user pinned the current answer's card (the pin button in `resultHeader`).
     /// While set, `collapseOnLeave` bails: the pointer leaving no longer folds the
@@ -759,6 +763,8 @@ final class NotchModel: ObservableObject {
     /// The result header's more menu (detach lives here). Same child-window
     /// problem as the metadata card: the pointer leaves the island to use it.
     @Published var isResultMoreMenuOpen = false
+    /// The Routines column beside the result page, from the header's ⋯.
+    @Published var showRoutines = false
 
     /// Whether the message tones play: sending, each reply bubble landing, and
     /// a reaction. One switch for the whole app — the notch and every detached
@@ -1214,6 +1220,7 @@ final class NotchModel: ObservableObject {
     private var leaveRecheckTask: Task<Void, Never>?
 
     private func cancelLeaveWatch() {
+        leaveHeldByPrompt = false
         leaveRecheckTask?.cancel()
         leaveRecheckTask = nil
         leaveWatch = nil
@@ -2122,21 +2129,25 @@ final class NotchModel: ObservableObject {
     /// Start a loop thread whose round one runs now, detached. Shared by `/loop`
     /// and `manage_loop`. Nil when the round could not start.
     @discardableResult
-    private func beginChatLoop(prompt: String, minutes: Int) -> UUID? {
+    private func beginChatLoop(prompt: String, minutes: Int,
+                               endsAt: Date? = nil, weekdaysOnly: Bool = false) -> UUID? {
         bindChatLoops()
         guard let id = runChatLoopRound(threadID: nil, prompt: prompt, round: 1) else { return nil }
         LoopInterval.remember(minutes)
-        ChatLoopManager.shared.register(id: id, prompt: prompt, minutes: minutes)
+        ChatLoopManager.shared.register(id: id, prompt: prompt, minutes: minutes,
+                                        endsAt: endsAt, weekdaysOnly: weekdaysOnly)
         return id
     }
 
     /// A loop whose round one waits for a time of day. Its thread is created
     /// when that round runs, under the id the loop is registered with now.
-    private func beginScheduledChatLoop(prompt: String, minutes: Int, firstRunAt: Date) {
+    private func beginScheduledChatLoop(prompt: String, minutes: Int, firstRunAt: Date,
+                                        endsAt: Date? = nil, weekdaysOnly: Bool = false) {
         bindChatLoops()
         LoopInterval.remember(minutes)
         ChatLoopManager.shared.register(id: UUID(), prompt: prompt, minutes: minutes,
-                                        firstRoundAt: firstRunAt)
+                                        firstRoundAt: firstRunAt, endsAt: endsAt,
+                                        weekdaysOnly: weekdaysOnly)
     }
 
     /// One loop round on the thread (`nil` for round one's new thread). From
@@ -3493,7 +3504,8 @@ final class NotchModel: ObservableObject {
                     return "Error: another confirmation is already waiting in this answer."
                 }
                 defer { settingsConfirmationAnswers.remove(answerID) }
-                let copy = loopConfirmationCopy(minutes: minutes, firstRunAt: request.firstRunAt)
+                let copy = loopConfirmationCopy(minutes: minutes, firstRunAt: request.firstRunAt,
+                                                endsOn: request.endsOn, weekdaysOnly: request.weekdaysOnly)
                 let choice = try await awaitUserChoice(
                     answerID: answerID,
                     question: copy.start + "\n" + prompt + "\n" + copy.schedule,
@@ -3503,20 +3515,24 @@ final class NotchModel: ObservableObject {
                     return "Cancelled. No loop was started."
                 }
             }
+            let span = (request.weekdaysOnly ? " on weekdays" : "")
+                + (request.endsOn.map { ", through \(Self.captureDueDescription($0))" } ?? ", for up to 7 days")
             if let first = request.firstRunAt {
-                beginScheduledChatLoop(prompt: prompt, minutes: minutes, firstRunAt: first)
+                beginScheduledChatLoop(prompt: prompt, minutes: minutes, firstRunAt: first,
+                                       endsAt: request.endsOn, weekdaysOnly: request.weekdaysOnly)
                 return "Started. Round one runs at \(Self.captureDueDescription(first)) in its own "
-                    + "thread; then every \(LoopInterval.short(minutes)), for up to 7 days, while "
+                    + "thread; then every \(LoopInterval.short(minutes))\(span), while "
                     + "Notchi is open. The user can stop it from the task list."
             }
-            guard beginChatLoop(prompt: prompt, minutes: minutes) != nil else {
+            guard beginChatLoop(prompt: prompt, minutes: minutes, endsAt: request.endsOn,
+                                weekdaysOnly: request.weekdaysOnly) != nil else {
                 return "Error: the loop could not start."
             }
             return "Started. Round one is running now in its own thread; then every "
-                + "\(LoopInterval.short(minutes)), for up to 7 days. The user can stop it "
+                + "\(LoopInterval.short(minutes))\(span). The user can stop it "
                 + "from the task list."
 
-        case .stop, .setInterval:
+        case .stop, .delete, .setInterval:
             let matches = manager.loops.filter {
                 $0.id.uuidString.lowercased().hasPrefix(request.loopID?.lowercased() ?? "-")
             }
@@ -3524,6 +3540,10 @@ final class NotchModel: ObservableObject {
                 return matches.isEmpty
                     ? "Error: no loop has that id. Call action=list."
                     : "Error: that id matches more than one loop. Give the full id."
+            }
+            if request.action == .delete {
+                manager.delete(loop.id)
+                return "Deleted. It is off the user's loops; its thread stays in Recent."
             }
             guard loop.active else { return "That loop is already stopped." }
             if request.action == .stop {
@@ -3556,27 +3576,48 @@ final class NotchModel: ObservableObject {
     /// A loop that runs more often than hourly waits on the Confirm card.
     static func loopNeedsConfirmation(minutes: Int) -> Bool { minutes < 60 }
 
-    private func loopConfirmationCopy(minutes: Int, firstRunAt: Date? = nil)
+    private func loopConfirmationCopy(minutes: Int, firstRunAt: Date? = nil,
+                                      endsOn: Date? = nil, weekdaysOnly: Bool = false)
         -> (start: String, change: String, schedule: String,
             confirmStart: String, confirmChange: String, cancel: String) {
         let every = LoopInterval.short(minutes)
         let rounds = LoopInterval.maxRounds(minutes: minutes)
         let first = firstRunAt.map(Self.captureDueDescription) ?? ""
+        let day = DateFormatter()
+        day.locale = Self.localeForInterfaceLanguage()
+        day.setLocalizedDateFormatFromTemplate("MMMd")
+        let last = endsOn.map(day.string(from:)) ?? ""
+        // first-round label, weekdays word, "until <day>", "up to <n> rounds"
+        let t: (first: String, weekdays: String, until: String, upTo: String)
         switch Localization.shared.language.resolved {
-        case .zhHans: return ("开始这个循环？", "更改这个循环的间隔？",
-                              (first.isEmpty ? "" : "首次 \(first) · ") + "每 \(every) · 最多 \(rounds) 轮", "开始", "更改", "取消")
-        case .zhHant: return ("開始這個循環？", "更改這個循環的間隔？",
-                              (first.isEmpty ? "" : "首次 \(first) · ") + "每 \(every) · 最多 \(rounds) 輪", "開始", "更改", "取消")
-        case .ja:     return ("このループを開始しますか？", "このループの間隔を変更しますか？",
-                              (first.isEmpty ? "" : "初回 \(first) · ") + "\(every)ごと · 最大\(rounds)回", "開始", "変更", "キャンセル")
-        case .ko:     return ("이 반복을 시작할까요?", "이 반복의 간격을 변경할까요?",
-                              (first.isEmpty ? "" : "첫 실행 \(first) · ") + "\(every)마다 · 최대 \(rounds)회", "시작", "변경", "취소")
-        case .fr:     return ("Lancer cette boucle ?", "Changer l'intervalle de cette boucle ?",
-                              (first.isEmpty ? "" : "Premier tour \(first) · ") + "Toutes les \(every) · \(rounds) tours au plus", "Lancer", "Changer", "Annuler")
-        case .es:     return ("¿Iniciar este bucle?", "¿Cambiar el intervalo de este bucle?",
-                              (first.isEmpty ? "" : "Primera ronda \(first) · ") + "Cada \(every) · hasta \(rounds) rondas", "Iniciar", "Cambiar", "Cancelar")
-        case .en:     return ("Start this loop?", "Change this loop's interval?",
-                              (first.isEmpty ? "" : "First round \(first) · ") + "Every \(every) · up to \(rounds) rounds", "Start", "Change", "Cancel")
+        case .zhHans: t = ("首次 ", "仅工作日", "到 \(last) 为止", "最多 \(rounds) 轮")
+        case .zhHant: t = ("首次 ", "僅工作日", "到 \(last) 為止", "最多 \(rounds) 輪")
+        case .ja:     t = ("初回 ", "平日のみ", "\(last)まで", "最大\(rounds)回")
+        case .ko:     t = ("첫 실행 ", "평일만", "\(last)까지", "최대 \(rounds)회")
+        case .fr:     t = ("Premier tour ", "en semaine", "jusqu'au \(last)", "\(rounds) tours au plus")
+        case .es:     t = ("Primera ronda ", "solo entre semana", "hasta el \(last)", "hasta \(rounds) rondas")
+        case .en:     t = ("First round ", "weekdays only", "until \(last)", "up to \(rounds) rounds")
+        }
+        let interval: String
+        switch Localization.shared.language.resolved {
+        case .zhHans, .zhHant: interval = "每 \(every)"
+        case .ja: interval = "\(every)ごと"
+        case .ko: interval = "\(every)마다"
+        case .fr: interval = "Toutes les \(every)"
+        case .es: interval = "Cada \(every)"
+        case .en: interval = "Every \(every)"
+        }
+        let schedule = [first.isEmpty ? nil : t.first + first, interval,
+                        weekdaysOnly ? t.weekdays : nil, endsOn == nil ? t.upTo : t.until]
+            .compactMap { $0 }.joined(separator: " · ")
+        switch Localization.shared.language.resolved {
+        case .zhHans: return ("开始这个循环？", "更改这个循环的间隔？", schedule, "开始", "更改", "取消")
+        case .zhHant: return ("開始這個循環？", "更改這個循環的間隔？", schedule, "開始", "更改", "取消")
+        case .ja:     return ("このループを開始しますか？", "このループの間隔を変更しますか？", schedule, "開始", "変更", "キャンセル")
+        case .ko:     return ("이 반복을 시작할까요?", "이 반복의 간격을 변경할까요?", schedule, "시작", "변경", "취소")
+        case .fr:     return ("Lancer cette boucle ?", "Changer l'intervalle de cette boucle ?", schedule, "Lancer", "Changer", "Annuler")
+        case .es:     return ("¿Iniciar este bucle?", "¿Cambiar el intervalo de este bucle?", schedule, "Iniciar", "Cambiar", "Cancelar")
+        case .en:     return ("Start this loop?", "Change this loop's interval?", schedule, "Start", "Change", "Cancel")
         }
     }
 
@@ -3796,7 +3837,14 @@ final class NotchModel: ObservableObject {
             return .failure(EventDraftError("Error: give the start as YYYY-MM-DDTHH:MM in the user's local time."))
         }
         let allDay = isBareDay(raw)
-        guard var start = parseCaptureDue(raw) else {
+        var zone: TimeZone?
+        if let name = request.timeZone {
+            guard let found = TimeZone(identifier: name) else {
+                return .failure(EventDraftError("Error: time_zone \"\(name)\" is not an IANA time zone such as America/Los_Angeles."))
+            }
+            zone = found
+        }
+        guard var start = parseCaptureDue(raw, in: zone ?? .current) else {
             return .failure(EventDraftError("Error: could not read start=\"\(raw)\". Give the user's local time as YYYY-MM-DDTHH:MM."))
         }
         let cal = Calendar.current
@@ -3806,7 +3854,7 @@ final class NotchModel: ObservableObject {
         }
         var end = cal.date(byAdding: allDay ? .day : .hour, value: 1, to: start) ?? start
         if let rawEnd = request.end {
-            guard let parsed = parseCaptureDue(rawEnd) else {
+            guard let parsed = parseCaptureDue(rawEnd, in: zone ?? .current) else {
                 return .failure(EventDraftError("Error: could not read end=\"\(rawEnd)\". Use the same form as start."))
             }
             // An all-day range names its last day; the event ends after it.
@@ -3819,9 +3867,24 @@ final class NotchModel: ObservableObject {
             end = candidate
         }
         let alert = request.alertMinutes ?? 10
+        var repeats: CalendarService.Repeat?
+        if let rule = request.repeatRule.flatMap(CalendarService.Repeat.Frequency.init(rawValue:)) {
+            var until: Date?
+            if let raw = request.repeatUntil {
+                guard let day = parseCaptureDue(raw, in: zone ?? .current) else {
+                    return .failure(EventDraftError("Error: could not read repeat_until=\"\(raw)\". Give the last day as YYYY-MM-DD."))
+                }
+                until = cal.date(bySettingHour: 23, minute: 59, second: 0, of: day)
+                guard let last = until, last > start else {
+                    return .failure(EventDraftError("Error: repeat_until is before the first time it happens."))
+                }
+            }
+            repeats = CalendarService.Repeat(frequency: rule, count: request.repeatCount, until: until)
+        }
         return .success(CalendarService.Draft(title: title, start: start, end: end, allDay: allDay,
                                               location: request.location, notes: nil,
-                                              alertMinutes: alert > 0 ? alert : nil))
+                                              alertMinutes: alert > 0 ? alert : nil,
+                                              repeats: repeats, timeZone: zone))
     }
 
     struct EventDraftError: Error {
@@ -3850,12 +3913,25 @@ final class NotchModel: ObservableObject {
                 fmt.locale = Self.localeForInterfaceLanguage()
                 when = "all day on \(fmt.string(from: draft.start))"
             } else {
-                when = "from \(Self.captureDueDescription(draft.start)) to \(Self.captureDueDescription(draft.end))"
+                var span = "from \(Self.captureDueDescription(draft.start)) to \(Self.captureDueDescription(draft.end))"
+                if let zone = draft.timeZone {
+                    let there = Self.wallClock(draft.start, in: zone) + "–" + Self.wallClock(draft.end, in: zone, timeOnly: true)
+                    span += " on this Mac's clock; that is \(there) in \(zone.identifier), the zone the event keeps"
+                }
+                when = span
             }
             let alert = draft.alertMinutes.map {
                 draft.allDay ? " It alerts at 9:00 that day." : " It alerts \($0) minutes before."
             } ?? " It has no alert."
-            return ("Added. The event is in the user's Calendar, \(when).\(alert)", .some(link))
+            var repeats = ""
+            if let r = draft.repeats {
+                let how: String = r.frequency == .weekdays ? "every weekday" : r.frequency.rawValue
+                repeats = " It repeats \(how)"
+                if let count = r.count { repeats += ", \(count) times in all" }
+                if let until = r.until { repeats += ", through \(Self.captureDueDescription(until))" }
+                repeats += "."
+            }
+            return ("Added. The event is in the user's Calendar, \(when).\(alert)\(repeats)", .some(link))
         case .failure(let err):
             return ("Error: \(err.errorDescription ?? "couldn't add the event.")", nil)
         }
@@ -3865,13 +3941,15 @@ final class NotchModel: ObservableObject {
     /// `2026-08-20 15:00`, a bare day) — that is what the tool asks for and what a
     /// user means by "3pm" — then a full ISO-8601 stamp for models that insist on
     /// sending an offset. A bare day anchors to 9am, matching `recurrenceDate`.
-    private static func parseCaptureDue(_ raw: String) -> Date? {
+    /// `zone` reads the wall-clock forms in another time zone (an event the
+    /// user gave in their colleague's time).
+    private static func parseCaptureDue(_ raw: String, in zone: TimeZone = .current) -> Date? {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return nil }
 
         let local = DateFormatter()
         local.locale = Foundation.Locale(identifier: "en_US_POSIX")
-        local.timeZone = TimeZone.current
+        local.timeZone = zone
         for format in ["yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd'T'HH:mm",
                        "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd HH:mm"] {
             local.dateFormat = format
@@ -3889,6 +3967,15 @@ final class NotchModel: ObservableObject {
         return iso.date(from: text)
     }
 
+    /// A moment on another zone's wall clock, for the result to state both times.
+    private static func wallClock(_ date: Date, in zone: TimeZone, timeOnly: Bool = false) -> String {
+        let fmt = DateFormatter()
+        fmt.locale = Foundation.Locale(identifier: "en_US_POSIX")
+        fmt.timeZone = zone
+        fmt.dateFormat = timeOnly ? "HH:mm" : "EEE MMM d HH:mm"
+        return fmt.string(from: date)
+    }
+
     /// The due time as the tool result states it back to the model — the user's
     /// locale and timezone, so a follow-up sentence quotes the same moment the
     /// card showed.
@@ -3902,7 +3989,7 @@ final class NotchModel: ObservableObject {
 
     /// The interface language as a `Locale`, for the date strings this file shows
     /// the user (and states back to the model).
-    private static func localeForInterfaceLanguage() -> Foundation.Locale {
+    static func localeForInterfaceLanguage() -> Foundation.Locale {
         switch Localization.shared.language.resolved {
         case .en:     return Foundation.Locale(identifier: "en_US")
         case .zhHans: return Foundation.Locale(identifier: "zh_Hans")
@@ -4769,6 +4856,7 @@ final class NotchModel: ObservableObject {
         case "claudecode", "claude_code": return .claudeCode
         case "grokcode", "grok_code": return .grokCode
         case "pi", "picode", "pi_code": return .piCode
+        case "dsh", "dshcode", "dsh_code": return .dshCode
         case "cursor", "cursorcode", "cursor_code": return .cursorCode
         case "commandcode", "command_code": return .commandCode
         case "anthropic", "claude": return .anthropic
@@ -4789,6 +4877,7 @@ final class NotchModel: ObservableObject {
         case .claudeCode: return "claude_code"
         case .grokCode:   return "grok_code"
         case .piCode:     return "pi_code"
+        case .dshCode:    return "dsh_code"
         case .cursorCode: return "cursor_code"
         case .commandCode: return "command_code"
         default:          return provider.rawValue
@@ -7438,6 +7527,17 @@ final class NotchModel: ObservableObject {
         !(mode == .load && turns.isEmpty) && !showWhatsNew
     }
 
+    /// Set when a leave arrived while a permission prompt held the panel.
+    private var leaveHeldByPrompt = false
+
+    /// The permission prompts are answered: run the leave that was held, if one
+    /// was. A panel the pointer never left (a keyboard summon) stays open.
+    func resumeLeaveAfterPrompt() {
+        guard leaveHeldByPrompt else { return }
+        leaveHeldByPrompt = false
+        collapseOnLeave(from: activeDisplay)
+    }
+
     /// Auto-retract once the pointer leaves — for EVERY page (the rule the user
     /// settled on: leave = fold, always). Closing is cheap now: the page is
     /// parked by `fullClose` and a hover within `parkedSessionTTL` restores it
@@ -7472,6 +7572,15 @@ final class NotchModel: ObservableObject {
         // `InfoPopoverGate`).
         if isAnswerPinned || isFloatingCardOpen || InfoPopoverGate.open || detachDrag != nil {
             cancelLeaveWatch()
+            return
+        }
+        // A system permission prompt Notchi raised holds it too: answering it
+        // means moving the pointer to a window off the island (see
+        // `PermissionPromptGate`). The leave is remembered, so the prompt's
+        // answer re-runs this check (`resumeLeaveAfterPrompt`).
+        if PermissionPromptGate.open {
+            cancelLeaveWatch()
+            leaveHeldByPrompt = true
             return
         }
         // An update the user just started holds the panel too. It runs for as
@@ -7534,6 +7643,11 @@ final class NotchModel: ObservableObject {
         guard open else { leaveWatch = nil; return }
         if isAnswerPinned || isFloatingCardOpen || InfoPopoverGate.open {
             cancelLeaveWatch(); return
+        }
+        if PermissionPromptGate.open {
+            cancelLeaveWatch()
+            leaveHeldByPrompt = true
+            return
         }
         // Parked back over (or still over) the island: nothing to fold, but keep
         // watching — AppKit's tracking state may be desynced, so the exit that
@@ -7650,6 +7764,7 @@ final class NotchModel: ObservableObject {
         showLoopIntervalPicker = false
         isResultMetadataMenuOpen = false
         isResultMoreMenuOpen = false
+        showRoutines = false
         text = ""; turns = []
         replyTarget = nil
         editTarget = nil
@@ -9039,7 +9154,8 @@ final class NotchModel: ObservableObject {
         let provider = APIKeyStore.selectedProvider
         let model = APIKeyStore.effectiveModel(for: provider) ?? provider.defaultModel
         guard provider != .codex, provider != .claudeCode, provider != .grokCode,
-              provider != .piCode, provider != .cursorCode else { return false }
+              provider != .piCode, provider != .cursorCode,
+              provider != .dshCode else { return false }
         return Provider.modelSupportsVision(model)
     }
 

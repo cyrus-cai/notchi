@@ -71,6 +71,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if provider == .piCode {
             return PiCLIService(model: APIKeyStore.effectiveModel(for: .piCode))
         }
+        // dsh runs on the key saved in its own settings. See `DshCLIService`.
+        if provider == .dshCode {
+            return DshCLIService(model: APIKeyStore.effectiveModel(for: .dshCode))
+        }
         // A custom endpoint is gated on being *configured* (URL + model), not on a
         // key: a local server authenticates nobody, so an empty key is a normal
         // setup there and the request simply goes out without an auth header.
@@ -115,6 +119,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if provider == .piCode {
             return PiCLIService(model: model)
         }
+        if provider == .dshCode {
+            return DshCLIService(model: model)
+        }
         if provider.isOpenAICompatible {
             return OpenAICompatAIService(provider: provider, apiKey: apiKey, model: model)
         } else {
@@ -135,6 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if provider == .cursorCode { return CursorCLIService.isAvailable }
         if provider == .commandCode { return CommandCodeCLIService.isAvailable }
         if provider == .piCode { return PiCLIService.isAvailable }
+        if provider == .dshCode { return DshCLIService.isAvailable }
         // The custom endpoint is "configured" when it has a URL and a model id —
         // its key is optional (see `CustomProvider`).
         if provider == .custom { return CustomProvider.isConfigured }
@@ -336,6 +344,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         CursorCLIService.warmUp()
         CommandCodeCLIService.warmUp()
         PiCLIService.warmUp()
+        DshCLIService.warmUp()
         // Same reason: resolving the proxy may spawn a login shell, and the first
         // agent run must not wait on it.
         ProxyConfig.warmUp()
@@ -895,6 +904,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                     addCredit: addCredit)
                 }
             }
+        }
+
+        // A permission prompt was answered: a leave-fold it held resumes.
+        NotificationCenter.default.addObserver(
+            forName: .permissionPromptEnded,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.model.resumeLeaveAfterPrompt() }
         }
 
         // The installed update is about to quit and reopen the app. Close the

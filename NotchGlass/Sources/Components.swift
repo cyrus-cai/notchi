@@ -218,6 +218,11 @@ struct PromptField: NSViewRepresentable {
     /// time with the wrapped text, clamped at `maxVisibleLines`. The caller frames
     /// the field with it and sizes the row around it. No-op by default.
     var onHeightChange: (CGFloat) -> Void = { _ in }
+    /// The height the caller is drawing the box at right now. When it differs
+    /// from the measured height, the next measurement reports again even if it
+    /// already reported that value once, so a report the caller missed cannot
+    /// leave the box at a stale height. `nil` keeps the old edge-only reports.
+    var currentHeight: CGFloat? = nil
 
     /// The text's left inset inside the box — matched to the ~2pt an `NSTextField`
     /// cell used to draw with, so the placeholder labels and the inline hint (which
@@ -317,6 +322,23 @@ struct PromptField: NSViewRepresentable {
         // back to the stale committed text — wiping the user's half-typed pinyin. And
         // re-renders DO happen mid-composition: the caret/height reports driving the
         // hint and the row size are SwiftUI state changes.
+        // An IME composition that is still open when the text is replaced from
+        // outside (a send clears the box) is abandoned. Otherwise the box keeps
+        // the old draft under the pinyin, and the IME's commit later writes the
+        // whole old draft back into `text`. While composing, `text` normally
+        // equals the editor minus the marked range; anything else is an
+        // outside replacement.
+        if tv.hasMarkedText() {
+            let committed = (tv.string as NSString)
+                .replacingCharacters(in: tv.markedRange(), with: "")
+            if committed != text {
+                let coord = context.coordinator
+                coord.isApplyingText = true
+                tv.inputContext?.discardMarkedText()
+                if tv.hasMarkedText() { tv.unmarkText() }
+                coord.isApplyingText = false
+            }
+        }
         let composing = tv.hasMarkedText()
         if !composing, tv.string != text {
             // A recall / submit / other model-side replacement starts a genuinely
@@ -427,6 +449,9 @@ struct PromptField: NSViewRepresentable {
         /// of `focusTrigger`, reset when it falls. Prevents re-enqueuing focus on
         /// every render. (See updateNSView.)
         var didFocus = false
+        /// True while `updateNSView` abandons a composition, so the edits AppKit
+        /// posts for it are not written back into `text`.
+        var isApplyingText = false
         /// The box we measure and the scroll view that clips it. Weak — AppKit owns
         /// the view tree; this is just our handle back into it from a notification.
         private weak var textView: PromptTextView?
@@ -494,7 +519,8 @@ struct PromptField: NSViewRepresentable {
         }
 
         func textDidChange(_ notification: Notification) {
-            guard let tv = notification.object as? PromptTextView else { return }
+            guard !isApplyingText,
+                  let tv = notification.object as? PromptTextView else { return }
             // A non-IME edit (plain typing, delete, paste) is an explicit new
             // layout decision and may shrink normally. An IME commit arrives while
             // `wasComposing` is still true; that edge deliberately keeps the floor.
@@ -676,7 +702,8 @@ struct PromptField: NSViewRepresentable {
             let centreY = lineRect.midY + tv.textContainerInset.height - scrolled
             let caretY = centreY - height / 2
 
-            if height != lastHeight {
+            let callerIsStale = parent.currentHeight.map { abs($0 - height) > 0.5 } ?? false
+            if height != lastHeight || callerIsStale {
                 lastHeight = height
                 parent.onHeightChange(height)
             }
@@ -1372,7 +1399,8 @@ struct ComposerBox<Placeholder: View, Trailing: View>: View {
                     onPasteImage: onPasteImage,
                     onCommandSubmit: onCommandSubmit,
                     onCaretWidth: { caretWidth = $0 },
-                    onHeightChange: { height = $0 }
+                    onHeightChange: { if height != $0 { height = $0 } },
+                    currentHeight: fieldHeight
                 )
                 .frame(height: fieldHeight)
                 // Shown only while the editor is truly empty — committed text, a
@@ -8394,18 +8422,9 @@ private struct AgentTrailPlanRow: View {
             Text(entry.title)
                 .font(.sf(waitFont, weight: .medium))
                 .foregroundStyle(Tokens.text4)
-            ForEach(Array(AgentTodo.decode(entry.detail ?? "").enumerated()), id: \.offset) { _, item in
-                HStack(alignment: .firstTextBaseline, spacing: 7) {
-                    Image(systemName: Self.glyph(item.status))
-                        .font(.sf(Tokens.TypeSize.caption, weight: .semibold))
-                        .foregroundStyle(item.status == .done ? Tokens.text3 : Tokens.text4)
-                        .frame(width: 11)
-                    Text(item.text)
-                        .font(.sf(waitFont))
-                        .foregroundStyle(item.status == .pending ? Tokens.text4 : Tokens.text2)
-                        .strikethrough(item.status == .done, color: Tokens.text4)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+            ForEach(Array(AgentTodo.decode(entry.detail ?? "").enumerated()), id: \.offset) { i, item in
+                AgentTrailPlanItem(text: item.text, status: item.status,
+                                   font: waitFont, order: i)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -8419,6 +8438,68 @@ private struct AgentTrailPlanRow: View {
                         .strokeBorder(.white.opacity(0.06), lineWidth: 0.5)
                 )
         )
+    }
+
+}
+
+/// One checklist line. A status change animates instead of jumping: the glyph
+/// swaps with the same `.replace` symbol transition the rest of the panel uses,
+/// and a done item's strike draws in from the leading edge. Items that arrive
+/// already done start fully struck — only a change seen live animates. `order`
+/// staggers the lines a little, so when one item ticks done and the next turns
+/// active, the second follows the first.
+private struct AgentTrailPlanItem: View {
+    let text: String
+    let status: AgentTodo.Status
+    let font: CGFloat
+    let order: Int
+
+    @State private var strike: CGFloat
+
+    init(text: String, status: AgentTodo.Status, font: CGFloat, order: Int) {
+        self.text = text
+        self.status = status
+        self.font = font
+        self.order = order
+        _strike = State(initialValue: status == .done ? 1 : 0)
+    }
+
+    private var change: Animation {
+        .easeOut(duration: 0.28).delay(Double(min(order, 6)) * 0.04)
+    }
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 7) {
+            Image(systemName: Self.glyph(status))
+                .font(.sf(Tokens.TypeSize.caption, weight: .semibold))
+                .foregroundStyle(status == .done ? Tokens.text3 : Tokens.text4)
+                .contentTransition(.symbolEffect(.replace))
+                .frame(width: 11)
+            Text(text)
+                .font(.sf(font))
+                .foregroundStyle(status == .pending ? Tokens.text4 : Tokens.text2)
+                .fixedSize(horizontal: false, vertical: true)
+                // The strike is a clear copy of the same text with only its
+                // strikethrough showing, revealed left to right — so a wrapped
+                // item is struck on every line, as `.strikethrough` would.
+                .overlay(alignment: .leading) {
+                    Text(text)
+                        .font(.sf(font))
+                        .foregroundStyle(.clear)
+                        .strikethrough(true, color: Tokens.text4)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .mask(alignment: .leading) {
+                            GeometryReader { geo in
+                                Rectangle().frame(width: geo.size.width * strike)
+                            }
+                        }
+                        .accessibilityHidden(true)
+                }
+        }
+        .animation(change, value: status)
+        .onChange(of: status) { _, new in
+            withAnimation(change) { strike = new == .done ? 1 : 0 }
+        }
     }
 
     private static func glyph(_ status: AgentTodo.Status) -> String {
@@ -9141,4 +9222,5 @@ extension View {
         }
     }
 }
+
 

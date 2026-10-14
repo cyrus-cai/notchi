@@ -20,6 +20,8 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
         manager.desiredAccuracy = kCLLocationAccuracyKilometer
     }
 
+    var authorizationStatus: CLAuthorizationStatus { manager.authorizationStatus }
+
     var isAuthorized: Bool {
         let status = manager.authorizationStatus
         return status == .authorizedAlways || status == .authorized
@@ -33,6 +35,7 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
         await withCheckedContinuation { cont in
             authWaiters.append(cont)
             guard authWaiters.count == 1 else { return }
+            PermissionPromptGate.enter()
             manager.requestWhenInUseAuthorization()
             Task { [weak self] in
                 try? await Task.sleep(for: .seconds(60))
@@ -42,6 +45,8 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
     }
 
     private func finishAuth() {
+        guard !authWaiters.isEmpty else { return }
+        PermissionPromptGate.exit()
         let waiters = authWaiters
         authWaiters = []
         waiters.forEach { $0.resume() }
@@ -112,7 +117,7 @@ struct WeatherTool: NotchTool {
     static let toolName = "weather"
     let name = toolName
     let description = """
-    Current weather and the daily forecast for up to 7 days: conditions, high \
+    Current weather and the daily forecast for up to 16 days: conditions, high \
     and low, chance and amount of rain, wind. Call for any weather question \
     ("明天要带伞吗", "周末杭州冷不冷", "weather in Tokyo"). Leave place empty for \
     where the user is; pass a city when they name one. Use this, not web_search \
@@ -122,13 +127,13 @@ struct WeatherTool: NotchTool {
         "type": "object",
         "properties": [
             "place": ["type": "string", "description": "City or place the user named. Omit for their current location."],
-            "days": ["type": "integer", "minimum": 1, "maximum": 7, "description": "Days of forecast from today. Default 3."],
+            "days": ["type": "integer", "minimum": 1, "maximum": 16, "description": "Days of forecast from today, up to 16. Default 3."],
         ],
     ]
 
     func execute(_ input: [String: Any]) async throws -> String {
         let named = (input["place"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let days = min(max((input["days"] as? NSNumber)?.intValue ?? 3, 1), 7)
+        let days = min(max((input["days"] as? NSNumber)?.intValue ?? 3, 1), 16)
         let place: Place
         if !named.isEmpty {
             guard let found = try await Self.geocode(named) else { return "No place called \"\(named)\" was found." }

@@ -52,6 +52,12 @@ enum NotesService {
     /// at a time, so the single `NSAppleScript` instance is never used concurrently.
     private static let queue = DispatchQueue(label: "com.notchglass.notes-applescript")
 
+    /// Run `work` on `queue`, with the panel held while it may raise the
+    /// Automation prompt for Notes (`PermissionPromptGate`).
+    private static func onQueue(_ work: @escaping () -> Void) {
+        queue.async { PermissionPromptGate.automating("com.apple.Notes", work) }
+    }
+
     /// The compiled script, created and used **only** on `queue`. Lazily built on
     /// the first write so we don't pay the compile cost at launch. `nil` if it
     /// failed to compile.
@@ -166,7 +172,7 @@ enum NotesService {
         }
         let body = htmlBody(from: trimmed)
 
-        queue.async {
+        onQueue {
             let result = runWrite(body: body)
             // Hop back to the main actor to touch any UI/model state.
             Task { @MainActor in completion(result) }
@@ -186,7 +192,7 @@ enum NotesService {
             Task { @MainActor in completion(false) }
             return
         }
-        queue.async {
+        onQueue {
             guard let script = scriptOnQueue() else {
                 Task { @MainActor in completion(false) }
                 return
@@ -213,7 +219,7 @@ enum NotesService {
     /// writes; the first call may raise the Automation prompt for Notes.
     static func readNotes(query: String, limit: Int) async -> Result<[NoteText], NotesError> {
         await withCheckedContinuation { cont in
-            queue.async { cont.resume(returning: readOnQueue(query: query, limit: limit)) }
+            onQueue { cont.resume(returning: readOnQueue(query: query, limit: limit)) }
         }
     }
 
@@ -251,7 +257,7 @@ enum NotesService {
     /// for `edit_note` to pick one.
     static func findNotes(query: String) async -> Result<[(id: String, title: String)], NotesError> {
         await withCheckedContinuation { cont in
-            queue.async {
+            onQueue {
                 guard let script = scriptOnQueue() else {
                     return cont.resume(returning: .failure(.scriptError("Couldn't prepare the Notes script.")))
                 }
@@ -278,7 +284,7 @@ enum NotesService {
     /// Append a line (e.g. `#工作`) to a note, or delete the note.
     static func edit(noteID: String, appendLine line: String?) async -> Result<Void, NotesError> {
         await withCheckedContinuation { cont in
-            queue.async {
+            onQueue {
                 guard let script = scriptOnQueue() else {
                     return cont.resume(returning: .failure(.scriptError("Couldn't prepare the Notes script.")))
                 }

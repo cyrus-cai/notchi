@@ -289,7 +289,9 @@ enum RemindersService {
         // write share one connection — the grant the prompt produces lands on the
         // same store `write` saves through.
         let store = currentStore()
+        PermissionPromptGate.enter()
         store.requestFullAccessToReminders { granted, _ in
+            PermissionPromptGate.exit()
             let result: Result<String?, RemindersError> =
                 granted ? write(trimmed, due: due, recurrence: recurrence, until: until, listName: listName, store: store)
                     : .failure(.permissionDenied)

@@ -44,7 +44,7 @@ enum MailService {
         if compiled { return _script }
         compiled = true
         let source = """
-        on notchMailList(mode, query, limitText)
+        on notchMailList(mode, query, limitText, daysText)
             set maxCount to limitText as integer
             tell application "Mail"
                 if mode is "unread" then
@@ -62,7 +62,7 @@ enum MailService {
                     set end of out to {(id of m) as string, (date received of m) as string, sender of m, subject of m, ""}
                 end repeat
                 if mode is "search" and n < maxCount then
-                    set cutoff to (current date) - (30 * days)
+                    set cutoff to (current date) - ((daysText as integer) * days)
                     set inBody to (messages of inbox whose date received > cutoff and content contains query)
                     repeat with m in inBody
                         if n ≥ maxCount then exit repeat
@@ -134,7 +134,10 @@ enum MailService {
                 for (i, arg) in args.enumerated() { list.insert(NSAppleEventDescriptor(string: arg), at: i + 1) }
                 event.setParam(list, forKeyword: keyDirectObject)
                 var error: NSDictionary?
-                let result = script.executeAppleEvent(event, error: &error)
+                // May raise the Automation prompt for Mail: hold the panel.
+                let result = PermissionPromptGate.automating("com.apple.mail") {
+                    script.executeAppleEvent(event, error: &error)
+                }
                 if let error {
                     let number = error[NSAppleScript.errorNumber] as? Int ?? 0
                     if number == -1743 || number == -1744 { return cont.resume(returning: .failure(.permissionDenied)) }
@@ -146,9 +149,9 @@ enum MailService {
     }
 
     /// Unread inbox messages, or those whose sender or subject contains
-    /// `query`, then the last 30 days' messages whose body does.
-    static func list(unread: Bool, query: String, limit: Int) async -> Result<[Header], MailError> {
-        switch await call("notchMailList", [unread ? "unread" : "search", query, String(limit)]) {
+    /// `query`, then messages from the last `days` days whose body does.
+    static func list(unread: Bool, query: String, limit: Int, days: Int = 30) async -> Result<[Header], MailError> {
+        switch await call("notchMailList", [unread ? "unread" : "search", query, String(limit), String(days)]) {
         case .failure(let error): return .failure(error)
         case .success(let list):
             guard list.numberOfItems > 0 else { return .success([]) }

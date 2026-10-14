@@ -157,7 +157,9 @@ final class NotificationService: NSObject {
         let center = self.center
         if !didRequestAuthorization {
             didRequestAuthorization = true
+            PermissionPromptGate.enter()
             center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+                PermissionPromptGate.exit()
                 Task { @MainActor in completion(granted) }
             }
             return

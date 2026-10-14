@@ -470,9 +470,12 @@ Never say you added, saved or changed anything you did not call a tool for.
 """),
     (["create_event"], """
 - A meeting, appointment or anything else that takes up time at a set moment → \
-create_event with an absolute local `start`. Never say it was added until the \
-tool result says so. After it is added, reply with one short line and nothing \
-else.
+create_event with an absolute local `start`. When the time is given in another \
+place's or person's zone ("9h cdmx", "21h en Barcelona", "9am PT", "东京时间 10 \
+点"), write that wall-clock time and pass time_zone; never convert it yourself. \
+"Weekly, three times", "every weekday" → repeat (with repeat_count or \
+repeat_until), one event, not several. Never say it was added until the tool \
+result says so. After it is added, reply with one short line and nothing else.
 """),
     (["read_calendar", "read_reminders", "read_notes"], """
 - The user's own schedule, to-dos and notes → read_calendar, read_reminders, \
@@ -506,8 +509,10 @@ the figures it returns.
 one in Finder.
 """),
     (["travel_time"], """
-- How long a trip takes now → travel_time (Apple Maps with current traffic); \
-never guess a time from memory while it is available.
+- How long a trip takes → travel_time (Apple Maps); never guess a time from \
+memory while it is available. For a trip at a stated time ("Friday 6pm", \
+"Saturday at 2"), pass leave_at or arrive_by — without it the result is for \
+leaving now — and say which time the estimate is for.
 """),
     (["weather"], """
 - Weather, rain, temperature, "要带伞吗" → weather; leave place empty for \
@@ -562,9 +567,10 @@ as usual. "Forget …" → forget. What they say now contradicts a remembered fa
     (["manage_loop"], """
 - Work to do again on a schedule or to watch over time — "every hour check X", \
 "tell me when Y changes", "每天早上总结…" → manage_loop action=start with a \
-self-contained prompt and an interval. An alert at a set time with no work in \
-it is create_reminder. Never say a loop started until the result says so, and then reply with one short line. To stop \
-or re-time one, action=list first.
+self-contained prompt and an interval; "weekdays" / "工作日" → weekdays_only, \
+an end ("until Dec 18", "到月底") → ends_on. An alert at a set time with no work in \
+it is create_reminder. Never say a loop started until the result says so, and then reply with one short line. To stop, \
+delete or re-time one, action=list first. A stopped loop can still be deleted.
 """),
 ]
 
@@ -885,6 +891,11 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     // one catalog, each model billed to its own upstream account. Not an HTTP
     // endpoint — it shells out to the local `pi` binary (see `PiCLIService`).
     case piCode
+    // DeepSeek Harness (github.com/deepseek-ai/deepseek-harness), the same keyless
+    // pattern: Notch spawns the user's own `dsh` binary, which runs on the provider
+    // and key saved in dsh's own settings. Not an HTTP endpoint (see
+    // `DshCLIService`).
+    case dshCode
     case anthropic
     case gemini
     case deepseek
@@ -1122,6 +1133,18 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
                 signupHost: "github.com",
                 signupURL: "https://github.com/earendil-works/pi",
                 envVarName: "PI_CLI_UNUSED")
+        case .dshCode:
+            // Not an HTTP backend — `DshCLIService` shells out to the local `dsh`
+            // binary; `endpoint` is a never-used placeholder. The models are dsh's
+            // DeepSeek catalog, passed as a patch overlay. The key is set in dsh,
+            // not here.
+            return ProviderSpec(
+                displayName: "DeepSeek Harness (DSH)",
+                endpoint: "https://github.com/unused",
+                models: DshCLIService.models,
+                signupHost: "github.com",
+                signupURL: "https://github.com/deepseek-ai/deepseek-harness",
+                envVarName: "DSH_CLI_UNUSED")
         case .gemini:
             return ProviderSpec(
                 displayName: "Google Gemini",
@@ -1200,7 +1223,8 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     /// and logged in (see each service's `isAvailable`).
     var isCLI: Bool {
         switch self {
-        case .codex, .claudeCode, .grokCode, .cursorCode, .commandCode, .piCode: return true
+        case .codex, .claudeCode, .grokCode, .cursorCode, .commandCode, .piCode, .dshCode:
+            return true
         default: return false
         }
     }
@@ -1219,6 +1243,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // pi's default is the provider+model pair its own settings.json names, out of
         // the catalog its CLI prints — never a curated shortlist of ours.
         if self == .piCode { return PiCLIService.defaultModel }
+        if self == .dshCode { return DshCLIService.defaultModel }
         // Cursor's default is likewise the row its own catalog marks
         // (`cursor-agent --list-models`), never a curated shortlist of ours.
         if self == .cursorCode { return CursorCLIService.defaultModel }
@@ -1245,6 +1270,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // pi's list is every model the user's signed-in providers expose, from
         // `pi --list-models` (see `PiCLIService`), falling back to the sentinel.
         if self == .piCode { return PiCLIService.availableModelIDs }
+        if self == .dshCode { return DshCLIService.models }
         // Cursor's list is the account's real catalog from
         // `cursor-agent --list-models` (see `CursorCLIService`), falling back to the
         // single sentinel.
@@ -1293,7 +1319,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         case .anthropic, .claudeCode: return "Anthropic"
         case .grokCode:               return "xAI"
         case .gemini:                 return "Google"
-        case .deepseek:               return "DeepSeek"
+        case .deepseek, .dshCode:     return "DeepSeek"
         case .qwen:                   return "Qwen"
         case .glm:                    return "Zhipu"
         case .kimi:                   return "Moonshot"
@@ -1317,6 +1343,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         case .cursorCode:  return "Cursor"
         case .commandCode: return "Command Code"
         case .piCode:      return "PI"
+        case .dshCode:     return "DeepSeek"
         case .custom:      return ""
         default:           return vendorName ?? ""
         }
@@ -1346,7 +1373,8 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // Anthropic speaks its native protocol; Codex and Claude Code aren't HTTP
         // at all (subprocesses). All are routed to their own client, never the
         // shared one.
-        case .anthropic, .codex, .claudeCode, .grokCode, .cursorCode, .commandCode, .piCode:
+        case .anthropic, .codex, .claudeCode, .grokCode, .cursorCode, .commandCode, .piCode,
+             .dshCode:
             return false
         default:
             return true
@@ -1382,8 +1410,10 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // way — the turn dispatcher takes the plain `stream` path for them. Every
         // other provider exposes a function-calling API the harness can drive.
         switch self {
-        case .codex, .claudeCode, .grokCode, .cursorCode, .commandCode, .piCode: return false
-        default:                                                                return true
+        case .codex, .claudeCode, .grokCode, .cursorCode, .commandCode, .piCode, .dshCode:
+            return false
+        default:
+            return true
         }
     }
 
@@ -1635,13 +1665,18 @@ struct OpenAICompatAIService: AIService {
     /// Model id; defaults to the provider's default when not overridden.
     var model: String
 
-    init(provider: Provider, apiKey: String, model: String? = nil) {
+    /// Another OpenAI-compatible chat-completions URL in place of the
+    /// provider's own. Only the use-case eval sets it, to run on a cheaper host.
+    var endpointOverride: URL?
+
+    init(provider: Provider, apiKey: String, model: String? = nil, endpointOverride: URL? = nil) {
         self.provider = provider
         self.apiKey = apiKey
         self.model = model ?? provider.defaultModel
+        self.endpointOverride = endpointOverride
     }
 
-    private var endpoint: URL { provider.endpoint }
+    var endpoint: URL { endpointOverride ?? provider.endpoint }
 
     /// Cap on how much of an error response body we'll read before giving up. A
     /// hostile/broken endpoint could stream an unbounded error body; we only need
@@ -3090,7 +3125,9 @@ enum ModelCatalog {
         // local subprocesses, not HTTP), so there's nothing to fetch — their model
         // lists come from the CLIs themselves.
         if provider == .codex || provider == .grokCode || provider == .commandCode
-            || provider == .piCode || provider == .cursorCode { return nil }
+            || provider == .piCode || provider == .cursorCode || provider == .dshCode {
+            return nil
+        }
         if !force, let hit = withCacheLock({ cache[provider] }),
            hit.apiKey == apiKey, Date().timeIntervalSince(hit.fetchedAt) < ttl {
             return hit.result
@@ -4617,7 +4654,7 @@ extension OpenAICompatAIService: AgentCapableService {
                 var noReasoning = false
                 while true {
                     do {
-                        var req = URLRequest(url: provider.endpoint)
+                        var req = URLRequest(url: endpoint)
                         req.httpMethod = "POST"
                         req.timeoutInterval = Self.streamTimeout
                         req.setValue("application/json", forHTTPHeaderField: "Content-Type")

@@ -88,6 +88,12 @@ struct CurrentContextTool: NotchTool {
             lines.append("Window: \(title)")
         }
 
+        // The AppleScript reads below may raise the Automation prompt for this
+        // app: hold the panel while they run (`PermissionPromptGate`).
+        let mayAsk = PermissionPromptGate.automationMayAsk(pid: app.processIdentifier)
+        if mayAsk { PermissionPromptGate.enter() }
+        defer { if mayAsk { PermissionPromptGate.exit() } }
+
         if let browser = Self.browsers[bundleID] {
             switch Self.frontTab(browser: browser, appName: appName) {
             case .success(let tab):

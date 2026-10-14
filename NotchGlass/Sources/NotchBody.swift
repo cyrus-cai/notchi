@@ -253,7 +253,27 @@ struct NotchBody: View {
                 // two view identities, so every round tore the whole thread down
                 // and rebuilt it when its first text flipped `.load` → `.result`
                 // (and a follow-up's `.result` → `.load` did it once more).
+                // The Routines page covers the thread's right half, edge to
+                // edge of the glass, and closes from its own ×. It never widens
+                // or heightens the panel.
                 resultView
+                    .overlay {
+                        if model.showRoutines {
+                            GeometryReader { geo in
+                                RoutinesPanel(onClose: {
+                                    withAnimation(.spring(response: 0.4, dampingFraction: 0.86)) {
+                                        model.showRoutines = false
+                                    }
+                                })
+                                .frame(width: geo.size.width / 2)
+                                .frame(maxWidth: .infinity, alignment: .trailing)
+                            }
+                            .padding(.trailing, -NotchBody.panelPadding)
+                            .padding(.top, -NotchBody.panelPadding)
+                            .padding(.bottom, -panelBottomPadding)
+                            .transition(.move(edge: .trailing).combined(with: .opacity))
+                        }
+                    }
             }
         }
         .padding(.horizontal, NotchBody.panelPadding)
@@ -446,6 +466,7 @@ struct NotchBody: View {
         if p == .piCode, id.isEmpty || id == PiCLIService.defaultSentinel {
             return p.defaultModel
         }
+        if p == .dshCode, !DshCLIService.models.contains(id) { return p.defaultModel }
         if p == .cursorCode, id.isEmpty || id == CursorCLIService.defaultSentinel {
             return p.defaultModel
         }
@@ -1480,6 +1501,7 @@ struct NotchBody: View {
         if CursorCLIService.isAvailable { out.append(.cursorCode) }
         if CommandCodeCLIService.isAvailable { out.append(.commandCode) }
         if PiCLIService.isAvailable { out.append(.piCode) }
+        if DshCLIService.isAvailable { out.append(.dshCode) }
         return out
     }
 
@@ -1669,7 +1691,7 @@ struct NotchBody: View {
         // use `shortDisplayName` above so the provider stays in the picker only.
         // Cursor is the third of that kind: its rows are Codex, Claude, Gemini,
         // Composer — no single family word to drop.
-        case .commandCode, .pi, .cursor: return label
+        case .commandCode, .pi, .cursor, .dsh: return label
         }
         for sep in ["-", " "] {
             let p = family + sep
@@ -5600,7 +5622,13 @@ struct NotchBody: View {
                             model.isResultMoreMenuOpen = false
                             model.openDetachedWindow()
                         }
-                        : nil as (() -> Void)?
+                        : nil as (() -> Void)?,
+                    routinesOpen: model.showRoutines,
+                    toggleRoutines: {
+                        withAnimation(.spring(response: 0.4, dampingFraction: 0.86)) {
+                            model.showRoutines.toggle()
+                        }
+                    }
                 )
             }
             // These are buttons sitting on the header's tear-off grip, which pushes
@@ -5885,7 +5913,8 @@ struct NotchBody: View {
                     onHeightChange: followUp ? { _ in } : { h in
                         guard h != inputHeight else { return }
                         withAnimation(NotchBody.promptGrowth) { inputHeight = h }
-                    }
+                    },
+                    currentHeight: followUp ? nil : inputHeight
                 )
                 .frame(height: followUp ? nil : inputHeight)
                 // The one trailing slot beside the caret — the position the old
@@ -7583,6 +7612,10 @@ struct ResultTrailingCluster: View {
     /// Tear-off action. When set, a more mark sits to the pin's right and this
     /// action is the row in the menu it opens.
     var detach: (() -> Void)? = nil
+    /// The Routines column beside the thread. With no detach to offer, the ⋯
+    /// toggles it directly; otherwise it is a row in the ⋯ menu.
+    var routinesOpen = false
+    var toggleRoutines: (() -> Void)? = nil
 
     var body: some View {
         GlassSegmentCluster(segments: {
@@ -7592,17 +7625,19 @@ struct ResultTrailingCluster: View {
                               action: togglePin) {
                 PinStateGlyph(pinned: pinned, size: 12, weight: .light)
             })
-            if detach != nil {
+            if detach != nil || toggleRoutines != nil {
                 segs.append(.init(id: "more",
-                                  engaged: moreOpen,
-                                  tooltip: L("recent.manage"),
-                                  action: { moreOpen.toggle() }) {
+                                  engaged: moreOpen || (detach == nil && routinesOpen),
+                                  tooltip: detach == nil ? L("routines.title") : L("recent.manage"),
+                                  action: {
+                                      if detach == nil { toggleRoutines?() } else { moreOpen.toggle() }
+                                  }) {
                     Image(systemName: "ellipsis")
                         .font(.sf(15, weight: .bold))
                 })
             }
             return segs
-        }(), showsTooltips: !moreOpen)
+        }(), showsTooltips: !moreOpen && !(detach == nil && routinesOpen))
         .modifier(MenuCardWindow(
             open: moreOpen,
             lowerTrailing: true,
@@ -7614,14 +7649,21 @@ struct ResultTrailingCluster: View {
     private var moreMenu: some View {
         let title = Self.actionTitle("detached.open")
         let chord = AppShortcutStore.chord(for: .detach).displayString
+        let routines = L("routines.title")
         return VStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
             MenuCardRow(title: title, accessory: chord, selected: false) {
                 moreOpen = false
                 detach?()
             }
+            if toggleRoutines != nil {
+                MenuCardRow(title: routines, selected: routinesOpen) {
+                    moreOpen = false
+                    toggleRoutines?()
+                }
+            }
         }
         .padding(MenuCard.cardPad)
-        .frame(width: MenuCard.width(titles: [(title, chord)]))
+        .frame(width: MenuCard.width(titles: [(title, chord), (routines, "")]))
         .manageMenuCardBackground()
     }
 
@@ -8554,10 +8596,11 @@ private struct UnifiedComposeModeControl: View {
             Text(title)
                 .font(.sf(Self.fontSize, weight: .regular))
                 .foregroundStyle(ink)
+                .brightness(0.1)
                 .lineLimit(1)
                 .padding(.horizontal, 7)
                 .padding(.vertical, 3.5)
-                .background(shape.fill(Color.white.opacity(hovering ? 0.12 : 0.07)))
+                .background(shape.fill(Color.white.opacity(hovering ? 0.14 : 0.10)))
                 .contentShape(shape)
         }
         .buttonStyle(.plain).exemptsDoubleClickPin()
@@ -9412,3 +9455,187 @@ private struct UnifiedIntroLearnMoreCard: View {
     }
 }
 
+/// The result page's right column, opened from the header's ⋯: every loop,
+/// Ask and agent, with a switch that stops or resumes it.
+struct RoutinesPanel: View {
+    @ObservedObject private var chatLoops = ChatLoopManager.shared
+    @ObservedObject private var agentManager = AgentTaskManager.shared
+
+    var onClose: () -> Void
+
+    private struct Item: Identifiable {
+        let id: UUID
+        let title: String
+        let intervalMinutes: Int
+        let weekdaysOnly: Bool
+        let nextRoundAt: Date?
+        let active: Bool
+        let agent: Bool
+        let startedAt: Date
+        /// When the round running now started; nil between rounds.
+        let runningSince: Date?
+    }
+
+    private var items: [Item] {
+        let agentLoops = agentManager.tasks.compactMap { task -> Item? in
+            guard let loop = task.loop else { return nil }
+            return Item(id: task.id, title: task.prompt, intervalMinutes: loop.intervalMinutes,
+                        weekdaysOnly: false, nextRoundAt: loop.nextRoundAt,
+                        active: loop.active, agent: true, startedAt: loop.startedAt,
+                        runningSince: task.isRunning ? task.startedAt : nil)
+        }
+        let askLoops = chatLoops.listed.map { loop in
+            Item(id: loop.id, title: loop.prompt, intervalMinutes: loop.intervalMinutes,
+                 weekdaysOnly: loop.weekdaysOnly, nextRoundAt: loop.nextRoundAt,
+                 active: loop.active, agent: false, startedAt: loop.startedAt,
+                 runningSince: loop.roundStartedAt)
+        }
+        return (agentLoops + askLoops).sorted { $0.startedAt > $1.startedAt }
+    }
+
+    var body: some View {
+        VStack(spacing: 14) {
+            // One row with the header's height: the tab, and × where ⋯ was.
+            HStack {
+                Text(L("routines.title"))
+                    .font(.sf(Tokens.TypeSize.label, weight: .medium))
+                    .foregroundStyle(Tokens.text1)
+                    .padding(.horizontal, 12)
+                    .frame(height: 28)
+                    .background(Capsule().fill(Tokens.recessFillLit))
+                Spacer(minLength: 0)
+                GlassSegmentCluster(segments: [
+                    .init(id: "close", tooltip: L("detached.close"), action: onClose) {
+                        Image(systemName: "xmark")
+                            .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
+                    },
+                ], showsTooltips: false)
+            }
+            let rows = items
+            if rows.isEmpty {
+                Text(L("routines.empty"))
+                    .font(.sf(Tokens.TypeSize.label))
+                    .foregroundStyle(Tokens.text4)
+                    .multilineTextAlignment(.center)
+                    .padding(.top, 8)
+                Spacer(minLength: 0)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(rows.enumerated()), id: \.element.id) { index, item in
+                            if index > 0 {
+                                Rectangle().fill(Tokens.hairline).frame(height: 0.5)
+                                    .padding(.horizontal, 12)
+                            }
+                            row(item)
+                        }
+                    }
+                    .background(
+                        RoundedRectangle(cornerRadius: Tokens.Radius.menu, style: .continuous)
+                            .fill(Tokens.recessFill)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: Tokens.Radius.menu, style: .continuous)
+                                    .strokeBorder(Tokens.recessRim, lineWidth: 0.5)))
+                    .padding(.bottom, NotchBody.panelPadding)
+                }
+                .scrollIndicators(.never)
+            }
+        }
+        .padding(.top, NotchBody.panelPadding)
+        .padding(.leading, NotchBody.panelPadding)
+        .padding(.trailing, NotchBody.panelPadding + NotchBody.resultSideInset)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        // No drawn edge: the page's glass and veil reach `edgeFade` past its
+        // left side and fade out there, so the thread dissolves into it.
+        .background {
+            ZStack {
+                Rectangle().fill(.clear).nativeGlass(in: Rectangle())
+                Color.black.opacity(0.95)
+            }
+            .mask {
+                HStack(spacing: 0) {
+                    LinearGradient(colors: [.clear, .black],
+                                   startPoint: .leading, endPoint: .trailing)
+                        .frame(width: Self.edgeFade)
+                    Color.black
+                }
+            }
+            .padding(.leading, -Self.edgeFade)
+        }
+        .contentShape(Rectangle())
+    }
+
+    /// How far left of the page its background fades in.
+    static let edgeFade: CGFloat = 40
+
+    private func row(_ item: Item) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                // The thread's own text, one step down.
+                Text(item.title)
+                    .font(.sf(Tokens.TypeSize.label))
+                    .foregroundStyle(item.active ? Tokens.text1 : Tokens.text3)
+                    .lineLimit(1)
+                Text(rule(item))
+                    .font(.sf(Tokens.TypeSize.meta))
+                    .foregroundStyle(Tokens.text3)
+                    .lineLimit(1)
+                if let state = state(item) {
+                    Text(state)
+                        .font(.sf(Tokens.TypeSize.meta))
+                        .foregroundStyle(Tokens.text4)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+            Toggle("", isOn: Binding(
+                get: { item.active },
+                set: { on in
+                    Haptics.levelChange()
+                    if item.agent {
+                        on ? agentManager.unpauseLoop(taskID: item.id)
+                           : agentManager.pauseLoop(taskID: item.id)
+                    } else {
+                        on ? chatLoops.unpause(item.id) : chatLoops.pause(item.id)
+                    }
+                }))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .tint(Tokens.text2)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+    }
+
+    /// "Weekdays · Every 1h · Next round at 3:20 PM", or "Every 1h · Stopped".
+    /// The schedule itself: "Every 1d", "Every 1d · Weekdays".
+    private func rule(_ item: Item) -> String {
+        var parts = [L("loop.every", LoopInterval.short(item.intervalMinutes))]
+        if item.weekdaysOnly { parts.append(L("routines.weekdays")) }
+        return parts.joined(separator: " · ")
+    }
+
+    /// Where the schedule stands: "Next Tomorrow at 8:20 AM",
+    /// "Running since 3:12 PM", "Stopped".
+    private func state(_ item: Item) -> String? {
+        if !item.active { return L("routines.stopped") }
+        if let since = item.runningSince { return L("routines.runningSince", Self.moment(since)) }
+        return item.nextRoundAt.map { L("routines.next", Self.moment($0)) }
+    }
+
+    /// "Today at 3:20 PM" / "Tomorrow at 8:20 AM", the date past those.
+    private static func moment(_ date: Date) -> String {
+        let fmt = DateFormatter()
+        fmt.locale = NotchModel.localeForInterfaceLanguage()
+        let cal = Calendar.current
+        if cal.isDateInToday(date) || cal.isDateInTomorrow(date) || cal.isDateInYesterday(date) {
+            fmt.dateStyle = .medium
+            fmt.timeStyle = .short
+            fmt.doesRelativeDateFormatting = true
+        } else {
+            fmt.setLocalizedDateFormatFromTemplate("MMMdjmm")
+        }
+        return fmt.string(from: date)
+    }
+}

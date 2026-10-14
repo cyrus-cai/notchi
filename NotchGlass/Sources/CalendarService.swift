@@ -56,6 +56,33 @@ enum CalendarService {
         /// Minutes before the start to alert; nil for none. All-day events
         /// alert at 9:00 that day.
         var alertMinutes: Int? = 10
+        var repeats: Repeat? = nil
+        /// The zone the event keeps its time in, so it shows right wherever the
+        /// Mac is; nil keeps the Mac's (floating for all-day events).
+        var timeZone: TimeZone? = nil
+    }
+
+    struct Repeat: Sendable {
+        enum Frequency: String, Sendable { case daily, weekdays, weekly, monthly }
+        var frequency: Frequency
+        /// How many times in all, or the last day; neither repeats with no end.
+        var count: Int? = nil
+        var until: Date? = nil
+
+        var rule: EKRecurrenceRule {
+            let end = count.map { EKRecurrenceEnd(occurrenceCount: $0) } ?? until.map { EKRecurrenceEnd(end: $0) }
+            switch frequency {
+            case .daily: return EKRecurrenceRule(recurrenceWith: .daily, interval: 1, end: end)
+            case .weekly: return EKRecurrenceRule(recurrenceWith: .weekly, interval: 1, end: end)
+            case .monthly: return EKRecurrenceRule(recurrenceWith: .monthly, interval: 1, end: end)
+            case .weekdays:
+                let days: [EKWeekday] = [.monday, .tuesday, .wednesday, .thursday, .friday]
+                return EKRecurrenceRule(recurrenceWith: .weekly, interval: 1,
+                                        daysOfTheWeek: days.map { EKRecurrenceDayOfWeek($0) },
+                                        daysOfTheMonth: nil, monthsOfTheYear: nil, weeksOfTheYear: nil,
+                                        daysOfTheYear: nil, setPositions: nil, end: end)
+            }
+        }
     }
 
     /// Save one event. On success the value is a link that opens it in
@@ -64,7 +91,9 @@ enum CalendarService {
     static func createEvent(_ draft: Draft,
                             completion: @escaping @MainActor (Result<String?, CalendarError>) -> Void) {
         let store = currentStore()
+        PermissionPromptGate.enter()
         store.requestWriteOnlyAccessToEvents { granted, _ in
+            PermissionPromptGate.exit()
             let result: Result<String?, CalendarError> =
                 granted ? write(draft, store: store) : .failure(.permissionDenied)
             Task { @MainActor in completion(result) }
@@ -85,6 +114,8 @@ enum CalendarService {
         event.startDate = draft.start
         event.endDate = draft.end
         event.isAllDay = draft.allDay
+        if let zone = draft.timeZone, !draft.allDay { event.timeZone = zone }
+        if let repeats = draft.repeats { event.addRecurrenceRule(repeats.rule) }
         if let location = draft.location, !location.isEmpty { event.location = location }
         if let notes = draft.notes, !notes.isEmpty { event.notes = notes }
         // An event the user asked for should tell them when it comes: Calendar

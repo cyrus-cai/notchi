@@ -1276,6 +1276,72 @@ enum InfoPopoverGate {
     static func exit() { depth = max(0, depth - 1) }
 }
 
+extension Notification.Name {
+    /// The last permission prompt Notchi raised was answered. Posted on the main
+    /// thread when `PermissionPromptGate` drops back to zero.
+    static let permissionPromptEnded = Notification.Name("notchPermissionPromptEnded")
+}
+
+/// Counts the macOS permission prompts Notchi has raised and not yet seen
+/// answered (Calendar, Reminders, Contacts, Photos, Location, Notifications,
+/// Automation). The prompt is a system window outside the island, so moving the
+/// pointer to it reads as leaving, and the panel used to fold while the user was
+/// answering. While `open`, the leave-fold stands down; on the way back to zero
+/// `.permissionPromptEnded` re-runs the leave check.
+///
+/// `enter` / `exit` may be called from any thread; the count lives on the main
+/// thread. Floored at zero, so an unbalanced exit cannot hold the panel open.
+enum PermissionPromptGate {
+    private static var depth = 0
+    /// Main thread only.
+    static var open: Bool { depth > 0 }
+
+    static func enter() {
+        DispatchQueue.main.async { depth += 1 }
+    }
+
+    static func exit() {
+        DispatchQueue.main.async {
+            guard depth > 0 else { return }
+            depth -= 1
+            if depth == 0 { NotificationCenter.default.post(name: .permissionPromptEnded, object: nil) }
+        }
+    }
+
+    /// Runs `body`, which may raise a prompt, with the panel held.
+    static func during<T>(_ body: () async throws -> T) async rethrows -> T {
+        enter()
+        defer { exit() }
+        return try await body()
+    }
+
+    /// Runs `body`, which sends Apple Events to `bundleID`, with the panel held
+    /// when that may raise the Automation prompt. Blocks the calling thread, like
+    /// the Apple Events it wraps; never call it on the main thread.
+    static func automating<T>(_ bundleID: String, _ body: () -> T) -> T {
+        let mayAsk = automationMayAsk(bundleID)
+        if mayAsk { enter() }
+        defer { if mayAsk { exit() } }
+        return body()
+    }
+
+    /// Whether Apple Events to `bundleID` may raise the Automation prompt: not
+    /// yet answered, or the app is not running, so its status can't be read
+    /// before the script launches it.
+    static func automationMayAsk(_ bundleID: String) -> Bool {
+        guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first
+        else { return true }
+        return automationMayAsk(pid: app.processIdentifier)
+    }
+
+    static func automationMayAsk(pid: pid_t) -> Bool {
+        let target = NSAppleEventDescriptor(processIdentifier: pid)
+        let status = AEDeterminePermissionToAutomateTarget(
+            target.aeDesc, AEEventClass(typeWildCard), AEEventID(typeWildCard), false)
+        return status == OSStatus(errAEEventWouldRequireUserConsent)
+    }
+}
+
 extension View {
     /// Hold the panel open while this view's popover is presented, and release
     /// the hold if the view goes away still showing (a panel closed by Esc, a

@@ -105,6 +105,25 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.10",
+            date: "2026-10-14",
+            features: [
+                "DeepSeek Harness (dsh) and Command Code are available as engines, on your own account.",
+                "Routines lists repeating tasks beside the conversation. Open it from ⋯.",
+                "Repeating tasks can skip weekends and stop on a set date.",
+                "Settings → General shows which permissions Notchi has.",
+            ],
+            improvements: [
+                "Calendar events can repeat and use another time zone.",
+                "Agent mode is now called Code.",
+                "A provider's model list appears once its key or sign-in works.",
+                "The notch stays open while a permission prompt is on screen.",
+            ],
+            fixes: [
+                "Typing with a Chinese input method no longer brings back a sent message.",
+            ]
+        ),
+        Entry(
             version: "0.9.9",
             date: "2026-10-13",
             features: [

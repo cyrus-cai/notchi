@@ -1960,6 +1960,7 @@ final class ModelCatalogStore: ObservableObject {
         case .grokCode:   return GrokCLIService.isAvailable
         case .commandCode: return CommandCodeCLIService.isAvailable
         case .piCode:     return PiCLIService.isAvailable
+        case .dshCode:    return DshCLIService.isAvailable
         case .cursorCode: return CursorCLIService.isAvailable
         // The user's own endpoint needs a URL and a model, not necessarily a key.
         case .custom:     return CustomProvider.isConfigured
@@ -2510,7 +2511,9 @@ enum AskModelMRU {
     /// after an update) are dropped rather than crashing the menu, and so are
     /// entries for a provider the app no longer offers (`Provider.offered`) — a
     /// recents row is a shortcut back into a backend, so it has to be gated the
-    /// same way the menus are.
+    /// same way the menus are. dsh's catalog is fixed in the app, so a dsh entry
+    /// outside it (the "dsh" placeholder stored before the catalog existed) is
+    /// dropped too.
     static var entries: [Entry] {
         let raw = UserDefaults.standard.stringArray(forKey: defaultsKey) ?? []
         return raw.compactMap { line in
@@ -2519,6 +2522,7 @@ enum AskModelMRU {
                   Provider.offered.contains(provider)
             else { return nil }
             let model = String(line[line.index(after: bar)...])
+            if provider == .dshCode, !DshCLIService.models.contains(model) { return nil }
             return model.isEmpty ? nil : Entry(provider: provider, model: model)
         }
     }
@@ -3288,6 +3292,12 @@ struct AgentEngineMark: View {
                     .fill(tint, style: FillStyle(eoFill: true))
                     .frame(width: size, height: size)
             }
+        case .dsh:
+            if let mark = VendorLogos.mark(for: "DeepSeek") {
+                SVGPathShape(pathData: mark.path, viewBox: mark.viewBox)
+                    .fill(tint, style: FillStyle(eoFill: true))
+                    .frame(width: size, height: size)
+            }
         }
     }
 }
@@ -3454,6 +3464,7 @@ struct AgentModelPickerView: View {
         // Same, one level out: pi's rows span several accounts as well as several
         // labs, so the caption is the CLI itself.
         case .pi:     return "PI"
+        case .dsh:    return "DSH"
         }
     }
 
@@ -3710,6 +3721,7 @@ struct AgentModelPickerView: View {
         case .cursor:      provider = .cursorCode
         case .commandCode: provider = .commandCode
         case .pi:          provider = .piCode
+        case .dsh:         provider = .dshCode
         }
         if let model = ModelCatalogStore.shared.rows(selected: provider)
             .first(where: { $0.provider == provider && $0.info.id == id }) {

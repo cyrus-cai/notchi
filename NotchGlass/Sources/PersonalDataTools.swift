@@ -79,7 +79,7 @@ struct ReadCalendarTool: NotchTool {
         let query = PersonalDataFormat.string(input["query"])?.lowercased()
 
         let store = EKEventStore()
-        let granted = (try? await store.requestFullAccessToEvents()) ?? false
+        let granted = (try? await PermissionPromptGate.during { try await store.requestFullAccessToEvents() }) ?? false
         guard granted else {
             return "Error: Calendar access is off for Notchi. The user can turn it on in System Settings → Privacy & Security → Calendars."
         }
@@ -143,7 +143,7 @@ struct ReadRemindersTool: NotchTool {
 
     func execute(_ input: [String: Any]) async throws -> String {
         let store = EKEventStore()
-        let granted = (try? await store.requestFullAccessToReminders()) ?? false
+        let granted = (try? await PermissionPromptGate.during { try await store.requestFullAccessToReminders() }) ?? false
         guard granted else { return "Error: \(L("reminders.error.permission"))" }
         let listNames = "Lists: " + store.calendars(for: .reminder).map(\.title).joined(separator: ", ")
         var lists: [EKCalendar]? = nil
@@ -253,7 +253,7 @@ struct ManageReminderTool: NotchTool {
             return "Error: action must be complete, reschedule, delete or move."
         }
         let store = EKEventStore()
-        let granted = (try? await store.requestFullAccessToReminders()) ?? false
+        let granted = (try? await PermissionPromptGate.during { try await store.requestFullAccessToReminders() }) ?? false
         guard granted else { return "Error: \(L("reminders.error.permission"))" }
 
         let reminder: EKReminder
@@ -349,7 +349,9 @@ struct ManageEventTool: NotchTool {
     changes its `title` or `location`, action=delete removes it after the user \
     confirms. Identify it by `id` from read_calendar, or by `query` (text in its \
     title) within the next 60 days. If several match, the result lists them \
-    with ids. Never say it changed until the result says so.
+    with ids. For a repeating event, span=future changes this and every later \
+    one; without it only this one changes — ask the user which they mean. \
+    Never say it changed until the result says so.
     """
     let schema: [String: Any] = [
         "type": "object",
@@ -360,6 +362,9 @@ struct ManageEventTool: NotchTool {
             "start": ["type": "string", "description": "move: the new local start, YYYY-MM-DDTHH:MM."],
             "title": ["type": "string", "description": "update: the new title."],
             "location": ["type": "string", "description": "update: the new location."],
+            "time_zone": ["type": "string", "description": "move: the IANA time zone `start` is written in, when it is not this Mac's (America/Los_Angeles)."],
+            "span": ["type": "string", "enum": ["this", "future"],
+                     "description": "A repeating event: this one only (default) or this and all later ones."],
         ],
         "required": ["action"],
     ]
@@ -372,7 +377,7 @@ struct ManageEventTool: NotchTool {
             return "Error: action must be move, update or delete."
         }
         let store = EKEventStore()
-        let granted = (try? await store.requestFullAccessToEvents()) ?? false
+        let granted = (try? await PermissionPromptGate.during { try await store.requestFullAccessToEvents() }) ?? false
         guard granted else {
             return "Error: Calendar access is off for Notchi. The user can turn it on in System Settings → Privacy & Security → Calendars."
         }
@@ -398,10 +403,23 @@ struct ManageEventTool: NotchTool {
             return "Error: give the event's id or a query."
         }
         let title = event.title ?? ""
+        let span: EKSpan = PersonalDataFormat.string(input["span"]) == "future" ? .futureEvents : .thisEvent
+        let repeating = event.hasRecurrenceRules
+        let spanNote = !repeating ? "" : span == .futureEvents
+            ? " This and every later occurrence changed."
+            : " It repeats; only this occurrence changed (span=future changes the later ones too)."
 
         switch action {
         case "move":
-            guard let raw = PersonalDataFormat.string(input["start"]), let start = Self.parse(raw) else {
+            var zone = TimeZone.current
+            if let name = PersonalDataFormat.string(input["time_zone"]) {
+                guard let found = TimeZone(identifier: name) else {
+                    return "Error: time_zone \"\(name)\" is not an IANA time zone such as America/Los_Angeles."
+                }
+                zone = found
+                event.timeZone = found
+            }
+            guard let raw = PersonalDataFormat.string(input["start"]), let start = Self.parse(raw, in: zone) else {
                 return "Error: give the new start as YYYY-MM-DDTHH:MM in the user's local time."
             }
             let length = event.endDate.timeIntervalSince(event.startDate)
@@ -417,22 +435,22 @@ struct ManageEventTool: NotchTool {
             guard try await confirm("\(title) · \(PersonalDataFormat.dayAndTime(event.startDate))") else {
                 return "The user did not confirm. The event was not deleted. Do not retry."
             }
-            do { try store.remove(event, span: .thisEvent, commit: true) } catch {
+            do { try store.remove(event, span: span, commit: true) } catch {
                 return "Error: \(error.localizedDescription)"
             }
-            return "Deleted \"\(title)\"."
+            return "Deleted \"\(title)\".\(spanNote)"
         }
-        do { try store.save(event, span: .thisEvent, commit: true) } catch {
+        do { try store.save(event, span: span, commit: true) } catch {
             return "Error: \(error.localizedDescription)"
         }
         return "Updated \"\(event.title ?? title)\": \(PersonalDataFormat.dayAndTime(event.startDate))–\(PersonalDataFormat.time(event.endDate))"
-            + (event.location.map { " · \($0)" } ?? "") + "."
+            + (event.location.map { " · \($0)" } ?? "") + " (this Mac's time).\(spanNote)"
     }
 
-    private static func parse(_ raw: String) -> Date? {
+    private static func parse(_ raw: String, in zone: TimeZone = .current) -> Date? {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = .current
+        f.timeZone = zone
         for format in ["yyyy-MM-dd'T'HH:mm", "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd HH:mm"] {
             f.dateFormat = format
             if let date = f.date(from: raw) { return date }
@@ -522,15 +540,18 @@ struct RecentProjectsTool: NotchTool {
     }
 }
 
-/// `travel_time`: how long a trip takes now, from Apple Maps (MapKit), with
-/// no key and no location permission — both ends are named places.
+/// `travel_time`: how long a trip takes, leaving now or at a given time, from
+/// Apple Maps (MapKit), with no key and no location permission — both ends are
+/// named places.
 struct TravelTimeTool: NotchTool {
     static let toolName = "travel_time"
     let name = toolName
     let description = """
-    Estimates how long a trip takes right now between two named places, with \
-    current traffic, using Apple Maps: distance and minutes by car, on foot or \
-    by public transit. Pass place names or addresses as the user wrote them; \
+    Estimates how long a trip takes between two named places using Apple \
+    Maps: distance and minutes by car, on foot or by public transit. Leaving \
+    now uses current traffic; for a trip at another time ("Friday at 6pm", \
+    "to be there by 9") pass leave_at or arrive_by, and Maps uses the traffic \
+    expected then. Pass place names or addresses as the user wrote them; \
     add the city when it is clear from the conversation. For the user's own \
     places write just home, work or here ("家", "公司", "这里" work too): \
     home and work come from their contact card or an address they gave \
@@ -546,6 +567,9 @@ struct TravelTimeTool: NotchTool {
                      "description": "Default driving (also right for a taxi)."],
             "save_as": ["type": "string", "enum": ["home", "work"],
                         "description": "When the user just told you their home or work address: keep the `from` address under this name for next time."],
+            "leave_at": ["type": "string", "description": "Leaving at this local time, YYYY-MM-DDTHH:MM. Omit for now."],
+            "arrive_by": ["type": "string", "description": "Arriving by this local time, YYYY-MM-DDTHH:MM. Give this or leave_at, not both."],
+            "time_zone": ["type": "string", "description": "Time zone of leave_at / arrive_by when it is not this Mac's, e.g. America/Mexico_City."],
         ],
         "required": ["from", "to"],
     ]
@@ -554,31 +578,74 @@ struct TravelTimeTool: NotchTool {
         guard let from = PersonalDataFormat.string(input["from"]),
               let to = PersonalDataFormat.string(input["to"]) else { return "Error: give from and to." }
         let mode = PersonalDataFormat.string(input["mode"]) ?? "driving"
+        let zone = PersonalDataFormat.string(input["time_zone"]).flatMap(TimeZone.init(identifier:)) ?? .current
+        var leave: Date?
+        var arrive: Date?
+        // Given both, the time the user leaves wins: it is the one they set.
+        if let raw = PersonalDataFormat.string(input["leave_at"]) {
+            guard let date = Self.parseTime(raw, in: zone) else { return "Error: leave_at must be YYYY-MM-DDTHH:MM." }
+            leave = date
+        } else if let raw = PersonalDataFormat.string(input["arrive_by"]) {
+            guard let date = Self.parseTime(raw, in: zone) else { return "Error: arrive_by must be YYYY-MM-DDTHH:MM." }
+            arrive = date
+        }
+        // A time already past (a minute or two of slack aside) is timed as now.
+        if let date = leave ?? arrive, date < Date().addingTimeInterval(-120) {
+            return "Error: \(Self.stamp(date, zone)) has already passed. Omit leave_at for a trip leaving now."
+        }
         if let kind = PersonalDataFormat.string(input["save_as"]).flatMap(UserPlaces.Kind.init(rawValue:)),
            UserPlaces.kind(of: from) == nil {
             UserPlaces.save(from, as: kind)
         }
-        let start: MKMapItem
+        // Each end is searched near the other: "Avenida Benito Juárez" alone
+        // finds a street in Beijing. The start goes first; when it cannot be
+        // found alone, the destination is found first and the start near it.
+        var start: MKMapItem?
+        var failure: String?
         switch await Self.resolve(from) {
         case .found(let item): start = item
-        case .unknown(let message): return message
+        case .unknown(let message): failure = message
         }
         let end: MKMapItem
-        switch await Self.resolve(to) {
+        switch await Self.resolve(to, near: start?.placemark.coordinate) {
         case .found(let item): end = item
         case .unknown(let message): return message
+        }
+        if start == nil {
+            guard UserPlaces.kind(of: from) == nil,
+                  case .found(let item) = await Self.resolve(from, near: end.placemark.coordinate) else {
+                return failure ?? "Apple Maps could not find \"\(from)\"."
+            }
+            start = item
+        }
+        guard let start else { return failure ?? "Apple Maps could not find \"\(from)\"." }
+        let apart = CLLocation(latitude: start.placemark.coordinate.latitude, longitude: start.placemark.coordinate.longitude)
+            .distance(from: CLLocation(latitude: end.placemark.coordinate.latitude, longitude: end.placemark.coordinate.longitude))
+        if apart > 1_000_000 {
+            return "The two places are \(Int(apart / 1000)) km apart: \"\(from)\" was found as \(Self.describe(start)) and "
+                + "\"\(to)\" as \(Self.describe(end)). If that is not what the user meant, add the city to the name and call again."
         }
         let request = MKDirections.Request()
         request.source = start
         request.destination = end
-        request.departureDate = Date()
+        if let arrive { request.arrivalDate = arrive } else { request.departureDate = leave ?? Date() }
         request.transportType = mode == "walking" ? .walking : mode == "transit" ? .transit : .automobile
         do {
             let eta = try await MKDirections(request: request).calculateETA()
             let minutes = Int((eta.expectedTravelTime / 60).rounded())
             let km = eta.distance / 1000
-            return String(format: "%@ → %@ by %@: about %d minutes, %.1f km (Apple Maps, leaving now).",
-                          start.name ?? from, end.name ?? to, mode, minutes, km)
+            let when: String
+            if leave == nil, arrive == nil {
+                when = "leaving now"
+            } else {
+                // Maps fills in the other end of the trip; both are stated so
+                // the answer names the time it was timed for.
+                when = "leaving \(Self.stamp(eta.expectedDepartureDate, zone)), arriving about \(Self.stamp(eta.expectedArrivalDate, zone))"
+                    + (zone == .current ? "" : " (\(zone.identifier) time)")
+                    + (mode == "driving" ? ", with the traffic expected then" : "")
+            }
+            return String(format: "%@ → %@ by %@: about %d minutes, %.1f km (Apple Maps, %@).",
+                          start.name ?? from, end.name ?? to, mode, minutes, km, when)
         } catch {
             return "Apple Maps could not route that (\(error.localizedDescription))."
         }
@@ -589,11 +656,33 @@ struct TravelTimeTool: NotchTool {
         case unknown(String)
     }
 
+    /// Wall-clock `YYYY-MM-DDTHH:MM` (or with a space) in `zone`.
+    private static func parseTime(_ raw: String, in zone: TimeZone) -> Date? {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = zone
+        for format in ["yyyy-MM-dd'T'HH:mm", "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd HH:mm"] {
+            f.dateFormat = format
+            if let date = f.date(from: raw) { return date }
+        }
+        return nil
+    }
+
+    /// "Fri 2026-10-16 18:00" in `zone`.
+    private static func stamp(_ date: Date, _ zone: TimeZone) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = zone
+        f.dateFormat = "EEE yyyy-MM-dd HH:mm"
+        return f.string(from: date)
+    }
+
     /// A place name for Apple Maps, or the user's own home, work or current
     /// location. Never searches Maps for "home": that finds a business
     /// called Home, or a hotel, and the trip is timed from there.
-    private static func resolve(_ query: String) async -> Resolved {
+    private static func resolve(_ query: String, near: CLLocationCoordinate2D? = nil) async -> Resolved {
         guard let kind = UserPlaces.kind(of: query) else {
+            if let near, let item = await place(query, near: near) { return .found(item) }
             if let item = await place(query) { return .found(item) }
             return .unknown("Apple Maps could not find \"\(query)\".")
         }
@@ -616,10 +705,22 @@ struct TravelTimeTool: NotchTool {
         return .found(item)
     }
 
-    private static func place(_ query: String) async -> MKMapItem? {
+    /// `near` limits the search to about 150 km around that point.
+    private static func place(_ query: String, near: CLLocationCoordinate2D? = nil) async -> MKMapItem? {
         let request = MKLocalSearch.Request()
         request.naturalLanguageQuery = query
+        if let near {
+            request.region = MKCoordinateRegion(center: near, latitudinalMeters: 300_000, longitudinalMeters: 300_000)
+            if #available(macOS 15.0, *) { request.regionPriority = .required }
+        }
         return try? await MKLocalSearch(request: request).start().mapItems.first
+    }
+
+    /// "Benito Juárez Airport, Mexico City, Mexico", for a result that names
+    /// where a search actually landed.
+    private static func describe(_ item: MKMapItem) -> String {
+        let mark = item.placemark
+        return [item.name, mark.locality, mark.country].compactMap { $0 }.joined(separator: ", ")
     }
 }
 
@@ -658,7 +759,7 @@ enum UserPlaces {
 
     private static func contactCardAddress(_ kind: Kind) async -> String? {
         let store = CNContactStore()
-        guard (try? await store.requestAccess(for: .contacts)) == true else { return nil }
+        guard (try? await PermissionPromptGate.during { try await store.requestAccess(for: .contacts) }) == true else { return nil }
         let keys = [CNContactPostalAddressesKey as CNKeyDescriptor]
         guard let me = try? store.unifiedMeContactWithKeys(toFetch: keys) else { return nil }
         let label = kind == .home ? CNLabelHome : CNLabelWork
@@ -699,7 +800,7 @@ struct ReadPhotosTool: NotchTool {
     ]
 
     func execute(_ input: [String: Any]) async throws -> String {
-        let status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+        let status = await PermissionPromptGate.during { await PHPhotoLibrary.requestAuthorization(for: .readWrite) }
         guard status == .authorized || status == .limited else {
             return "Error: Photos access is off for Notchi. The user can allow it in System Settings → Privacy & Security → Photos."
         }
@@ -838,7 +939,8 @@ struct ReadMailTool: NotchTool {
     let description = """
     Reads the user's Apple Mail inbox: action=unread lists unread messages, \
     action=search lists messages whose sender or subject contains `query`, \
-    then messages from the last 30 days whose text contains it (an order or \
+    then messages from the last `days` days (default 30, up to 365) whose text \
+    contains it (an order or \
     tracking number, an error message, an invoice number), with the line it \
     was found in, \
     action=read returns one message's text by `id` from a list. Newest first.
@@ -850,6 +952,8 @@ struct ReadMailTool: NotchTool {
             "query": ["type": "string", "description": "search: text in the sender, subject or (last 30 days) message body."],
             "id": ["type": "string", "description": "read: the message id from a list."],
             "limit": ["type": "integer", "minimum": 1, "maximum": 30, "description": "unread/search: how many, default 10."],
+            "days": ["type": "integer", "minimum": 1, "maximum": 365,
+                     "description": "search: how far back the message text is searched. Default 30; widen it for \"last March\", \"上个月\"."],
         ],
         "required": ["action"],
     ]
@@ -868,7 +972,8 @@ struct ReadMailTool: NotchTool {
         let query = PersonalDataFormat.string(input["query"]) ?? ""
         if action == "search", query.isEmpty { return "Error: give the query." }
         let limit = min(max(PersonalDataFormat.int(input["limit"]) ?? 10, 1), 30)
-        switch await MailService.list(unread: action == "unread", query: query, limit: limit) {
+        let days = min(max(PersonalDataFormat.int(input["days"]) ?? 30, 1), 365)
+        switch await MailService.list(unread: action == "unread", query: query, limit: limit, days: days) {
         case .failure(let error): return "Error: \(error.errorDescription ?? "")"
         case .success(let rows):
             guard !rows.isEmpty else { return action == "unread" ? "No unread messages in the inbox." : "No message matches \"\(query)\"." }
@@ -1029,7 +1134,9 @@ struct ReadNotesTool: NotchTool {
     let description = """
     Reads the user's notes on this Mac: the most recently edited ones, or those \
     containing `query`. Call when they ask about something they wrote down \
-    ("what did I note about the trip", "my last few notes").
+    ("what did I note about the trip", "my last few notes"). A `query` also \
+    searches Apple Notes when Notchi keeps its own notes elsewhere; each \
+    result says where it came from.
     """
     let schema: [String: Any] = [
         "type": "object",
@@ -1056,11 +1163,37 @@ struct ReadNotesTool: NotchTool {
             }
         case .markdownFolder:
             notes = Self.markdownNotes(query: query, limit: limit)
+            // Notchi files to Markdown here, but "my note 大理行程" is often
+            // one the user keeps in Apple Notes. A search looks there too,
+            // read only; the most-recent listing stays Notchi's own.
+            if !query.isEmpty {
+                var apple: [NotesService.NoteText] = []
+                var appleError: String?
+                switch await NotesService.readNotes(query: query, limit: limit) {
+                case .success(let found): apple = found
+                case .failure(let error): appleError = error.errorDescription ?? "couldn't read Apple Notes."
+                }
+                let own = Self.render(notes)
+                let theirs = Self.render(apple)
+                var parts: [String] = []
+                if !own.isEmpty { parts.append("Notchi's notes (Markdown folder):\n\n" + own) }
+                if !theirs.isEmpty { parts.append("Apple Notes (read only here):\n\n" + theirs) }
+                if parts.isEmpty {
+                    return "No notes contain \"\(query)\" in Notchi's notes"
+                        + (appleError.map { ". Apple Notes could not be searched: \($0)" } ?? " or in Apple Notes.")
+                }
+                if let appleError { parts.append("(Apple Notes could not be searched: \(appleError))") }
+                return parts.joined(separator: "\n\n")
+            }
         }
         guard !notes.isEmpty else {
             return query.isEmpty ? "No notes found." : "No notes contain \"\(query)\"."
         }
-        return notes.map { note in
+        return Self.render(notes)
+    }
+
+    private static func render(_ notes: [NotesService.NoteText]) -> String {
+        notes.map { note in
             var body = note.text.trimmingCharacters(in: .whitespacesAndNewlines)
             if body.count > Self.noteCharLimit { body = String(body.prefix(Self.noteCharLimit)) + "…" }
             let when = note.modified.map { " (edited \(PersonalDataFormat.dayAndTime($0)))" } ?? ""
@@ -1137,7 +1270,10 @@ struct RecentSongsTool: NotchTool {
                 guard let script = NSAppleScript(source: source) else {
                     return cont.resume(returning: .failure(Failure(message: "Could not prepare the Music script.")))
                 }
-                let value = script.executeAndReturnError(&error)
+                // May raise the Automation prompt for Music: hold the panel.
+                let value = PermissionPromptGate.automating("com.apple.Music") {
+                    script.executeAndReturnError(&error)
+                }
                 if let error {
                     let number = error[NSAppleScript.errorNumber] as? Int ?? 0
                     if number == -1743 || number == -1744 {
