@@ -107,6 +107,8 @@ final class WhatsNewService: ObservableObject {
         Entry(
             version: "0.9.10",
             date: "2026-10-14",
+            headline: "DeepSeek Harness and Command Code, in the notch.",
+            heroAssetName: "WhatsNew0910Promo",
             features: [
                 "DeepSeek Harness (dsh) and Command Code are available as engines, on your own account.",
                 "Routines lists repeating tasks beside the conversation. Open it from ⋯.",
