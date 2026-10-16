@@ -138,8 +138,6 @@ final class PromptTextView: NSTextView {
 ///     SwiftUI gives no hook to turn it off — `disableEditorMagic` does.
 ///  2. **It grows down, not sideways.** A long prompt WRAPS and the box gains a
 ///     line at a time, up to `maxVisibleLines`, after which it scrolls internally.
-///     The old single-line field scrolled horizontally, hiding everything but the
-///     tail of what you'd typed.
 ///
 /// The caller sizes the row from `onHeightChange` (the box's current height,
 /// already clamped to the line cap).
@@ -567,7 +565,7 @@ struct PromptField: NSViewRepresentable {
         /// re-entered itself: `scrollRangeToVisible` scrolls, which posts this
         /// notification, which chased again — and when the centred scroll never
         /// settled on one offset, that recursed until the main thread's stack ran
-        /// out (the crash in 0.9.6). It also yanked a box the user had scrolled
+        /// out. It also yanked a box the user had scrolled
         /// by hand straight back to the caret.
         @objc private func clipBoundsDidChange() {
             guard let tv = textView else { return }
@@ -657,23 +655,14 @@ struct PromptField: NSViewRepresentable {
                     scroll.hasVerticalScroller = scrollable
                 }
                 // Below the cap the box does not scroll, it GROWS — so the one
-                // correct offset is the top, always. This used to be a blind
-                // `scrollRangeToVisible` on every edit, and on the keystroke that
-                // wrapped a line it did real damage: the caret had just moved to a
-                // line the box wasn't tall enough for yet (the frame only catches up
-                // a runloop tick later, once this report reaches SwiftUI), so AppKit
-                // did the only thing it could and scrolled a whole line down —
-                // shoving every already-drawn line up and slicing the first one off
-                // at the top edge. Measured off a screen recording: the text jumped
-                // up a full line, the top line was cut to a 5pt sliver, and it took
-                // ~90ms to slide back. Pinning to the top means a wrap simply
-                // reveals the new line at the bottom and never moves what's already
-                // there.
+                // correct offset is the top, always. Don't `scrollRangeToVisible`
+                // here: on the keystroke that wraps a line the caret sits on a line
+                // the frame hasn't grown to yet (that lands a runloop tick later),
+                // so AppKit scrolls a whole line down and slices the top line off.
                 //
                 // Past the cap the box really is a scroller and the caret has to be
-                // chased — but now it happens AFTER the height is settled (the frame
-                // stops changing at the cap), so it can only ever scroll content
-                // that genuinely doesn't fit.
+                // chased — after the height is settled (the frame stops changing
+                // at the cap), so it only ever scrolls content that doesn't fit.
                 if scrollable {
                     if chaseCaret { tv.scrollRangeToVisible(tv.selectedRange()) }
                 } else if scroll.contentView.bounds.origin.y != 0 {
@@ -723,8 +712,7 @@ struct PromptField: NSViewRepresentable {
         /// The authoritative kill switch for the word-completion popup: the text view
         /// asks its delegate for completions on every edit; returning an empty list
         /// (and -1 selection) means there's never anything to show, so the panel never
-        /// appears. (Calling `complete(_:)` ourselves did the OPPOSITE — it *opened*
-        /// the panel and looped — so that's gone.)
+        /// appears. (Don't call `complete(_:)` ourselves — it *opens* the panel.)
         func textView(_ textView: NSTextView,
                       completions words: [String],
                       forPartialWordRange charRange: NSRange,
@@ -758,7 +746,7 @@ struct PromptField: NSViewRepresentable {
             // Tab steps the idle prompt's destination cycle (Ask → Note →
             // Remind); Shift-Tab flips the Ask ⇄ Agent bucket. A caller that
             // wants only one behaviour leaves `onBackTab` nil, and Shift-Tab
-            // falls back to `onTab` (the old shared behaviour). The caller
+            // falls back to `onTab`. The caller
             // decides whether to consume the key; unconsumed, it falls through
             // to its usual focus move.
             if commandSelector == #selector(NSResponder.insertTab(_:)) {
@@ -865,7 +853,7 @@ struct HistorySearchField: NSViewRepresentable {
     func makeNSView(context: Context) -> NSTextField {
         // MagiclessTextField matters MOST here: this field is deliberately not
         // auto-focused (see above) — a click is its normal way in, which is
-        // exactly the path where editor magic used to stay armed until the
+        // exactly the path where editor magic would stay armed until the
         // first committed keystroke.
         let field = MagiclessTextField()
         field.delegate = context.coordinator
@@ -1137,13 +1125,8 @@ struct AgentFollowUpKeyHints: View {
 /// round still in flight and the activity ticker underneath it.
 ///
 /// One implementation, because the panel's detail page and its torn-off window
-/// are the same page at two sizes. They had drifted: the panel walks
-/// `task.exchanges` so a follow-up thread keeps ALL prior answers on screen,
-/// while the detached window rendered the flat trail plus only
-/// `exchanges.last?.answer` — so tearing a multi-round run out of the notch
-/// silently dropped every earlier round's report (the exact bug the panel page
-/// had already been fixed for). The window also skipped `isLazy`, rebuilding
-/// hundreds of trail rows on a page that pins to its tail.
+/// are the same page at two sizes: both walk `task.exchanges` so a follow-up
+/// thread keeps ALL prior answers on screen, and both stay `isLazy`.
 ///
 /// Callers own the scroll, the runways and the tail-follow; this owns what the
 /// record is made of.
@@ -1157,7 +1140,7 @@ struct AgentRecordBody: View {
     /// runways). It has to sit ABOVE the anchor: `scrollTo(anchor: .bottom)`
     /// aligns the anchor's bottom edge with the viewport's, so a runway placed
     /// below it would park the newest line at the viewport bottom — behind the
-    /// box — which is exactly what the sibling layout used to do.
+    /// box.
     var tailRunway: CGFloat = 0
     /// Reading sizes for the record's two voices. The main panel and detached
     /// window keep their established scale; the split history detail passes its
@@ -1310,15 +1293,11 @@ struct AgentRecordBody: View {
 /// chat follow-up, the panel's agent-detail page, and the torn-off windows of
 /// both.
 ///
-/// It exists because those four had drifted into two species. The panel's boxes
-/// grow on `NotchBody.composerShape` (a pill on its resting line that keeps the
-/// SAME corner once the draft wraps), lift floor and rim together on focus, and
-/// hand the placeholder slot to a SwiftUI label so it can clear the instant IME
-/// pinyin appears. The detached windows meanwhile ran a flat `Capsule` with
-/// `lit: false` and the native placeholder — a different rounding, no focus
-/// response, and in the thread window a single-line `TextField` that couldn't
-/// grow at all. A torn-off session is the same conversation in a bigger frame,
-/// so its input cannot be a different control.
+/// It grows on `NotchBody.composerShape` (a pill on its resting line that keeps
+/// the SAME corner once the draft wraps), lifts floor and rim together on focus,
+/// and hands the placeholder slot to a SwiftUI label so it can clear the instant
+/// IME pinyin appears. A torn-off session is the same conversation in a bigger
+/// frame, so its input cannot be a different control.
 ///
 /// The box owns its own height and caret-width state. Those only ever fed its
 /// own silhouette and its placeholder's fade, so keeping them in here is what
@@ -1633,10 +1612,7 @@ struct GlassIconButton: View {
         .buttonStyle(GlassPressStyle())
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
-        // `help` used to be accepted and silently dropped — this chip was the one
-        // icon button in the app with NO hover hint at all, while its neighbours
-        // carried the glass tip and the segment cluster carried AppKit's yellow
-        // bubble. One tooltip species everywhere now.
+        // The same glass tip every icon button uses — one tooltip species.
         .notchTooltip(help, edge: tipEdge, shows: showsTooltip)
         .accessibilityLabel(help)
     }
@@ -1937,9 +1913,7 @@ struct PanelBackPill: View {
 /// module (Settings, What's New, the first-run guide) back where it came from.
 /// A quiet 26pt glyph over the same soft capsule wash every other row-level
 /// affordance uses, so the three headers open and close with one gesture in one
-/// voice. Three copies of this used to drift apart: two byte-identical, and the
-/// onboarding's a 30pt `.plain` button at a lighter weight and a dimmer ink that
-/// gave no hover feedback at all.
+/// voice — keep it the only copy.
 ///
 /// Not to be confused with the result header's `GlassBackButton` — that one is a
 /// real glass circle because it sits *on* the glass, opposite the glass trailing
@@ -2335,7 +2309,7 @@ private struct ConfirmationDialogGlass: View {
 
 /// The destructive "Clear recent history?" confirmation, rendered as a card
 /// **centered over the whole island** rather than a popover anchored to the Clear
-/// pill (which dropped it down near the bottom of the panel). A dim scrim catches
+/// pill. A dim scrim catches
 /// outside taps to cancel; the card itself floats in the middle of the glass.
 struct ClearHistoryConfirm: View {
     /// Rows filed in the last 24 hours, and the archive's total. The narrow scope is
@@ -3465,8 +3439,7 @@ enum OrbEngine {
 ///
 /// 1. **True overlap.** The outgoing and incoming words are two live layers in the
 ///    same leading slot, animated in opposite directions at once — the slot always
-///    has a word in it. (The previous implementation faded out, swapped, then
-///    faded in: sequential legs with a fully-blank beat in the middle.)
+///    has a word in it.
 /// 2. **Blur + drift.** A plain opacity crossover double-exposes the two words at
 ///    the midpoint — both at half strength, glyph shapes fighting. So each layer
 ///    also blurs slightly and drifts a few points vertically (out: up and away;
@@ -3643,10 +3616,10 @@ struct WaitElapsedSuffix: View {
 /// One address in the reading list: the page's host, opening the page itself on
 /// click, with the chevron only under the cursor. Deliberately NOT a status line
 /// — the header row above the list already says what is happening, so repeating
-/// "Reading " on every row was four words of noise per page.
+/// "Reading " on every row would be noise.
 ///
-/// Typography follows `SourceRow`, the app's other list of pages: quiet by
-/// default, one shade up on hover, never a highlighted "current" row.
+/// Typography: quiet by default, one shade up on hover, never a highlighted
+/// "current" row.
 private struct ReadingSourceRow: View {
     let source: WebSource
     var font: CGFloat
@@ -3675,8 +3648,8 @@ private struct ReadingSourceRow: View {
     }
 }
 
-/// Every page a round pulled in, all of them listed — the batch is not walked or
-/// truncated any more. The list holds a FIXED viewport (`visibleRows` rows) and
+/// Every page a round pulled in, all of them listed — never walked or truncated.
+/// The list holds a FIXED viewport (`visibleRows` rows) and
 /// scrolls its overflow inside it, so a seven-source round shows the same height
 /// as a two-source one and can never push the composer down the panel.
 ///
@@ -3707,8 +3680,8 @@ private struct ReadingSourceList: View {
 
     /// The viewport this list will occupy. Public so a collapsing container can
     /// animate against a concrete number — a height of `nil` (let it size itself)
-    /// has nothing to interpolate, which is why the anchor's list used to snap
-    /// open and shut while only its opacity crossfaded.
+    /// has nothing to interpolate, so the anchor's list would snap open and shut
+    /// while only its opacity crossfaded.
     static func viewportHeight(count: Int, font: CGFloat) -> CGFloat {
         let row = PromptField.lineHeight(for: font)
         let shown = CGFloat(min(count, visibleRows))
@@ -3764,11 +3737,10 @@ private struct ReadingSourceList: View {
 /// streaming in, and the settled answer — in ONE view, so nothing structural
 /// swaps underneath the answer when the stream ends.
 ///
-/// Why one view: the answer used to render through `StreamingMarkdown` while
-/// streaming and then get replaced by a plain `MarkdownBlocks` once settled.
-/// That swap re-built the whole subtree from a new identity, and the sub-pixel
-/// difference between the two layouts hard-cut the answer ~2pt up-left at
-/// completion (the "突然跳掉位移"). Here the answer is ALWAYS the same
+/// Why one view: swapping a streaming renderer for a plain `MarkdownBlocks` at
+/// settle rebuilds the subtree from a new identity, and the sub-pixel difference
+/// between the two layouts hard-cuts the answer ~2pt up-left at completion
+/// (the "突然跳掉位移"). Here the answer is ALWAYS the same
 /// `MarkdownBlocks` — streaming just keeps feeding it more `text` and it reflows
 /// in place; settling only flips `textSelection` on the unchanged tree, which
 /// causes no rebuild and no jump.
@@ -3939,10 +3911,9 @@ struct AssistantTurnView: View {
     /// Gap between that gutter and the headline; closes with it.
     private static let waitOrbGap: CGFloat = 8
 
-    /// Status type runs one step under the answer's. The wait line used to be set
-    /// at the answer's own size, which made a running tool read as loudly as the
-    /// reply it was still fetching. The elapsed suffix takes its own −2 from here,
-    /// so the two keep the gradient they always had.
+    /// Status type runs one step under the answer's, so a running tool doesn't
+    /// read as loudly as the reply it is still fetching. The elapsed suffix takes
+    /// its own −2 from here.
     private var waitFont: CGFloat { max(Tokens.TypeSize.meta, cardFont - 2) }
 
     /// How far the pre-answer wait row sits left of the text edge. The orb is
@@ -4036,8 +4007,7 @@ struct AssistantTurnView: View {
     /// Show the wait overlay while streaming with no visible answer yet. The wait
     /// yields the INSTANT real text lands — no grace period: the line renders on
     /// top of the answer (it's an overlay), so any hold past the first tokens
-    /// double-exposes the two texts (the old `readingHold` kept a host name over
-    /// the streaming answer for up to a dwell). A host mid-glance just dissolves
+    /// double-exposes the two texts. A host mid-glance just dissolves
     /// into the answer on the shared fade. Suppressed while an `ask_user`
     /// question card is up: the card IS the wait state then, and a "Waiting for
     /// your choice…" line above it would just say it twice. Reasoning streaming
@@ -4159,13 +4129,12 @@ struct AssistantTurnView: View {
     /// of pages, which opens itself while the round reads and closes itself the
     /// moment the answer starts.
     ///
-    /// Why it is ONE view the whole way through: the live list used to be a wait
-    /// OVERLAY that vanished, and the collapsed anchor a separate sibling that
-    /// appeared. Two views swapping cannot be animated into each other — the
-    /// handover was a hard cut no transition could bridge, whatever easing sat on
-    /// either side. Here nothing is swapped: the words dissolve, the orb fades
-    /// out of its gutter, and the list's height closes, all on the same beat,
-    /// and the answer under it rises into the room that frees up.
+    /// Why it is ONE view the whole way through: two views swapping (a live wait
+    /// overlay, then a separate settled anchor) cannot be animated into each
+    /// other — the handover is a hard cut. Here nothing is swapped: the words
+    /// dissolve, the orb fades out of its gutter, and the list's height closes,
+    /// all on the same beat, and the answer under it rises into the room that
+    /// frees up.
     private var readingBlock: some View {
         let expanded = readingExpanded
         let working = streaming && !hasText
@@ -4460,10 +4429,9 @@ struct AssistantTurnView: View {
             // its two distinct modifier types (`Enabled`/`Disabled…`), changing the
             // view's identity and re-introducing exactly the rebuild-jump this unified
             // view exists to kill. A constant `.enabled` keeps one identity throughout,
-            // so the answer just reflows in place and never jumps. (The earlier reason
-            // to disable mid-stream — the tail-follow `scrollTo` collapsing a drag —
-            // only bites in the long, clipped/scrolling layout; the jump-free guarantee
-            // matters more, and most answers are short and never scroll.)
+            // so the answer just reflows in place and never jumps. (Trade-off: the
+            // tail-follow `scrollTo` can collapse a mid-stream drag in a long,
+            // scrolling answer; the jump-free guarantee matters more.)
             MarkdownBlocks(source: linkLayout.lead, baseFont: cardFont, color: color,
                            onInAppCopy: onInAppCopy,
                            streamingTail: streaming && !linkLayout.hasMore)
@@ -4581,9 +4549,8 @@ struct AssistantTurnView: View {
         Haptics.confirm()
     }
 
-    /// Right-click on the answer bubble. Same actions the footer icons used to
-    /// carry (copy, copy as plain text, regenerate, which model answered),
-    /// grouped like a Messages context menu. Reactions are not in this menu yet.
+    /// Right-click on the answer bubble: copy, copy as plain text, regenerate,
+    /// which model answered — grouped like a Messages context menu.
     @ViewBuilder
     private var answerTurnMenu: some View {
         if hasText {
@@ -4995,8 +4962,6 @@ private struct UserQuestionOptionRow: View {
     }
 }
 
-/// Renders inline `**bold**` markdown into styled text — the same lightweight
-/// transform the prototype applied to AI answers.
 private struct ThreadSearchHighlightKey: EnvironmentKey {
     static let defaultValue: String? = nil
 }
@@ -5009,6 +4974,7 @@ extension EnvironmentValues {
     }
 }
 
+/// Renders inline `**bold**` markdown into styled text.
 struct InlineMarkdownText: View {
     let raw: String
     /// Colour for surviving links. Defaults to primary ink so links read in the
@@ -5415,8 +5381,8 @@ enum MarkdownParser {
     /// Memoized `parse`. A streaming answer's growing source is rendered by
     /// several sibling copies of the same turn at once — the visible thread,
     /// NotchBody's hidden height probe, the progressive-blur overlay copies —
-    /// and SwiftUI can re-evaluate each body more than once per update; every
-    /// evaluation used to re-run the full line-by-line parse of the whole
+    /// and SwiftUI can re-evaluate each body more than once per update; without
+    /// a cache every evaluation re-runs the full line-by-line parse of the whole
     /// accumulated answer. One cache entry per distinct source collapses all
     /// of that to a single parse. NSCache is thread-safe and purges under
     /// memory pressure; the count limit bounds the streaming case, where each
@@ -6547,10 +6513,9 @@ struct MarkdownBlocks: View {
                     ImageExpandStack(images: images)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 case .block(let i, let block):
-                    // Per-block styling lives in `MarkdownBlockRow`, shared with the
-                    // streaming renderer (`StreamingMarkdown`) so a settled answer and a
-                    // live one are laid out identically — they differ only in the tail
-                    // fade/selection wrapping, never in how a block kind looks.
+                    // Per-block styling lives in `MarkdownBlockRow`, shared with
+                    // `StreamingMarkdown`, so every renderer lays a block kind out
+                    // identically.
                     // `.equatable()` — see the row's `Equatable` conformance for why.
                     MarkdownBlockRow(block: block, baseFont: baseFont, color: color,
                                      onInAppCopy: onInAppCopy,
@@ -6563,22 +6528,13 @@ struct MarkdownBlocks: View {
     }
 }
 
-/// The streaming face of `MarkdownBlocks`: same layout, but the live tail
-/// **fades in** as chunks land instead of snapping. The result is the "逐字出现"
-/// typewriter feel the answer is supposed to have — text appears to dissolve into
-/// place rather than blink on in jumps.
+/// A head/tail split of `MarkdownBlocks` for a streaming answer: the *settled
+/// head* (every item but the last) and the *growing tail* (the final item),
+/// with the tail wrapped in `TailFadeIn` — currently a no-op.
 ///
-/// Why only the tail: re-parsing the whole `source` every chunk and re-fading all
-/// of it would make the entire (already-read) answer flicker on each token. So we
-/// split the parsed blocks into the *settled head* (every block but the last) and
-/// the *growing tail* (the final block). The head renders through the plain
-/// `MarkdownBlocks` with no animation; the tail is keyed on its own text so that
-/// each time it grows, SwiftUI re-runs an 80ms opacity ramp from `tailFloor` → 1
-/// over just that block — the freshly-arrived words shimmer in, the rest holds.
-///
-/// Settles to nothing once streaming ends: the caller swaps back to a plain
-/// `MarkdownBlocks` for the finished, fully-selectable answer (see `turnView`),
-/// so none of this fade machinery touches a settled turn.
+/// The live answer no longer streams through this view: `AssistantTurnView`
+/// keeps one `MarkdownBlocks` throughout, and the per-glyph tail fade lives in
+/// `StreamTailRenderer` (`MarkdownBlocks.streamingTail`).
 struct StreamingMarkdown: View {
     let source: String
     var baseFont: CGFloat = Tokens.TypeSize.reading
@@ -6655,15 +6611,9 @@ struct StreamingMarkdown: View {
     }
 }
 
-/// No-op. The tail block used to dim to a `floor` opacity and ease back to 1 on
-/// every chunk (a typewriter-style fade), but with a long single-paragraph answer
-/// the *whole* tail is one block, so the entire body below the first line dimmed
-/// and re-lit on each token — read as the text going pale mid-answer and only
-/// settling once the stream ended. Tail text now renders at full opacity like the
-/// settled head; streaming just reflows line by line, no fade. Kept as a modifier
-/// (rather than deleting the call site) so `StreamingMarkdown`'s head/tail split is
-/// untouched and the fade can be reintroduced here if it's ever made
-/// per-new-character instead of per-block.
+/// No-op. A per-BLOCK fade dims the whole tail on every token — with a long
+/// single-paragraph answer the tail is the entire body, so it reads as the text
+/// going pale mid-answer. Per-glyph fading is `StreamTailRenderer`'s job.
 private struct TailFadeIn: ViewModifier {
     let token: Int
     func body(content: Content) -> some View { content }
@@ -6672,11 +6622,9 @@ private struct TailFadeIn: ViewModifier {
 // MARK: - Streaming tail glyph fade (macOS 15+)
 
 /// Which glyphs of the streaming tail are *fresh* — revealed within the last fade
-/// window — recorded as character-count milestones with timestamps. This is the
-/// per-NEW-CHARACTER fade the old `TailFadeIn` couldn't do: that one re-faded the
-/// whole tail block per chunk (a long paragraph visibly dimmed and re-lit on every
-/// token — why it was neutered to a no-op). Here only glyphs *beyond* the length
-/// already seen animate; everything already read never re-fades.
+/// window — recorded as character-count milestones with timestamps. Only glyphs
+/// *beyond* the length already seen animate; everything already read never
+/// re-fades (unlike a per-block fade — see `TailFadeIn`).
 struct GlyphBirths: Equatable {
     struct Milestone: Equatable {
         var count: Int
@@ -7647,12 +7595,6 @@ private struct CodeBlockView: View {
     private static let inset: CGFloat = 8
 
     var body: some View {
-        // NOTE: the parent `MarkdownBlocks` container in NotchBody wraps the whole
-        // answer in `.textSelection(.disabled)` WHILE STREAMING (so tail-follow
-        // scroll can't collapse a drag) and `.enabled` once settled — so the inner
-        // `.textSelection(.enabled)` here is only effective post-stream. The copy
-        // button below works in BOTH states; don't remove the parent wrapper without
-        // auditing this.
         VStack(alignment: .leading, spacing: 6) {
             Text(CodeHighlighter.highlighted(shownText, language: language))
                 .font(.system(size: baseFont - 1, weight: .regular, design: .monospaced))
@@ -8127,10 +8069,9 @@ struct AgentWorkTrailView: View {
     }
 
     /// One work stretch — thinking plus every tool call until the next
-    /// narration, plan, or prompt marker. Reasoning used to flush the tool
-    /// run, so one round painted as Thinking / 3 reads / Thinking / 3 reads.
-    /// Thinking no longer splits the calls; consecutive thoughts merge into
-    /// one fold. Narration still starts a new stretch, so the story between
+    /// narration, plan, or prompt marker. Thinking does not split the calls
+    /// (no Thinking / 3 reads / Thinking / 3 reads); consecutive thoughts merge
+    /// into one fold. Narration still starts a new stretch, so the story between
     /// rounds stays in order.
     private var blocks: [Block] {
         var out: [Block] = []
@@ -8207,11 +8148,8 @@ struct AgentWorkTrailView: View {
                 // A follow-up round's prompt marker — present only in the
                 // live trail (the record files the prompt as its own user
                 // turn instead). It IS a question the user asked, so it wears
-                // the same bubble every other prompt on the page wears: the
-                // marker used to carry its own tighter shell, which made the
-                // in-flight round look unlike the settled ones above it and
-                // made the bubble visibly jump the moment the round settled
-                // and re-rendered as a real turn.
+                // the same bubble every other prompt on the page wears — so it
+                // doesn't jump the moment the round settles into a real turn.
                 UserQuestionBubble(text: String(entry.title.dropFirst(2)),
                                    baseFont: min(Tokens.TypeSize.reading, baseFont),
                                    isAgent: true)
@@ -8234,9 +8172,8 @@ struct AgentWorkTrailView: View {
 }
 
 /// A paragraph of the agent's narration. Long ones fold to a readable height
-/// with a "show all" line rather than being cut at parse time — the trail used
-/// to keep only the first 500 characters of a block, and everything past that
-/// was simply gone from the record.
+/// with a "show all" line rather than being cut at parse time, so nothing is
+/// lost from the record.
 private struct AgentTrailProse: View {
     let text: String
     /// False for the block still streaming: folding it would collapse the
@@ -8287,9 +8224,9 @@ private struct AgentTrailProse: View {
 }
 
 /// The model's own reasoning, folded away behind one quiet line. Collapsed by
-/// default on purpose, and folded HERE only: raw reasoning used to roll through
-/// the activity ticker too, which put sliding half-sentences on the panel's one
-/// live line. The trail stays a record of what was DONE and the thinking is
+/// default on purpose, and folded HERE only: raw reasoning in the activity
+/// ticker would put sliding half-sentences on the panel's one live line.
+/// The trail stays a record of what was DONE and the thinking is
 /// there when you go looking for it.
 private struct AgentTrailThinkingRow: View {
     let text: String
@@ -8335,8 +8272,8 @@ struct ThinkingFoldRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Button {
-                // Don't inherit the island's layout spring — that squash is
-                // what a click on this row used to look like.
+                // Don't inherit the island's layout spring — a click on this row
+                // would otherwise squash it.
                 var t = Transaction()
                 t.disablesAnimations = true
                 withTransaction(t) { expanded.toggle() }
@@ -8636,9 +8573,8 @@ private struct AgentTrailToolRow: View {
     @State private var expanded = false
 
     /// The trail's one chrome size, shared with the thinking row, the group
-    /// summary and the plan card. Mono used to step down only 1pt from the
-    /// prose, which put a visibly larger command line next to a smaller
-    /// "Thinking" line — three type sizes in a stack that says one thing.
+    /// summary and the plan card, so the command line and the "Thinking" line
+    /// don't read as different type sizes.
     private var codeFont: CGFloat { max(Tokens.TypeSize.meta, baseFont - 2) }
 
     var body: some View {
@@ -9087,7 +9023,7 @@ struct MenuCardRow: View {
     /// means "this is the one in effect" rather than "this is where the cursor is".
     var emphasized: Bool = false
     let selected: Bool
-    /// Draw the selected wash here. Off for a card that gilides ONE wash across
+    /// Draw the selected wash here. Off for a card that glides ONE wash across
     /// its rows (the agent picker's springy glide) — the row still takes the
     /// selected ink, it just doesn't paint a second highlight under it.
     var wash: Bool = true

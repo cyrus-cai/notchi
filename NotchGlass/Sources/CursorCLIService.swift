@@ -3,7 +3,7 @@ import AppKit
 
 /// A model backend that shells out to the user's locally-installed **Cursor CLI**
 /// (`cursor-agent -p --output-format stream-json`) and streams its answer back —
-/// the sixth of the same family as `CodexCLIService` / `ClaudeCLIService` /
+/// one of the same family as `CodexCLIService` / `ClaudeCLIService` /
 /// `GrokCLIService` / `CommandCodeCLIService` / `PiCLIService`.
 ///
 /// Like the others, Cursor carries **no API key of ours**: it reuses the sign-in
@@ -53,9 +53,8 @@ import AppKit
 /// Deliberately NOT passed: `--stream-partial-output`. It makes Cursor emit each
 /// token as its own `assistant` event, which is what a streaming UI wants — but
 /// the CLI keeps accumulating those same deltas and flushes the whole run as one
-/// more `assistant` event at the end (verified in the shipped bundle), so every
-/// answer would arrive twice. Buffered events are the correct read until that is
-/// fixed; it also leaves this exactly where the Claude Code path already is.
+/// more `assistant` event at the end, so every answer would arrive twice.
+/// Buffered events are the correct read until that is fixed.
 ///
 /// Cursor runs its own agent loop, so this conforms to `AIService` only — like
 /// its siblings it deliberately does NOT adopt Notch's tool harness.
@@ -450,18 +449,14 @@ struct CursorCLIService: AIService {
     }
 
     /// Re-read the catalog off the main thread and store it. Called from `warmUp()`
-    /// at launch so the picker reads a warm cache. Cheap on a hit — it returns
-    /// without spawning while the persisted catalog was written by *this* CLI build
-    /// and is inside the TTL. `force` (the manual refresh) skips that gate and
-    /// re-probes; a failed probe leaves the cached catalog alone.
-    /// Re-read the catalog off the main thread and store it. This is also the
+    /// at launch so the picker reads a warm cache. This is also the
     /// sign-in probe (see `authExists`), so it is deliberately NOT gated on being
     /// signed in — that would be circular, and a signed-out account is one of the
     /// answers it exists to get.
     ///
     /// Cheap on a hit: it returns without spawning while the persisted catalog was
     /// written by *this* CLI build and is inside the TTL. `force` (a manual refresh
-    /// or a re-check) skips that gate.
+    /// or a re-check) skips that gate; a failed probe leaves the cached catalog alone.
     static func refreshModels(force: Bool = false) {
         // `--list-models` is one of the flags an old build doesn't have; asking it
         // only produces an unknown-option error.
@@ -683,8 +678,8 @@ struct CursorCLIService: AIService {
     }
 
     /// Kick off a fresh Cursor sign-in and see it through: spawn
-    /// `cursor-agent login`, open the URL it prints, and wait for the credentials to
-    /// land in `~/.cursor/auth.json`. Returns false only when the binary can't be
+    /// `cursor-agent login`, open the URL it prints, and wait for the child to
+    /// finish. Returns false only when the binary can't be
     /// found; everything after that is reported through `isSigningIn` /
     /// `lastSignInFailure` and a `.cliAvailabilityResolved` post. Doubles as the
     /// first-time "Sign in" action.

@@ -27,12 +27,9 @@ final class NotchPanel: NSPanel {
     /// Anything below layer 24 is also below the menu bar, so while the island sits
     /// here macOS draws the menu bar — its titles and its item chips — straight over
     /// the island's black notch cap, and the top of the "notch" visibly comes apart.
-    /// That used to happen on the FIRST keystroke of every editing session (NSTextView
-    /// posts `textDidBeginEditing` on the first edit, not on focus) and lasted until
-    /// the caret left, which is what the "typing pulls a gap open at the top of the
-    /// notch" report was. There is no level that clears the menu bar *and* stays under
-    /// the candidate window, so the drop is now scoped to the moments that need it:
-    /// a live composition, when the popup is on screen and the eye is on it anyway.
+    /// No level clears the menu bar *and* stays under the candidate window, so the
+    /// drop is scoped to a live composition, when the popup is on screen anyway —
+    /// not to the whole editing session.
     static let editingLevel: NSWindow.Level = .floating
 
     /// How many field editors currently hold the caret. The island can host more than
@@ -59,9 +56,7 @@ final class NotchPanel: NSPanel {
     /// The panel is `.nonactivatingPanel` and its canvas takes first mouse, so a
     /// click on the open island is DELIVERED without the app ever coming
     /// forward: buttons work, but every keyboard chord the panel owns stays
-    /// dead, because key events go to whatever app is actually active. That is
-    /// what "the pin shortcut does nothing" looked like on a pinned panel the
-    /// user had clicked away from — its pin *button* still worked, ⌘P did not.
+    /// dead, because key events go to whatever app is actually active.
     /// Clicking the open island is deliberate engagement, so it claims the
     /// keyboard the way clicking any window does.
     var onClickInside: (() -> Void)?
@@ -97,7 +92,7 @@ final class NotchPanel: NSPanel {
         )
 
         isFloatingPanel = true
-        level = Self.restingLevel              // above menu bar / normal windows
+        level = Self.restingLevel
         backgroundColor = .clear
         isOpaque = false
         hasShadow = false
@@ -235,12 +230,6 @@ extension NSWindow {
         return search(content)
     }
 
-    /// A right-click on selectable text goes to the text view, which shows the
-    /// system text menu (Cut / Copy / Paste / Font…) instead of the
-    /// `.contextMenu` the answer declares. With no selection that menu's Copy is
-    /// disabled, so this shows the SwiftUI menu at that point instead. With a
-    /// selection the system menu stays, since its Copy copies the selection.
-    /// Returns true when it showed a menu.
     func isOverEditableText(_ point: NSPoint) -> Bool {
         guard let contentView,
               var view = contentView.hitTest(contentView.convert(point, from: nil)) else { return false }
@@ -265,6 +254,12 @@ extension NSWindow {
         }
     }
 
+    /// A right-click on selectable text goes to the text view, which shows the
+    /// system text menu (Cut / Copy / Paste / Font…) instead of the
+    /// `.contextMenu` the answer declares. With no selection that menu's Copy is
+    /// disabled, so this shows the SwiftUI menu at that point instead. With a
+    /// selection the system menu stays, since its Copy copies the selection.
+    /// Returns true when it showed a menu.
     func showAnswerMenuOverSelectableText(_ event: NSEvent) -> Bool {
         guard let textView = selectableTextView(at: event.locationInWindow) else { return false }
         if firstResponder === textView, let systemMenu = textView.menu(for: event) {

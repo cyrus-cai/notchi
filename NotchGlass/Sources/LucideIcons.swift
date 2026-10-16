@@ -1,7 +1,7 @@
 import SwiftUI
 import CoreGraphics
 
-/// The three glyphs the ⋯ manage menu wears, lifted from **Lucide** as raw `<path d="…">`
+/// The glyphs the app's menus and rows wear, lifted from **Lucide** as raw `<path d="…">`
 /// data and stroked at render time — the same "vector, no bitmap, tints with the palette"
 /// approach `VendorLogos` takes, one file over.
 ///
@@ -80,9 +80,7 @@ enum LucideIcons {
         "M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326",
     ], viewBox: 24)
 
-    /// lucide `code-xml` — the Agent bucket. Replaces two different SF glyphs that used
-    /// to split the same concept between surfaces (`chevron.left.forwardslash.chevron.right`
-    /// on the bucket pill, `terminal` on the tear-off card).
+    /// lucide `code-xml` — the Agent bucket, on every surface that shows it.
     static let codeXml = Mark(paths: [
         "m18 16 4-4-4-4",
         "m6 8-4 4 4 4",
@@ -105,10 +103,6 @@ enum LucideIcons {
         "M12 6v6l4 2",
     ], viewBox: 24)
 
-    /// lucide `hash` — the neutral "a quantity of something" mark. Stats' token
-    /// tile wears it because that figure isn't a bucket the way the three beside
-    /// it are: it's a measure taken across all of them, and lending it any
-    /// bucket's glyph would say it belonged to that bucket.
     /// Lucide `repeat` — a `/loop` thread's interval row.
     static let loop = Mark(paths: [
         "m17 2 4 4-4 4",
@@ -117,9 +111,8 @@ enum LucideIcons {
         "M21 13v1a4 4 0 0 1-4 4H3",
     ], viewBox: 24)
 
-    /// Lucide `square` — the stop-loop row. The `circle-stop` it replaced put a
-    /// 6pt square inside a 20pt circle; at the 13pt the row draws it, the two
-    /// strokes collapsed into a dot in a ring. One square at full size holds.
+    /// Lucide `square` — the stop-loop row. Not `circle-stop`: at 13pt its
+    /// square-in-a-circle collapses into a dot in a ring.
     static let circleStop = Mark(paths: [
         "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z",
     ], viewBox: 24)
@@ -129,6 +122,10 @@ enum LucideIcons {
         "M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z",
     ], viewBox: 24)
 
+    /// lucide `hash` — the neutral "a quantity of something" mark. Stats' token
+    /// tile wears it because that figure isn't a bucket the way the three beside
+    /// it are: it's a measure taken across all of them, and lending it any
+    /// bucket's glyph would say it belonged to that bucket.
     static let hash = Mark(paths: [
         "M4 9h16",
         "M4 15h16",

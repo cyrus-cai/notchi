@@ -20,8 +20,8 @@
 // Keys are never passed in or printed: the harness reads the running app's own
 // settings (`com.notchglass.app` defaults) at runtime, exactly as the app does.
 //
-// `OrbState` is stubbed below rather than dragging in Components.swift (2k lines
-// of SwiftUI for a four-case tag the harness only forwards to the UI).
+// `OrbState` is stubbed below rather than dragging in Components.swift (thousands
+// of lines of SwiftUI for a four-case tag the harness only forwards to the UI).
 
 import Foundation
 
@@ -282,7 +282,7 @@ func run() async {
     var recoveredQueries = 0
     var failures: [String] = []
     // Per-kind tallies, because a ceiling that helps one kind hurts the other and
-    // one combined average shows neither. `hitCeiling` is the number that decides
+    // one combined average shows neither. `hitCeilingByKind` is the number that decides
     // whether a sweep measured anything at all: if no query ever reaches the
     // ceiling, every ceiling is the same ceiling and the run has no opinion.
     var searchesByKind: [QueryKind: Int] = [:]

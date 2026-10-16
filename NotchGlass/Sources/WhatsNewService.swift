@@ -96,11 +96,10 @@ final class WhatsNewService: ObservableObject {
 
     /// The release notes, written straight into the app. **Edit here each release.**
     ///
-    /// Each release has three sections — `features` (brand-new capabilities),
-    /// `improvements` (refinements to existing behaviour), and `fixes` (what got
-    /// fixed). Write for the user, not the code: say what changed for *them* and
-    /// why it's nice, in plain language. Skip internal/refactor churn they'd never
-    /// notice. Leave a section empty (omit it) if there's nothing for it.
+    /// Sections are described on `Entry`. Write for the user, not the code: say
+    /// what changed for *them* and why it's nice, in plain language. Skip
+    /// internal/refactor churn they'd never notice. Leave a section empty (omit
+    /// it) if there's nothing for it.
     /// English-only by design. Order doesn't matter — `sorted` puts the newest
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [

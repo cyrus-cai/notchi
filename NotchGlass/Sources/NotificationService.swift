@@ -13,8 +13,8 @@ import UserNotifications
 ///
 /// Scope is deliberately narrow: it ONLY fires for the detached case. If the
 /// panel is still on screen showing the answer stream, the user is already
-/// watching — no notification. (The trigger lives in `NotchModel.submit`, gated
-/// on `!isOnScreen`.)
+/// watching — no notification. (The trigger is `NotchModel.notifyAnswerReady`,
+/// gated on `walkedAway` at its call sites.)
 @MainActor
 final class NotificationService: NSObject {
     static let shared = NotificationService()
@@ -30,7 +30,7 @@ final class NotificationService: NSObject {
     /// `AppDelegate` observes it, summons the panel, and reopens the thread.
     static let answerTapped = Notification.Name("notchAnswerNotificationTapped")
 
-    /// Category for a finished agent-Codex task's banner, so its tap routes
+    /// Category for a finished agent task's banner, so its tap routes
     /// to the panel's idle view (where the result card lives) instead of a thread.
     private static let agentCategory = "agentDone"
 
@@ -50,7 +50,7 @@ final class NotificationService: NSObject {
         super.init()
     }
 
-    /// Wire the agent so taps route back into the app. Call once at launch.
+    /// Wire the delegate so taps route back into the app. Call once at launch.
     func configure() {
         center.delegate = self
     }
@@ -102,7 +102,7 @@ final class NotificationService: NSObject {
         }
     }
 
-    /// Post a "agent task finished" banner (XII: agent-to-Codex). A
+    /// Post an "agent task finished" banner. An
     /// agent run takes minutes, so the user has almost certainly walked away;
     /// this closes the loop the same way the answer-ready banner does. Tapping it
     /// summons the panel and reopens the run's Recent record (`threadID` — the
@@ -142,8 +142,8 @@ final class NotificationService: NSObject {
             content.categoryIdentifier = Self.agentCategory
             content.userInfo = [Self.threadIDKey: threadID.uuidString]
             content.sound = silent ? nil : .default
-            // One agent task at a time → one stable id, so a rerun replaces
-            // its prior banner instead of stacking.
+            // One stable id, so a newer run's banner replaces the prior one
+            // instead of stacking.
             let request = UNNotificationRequest(
                 identifier: "agentTask", content: content, trigger: nil)
             self.center.add(request, withCompletionHandler: nil)

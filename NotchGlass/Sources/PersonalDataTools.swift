@@ -701,10 +701,8 @@ struct TravelTimeTool: NotchTool {
         [from, to].allSatisfy { UserPlaces.kind(of: $0) == nil || UserPlaces.kind(of: $0) == .here }
     }
 
-    /// The trip on OpenStreetMap: Nominatim finds each end, the FOSSGIS OSRM
-    /// servers time it by car or on foot. No live or expected traffic, and no
-    /// transit, which the result says. nil when either end or the route can't
-    /// be had there either.
+    /// Apple placed a name with no CJK script in it inside China: likely the
+    /// China-region Maps mismatch, worth checking on OpenStreetMap.
     private static func placedInChina(_ query: String, _ item: MKMapItem) -> Bool {
         guard UserPlaces.kind(of: query) == nil, item.placemark.isoCountryCode == "CN" else { return false }
         return !query.unicodeScalars.contains {
@@ -712,6 +710,10 @@ struct TravelTimeTool: NotchTool {
         }
     }
 
+    /// The trip on OpenStreetMap: Nominatim finds each end, the FOSSGIS OSRM
+    /// servers time it by car or on foot. No live or expected traffic, and no
+    /// transit, which the result says. nil when either end or the route can't
+    /// be had there either.
     /// `abroadOnly`: only when an end lies outside China, so a Latin-script
     /// name for a place that really is in China stays with Apple Maps.
     private static func openStreetMap(from: String, to: String, mode: String, timed: Bool,

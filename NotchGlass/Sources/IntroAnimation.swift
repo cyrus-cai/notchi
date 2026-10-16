@@ -49,7 +49,7 @@ final class IntroAnimation {
         /// rises and gathers into the solid at its resting size.
         static let emergeAt: TimeInterval    = 0.20
         static let emerge: TimeInterval      = 3.60
-        /// The turn + shrink + flight into the notch — unchanged.
+        /// The turn + shrink + flight into the notch.
         static let flightAt: TimeInterval    = 6.20
         static let flight: TimeInterval      = 1.15
         static let veilOut: TimeInterval     = 0.90
@@ -452,10 +452,9 @@ final class IntroAnimation {
 
     /// The arrival's sound: the low pedal that opens Strauss's *Sonnenaufgang* —
     /// organ and double basses, no brass, no melody, nothing that resolves. Cut
-    /// from the recording rather than synthesised: two attempts at generating
-    /// something ("a struck bell", "designed air") both came out as either a temple
-    /// gong or a whoosh, because what this moment wants is an orchestra holding one
-    /// chord, and that is not a thing you can fake with sine waves.
+    /// from the recording rather than synthesised: what this moment wants is an
+    /// orchestra holding one chord, and that is not a thing you can fake with sine
+    /// waves.
     ///
     /// The recording is Philip Milman's, from classicals.de, under CC BY 4.0 —
     /// which is why the About pane credits it. That licence is the whole reason
@@ -470,11 +469,11 @@ final class IntroAnimation {
     ///
     /// It is a bed, not a hit. There is deliberately no accent to sync the visuals
     /// to — an edit that lands a cymbal on the frame the mark solidifies reads as
-    /// contrived, and did when it was tried. The cue simply runs underneath.
+    /// contrived. The cue simply runs underneath.
     ///
     /// Played through `AVAudioPlayer` and *not* torn down with the rest of the
-    /// overlay: the tail is still fading when the panel opens, and cutting the
-    /// engine there is exactly the abrupt stop this replaced.
+    /// overlay: the tail is still fading when the panel opens, and cutting it
+    /// there would be an abrupt stop.
     private func playArrivalCue() {
         guard let url = Bundle.main.url(forResource: "intro-sunrise", withExtension: "m4a"),
               let player = try? AVAudioPlayer(contentsOf: url)
@@ -637,7 +636,7 @@ final class IntroAnimation {
     /// The glass. Everything visible is built in `glassShader`; these properties
     /// only set up the blend and hand the shader its knobs.
     ///
-    /// Two of these are made per piece, one per face direction — see `glassNode`.
+    /// Two of these are made per piece, one per face direction — see `glassPasses`.
     private static func glass() -> SCNMaterial {
         let m = SCNMaterial()
         m.lightingModel = .physicallyBased

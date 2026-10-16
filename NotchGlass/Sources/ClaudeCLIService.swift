@@ -22,8 +22,7 @@ import Foundation
 ///    into a single stdin prompt, the persona rides `--system-prompt`.
 ///  · `--safe-mode` isolates the turn from the user's customizations (CLAUDE.md,
 ///    plugins, MCP servers, hooks) — the Codex `--ignore-user-config` analog.
-///    Verified locally: without it, a loaded setup adds ~10k tokens of context
-///    to every turn.
+///    Without it, a loaded setup adds ~10k tokens of context to every turn.
 ///  · `--no-session-persistence` keeps quick chats out of `~/.claude` session
 ///    history (the agent path is the opposite: it persists for `--resume`).
 ///  · `--tools WebSearch WebFetch` leaves exactly the web tools available, so a
@@ -225,16 +224,14 @@ struct ClaudeCLIService: AIService {
     /// The cache is keyed on `binaryFingerprint()`, not on a clock. Only two
     /// things move this mapping: the CLI updating (fingerprint catches it the
     /// moment it happens) and the account's default model changing (invisible to
-    /// a version, which is what the TTL below is left for). Keying on time alone
-    /// used to mean a CLI update took up to a day to show up in the picker.
+    /// a version, which is what the TTL below is left for).
     private static let resolvedModelsLock = NSLock()
     private static var cachedResolvedModels: [String: String]?
     private static let resolvedModelsKey = "claudeCode.resolvedModels"
     private static let resolvedModelsFetchedAtKey = "claudeCode.resolvedModels.fetchedAt"
     private static let resolvedModelsFingerprintKey = "claudeCode.resolvedModels.fingerprint"
     /// Backstop for the one change the fingerprint can't see — the account's
-    /// default model. A week: CLI updates land via the fingerprint instead, so
-    /// this no longer has to be the freshness mechanism.
+    /// default model. A week: CLI updates land via the fingerprint instead.
     private static let resolvedModelsTTL: TimeInterval = 7 * 24 * 3600
 
     /// A resolved id as a display name: "claude-opus-4-8" → "Claude Opus 4.8".
@@ -306,8 +303,7 @@ struct ClaudeCLIService: AIService {
         }
 
         // One spawn per alias, all at once: they're independent processes and each
-        // is a cold node boot, so serially this ran to 4× the wall clock of the
-        // slowest one. Rare now that the fingerprint gates it, but no reason to wait.
+        // is a cold node boot, so running them serially multiplies the wall clock.
         let landedLock = NSLock()
         var landed: [String: String] = [:]
         let group = DispatchGroup()

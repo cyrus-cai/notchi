@@ -1623,7 +1623,7 @@ struct SearchHistoryTool: NotchTool {
 }
 
 /// The description every client-side web-search tool advertises. One shared
-/// string so the three backends (GLM / Exa / Keenable) never drift apart: the
+/// string so the search backends never drift apart: the
 /// model's search behavior should not change with the backend. Beyond the
 /// when-to-search trigger it teaches the two habits that cut rounds and break
 /// the re-search loop: batch independent queries into ONE turn (the harness
@@ -1686,8 +1686,8 @@ struct SearchServiceError: LocalizedError, Sendable {
 
 /// The service answered, but with no hits. Distinct from `SearchServiceError`
 /// (the service itself failed). The harness reports this to the user instead of
-/// spending another model round on it — that follow-up is what used to sit for
-/// tens of seconds and then surface as a model 429.
+/// spending another model round on it, which can sit for tens of seconds and
+/// then surface as a model 429.
 enum SearchMiss {
     static func modelText(query: String) -> String {
         "The search returned no results for \"\(query)\". Do not fabricate "
@@ -1748,12 +1748,10 @@ struct KimiSearchProvider: SearchProvider {
 }
 
 /// Real web search for GLM, via Zhipu's **standalone** Web Search API
-/// (`/paas/v4/web_search`). XII-118 originally wired GLM as a "mode A" in-chat
-/// `tools:[{web_search}]` entry, but live testing showed that path silently does
-/// NOT search on the current account/models (glm-4.5-air / glm-4.6 / glm-4-air all
-/// returned training-cutoff hallucinations with no `web_search` array) — exactly
-/// the dishonest behavior XII-116 fought. The standalone API, by contrast, returns
-/// genuine real-time results. So GLM search is a real *client-side* tool: the
+/// (`/paas/v4/web_search`). The in-chat `tools:[{web_search}]` entry silently
+/// does NOT search on the current account/models (glm-4.5-air / glm-4.6 /
+/// glm-4-air return training-cutoff answers with no `web_search` array), while
+/// the standalone API returns real-time results. So GLM search is a real *client-side* tool: the
 /// model calls it, the harness hits the standalone endpoint with the user's GLM
 /// key, and feeds the results back. This DOES drive the "🔍 searching" activity
 /// line (it goes through the harness tool loop), unlike a true server-side search.
@@ -1761,9 +1759,9 @@ struct GLMSearchProvider: SearchProvider {
     // The service sends this capability under the `lookup_web` wire alias because
     // `web_search` collides with GLM's own built-in server-side tool: glm-4.x
     // ignores the results we feed back and re-calls the tool in a loop until
-    // the iteration cap, then answers from training data (the stale/hallucinated
-    // answers Cyrus saw). A distinct name makes the model treat it as an ordinary
-    // function: it reads the fed-back results and answers from them. Verified live.
+    // the iteration cap, then answers from training data. A distinct name makes
+    // the model treat it as an ordinary function: it reads the fed-back results
+    // and answers from them.
     private static let endpoint = URL(string: "https://open.bigmodel.cn/api/paas/v4/web_search")!
     private static let timeout: TimeInterval = 15
     private static let maxResults = 6
@@ -1833,11 +1831,10 @@ struct GLMSearchProvider: SearchProvider {
 /// Provider-agnostic web search via **Exa** (`https://api.exa.ai/search`). Unlike
 /// `GLMSearchProvider` (which reuses the GLM provider's key and only exists because
 /// GLM's in-chat search silently no-ops), Exa is a standalone search backend with
-/// its own key (`APIKeyStore.currentExaKey()` / `EXA_API_KEY`). When that key is
-/// present this tool is registered for *every* provider and the providers' own
-/// native server-side search is suppressed — Exa becomes the single searcher for
-/// all backends (the point: a better, fresher, cheaper replacement than each
-/// vendor's built-in search). Like the GLM tool it is a `SourcedTool`: one call
+/// its own key (`APIKeyStore.currentExaKey()` / `EXA_API_KEY`). When the user
+/// picks it (`APIKeyStore.resolvedSearchBackend()`) it is registered for *every*
+/// provider and the providers' own native server-side search is suppressed.
+/// Like the GLM tool it is a `SourcedTool`: one call
 /// yields both the model-facing grounded text and the `[WebSource]` badge data.
 ///
 /// Request shape follows Exa's coding-agent guide: `type:"auto"` (balanced
@@ -1930,11 +1927,10 @@ struct ExaSearchProvider: SearchProvider {
 /// search backend keyed by `APIKeyStore.currentKeenableKey()` / `KEENABLE_API_KEY`.
 /// NOTE: despite Keenable's "no API key required" marketing (which applies only to
 /// its CLI/MCP, not the raw HTTP API), the `/v1/search` endpoint *always* requires
-/// an `X-API-Key` header — a keyless call returns 401. So this tool is only
-/// registered when a Keenable key is configured.
+/// an `X-API-Key` header — a keyless call returns 401. So picking it only takes
+/// effect when a Keenable key is configured (`APIKeyStore.resolvedSearchBackend()`).
 ///
-/// Precedence: Exa wins when its key is set; else Keenable when *its* key is set
-/// (`ToolRegistry.standard(for:)`). Like the other client search tools it is a
+/// Like the other client search tools it is a
 /// `SourcedTool`: one call yields both the model-facing grounded text and the
 /// `[WebSource]` badge data.
 ///
@@ -2942,11 +2938,10 @@ extension ToolRegistry {
     /// off `Provider.serverSearch` (XII-118). Two providers are client-side
     /// exceptions, both added here per provider:
     ///  • **GLM** — its in-chat `tools:[{web_search}]` path silently doesn't search
-    ///    on the current account/models (verified live), so GLM uses a real
+    ///    on the current account/models, so GLM uses a real
     ///    client-side `GLMSearchProvider` that hits Zhipu's standalone search API.
     ///  • **Kimi** — its builtin search needs a client-side echo, so the
     ///    `$web_search` passthrough is added so the harness can echo the call back.
-    /// (The defunct DuckDuckGo `WebSearchTool` was removed — see XII-116/XII-118.)
     ///
     /// **Unified searcher (optional, user-chosen).** A single client-side
     /// search tool can replace every provider's native search — the server-search

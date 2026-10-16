@@ -10,7 +10,7 @@ struct PickerModel: Identifiable {
     let provider: Provider
     let providerName: String
     let hasKey: Bool
-    /// Whether this model rides above its provider's separator — the shortlist. For
+    /// Whether this model is in its provider's shortlist. For
     /// OpenRouter that's the auto-router plus the most-used few of its free lineup;
     /// for other providers, the curated picks topped up with the newest models the
     /// vendor serves; for keyless providers, one representative row. Built by
@@ -31,18 +31,14 @@ struct PickerModel: Identifiable {
 // MARK: - The picker
 
 /// The model chooser is the **system's own menu** — no card, no search field, no
-/// custom list. It was a 300pt floating panel whose rows arrived in one long
-/// cross-provider run, which is both more screen than the question deserves and an
-/// order nobody could name. An `NSMenu` fixes both at once: the top level is the
-/// providers you can call, each one opening its own models. Families keep their
+/// custom list, and no long cross-provider run of rows in an order nobody could
+/// name. The top level is the providers you can call, each one opening its own
+/// models. Families keep their
 /// catalog order while siblings rank by cost efficiency, so comparisons stay local
 /// instead of turning the whole menu into one cross-vendor leaderboard.
 ///
-/// Within a provider, its shortlist (`PickerModel.featured` — the picks plus the
-/// newest arrivals) sits above a separator, the rest of the catalog below it, so the
-/// good ones are on top without anything becoming unreachable. Providers with no key
-/// live under their own section header; picking one of their models runs the "Add
-/// key" route rather than switching the backend.
+/// Providers with no key live under their own section header; picking one of their
+/// models runs the "Add key" route rather than switching the backend.
 ///
 /// The menu is a snapshot taken when it opens: a live-model refresh that lands while
 /// it's up shows on the next open, which is how every other menu on the system
@@ -199,9 +195,8 @@ private struct ModelMenuPresenter: NSViewRepresentable {
             // Two blocks, not one list. Notchi ships with the app and spends the
             // balance in the card above; every other row is an account you hold
             // with someone else. So it leads the menu, above the separator, under
-            // its own heading — but as one submenu like any other provider. Flat
-            // rows were fine while it served two tiers; it now serves a lineup,
-            // and a lineup on the top level pushes every other backend off the
+            // its own heading — but as one submenu like any other provider: its
+            // lineup on the top level would push every other backend off the
             // bottom of the menu.
             let house = order.filter(\.isFirstParty)
             let houseModels = house.flatMap { byProvider[$0] ?? [] }
@@ -225,8 +220,7 @@ private struct ModelMenuPresenter: NSViewRepresentable {
                 for p in keyed { menu.addItem(providerItem(p, byProvider[p] ?? [])) }
             }
             // Providers you'd have to set up first, under their own heading and
-            // below everything callable — the same "what a key would unlock" shelf
-            // the old card kept at the bottom of its list.
+            // below everything callable — a "what a key would unlock" shelf.
             if !keyless.isEmpty {
                 if !menu.items.isEmpty { menu.addItem(.separator()) }
                 menu.addItem(.sectionHeader(title: L("model.picker.unconfigured")))
@@ -743,9 +737,9 @@ struct ModelDetailCard: View {
             // Meters for a model we rate; the wallet for the one we run.
             //
             // Speed and Intelligence are `ModelRatings`' read of an id, and on
-            // `nono-flash` that read is the word "flash" in a name we chose
-            // ourselves — a 5/5 speed bar sourced from our own marketing, and a
-            // 3/5 intelligence bar sourced from nothing. What is true of this
+            // our own ids that read is a word in a name we chose ourselves
+            // ("flash") — a speed bar sourced from our own marketing, and an
+            // intelligence bar sourced from nothing. What is true of this
             // one and of no other card is the remaining credit, so the two
             // invented bars give way to the wallet, which sits at the bottom of
             // the card, under the notes.
@@ -912,9 +906,8 @@ struct ModelDetailCard: View {
     /// draws until the gateway has answered — a card that says "no credit" for
     /// the length of one request is telling a paying user they have not paid.
     ///
-    /// There is no rail here any more. The rail measured a month's allowance
-    /// against its own ceiling; prepaid credit has no denominator, and a bar
-    /// with nothing to fill is a shape borrowed from a meaning that is gone.
+    /// No rail: prepaid credit has no denominator, so a bar would have nothing
+    /// to fill.
     @ViewBuilder
     private var walletWell: some View {
         if let wallet {
@@ -1072,8 +1065,8 @@ struct ModelDetailCard: View {
     /// the one thing the gap was opened for.
     ///
     /// Position and rotation are computed outright rather than composed from
-    /// nested `rotationEffect`s. The composed version is shorter and it is how
-    /// this was written twice, both times mirrored: whether a positive angle
+    /// nested `rotationEffect`s. The composed version is shorter but easy to get
+    /// mirrored: whether a positive angle
     /// carries a glyph left or right depends on a sign convention that is easy to
     /// reason about backwards and impossible to check by reading. Trig against a
     /// stated frame — origin at the centre, y downward, φ measured from the top and
@@ -1142,10 +1135,8 @@ struct ModelDetailCard: View {
     /// groove, and for the run a vertical falloff plus one specular sliver and a
     /// little spill onto the track around it.
     ///
-    /// `Meter` is this with ticks and a title on it, and this
-    /// bare. They share the material deliberately: a percentage drawn in a
-    /// different glass to the meters it replaces would read as a different kind
-    /// of figure.
+    /// `Meter` is this with ticks and a title on it, sharing its `groove` and
+    /// `lozenge`.
     private struct GlassBar: View {
         /// 0–1 of the track.
         let fraction: Double
@@ -1155,10 +1146,9 @@ struct ModelDetailCard: View {
         var body: some View {
             GeometryReader { geo in
                 let raw = geo.size.width * CGFloat(min(1, max(0, fraction)))
-                // A month that has been spent from, however little, still shows a
-                // mark — a rail reading empty after real requests tells the wrong
-                // story. Below its own height the lozenge is a squashed disc, so
-                // that height is the floor.
+                // Any nonzero fraction, however small, still shows a mark. Below
+                // its own height the lozenge is a squashed disc, so that height is
+                // the floor.
                 let filled = fraction > 0 ? max(Self.height, raw) : 0
                 ZStack(alignment: .leading) {
                     Self.groove
@@ -1914,7 +1904,7 @@ final class ModelDetailPanel {
 /// The catalog every picker reads: what each provider serves, which of those models
 /// survive the fold, and which providers are callable at all.
 ///
-/// It's a session-wide store rather than per-view state because the picker now has two
+/// It's a session-wide store rather than per-view state because the picker has two
 /// front doors — the settings chip and the panel's ⌘⇧I summon — and a per-view cache
 /// would re-fetch (and re-fold) the whole catalog for each of them.
 @MainActor
@@ -2240,8 +2230,7 @@ final class ModelCatalogStore: ObservableObject {
     ///    actually serves — so an 80-id `/v1/models` dump (embeddings, TTS, whisper…)
     ///    collapses to the handful of chat models we vouch for.
     ///
-    /// Everything outside this set still exists in the list — it just lives behind the
-    /// picker's "Show all N models" row, and search always reaches it.
+    /// Everything outside this set still exists in the list, after the shortlist.
     private func shortlistIDs(for p: Provider, infos: [ModelInfo], hasKey: Bool) -> Set<String> {
         guard hasKey else { return Set([infos.first?.id].compactMap { $0 }) }
         if let featured = featuredByProvider[p], !featured.isEmpty {
@@ -2274,9 +2263,8 @@ final class ModelCatalogStore: ObservableObject {
     /// **Newest first** — the order every model list in the app is drawn in.
     ///
     /// A vendor's catalog arrives in whatever order its API felt like (roughly
-    /// alphabetical for most, insertion order for others), which is why the picker
-    /// used to read as a jumble: `gpt-5.4-nano` above `gpt-5.6`, three generations
-    /// interleaved. The vendor's own `created` timestamp is the one signal that says
+    /// alphabetical for most, insertion order for others): `gpt-5.4-nano` above
+    /// `gpt-5.6`, three generations interleaved. The vendor's own `created` timestamp is the one signal that says
     /// which model is the current one, and it keeps working without a manifest edit.
     ///
     /// Two riders on the date: a preview / experimental build never outranks a
@@ -2306,10 +2294,7 @@ final class ModelCatalogStore: ObservableObject {
 
     /// A row's title. Claude Code's ids are the CLI's rolling aliases, so a row
     /// would otherwise read "Opus" — a family, not a model; once the probe has
-    /// landed it names the concrete model the alias runs ("Claude Opus 5"). The
-    /// account-default sentinel that used to head that list ("claude", shown as
-    /// "Default · …") is gone — it was a twin of whichever alias it resolved to,
-    /// and "Default" names nothing you can point at.
+    /// landed it names the concrete model the alias runs ("Claude Opus 5").
     private func title(for info: ModelInfo, provider p: Provider) -> String {
         if info.id.isEmpty { return L("model.picker.default") }
         // Blend's name is written here, not read off the gateway's catalog, so
@@ -2373,10 +2358,9 @@ final class ModelCatalogStore: ObservableObject {
             }
         }
         let short = shortlistIDs(for: p, infos: infos, hasKey: hasKey)
-        // Shortlisted models lead their provider's block (the menu splits the block
-        // there — picks above, "More models" below), and **within each half the
+        // Shortlisted models lead their provider's block, and **within each half the
         // newest model is first** (`newerFirst`). The vendor's own catalog order is
-        // only the last tiebreak now.
+        // only the last tiebreak.
         let ordered = infos.enumerated().sorted { a, b in
             let af = short.contains(a.element.id), bf = short.contains(b.element.id)
             if af != bf { return af }
@@ -2400,9 +2384,7 @@ final class ModelCatalogStore: ObservableObject {
                 displayName: title(for: info, provider: p)))
         }
         // The logo gate can zero out a whole provider's shortlist — a gateway fronting
-        // vendors we ship no mark for. Now that the fold has no "show all" escape
-        // hatch, that would strand the provider behind search, so its first row rides
-        // regardless.
+        // vendors we ship no mark for, so its first row rides regardless.
         if hasKey, !block.contains(where: \.featured), let first = block.first {
             block[0] = PickerModel(provider: first.provider, providerName: first.providerName,
                                    hasKey: true, featured: true, info: first.info,
@@ -3428,22 +3410,20 @@ struct AgentModelPickerView: View {
     /// The card's content width — a FIXED constant, deliberately not derived
     /// from the armed engine's rows. Deriving it meant the card resized on every
     /// engine flip (a short fleet shrank it, a long id grew it) and the rows
-    /// slid out from under the pointer mid-switch — the same class of jump the
-    /// fixed four-row list window already fixed vertically. So width is pinned
+    /// slid out from under the pointer mid-switch. So width is pinned
     /// to the narrow end: names longer than it truncate (`MenuCardRow` is
     /// `lineLimit(1)` + tail), which is the right trade for a card that hangs
     /// off the notch and carries two- or three-token model names.
     private var cardWidth: CGFloat { Self.fixedWidth }
 
-    /// The one width every engine draws at — the old design's floor. It fits the
+    /// The one width every engine draws at. It fits the
     /// engine caption ("Command Code") and the model names that exist; anything
     /// past it was only ever a vendor id spending width it hadn't earned. Shared
     /// with the Ask menu, which caps itself here.
     private static let fixedWidth: CGFloat = MenuCard.pickerWidth
 
     /// The armed engine's whole fleet. The other engine's sits behind its mark in
-    /// the bottom bar — half the content of the old mixed list, and the rows can
-    /// stay bare names.
+    /// the bottom bar, so the rows can stay bare names.
     private var allEngineChoices: [AgentModelChoice] {
         choices.filter { $0.engine == selectedEngine }
     }
@@ -3499,7 +3479,7 @@ struct AgentModelPickerView: View {
         return s.recent + s.other
     }
 
-    /// How many rows the recents section holds. Two rows past the list's own
+    /// How many rows the recents section holds. Twice the list's own
     /// four-row window, so the section is worth scrolling into but can never
     /// become the whole list on a big catalog.
     private static let recentRows = 8
@@ -3572,26 +3552,25 @@ struct AgentModelPickerView: View {
 
     /// The list window is AT MOST four rows: the fleet's own height while it is
     /// shorter, four rows and a scroll once it is longer — the same rule the Ask
-    /// recents card uses. It was four rows flat for every engine, to stop the card
-    /// resizing on an engine flip, but that made Grok's single model sit on three
-    /// rows of air, and it never bought what it claimed: the card already changes
-    /// height on a flip, because the effort ladder is drawn only for models that
-    /// have rungs. What keeps a flip from throwing the rows around is the anchor,
-    /// not a frozen height — the card hangs from its top edge, so the list stays
-    /// where it is and only the ladder and the engine row below it move.
+    /// recents card uses. Not four rows flat: that would sit a single-model fleet
+    /// on rows of air, and the card changes height on a flip anyway (the effort
+    /// ladder is drawn only for models that have rungs). What keeps a flip from
+    /// throwing the rows around is the anchor — the card hangs from its top edge,
+    /// so the list stays where it is and only the ladder and the engine row below
+    /// it move.
     private static let listRows = MenuCard.pickerListRows
-    /// How deep the list dissolves at whichever edge is actually mid-scroll. At
-    /// the old 6pt (the card's own padding) the taper was a sliver — rows ended
-    /// on what read as a hard cut. Two thirds of a row is enough to see a row go.
-    /// Rows are a fixed height at fixed spacing, so the height is pure arithmetic —
-    /// DEMANDED explicitly rather than `.frame(maxHeight:)`, because a flexible
-    /// ScrollView inside an NSPopover just accepts whatever height the popover
-    /// last proposed and clips.
+    /// How deep the list dissolves at whichever edge is actually mid-scroll —
+    /// two thirds of a row, enough to see a row go instead of a hard cut.
     private static let edgeFade: CGFloat = 18
 
     /// The window the rows are drawn in: the four-row cap, or the content when it
     /// is shorter. Measured from the unfiltered fleet, so the card keeps its
     /// size while a query narrows the list.
+    ///
+    /// Rows are a fixed height at fixed spacing, so the height is pure arithmetic —
+    /// DEMANDED explicitly rather than `.frame(maxHeight:)`, because a flexible
+    /// ScrollView inside an NSPopover just accepts whatever height the popover
+    /// last proposed and clips.
     private var listHeight: CGFloat {
         let recent = recentChoices.count, all = allEngineChoices.count
         let full = CGFloat(max(1, all)) * MenuCard.pickerRowStride - MenuCard.rowSpacing
@@ -3630,7 +3609,7 @@ struct AgentModelPickerView: View {
                 ScrollView(showsIndicators: false) {
                     VStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
                         // Only the armed engine's models — the other engine is one
-                        // tap away in the engine switch above, so the rows stay
+                        // tap away in the engine switch below, so the rows stay
                         // bare names. The ones this engine actually gets run with
                         // lead; the rest of its catalog follows under a rule.
                         ForEach(rows.recent, id: \.self, content: modelRow)
@@ -3677,9 +3656,7 @@ struct AgentModelPickerView: View {
                 }
                 // The shared dissolve (`scrollEdgeFade`) at both overflow edges instead
                 // of a hard cut. Gated on actual overflow — a short engine list sizes
-                // to content, and fading it would dim real rows. The feather is the
-                // runway's depth, so a row is either standing in the window or on its
-                // way out through it — never half-dimmed at rest.
+                // to content, and fading it would dim real rows.
                 .scrollEdgeFade(top: scrolledOffTop, bottom: scrolledOffBottom,
                                 fade: Self.edgeFade)
                 .frame(height: listHeight)
@@ -3878,8 +3855,7 @@ struct AgentModelPickerView: View {
             // footnote naming whose models these are. The chevron is the part
             // that says "this is a control", and it only has to say that once
             // the pointer is here, so it fades in with the wash. Spelled out
-            // whole, which a full row has the width for ("Command Code", not
-            // the old chip's "Cmd").
+            // whole, which a full row has the width for ("Command Code").
             HStack(spacing: 6) {
                 Text(groupTitle(for: selectedEngine))
                     .font(.sf(MenuCard.pickerFontSize, weight: .regular))
@@ -4052,8 +4028,7 @@ struct AgentModelPickerView: View {
     }
 
     /// Step the effort ±1 along the ladder. Index -1 is the CLI default (nothing lit),
-    /// so ← off the first rung lands back there — the only way out of an effort once
-    /// picked, short of clicking the lit pill.
+    /// so ← off the first rung lands back there.
     private func stepEffort(_ delta: Int) {
         let rungs = effortsMirror
         guard !rungs.isEmpty else { return }

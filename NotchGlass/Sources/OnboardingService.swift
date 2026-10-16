@@ -23,7 +23,6 @@ final class OnboardingService: ObservableObject {
     /// has run (or been skipped) — it never leads twice.
     @Published private(set) var showIntro: Bool
 
-    /// The key recording that the intro has played.
     private static let introDoneKey = "onboarding_intro_done"
 
     /// The keys the previous (guided, multi-step) first run wrote. Either one
@@ -46,8 +45,6 @@ final class OnboardingService: ObservableObject {
     /// without a rebuild via either:
     ///   · `defaults write com.notchglass.app onboarding_always_show -bool YES`
     ///   · launching with the `NOTCH_ONBOARDING_ALWAYS=1` environment variable
-    /// (Set the default back to NO / unset the env var to restore normal
-    /// once-ever behaviour.)
     static let alwaysShowKey = "onboarding_always_show"
     static var alwaysShow: Bool {
         if let env = ProcessInfo.processInfo.environment["NOTCH_ONBOARDING_ALWAYS"],

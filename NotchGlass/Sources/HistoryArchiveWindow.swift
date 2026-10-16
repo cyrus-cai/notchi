@@ -244,10 +244,9 @@ private struct HistoryArchiveView: View {
     }
 
     var body: some View {
-        // ONE filter pass per render. The filter walks the whole archive — which
-        // is unbounded — and as a computed property it used to re-run for every
-        // access in a single evaluation (the empty check, the list's rows, the
-        // header's count), tripling the per-keystroke cost of the search field.
+        // ONE filter pass per render: the filter walks the whole (unbounded)
+        // archive, and reading the computed property at each use (the empty check,
+        // the rows, the header's count) would triple the per-keystroke cost.
         let items = filteredItems
         return HSplitView {
             master(items: items)
@@ -462,9 +461,9 @@ private struct HistoryArchiveView: View {
     }
 }
 
-/// One source-filter pill in the master header — the same Liquid Glass chip family
-/// as the notch's `ManageFilterChip`: plain glass that brightens on hover, wearing
-/// its source's tint when active. Tapping toggles the filter.
+/// One source-filter pill in the master header — the notch's Liquid Glass chip
+/// family: plain glass that brightens on hover, wearing its source's tint when
+/// active. Tapping toggles the filter.
 private struct HistoryFilterPill: View {
     let title: String
     let active: Bool

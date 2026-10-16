@@ -7,8 +7,7 @@ import SwiftUI
 enum Tokens {
     /// Base "ink" for all text — a clean near-white. The idle prompt and labels
     /// live in the *upper, dark* part of the panel, so the scale is kept bright:
-    /// opacity-on-dark below ~0.7 turns to muddy gray (the washed-out look we're
-    /// fixing). Every level derives from this one ink so the text reads as one
+    /// opacity-on-dark below ~0.7 turns to muddy gray. Every level derives from this one ink so the text reads as one
     /// family, but no level drops so far that it greys out against the glass.
     static let ink = Color.white
 
@@ -31,10 +30,8 @@ enum Tokens {
     // `glassCapsule` instead; that's a different, translucent species.)
     //
     // Two states, one recipe: a faint white floor with a hairline rim at rest,
-    // both lifting together when the control is hovered/focused. Every site used
-    // to carry its own hand-picked pair (0.05/0.06 floors, 0.10/0.12/0.16 rims,
-    // 0.20/0.22/0.24 lit rims) — near-identical numbers that read as drift, not
-    // as intent. Route new recessed controls through `recessedSurface`.
+    // both lifting together when the control is hovered/focused. Route new
+    // recessed controls through `recessedSurface` rather than hand-picking a pair.
     static let recessFill    = Color.white.opacity(0.06)
     static let recessFillLit = Color.white.opacity(0.10)
     static let recessRim     = Color.white.opacity(0.12)
@@ -42,8 +39,7 @@ enum Tokens {
 
     /// The same surface one step louder, for the *primary* action of a screen —
     /// the onboarding's Next/Ask, Settings' "Connect OpenRouter". One rung above
-    /// the recessed rest so the eye lands on it first, and — unlike before — it
-    /// still answers a hover, which those two buttons alone in the app did not.
+    /// the recessed rest so the eye lands on it first; it still answers a hover.
     static let prominentFill    = Color.white.opacity(0.12)
     static let prominentFillLit = Color.white.opacity(0.18)
     static let prominentRim     = Color.white.opacity(0.22)
@@ -56,8 +52,7 @@ enum Tokens {
     /// The faster twin, for *list rows* — Recent, the archive, the settings
     /// sidebar, the model pickers. A cursor sweeping a list crosses several rows a
     /// second, so the wash has to keep up; at chip speed it smears behind the
-    /// pointer. (These two used to be five values between 0.12 and 0.18, assigned
-    /// per-site rather than per-species.)
+    /// pointer.
     static let rowFade: TimeInterval = 0.12
     /// Cards fanning out of — or gathering back into — a stack, the way a
     /// Notification Center group opens. Springy enough that the pile reads as
@@ -409,8 +404,8 @@ extension View {
 /// radii scale off `lineWidth` so a 30pt capsule and a 22pt-radius card each get
 /// a rim proportional to themselves.
 ///
-/// It does not move. An earlier version rotated the sweep, which read as a stripe
-/// travelling across the panel rather than as light in an edge.
+/// It does not move: a rotating sweep reads as a stripe travelling across the
+/// panel rather than as light in an edge.
 struct BrandAura<S: InsettableShape>: View {
     var shape: S
     var lineWidth: CGFloat = 1
@@ -469,10 +464,6 @@ extension View {
     /// (FEATURES / FIXES, the model picker's provider groups). Caption size,
     /// semibold, tracked out — quiet enough to label without competing with
     /// the content it sits over.
-    ///
-    /// Four surfaces used to spell this out by hand and had drifted to 10/0.8 in
-    /// three of them and 9.5/0.7 in the fourth — a difference nobody chose and
-    /// nobody can see, which is exactly how a register stops being a register.
     ///
     /// `color` exists for the one caller whose captions are also a CONTROL — the
     /// template picker's category tabs, where the selected group has to read as
@@ -549,12 +540,10 @@ struct NotchMetrics {
     /// is one, the drawing constant only on notch-less screens (there the island
     /// *is* the notch, so the constant defines it).
     ///
-    /// It used to be `Tokens.notchWidth` (192) everywhere, overhanging the real
-    /// 185pt cutout by ~3.5pt per side. Those points land on live screen, and the
-    /// island's straight side edges painted them black — covering the hardware's
-    /// own curved shoulders, so the notch ended in a hard vertical cut instead of
-    /// the rounded transition macOS draws. Drawn at the cutout's exact width the
-    /// resting island sits entirely *inside* it and the transition survives.
+    /// Not `Tokens.notchWidth` (192): that overhangs the real 185pt cutout, and
+    /// the island's straight side edges then paint over the hardware's curved
+    /// shoulders. At the cutout's exact width the resting island sits entirely
+    /// *inside* it and the rounded transition survives.
     var restWidth: CGFloat { hardwareNotchWidth ?? Tokens.notchWidth }
 }
 
@@ -679,10 +668,7 @@ extension View {
 /// band: the mask is fully opaque at the very top and tapers to clear at the
 /// band's lower edge, so the frost reads as deepening upward — the look of rows
 /// dissolving *behind* the floating input header — while the un-blurred original
-/// shows through below. (An earlier version stacked four blurred copies for a
-/// stepped ramp; that rebuilt the whole up-to-50-row list four times per edge on
-/// every open and was the multi-second click-to-expand stall. The gradient mask
-/// already carries the ramp, so the single flattened copy reads the same.)
+/// shows through below.
 ///
 /// This is the partner to `ScrollEdgeFade`: that mask handles *opacity* (rows
 /// thin out toward the top), this handles *focus* (rows frost out toward the
@@ -702,17 +688,14 @@ extension View {
 /// the floating input — and tapers fully to clear before it touches the first row's
 /// resting position. At idle no row is inside the band, so nothing white is sampled
 /// into a blurred copy and there is no halo. As the user scrolls, rows travel up
-/// into the runway band and frost on the way out — which is the whole point. The
-/// earlier bug was a band (`immersiveBlurReach = 130` over a 320pt viewport) that
-/// reached ~140pt down, well past the first row at ~84pt, so the light-grey glyphs
-/// (`Tokens.text2`, white@0.74) blurred at radius 26 stacked into a bright text-shaped
-/// wash parked behind the top rows. Keep the band's deepest reach short of the
-/// runway height; see `immersiveBlurReach` for the exact budget.
+/// into the runway band and frost on the way out — which is the whole point. Keep
+/// the band's deepest reach short of the runway height; see `immersiveBlurReach`
+/// for the exact budget.
 struct ProgressiveTopBlur: ViewModifier {
     /// Height of the blur band, in points, measured from the top edge down.
     /// Below this the content is fully sharp.
     var height: CGFloat
-    /// Peak blur radius at the very top edge. Each layer steps up toward this.
+    /// Peak blur radius at the very top edge.
     var maxRadius: CGFloat = 7
 
     func body(content: Content) -> some View {
@@ -727,16 +710,10 @@ struct ProgressiveTopBlur: ViewModifier {
                 // The blur band as a fraction of the view height, clamped so it
                 // never swallows the whole region on a short view.
                 let band = min(height / h, 0.9)
-                // ONE blurred copy, not a stack of four. The earlier version
-                // re-rendered the entire (up-to-50-row) `content` four times — a
-                // ForEach(0..<4) where each iteration built, laid out and blurred the
-                // whole list. That 4× tree build landed on the main thread the instant
-                // the immersive list mounted (plus a matching 4× in the bottom mirror =
-                // 8 full-list renders per open), which is what stalled the click-to-
-                // expand for seconds on a long history. The smooth top-deepening ramp
-                // is already carried by the gradient MASK below, so a single uniform
-                // blur masked by that ramp reads the same as the stepped stack at a
-                // quarter of the cost. `.drawingGroup()` flattens this one copy into a
+                // ONE blurred copy: every copy rebuilds the whole list on the main
+                // thread at mount, and a stack of them stalled click-to-expand on a
+                // long history. The gradient MASK below carries the ramp, so a single
+                // uniform blur reads the same. `.drawingGroup()` flattens this copy into a
                 // single Metal texture so the blur runs on a cached raster (constant
                 // cost, independent of row count) rather than re-rasterizing the live
                 // tree every frame — safe here because this overlay copy never
@@ -900,8 +877,8 @@ extension View {
 /// The bottom-edge mirror of `ProgressiveTopBlur`: a variable blur on the BOTTOM
 /// band — sharp above, blurring harder the closer a pixel sits to the bottom edge.
 /// Used so rows scrolling DOWN into the runway behind the floating manage bar frost
-/// out the same way rows scrolling UP behind the input do. Same stacked-layer
-/// approximation, just with the gradient flipped (strongest layer hugs the bottom).
+/// out the same way rows scrolling UP behind the input do. Same single-copy
+/// approximation, just with the gradient flipped.
 ///
 /// **The band must end BELOW the last resting row**, or its blurred glyphs halo —
 /// the same rule as the top, mirrored: the band reaches only across the bottom
@@ -912,14 +889,12 @@ struct ProgressiveBottomBlur: ViewModifier {
     /// Height of the blur band, in points, measured from the bottom edge up.
     /// Above this the content is fully sharp.
     var height: CGFloat
-    /// Peak blur radius at the very bottom edge. Each layer steps up toward this.
+    /// Peak blur radius at the very bottom edge.
     var maxRadius: CGFloat = 7
 
     func body(content: Content) -> some View {
         // Mirror of `ProgressiveTopBlur`: ONE flattened blurred copy, gradient-masked
-        // to the bottom band, not a four-deep stack. See the top variant for why the
-        // 4× full-list re-render was the click-to-expand stall and why a single
-        // `.drawingGroup()`-rasterized blur reads identically here.
+        // to the bottom band. See the top variant for why.
         content.overlay(
             GeometryReader { geo in
                 let h = max(geo.size.height, 1)
@@ -1078,16 +1053,11 @@ extension View {
 /// `notchTooltip(_:)` on a control only publishes "here is my rectangle, here is
 /// my text".
 ///
-/// That split is the fix for the capsule that kept getting sliced at the panel's
-/// left and right edge. Earlier versions drew the capsule inside the control's
-/// own subtree and tried to work out, from down there, how much room was left:
-/// they recovered an ancestor's bounds through a named coordinate space or an
-/// environment value (either can arrive a frame late, or not at all), guessed
-/// whether an enclosing ScrollView was the thing really clipping it, and
-/// pre-measured the capsule in a hidden twin so the first frame landed clamped.
-/// Any one of those going wrong drew the capsule outside the clip and the glass
-/// cut it in half — which is why the bug came back each time from a new
-/// direction.
+/// That split keeps the capsule from being sliced at the panel's edges. Drawn
+/// inside the control's own subtree, it has to guess from down there how much
+/// room is left (an ancestor's bounds can arrive a frame late, an enclosing
+/// ScrollView may be what clips it), and any wrong guess lets the glass cut it
+/// in half.
 ///
 /// Three things keep this version honest:
 ///
@@ -1098,7 +1068,7 @@ extension View {
 ///   next layout pass simply resolves somewhere else;
 /// - the layer is a SIBLING of the clipped content, not a descendant, so neither
 ///   the island's shape nor any ScrollView can chop it. A clamp that is off by a
-///   few points now reads as slightly off-centre instead of losing half the text;
+///   few points reads as slightly off-centre instead of losing half the text;
 /// - the capsule is placed with `alignmentGuide`, which hands the layer the
 ///   capsule's real laid-out size DURING the same pass that positions it — no
 ///   measure-then-place round trip, so the first frame is already in place.
@@ -1208,9 +1178,7 @@ private struct TooltipLayerView: View {
 /// It answers ONE question — does this text still fit on a single line between
 /// the walls — so a fraction of a point of disagreement with SwiftUI's own
 /// layout is harmless: either answer looks right, and the capsule is placed from
-/// its real size regardless. That is the whole reason the old hidden measuring
-/// twins are gone: they existed to feed the POSITION, and a stale measurement
-/// there put the capsule off the edge.
+/// its real size regardless — this never feeds the POSITION.
 @MainActor
 private enum TooltipTextMetrics {
     private static var cache: [String: CGFloat] = [:]
@@ -1305,7 +1273,7 @@ extension Notification.Name {
 /// Counts the macOS permission prompts Notchi has raised and not yet seen
 /// answered (Calendar, Reminders, Contacts, Photos, Location, Notifications,
 /// Automation). The prompt is a system window outside the island, so moving the
-/// pointer to it reads as leaving, and the panel used to fold while the user was
+/// pointer to it reads as leaving and would fold the panel while the user is
 /// answering. While `open`, the leave-fold stands down; on the way back to zero
 /// `.permissionPromptEnded` re-runs the leave check.
 ///
@@ -1525,12 +1493,12 @@ private struct TooltipClickDismiss: NSViewRepresentable {
 /// below) so the wafer refracts what's behind it, plus the two touches that make
 /// glass read as glass instead of a painted board — a top-down sheen and a
 /// directional specular rim, bright along the top edge and fading down the sides.
-/// Same recipe as `GlassCard` / `glassCapsule`; don't hand-roll a third one.
+/// Same recipe as `glassCapsule`; don't hand-roll another one.
 ///
 /// The veil over the glass is deliberate, not a leftover. Bare `.clear` glass
 /// composites to only ~0.34 and 11pt text sitting on arbitrary wallpaper or body
-/// copy goes to mud; 0.30 over the 0.34 baked tint lands ≈0.54 — a touch airier
-/// than the old flat 0.62 while still occluding enough to stay legible.
+/// copy goes to mud; 0.30 over the 0.34 baked tint lands ≈0.54 — airy while
+/// still occluding enough to stay legible.
 private struct TooltipLabel: View {
     let text: String
     /// An exact capsule width for a tip that has to wrap, or `nil` for the

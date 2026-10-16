@@ -4,13 +4,13 @@ import Foundation
 /// CLI** (`cmd -p --output-format json`) and streams its answer back — the
 /// commandcode.ai twin of `CodexCLIService` / `ClaudeCLIService` / `GrokCLIService`.
 ///
-/// Like the other three, Command Code carries **no API key of ours**: it reuses the
+/// Like the other CLI backends, Command Code carries **no API key of ours**: it reuses the
 /// sign-in the user already did (`cmd login` → browser OAuth, key cached in
 /// `~/.commandcode/auth.json`), or the `COMMAND_CODE_API_KEY` env var if they set
 /// one. Usage bills against the user's own Command Code plan — the whole point of a
 /// "use the CLI I already pay for" backend.
 ///
-/// What makes it different from its three siblings: Command Code is an **aggregator**
+/// What makes it different from its siblings: Command Code is an **aggregator**
 /// (one account fronts ~50 models across Anthropic / OpenAI / Google / xAI / Qwen /
 /// Kimi / GLM / DeepSeek / …), so its model list is the interesting surface, not a
 /// single vendor's lineup. That list comes from the CLI itself — `cmd --list-models`
@@ -112,12 +112,10 @@ struct CommandCodeCLIService: AIService {
     /// The resolved binary **without ever waiting**: the answer if the resolution has
     /// already landed, else `nil` (and a warm-up kicked off), never a block.
     ///
-    /// This is the render-safe read, and it exists because "warm it up off-main" does
-    /// not on its own keep the main thread out of the resolution — it only moves who
-    /// holds `resolveLock`. `probeModels` runs `cmd --list-models`, a Node CLI cold
-    /// start of ~2s; a `body` that called `resolveBinary()` while that was in flight
-    /// sat on the mutex for the whole spawn. That is exactly the first hover after a
-    /// relaunch, and it read as the notch refusing to open.
+    /// This is the render-safe read: warming up off-main only moves who holds
+    /// `resolveLock`, so a `body` calling `resolveBinary()` during the launch probe
+    /// (`cmd --list-models`, seconds long) would block the first hover after a
+    /// relaunch for the whole spawn.
     static func resolvedBinaryIfReady() -> String? {
         guard !isRetired else { return nil }
         // Last launch's answer, if it's still on disk — a `UserDefaults` read and one
@@ -176,16 +174,11 @@ struct CommandCodeCLIService: AIService {
 
     // MARK: - Remembering the last launch's answer
 
-    /// Where the previous launch's resolution lives. Command Code is the one CLI
-    /// backend whose vetting spawn is expensive: its siblings answer `--version` in
-    /// under half a second, while `cmd --list-models` takes **8-11 seconds** on a
-    /// normal machine (it is network-bound, not CPU-bound — node itself boots in
-    /// 70ms). Everything is derived from that one spawn — is the engine available,
-    /// what models does it serve — so with an in-memory-only cache EVERY launch had a
-    /// ten-second window where Command Code read as unconfigured: the engine missing
-    /// from the agent picker's list, its chip falling back to the bare engine name.
-    /// That window is what these keys close: the answer is written to disk and read
-    /// back at the next launch before anything renders.
+    /// Where the previous launch's resolution lives. The vetting spawn,
+    /// `cmd --list-models`, takes **8-11 seconds** (network-bound) and answers both
+    /// "is it available" and "which models", so without a disk copy every launch
+    /// would show Command Code as unconfigured for that long. The answer is written
+    /// here and read back at the next launch before anything renders.
     private static let storedPathKey = "commandCode.binaryPath"
     private static let storedCatalogKey = "commandCode.catalog"
     private static let storedFingerprintKey = "commandCode.catalog.fingerprint"

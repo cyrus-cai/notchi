@@ -200,8 +200,7 @@ private final class DetachedWindow: NSWindow {
     /// card's content is one `NSHostingView`, which answers
     /// `mouseDownCanMoveWindow = true` for every point SwiftUI merely draws, so
     /// the window server claimed those presses for its own background drag and
-    /// then moved nothing. The same mechanism made the earlier grab view
-    /// (`WindowDragArea`, now gone) carve two dead strips instead of a handle.
+    /// then moved nothing.
     ///
     /// So the move is explicit: the press is watched here, and once it travels,
     /// the window follows the pointer by hand. Nothing about it depends on which
@@ -211,13 +210,10 @@ private final class DetachedWindow: NSWindow {
     /// borderless window that isn't opaque gets an INPUT REGION, and a press
     /// outside it is routed to whatever app is behind the window — the app never
     /// hears about it. A view that opts out of SwiftUI hit testing is left out of
-    /// that region no matter how solidly it draws, which is what a
-    /// `.allowsHitTesting(false)` on the card's own glass cost: the card was a
-    /// hole everywhere except its input recess and the rows' focus proxies, so it
-    /// could be picked up by the input line and nowhere else. Measured, on this
-    /// exact window shape: glass + 30% black, opted out → the press goes to the
-    /// app behind; the same pixels left hit-testable → the press arrives. The
-    /// glass is the card's surface; it takes the press.
+    /// that region no matter how solidly it draws — so a
+    /// `.allowsHitTesting(false)` on the card's own glass would turn the card into
+    /// a hole the press falls through. The glass is the card's surface; it takes
+    /// the press.
     override func sendEvent(_ event: NSEvent) {
         switch event.type {
         case .leftMouseDown:
@@ -593,15 +589,15 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
 
     /// A selection that only answered after its composer was already standing.
     ///
-    /// The composer no longer waits for the accessibility read: the first,
+    /// The composer does not wait for the accessibility read: the first,
     /// synchronous pass answers instantly for a native app, and when it comes
     /// back empty the box opens anyway while a browser's web tree is still being
     /// woken up (`SelectedTextCapture.current(firstPassEmpty:completion:)`). This
     /// is where that late text lands.
     ///
-    /// It only ever ADDS context. A window the user has already sent, or one
-    /// whose badge they dropped, is left exactly as it is — a late arrival must
-    /// never overwrite what someone did in the meantime.
+    /// It only ever ADDS context. A window the user has already sent is left
+    /// exactly as it is — a late arrival must never overwrite what someone did
+    /// in the meantime.
     static func attachCompactSelection(shortcutID: UUID, text: String) {
         guard !text.isEmpty,
               let c = controllers.first(where: { $0.compactShortcutID == shortcutID }),
@@ -629,11 +625,9 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
     /// geometry, drawing nothing but its own input capsule's rounded left cap.
     ///
     /// This is the one-glass rule (see `ForceClickHerald`). The press is not a
-    /// stand-in that later hands over to a window — it IS this window, small. The
-    /// cue and the composer were two `.clear` glass surfaces before, and glass
-    /// multiplies: every frame where both stood measured more than twice as dark as
-    /// either alone, which is exactly the "opens opaque, then turns into glass"
-    /// this replaces.
+    /// stand-in that later hands over to a window — it IS this window, small. Two
+    /// `.clear` glass surfaces (cue + composer) would multiply: every frame where
+    /// both stood reads more than twice as dark as either alone.
     static func beginPressureComposer(shortcutID: UUID, model: NotchModel,
                                       at pointer: NSPoint)
         -> DetachedSessionWindowController? {
@@ -714,8 +708,8 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
     }
 
     /// The press fired: the cap springs out to the capsule's full width and the
-    /// window stops being a cue. One surface, one spring — the composer's field and
-    /// badge arrive *inside* a shape that is already standing there.
+    /// window stops being a cue. One surface, one spring — the composer's field
+    /// arrives *inside* a shape that is already standing there.
     func openFromPressure() {
         guard isDrawingPressure, let window else { return }
         // Hand the shape back to SwiftUI at its true size before stretching it: the
@@ -935,11 +929,9 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
         // Enter opens the capsule into the waiting card, once, and the window
         // then holds there for the whole wait — the answer's arrival grows it
         // from that floor in one continuous glide (`resizeCompactThread`).
-        //
-        // It used to freeze at exactly the capsule's height so Enter moved
-        // nothing at all. That only worked while the answer face was a bare
-        // slab: it now carries the same header and follow-up line every other
-        // detached thread does, and a capsule-height window would clip both.
+        // It can't stay at the capsule's height: the answer face carries the
+        // same header and follow-up line every other detached thread does, and
+        // a capsule-height window would clip both.
         //
         // That growth is GLIDED, not set: a hard `setFrame` from the one-line
         // capsule to the waiting card is a cut, and a cut is what makes the card
@@ -959,11 +951,10 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
         compactFloorHeight = max(composerHeightWithoutLedger(),
                                  Self.compactWaitingHeight)
         // The box the user typed in opens DOWNWARD and nothing else: same width,
-        // same top edge, same left edge. It used to widen to the answer's
-        // reading box (`compactWidth`) on the way, which moved the trailing edge
-        // — and, at a screen edge, the whole window — out from under the line
-        // the user had just pressed Enter on. One axis moves, and it is the one
-        // the answer is arriving on.
+        // same top edge, same left edge. Widening to the answer's reading box
+        // (`compactWidth`) would move the trailing edge — and, at a screen edge,
+        // the whole window — out from under the line the user had just pressed
+        // Enter on. One axis moves, and it is the one the answer is arriving on.
         resizeCompactThread(to: compactFloorHeight, reset: true, animated: true)
     }
 
@@ -1032,13 +1023,10 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
         // it is one line, and the ledger below it is the same rows it always had —
         // so it lands there in ONE set and the cross-fade carries the change.
         //
-        // Routed through the disclosure's reveal mask (what it used to do), the
-        // return settled its top TWICE: the mask is top-anchored and holds the
-        // window at the ANSWER's height for the whole collapse, laying the
-        // composer out inside that tall frame, and the face then re-measured
-        // itself on mount — a second, un-animated height report that cancelled the
-        // reveal mid-flight and hard-set the frame. That is the jump-and-return
-        // on the way back.
+        // Not through the disclosure's reveal mask: that mask is top-anchored and
+        // holds the window at the ANSWER's height for the whole collapse, and the
+        // face's own re-measure on mount then cancels the reveal mid-flight and
+        // hard-sets the frame — a visible jump-and-return.
         let hasSelection = !state.compactSourceText
             .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         resizeCompactThread(
@@ -1072,12 +1060,10 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
         // would have SwiftUI spring the whole face's layout to meet it.
         state.session = .thread(id: threadID)
         // A saved thread is already written, so the window knows how tall it has
-        // to be before the face mounts — open it AT that height in one move. It
-        // used to open at the waiting card's floor and let the mounted view grow
-        // it back out, which took the disclosure's own 0.7s reveal to hand the
-        // answer over (the visible "a beat late"), and a longer answer's growth
-        // landed mid-reveal only to be shrunk away again by that reveal's
-        // completion — leaving a window too short to show the answer at all.
+        // to be before the face mounts — open it AT that height in one move.
+        // Opening at the waiting card's floor and growing would hand the answer
+        // over a beat late, and a longer answer's growth could be shrunk away by
+        // the reveal's completion.
         //
         // And it lands in ONE set, not through the disclosure's reveal mask. That
         // mask is top-anchored: while it runs, the card is laid out at the OLD
@@ -1158,7 +1144,7 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
             ?? NSScreen.screens.first(where: { $0.frame.intersects(frame) })?.visibleFrame
             ?? NSScreen.main?.visibleFrame
         let screenCap = visible.map { $0.height * 0.65 } ?? Self.compactMaxHeight
-        // The bare composer is exactly as tall as its badge + capsule — far
+        // The bare composer is exactly as tall as its band + card — far
         // shorter than any answer, and it must SHRINK again when a wrapped draft
         // is deleted, so it takes neither the answer floor nor the growth-only
         // hysteresis below.
@@ -1209,9 +1195,8 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
         // card to its own animating height and commits its target frame when it
         // finishes. Gliding underneath it draws the extra height behind that mask
         // and then loses it to the stale commit — and the growth-only hysteresis
-        // above never asks again, so the answer stays clipped for good (this is
-        // what left a reopened thread showing its toolbar over an empty card).
-        // Re-aim the reveal instead.
+        // above never asks again, so the answer stays clipped for good. Re-aim
+        // the reveal instead.
         if compactRevealCompletion != nil || state.compactRevealHeight != nil {
             animateCompactHeight(to: measured)
             return
@@ -1334,13 +1319,11 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
 
         DispatchQueue.main.async { [weak self] in
             guard let self, self.compactRevealGeneration == generation else { return }
-            // The commit rides the reveal's OWN completion, not a stopwatch. A
-            // fixed delay had to be padded past the underdamped spring's settle
-            // to be safe, which left the card folded and the window — its glass
-            // and its shadow — still standing at the old height for the padding,
-            // then snapping down a beat later. `.logicallyComplete` fires when the
-            // spring has reached its value rather than when its last ripple is
-            // retired, so the frame lands with the fold instead of after it.
+            // The commit rides the reveal's OWN completion, not a stopwatch: a
+            // fixed delay must be padded past the underdamped spring's settle,
+            // leaving the window standing at the old height a beat after the
+            // fold. `.logicallyComplete` fires when the spring has reached its
+            // value rather than when its last ripple is retired.
             withAnimation(revealAnimation, completionCriteria: .logicallyComplete) {
                 self.state.compactRevealHeight = targetHeight
             } completion: {
@@ -1366,7 +1349,7 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
     /// schedules SwiftUI's next update, and that update lands whole frames later.
     /// Both ways of ignoring that are visible on screen:
     ///
-    ///   · resize the window first (what this used to do) and the card is
+    ///   · resize the window first and the card is
     ///     presented at its FINAL size with no mask on it for 2-3 frames, then
     ///     snapped back to the old height for the reveal to play from — the
     ///     flash on entering an answer;
@@ -1409,10 +1392,9 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
     /// Open the window down to `height` as ONE continuous move.
     ///
     /// An answer doesn't arrive at a height, it arrives at thirty of them — a
-    /// chunk of Markdown at a time. Animating each report separately (the old
-    /// 0.18s ease-out per geometry change) restarts the deceleration on every
-    /// chunk, which is what made the expansion read as a stutter of little
-    /// lurches instead of one shot. So the target is just re-aimed while the
+    /// chunk of Markdown at a time. Animating each report separately restarts
+    /// the deceleration on every chunk, so the expansion reads as a stutter of
+    /// little lurches instead of one shot. So the target is just re-aimed while the
     /// window is already moving: a critically-damped glide chases whatever the
     /// latest target is at whatever speed it currently has, and stops once —
     /// when the answer stops growing.
@@ -1472,12 +1454,8 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
     /// ONE width for every pointer-side window: the box the user types in, and
     /// the answer it becomes — a prompt shortcut firing straight into a card
     /// included. They are the same window, so they are the same width.
-    ///
-    /// It used to be two numbers, 330 for the composer and 410 for the answer,
-    /// with Enter widening the box between them. 410 is wider than a card
-    /// summoned at the pointer wants to be, 330 is tight for prose, and the
-    /// widening was a moving edge under the line the user had just typed. This
-    /// sits between them.
+    /// Widening the box on Enter would move an edge under the line the user had
+    /// just typed.
     static let compactWidth: CGFloat = 350
     /// The composer is that same box before it has anything to say.
     static let composerWidth: CGFloat = compactWidth
@@ -1485,9 +1463,8 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
     /// window chrome an answered card carries (margins, header, follow-up row),
     /// its own top/bottom padding, the resting gaps the one orb row rests
     /// between, and that row. A single line never scrolls, so it wears the
-    /// resting rhythm rather than the runways (`DetachedThreadView`) — budgeting
-    /// two 28pt runways for it opened the wait 38pt taller than the card it
-    /// becomes and left the orb floating in the middle of an empty box.
+    /// resting rhythm rather than the runways (`DetachedThreadView`), which
+    /// would open the wait taller than the card it becomes.
     private static let compactInitialHeight: CGFloat =
         CompactShortcutMetrics.answerChrome
             + DetachedThreadView.compactCardPadding * 2
@@ -1502,14 +1479,13 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
             + DetachedThreadView.waitingBottomGap
     fileprivate static let compactMaxHeight: CGFloat = 520
     /// Kept at or below `compactWidth` — a compact composer opens into its
-    /// answer at its OWN width now, and a floor wider than that is a floor
+    /// answer at its OWN width, and a floor wider than that is a floor
     /// AppKit widens the window through the instant the answer face sets it.
     private static let compactMinSize = NSSize(width: 300, height: 96)
     /// The bare prompt-shortcut composer is shorter than any answer window, so
     /// it carries its own floor — the shared one would have AppKit inflate it
-    /// back into a half-empty slab the moment it's created.
-    /// Kept below `compactWidth` on BOTH axes — a floor wider than the composer
-    /// is a floor AppKit inflates it back through the moment it is created.
+    /// back into a half-empty slab the moment it's created. Kept below
+    /// `compactWidth` too, for the same reason.
     private static let compactComposerMinSize = NSSize(width: 300, height: 60)
     private static let pointerGap: CGFloat = 6
     /// The safe distance a pointer-side window keeps from every edge of its
@@ -1531,7 +1507,7 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
             // A composer is just the input: born as a slab the height of the
             // prompt row, hanging from the same top edge the panel had, instead
             // of a session-sized window three-quarters empty. The prompt-shortcut
-            // composer is shorter still — a badge over a capsule, nothing else.
+            // composer is shorter still — a band over its card, nothing else.
             let h = bareComposer
                 ? composerRestingHeight
                 : DetachedComposeView.restingHeight
@@ -1553,10 +1529,7 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
         // — which is the hosting view, i.e. all of the card's own glass — and
         // runs its background-drag itself. It then moves nothing, and the app
         // never sees the event at all (a global monitor catches those presses;
-        // `sendEvent` does not). The only pixels that stayed alive were the ones
-        // AppKit views cover — the input's recess and the two chips — which is
-        // exactly the map of what could and couldn't be grabbed: the header row's
-        // empty half, the card's padding, dead; the input capsule, fine.
+        // `sendEvent` does not). Only pixels AppKit views cover would stay alive.
         //
         // With it off, every press reaches `DetachedWindow.sendEvent`, which
         // carries the window by hand (see the note there).
@@ -1722,10 +1695,8 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
     ///
     /// Beside the pointer: its right side, flipped left when that would cross the
     /// display, with the top edge just above the cursor. A prompt shortcut firing
-    /// straight into an answer already opened here; a force click's composer used
-    /// to be placed by its CARET instead, so the box wrapped around the cursor
-    /// and the two gestures dropped their windows in visibly different places.
-    /// The shortcut's placement is the one that survived.
+    /// straight into an answer and a force click's composer both open here, so
+    /// the two gestures drop their windows in the same place.
     ///
     /// Pinning the *top* edge is what keeps it true for the rest of the window's
     /// life — every compact resize hangs off that edge (`setCompactHeight`), so
@@ -1788,14 +1759,12 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
                       height: height)
     }
 
-    /// The composer just told us where its caret really is. Remember it for the next
-    /// press (and for the pressure cue), then slide this window so the caret sits on
-    /// the pointer that summoned it — the opening estimate is corrected inside the
-    /// entrance, before there is anything to see.
+    /// The composer just told us where its caret really is. Remember it for the
+    /// next press (and for the pressure cue).
     private func alignCaret(to offset: CGPoint) {
         // Remembered, not acted on. The offset still says where the input
         // capsule sits INSIDE the window, which is what the pressure cue scales
-        // about (`drawPressure`) — but the window is no longer placed by it. It
+        // about (`drawPressure`) — but the window is not placed by it. It
         // opens beside the pointer like every other pointer-side window
         // (`pointerSideRect`), so sliding it afterwards to put the caret back
         // under the cursor would undo exactly that.
@@ -1804,7 +1773,7 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
 
     /// A window origin pulled back inside `visible`, keeping `screenMargin` clear
     /// on every edge. The single definition of "don't touch the sides" for the
-    /// pointer-side windows — placement, the caret nudge and every resize go
+    /// pointer-side windows — placement, re-anchoring and every resize go
     /// through it, so they cannot disagree about where the edge is.
     ///
     /// A display too small to hold the window with its margins keeps the leading
@@ -1823,11 +1792,10 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
     /// Where the entrance grows from: the pointer itself, expressed as a unit
     /// point in the window's own frame.
     ///
-    /// A caret-placed composer holds the pointer *inside* it, so a corner anchor
-    /// would swell the box out of a corner the user isn't looking at — it has to
-    /// open from the caret. An answer window sits beside the pointer, which is
-    /// outside its frame, so the clamp lands it on the leading or trailing edge
-    /// exactly as the old corner test did.
+    /// A window holding the pointer *inside* it swells from that point rather
+    /// than from a corner the user isn't looking at. A window beside the pointer
+    /// has it outside its frame, so the clamp lands it on the leading or
+    /// trailing edge.
     private func anchorEntrance(rect: NSRect, pointer: NSPoint) {
         guard rect.width > 0, rect.height > 0 else {
             state.entranceAnchor = .topLeading
@@ -1864,9 +1832,9 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
     /// A pointer-side window is *defined* by the pointer that summoned it, so a
     /// fresh invocation brings it to where the user is working NOW — even on the
     /// same display. Nothing closes these on focus loss: an unpinned one just
-    /// drops behind the app in front, which reads as dismissed. Re-firing it then
-    /// used to raise it back at its old spot, a screen away from the selection
-    /// that summoned it.
+    /// drops behind the app in front, which reads as dismissed. Re-firing it must
+    /// not raise it back at its old spot, a screen away from the selection that
+    /// summoned it.
     ///
     /// Two cases keep the window exactly where it is:
     ///   · it's PINNED — the tack means "keep this where I put it";
@@ -2052,19 +2020,6 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
         if state.phase == .settled { applyPinLevel() }
     }
 
-    /// The app's editable chords, answered by the window that has the keyboard.
-    /// The panel's `KeyEventCatcher` bails whenever its own window isn't key
-    /// (one catcher per screen, all of them watching the same local monitor), so
-    /// every chord the panel owns is dead inside a torn-out window unless it is
-    /// re-served here — including ⌘P, which this window's pin chip advertises in
-    /// its tooltip.
-    ///
-    /// Only the chords whose action EXISTS in this window are claimed; the rest
-    /// fall through to the system, exactly as they do over settings in the
-    /// panel. ⌘F (the recent-list filter), ⌘⇧I (the picker card), ⌘N (a fresh
-    /// chat) and ⌃⇧= (detach) all name panel-only surfaces — a detached window
-    /// has no recent list, no picker and no idle prompt, and it is already
-    /// detached — so swallowing them here would only make them fizzle.
     /// What Esc dismisses before the compact window closes: the pause chooser,
     /// then the expanded History ledger.
     private func dismissTopLayer() -> Bool {
@@ -2090,6 +2045,19 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
         return true
     }
 
+    /// The app's editable chords, answered by the window that has the keyboard.
+    /// The panel's `KeyEventCatcher` bails whenever its own window isn't key
+    /// (one catcher per screen, all of them watching the same local monitor), so
+    /// every chord the panel owns is dead inside a torn-out window unless it is
+    /// re-served here — including ⌘P, which this window's pin chip advertises in
+    /// its tooltip.
+    ///
+    /// Only the chords whose action EXISTS in this window are claimed; the rest
+    /// fall through to the system, exactly as they do over settings in the
+    /// panel. ⌘F (the recent-list filter), ⌘⇧I (the picker card), ⌘N (a fresh
+    /// chat) and ⌃⇧= (detach) all name panel-only surfaces — a detached window
+    /// has no recent list, no picker and no idle prompt, and it is already
+    /// detached — so swallowing them here would only make them fizzle.
     private func handleAppShortcut(_ event: NSEvent) -> Bool {
         // While a chord is being recorded in Shortcuts the keyboard belongs to
         // the recorder — same rule the panel's catcher opens with.
@@ -2251,14 +2219,11 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
     /// A force-click composer nobody typed into takes itself off screen the
     /// moment the keyboard leaves it.
     ///
-    /// Nothing else ever closed it. Unpinned it only *slips behind* the app in
-    /// front, which reads as gone — but it is still there, on every Space
-    /// (`.moveToActiveSpace`), and the next `NSApp.activate(ignoringOtherApps:)`
-    /// from any other part of the app raises it back over everything. A gesture
-    /// as easy to trip as a force click then leaves a trail of empty capsules
-    /// that keep reappearing, which is what `retirePointerWindows` was patching
-    /// from the far end (retire the *previous* one when a new one opens) instead
-    /// of never leaving one behind.
+    /// Unpinned it only *slips behind* the app in front, which reads as gone —
+    /// but it is still there, on every Space (`.moveToActiveSpace`), and the next
+    /// `NSApp.activate(ignoringOtherApps:)` from any other part of the app raises
+    /// it back over everything. A gesture as easy to trip as a force click would
+    /// then leave a trail of empty capsules that keep reappearing.
     ///
     /// Only the untouched composer goes. A draft, an answer, or a tack is the
     /// user's, and stays until they close it.
@@ -2304,9 +2269,9 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
         // The pointer is ON the box. Whatever took the keyboard away, the user is
         // reaching for this — picking it up, going for one of its shortcuts,
         // about to type in it. A window is never taken out from under the hand
-        // that is on it, and this is what closed the box mid-drag: the press
-        // that grabbed it also handed activation back to the app underneath, and
-        // the box read that as the keyboard leaving and dissolved.
+        // that is on it: the press that grabbed it can also hand activation back
+        // to the app underneath, which would otherwise read as the keyboard
+        // leaving.
         if let window,
            window.frame.insetBy(dx: -8, dy: -8).contains(NSEvent.mouseLocation) {
             return false
@@ -2318,10 +2283,8 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
     /// The entrance, run backwards: the face settles back toward the pointer it
     /// grew out of while the window sinks under it.
     ///
-    /// A bare alpha ramp on its own was the stiff version — the capsule arrives by
-    /// swelling out of the caret over a 0.36s spring and left by simply ceasing to
-    /// be there, on a curve half that long, with nothing moving. The shape has to
-    /// go the way it came: `state.exiting` collapses the face on its entrance
+    /// A bare alpha ramp reads stiff against an entrance that swells out of the
+    /// pointer on a spring. The shape has to go the way it came: `state.exiting` collapses the face on its entrance
     /// anchor, and the window's own alpha carries the shadow (which AppKit derives
     /// from the silhouette and will not fade with SwiftUI's opacity) out with it.
     private func fadeOutAndClose() {
@@ -2347,7 +2310,7 @@ final class DetachedSessionWindowController: NSObject, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         endRide()
         stopCompactGlide()
-        // The reveal's commit now also rides SwiftUI's animation completion, which
+        // The reveal's commit also rides SwiftUI's animation completion, which
         // no work item can cancel — the generation bump is what retires it.
         compactRevealGeneration += 1
         compactRevealCompletion?.cancel()
@@ -2410,19 +2373,17 @@ final class DetachedWindowState: ObservableObject {
     /// True when a force click already stretched this capsule into place
     /// (`ForceClickHerald`). The face then skips its own swell — replaying it over
     /// the identical shape the press is holding is exactly the cross-fade the
-    /// stretch exists to avoid. The badge under the box still arrives on its own
-    /// beat.
+    /// stretch exists to avoid.
     @Published var grownIn = false
     /// How far the force click that is drawing this window has come, 0…1 — `nil`
     /// once it has fired and this is an ordinary composer.
     ///
     /// While it is set, the window draws its input capsule's rounded left cap and
-    /// nothing else: no field, no band, no badge. That cap is not a stand-in for
+    /// nothing else: no field, no band. That cap is not a stand-in for
     /// the composer's capsule, it IS the composer's capsule at its cap width, so
-    /// firing only springs one number. Two surfaces were tried first — a cue panel
-    /// above the window — and could not be made to hand over invisibly: `.clear`
-    /// Liquid Glass multiplies, so the frames where both stood came out more than
-    /// twice as dark as either alone.
+    /// firing only springs one number. A separate cue surface can't hand over
+    /// invisibly: `.clear` Liquid Glass multiplies, so frames where both stood
+    /// come out more than twice as dark as either alone.
     @Published var pressDepth: Double?
     /// Bumped whenever the window lands at a new pointer without being re-made
     /// (the same shortcut fired again somewhere else) — the face replays its
@@ -2499,8 +2460,7 @@ struct DetachedSessionRootView: View {
     var onCompactPrompt: (String, ModelPin?) -> Void = { _, _ in }
     var onToggleForceTouchHistory: () -> Void = {}
     var onOpenForceTouchHistory: (UUID) -> Void = { _ in }
-    /// Where the composer's caret laid out, in the window's own coordinates — the
-    /// window is placed by it rather than by counted insets.
+    /// Where the composer's caret laid out, in the window's own coordinates.
     var onCaretOffset: (CGPoint) -> Void = { _ in }
     /// Compact prompt-shortcut threads size to their answer instead of taking a
     /// fixed session-window frame.
@@ -2522,13 +2482,11 @@ struct DetachedSessionRootView: View {
     /// which is also what the prompt-shortcut card already wore
     /// (`CompactShortcutMetrics.corner`). ONE radius across every detached face:
     /// a torn-out session and a pointer-side answer are the same window at two
-    /// sizes, so they cannot round differently. (It used to be 16 here, which
-    /// read as a second, squarer species of window beside the 30 of the
-    /// shortcut card.)
+    /// sizes, so they cannot round differently.
     static let cornerRadius: CGFloat = Tokens.Radius.shell
 
-    /// The empty-prompt shortcut face paints NO window slab: its context badge
-    /// floats free above a capsule input, and those two pieces *are* the window
+    /// The empty-prompt shortcut face paints NO window slab: its card floats free
+    /// below a clear band, and that card *is* the window
     /// (see `CompactShortcutPromptView`). Every other face — threads, composer,
     /// agent tasks — rides the smoked glass slab.
     private var isBareComposer: Bool {
@@ -2555,9 +2513,9 @@ struct DetachedSessionRootView: View {
         .animation(reduceMotion ? nil : .easeOut(duration: Tokens.hoverFade), value: state.phase)
     }
 
-    /// The prompt-shortcut window's two faces. The **composer** is a band, a
-    /// capsule and a footnote badge floating free over the app underneath. The
-    /// **answer** is not a special card any more — it is the ordinary detached
+    /// The prompt-shortcut window's two faces. The **composer** is a band and a
+    /// card floating free over the app underneath. The **answer** is not a
+    /// special card — it is the ordinary detached
     /// session slab (`DetachedThreadView`: header, thread, follow-up), filling
     /// the window inside the same 8pt margin, so a pointer-side answer and a
     /// torn-out session are one window at two sizes rather than two styles.
@@ -2578,10 +2536,8 @@ struct DetachedSessionRootView: View {
         // existing top edge. The NSWindow itself is never resized per frame.
         //
         // The reveal edge carries the CARD's own bottom corners, not a straight
-        // cut. A plain `Rectangle` mask sliced the sheet on a hard horizontal
-        // line, so for the whole 0.28s disclosure the window wore square bottom
-        // corners and only snapped round on the last frame — the disclosure read
-        // as a box being unrolled rather than the card growing. So the mask is
+        // cut — a plain `Rectangle` mask would wear square bottom corners for the
+        // whole disclosure and read as a box being unrolled. So the mask is
         // the card's silhouette: inset by the window's own transparent margin
         // (nothing is ever drawn out there, so nothing is lost) and rounded at
         // the bottom on the same radius the slab wears. The top stays a square
@@ -2601,7 +2557,7 @@ struct DetachedSessionRootView: View {
         // back to its silhouette.
         .overlay(alignment: .top) { compactChrome }
         // ONE entrance for the sheet and whatever is drawn on it. Split across
-        // the two faces (as it was) the glass and its content could be caught
+        // the two faces, the glass and its content could be caught
         // mid-morph playing different transforms — the exact seam this whole
         // arrangement exists to remove.
         .modifier(CompactEntrance(bare: isBareComposer, entered: entered,
@@ -2620,8 +2576,8 @@ struct DetachedSessionRootView: View {
     }
 
     /// Close keeps the native-notification position on the card's upper-left
-    /// corner. Settings now lives beside the History disclosure in the composer
-    /// row, so the right corner deliberately stays empty.
+    /// corner. Settings lives beside the History disclosure in the composer row,
+    /// so the right corner deliberately stays empty.
     @ViewBuilder
     private var compactChrome: some View {
         if isBareComposer {
@@ -2740,16 +2696,14 @@ struct DetachedSessionRootView: View {
     /// point: it reads as one surface reshaping, not two slabs swapping.
     ///
     /// **Drill.** A saved conversation opened out of the ledger, and Back out of
-    /// it. Nothing travels — a sideways page push was tried here first and is far
-    /// too heavy a move for a 370pt card whose height is also landing in one set.
+    /// it. Nothing travels — a sideways page push is far too heavy a move for a
+    /// 370pt card whose height is also landing in one set.
     ///
     /// A BATON PASS, not an overlap: the leaving page is gone before the arriving
     /// one starts (the insertion's delay is exactly the removal's duration).
     /// Running them together — which is what a literal cross-fade does — puts two
     /// full pages of text on the card at half strength each, and at these
-    /// durations both are perfectly legible at once: six ledger rows and four
-    /// lines of answer, interleaved. That double exposure is the mess; length
-    /// only made it easier to read.
+    /// durations both are perfectly legible at once — a double exposure.
     ///
     /// Still deliberately slower than the morph's, so the dissolve is something
     /// you watch rather than a cut with a smear on it.
@@ -2775,10 +2729,9 @@ struct DetachedSessionRootView: View {
     /// except its bottom edge, which follows the window down as the answer
     /// arrives (`glideCompact`).
     ///
-    /// The top edge used to RISE into the band as the card opened, taking the
-    /// chips row and the card's whole top margin with it. That is a window
-    /// changing shape, and it read as one — a second box appearing over the line
-    /// just typed. The band stays.
+    /// The top edge must not rise into the band as the card opens: that is a
+    /// window changing shape, and it reads as a second box appearing over the
+    /// line just typed. The band stays.
     ///
     /// It is also the force-click cue: the press narrows this same sheet to the
     /// card's left cap and deepens its fill, and firing springs it back to full
@@ -2828,12 +2781,6 @@ struct DetachedSessionRootView: View {
 
     /// The empty-prompt shortcut's composer: a band held clear on top, and the
     /// card.
-    ///
-    /// There is no "Using copied text" footnote under it any more. The window is
-    /// only ever summoned ON a selection, so the badge said the one thing that
-    /// was never in doubt — and it cost a whole band of height plus the beat of
-    /// motion to bring it in. (Its × dropped the captured text, which went with
-    /// it: an answer about nothing is not what anyone presses for.)
     private var compactComposerFace: some View {
         face
         // The space the caret reports its position in: this view fills the window's
@@ -2883,8 +2830,8 @@ struct DetachedSessionRootView: View {
     }
 
     /// The composer face's lower half: the instruction capsule. (The answer it
-    /// becomes is no longer a box inside this frame — it is the window's own
-    /// slab, see `compactShortcutFace`.)
+    /// becomes is not a box inside this frame — it is the window's own slab, see
+    /// `compactShortcutFace`.)
     private var compactBox: some View { sessionBody }
 
     /// `glass: false` for the compact prompt-shortcut face, whose glass is the
@@ -3103,11 +3050,9 @@ enum CompactShortcutMetrics {
 
     // MARK: Where the caret lands
     //
-    // The composer is placed by its text cursor, not by its corner: a force
-    // click puts the caret exactly under the pointer
-    // (`DetachedSessionWindowController.compactRect`). These are the offsets that
-    // buys, and `ForceClickHerald` draws against the same numbers so the pressure
-    // cue and the capsule it becomes occupy one spot.
+    // Where the input capsule sits inside the window. The pressure cue scales
+    // about it (`drawPressure`), and `ForceClickHerald` draws against the same
+    // numbers so the cue and the capsule it becomes occupy one spot.
 
     /// The card edge to the first glyph's cell: the card's own padding plus the
     /// compact input row's deliberately small internal inset.
@@ -3127,14 +3072,10 @@ enum CompactShortcutMetrics {
     /// number comes from the laid-out view (`CaretProbe` → `rememberCaret`) and is
     /// persisted.
     ///
-    /// It has to work that way. Placing the window by hand-totalled insets, while
-    /// the face lays itself out from its own stack, is two sources of truth for one
-    /// number — and they have already drifted once: a band moved from above the box
-    /// to below it, the face grew a `footer`'s worth of height that the placement
-    /// arithmetic didn't know about, and the pressure cue and the capsule it was
-    /// supposed to become ended up on different lines of text. Measuring makes that
-    /// class of bug impossible: the cue reads whatever the composer last actually
-    /// did, so re-laying the face out can move both or neither, never one.
+    /// It has to work that way. Hand-totalled insets, while the face lays itself
+    /// out from its own stack, are two sources of truth for one number, and they
+    /// drift. Measured, the cue reads whatever the composer last actually did, so
+    /// re-laying the face out can move both or neither, never one.
     static var caretOffset: CGPoint {
         if let stored = UserDefaults.standard.array(forKey: caretKey) as? [CGFloat],
            stored.count == 2, stored[0] > 0, stored[1] > 0 {
@@ -3167,7 +3108,7 @@ enum CompactShortcutMetrics {
 }
 
 /// Reports where the prompt's first glyph cell sits inside the window, so the
-/// composer can be *placed* by its caret instead of by a hand-totalled stack of
+/// pressure cue is drawn from a measurement instead of a hand-totalled stack of
 /// insets that nothing verifies (`CompactShortcutMetrics.caretOffset`).
 private struct CaretProbe: View {
     var report: (CGPoint) -> Void
@@ -3232,7 +3173,7 @@ private struct CompactShortcutTrailingControl: View {
     }
 }
 
-/// The main-flow disclosure, now standing beside rather than inside the compact
+/// The main-flow disclosure, standing beside rather than inside the compact
 /// input recess.
 private struct CompactHistoryDisclosure: View {
     var expanded: Bool
@@ -3276,9 +3217,9 @@ private struct CompactNotificationCloseButton: View {
 }
 
 /// The same smoked glass the window slab wears (`DetachedWindowGlass`), cut to
-/// an arbitrary shape. The bare composer has no slab to sit on, so its badge
-/// and its input capsule each carry this themselves and still read as pieces of
-/// the island rather than two foreign chips.
+/// an arbitrary shape. The bare composer has no slab to sit on, so its card
+/// carries this itself and still reads as a piece of the island rather than a
+/// foreign chip.
 struct CompactComposerGlass<S: InsettableShape>: View {
     var shape: S
     /// How tall the CARD is right now, in points, when that differs from this
@@ -3289,10 +3230,8 @@ struct CompactComposerGlass<S: InsettableShape>: View {
     /// It exists because the window keeps the disclosure's OPEN height until the
     /// reveal lands (`animateCompactHeight`), so during a fold this surface is
     /// taller than the card drawn on it. With the veil's stops being fractions of
-    /// the surface, that stretched the gradient over the open height and left the
-    /// mask showing only its smoked top — the transparent hem sat below the
-    /// mask's edge — until the frame commit re-flowed the whole gradient into the
-    /// collapsed box in one frame. That one frame is the flash.
+    /// the surface, the gradient would stretch over the open height and then
+    /// re-flow into the collapsed box in one frame — a flash.
     var cardHeight: CGFloat? = nil
 
     /// Smoked at the crown, letting go at the hem, and deliberately NOT a
@@ -3304,9 +3243,8 @@ struct CompactComposerGlass<S: InsettableShape>: View {
     /// glass carries a 56pt composer capsule, the Recent list unfolded under it,
     /// and the answer card — and all three are the same object at three heights,
     /// so the gradient has to stretch with it. Anchoring the hem to a fixed depth
-    /// (which it was, briefly) left everything but the last 30pt of an unfolded
-    /// list wearing the old even veil: the capsule shaded and the drawer under it
-    /// flat, i.e. two materials in one window.
+    /// would leave an unfolded list mostly flat under a shaded capsule — two
+    /// materials in one window.
     /// `hem` is where location 1.00 lands, as a fraction of the surface — 1 for
     /// a surface that IS the card. Below the hem the gradient simply carries its
     /// last colour on, and that region is under the reveal mask anyway.
@@ -3366,9 +3304,9 @@ struct DetachedWindowGlass: View {
 ///
 /// It is the one face with no window slab behind it: everything lives in ONE
 /// floating card — the shortcut buttons over a sunken input row — with the
-/// "Using copied text" badge and the band above it belonging to the root view,
-/// which carries them unchanged into the answer face. This view is ONLY the
-/// card, so asking grows that card in place and moves nothing else
+/// band above it belonging to the root view, which carries it unchanged into
+/// the answer face. This view is ONLY the card, so asking grows that card in
+/// place and moves nothing else
 /// (see `DetachedSessionRootView.compactShortcutFace`).
 ///
 /// The card and the field inside it are the app's two existing recipes stacked:
@@ -3390,7 +3328,7 @@ private struct CompactShortcutPromptView: View {
     var onDisable: (NotchModel.ForceTouchDisable) -> Void = { _ in }
     var onDesiredHeight: (CGFloat) -> Void = { _ in }
     /// Where this face's text cursor actually landed, in the window's own
-    /// coordinates. The window is placed by it (`alignCaret`).
+    /// coordinates (`alignCaret`).
     var onCaretOffset: (CGPoint) -> Void = { _ in }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -3409,7 +3347,7 @@ private struct CompactShortcutPromptView: View {
 
     /// The card's padding around its rows and its field, and the gap between the
     /// two. `cardPad` is what makes the card's corner concentric with the input
-    /// recess inside it (`cardShape`).
+    /// recess inside it (`cardCornerRadius`).
     static let cardPad: CGFloat = 8
     static let cardGap: CGFloat = 8
     /// Match the field's first glyph to `MenuCardRow`'s title inset. PromptField
@@ -3442,7 +3380,7 @@ private struct CompactShortcutPromptView: View {
     static let historyMaxHeight: CGFloat = 220
     /// The strip between the composer and the first row's resting top — the main
     /// flow's `immersiveHeaderGap` (12) at card scale. It is NOT the plain
-    /// `cardGap` this used to be: the runway lives INSIDE the ledger's scroll (as
+    /// `cardGap`: the runway lives INSIDE the ledger's scroll (as
     /// a safe-area inset, see `historyDrawer`), so rows dragged up travel into it
     /// and dissolve under the input the way the panel's immersive Recent dissolves
     /// under "Type anything…", instead of ending on a hard cut one gap below the
@@ -3500,10 +3438,9 @@ private struct CompactShortcutPromptView: View {
         return whole > historyMaxHeight
     }
 
-    /// The window's height with a one-line prompt: the band's chrome, the card
-    /// (its padding, the picks, one input row) and the badge's own band under it
-    /// — the same slot the answer's action pill lands in. A wrapped draft grows
-    /// it from here.
+    /// The window's height with a one-line prompt: the band's chrome and the card
+    /// (its padding, the picks, one input row). A wrapped draft grows it from
+    /// here.
     static func restingHeight(withPicks: Bool) -> CGFloat {
         CompactShortcutMetrics.chrome + cardPad * 2
             + (withPicks ? picksBlock(quickPicks.count) : 0)
@@ -3641,11 +3578,7 @@ private struct CompactShortcutPromptView: View {
                             // being sliced by the viewport — the panel's shared
                             // overflow language (`scrollEdgeFade`), the same one the
                             // History drawer below and the settings page's shortcut
-                            // rail already speak. It replaces a per-item
-                            // `scrollTransition` that snapped a whole capsule between
-                            // opaque and clear: a chip crossing the edge became a flat
-                            // half-transparent slab with a hard cut down its side,
-                            // which is exactly the harshness this taper removes.
+                            // rail already speak.
                             // Leading taper is kept short: at rest the first chip sits
                             // flush at 0, so anything longer would visibly thin its
                             // own corner instead of only softening what scrolls past.
@@ -3681,8 +3614,9 @@ private struct CompactShortcutPromptView: View {
         // While a force click is still being decided the card is drawn as its own
         // cap, and a field laid out inside a 48pt circle is neither useful nor
         // cheap — the glass is the whole cue. The content keeps its full-width
-        // layout underneath (it is the glass that is narrow, see `cardGlass`), so
-        // the stretch never re-wraps a line of text.
+        // layout underneath (it is the glass that is narrow, see
+        // `DetachedSessionRootView.compactGlass`), so the stretch never re-wraps
+        // a line of text.
         .opacity(state.pressDepth == nil ? 1 : 0)
         .padding(Self.cardPad)
         .frame(height: cardHeight, alignment: .top)
@@ -3792,7 +3726,7 @@ private struct CompactShortcutPromptView: View {
                 .safeAreaInset(edge: .top, spacing: 0) {
                     Color.clear.frame(height: Self.historyTopRunway)
                 }
-                // Both edges taper now, as they do in the panel: the top dissolves
+                // Both edges taper, as they do in the panel: the top dissolves
                 // rows sliding up under the input, the bottom rows sliding down
                 // behind the settings chip.
                 .scrollEdgeFade(top: true,
@@ -3933,7 +3867,6 @@ private struct CompactShortcutPromptView: View {
 /// an armed Agent bucket spawns its run into the tray, and an Ask starts a round
 /// that this very window then holds — the composer becomes the conversation in
 /// place (`DetachedSessionWindowController.adoptThread`).
-///
 struct DetachedComposeView: View {
     @ObservedObject var state: DetachedWindowState
     @ObservedObject var model: NotchModel
@@ -3949,7 +3882,8 @@ struct DetachedComposeView: View {
     @State private var caretWidth: CGFloat = 0
     @State private var caretY: CGFloat = 0
     @State private var inputHeight: CGFloat = PromptField.lineHeight(for: NotchBody.idleFontSize)
-    /// This window's own read of its own line — see the type comment.
+    /// The date read off this window's own line, which decides Notes vs
+    /// Reminders for a capture.
     @State private var due: Date?
     /// Tab's manual destination override, scoped to the line being written
     /// exactly like the panel's (`NotchModel.manualPanelOverride`).
@@ -4037,7 +3971,7 @@ struct DetachedComposeView: View {
         }
         // The date read that decides which service a capture is filed through,
         // mirroring the panel's `scheduleDueDetection`. Nothing classifies this
-        // window's line any more — the destination is whatever the user pinned.
+        // window's line — the destination is whatever the user pinned.
         // `.task(id:)` cancels the in-flight read on every keystroke.
         .task(id: trimmed) {
             let snapshot = trimmed
@@ -4193,8 +4127,7 @@ struct DetachedComposeView: View {
 /// than the runway so no resting row sits inside it and haloes (see
 /// `ProgressiveTopBlur`). The BOTTOM edge is the exact mirror — same runway,
 /// same band, `progressiveBottomBlur` — so a thread scrolled to its end melts
-/// into the follow-up line the way it melts into the header, instead of the
-/// hard cut the tear-off used to show there. Internal on purpose: the panel's
+/// into the follow-up line the way it melts into the header. Internal on purpose: the panel's
 /// agent-detail page (NotchBody) is the same species and shares these numbers,
 /// so the tear-off keeps the exact dissolve the panel showed.
 enum ThreadScroll {
@@ -4208,10 +4141,9 @@ enum ThreadScroll {
 ///
 /// `max`, NOT `value = nextValue()`: the probe is one contributor among the
 /// siblings SwiftUI reduces over, and the ones that set nothing hand back the
-/// default. A last-writer-wins reduce therefore delivered a flat **0** for
-/// every compact answer (measured), so the window's "authoritative" measurement
-/// never reached it at all and its whole height fell to the AppKit estimate
-/// below — which is how a short answer ended up in a window a third empty.
+/// default. A last-writer-wins reduce would deliver a flat **0** for every
+/// compact answer, and the window's height would fall back to the AppKit
+/// estimate.
 private struct DetachedThreadContentHeightKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
@@ -4301,9 +4233,7 @@ struct DetachedThreadView: View {
     /// ONE rhythm for every detached thread — a pointer-side prompt-shortcut
     /// answer and a torn-out session are the same view at two sizes, so they get
     /// the same runways, the same card padding, the same header and the same
-    /// follow-up line. (The compact face used to run a second, tighter set of
-    /// numbers — 0 card padding, 15/14 runways, no header, no follow-up — which
-    /// is precisely what made it read as a different kind of window.)
+    /// follow-up line.
     ///
     /// The top runway must clear the complete frost band; otherwise the first
     /// answer line rests inside the blur and looks clipped.
@@ -4313,9 +4243,8 @@ struct DetachedThreadView: View {
     /// will, so its threads scroll and the 28pt bands are free — they live in
     /// space the window already has. A pointer-side card is the opposite: it
     /// sizes ITSELF to its answer, so every point of runway is a point the
-    /// window grows by. At 28+28 a two-line reply opened a card carrying 36pt of
-    /// nothing between its action row and the follow-up capsule against 23 under
-    /// the capsule — the bottom margin reading as a sag.
+    /// window grows by, and full runways make a short reply's card read as
+    /// sagging.
     ///
     /// So the compact card rests on the panel's own short-answer rhythm instead
     /// (`NotchBody.resultView`: header, an 18pt quiet gap, the thread, 24pt, the
@@ -4352,12 +4281,6 @@ struct DetachedThreadView: View {
     /// sides, so the follow-up capsule sits as far from the bottom edge as it
     /// does from the sides and 15 reads concentric against the window's 30pt
     /// corner (`DetachedSessionRootView.cornerRadius`, the island's own radius).
-    ///
-    /// It used to run horizontal 20 / top 15 / bottom 14 here — three different
-    /// numbers, none of them the panel's — which is exactly what made a detached
-    /// window's margins read as a different species from the notch's: the
-    /// follow-up line hung 20 from the sides but only 14 off the rounded bottom,
-    /// so the corner curve ate the side gap and the row looked to sag.
     static let cardHorizontalPadding: CGFloat = NotchBody.panelPadding
     static let cardTopPadding: CGFloat = NotchBody.panelPadding
     static let cardBottomPadding: CGFloat = NotchBody.panelPadding
@@ -4366,7 +4289,7 @@ struct DetachedThreadView: View {
     static let compactCardPadding: CGFloat = 8
     /// The header pill's height (`GlassSegmentCluster` — a 26pt chip in 3pt of
     /// glass) and the follow-up row's, so the compact window can budget for the
-    /// chrome it now carries (`CompactShortcutMetrics.answerChrome`).
+    /// chrome it carries (`CompactShortcutMetrics.answerChrome`).
     static let headerHeight: CGFloat = 32
     static let compactFollowUpGap: CGFloat = 8
     static let followUpGap: CGFloat = 8
@@ -4380,8 +4303,8 @@ struct DetachedThreadView: View {
     /// The header row alone rides the compact card's tighter inset — those two
     /// marks are the composer's chips, in the composer's exact spot, and they
     /// may not move when Enter replaces what is under them. Prose does not
-    /// inherit that: text at 8 from the rim reads as a card with no margins
-    /// (which is what it looked like), so the reading column below keeps the
+    /// inherit that: text at 8 from the rim reads as a card with no margins,
+    /// so the reading column below keeps the
     /// panel's own `cardHorizontalPadding` in both faces.
     private var headerHorizontal: CGFloat {
         compactShortcut ? Self.compactCardPadding : Self.cardHorizontalPadding
@@ -4404,12 +4327,10 @@ struct DetachedThreadView: View {
         compactShortcut ? Self.compactFollowUpGap : Self.followUpGap
     }
     /// The runway the thread travels DOWN into, behind the floating composer:
-    /// the box's own 34pt reach from the viewport's bottom edge, the gap it used
-    /// to stand in as a sibling row, and whatever resting space this face already
-    /// kept under its content. The scroll's frame grew by exactly the gap + row
-    /// the sibling layout occupied, so a card is the same height it always was —
-    /// the thread simply dissolves behind the box now instead of ending on a hard
-    /// cut above it (the result view's design, one composer treatment everywhere).
+    /// the box's own 34pt reach from the viewport's bottom edge, its gap, and
+    /// whatever resting space this face already keeps under its content. The
+    /// thread dissolves behind the box instead of ending on a hard cut above it
+    /// (the result view's design, one composer treatment everywhere).
     private var followUpRunway: CGFloat {
         // No composer stands there during the first round's wait.
         firstRoundThinking
@@ -4447,11 +4368,10 @@ struct DetachedThreadView: View {
     /// orb sits in it. Every round after that is a follow-up: the question
     /// bubble and the wait row under it are real content arriving in a card
     /// that is already open, and the card has to make room for them AS THEY
-    /// ARRIVE. Gating the height report on the LATEST answer instead meant a
-    /// follow-up reported nothing at all while it thought (the new assistant
-    /// turn is empty until the first token), so the box stayed exactly as tall
-    /// as it was and the new question pushed the follow-up capsule out through
-    /// its own bottom edge.
+    /// ARRIVE. Gating on the LATEST answer instead would report nothing while a
+    /// follow-up thinks (the new assistant turn is empty until the first token),
+    /// and the new question would push the follow-up capsule out through the
+    /// card's bottom edge.
     private var hasAnswered: Bool {
         renderedTurns.contains {
             $0.role == "assistant"
@@ -4476,10 +4396,8 @@ struct DetachedThreadView: View {
             // The thread and the composer share one slot: every detached thread
             // can be continued where it stands, and the line to continue it in
             // FLOATS over the scroll's bottom — the panel result view's design,
-            // so one composer treatment covers every surface. The scroll's frame
-            // absorbed the gap + row the sibling layout spent, so the card is the
-            // same height it was and the thread now dissolves behind the box
-            // instead of hard-cutting above it.
+            // so one composer treatment covers every surface, and the thread
+            // dissolves behind the box instead of hard-cutting above it.
             ZStack(alignment: .bottom) {
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -4660,13 +4578,10 @@ struct DetachedThreadView: View {
     ///
     /// Measured off the THREAD, not the newest answer. The AppKit estimate alone
     /// asks "would this one answer's prose fill a whole 520pt window?", which in
-    /// a follow-up round is answered by an assistant turn that is still empty —
-    /// so a second question landing in an already-capped card followed nothing at
-    /// all, and the new bubble plus its wait row sat below the fold behind the
-    /// composer. The content probe reports the complete stack (every turn, both
-    /// bubbles of every round), so it knows what the estimate cannot. The
-    /// estimate stays as the streaming backstop it was, for the beat before a
-    /// geometry pass lands.
+    /// a follow-up round is answered by an assistant turn that is still empty.
+    /// The content probe reports the complete stack (every turn, both bubbles of
+    /// every round), so it knows what the estimate cannot. The estimate stays as
+    /// the streaming backstop, for the beat before a geometry pass lands.
     private var compactAnswerIsCapped: Bool {
         max(compactWindowHeight(forContentHeight: measuredContentHeight),
             estimatedCompactWindowHeight(for: latestAnswerText))
@@ -4683,8 +4598,8 @@ struct DetachedThreadView: View {
     /// It measures the answer ONE LINE PER BLOCK. `MarkdownParser.plainText` is
     /// the clipboard serialization: it joins every block — each bullet of a list
     /// included — with a BLANK line, which the renderer never draws (blocks sit
-    /// 8pt apart, see `MarkdownBlocks`). Measuring that text charged a phantom
-    /// line per bullet: a six-bullet answer measured 480pt against a real 367pt.
+    /// 8pt apart, see `MarkdownBlocks`). Measuring that text would charge a
+    /// phantom line per bullet.
     private func estimatedCompactWindowHeight(for answer: String) -> CGFloat {
         guard compactShortcut else { return 0 }
         return Self.estimatedCompactWindowHeight(for: answer)
@@ -4923,9 +4838,7 @@ struct DetachedThreadView: View {
     /// included: the window's own actions — pin, close — as two bare glyphs on
     /// the trailing edge, and nothing else. Content
     /// actions — copy, plain copy, regenerate, ⓘ — never live here; they belong
-    /// to the answer and ride its footer (`AssistantTurnView`). The compact face
-    /// used to float a copy+pin pill outside the card instead, which put the
-    /// same copy button in two different places in two windows.
+    /// to the answer and ride its footer (`AssistantTurnView`).
     private var header: some View {
         HStack(spacing: 10) {
             // Width only. A `maxHeight: .infinity` here makes the header row
@@ -4939,7 +4852,7 @@ struct DetachedThreadView: View {
                 .frame(maxWidth: .infinity)
             // On the compact face this row is empty on purpose: its two marks
             // are the composer's, still standing where the composer left them
-            // (`DetachedSessionRootView.compactChips`).
+            // (`DetachedSessionRootView.compactChrome`).
             if !compactShortcut {
                 WindowTrailingCluster(pinned: pinned, togglePin: onTogglePin,
                                       close: onClose)
@@ -5050,12 +4963,12 @@ struct DetachedAgentTaskView: View {
     private static let scrollSpace = "detached-agent-scroll"
     private static let tailSlack: CGFloat = 28
     /// The floating composer's reach up from the viewport's bottom edge: its own
-    /// 34pt box plus the 8pt gap it used to stand in as a sibling row.
+    /// 34pt box plus its 8pt gap.
     private static let followUpReach: CGFloat =
         DetachedThreadView.followUpHeight + DetachedThreadView.followUpGap
     /// …and the empty scroll space the trail travels down into behind it, which
-    /// keeps the record resting exactly where it did (`ThreadScroll.runway`
-    /// under the last row) with the box now floating over that space.
+    /// keeps the record resting `ThreadScroll.runway` above the last row with
+    /// the box floating over that space.
     private static let followUpRunway: CGFloat = followUpReach + ThreadScroll.runway
 
     private var task: AgentTaskManager.AgentTask? {
@@ -5087,17 +5000,14 @@ struct DetachedAgentTaskView: View {
             // Trail and composer share one slot: the input FLOATS over the
             // scroll's bottom, the same design the panel's result view and detail
             // page wear, so the trail dissolves behind the box instead of ending
-            // on a hard cut above a sibling row. The scroll simply takes the
-            // height that row used to occupy — the window is unchanged.
+            // on a hard cut above a sibling row.
             ZStack(alignment: .bottom) {
                 ScrollViewReader { proxy in
                     ScrollView {
                         // The panel detail page's own record body, shared verbatim
                         // (`AgentRecordBody`): every settled round's prompt, trail
-                        // and report, then the round in flight. This window used to
-                        // render the flat trail plus only the LATEST answer, so a
-                        // multi-round run lost every earlier report the moment it
-                        // was torn out of the notch.
+                        // and report, then the round in flight, so a multi-round run
+                        // keeps every earlier report when torn out of the notch.
                         AgentRecordBody(task: task, bottomID: Self.bottomID,
                                         // The runway the trail travels down into,
                                         // behind the floating composer — it has to

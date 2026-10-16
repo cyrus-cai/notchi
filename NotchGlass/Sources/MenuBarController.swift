@@ -2,16 +2,13 @@ import AppKit
 
 /// The menu bar item — the app's only always-visible affordance besides the
 /// notch itself. Notch is an `.accessory` app with no Dock icon by default, so
-/// until now the *only* way in was hovering the notch or firing the summon
-/// shortcut; a user who forgot the shortcut and was on a full-screen Space had
-/// no handle at all. This is that handle: click the icon, get a menu.
+/// without it the only way in is hovering the notch or the summon shortcut.
 ///
-/// Shape follows the convention every mature menu-bar utility settles on (and
-/// the Typeless menu Cyrus pointed at): the two or three things you actually
-/// come here to *do* on top, the one setting you flip most often as a submenu,
-/// then the housekeeping block (version / what's new / update) and Quit. Nothing
-/// here is a feature of its own — every item routes into a path the panel
-/// already owns, so the menu can never drift from the app.
+/// Layout follows the usual menu-bar utility convention: the two or three
+/// things you actually come here to *do* on top, the one setting you flip most
+/// often as a submenu, then the housekeeping block (version / what's new /
+/// update) and Quit. Nothing here is a feature of its own — every item routes
+/// into a path the panel already owns, so the menu can never drift from the app.
 ///
 /// The menu is rebuilt on every open (`menuNeedsUpdate`) rather than held live:
 /// the model list, the update phase and the interface language all change under
@@ -93,11 +90,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     ///
     /// Two departures from the Dock icon, both to stop it shouting: the corners
     /// are filleted, and the whole mark sits at 13pt rather than filling the
-    /// bar's full content height. At Dock size those hard 90° corners read as
-    /// precision; at 13pt, against a row of light SF Symbols, they read as a
-    /// black wedge — the mark ends up louder than everything beside it. Rounding
-    /// costs nothing at this size (the silhouette is unchanged) and buys back the
-    /// softness the plate used to provide.
+    /// bar's full content height. Hard 90° corners at 13pt, against a row of
+    /// light SF Symbols, read as a black wedge louder than everything beside it.
     private static func statusIcon() -> NSImage {
         let side: CGFloat = 13
         let icon = NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in

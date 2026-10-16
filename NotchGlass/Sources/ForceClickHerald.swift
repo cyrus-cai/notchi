@@ -4,24 +4,15 @@ import SwiftUI
 /// What a force click looks like while it is still being decided — and how it
 /// turns into the composer.
 ///
-/// The gesture used to be invisible until the instant it fired: nothing on screen
-/// said "keep pushing", "that was enough", or "that wasn't" — so pressing read as
-/// a coin flip, and a press that fell just short felt like the app had ignored it.
-///
 /// **There is exactly one glass surface for the whole gesture: the composer's own
 /// input capsule.** This object does not draw anything. It owns no window, no
 /// panel and no view — it converts the trackpad's pressure stream into calls on
 /// the real composer window, which is born at the press and stretches into itself
 /// when the press fires.
 ///
-/// That is not a refactor for tidiness; it is the whole fix. The cue used to be a
-/// second `.screenSaver`-level panel drawing the same capsule, which handed over
-/// to the window once it had stretched. Two Liquid Glass surfaces cannot hand over
-/// invisibly: `.clear` glass multiplies, so the frames where both stood measured
-/// 47/255 against 94 for either alone — a pill more than twice as dark as the
-/// thing on both sides of the swap. That flash read as "the panel opened opaque",
-/// and the cue's 0.13s fade-out then read as "…and only now turns into glass".
-/// Neither was an animation anyone wrote. One surface has nothing to hand over.
+/// Don't reintroduce a separate cue panel that hands over to the window: two
+/// Liquid Glass surfaces cannot hand over invisibly — `.clear` glass multiplies,
+/// so the overlap frames flash a pill twice as dark as either alone.
 ///
 /// The press phase is driven straight from the trackpad's ~125Hz pressure frames
 /// through the hosting layer's transform, with implicit animation off: the
@@ -107,8 +98,7 @@ final class ForceClickHerald {
         -> DetachedSessionWindowController? {
         // A shortcut configured to answer in the notch is not opening anything at
         // the pointer, so there is nothing here for a press to grow into. Drawing
-        // the capsule anyway would mean building a window purely to throw it away
-        // (which is what the old cue did, via `abort`).
+        // the capsule anyway would mean building a window purely to throw it away.
         guard SelectedTextShortcutStore.current.opensInPointerWindow else { return nil }
         return DetachedSessionWindowController.beginPressureComposer(
             shortcutID: SelectedTextShortcutStore.actionID, model: model, at: pointer)

@@ -138,10 +138,8 @@ private struct PermissionStatusPill: View {
 }
 
 /// Settings rendered *inside* the notch panel, in place of the recent list —
-/// not a separate window. Carries the same logic as the old native `SettingsView`
-/// (active provider, its API key, an optional model override, all in
-/// `UserDefaults` via `APIKeyStore`) but wears the panel's Liquid Glass skin so it
-/// reads as part of the island. The gear and ⌘, both swap the RECENT block for
+/// not a separate window — wearing the panel's Liquid Glass skin so it reads as
+/// part of the island. The gear and ⌘, both swap the RECENT block for
 /// this; the back chevron returns to the idle prompt.
 struct InlineSettingsView: View {
     @ObservedObject var model: NotchModel
@@ -222,7 +220,6 @@ struct InlineSettingsView: View {
     /// list fetched for one surface is already warm for the other.
     @ObservedObject private var catalog = ModelCatalogStore.shared
 
-    /// Whether the Model row's menu is open.
     @State private var modelPickerOpen = false
 
     /// The Prompt Shortcut editor uses the same model menu, but owns a separate
@@ -761,10 +758,9 @@ struct InlineSettingsView: View {
     /// immersive recent layout's prompt FLOATS over its scroll surface, so that
     /// whole view is its 320pt list, while Settings stacks a back-pill header
     /// (12 + 26 + 4) and a 12pt gap above its pane, and that chrome comes out of
-    /// the same budget. Short panes leave air at the bottom; long ones scroll. It
-    /// used to track each pane's measured content height, which meant the island
-    /// resized on every category switch (and re-measured on every layout pass) —
-    /// a fixed frame is both steadier to look at and cheaper to draw.
+    /// the same budget. Short panes leave air at the bottom; long ones scroll. Fixed
+    /// rather than measured per pane, so the island doesn't resize on every
+    /// category switch (or re-measure on every layout pass).
     private static let headerChrome: CGFloat = 12 + Tokens.Control.header + 4 + 12
     private var settingsPaneHeight: CGFloat {
         NotchBody.immersiveListHeight - Self.headerChrome
@@ -779,10 +775,9 @@ struct InlineSettingsView: View {
     }
 
     /// The widest label in the open pane, so every control in it can start at the
-    /// same x. Rows used to size their label to its own text (`minWidth: 64` and
-    /// `fixedSize`), which left one pane with as many control origins as it had
-    /// rows — the ragged right half is what read as clutter. A fixed pixel column
-    /// can't do this job: French and Spanish labels are visibly longer than the
+    /// same x; sizing each label to its own text leaves a ragged control column.
+    /// A fixed pixel column can't do this job: French and Spanish labels are
+    /// visibly longer than the
     /// English ones, so the number would either clip or waste half the pane.
     private struct LabelColumnWidthKey: PreferenceKey {
         static let defaultValue: CGFloat = 0
@@ -800,9 +795,9 @@ struct InlineSettingsView: View {
     private static let modelCardShape = RoundedRectangle.menu
 
     /// The empty inset above the pane's first row, and the length of the top
-    /// taper that dissolves into it. The taper is the longer of the two: a 12pt
-    /// fade that stopped at the runway's edge read as a hard cut, so it now
-    /// starts well above the first row and reaches down past it — matched to the
+    /// taper that dissolves into it. The taper is the longer of the two (a fade
+    /// that stops at the runway's edge reads as a hard cut), so it starts well
+    /// above the first row and reaches down past it — matched to the
     /// bottom's 32pt so both edges of the pane dissolve at the same rate. It only
     /// ever draws while the pane is scrolled (`paneScrolledOffTop`), so at rest
     /// the first row is still fully solid.
@@ -832,10 +827,8 @@ struct InlineSettingsView: View {
     /// itself should not have to know which.
     ///
     /// Every category scrolls inside ONE shared frame (see
-    /// `settingsPaneHeight`) instead of stretching the island taller: the
-    /// Shortcuts reference used to be the only pane with its own fixed-height
-    /// scroll; now the whole settings body rides the same ceiling and the same
-    /// edge tapers.
+    /// `settingsPaneHeight`) instead of stretching the island taller, with the
+    /// same ceiling and the same edge tapers.
     @ViewBuilder
     private var paneContent: some View {
         ScrollViewReader { proxy in
@@ -843,25 +836,8 @@ struct InlineSettingsView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     switch section {
             case .model:
-                // Two steps, in the order you make them: pick the backend,
-                // then pick one of *its* models. The API key stays supporting
-                // cast — folded into `keySection`, which only unfolds when the
-                // choice actually needs a key (or the user opens it by hand).
                 // No "MODEL" caption over the card: the sidebar entry beside it
-                // already names the pane, and the card is its own boundary now.
-                // What is left of the month leads the pane when nono is the
-                // backend. It is the one row here that reports rather than
-                // configures, and it is what the user opens this pane to check;
-                // sitting under Provider and Model it read as a footnote to
-                // them.
-                // One card holds the whole backend decision, for EVERY provider
-                // — the frame never changes when you switch. What changes is what
-                // is inside it and whether its rim is lit: on nono the group
-                // carries the plan meter and wears the first-party rim light (see
-                // `BrandAura`), on a third-party backend it carries that vendor's
-                // key section and the rim goes dark. Making the card itself
-                // appear and disappear with the provider was the wrong read — the
-                // pane restyled itself mid-choice.
+                // already names the pane, and the card is its own boundary.
                 // The card is the wallet, and only the wallet. It is there
                 // whichever backend is selected — a balance is not a property of
                 // the current choice, and hiding it behind the provider switch
@@ -881,16 +857,15 @@ struct InlineSettingsView: View {
                 .padding(.vertical, 12)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .recessedSurface(in: Self.modelCardShape, lit: false)
-                // The mark is said ONCE, by the group. The provider menu and the
-                // model chip inside it used to each wear their own aura, which on
-                // nono lit three rims stacked inside one another.
-                //
+                // The mark is said ONCE, by the card — not by the rows below it.
                 // Lit whichever backend is answering: the card is Notchi's
                 // wallet either way.
                 .brandAura(in: Self.modelCardShape, lineWidth: 1.2)
                 // Everything you bring yourself, outside the card and unadorned,
                 // in the order you set it up: which backend answers, which of
-                // its models, and the key that lets it. The caption names this
+                // its models (only once it can answer), and the key that lets
+                // it. The API key stays folded in `keySection` unless the choice
+                // needs one or the user opens it. The caption names this
                 // group as the alternative to the wallet above.
                 Text(L("model.byok"))
                     .captionLabel()
@@ -902,10 +877,9 @@ struct InlineSettingsView: View {
                     modelRow
                 }
                 keySection
-                // Web search used to be a category of its own — a whole sidebar
-                // entry for two rows. It is the same question this pane already
-                // answers (which backend, and its key), so it rides here as a
-                // labelled group instead.
+                // Web search is the same question this pane already answers
+                // (which backend, and its key), so it rides here as a labelled
+                // group rather than its own category.
                 Text(L("sidebar.search"))
                     .captionLabel()
                     .padding(.top, 2)
@@ -1065,18 +1039,14 @@ struct InlineSettingsView: View {
                 guard required, section == .model else { return }
                 DispatchQueue.main.async { proxy.scrollTo(Self.keySectionAnchor, anchor: .top) }
             }
-            // The top taper exists only once the pane is actually scrolled: a
-            // permanent one dimmed the first row of every pane before the user had
-            // scrolled anything, and the fade is there to dissolve rows leaving
-            // past the back pill — nothing is leaving while the pane sits at top.
-            // It starts above the first row and runs long (see `paneTopFade`) so
-            // rows thin out gradually on the way past the back pill instead of
-            // snapping off at the runway's edge.
-            // The bottom taper is gated on the pane actually overflowing — which
-            // is what `scrollEdgeFade` documents and what every other scrolling
-            // region in the app does. Unconditional, it dimmed the last 32pt of
-            // panes that fit perfectly well: About's colophon, and Stats' bottom
-            // card, both washed out with nothing below them to dissolve into.
+            // The top taper exists only once the pane is actually scrolled: it is
+            // there to dissolve rows leaving past the back pill, and nothing is
+            // leaving while the pane sits at top. It starts above the first row
+            // and runs long (see `paneTopFade`) so rows thin out gradually
+            // instead of snapping off at the runway's edge.
+            // The bottom taper is gated on the pane actually overflowing, as
+            // `scrollEdgeFade` documents — otherwise it washes out the last 32pt
+            // of panes that fit (About's colophon, Stats' bottom card).
             .scrollEdgeFade(top: paneScrolledOffTop, bottom: paneOverflows,
                             topFade: Self.paneTopFade, bottomFade: 32)
             // A pane swap starts at the top again; the observer only reports on
@@ -1243,11 +1213,9 @@ struct InlineSettingsView: View {
     }
 
     /// "Aug 5 · 21 chats · 2 agent runs" — the date, and what actually went
-    /// through the notch that day, bucket by bucket. It used to read "23 items",
-    /// which left the reader working out what an item was; each figure now
-    /// carries the noun its column in the totals row carries, singular forms
-    /// included, because "1 chats" is the kind of thing that makes a panel look
-    /// unfinished. A day nothing happened on shows only its date — the empty
+    /// through the notch that day, bucket by bucket. Each figure carries the noun
+    /// its column in the totals row carries, singular forms included ("1 chat",
+    /// never "1 chats"). A day nothing happened on shows only its date — the empty
     /// square under the pointer has already said the rest.
     @ViewBuilder
     private var statsReadout: some View {
@@ -1427,9 +1395,10 @@ struct InlineSettingsView: View {
             customEndpointRows
         }
 
-        // Codex has no key to paste — it shows a sign-in status row. OpenRouter
-        // gets the one-click Connect row (unless the user asked to paste by
-        // hand, or an env var forces a key). Everyone else gets the key field.
+        // The CLI backends have no key to paste — each shows its sign-in status
+        // row. nono and OpenRouter get their account rows (unless the user asked
+        // to paste by hand, or an env var forces a key). Everyone else gets the
+        // key field.
         if keyScope == .codex {
             codexAccountRow
         } else if keyScope == .claudeCode {
@@ -1589,8 +1558,8 @@ struct InlineSettingsView: View {
     /// a no-op if it's already there.
     ///
     /// Notchi is the exception, and the reason the pill exists: it comes here for
-    /// the balance card, which leads the pane whatever is selected. Nothing to
-    /// switch — aiming the provider rows at it is what this pane no longer does.
+    /// the balance card, which leads the pane whatever is selected, so there is
+    /// nothing to switch.
     private func adoptPendingSettingsProvider() {
         guard let focus = model.pendingSettingsProvider else { return }
         model.pendingSettingsProvider = nil
@@ -1832,7 +1801,7 @@ struct InlineSettingsView: View {
             }
 
             // Only the live env-override status stays inline (it explains why the
-            // field is locked); the how-to note moved into the ⓘ above.
+            // field is locked); the how-to note is in the ⓘ above.
             if keenableEnvOverride {
                 Text(L("model.footer.env", "KEENABLE_API_KEY"))
                     .font(.sf(Tokens.TypeSize.meta))
@@ -1918,7 +1887,7 @@ struct InlineSettingsView: View {
             }
 
             // Only the live env-override status stays inline; the how-to note
-            // moved into the ⓘ above.
+            // is in the ⓘ above.
             if exaEnvOverride {
                 Text(L("model.footer.env", "EXA_API_KEY"))
                     .font(.sf(Tokens.TypeSize.meta))
@@ -2022,20 +1991,14 @@ struct InlineSettingsView: View {
         return text
     }
 
-    /// The connectivity-test result, shown as a restrained inline pill rather than
-    /// the old harsh filled-circle-plus-red-text. A small status dot (the only
-    /// saturated mark), the verdict in a softened status color, sitting on a faint
-    /// wash of that same color so it reads as a calm badge inside the glass — green
-    /// for a working key, red for a rejected one, never shouting.
+    /// The connectivity-test result, as a status line (see `statusPill`).
     @ViewBuilder
     private func testVerdict(_ result: ConnectivityTest.Result) -> some View {
         statusPill(ok: result.isOK, message: result.message)
     }
 
-    /// The status line under a key/account field. Success reads as a quiet aside —
-    /// a small green dot and faint text in the same register as the rest of the
-    /// panel — while a failure keeps the louder red pill so a real problem still
-    /// catches the eye.
+    /// The status line under a key/account field. Success reads as a quiet aside
+    /// in faint text, in the same register as the rest of the panel.
     @ViewBuilder
     private func statusPill(ok: Bool, message: String) -> some View {
         if ok {
@@ -2134,8 +2097,8 @@ struct InlineSettingsView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        // Rates are no longer on the face, so the card no longer fetches a
-        // catalog to draw itself. `pricingSection` asks for them when it opens.
+        // The card shows no rates, so it fetches no catalog to draw itself.
+        // `pricingSection` asks for them when it opens.
         .task { await nono.load() }
     }
 
@@ -2376,8 +2339,6 @@ struct InlineSettingsView: View {
     /// where Stripe's flat fee costs the most per dollar and a default should
     /// not steer people into it.
     @State private var topUpUSD: Double = 5
-    /// Whether the sidebar still wears its dot on Capture. Mirrored in `@State`
-    /// so the pane redraws the moment that pane is opened.
     /// Whether the Copy sensing row wears its tag. Read ONCE per appearance of
     /// Settings (see `onAppear`) rather than tracked live: opening the menu
     /// records the tag as read, and this visit keeps showing it anyway.
@@ -3300,8 +3261,7 @@ struct InlineSettingsView: View {
                 // manifest for 6h, a vendor's `/v1/models` for an hour, the CLI
                 // catalogs for the whole launch), which is right until a model ships
                 // mid-session and the list you're looking at is the stale one. One
-                // tap re-asks every backend. Doubles as the load indicator — the
-                // spinner it replaces was this same slot.
+                // tap re-asks every backend. Doubles as the load indicator.
                 Button {
                     Task { await manualRefreshModels() }
                 } label: {
@@ -3392,14 +3352,9 @@ struct InlineSettingsView: View {
     ///
     /// Drawn as a two-card picker rather than a dropdown: "which screens" is a
     /// spatial choice, so each card shows a miniature laptop + external monitor
-    /// with a bright pill on every screen that gets an island.
-    /// The two placement cards, on a line of their own.
-    ///
-    /// The label moved out to the group caption above ("SHOW ON"): as an inline
-    /// label it had to be nudged down by a hand-tuned 8pt to look level with the
-    /// cards' first inner line, and it pushed the heaviest control on the page
-    /// off the pane's left margin. Caption above, cards at the margin — no
-    /// vertical fudge left to keep true.
+    /// with a bright pill on every screen that gets an island. No inline label:
+    /// the group caption above ("SHOW ON") names it, so the cards sit at the
+    /// pane's left margin with no hand-tuned vertical offset to keep true.
     private var placementRow: some View {
         HStack(alignment: .top, spacing: 12) {
             ForEach(DisplayPlacement.allCases) { p in
@@ -3481,7 +3436,6 @@ struct InlineSettingsView: View {
         NotificationCenter.default.post(name: .appIconStyleChanged, object: nil)
     }
 
-    /// Whether the app shows a Dock icon. Off by default — the notch overlay is a
     /// Whether the app shows a Dock icon — mirrors the persisted value; writes go
     /// through `selectDockIconVisibility` so `AppDelegate` flips the activation
     /// policy immediately.
@@ -3590,14 +3544,12 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// Whether Notch launches itself when you log in. Off by default; flipping it
-    /// on registers a login item via `SMAppService` so the notch is there from the
-    /// first hover after every restart, with no manual relaunch.
     /// Custom instructions (XII-137): personal preference the model gets
     /// appended after its built-in persona on the Ask path — "always answer in
     /// English", "prefer code", "metric units". Empty by default. Deliberately
     /// understated: the hint says it refines, never that it overrides the core
     /// rules.
+    ///
     /// Always folded away at rest behind the same glass disclosure chip the API
     /// key uses — including when an instruction is already on file: it is a
     /// once-in-a-while preference, not something the pane should spend a whole
@@ -3890,6 +3842,9 @@ struct InlineSettingsView: View {
         }
     }
 
+    /// Whether Notchi launches itself when you log in. Off by default; flipping it
+    /// on registers a login item via `SMAppService` so the notch is there from the
+    /// first hover after every restart, with no manual relaunch.
     private var launchAtLoginRow: some View {
         settingRow(label: L("general.launchAtLogin")) {
             Toggle("", isOn: Binding(
@@ -4307,9 +4262,9 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// The reactions hint, with a Learn more link at the end of its last line,
-    /// the credential rule it explains. Underlined for the same reason as Stats' privacy
-    /// link: the popover body is already `text2`.
+    /// The reactions hint, with a Learn more link at the end of its last line.
+    /// Underlined for the same reason as Stats' privacy link: the popover body
+    /// is already `text2`.
     private var emojiReactionsHint: AttributedString {
         var text = AttributedString(L("chat.emojiReactions.hint") + " ")
         var link = AttributedString(L("model.detail.learnMore"))
@@ -4835,10 +4790,9 @@ struct InlineSettingsView: View {
     /// The two engines side by side. Every line the answer is yes or no is a
     /// check or a cross, so the difference reads at a glance instead of being
     /// assembled out of two paragraphs; the facts that are not yes/no — where
-    /// Jev runs and how credentials are dropped — sit under
-    /// the grid in one card. The credential line used to be a grid row with a
-    /// check in both columns, which said it happens without ever saying how. It hangs off the row’s ⓘ, like every other note this
-    /// pane keeps out of the way.
+    /// Jev runs and how credentials are dropped — sit under the grid in one
+    /// card. The table hangs off the row’s ⓘ, like every other note this pane
+    /// keeps out of the way.
     private var copySenseComparisonTable: some View {
         CopySenseNoteUnderGrid(spacing: 12) {
             Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 10) {
@@ -5018,9 +4972,9 @@ struct InlineSettingsView: View {
                                    onCapture: captureShortcut,
                                    onDoubleModifier: captureDoubleModifier,
                                    onCancel: { recordingShortcut = nil }))
-        // Leaving the pane ends recording outright. The armed target used to
-        // survive in `@State` while the monitor was dismantled, so coming back
-        // silently re-armed the old row and the next chord landed on it.
+        // Leaving the pane ends recording outright: an armed target left in
+        // `@State` after the monitor is dismantled would silently re-arm the old
+        // row on return, and the next chord would land on it.
         .onDisappear {
             recordingShortcut = nil
             presentedPromptShortcutID = nil
@@ -5053,15 +5007,14 @@ struct InlineSettingsView: View {
         VStack(alignment: .leading, spacing: 0) {
             // The title keeps the text position of every other group's title, and
             // the add chip hangs in an OVERLAY rather than in the row: a 24pt
-            // button inside the HStack made this one header 24pt tall, so its text
-            // sat ~5pt lower than "Summoning" below it and the block opened with a
-            // band of air above the words.
+            // button inside the HStack would make this one header 24pt tall and
+            // push its text ~5pt lower than "Summoning" below it.
             //
             // The header still RESERVES the chip's full height, with the text
             // pinned to the top of that box. This group is the first thing in the
             // Shortcuts pane, so its title sits at y=0 of the scroll content — a
-            // 24pt chip centred on a ~15pt line overflowed ~5pt above the scroll
-            // view's edge, which clipped the chip's upper arc clean off.
+            // 24pt chip centred on a ~15pt line would overflow ~5pt above the
+            // scroll view's edge and clip the chip's upper arc.
             Text(L("shortcuts.promptAction"))
                 .font(.sf(Tokens.TypeSize.label, weight: .medium))
                 .foregroundStyle(Tokens.text1)
@@ -5175,9 +5128,6 @@ struct InlineSettingsView: View {
             .templates ?? promptTemplateGroups.first?.templates ?? []
     }
 
-    /// The reference component's classic Cover Flow, scaled to this compact
-    /// dialog: square cards, 70-degree inward side faces, symmetric depth order,
-    /// direct dragging, tap-to-focus, an index, and a second draggable track.
     /// The template the picker is currently showing in full, resolved from the
     /// live library rather than held as a copy, so a manifest refresh under an
     /// open detail page updates it instead of stranding stale text.
@@ -5377,6 +5327,9 @@ struct InlineSettingsView: View {
         return wrappedPromptTemplateIndex(promptTemplateCoverflowVirtualIndex)
     }
 
+    /// The reference component's classic Cover Flow, scaled to this compact
+    /// dialog: square cards, inward-turned side faces, symmetric depth order,
+    /// direct dragging and tap-to-focus.
     private var promptTemplateCoverflow: some View {
         VStack(spacing: 0) {
             GeometryReader { proxy in
@@ -5494,10 +5447,10 @@ struct InlineSettingsView: View {
             VStack(alignment: .leading, spacing: 0) {
                 Spacer(minLength: 0)
 
-                // 16.5 over 11 — a 1.5x step, where the old 15/11.5 pair sat close
-                // enough that the card read as one grey block of text. The name is
-                // the card's headline and is set like one: bigger, tighter, and
-                // carrying the ink, over a gloss that stays deliberately quiet.
+                // 16.5 over 11 — a 1.5x step; a closer pair reads as one grey
+                // block of text. The name is the card's headline and is set like
+                // one: bigger, tighter, and carrying the ink, over a gloss that
+                // stays deliberately quiet.
                 Text(template.name)
                     .font(.sf(Tokens.TypeSize.prompt, weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.97))
@@ -5756,8 +5709,8 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// The former `+` behavior remains available as the last picker action. A
-    /// blank row is kept only in memory until the user actually edits a field.
+    /// The picker's last action: a blank shortcut. The blank row is kept only
+    /// in memory until the user actually edits a field.
     private func addBlankPromptShortcut() {
         let shortcut = PromptShortcut()
         withAnimation(Tokens.stackSpring) {
@@ -5830,8 +5783,8 @@ struct InlineSettingsView: View {
         .buttonStyle(.plain).exemptsDoubleClickPin()
         .accessibilityLabel(L("shortcuts.promptAction.edit"))
         // The rail is ordered, scrolls, and has no drag handles: reordering is
-        // one move — put this one first — and deleting no longer means opening
-        // the card to reach the button inside it.
+        // one move — put this one first — and deleting doesn't need the card
+        // opened.
         .contextMenu {
             if promptShortcuts.first?.id != binding.id {
                 Button(L("shortcuts.promptAction.moveToFront")) {
@@ -5916,9 +5869,9 @@ struct InlineSettingsView: View {
         let forceClick = promptForceTouchBinding(for: binding.id)
         return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
-                // Read-only: the name is the AI's, not a field. It used to be a
-                // TextField, which made the card's heading look like the first
-                // thing to fill in — it isn't, the prompt is.
+                // Read-only: the name is the AI's, not a field. As a TextField the
+                // heading would look like the first thing to fill in — it isn't,
+                // the prompt is.
                 Text(promptShortcutName(binding)
                      ?? (binding.prompt.isEmpty
                          ? L("shortcuts.promptAction")
@@ -6015,13 +5968,12 @@ struct InlineSettingsView: View {
             // no way to say "that's it" leaves the user guessing whether anything
             // took — so the edit ends the way the app's other dialogs end: one
             // primary capsule that closes it, with Delete beside it in the quiet
-            // register (a rule across the card drew a second, competing edge inside
-            // a slab that already has one).
+            // register.
             //
             // Both are sized to their own words and parked at the bottom right, the
-            // corner every dialog's actions live in. Split full-width, a two-word
-            // Delete wore half the card — the weight of a primary action for the one
-            // thing here that throws work away.
+            // corner every dialog's actions live in; split full-width, Delete would
+            // carry a primary action's weight for the one thing here that throws
+            // work away.
             HStack(spacing: 8) {
                 Spacer(minLength: 0)
 
@@ -6505,10 +6457,6 @@ struct InlineSettingsView: View {
 
     // MARK: - About
 
-    /// The About pane: who the app is before the version mechanics. An identity
-    /// block (name, tagline, one-line description) sits above the Version row so
-    /// the panel reads as more than a build number, then a quiet links row hands
-    /// off to the source and release pages.
     // MARK: - Stats
 
     /// Settings → **Stats**. The pane is a pure function of the archive, so this
@@ -6553,6 +6501,9 @@ struct InlineSettingsView: View {
         statsTokens = TokenMeter.shared.reading
     }
 
+    /// The About pane: who the app is before the version mechanics — an
+    /// identity block (icon, name, version and its update action), then the
+    /// links (`aboutLinks`), then the attribution footnote.
     private var aboutSection: some View {
         VStack(alignment: .leading, spacing: 14) {
             // 1 — Identity: who the app is, with the version and its update
@@ -6714,7 +6665,7 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// GitHub and X lead the About actions. The four quieter product/support
+    /// GitHub, X and Discord lead the About actions. The four quieter product/support
     /// destinations remain directly visible underneath — no nested menu and no
     /// trip back to the prompt's More menu.
     private var aboutLinks: some View {
@@ -7053,9 +7004,6 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// Attribution stays on its own level instead of hiding behind the replay
-    /// button's hover help. This makes the bundled recording's author, source,
-    /// licence, and the fact that it was edited continuously visible.
     // MARK: - Survey
 
     /// Option ids, the same lists as `SURVEY_OPTIONS` in the gateway's
@@ -7491,8 +7439,8 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// One of the four secondary About destinations. They return to the original
-    /// one-action-per-row rhythm, grouped together underneath the social row.
+    /// One of the four secondary About destinations: one action per row,
+    /// grouped together underneath the social row.
     private struct AboutUtilityButton: View {
         let title: String
         let leaves: Bool
@@ -7613,7 +7561,7 @@ struct InlineSettingsView: View {
     }
 
     /// The quiet text-link species used throughout About. It stays visually light,
-    /// but unlike inert body copy it now answers the pointer consistently.
+    /// but unlike inert body copy it answers the pointer.
     private struct AboutTextLink: View {
         let title: String
         let weight: Font.Weight
@@ -7680,13 +7628,12 @@ struct InlineSettingsView: View {
     /// A label-on-the-left, control-on-the-right row, sized so the provider and
     /// model menus line up. Pass `info` to hang a collapsed ⓘ note right after the
     /// label — the same mark the answer footer uses for the model that replied.
-    /// One label + control line.
     ///
     /// `aligned` opts the row into the pane's shared label column: it reports its
     /// natural label width up through `LabelColumnWidthKey` and takes the widest
     /// one back, so every control in the pane starts at the same x. Off by
-    /// default — panes whose rows nest (`keySection`, `permissionsSection`) are
-    /// left on the old self-sizing behaviour until this is proven on Appearance.
+    /// default — panes whose rows nest (`keySection`, `permissionsSection`) keep
+    /// self-sizing labels.
     ///
     /// The measurement and the width are deliberately on DIFFERENT views: the
     /// inner stack stays `fixedSize()` and is what gets measured, the resolved
@@ -7749,7 +7696,7 @@ struct InlineSettingsView: View {
                alignment: .leading)
     }
 
-    // MARK: - Logic (mirrors the old SettingsView)
+    // MARK: - Logic
 
     /// Fetch the *current* provider's live model list into `ModelCatalogStore`, so the
     /// picker shows what the vendor serves right now for the provider in effect.
@@ -7771,9 +7718,8 @@ struct InlineSettingsView: View {
                 ?? (optionalKey ? "" : nil) else { return }
         loadingModels = true
         let live = await ModelCatalog.fetch(for: target, apiKey: key)
-        // Stop the spinner unconditionally — an early return on the staleness
-        // guard below used to strand it spinning forever after a mid-fetch
-        // provider switch.
+        // Stop the spinner unconditionally — the staleness guard below returns
+        // early after a mid-fetch provider switch and would strand it spinning.
         loadingModels = false
         // Guard against a stale response after the user switched providers.
         guard target == provider else { return }
@@ -7810,7 +7756,7 @@ struct InlineSettingsView: View {
         if newProvider == .custom { customModel = id }
         // An explicit pick is a "recently used" model from the user's point of
         // view — record it so the Ask chip's quick menu keeps it after the
-        // selection moves on (picks made here used to vanish from the menu).
+        // selection moves on.
         AskModelMRU.record(provider: newProvider, model: id)
         NotificationCenter.default.post(name: .aiBackendChanged, object: nil)
     }
@@ -7860,9 +7806,9 @@ struct InlineSettingsView: View {
     }
 }
 
-/// The prompt editor's two closing actions: full width, fully rounded — the same
-/// capsule every other affordance on the island wears, just stretched across the
-/// card. `primary` is the island's own glass; `destructive` carries no resting
+/// The prompt editor's two closing actions: fully rounded — the same capsule
+/// every other affordance on the island wears. `primary` is the island's own
+/// glass; `destructive` carries no resting
 /// surface at all, so ending the shortcut never reads as loud as finishing the
 /// edit — it only takes a whisper of red under the pointer.
 private struct PromptCardActionStyle: ButtonStyle {
@@ -7988,21 +7934,10 @@ struct GlassPopoverBackground: ViewModifier {
     }
 }
 
-/// A collapsed explanatory note: a quiet ⓘ that reveals its text in a popover on
-/// click, so the settings rows stay a clean stack instead of carrying an always-on
-/// caption under each one. Same register as the answer footer's model-info ⓘ — a
-/// faint `info.circle` that brightens on hover, over the panel's own glass.
-///
-/// Takes either a plain string or a pre-built `AttributedString` (for hints with an
-/// inline link), so both the terse captions and the "get a key at …" hints collapse
-/// behind the same mark.
 /// A bare word-action hanging off a settings row — Save / Test / Change /
-/// Cancel / Disconnect / Choose…. Fourteen of these were spelled out by hand
-/// across the panel as `.buttonStyle(.plain)` + a fixed ink, which made them the
-/// one interactive class in the whole app that answered a hover with *nothing*;
-/// several also rested at `text1`, brighter than the very row label they hang
-/// off, so the eye read the escape hatch before the setting. One control now:
-/// quiet at rest (secondary ink, below its label), full ink under the cursor.
+/// Cancel / Disconnect / Choose…. Quiet at rest (secondary ink, below its
+/// label, so the eye reads the setting before the escape hatch), full ink
+/// under the cursor.
 struct SettingActionButton: View {
     var title: String
     /// Rest ink. Defaults to the secondary register; a de-emphasised action (a
@@ -8077,8 +8012,7 @@ struct AmountStepper: View {
                 // The same digit roll the Stats figures and the island's running
                 // chip use. The animation has to ride the Text for
                 // `numericText` to fire; on the enclosing stack it only moves
-                // the layout, which is what a stepped figure did before — one
-                // string cutting to another.
+                // the layout, and one string cuts to another.
                 .contentTransition(.numericText(value: value))
                 .animation(reduceMotion ? nil : .snappy(duration: 0.22), value: value)
             button("plus", enabled: value < range.upperBound) { nudge(1) }
@@ -8103,6 +8037,14 @@ struct AmountStepper: View {
     }
 }
 
+/// A collapsed explanatory note: a quiet ⓘ that reveals its text in a popover on
+/// click, so the settings rows stay a clean stack instead of carrying an always-on
+/// caption under each one. Same register as the answer footer's model-info ⓘ — a
+/// faint `info.circle` that brightens on hover, over the panel's own glass.
+///
+/// Takes either a plain string or a pre-built `AttributedString` (for hints with an
+/// inline link), so both the terse captions and the "get a key at …" hints collapse
+/// behind the same mark.
 struct SettingInfo: View {
     private let plain: String?
     private let rich: AttributedString?
@@ -8540,12 +8482,6 @@ private struct GlassMenuCard: View {
     }
 }
 
-/// An invisible helper that captures the next key chord while `active` is true.
-/// Installs a local `.keyDown` monitor (scoped to this app's own key window, so
-/// it can't see other apps' input) and hands the virtual key code + modifier
-/// flags to `onCapture`. Swallowing the event while recording keeps Esc/Space
-/// from leaking into the panel underneath. The monitor is torn down the moment
-/// `active` flips false or the view disappears — no global tap, no leak.
 /// The shared shell behind the placement and Dock-icon picker cards: fixed
 /// width, rounded fill + hairline border, and a hover lift that brightens both
 /// by the same step the About rows use — so an unselected card answers the
@@ -8582,12 +8518,6 @@ private struct PickerCard<Content: View>: View {
     }
 }
 
-/// A native `NSSlider` quantized to a fixed ladder of tick positions — the
-/// "multi-segment" control behind the hover-sensitivity row and the Agent
-/// card's thinking-strength dial. Nothing here draws: the stock AppKit control
-/// keeps its own shape, tick marks and interaction animation. The representable
-/// only hands it a plain host view and puts it at that host's local origin, so
-/// its promoted Liquid Glass knob has no SwiftUI-origin offset to reconcile.
 /// Centers a setting row's label on a detent slider's *track*, not on the whole
 /// control. The control is a `VStack` of slider + tick labels, so both
 /// `.center` and the default `.firstTextBaseline` leave the label sitting off
@@ -8601,6 +8531,12 @@ extension VerticalAlignment {
     static let sliderTrack = VerticalAlignment(SliderTrackAlignment.self)
 }
 
+/// A native `NSSlider` quantized to a fixed ladder of tick positions — the
+/// "multi-segment" control behind the hover-sensitivity row and the Agent
+/// card's thinking-strength dial. Nothing here draws: the stock AppKit control
+/// keeps its own shape, tick marks and interaction animation. The representable
+/// only hands it a plain host view and puts it at that host's local origin, so
+/// its promoted Liquid Glass knob has no SwiftUI-origin offset to reconcile.
 struct NativeDetentSlider: NSViewRepresentable {
     @Binding var value: Double
     /// Number of detents on the ladder (tick marks + the positions they mark).
@@ -8881,6 +8817,12 @@ private struct PromptTemplateCoverflowScrollMonitor: NSViewRepresentable {
     }
 }
 
+/// An invisible helper that captures the next key chord while `active` is true.
+/// Installs a local `.keyDown` monitor (scoped to this app's own key window, so
+/// it can't see other apps' input) and hands the virtual key code + modifier
+/// flags to `onCapture`. Swallowing the event while recording keeps Esc/Space
+/// from leaking into the panel underneath. The monitor is torn down the moment
+/// `active` flips false or the view disappears — no global tap, no leak.
 private struct HotKeyRecorder: NSViewRepresentable {
     var active: Bool
     var onCapture: (UInt32, NSEvent.ModifierFlags) -> Void

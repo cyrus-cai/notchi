@@ -21,10 +21,8 @@ struct ContentView: View {
 
     var body: some View {
         ZStack(alignment: .top) {
-            // No click-outside scrim anymore: leaving the island already folds the
-            // panel (see `collapseOnLeave` — leave = fold, restored on re-hover),
-            // so by the time the pointer reaches anything outside, the panel is
-            // gone. Removing the scrim also stops it swallowing the first click
+            // No click-outside scrim: leaving the island already folds the panel
+            // (see `collapseOnLeave`), and a scrim would swallow the first click
             // on whatever sits under the canvas.
             NotchIsland(model: model)
                 // Rebuild the island's subtree on an App Language switch so every
@@ -32,8 +30,8 @@ struct ContentView: View {
                 // (or being opened) when the user returns from a switch, so the
                 // identity change never interrupts a visible animation.
                 .id(loc.language)
-                // Drop a project folder on the island to start composing a
-                // agent task in it (XII: agent-to-Codex) — the folder is
+                // Drop a project folder on the island to start composing an
+                // agent task in it — the folder is
                 // exactly the argument the mode needs, so one drop enters the
                 // compose with it in place. Any other files attach to the next
                 // ask (`handleFileDrop`). Dragging over the resting notch
@@ -166,8 +164,7 @@ struct ContentView: View {
                 model.toggleAgentBucket()
                 return true
             }
-            // ⌘F summons the recent-list filter. The chip is gone — this is the only
-            // way in. Only meaningful when there's a list worth filtering (matches the
+            // ⌘F summons the recent-list filter — the only way in. Only meaningful when there's a list worth filtering (matches the
             // field's own > 6 render gate). If the list is collapsed, open it first so
             // the field has somewhere to land; if the filter's already up, ⌘F is a
             // no-op rather than a toggle (Esc clears/closes it — see below).
@@ -551,10 +548,9 @@ private struct WorkEarWidthsKey: PreferenceKey {
 /// The resting notch's background-work readout, in the same two-eared compact
 /// idiom as `ClipboardSenseEars`. Running: the live doing-word on the left
 /// shoulder — the chat round's actual tool line ("Searching the web…",
-/// "Reading github.com…"), or a per-action verb for an agent Codex run —
-/// and a once-a-second elapsed clock on the right, the collapsed twin of the
-/// agent card's clock, replacing the old three-dot wave (the ticking time
-/// is the "it's alive" signal; dots on top were dead weight).
+/// "Reading github.com…"), or a per-action verb for an agent run — and a
+/// once-a-second elapsed clock on the right, the collapsed twin of the agent
+/// card's clock (the ticking time is the "it's alive" signal).
 /// When the work settles the ears fold flat — the notification banner already
 /// said what finished; the resting notch keeps no tally.
 private struct BackgroundWorkEars: View {
@@ -653,9 +649,8 @@ private struct BackgroundWorkEars: View {
 /// The continuous black→glass island that grows out of the notch.
 struct NotchIsland: View {
     @ObservedObject var model: NotchModel
-    /// The agent-Codex run — a minutes-long background task the collapsed
-    /// notch reports right alongside detached Ask rounds (same busy ears, same
-    /// finished-count badge).
+    /// Agent runs — minutes-long background tasks the collapsed notch reports
+    /// right alongside detached Ask rounds (same busy ears).
     @ObservedObject private var agentManager = AgentTaskManager.shared
     /// The update card the resting notch unfolds into (`UpdatePrompt`).
     @ObservedObject private var updatePrompt = UpdatePrompt.shared
@@ -677,7 +672,7 @@ struct NotchIsland: View {
     @State private var senseEarContent = SenseEarWidths()
 
     /// The background-work ears' measured content widths (via
-    /// `WorkEarWidthsKey`) — the verb / count badge on the left, the elapsed
+    /// `WorkEarWidthsKey`) — the verb on the left, the elapsed
     /// clock on the right — kept apart from the copy-sense measurements so the
     /// two occupants can't smear widths into each other mid-crossfade.
     @State private var workEarContent = SenseEarWidths()
@@ -694,9 +689,8 @@ struct NotchIsland: View {
     @State private var kick = EntryKick.zero
 
     /// THIS screen's open state — gated on `activeDisplay` so hovering one
-    /// screen's notch never unfurls the islands on the others. Every read that
-    /// used to consult `model.open` goes through here (including the animation
-    /// `value:`s — a display *switch* flips this while `model.open` stays true,
+    /// screen's notch never unfurls the islands on the others. Read this, not
+    /// `model.open` (including the animation `value:`s — a display *switch* flips this while `model.open` stays true,
     /// and the fold/unfurl must still animate).
     private var isOpen: Bool {
         model.isOpen(on: metrics.displayID)
@@ -713,7 +707,7 @@ struct NotchIsland: View {
 
     /// True when the panel is fully closed (on every display) but background
     /// work is still running — a detached Ask round streaming, or an agent
-    /// Codex run working in its folder. The resting notch flexes into the busy
+    /// run working in its folder. The resting notch flexes into the busy
     /// ears: verb left, elapsed clock right. Gated on the GLOBAL `open`, not
     /// this display's `isOpen`: while the panel is open anywhere the work is on
     /// screen there, and the other displays' resting notches shouldn't claim it.
@@ -731,7 +725,7 @@ struct NotchIsland: View {
     }
 
     /// The busy left ear's label — what the work is ACTUALLY doing right now,
-    /// not a frozen verb. An agent Codex run outranks the chat line (the
+    /// not a frozen verb. An agent run outranks the chat line (the
     /// longer, heavier task defines the notch's mood): its activity stream
     /// maps to a verb per action kind. A chat round shows the same live
     /// tool-activity line the panel's detail row would ("Searching the web…",
@@ -778,7 +772,7 @@ struct NotchIsland: View {
 
     /// True when the resting notch is offering (or narrating) a clipboard
     /// capture. Gated on the GLOBAL `open` like `busy`, and yields to the busy
-    /// dots — an in-flight answer outranks a copy hint for the one strip.
+    /// ears — an in-flight answer outranks a copy hint for the one strip.
     private var sensing: Bool {
         !model.open && !showsPrompt && !busy && model.clipboardSense != .idle
     }
@@ -809,11 +803,8 @@ struct NotchIsland: View {
         return senseEarContent.right + senseEarPad * 2
     }
 
-    /// The click level's hover acknowledgement is live on THIS island: the notch
-    /// is flexed a few points out under the pointer, with the panel still folded.
-    /// Scoped to this display so the pointer on one screen doesn't nudge the
-    /// resting notch on every other one.
-    /// Whether the click level's flex is raised for THIS island. Deliberately
+    /// Whether the click level's flex is raised for THIS island (scoped to this
+    /// display so the pointer on one screen doesn't nudge the others). Deliberately
     /// free of `isOpen`: it is the key the peek animation is scoped to, and if it
     /// flipped on the open edge the peek's own spring would fire on that
     /// transaction and take the unfurl with it. The rendered swell is what
@@ -1017,9 +1008,8 @@ struct NotchIsland: View {
             // the shell: `model.closing` first pulls it in a few percent (the
             // close has visibly started), then `beginClose` drops `open` and the
             // removal transition scales it toward the notch on the shell's own
-            // retract spring, blurring and fading as it goes. The old close faded
-            // the content out before the shell moved, so the whole retract played
-            // as an empty black slab.
+            // retract spring, blurring and fading as it goes, so the retract never
+            // plays as an empty black slab.
             if isOpen {
                 NotchBody(model: model)
                     // The shoulders widen the FRAME, not the content box — pad
@@ -1061,9 +1051,8 @@ struct NotchIsland: View {
                                   expanded: isOpen || showsPrompt,
                                   cameraZone: metrics.restHeight))
         // The destructive "Clear recent history?" confirmation floats centered over
-        // the whole island (scrim + card), instead of a popover anchored under the
-        // Clear pill that landed it near the bottom of the panel. Mounted here so it
-        // centers in the full glass body; clipped to the island shape below.
+        // the whole island (scrim + card). Mounted here so it centers in the full
+        // glass body; clipped to the island shape below.
         //
         // Gated on THIS display's `isOpen`: `confirmingClear` is one flag on the
         // shared model, but every screen in `.all` mode hosts its own panel — so
@@ -1177,8 +1166,8 @@ struct NotchIsland: View {
         // `NotchShape` can never slice a capsule, and after the rim so nothing
         // paints over one. `inset` is the shoulder flare: the frame carries it,
         // the drawn body doesn't, so the glass wall runs `topFlare` inside this
-        // box on both sides. Clamping to the frame instead is what used to leave
-        // a right-edge hint hanging over the shoulder and chopped.
+        // box on both sides. Clamping to the frame instead would leave a
+        // right-edge hint hanging over the shoulder and chopped.
         .notchTooltipClipBox(inset: topFlare)
         // A settled detached window dragged over the notch: the island swells a
         // touch to say it'll take the session back on release.
@@ -1255,7 +1244,7 @@ struct NotchIsland: View {
         .onPreferenceChange(SenseEarWidthsKey.self) { senseEarContent = $0 }
         .onPreferenceChange(WorkEarWidthsKey.self) { workEarContent = $0 }
         // Keep the model's resting-notch hover rect in step with the ears —
-        // hovering the verb/clock, the finished badge, or the copy hint must
+        // hovering the verb/clock or the copy hint must
         // count as hovering the notch (see `pointerInsideRestingNotch`).
         .onAppear { model.registerRestingEars(left: earLeft, right: earRight) }
         .onChange(of: earLeft) { _, _ in
@@ -1350,11 +1339,10 @@ struct NotchIsland: View {
         return min(speed / 2500, 1).squareRoot()
     }
 
-    /// The unfurl spring, eased by approach speed. The resting end is *calmer*
-    /// than the old fixed spring (longer response, more damping — an unhurried
-    /// bloom); a fast entry only tightens it back to roughly the old feel, so
-    /// momentum shows up as the energetic end of the range, never as haste
-    /// beyond what the panel already had.
+    /// The unfurl spring, eased by approach speed. The resting end is calm
+    /// (longer response, more damping — an unhurried bloom); a fast entry only
+    /// tightens it a little, so momentum shows up as the energetic end of the
+    /// range, never as haste.
     private var openSpring: Animation {
         guard !reduceMotion else {
             return .spring(response: 0.50, dampingFraction: 0.85)
@@ -1382,13 +1370,12 @@ struct NotchIsland: View {
         return .spring(response: 0.26, dampingFraction: 0.95)
     }
 
-    /// The retract animation. Paced to breathe with the open (response 0.50):
-    /// the original 0.34 retract was nearly twice as fast as the unfurl, and with
-    /// leave-to-fold making the close a constant companion it read as a harsh
-    /// clamp. Critically damped: the earlier underdamped spring (0.76) dipped
-    /// the island below its resting height and climbed back — on a screen where
-    /// the resting island shows below the hardware cutout, that read as the
-    /// notch bouncing at the end of every fold. Reduce-motion keeps the flat ease.
+    /// The retract animation. Paced to breathe with the open: leave-to-fold makes
+    /// the close a constant companion, and a much faster retract reads as a harsh
+    /// clamp. Critically damped: an underdamped spring dips the island below its
+    /// resting height and climbs back — on a screen where the resting island
+    /// shows below the hardware cutout, that reads as the notch bouncing at the
+    /// end of every fold. Reduce-motion keeps the flat ease.
     private var closeSpring: Animation {
         guard !reduceMotion else { return .easeOut(duration: 0.30) }
         return .spring(response: 0.46, dampingFraction: 1.0)

@@ -22,10 +22,9 @@ struct NotchGlassApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        // No standard windows — everything lives in the notch panel created by
-        // the AppDelegate. Settings now render *inside* that panel (see
-        // `InlineSettingsView`), so there's no native preferences window anymore.
-        // SwiftUI's `App` still requires at least one scene, so we keep a
+        // No standard windows — everything, Settings included (see
+        // `InlineSettingsView`), lives in the notch panel created by the
+        // AppDelegate. SwiftUI's `App` still requires at least one scene, so we keep a
         // `Settings` scene — but macOS wires the app menu's "Settings…" item
         // straight to it, so a menu click WILL open this window (⌘, never gets
         // here; the AppDelegate's key monitor swallows it first). Instead of a
@@ -38,7 +37,7 @@ struct NotchGlassApp: App {
             // menu after launch. The app menu only exists in `.regular` mode (Dock
             // icon shown); in the default `.accessory` overlay there's no menu bar
             // at all, so the item simply isn't visible then. The action routes
-            // through `AppDelegate` via a notification — same handler ⌘ uses.
+            // through `AppDelegate` via a notification.
             .commands {
                 CommandGroup(after: .appInfo) {
                     Button(L("about.checkForUpdates") + "…") {

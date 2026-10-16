@@ -91,10 +91,9 @@ enum ReasoningPreview {
 // model wrote, any tool calls it requested, and why it stopped.
 //
 // `TurnEvent` is that richer stream. `AIService.streamTurn` yields these events
-// for one model turn; `AgentHarness` runs the multi-turn loop on top. The old
-// `stream(system:messages:)` stays exactly as it was — every non-agent path
-// (title generation, the `complete` convenience, any provider that can't or
-// won't do tools) keeps using it untouched. Tool support is purely additive.
+// for one model turn; `AgentHarness` runs the multi-turn loop on top. Every
+// non-agent path (title generation, the `complete` convenience, any provider
+// that can't or won't do tools) keeps using plain `stream(system:messages:)`.
 
 /// One incremental event from a single agent turn.
 enum TurnEvent: Sendable {
@@ -125,8 +124,7 @@ enum TurnEvent: Sendable {
     /// A tool-call block just OPENED in the stream: the model has committed to
     /// running `name`, but its arguments are still streaming in. Emitted so the
     /// UI can raise the activity line the moment the decision is visible instead
-    /// of waiting the seconds it takes the arguments JSON to finish — the window
-    /// in which a preface-then-search turn used to show no progress at all. The
+    /// of waiting the seconds it takes the arguments JSON to finish. The
     /// assembled `.toolCall` for the same call still follows.
     case toolCallStarted(name: String)
     /// The model finished a tool-call request: it wants `name(input)` run, keyed
@@ -401,17 +399,6 @@ struct ToolRegistry: Sendable {
 
 // MARK: - The harness loop
 
-/// Drives the agentic loop on top of an `AgentCapableService`. Each iteration:
-/// stream one turn, surfacing text as it arrives; if the model requested tools,
-/// run them concurrently, append the assistant-call turn and the tool-result turn
-/// to the running conversation, and loop; otherwise stop.
-///
-/// The harness is deliberately UI-agnostic — it reports progress through two
-/// callbacks so `NotchModel` can drive its existing streaming `Turn` without the
-/// harness knowing anything about SwiftUI. It also respects cancellation at every
-/// await point (the surrounding `Task` is cancelled on supersede / panel close,
-/// exactly as the plain path), and bounds itself with `maxIterations` so a model
-/// that loops forever on tools can't pin the task open.
 /// The one failure the harness raises on its own behalf.
 ///
 /// It exists so "the model returned nothing" can travel as an *error* instead of
@@ -420,7 +407,6 @@ struct ToolRegistry: Sendable {
 /// error reaches `NotchModel`'s catch: the row carries a real reason, the turn is
 /// flagged `isError` (so the next round's wire copy never replays it as model
 /// speech), the panel offers a retry, and a diagnostics breadcrumb is left behind.
-/// A successful empty answer got none of that — it just wrote a blank.
 enum AgentHarnessError: LocalizedError {
     /// Two turns running produced nothing visible — the second with every tool
     /// withdrawn and an explicit instruction to answer in words. There is nothing
@@ -434,6 +420,17 @@ enum AgentHarnessError: LocalizedError {
     }
 }
 
+/// Drives the agentic loop on top of an `AgentCapableService`. Each iteration:
+/// stream one turn, surfacing text as it arrives; if the model requested tools,
+/// run them concurrently, append the assistant-call turn and the tool-result turn
+/// to the running conversation, and loop; otherwise stop.
+///
+/// The harness is deliberately UI-agnostic — it reports progress through main-actor
+/// callbacks (the sinks below) so `NotchModel` can drive its existing streaming `Turn` without the
+/// harness knowing anything about SwiftUI. It also respects cancellation at every
+/// await point (the surrounding `Task` is cancelled on supersede / panel close,
+/// exactly as the plain path), and bounds itself with `maxIterations` so a model
+/// that loops forever on tools can't pin the task open.
 struct AgentHarness {
     let service: AgentCapableService
     let registry: ToolRegistry
@@ -475,14 +472,11 @@ struct AgentHarness {
     /// Only the opening turn is forced, and only while search is still advertised.
     /// A clock-time, clipboard, settings, or capture question is left alone.
     ///
-    /// Not enabled for Nono. Measured against production on 2026-09-11: with a
-    /// named `tool_choice`, Darkbloom sends no byte until the whole turn has been
-    /// generated, and the model's reasoning leaks into the tool arguments. With
-    /// the gateway's default output cap the turn outlasts Darkbloom's
-    /// first-response timeout and comes back as `429 all providers at capacity …
-    /// timeout waiting for first response` after ~12s, on every forced turn. The
-    /// same question with `tool_choice` left on auto streamed in 1.6s and the
-    /// model called `web_search` itself.
+    /// Not enabled for Nono (measured 2026-09-11): with a named `tool_choice`,
+    /// Darkbloom sends no byte until the whole turn is generated and the model's
+    /// reasoning leaks into the tool arguments, so every forced turn outlasts its
+    /// first-response timeout and comes back as a `429 … timeout waiting for first
+    /// response`. On auto, the same question streamed in 1.6s and still searched.
     var forceSearchOnChangingFacts: Bool = false
 
     /// What nono is told this run came from (`NoNoRequestContext`). Bound
@@ -542,10 +536,9 @@ struct AgentHarness {
     /// cancellation, exactly like the plain path, so the caller's existing
     /// catch/persist logic applies unchanged.
     ///
-    /// `@MainActor` so the whole loop runs where the plain single-shot stream loop
-    /// ran — UI sinks fire synchronously in order, and the consuming side of
+    /// `@MainActor` so UI sinks fire synchronously in order; the consuming side of
     /// `streamTurn` (whose producer stays on a detached `URLSession` task) is driven
-    /// from the main actor exactly as the old `for await chunk` loop was.
+    /// from the main actor, like the plain single-shot stream loop.
     @MainActor
     func run(system: String,
              messages: [AgentMessage],
@@ -561,7 +554,7 @@ struct AgentHarness {
         // *gap* should say: before any tool the wait is plain "thinking" (the load
         // view's dots); after a tool round, the gap is the model reading what it
         // just fetched, so we keep a "composing" cue on screen instead of dropping
-        // back to generic dots (the empty state Cyrus flagged). It also tells a
+        // back to generic dots. It also tells a
         // second-or-later tool round to say "refining" rather than "searching".
         var didTool = false
         // The concrete model is reported to `onModel` at most once across the whole
@@ -648,9 +641,8 @@ struct AgentHarness {
             //
             // No search label here. This turn is the model writing the query;
             // the search has not started. `toolCallStarted` raises the label
-            // when the call actually arrives. Raising it now made a model
-            // failure on this turn (an upstream 429 after ~30s) read as a
-            // search that found nothing.
+            // when the call actually arrives, so a model failure on this turn
+            // doesn't read as a search that found nothing.
             let requiredTool: String?
             if forceSearchOnChangingFacts,
                iteration == 0,
@@ -817,12 +809,10 @@ struct AgentHarness {
                 // reads as finished here and lands downstream as a blank row, exactly
                 // like a turn that streamed nothing at all.
                 //
-                // Returning on a blank is what produced the empty notch: the round
-                // was filed as a *successful* answer that happened to be empty, so
-                // nothing upstream could tell it apart from a real reply. A round must
-                // end with an answer or an error — never with silence. So give the
-                // model one more turn, stripped of tools and told plainly what we saw;
-                // if that comes back empty too, fail loudly instead of quietly.
+                // A round must end with an answer or an error — never with silence,
+                // which upstream can't tell apart from a real (empty) reply. So give
+                // the model one more turn, stripped of tools and told plainly what we
+                // saw; if that comes back empty too, fail loudly instead of quietly.
                 if assistantText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     if let searchFailure, !searchWorked { throw searchFailure }
                     if searchRounds > 0, !searchWorked {
@@ -948,8 +938,8 @@ struct AgentHarness {
             if let endsRound, endsRound(completed) { return }
 
             // Empty or failed search: tell the user that, now. Feeding the miss
-            // back into another model round is what used to wait ~30s and then
-            // surface as a model 429 ("timeout waiting for first response").
+            // back into another model round waits ~30s and then surfaces as a
+            // model 429 ("timeout waiting for first response").
             let didSearchThisRound = pendingCalls.contains { Self.isSearchTool($0.name) }
             if didSearchThisRound, !searchWorked {
                 onActivity(nil, .composing)
@@ -1014,7 +1004,7 @@ struct AgentHarness {
 
             // The next turn is the capped one, with no tools. Say so on the last
             // result, or the model reaches for another call it can only write as
-            // text — the `<tool_call>…` that once ended an answer.
+            // text (`<tool_call>…`).
             if iteration + 1 >= maxIterations, !resultsToSend.isEmpty {
                 resultsToSend[resultsToSend.count - 1].result += Self.stepCapNote
             }
@@ -1080,20 +1070,6 @@ struct AgentHarness {
         name == WebSearchTool.toolName
     }
 
-    /// The note handed to a model whose turn produced no answer at all: what we saw,
-    /// and what to do instead. English for the same reason `searchStopNudge` is —
-    /// every provider, CJK models included, follows an English directive most
-    /// reliably, exactly as the tool descriptions are English.
-    ///
-    /// Naming the leaked tool is what makes this worth sending. A model told only
-    /// "you produced nothing" will often produce nothing again — it has no idea what
-    /// it did wrong. Told "the `web_search` call you wrote as text cannot run", it
-    /// has something specific to correct, and the obvious correction is to speak.
-    ///
-    /// The last sentence matters as much as the first: a model that searched and
-    /// found nothing will sometimes rather say nothing than admit the miss, and
-    /// silence is precisely the failure we're closing. So "I couldn't find it" is
-    /// named explicitly as an acceptable answer.
     /// The `![alt](url)` images in an answer, in order, without repeats.
     static func imageURLs(in text: String) -> [URL] {
         guard let regex = try? NSRegularExpression(pattern: #"!\[[^\]]*\]\((https?://[^)\s]+)\)"#) else { return [] }
@@ -1119,6 +1095,20 @@ struct AgentHarness {
         + "Next, reply to the user without calling tools: what you did, what you found, "
         + "and what is still left for them to do or to ask you for."
 
+    /// The note handed to a model whose turn produced no answer at all: what we saw,
+    /// and what to do instead. English for the same reason `searchStopNudge` is —
+    /// every provider, CJK models included, follows an English directive most
+    /// reliably, exactly as the tool descriptions are English.
+    ///
+    /// Naming the leaked tool is what makes this worth sending. A model told only
+    /// "you produced nothing" will often produce nothing again — it has no idea what
+    /// it did wrong. Told "the `web_search` call you wrote as text cannot run", it
+    /// has something specific to correct, and the obvious correction is to speak.
+    ///
+    /// The last sentence matters as much as the first: a model that searched and
+    /// found nothing will sometimes rather say nothing than admit the miss, and
+    /// silence is precisely the failure we're closing. So "I couldn't find it" is
+    /// named explicitly as an acceptable answer.
     private static func emptyTurnNote(leaked name: String?) -> String {
         let seen: String
         if let name {
@@ -1220,7 +1210,7 @@ struct AgentHarness {
     /// The query a search call is about to run, tidied for the one-line wait
     /// slot — or nil when the call's arguments haven't arrived yet (the
     /// streaming `toolCallStarted` preview passes an empty input), so the caller
-    /// falls back to the generic line. Our three search tools name the argument
+    /// falls back to the generic line. Our search tools name the argument
     /// `query`; Kimi's wire-level builtin names it `search_query`.
     private static func searchQuery(of call: ToolInvocation) -> String? {
         let raw = (call.input["query"] as? String) ?? (call.input["search_query"] as? String)
@@ -1396,12 +1386,12 @@ enum ReasoningTags {
 /// *text* output instead of returning a structured tool_call. The tell-tale is a
 /// `<|…|>` opener (e.g. MiniMax's `<|DSML|tool_calls>` / `<|DSML|invoke name=…>`);
 /// normal answer prose never contains the `<` + pipe sequence, so it's a safe
-/// sentinel. GLM also writes `<tool_call>name<arg_key>…`, the second opener. The pipe comes in two flavors: the ASCII `|` (U+007C) and the
-/// **fullwidth** `｜` (U+FF5C). Chinese-trained tokenizers (MiniMax, DeepSeek,
-/// GLM, Kimi, Qwen) emit their special control tokens with the fullwidth bar —
-/// the real leaked token is `<｜tool▁calls｜>`, not `<|...|>` — so both must be
-/// treated as the opener, or the markup sails straight through (the bug Cyrus
-/// kept seeing after the half-width-only first fix).
+/// sentinel. GLM also writes `<tool_call>name<arg_key>…`, the second opener.
+/// The pipe comes in two flavors: the ASCII `|` (U+007C) and the **fullwidth**
+/// `｜` (U+FF5C). Chinese-trained tokenizers (MiniMax, DeepSeek, GLM, Kimi, Qwen)
+/// emit their special control tokens with the fullwidth bar — the real leaked
+/// token is `<｜tool▁calls｜>`, not `<|...|>` — so both must be treated as the
+/// opener, or the markup sails straight through.
 ///
 /// Stateful because text streams in token by token: an opener can be split across
 /// chunks (`<`, then `|DS`…). Once an opener is seen, *everything* from it onward

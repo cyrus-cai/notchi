@@ -41,9 +41,9 @@ enum NotesError: LocalizedError {
 /// runloop** to handle the user's click. If we block the main thread inside
 /// `executeAppleEvent`, the prompt can paint but never receives the click: the
 /// main thread waits on the script, the script waits on the user, the user's
-/// click waits on the main thread → the whole app deadlocks (the freeze seen when
-/// the permission dialog appeared). So the script runs on a dedicated **serial**
-/// background queue, leaving the main runloop free to drive the prompt. The
+/// click waits on the main thread → the whole app deadlocks. So the script runs
+/// on a dedicated **serial** background queue, leaving the main runloop free to
+/// drive the prompt. The
 /// `NSAppleScript` "not thread-safe" caveat is satisfied because the instance is
 /// created on, and only ever touched from, that one serial queue — never shared
 /// across threads, never run concurrently.
@@ -85,14 +85,12 @@ enum NotesService {
         // Note target, in order of preference:
         //   1. The default account's *first* folder — robust against the top-level
         //      folder being localized ("备忘录" on a zh system) or not literally
-        //      named "Notes". Hard-coding `folder "Notes"` was the main source of
-        //      the intermittent "AppleEvent handler failed" (-10000): on iCloud
-        //      accounts that reference often doesn't resolve, and it momentarily
-        //      vanishes mid-sync.
+        //      named "Notes". A hard-coded `folder "Notes"` causes intermittent
+        //      -10000 errors: on iCloud accounts it often doesn't resolve, and it
+        //      momentarily vanishes mid-sync.
         //   2. If that fails (no account/folder ready, e.g. mid-launch or mid-sync),
         //      create the note **unanchored** — `make new note with properties …`
-        //      lets Notes file it in its own default location. This is the path that
-        //      survives the transient states that used to throw.
+        //      lets Notes file it in its own default location.
         let source = """
         on notchCreateNote(noteBody)
             tell application "Notes"
@@ -166,7 +164,6 @@ enum NotesService {
     static func writeNote(_ text: String, completion: @escaping @MainActor (Result<String?, NotesError>) -> Void) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            // Nothing to write — treat an empty submit as a (no-op) success.
             Task { @MainActor in completion(.success(nil)) }
             return
         }
@@ -174,7 +171,6 @@ enum NotesService {
 
         onQueue {
             let result = runWrite(body: body)
-            // Hop back to the main actor to touch any UI/model state.
             Task { @MainActor in completion(result) }
         }
     }
