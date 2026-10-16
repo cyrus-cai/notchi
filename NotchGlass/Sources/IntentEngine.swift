@@ -9,9 +9,7 @@ import FoundationModels
 /// Decides, from the text in the input box alone, whether the user is **asking
 /// the AI** or **jotting a note** — the brain behind the panel's auto-routing.
 ///
-/// This replaced the original hand-written rules engine, which topped out around
-/// "openers and question marks" and misread anything phrased naturally. The
-/// engine is model-based but still fully **on-device and provider-independent**:
+/// The engine is model-based but fully **on-device and provider-independent**:
 ///
 ///   1. The user's line is embedded with `NLContextualEmbedding` — the OS's
 ///      built-in multilingual transformer (NaturalLanguage framework, macOS 14+,
@@ -29,8 +27,8 @@ import FoundationModels
 /// caller can classify on (debounced) keystrokes without touching typing
 /// performance. Until `prepare()` finishes (first launch trains the head in the
 /// background, a few seconds at most), every read is `.empty` — which the UI
-/// already treats as "no signal → default to Ask", so the app degrades to
-/// exactly the old resting behavior rather than blocking on the model.
+/// already treats as "no signal → default to Ask", so the app degrades to the
+/// default rather than blocking on the model.
 actor IntentEngine {
     static let shared = IntentEngine()
 
@@ -370,7 +368,7 @@ actor IntentEngine {
 // MARK: - Logistic head
 
 /// A logistic regression over the embedding space — the entire trainable part of
-/// the classifier: 512 weights and a bias. Fit on-device with plain batch
+/// the classifier: one weight per embedding dimension and a bias. Fit on-device with plain batch
 /// gradient descent (vDSP-vectorized, so the one-time fit is fast even in Debug),
 /// L2-regularized to keep it sane on a few hundred examples.
 struct LogisticHead: Codable {
@@ -408,7 +406,6 @@ struct LogisticHead: Codable {
                 vDSP_dotprD(weights, 1, x, 1, &dot, vDSP_Length(dimension))
                 let p = 1.0 / (1.0 + exp(-(dot + bias)))
                 var err = (p - y) * (y > 0.5 ? posWeight : negWeight)
-                // gradW += err * x
                 vDSP_vsmaD(x, 1, &err, gradW, 1, &gradW, 1, vDSP_Length(dimension))
                 gradB += err
             }

@@ -71,20 +71,18 @@ struct NotchShape: InsettableShape {
 /// The island background — modeled on the iOS Control-Center / Now-Playing
 /// **uniform dark Liquid Glass** look: one even slab of translucent dark glass
 /// that refracts the wallpaper/app icons behind it across its *whole* surface
-/// (the top included), wrapped in a continuous soft specular rim that reads as
-/// the thickness of the glass.
+/// (the top included).
 ///
 /// Layers, back to front:
 ///  1. High-transparency native `.glassEffect(.clear)` over the whole shape —
 ///     real, strong refraction so the background bleeds through everywhere.
 ///  2. A near-solid dark veil that keeps text legible, plus a faint top-edge
-///     sheen. Open, the whole material fades to fully clear over the bottom
-///     band (`bottomFade`), as in the iOS Siri card.
-///  3. A thin camera-zone darkening at the very top so the hardware notch /
-///     lens area stays discreet without going to a hard black band.
-///  4. A continuous, soft **edge rim** all the way around — the signature look:
-///     a bright fine line that wraps the entire perimeter, strongest at top and
-///     bottom, fading on the straight sides.
+///     sheen. Open, the whole material fades over the bottom band
+///     (`bottomFade`), as in the iOS Siri card.
+///  3. Open only: a diagonal gloss and a one-shot sweep of light.
+///  4. A true-black cap over the camera zone so the top fuses with the
+///     hardware notch.
+/// The specular edge rim is drawn separately (`IslandRim`).
 struct GlassMaterial: View {
     var bottomRadius: CGFloat
     /// The island's concave top shoulders — see `NotchShape.topRadius`.
@@ -147,8 +145,7 @@ struct GlassMaterial: View {
             // of being `if expanded`-inserted: each is a blurred offscreen
             // layer, and allocating those buffers on the open's very first
             // frame cost that frame its budget — a visible hitch right as the
-            // expansion starts. An opacity flip under the open spring reads
-            // identically to the old insertion fade.
+            // expansion starts.
             diagonalGloss(shape).opacity(expanded ? 1 : 0)
             blackCap(shape)
             expandShimmer(shape).opacity(expanded ? 1 : 0)
@@ -160,8 +157,8 @@ struct GlassMaterial: View {
         }
         .compositingGroup()
         // The shape cut and the open panel's bottom fade in one mask. Open, the
-        // whole material (glass, veil, tint) fades to fully clear over the
-        // bottom band, so the wallpaper there shows unrefracted, as in the iOS
+        // whole material (glass, veil, tint) fades toward clear over the
+        // bottom band (down to `bottomFadeFloor`), as in the iOS
         // Siri card. At rest the plain shape fill covers the fade.
         .mask {
             GeometryReader { geo in
@@ -254,7 +251,7 @@ struct GlassMaterial: View {
             .frame(width: Self.bandWidth, height: 110)
             .blur(radius: 6)
             // Flatten the blurred band to one offscreen texture (same trick as
-            // the drop shadow below): its content is fixed — a 110pt gradient,
+            // the drop shadow in `body`): its content is fixed — a 110pt gradient,
             // stops in fractions — so the 0.7s sweep animates a cached raster
             // via the offset transform instead of re-running the radius-6 blur
             // on every frame of the travel. Pixel-identical.
@@ -339,7 +336,7 @@ struct GlassMaterial: View {
     ///  · **Expanded** — a *solid black top that melts into uniform glass*:
     ///    fully-opaque black across the camera/notch zone (so it fuses with the
     ///    hardware notch — no wallpaper showing through up there), then easing
-    ///    over a soft band into the even ~0.55 smoked-glass tint that holds for
+    ///    over a soft band into the even ~0.82 smoked-glass tint that holds for
     ///    the rest of the panel. The black zone is anchored in *absolute points*
     ///    via the rendered height so it stays a constant size as the panel grows.
     private var darkVeil: some View {
@@ -352,7 +349,7 @@ struct GlassMaterial: View {
             // One even body tint under the melt — lighter than the iOS Siri
             // card's ~0.97, so the panel still reads as glass. The clearing
             // toward the bottom is not here: the material's mask fades glass
-            // and veil together to fully clear (`bottomFade`), which a veil
+            // and veil together (`bottomFade`), which a veil
             // alone can't do over the baked tint.
             let glassBody = 0.82
 

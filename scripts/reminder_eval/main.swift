@@ -21,8 +21,7 @@
 
 import Foundation
 
-// Stub for the app's localizer (real one lives in Localization.swift behind a
-// SwiftUI import). Only RemindersError uses it, which the parser tests never hit.
+// Stub for the app's localizer (see header).
 func L(_ key: String) -> String { key }
 func L(_ key: String, _ args: CVarArg...) -> String { key }
 

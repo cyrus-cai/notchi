@@ -301,16 +301,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Seed the configured flag to match the service the model launched with.
         model.isConfigured = AppDelegate.isConfigured()
 
-        // …and re-seed it once a CLI's binary resolution lands. For the five CLI
+        // …and re-seed it once a CLI's binary resolution lands. For the CLI
         // providers "configured" IS "the binary resolved and you're signed in",
         // and that answer is resolved asynchronously (`warmUp()` below) — a read
-        // taken here, on a cold cache, is always `false`. Without this observer
-        // that `false` latched for the whole session: with `codex` / `claude` /
-        // `grok` / `cmd` / `pi` as the selected provider, every launch came up claiming
-        // nothing was configured — the Ask chip red on "Choose model…", the model
-        // list falling back to the CLI offer — until some Settings action posted
-        // `.aiBackendChanged`. Registered *before* the warm-ups so the probe
-        // can't finish into a window where nobody is listening.
+        // taken here, on a cold cache, is always `false`, and without this
+        // observer it would latch for the whole session. Registered *before* the
+        // warm-ups so the probe can't finish into a window where nobody is
+        // listening.
         NotificationCenter.default.addObserver(
             forName: .cliAvailabilityResolved, object: nil, queue: .main
         ) { [weak self] _ in
@@ -694,9 +691,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if pose == "menu" {
                 let rows = env["NOTCH_DEMO_FORCE_ROWS"]
                     ?? "Translate → En|Proofread|Summarize in three lines"
-                // Demo rows are process-local. Persisting them used to overwrite
-                // the user's actual Prompt shortcuts with `prompt: "Demo"` and
-                // leave that damage behind after the screenshot run ended.
+                // Demo rows are process-local: persisting them would overwrite
+                // the user's actual Prompt shortcuts with `prompt: "Demo"`.
                 PromptShortcutStore.debugOverride = rows.split(separator: "|").map {
                     PromptShortcut(prompt: "Demo", name: String($0),
                                    showsInForceTouch: true)
@@ -870,7 +866,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // Settings now live *inside* the panel (see `InlineSettingsView`), so the
+        // Settings live *inside* the panel (see `InlineSettingsView`), so the
         // request just opens the panel straight into the settings view. Making the
         // panel open also makes it the key window (via the `$open` observer above),
         // so the API-key field can take keystrokes immediately.
@@ -962,7 +958,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Wire the answer-ready notification service: set its delegate so taps
         // route back here, and observe the tap so we can summon the panel and
         // reopen the conversation. (The banners themselves are posted from
-        // `NotchModel.submit` when a round finishes after the user walked away.)
+        // `NotchModel.notifyAnswerReady` when a round finishes after the user
+        // walked away.)
         NotificationService.shared.configure()
         NotificationCenter.default.addObserver(
             forName: NotificationService.answerTapped,
@@ -990,8 +987,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // File every settled agent run into Recent (XII: agent-to-Codex),
-        // so the result outlives the in-panel card and the banner tap below has
+        // File every settled agent run into Recent, so the result outlives the in-panel card and the banner tap below has
         // a row to land on.
         AgentTaskManager.shared.onSettled = { [weak self] task in
             self?.model.recordAgentHistory(task)
@@ -1012,7 +1008,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = NetworkReachability.shared
         AgentTaskManager.shared.restorePersistedLoops()
 
-        // A tap on an agent-Codex "task finished" banner: summon the panel and
+        // A tap on an agent "task finished" banner: summon the panel and
         // reopen the run's Recent record (filed above just before the banner
         // posted) — the same routing as an answer tap.
         NotificationCenter.default.addObserver(
@@ -1059,8 +1055,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // The configurable global summon shortcut (default: double-tap ⌥). A
         // double-tap is detected by watching `flagsChanged`; a recorded chord uses
-        // the same Carbon mechanism as ⌘, (fires from anywhere, no accessibility
-        // permission). User-editable in Settings → General, so it re-registers on
+        // a Carbon hot key (fires from anywhere, no accessibility permission). User-editable in Settings → General, so it re-registers on
         // change.
         registerSummonHotKey()
         NotificationCenter.default.addObserver(
@@ -1095,7 +1090,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 progress: { [weak self] reached in
                     MainActor.assumeIsolated {
                         guard let reached else { return ForceClickHerald.shared.cancel() }
-                        // The press draws the composer window itself now, so it needs
+                        // The press draws the composer window itself, so it needs
                         // the model the window will be built against.
                         guard let self else { return }
                         ForceClickHerald.shared.update(progress: reached, model: self.model)
@@ -1282,7 +1277,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } else {
                 // The composer is opening in the notch, nowhere near the pointer:
                 // only the pointer-side window inherits the cue's geometry and
-                // takes it off screen (`takeOverFromPressureCue`). Here the cue
+                // takes it off screen (`ForceClickHerald.handOff()`). Here the cue
                 // has to let go itself, or it stays standing where the press was.
                 ForceClickHerald.shared.abort()
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
@@ -1308,8 +1303,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         captureSelectedText(
             pointed: grownFromPressure,
-            // No early open on an empty first read any more: empty may now BE the
-            // answer, and an answer of "nothing selected" opens nothing. The box
+            // No early open on an empty first read: empty may BE the answer, and an answer of "nothing selected" opens nothing. The box
             // waits for the capture to finish either way.
             //
             // Nothing selected is not a failure, but it is also not an ordinary
@@ -1335,8 +1329,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// pointer simply wasn't on any text — and carries the same trigger context as
     /// a hit, so a caller can go on and open something anyway. **`unavailable`** is
     /// the capture not being possible at all (accessibility denied, or another
-    /// capture still running); nothing follows it. Both used to be a bare `return`,
-    /// which left whatever the caller had already put on screen standing there.
+    /// capture still running); nothing follows it. Neither may be a bare
+    /// `return`: that leaves whatever the caller already put on screen standing.
     private func captureSelectedText(
         pointed: Bool = false,
         firstPassEmpty: ((NSPoint, NSRunningApplication?) -> Void)? = nil,
@@ -1348,7 +1342,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // accessibility tree can take a beat and the pointer may have moved by then.
         let triggerPoint = NSEvent.mouseLocation
         let sourceApplication = NSWorkspace.shared.frontmostApplication
-        // The capture can now take a beat (waking a browser's accessibility tree),
+        // The capture can take a beat (waking a browser's accessibility tree),
         // so a second chord during that beat must not start a second round.
         guard !isCapturingSelection else { return unavailable() }
         isCapturingSelection = true
@@ -1732,8 +1726,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // the physical notch is ~37-38pt on notched MacBooks, and the
                 // busy extension sits beside it over visible screen — a drawn
                 // zone even a few px shorter reads as the extension "hanging"
-                // above the notch's bottom edge. (Black-on-black hid the
-                // mismatch for years; the extension exposed it.) The +1 is a
+                // above the notch's bottom edge. The +1 is a
                 // one-sided error margin: measurement/AA residue as DRAWN-TOO-
                 // SHORT shows a step at the junction, while drawn-too-tall just
                 // moves the whole continuous bottom edge down a hair — so bleed
@@ -2222,14 +2215,13 @@ extension NSScreen {
     /// "which display is the user on right now?" question in the app goes
     /// through (panel summons, the pointer-side shortcut window).
     ///
-    /// Not `NSMouseInRect(_:_:false)`, which used to do this job in two places:
-    /// it deliberately owns only three of a rect's four edges (x ∈ [minX, maxX),
-    /// y ∈ (minY, maxY]) so neighbouring *views* never both claim a point — and
-    /// on stacked displays that hands a pointer resting exactly on the seam to
-    /// the screen *below*. `CGRect.contains` has the same flaw mirrored (it drops
-    /// the top edge, i.e. the menu-bar row). And when neither claimed the point,
-    /// the callers fell back to `NSScreen.main` — the screen with the key window,
-    /// which has nothing to do with where the mouse is.
+    /// Not `NSMouseInRect(_:_:false)`: it deliberately owns only three of a
+    /// rect's four edges (x ∈ [minX, maxX), y ∈ (minY, maxY]) so neighbouring
+    /// *views* never both claim a point — and on stacked displays that hands a
+    /// pointer resting exactly on the seam to the screen *below*. `CGRect.contains`
+    /// has the same flaw mirrored (it drops the top edge, i.e. the menu-bar row).
+    /// Nor `NSScreen.main` as a fallback — the screen with the key window, which
+    /// has nothing to do with where the mouse is.
     ///
     /// So: nearest screen by distance-to-frame. A point inside (or on any edge
     /// of) exactly one screen scores zero there and nowhere else; a genuine seam

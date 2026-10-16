@@ -58,7 +58,7 @@ enum AgentEngine: String, CaseIterable {
     /// Known dead — resolved, and the answer was no. The ONLY safe trigger for
     /// dropping a remembered engine and the model pick under it: `!isAvailable`
     /// alone is true during every launch's probe window, and acting on it there
-    /// is how a relaunch used to silently reset the armed model to the first
+    /// would silently reset the armed model on relaunch to the first
     /// engine's default.
     var isKnownUnavailable: Bool { isAvailabilityResolved && !isAvailable }
 
@@ -70,7 +70,7 @@ enum AgentEngine: String, CaseIterable {
         self == .codex || self == .claude
     }
 
-    /// The terminal command that picks this engine's session back up. Neither
+    /// The terminal command that picks this engine's session back up. No
     /// CLI is spawned with `--ephemeral` / `--no-session-persistence`, so a run
     /// Notch lost track of (quit, crash) is still resumable by hand — the
     /// interrupted run's Recent row hands the user the exact line.
@@ -180,8 +180,8 @@ enum AgentEngine: String, CaseIterable {
                 AgentModelChoice(engine: self, id: $0.id, label: $0.displayName)
             }
         case .commandCode:
-            // Command Code's catalog is the widest of the four (an aggregator: ~50
-            // models across a dozen labs), read from the CLI itself — see
+            // Command Code's catalog is an aggregator's (~50 models across a
+            // dozen labs), read from the CLI itself — see
             // `CommandCodeCLIService`. Same empty-cache fallback as Grok's: an
             // available engine must never have an empty section.
             let listed = CommandCodeCLIService.listedModels
@@ -192,10 +192,10 @@ enum AgentEngine: String, CaseIterable {
                 AgentModelChoice(engine: self, id: $0.id, label: $0.displayName)
             }
         case .pi:
-            // pi's catalog is the widest of the five, because it is not one account's
+            // pi's catalog is the widest, because it is not one account's
             // lineup but every provider the user has signed pi into — read from the
             // CLI itself (see `PiCLIService`). Same empty-catalog fallback as the
-            // other two: an available engine must never have an empty section.
+            // others: an available engine must never have an empty section.
             let listed = PiCLIService.listedModels
             if listed.isEmpty {
                 return [AgentModelChoice(engine: self, id: nil, label: displayName)]
@@ -228,8 +228,8 @@ struct AgentModelChoice: Hashable {
 }
 
 /// Reasoning effort for an agent run — the armed row's third chip. `nil`
-/// (no selection) leaves both CLIs on their own defaults. The full ladder both
-/// CLIs speak today; which rungs the menu actually offers comes from
+/// (no selection) leaves the CLI on its own default. The full ladder the
+/// CLIs speak; which rungs the menu actually offers comes from
 /// `AgentEngine.effortChoices(forModelID:)`, since they differ per engine
 /// and (for Codex) per model.
 enum AgentEffort: String, CaseIterable {
@@ -247,11 +247,10 @@ extension AgentEngine {
 
 /// Which `--effort` levels an engine+model actually accepts.
 ///
-/// This used to be three hardcoded ladders, and the Command Code one was wrong in
-/// a way that **killed runs**: the CLI doesn't ignore a level it doesn't take, it
+/// A hardcoded ladder is wrong in a way that **killed runs** on Command Code: the CLI doesn't ignore a level it doesn't take, it
 /// refuses the whole task before doing any work —
 /// `Unknown effort "low". Supported: high, max.` Measured against the installed
-/// CLI (v1.26.0, 55 models), the old `[.low, .medium, .high]` guess was right for
+/// CLI (v1.26.0, 55 models), a `[.low, .medium, .high]` guess was right for
 /// 7 of them; 29 accept no effort flag at all, and the CLI's own default model
 /// (`deepseek/deepseek-v4-flash`) takes only `high`/`max` — which is exactly the
 /// combination a fresh install hit.
@@ -294,7 +293,7 @@ enum AgentEffortCatalog {
             let picked = modelID.flatMap { id in models.first { $0.id == id } }
                 ?? models.first(where: \.isDefault) ?? models.first
             // Until that list lands, the lowest common denominator every Codex
-            // model accepts — unchanged from before, and safe because Codex is one
+            // model accepts — safe because Codex is one
             // vendor's own lineup rather than an aggregator's.
             guard let picked else { return [.low, .medium, .high] }
             return picked.efforts.compactMap(AgentEffort.init)
@@ -477,7 +476,7 @@ extension Array where Element == AgentLogEntry {
     /// parser can't tell mid-run which text block is the last, so every narration
     /// block becomes a trail entry AND the last one also becomes the round's answer
     /// (`finalMessage`). Any view that stacks the trail above the answer therefore
-    /// printed the report twice (the "回答内容重复展示"). Drop it here, where both
+    /// printed the report twice. Drop it here, where both
     /// halves are known. Only a non-mono (narration) tail entry is eligible — a tool
     /// row (`mono`) is never the answer — and only when the answer begins with its
     /// (prefix-capped, whitespace-trimmed) title. Pass an empty `answer` (e.g. while
@@ -593,14 +592,14 @@ enum AgentTodo {
     }
 }
 
-/// Runs a **agent implementation task**: the user picks a folder, describes a
-/// task, and a local agent CLI (Codex or Claude Code — `AgentEngine`) works
+/// Runs an **agent implementation task**: the user picks a folder, describes a
+/// task, and a local agent CLI (Codex, Claude Code, … — `AgentEngine`) works
 /// *in that folder* — reading and writing files — until it's done, then reports
-/// its result back (XII: agent-to-Codex).
+/// its result back.
 ///
 /// This is deliberately a different animal from `CodexCLIService` (the chat
 /// backend), even though both shell out to the same `codex` binary:
-///  · **write access** — the chat runs `-s read-only` in a throwaway temp dir; a
+///  · **write access** — the chat runs `-s read-only` in a throwaway temp dir; an
 ///    agent task runs `-s workspace-write -C <folder>` so Codex can actually
 ///    implement things in the user's project. (Network stays off inside the
 ///    sandbox — codex's own workspace-write default — so an unattended task can't
@@ -724,7 +723,7 @@ final class AgentTaskManager: ObservableObject {
         var log: [AgentLogEntry] = []
         var finishedAt: Date? = nil
         var outcome: Outcome? = nil          // nil while running
-        /// Codex's final message — the reported result of the implementation.
+        /// The agent's final message — the reported result of the implementation.
         var result: String = ""
         /// The failure reason when `outcome == .failure`.
         var failureReason: String? = nil
@@ -1100,7 +1099,7 @@ final class AgentTaskManager: ObservableObject {
         case .commandCode:
             return CommandCodeCLIService.authExists() ? CommandCodeCLIService.resolveBinary() : nil
         case .pi:
-            // Resolve FIRST, then check the sign-in — the opposite order of its
+            // Resolve FIRST, then check the sign-in — the opposite order of most
             // siblings, and load-bearing: pi's `authExists` reads the catalog, and
             // the catalog is filled BY the resolution (`pi --list-models` is both
             // probes in one spawn). Asking first on a cold cache would answer "not
@@ -1365,9 +1364,8 @@ final class AgentTaskManager: ObservableObject {
 
         let state: AgentEventParser = Self.makeParser(for: engine)
 
-        // Progress streams off the growing log file — push became poll: the
-        // pipe's readability handler used to feed these bytes; a quarter-second
-        // tail tick now reads the same bytes through the same parser.
+        // Progress streams off the growing log file: a quarter-second tail
+        // tick feeds its new bytes through the parser.
         let tailer = RunLogTailer(url: outURL) { [weak self] data in
             if let update = state.ingest(data) {
                 Task { @MainActor in
@@ -1383,8 +1381,7 @@ final class AgentTaskManager: ObservableObject {
         p.terminationHandler = { [weak self] proc in
             watchdog.cancel()
             // Once the process exited, everything it wrote is in the file —
-            // there is no kernel pipe buffer to race (the old TeardownLatch's
-            // whole job). One final drain picks up the tail, result event
+            // there is no kernel pipe buffer to race. One final drain picks up the tail, result event
             // included; stderr rides in for the failure tail.
             tailer.finishAndDrain()
             Self.appendStderrFile(errURL, to: state)
@@ -1402,9 +1399,9 @@ final class AgentTaskManager: ObservableObject {
             try? outWrite.close()
             try? errWrite.close()
             // A run that never launched settles like any other failure — same
-            // exchange, same Recent row. Hand-rolling the outcome here (as this
-            // used to) skipped `onSettled`, so a spawn failure left no record
-            // at all once its card was dismissed.
+            // exchange, same Recent row. Hand-rolling the outcome here would
+            // skip `onSettled`, so a spawn failure would leave no record once
+            // its card was dismissed.
             let reason = Self.spawnFailureReason(engine, error.localizedDescription)
             settle(taskID: taskID,
                    snapshot: AgentSnapshot(finalMessage: "", failure: reason,
@@ -1503,8 +1500,8 @@ final class AgentTaskManager: ObservableObject {
     /// to take a mid-round instruction (headless, no TTY, stdin already closed),
     /// so this is the honest equivalent: kill the process, keep everything it
     /// reported, and re-open the SAME session with the new prompt the moment it
-    /// settles. `whileRunning` is why this exists at all — queueing (`followUp`)
-    /// makes the user wait out work they've already decided is wrong.
+    /// settles. Queueing (`followUp`) instead would make the user wait out work
+    /// they've already decided is wrong.
     ///
     /// Falls back to queueing when there's no session to resume yet (the round
     /// died before its id landed): stopping there would end the task outright.
@@ -1543,11 +1540,11 @@ final class AgentTaskManager: ObservableObject {
 
     /// A run that was still in flight, remembered on disk. The live task lives
     /// only in memory and history is written when the run *settles* — so a quit,
-    /// a crash, or a kill mid-run used to erase the run entirely: no card, no
+    /// a crash, or a kill mid-run would erase the run entirely: no card, no
     /// Recent row, nothing but the CLI's own session on disk. This marker is
     /// written when the process spawns and cleared when it settles; anything
     /// still there at launch is by definition a run that never got to settle.
-    /// (Since the reliability pass, "settle" here means *filed to disk*: the
+    /// ("Settle" here means *filed to disk*: the
     /// marker outlives settle itself and is cleared by `recordAgentHistory`
     /// only after the run's history row is written.)
     private struct InFlightRun: Codable {
@@ -2063,8 +2060,7 @@ final class AgentTaskManager: ObservableObject {
         try? FileManager.default.removeItem(at: stderrLogURL(taskID: taskID))
     }
 
-    /// Feed a run's redirected stderr file to its parser at teardown — the
-    /// live pipe handler this replaces streamed the same bytes. Capped: only
+    /// Feed a run's redirected stderr file to its parser at teardown. Capped: only
     /// the tail survives into the failure reason anyway.
     nonisolated private static func appendStderrFile(_ url: URL, to state: AgentEventParser) {
         guard var data = try? Data(contentsOf: url), !data.isEmpty else { return }
@@ -2197,7 +2193,7 @@ final class AgentTaskManager: ObservableObject {
               let run = runs[taskID] else {
             // A settle that lands here leaves NO exchange and NO history row —
             // if a run ever "vanishes", this breadcrumb is the lead. Should be
-            // unreachable: the teardown latch fires exactly once per run.
+            // unreachable: each run settles exactly once.
             DiagnosticsLog.shared.record(provider: "Agent", kind: "agent-settle-dropped")
             return
         }
@@ -2206,8 +2202,8 @@ final class AgentTaskManager: ObservableObject {
         cleanupTempImages(run)
         // The in-flight crash marker is NOT cleared here: it survives until the
         // history row is safely on disk (`recordAgentHistory` clears it after
-        // its immediate archive write). Clearing at settle left a window —
-        // marker gone, row still in the save debounce — where a crash erased
+        // its immediate archive write). Clearing at settle would leave a window —
+        // marker gone, row still in the save debounce — where a crash erases
         // the run entirely.
         t.finishedAt = Date()
         t.activity = nil
@@ -2232,8 +2228,8 @@ final class AgentTaskManager: ObservableObject {
 
         // Every settled round becomes an exchange — a cancel included. A run
         // the user stops after ten minutes still edited files and still has a
-        // resumable CLI session; dropping it on the floor was how a stopped run
-        // vanished the moment its card was dismissed. The answer text here is
+        // resumable CLI session; dropping it would make a stopped run vanish
+        // the moment its card was dismissed. The answer text here is
         // what history shows, so empty results fall back to the same outcome
         // lines the card headline uses.
         var answer: String
@@ -2283,7 +2279,7 @@ final class AgentTaskManager: ObservableObject {
         }
         // A follow-up marker is only a live placeholder. Once the round becomes
         // an exchange, the prompt is rendered by `UserQuestionBubble`; leaving
-        // the marker in either trail printed the same instruction again below.
+        // the marker in either trail would print the same instruction again below.
         var roundStartIndex = run.logStartIndex
         if let markerID = run.promptMarkerID {
             if let markerIndex = t.log.firstIndex(where: { $0.id == markerID }) {
@@ -2516,9 +2512,8 @@ final class AgentTaskManager: ObservableObject {
 }
 
 /// Tails a run's stdout log file: a quarter-second timer reads whatever grew
-/// since the last tick and hands it to `onData` (the pipe readability handler
-/// this replaced pushed the same bytes; the parser line-buffers, so chunk
-/// boundaries don't matter). `finishAndDrain` — called once the process is
+/// since the last tick and hands it to `onData` (the parser line-buffers, so
+/// chunk boundaries don't matter). `finishAndDrain` — called once the process is
 /// known to have exited — stops the timer and synchronously reads the file to
 /// its end, so the final result event is always ingested before the settle.
 private final class RunLogTailer: @unchecked Sendable {
@@ -2704,8 +2699,8 @@ private protocol AgentEventParser: AnyObject {
 }
 
 /// The **codex** dialect (`codex exec --json`). Line-buffers stdout and distills
-/// it into progress + a final snapshot. Lock-guarded: the readability and
-/// termination handlers fire on different queues. Mirrors `StreamState` in
+/// it into progress + a final snapshot. Lock-guarded: the log tailer and the
+/// termination handler fire on different queues. Mirrors `StreamState` in
 /// `CodexCLIService`, but where the chat only wants `agent_message` text, the
 /// agent wants the *work trail* too: commands run, files changed, the report.
 private final class CodexAgentStreamState: AgentEventParser {
@@ -3093,7 +3088,7 @@ private final class ClaudeAgentStreamState: AgentEventParser {
                         }
                         // Every tool call gets a work-trail entry; the handful
                         // below also drive the collapsed activity ticker and the
-                        // changed-files summary, same as before.
+                        // changed-files summary.
                         var entryTitle = name
                         var entryKind = AgentLogEntry.Kind.plain
                         var entryDetail: String? = nil
@@ -3309,7 +3304,7 @@ private final class ClaudeAgentStreamState: AgentEventParser {
 }
 
 /// The **grok** dialect (`grok --prompt-file … --output-format streaming-json`).
-/// Deliberately the thinnest of the three parsers, because grok's headless
+/// Deliberately the thinnest of the parsers, because grok's headless
 /// streaming-json surfaces only `text` (answer deltas), `thought` (reasoning
 /// deltas) and a terminal `end` — NO per-tool events, even when the run edits
 /// files or runs commands (verified). So there is no fine-grained work trail to
@@ -3318,8 +3313,8 @@ private final class ClaudeAgentStreamState: AgentEventParser {
 /// full per-command / per-file trail would need grok's ACP mode (`grok agent
 /// stdio`), a bidirectional JSON-RPC protocol incompatible with this subsystem's
 /// file-tailing, survive-app-quit design. The `end` event carries `sessionId`
-/// (what `grok --resume` continues) and `stopReason`; no token usage is emitted,
-/// so the context meter stays blank for grok.
+/// (what `grok --resume` continues) and `stopReason`, plus token usage when the
+/// build emits it (otherwise the context meter stays blank for grok).
 private final class GrokAgentStreamState: AgentEventParser {
     private let lock = NSLock()
     private var buffer = Data()
@@ -3788,8 +3783,8 @@ private final class CursorAgentStreamState: AgentEventParser {
     }
 }
 
-/// The **Command Code** dialect (`cmd -p --output-format json`). The richest of the
-/// four: every agent event is forwarded as its own `{"type":"event","event":{…}}`
+/// The **Command Code** dialect (`cmd -p --output-format json`). The richest
+/// dialect: every agent event is forwarded as its own `{"type":"event","event":{…}}`
 /// frame, so the full work trail is available — `tool_running` opens an entry,
 /// `tool_completed` attaches its output, `model_request_*` names the model and the
 /// turn's token usage, `run_start` hands over the session id `cmd --resume`

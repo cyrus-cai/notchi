@@ -203,10 +203,8 @@ final class ClickOpenProbe {
 
         // Both monitors run on the main thread, and the local one runs BEFORE the
         // event reaches the window — so the state is read synchronously right
-        // here. (Hopping to a `main.async` first was wrong: the hop lands after
-        // SwiftUI has already handled the press, so every trace read back
-        // `open=true, armed=false` — the post-open state, not the one the press
-        // actually met.)
+        // here. A `main.async` hop would land after SwiftUI has already handled
+        // the press and read back the post-open state instead.
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown]) { event in
             MainActor.assumeIsolated { ClickOpenProbe.shared.mouseDown(scope: "global", event: event) }
         }

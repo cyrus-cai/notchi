@@ -851,7 +851,7 @@ struct LoopScheduleChip: View {
 /// the round list off screen. Mount it as a `.overlay(alignment: .topTrailing)`
 /// on the record body, with the body padded by `width` + its gutter — the
 /// overlay's frame is the travel the column slides along. See
-/// `stickyOffset(in:)`.
+/// `StickyColumn`.
 struct LoopRoundSidebar: View {
     struct Item: Identifiable {
         let id: Int
@@ -906,7 +906,7 @@ struct LoopRoundSidebar: View {
 /// Clamped at both ends: never above the record's top, and never past the point
 /// where the column's own bottom reaches the record's, so it leaves with the
 /// record instead of hanging off it. Returns 0 where there is no scroller —
-/// then the column sits at the record's top, as it did before.
+/// then the column sits at the record's top.
 private struct StickyColumn: ViewModifier {
     let rows: Int
     let topInset: CGFloat

@@ -188,8 +188,8 @@ final class NoNoAccount: ObservableObject {
     var hasToken: Bool { !token.isEmpty }
 
     /// Ask the gateway for a token if this install has none, then read the
-    /// account. Safe to call on every appearance of the settings pane: it is a
-    /// no-op once a token exists and a refresh is not already running.
+    /// account. Safe to call on every appearance of the settings pane: it
+    /// returns at once while a request or refresh is running.
     func load() async {
         if case .working = phase { return }
         if refreshInFlight { return }
@@ -649,10 +649,8 @@ final class NoNoAccount: ObservableObject {
     }
 }
 
-/// Which classifier Copy Sense asks. On-device is the whole feature for a free
-/// account; Jev is the gateway route (`/v1/sense`), which refuses any account
-/// that has never bought credit, so the pick only shows for accounts that
-/// qualify.
+/// Which classifier Copy Sense asks: on-device, or Jev through the gateway
+/// route (`/v1/sense`), free for any account with a token.
 enum CopySenseEngine: String, CaseIterable, Identifiable {
     /// `IntentEngine` alone. The copied text never leaves the Mac.
     case onDevice

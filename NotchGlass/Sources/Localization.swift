@@ -40,7 +40,7 @@ enum AppLanguage: String, CaseIterable, Identifiable {
     }
 
     /// The concrete locale this choice resolves to — `.system` reads the OS
-    /// preference and folds it onto the five we ship, defaulting to English for
+    /// preference and folds it onto the seven we ship, defaulting to English for
     /// anything we don't translate.
     var resolved: Localization.Locale {
         switch self {
@@ -57,8 +57,8 @@ enum AppLanguage: String, CaseIterable, Identifiable {
 
     /// Map the OS's preferred localization onto one of our seven. `zh-Hant` /
     /// `zh-TW` / `zh-HK` / `zh-MO` → Traditional; any other `zh*` → Simplified;
-    /// `ja*` → Japanese; `ko*` → Korean; everything else → English — mirrors the
-    /// landing page's `normLang`.
+    /// `ja*` → Japanese; `ko*` → Korean; `fr*` → French; `es*` → Spanish;
+    /// everything else → English.
     private static var systemLocale: Localization.Locale {
         let pref = (Locale.preferredLanguages.first ?? "en").lowercased()
         if pref.hasPrefix("zh-hant") || pref.hasPrefix("zh-tw")

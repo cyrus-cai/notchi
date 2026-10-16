@@ -13,7 +13,7 @@ import SwiftUI
 ///
 /// The numbers are the web components' own, kept verbatim: card 190×126, expanded
 /// offsets (∓96, ∓54) / (∓78, ±54), rotations −10 / 7 / −4 / 11 (×0.7 collapsed,
-/// ×1.2 expanded), spring 180 / 24 / 0.75, hover 1.025 → 1.04, press 0.98, modal
+/// ×1.2 expanded), spring 180 / 24 / 0.75, hover 1.025 → 1.04, modal
 /// view transition 0.32s on [0.22, 1, 0.36, 1], drag constrained to ±90 with 0.22
 /// elasticity, dismissed past 140pt or 650pt/s.
 ///
@@ -602,9 +602,9 @@ private struct ImageLightbox: View {
                         }
                         if let host {
                             // The way out to the source, in the same chip grammar
-                            // the degraded media reference uses — tapping the
-                            // picture is the dismiss gesture now, so the link
-                            // needs its own target.
+                            // the degraded media reference uses — the picture
+                            // itself is the dismiss drag, so the link needs its
+                            // own target.
                             MediaLinkChip(label: host) {
                                 current.map { openImageURL($0.urlString) }
                             }

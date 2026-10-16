@@ -1,17 +1,17 @@
 import Foundation
 
 /// A model backend that shells out to the user's locally-installed **pi** CLI
-/// (`pi -p --mode json`) and streams its answer back — the fifth of the same family
-/// as `CodexCLIService` / `ClaudeCLIService` / `GrokCLIService` /
+/// (`pi -p --mode json`) and streams its answer back — the same family as
+/// `CodexCLIService` / `ClaudeCLIService` / `GrokCLIService` /
 /// `CommandCodeCLIService`.
 ///
-/// Like the other four, pi carries **no API key of ours**: it reuses whatever the
+/// Like the other CLI backends, pi carries **no API key of ours**: it reuses whatever the
 /// user already signed in with (`/login` inside pi's own TUI → OAuth tokens in
 /// `~/.pi/agent/auth.json`, or any of the ~40 provider API-key env vars pi reads).
 /// Usage bills against the user's own accounts — the whole point of a "use the CLI I
 /// already pay for" backend.
 ///
-/// What makes it different from its four siblings: pi is a **multi-account
+/// What makes it different from its siblings: pi is a **multi-account
 /// aggregator**. Command Code fronts ~50 models under ONE account; pi fronts every
 /// provider the user has separately signed into — a ChatGPT subscription, a Claude
 /// Pro plan, a Command Code account, an xAI key — side by side in a single catalog.
@@ -19,7 +19,7 @@ import Foundation
 /// catalog carries `gpt-5.4` twice, once under `commandcode` and once under
 /// `openai-codex`. The ids this service hands the rest of the app are therefore
 /// `"<pi-provider>/<model-id>"`, split back apart into `--provider` / `--model` at
-/// spawn time (see `spawnArgs`).
+/// spawn time (see `modelArgs(for:)`).
 ///
 /// **Compliance posture (mirrors the other CLI backends):** only the official binary
 /// is ever executed. Notch speaks no HTTP to any pi provider, never reads the tokens
@@ -40,15 +40,16 @@ import Foundation
 ///  · a chat turn runs with **no tools at all** (`-nt`). pi's built-ins are
 ///    `read`/`write`/`edit`/`bash`/`ls`/`grep`/`find` — a filesystem/shell set with
 ///    no web search in it, so none of it can help answer a chat question and all of
-///    it would run unattended. `--no-extensions` / `--no-skills` /
-///    `--no-context-files` / `--no-prompt-templates` / `--no-themes` /
-///    `--no-approve` plus an ephemeral cwd keep the turn out of the user's own pi
-///    configuration, and `--no-session` keeps quick chats out of their history.
+///    it would run unattended. `--no-skills` / `--no-context-files` /
+///    `--no-prompt-templates` / `--no-themes` / `--no-approve` plus an ephemeral
+///    cwd keep the turn out of the user's own pi configuration (`--no-extensions`
+///    is deliberately absent — see `stream`), and `--no-session` keeps quick chats
+///    out of their history.
 ///
 /// pi runs its own agent loop internally, so this conforms to `AIService` only —
-/// like the twins it deliberately does NOT adopt the tool harness. Note that pi is
-/// the one CLI backend with **no web search of any kind** (see
-/// `Provider.supportsWebSearch`), so a pi chat answers from training data alone.
+/// like the twins it deliberately does NOT adopt the tool harness. pi has **no web
+/// search of any kind** (see `Provider.supportsWebSearch`), so a pi chat answers
+/// from training data alone.
 struct PiCLIService: AIService {
     /// The `"<pi-provider>/<model-id>"` pick, or `nil` for "pi's own configured
     /// default" (no `--provider` / `--model` flags at all).
@@ -607,9 +608,9 @@ struct PiCLIService: AIService {
             //
             // `--no-extensions` is deliberately NOT here, and must not be added: in
             // pi an extension package is how a *provider* is registered, not just a
-            // tool. Passing it kills the very model the user picked — verified live,
-            // where `--no-extensions --provider commandcode` died with
-            // `Unknown provider "commandcode"`. The reason it was wanted (a project's
+            // tool. Passing it kills the very model the user picked
+            // (`--no-extensions --provider commandcode` dies with
+            // `Unknown provider "commandcode"`). The reason it was wanted (a project's
             // own extension code running unbidden) is already covered twice over —
             // `-nt` disables extension tools along with the built-ins, and the cwd is
             // an empty temp dir with `--no-approve` on top.

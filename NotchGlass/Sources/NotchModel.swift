@@ -17,7 +17,7 @@ private let historyImageCache = NSCache<NSString, NSImage>()
 /// Decodes a JSON array element-by-element, dropping any element that fails to
 /// decode instead of failing the whole array. Used for persisted history so one
 /// corrupt or future-incompatible row can't wipe every Recent item (see
-/// `loadHistory`). A single `try? decode([T].self …)` is all-or-nothing; this
+/// `decodeHistory`). A single `try? decode([T].self …)` is all-or-nothing; this
 /// isolates each element behind its own `try?`.
 private struct LossyArray<T: Decodable>: Decodable {
     let elements: [T]
@@ -115,7 +115,6 @@ final class ConversationStore: ObservableObject {
         return loop
     }
 
-    /// The position of a turn in `turns`.
     func index(of id: UUID) -> Int? {
         if let indexCache { return indexCache[id] }
         var map: [UUID: Int] = [:]
@@ -316,11 +315,10 @@ final class NotchModel: ObservableObject {
             self.hidesUserBubble = hidesUserBubble
         }
 
-        // Same defensive decode as `HistoryItem` (see the long note there): turns
-        // are persisted inside a saved thread, and the whole history list is
-        // decoded in one `try?` — so a turn saved before `usedClipboard`/`streaming`
-        // existed must NOT throw `keyNotFound` and take the entire list down with
-        // it. `decodeIfPresent` + defaults is what keeps old saved conversations
+        // Same defensive decode as `HistoryItem` (see the note there): turns are
+        // persisted inside a saved thread, so a turn saved before
+        // `usedClipboard`/`streaming` existed must NOT throw `keyNotFound` and take
+        // its whole thread down with it. `decodeIfPresent` + defaults is what keeps old saved conversations
         // loadable. `role`/`text` are required — every saved turn has them.
         // `toolActivity` is deliberately absent: it's runtime-only UI state.
         enum CodingKeys: String, CodingKey { case id, role, text, streaming, hidesUserBubble, usedClipboard, sources, isError, regenModel, answerModel, imageFiles, isAgent, agentLog, reasoning, loopRound, reaction, sharedLinks, isLocal, captures, sentAt, interrupted }
@@ -510,15 +508,14 @@ final class NotchModel: ObservableObject {
             self.origin = origin
         }
 
-        // Custom decoder — the load-bearing reason this exists: history is decoded
-        // as one `try? JSONDecoder().decode([HistoryItem].self …)` (see
-        // `loadHistory`), so if ONE item fails to decode the WHOLE list is dropped
-        // and every Recent row vanishes. Swift's *synthesized* `Decodable` calls
+        // Custom decoder — the load-bearing reason this exists: an item that fails
+        // to decode is dropped from Recent (`decodeHistory` skips it via
+        // `LossyArray`). Swift's *synthesized* `Decodable` calls
         // `decode` (not `decodeIfPresent`) for non-optional stored properties even
         // when they carry a Swift default — the `= .ask` / `= nil` defaults apply
         // only to the memberwise init, NOT to decoding. So an item saved before
         // `source`/`link`/`turns`/`title` existed would throw `keyNotFound` and
-        // wipe the list. Decoding the newer fields with `decodeIfPresent` (and
+        // vanish. Decoding the newer fields with `decodeIfPresent` (and
         // falling back to their defaults) is what actually makes old items decode
         // cleanly with no migration. `id`/`q`/`a`/`t` are required — every saved
         // item has always had them.
@@ -1396,7 +1393,7 @@ final class NotchModel: ObservableObject {
     ///
     /// On the closed→open edge two further gates apply, both aimed at the same
     /// complaint: reaching for a menu bar item near the notch kept unfurling the
-    /// panel over it. See `cursorReallyEntered` and `isMenuBarSweep`.
+    /// panel over it. See `MouseVelocityTracker.cursorMoved` and `isMenuBarSweep`.
     func hoverEntered(on display: CGDirectDisplayID?, velocity: CGVector) {
         ClickOpenProbe.shared.hover("entered display=\(display.map(String.init) ?? "nil") open=\(open)")
         if open {
@@ -1415,8 +1412,7 @@ final class NotchModel: ObservableObject {
         // verb/clock and the copy-sense hint flex the ears out by tens of points,
         // straight over the menu bar. That is the island arriving at the cursor,
         // not the cursor arriving at the island, and it must not open anything.
-        // (`collapseOnLeave` has carried the mirror of this test for exits all
-        // along; this is the missing half.)
+        // (`collapseOnLeave` carries the mirror of this test for exits.)
         guard MouseVelocityTracker.shared.cursorMoved(within: 0.2) else {
             ClickOpenProbe.shared.hover("entered DROPPED: cursor had not moved")
             return
@@ -3073,8 +3069,8 @@ final class NotchModel: ObservableObject {
     var currentActivity: String? { thinkingActivity }
 
     /// The rotating mood word on its own (no activity merged in), exposed read-only
-    /// so `StreamingTurnContent`'s dots row shows *only* the mood word — never the
-    /// activity label, which now lives in its own row.
+    /// so `AssistantTurnView`'s wait row shows *only* the mood word — never the
+    /// activity label, which has its own row.
     var currentThinkingWord: String { thinkingWord }
 
     /// Pick a fresh thinking word, avoiding an immediate repeat. A pinned task word
@@ -5393,8 +5389,7 @@ final class NotchModel: ObservableObject {
         }
     }
     /// Whether the inline settings panel is showing in place of the recent list.
-    /// Replaces the old native Settings window — the gear (and ⌘,) flip this, and
-    /// the idle view swaps the RECENT block for the settings form when it's true.
+    /// The gear (and ⌘,) flip this, and the idle view swaps the RECENT block for the settings form when it's true.
     @Published var showSettings = false
     /// The "What's New" release-notes panel — ⌘↵ (and the input-row cue) flip this.
     /// Like settings, it owns the whole idle body when true and the back chevron /
@@ -9725,7 +9720,7 @@ final class NotchModel: ObservableObject {
                     self.resolveUserQuestion(q.id, with: .failure(CancellationError()))
                 }
             }
-            // The deferred vision encode (see `pendingVisionImage` above): produce
+            // The deferred vision encode (see `pendingVisionImages` above): produce
             // the wire bytes off the main actor, then attach them to the outgoing
             // context — nothing reads `context` until the stream starts below, so
             // the suspension is invisible beyond the thinking dots it happens under.
@@ -12385,7 +12380,7 @@ final class NotchModel: ObservableObject {
 
     /// Park one already-encoded JPEG in the store. Returns the filename to stamp on
     /// the turn, or `nil` if the write failed — in which case the turn simply keeps
-    /// no attachment, exactly as it did before this existed.
+    /// no attachment.
     nonisolated static func storeHistoryImage(_ jpeg: Data) -> String? {
         let dir = historyImagesDirectory
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

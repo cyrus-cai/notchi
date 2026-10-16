@@ -7,7 +7,7 @@ import SwiftUI
 /// card on the surface the click came from.
 ///
 /// With the setting off, without an account token, or when the gateway gives no
-/// answer, the link opens directly — the same behaviour as before this existed.
+/// answer, the link opens directly.
 @MainActor
 final class LinkGate: ObservableObject {
     static let shared = LinkGate()

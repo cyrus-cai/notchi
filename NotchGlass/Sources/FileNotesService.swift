@@ -53,9 +53,8 @@ enum FileNotesError: LocalizedError {
 }
 
 /// Writes typed lines into per-day Markdown files — the local-folder sibling of
-/// `NotesService`, wearing the same async API shape so `NotchModel`'s two write
-/// paths (submit + closed-notch sense) branch on `NoteDestination` and nothing
-/// else changes.
+/// `NotesService`, wearing the same async API shape so `NotchModel`'s write
+/// paths branch on `NoteDestination` and nothing else changes.
 ///
 /// **Layout: one file per day, entries appended.** A jot-per-file would just
 /// move "scattered" from Notes into Finder; a day file keeps the stream of
@@ -223,7 +222,7 @@ enum FileNotesService {
         }
     }
 
-    /// The actual append. Runs on `queue`. Returns the day file's path on success.
+    /// Runs on `queue`. Returns the day file's path on success.
     private static func appendOnQueue(_ text: String, folder: String) -> Result<String?, FileNotesError> {
         let fm = FileManager.default
         do {

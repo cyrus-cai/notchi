@@ -2,9 +2,9 @@ import AppKit
 import SwiftUI
 
 /// The "What's New" release-notes panel, rendered *inside* the notch in place of
-/// the recent list — same full-body takeover as `InlineSettingsView`. Reached by
-/// ⌘↵, by the input-row cue, or by the once-per-version auto-show; the back
-/// chevron / Esc returns to the idle prompt.
+/// the recent list — same full-body takeover as `InlineSettingsView`. Reached
+/// from the menu bar, the Recent menu, or About in Settings
+/// (`NotchModel.openWhatsNew`); the back chevron / Esc returns to the idle prompt.
 ///
 /// Content comes from `WhatsNewService`, whose notes are bundled into the app —
 /// so the normal case is just a scrollable column of per-version sections, always

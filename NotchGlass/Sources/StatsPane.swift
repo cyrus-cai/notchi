@@ -252,9 +252,8 @@ struct StatsPane: View {
     /// it can push around.
     @Binding var hovered: StatsHoverDay?
 
-    /// The gap between this pane's two cards — the same 14 the settings pane puts
-    /// between its own rows, so Stats keeps the vertical rhythm of every other
-    /// category rather than inventing a tighter one.
+    /// The gap between this pane's blocks, in step with the settings pane's own
+    /// row rhythm rather than a tighter one.
     private static let blockGap: CGFloat = 12
 
     var body: some View {
@@ -407,14 +406,13 @@ private struct StatsTotal: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 5) {
-                // 12, up from 11: the mark has to hold its own beside an 18pt
-                // Prompt figure, and at 11 it read as a stray dot next to one.
+                // At 11 the mark read as a stray dot beside an 18pt Prompt figure.
                 LucideIcon(mark: icon, size: 12)
                     .foregroundStyle(Tokens.text4)
                 StatsFigure(value: value, format: format)
             }
-            // The longest label in the pane ("Palabras respondidas") is wider than
-            // a quarter of the panel; it shrinks rather than truncating, because a
+            // A long localized label can be wider than a quarter of the
+            // panel; it shrinks rather than truncating, because a
             // clipped label on a four-column sheet reads as a layout bug.
             // The label row is pinned to the height the label alone would take
             // (13 at `.sf(Tokens.TypeSize.meta)`) so the ⓘ can't set it. Left to size itself, the
@@ -487,10 +485,9 @@ private struct StatsActivityCard: View {
                            value: digest.agentMessages,
                            format: StatsFormat.total,
                            label: L("stats.agentRuns"))
-                // The fourth column the row was always laid out for. Its mark is
-                // `hash` rather than a bucket glyph on purpose: the other three
-                // name *which* bucket they counted, and this one is a measure
-                // taken across all of them. It is also the one figure here that
+                // The mark is `hash` rather than a bucket glyph on purpose: the
+                // other three name *which* bucket they counted, and this one is a
+                // measure taken across all of them. It is also the one figure here that
                 // starts at zero on an old archive, so it carries the ⓘ that
                 // says why.
                 StatsTotal(icon: LucideIcons.hash,
@@ -978,11 +975,8 @@ enum StatsFormat {
 
     /// Plain grouped digits, every figure on the pane.
     ///
-    /// The word count was compact for a while ("29K", the way the reference
-    /// screenshot does it) — but compact notation rounds to one significant digit
-    /// in Chinese, where 30,458 words comes back as "3万". A number that loses an
-    /// order of magnitude of precision to save four characters is not worth the
-    /// four characters; the tile has room for the real figure.
+    /// Not compact notation: in Chinese that rounds to one significant digit
+    /// (30,458 → "3万"), and the tile has room for the real figure.
     static func count(_ value: Int) -> String {
         kit.number.string(from: NSNumber(value: value)) ?? "\(value)"
     }
@@ -1075,8 +1069,8 @@ enum StatsSnapshot {
             : TokenMeter.shared.reading
 
         // The pane's real width in the panel: the category column and the divider
-        // taken off `openWidthSettings`. The settings body no longer adds a side
-        // inset of its own — it sits on the panel's gutter.
+        // taken off `openWidthSettings`. The settings body adds no side inset of
+        // its own — it sits on the panel's gutter.
         let width = Tokens.openWidthSettings - 104 - 12 - 0.5 - 14
         // NOTCH_STATS_SNAPSHOT_FIT=1 clips to the settings pane's real viewport
         // (`NotchBody.immersiveListHeight` less the back-pill chrome, plus the

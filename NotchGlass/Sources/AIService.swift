@@ -28,21 +28,16 @@ struct ChatMessage: Sendable, Equatable {
 }
 
 /// A wire-ready image attachment: the base64 payload plus its mime type. Built
-/// once in `NotchModel.encodeForVision` (long side capped, JPEG) and carried
+/// once in `NotchModel.encodeJPEGForVision` (long side capped, JPEG) and carried
 /// opaquely from there to whichever client sends it.
 struct ChatImage: Sendable, Equatable {
     let base64: String
     let mediaType: String   // e.g. "image/jpeg"
 }
 
-/// The seam where the notch talks to an AI. In the web prototype this was
-/// `window.claude.complete()`; here it's an async protocol so a real Claude API
-/// client can be dropped in later without touching any UI code.
-///
-/// Per the current scope the app ships with `StubAIService` — no network, no API
-/// key. To go live, implement this protocol against the Anthropic API (ideally
-/// through a small backend so the key never ships in the app) and swap the
-/// instance handed to `NotchModel`.
+/// The seam where the notch talks to an AI. Every backend — the HTTP clients and
+/// the CLI services — implements it, so the UI never knows which one is live;
+/// `StubAIService` is the offline stand-in when nothing is configured.
 protocol AIService: Sendable {
     /// Continue a conversation, streaming the reply as it arrives. `system` is the
     /// persona/instruction; `messages` is the full alternating user/assistant
@@ -115,9 +110,8 @@ enum ReplyTokens {
     /// that thinking plus a short answer never comes close, low enough to stay
     /// within what every Claude model accepts as a max output.
     ///
-    /// Untested here — this machine has no Anthropic key, so unlike the numbers
-    /// above this one rests on the documented output ceiling rather than on a
-    /// measurement of our own.
+    /// Unlike the numbers above, this one rests on the documented output ceiling
+    /// rather than on a measurement of our own.
     static let anthropicRequiredCeiling = 8192
 }
 
@@ -125,10 +119,9 @@ enum ReplyTokens {
 ///
 /// Notch does **not** send `temperature`. Same reasoning as `ReplyTokens`: reply
 /// character is a matter of style, and style is already set where it belongs —
-/// `notchSystemPrompt`. A flat 0.7 was never solving anything; it just rode along
-/// on every request as a leftover default.
+/// `notchSystemPrompt`.
 ///
-/// It was also actively breaking models. OpenAI locks the reasoning line to the
+/// Sending it also breaks models. OpenAI locks the reasoning line to the
 /// default (1) from `gpt-5.5` onward, so any explicit value is a hard 400 — not a
 /// warning, not a clamp. Measured on the wire with the same key, one question,
 /// with vs. without the field:
@@ -614,12 +607,10 @@ func notchSystemPrompt(advertisedTools: Set<String>? = nil) -> String {
 /// Rendered in the user's interface language to match the answer, mirroring
 /// `DateTimeTool`'s locale handling.
 ///
-/// The date is the **last** line, not the first. It used to lead, which read
-/// better and cost more: an upstream prompt cache matches on a prefix, so the
-/// one part of this prompt that changes every midnight sat in front of the part
-/// that never changes, and every request on a new day re-prefilled the whole
-/// persona instead of reusing it. Ordered this way, everything above the date is
-/// byte-identical from one day to the next. Nothing else here varies per
+/// The date is the **last** line, not the first: an upstream prompt cache matches
+/// on a prefix, so a leading date would re-prefill the whole persona on every new
+/// day. Ordered this way, everything above the date is byte-identical from one
+/// day to the next. Nothing else here varies per
 /// request: the preferences and the stances are per-account settings.
 func notchSystemPromptDated(customInstructions: String? = nil,
                             memories: String? = nil,
@@ -729,9 +720,6 @@ only from those results. Do not hedge with "as of my last update" or \
 skipping it.
 """
 
-/// System prompt for summarizing a conversation into a short recent-list title.
-/// The title is derived from the *actual* exchange (not the user's first message),
-/// so generic prompts like "总结一下" don't end up as the displayed title.
 /// For `NotchModel.scanHistoryForMemories`: lasting facts about the user, read
 /// from the messages they sent in past conversations.
 let memoryExtractSystemPrompt = """
@@ -750,6 +738,9 @@ about the world.
 - At most 20 lines. If there is nothing, reply NONE.
 """
 
+/// System prompt for summarizing a conversation into a short recent-list title.
+/// The title is derived from the *actual* exchange (not the user's first message),
+/// so generic prompts like "总结一下" don't end up as the displayed title.
 let titleSystemPrompt = """
 You write short, *distinctive* titles for a list of past conversations. The \
 list shows many titles stacked together, so each one must be specific enough \
@@ -852,16 +843,14 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     // Gated out of the menu by `offered` until the gateway is live; see
     // `nonoIsLive`.
     case nono
-    /// First in the menu deliberately: the only backend that works without
-    /// pasting a key (one-click OAuth connect, free models) — the default for
-    /// fresh installs.
+    /// Works without pasting a key (one-click OAuth connect, free models) — the
+    /// fresh-install default whenever nono isn't offered.
     case openrouter
     // Vercel AI Gateway is the other aggregator — one key fronts hundreds of
     // models across OpenAI/Anthropic/Google/xAI/… with automatic provider
     // fallback. Sits right after OpenRouter, its keyless sibling in kind.
     case vercel
-    // International majors first, then domestic providers by familiarity —
-    // OpenRouter stays at the top as the keyless default for fresh installs.
+    // International majors first, then domestic providers by familiarity.
     case openai
     // OpenAI's Codex CLI, driven as a keyless backend: it reuses the user's
     // `codex login` (ChatGPT sign-in) instead of an API key, so it sits right
@@ -892,7 +881,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     // shells out to the local `cmd` binary (see `CommandCodeCLIService`).
     case commandCode
     // pi (github.com/earendil-works/pi), the same keyless pattern again — and the
-    // widest of the five: it fronts every provider the user has separately signed
+    // widest of the aggregators: it fronts every provider the user has separately signed
     // into (a ChatGPT plan, a Claude plan, a Command Code account, an xAI key …) in
     // one catalog, each model billed to its own upstream account. Not an HTTP
     // endpoint — it shells out to the local `pi` binary (see `PiCLIService`).
@@ -944,17 +933,15 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
 
     /// Whether nono is deployed and serving.
     ///
-    /// `false` keeps it out of every menu while `api.notch.website` is not yet
-    /// answering — a provider a user can select but that cannot possibly work is
-    /// worse than one that isn't there. Flip the constant in the same change that
-    /// puts the Worker live; a local override counts as live so the gateway can
-    /// be worked on before then.
+    /// `false` keeps it out of every menu — a provider a user can select but that
+    /// cannot possibly work is worse than one that isn't there. A local override
+    /// counts as live so the gateway can be worked on regardless.
     static let nonoShipsLive = true
     static var nonoIsLive: Bool { nonoShipsLive || !nonoBaseURLOverride.isEmpty }
 
     /// The providers the app actually OFFERS — every case except `.commandCode`
-    /// while it is switched off (see `CommandCodeCLIService.isRetired`) and, until
-    /// it is deployed, `.nono`. Every list the user sees walks this, not
+    /// while it is switched off (see `CommandCodeCLIService.isRetired`) and `.nono`
+    /// while it is not live (`nonoIsLive`). Every list the user sees walks this, not
     /// `allCases`: a case that is switched off still decodes from a saved pick so
     /// it can repoint itself, but it must not appear in a menu.
     static let offered: [Provider] = allCases.filter {
@@ -991,13 +978,9 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
                 // an app release — that indirection is the point, so this id is
                 // the whole public surface.
                 //
-                // `nono` and then `nono-flash` (Blend1) were the head of this
-                // list, which made each every install's `defaultModel`. Both are
-                // retired; the gateway runs either as `auto-us` because copies
-                // in the field still send them.
-                //
-                // The head is `auto-us`, so a user who has not picked a model
-                // runs Auto (US).
+                // The retired `nono` and `nono-flash` (Blend1) ids were once the
+                // default here; the gateway still runs either as `auto-us` because
+                // copies in the field send them.
                 models: ["auto-us"],
                 signupHost: "notch.website",
                 signupURL: "https://notch.website",
@@ -1220,10 +1203,6 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     // (`provider.displayName`, `provider.endpoint`, …) keep working unchanged.
     var displayName: String     { spec.displayName }
     var endpoint: URL           { spec.endpoint }
-    // Models go through the remote curated manifest first (hot-updated from the
-    // website, see `RemoteModelManifest`), so the shortlist and the default a
-    // fresh install uses can move without an app release; the bundled spec is
-    // the offline fallback.
     /// Backends that are driven by the user's own signed-in CLI rather than a key
     /// we hold: nothing to paste, and "configured" means the binary is installed
     /// and logged in (see each service's `isAvailable`).
@@ -1235,6 +1214,10 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
+    // Models go through the remote curated manifest first (hot-updated from the
+    // website, see `RemoteModelManifest`), so the shortlist and the default a
+    // fresh install uses can move without an app release; the bundled spec is
+    // the offline fallback.
     var defaultModel: String {
         // Codex's model isn't a curated shortlist — it's whatever the user's own
         // `codex` is configured to run (read from ~/.codex/config.toml), so the
@@ -1313,10 +1296,9 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         switch self {
         // The gateways front other people's models, and a custom endpoint could be
         // serving anything at all — in both cases the id has to speak for itself.
-        // Command Code is the third of that kind — a CLI account that fronts ~50
-        // models from a dozen labs, so its ids name their own vendor. pi is the
-        // fourth, and the widest: its ids are `<pi-provider>/<model>`, and the model
-        // half names the real lab (see `PiCLIService.vendor(forID:)`).
+        // The aggregator CLIs (Cursor, Command Code, pi) are the same kind: their
+        // ids name their own vendor — pi's are `<pi-provider>/<model>`, whose
+        // model half names the real lab (see `PiCLIService.vendor(forID:)`).
         case .openrouter, .vercel, .custom, .cursorCode, .commandCode, .piCode: return nil
         // nono's ids name no vendor on purpose — that is the product. The mark
         // the picker draws is Notchi's own, never the model actually running.
@@ -1376,7 +1358,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     /// `/v1/messages`). `AppDelegate` uses this to pick the client implementation.
     var isOpenAICompatible: Bool {
         switch self {
-        // Anthropic speaks its native protocol; Codex and Claude Code aren't HTTP
+        // Anthropic speaks its native protocol; the CLI backends aren't HTTP
         // at all (subprocesses). All are routed to their own client, never the
         // shared one.
         case .anthropic, .codex, .claudeCode, .grokCode, .cursorCode, .commandCode, .piCode,
@@ -1411,7 +1393,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     /// harness reads that as a normal `end_turn`. The gate exists so a future
     /// known-toolless provider can be excluded cleanly without touching the harness.
     var supportsTools: Bool {
-        // Codex and Claude Code run their OWN agent loops inside the CLI (search,
+        // The CLI backends run their OWN agent loops inside the CLI (search,
         // reasoning, file access), so Notch's tool harness must stay out of their
         // way — the turn dispatcher takes the plain `stream` path for them. Every
         // other provider exposes a function-calling API the harness can drive.
@@ -1455,14 +1437,10 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     /// same 6h refresh as the model shortlists — so a newly released model stops
     /// being wrong without an app release.
     ///
-    /// **An unknown id reads as vision-capable**, which inverts the old bundled
-    /// allowlist. That allowlist encoded a 2023-shaped world and had gone stale in
-    /// the obvious way: it recognized GLM's vision line only by a trailing `v`
-    /// (`glm-4v`), a convention Zhipu dropped when the 5.x line went natively
-    /// multimodal, so every GLM 5 model was told it couldn't see. Inverting also
-    /// changes what a miss costs — the blocklist covers most of what Notch dials,
-    /// and the ids it misses skew NEW, where multimodal is now the norm. A wrong
-    /// yes costs one ignored attachment; a wrong no silently removes a feature the
+    /// **An unknown id reads as vision-capable.** Naming conventions for vision
+    /// models don't last (GLM's trailing `v` disappeared when 5.x went natively
+    /// multimodal), and the ids the blocklist misses skew NEW, where multimodal is
+    /// the norm. A wrong yes costs one ignored attachment; a wrong no silently removes a feature the
     /// model has. When a provider does reject the image, the turn retries without
     /// it and remembers (`VisionProbe`), so a wrong yes self-corrects once.
     static func modelSupportsVision(_ model: String) -> Bool {
@@ -1965,19 +1943,16 @@ struct OpenAICompatAIService: AIService {
 
     // OpenAI-compatible request / streaming-response shapes (only fields we use).
     //
-    // No output cap is sent. It used to be, under whichever key the vendor wanted
-    // (`max_completion_tokens` for MiMo, `max_tokens` for everyone else), which is
-    // why the encoder below is key-driven — that machinery now carries only the
-    // fields we still send. See `ReplyTokens` for why the cap went away, and
-    // `SamplingKnobs` for why `temperature` went with it.
+    // No output cap and no `temperature` are sent — see `ReplyTokens` and
+    // `SamplingKnobs`.
     private struct RequestBody: Encodable {
         let model: String
         let messages: [Message]
         let stream: Bool
         /// OpenRouter's server-side failover chain (`models`), primary first —
         /// see `OpenRouterFreeModels.serverFallbacks`. `nil` for every other
-        /// provider (and for OpenRouter paid models), keeping the wire body
-        /// byte-identical to before.
+        /// provider (and for OpenRouter paid models), which leaves the field off
+        /// the wire.
         var fallbackModels: [String]? = nil
         /// `stream_options: {include_usage: true}` — what makes a streaming
         /// response end with a `usage` block instead of just `[DONE]`. It is the
@@ -2616,7 +2591,7 @@ enum RemoteModelManifest {
         /// vendors that hide it (OpenAI, Anthropic, Google) don't emit until the
         /// answer begins, so ranking a mixed list by that field reports a
         /// streaming policy as a hundredfold speed difference. This field means
-        /// the same thing for both — see TIME_TO_ANSWER in `api/model-stats.js`.
+        /// the same thing for both — see TIME_TO_ANSWER in `docs/api/model-stats.js`.
         let timeToAnswer: Double?
         /// Intelligence per dollar, scored 1–100 against the manifest's own
         /// lineup — the number the card draws in its ring. A score rather than the
@@ -3089,18 +3064,15 @@ enum ModelCatalog {
 
     /// In-memory cache of the last successful live fetch per provider, so the
     /// network hit (plus, for OpenRouter, the extra `UsageRankings` call) isn't
-    /// repeated every time Settings reopens. `InlineSettingsView` is "closed ==
-    /// destroyed" (`NotchBody.swift`'s `if model.showSettings { InlineSettingsView(…) }`),
-    /// which wipes its own `@State private var liveByProvider` — this cache lives
-    /// on the type instead, so it survives that teardown across the app's whole
-    /// process lifetime (until `ttl` lapses or the key changes).
+    /// repeated every time the picker or Settings reopens. Lives on the type for
+    /// the whole process (until `ttl` lapses or the key changes).
     ///
     /// Keyed by provider, but an entry also carries the `apiKey` it was fetched
     /// with: a stale entry from a different key for the same provider is treated
     /// as a miss, so pasting a new key always shows that key's own catalog.
     /// Guarded by `cacheLock` for the same reason as `RemoteModelManifest.cached`
-    /// — `loadAllProviderModels` fires one concurrent fetch per provider via a
-    /// `TaskGroup`, and NSLock can't be touched directly from async code.
+    /// — `ModelCatalogStore.loadKeyed` fires one concurrent fetch per provider via
+    /// a task group, and NSLock can't be touched directly from async code.
     private struct CacheEntry {
         let apiKey: String
         let result: Result
@@ -3123,11 +3095,10 @@ enum ModelCatalog {
     ///
     /// Serves the cached result when one exists for this exact `(provider,
     /// apiKey)` pair and is younger than `ttl` — set `force: true` to bypass it
-    /// (for a manual refresh/retry action, should one ever be wired up; nothing
-    /// in the Settings UI does today). A failed fetch is never cached, so the
+    /// (a manual refresh). A failed fetch is never cached, so the
     /// next call — cache or no — always gets a real retry.
     static func fetch(for provider: Provider, apiKey: String, force: Bool = false) async -> Result? {
-        // Codex / Grok / Command Code / pi have no `/v1/models` endpoint (they're
+        // The CLI backends have no `/v1/models` endpoint (they're
         // local subprocesses, not HTTP), so there's nothing to fetch — their model
         // lists come from the CLIs themselves.
         if provider == .codex || provider == .grokCode || provider == .commandCode
@@ -3214,8 +3185,8 @@ enum ModelCatalog {
     }
 
     /// nono's last good `/v1/models` body. The in-memory `cache` above ends with
-    /// the process, so without this every launch showed the Ask menu's Notchi
-    /// list as the bundled Blend1 row until the gateway answered. The raw body is
+    /// the process, so this is what the Ask menu's Notchi list shows until the
+    /// gateway answers at launch. The raw body is
     /// stored rather than the parsed result, so a relaunch decodes it the same way
     /// a live fetch does.
     private static let persistedNonoKey = "ModelCatalog.nonoModels"
@@ -3330,9 +3301,8 @@ enum ModelCatalog {
             ///     that emits images or audio isn't a chat model.
             ///  3. the id itself — every first-party vendor (OpenAI, Gemini, Qwen,
             ///     GLM, …) ships *no* classification at all, so the modality has to
-            ///     be read off the name (`ModalityFilter`). The old code treated a
-            ///     missing `type` as "keep", which is why OpenAI's picker arrived
-            ///     carrying its entire non-chat catalog.
+            ///     be read off the name (`ModalityFilter`). A missing `type` must not
+            ///     mean "keep", or OpenAI's picker carries its entire non-chat catalog.
             var isChatModel: Bool {
                 if let type { return type == "language" }
                 if let out = architecture?.outputModalities, !out.isEmpty {
@@ -3635,7 +3605,7 @@ enum ModelRatings {
         ("gpt-4.1",            3, 4, nil),
         ("gpt-4o-mini",        5, 3, nil),
         ("gpt-4o",             4, 3, nil),
-        ("gpt-4-turbo",        3, 3, nil),         // was 5/2: "turbo" read as a mini
+        ("gpt-4-turbo",        3, 3, nil),         // "turbo" is not a mini
         ("gpt-4",              2, 3, nil),         // the 2023 original; slow and dear
         ("gpt-3.5-turbo",      5, 1, nil),
         ("gpt-oss-120b",       4, 3, nil),
@@ -3650,9 +3620,8 @@ enum ModelRatings {
         ("/o1-pro",            1, 5, .advanced),
         ("/o1",                1, 4, nil),
         // ── Anthropic ─────────────────────────────────────────────────────────────
-        // Keyed by version, not by tier name. The old `opus`/`sonnet`/`haiku` needles
-        // gave claude-3-haiku and claude-haiku-4.5 the same numbers, and dropped
-        // claude-fable-5 (a flagship — 1M ctx, priced above opus-4.8) on the floor.
+        // Keyed by version, not by tier name: a bare `haiku` needle would give
+        // claude-3-haiku and claude-haiku-4.5 the same numbers.
         ("claude-fable-5",     2, 5, .advanced),
         ("claude-opus-4.8",    2, 5, .advanced),   // …-fast via variantAdjust
         ("claude-opus-4.7",    2, 5, .advanced),
@@ -3734,7 +3703,7 @@ enum ModelRatings {
         ("qwen-flash",         5, 2, nil),
         ("qwen-plus",          4, 3, nil),
         ("qwen2.5",            3, 3, nil),
-        ("qwen",               3, 3, nil),         // was 3/4 for all 60 qwen ids
+        ("qwen",               3, 3, nil),
         // ── Moonshot Kimi ─────────────────────────────────────────────────────────
         ("kimi-k2.7-code",     3, 5, .advanced),   // …-highspeed via variantAdjust
         ("kimi-k2.7",          3, 5, .advanced),
@@ -3937,7 +3906,7 @@ enum ModelRatings {
     ///
     /// A first-party endpoint's catalog is full of ids that name no vendor (OpenAI's
     /// `dall-e-3`, GLM's `cogview-4`, MiniMax's `speech-02`) or name a non-vendor
-    /// (Gemini's OpenAI-compat layer prefixes every id with `models/`, which used to
+    /// (Gemini's OpenAI-compat layer prefixes every id with `models/`, which would
     /// capitalize into a "Models" monogram). Those are the provider's own models, so
     /// the provider's brand is the honest answer.
     ///
@@ -4105,9 +4074,8 @@ enum ModelRatings {
 /// The primary signal is **real usage** — OpenRouter's own `rankings-daily`
 /// dataset (total tokens per model over the last week), which is millions of
 /// users voting with their feet. A model people actually run a lot is a far
-/// truer "is this good" signal than any spec: hy3 leads the free lineup by 4×,
-/// while nominally-huge models (llama-3.3-70b, hermes-405b) don't crack the
-/// top-50 at all. Featured = has real usage, ordered most-used first.
+/// truer "is this good" signal than any spec — nominally-huge models often
+/// don't crack the top-50 at all. Featured = has real usage, ordered most-used first.
 ///
 /// Usage needs the user's key (and a fetch that can fail), so **parameter
 /// count is the fallback**: a model with no usage row is ranked by total
@@ -4333,10 +4301,9 @@ enum UsageRankings {
     /// `tencent/hy3-20260706:free` both → `tencent/hy3`). Keying on the stem,
     /// then matching a free id's stem against it by *prefix* (see
     /// `OpenRouterFreeModels`), collapses every version of a model onto one
-    /// total. This is deliberately looser than exact-key equality: an earlier
-    /// version tried to reduce both sides to an identical string and silently
-    /// dropped hy3's bulk, because a `-preview` tail on the ranking side has no
-    /// counterpart on the `:free` id side and the two keys never met.
+    /// total. Deliberately looser than exact-key equality: a `-preview` tail on
+    /// the ranking side has no counterpart on the `:free` id side, so exact keys
+    /// would never meet.
     static func byBaseName(_ rows: [Row]) -> [String: Double] {
         var totals: [String: Double] = [:]
         for r in rows {
@@ -4534,28 +4501,6 @@ private enum AgentWire {
     }
 }
 
-/// Models that refuse to run function tools *while reasoning* on the legacy
-/// `/v1/chat/completions` endpoint.
-///
-/// OpenAI's `gpt-5.6-*` answers a tool request with a 400: "Function tools with
-/// reasoning_effort are not supported for … in /v1/chat/completions. To use
-/// function tools, use /v1/responses or set reasoning_effort to 'none'." No value
-/// of the field helps except `none` — `low`/`medium` fail identically — so unlike
-/// `temperature` (`SamplingKnobs`) this one can't be fixed by *not* sending a
-/// field: the model needs to be told to stop reasoning. Measured on the wire, one
-/// tool-bearing request per model:
-///
-///   · `gpt-5.6-luna` / `-terra`  no field / low / medium → 400
-///                                `"none"`                → streams, tools work
-///   · `gpt-5.5`, `gpt-5.4`, `-mini`  no field            → streams (they reason
-///                                                          *and* call tools fine)
-///
-/// So it can't be sent unconditionally either — that would silently drop reasoning
-/// on every model that doesn't need it. And a hardcoded model list is exactly the
-/// thing that rots on the next OpenAI release. Instead this is **learned from the
-/// 400 itself**: the vendor names the requirement, we honor it and replay the same
-/// turn once, then remember the model id so the round-trip is paid once per launch.
-/// A model id nobody has heard of yet needs no code change.
 /// The locally-learned half of the vision gate, and the safety net under
 /// `Provider.modelSupportsVision`'s "an unknown model can see" default.
 ///
@@ -4630,6 +4575,28 @@ enum VisionProbe {
     }
 }
 
+/// Models that refuse to run function tools *while reasoning* on the legacy
+/// `/v1/chat/completions` endpoint.
+///
+/// OpenAI's `gpt-5.6-*` answers a tool request with a 400: "Function tools with
+/// reasoning_effort are not supported for … in /v1/chat/completions. To use
+/// function tools, use /v1/responses or set reasoning_effort to 'none'." No value
+/// of the field helps except `none` — `low`/`medium` fail identically — so unlike
+/// `temperature` (`SamplingKnobs`) this one can't be fixed by *not* sending a
+/// field: the model needs to be told to stop reasoning. Measured on the wire, one
+/// tool-bearing request per model:
+///
+///   · `gpt-5.6-luna` / `-terra`  no field / low / medium → 400
+///                                `"none"`                → streams, tools work
+///   · `gpt-5.5`, `gpt-5.4`, `-mini`  no field            → streams (they reason
+///                                                          *and* call tools fine)
+///
+/// So it can't be sent unconditionally either — that would silently drop reasoning
+/// on every model that doesn't need it. And a hardcoded model list is exactly the
+/// thing that rots on the next OpenAI release. Instead this is **learned from the
+/// 400 itself**: the vendor names the requirement, we honor it and replay the same
+/// turn once, then remember the model id so the round-trip is paid once per launch.
+/// A model id nobody has heard of yet needs no code change.
 private enum ToolReasoningOptOut {
     private static let lock = NSLock()
     private static var models: Set<String> = []
@@ -4763,7 +4730,7 @@ extension OpenAICompatAIService: AgentCapableService {
                                 body["reasoning_effort"] = "none"
                             }
                             // Harness-forced first search on a time-moving question
-                            // (Nono). The name is canonical; the wire alias is what
+                            // (`forceSearchOnChangingFacts`). The name is canonical; the wire alias is what
                             // the vendor's `tool_choice` field actually matches.
                             if let requiredTool,
                                let wire = Self.requiredToolChoice(for: requiredTool,

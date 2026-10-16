@@ -78,7 +78,7 @@ enum RemindersService {
     /// System date parser — handles natural phrasing in the languages the app
     /// targets ("明天下午三点", "周日早上十点", "tomorrow 3pm", "friday").
     /// Created once; matching a one-line string costs well under a millisecond,
-    /// so callers can run it synchronously per keystroke.
+    /// so it can run per keystroke.
     private static let detector =
         try? NSDataDetector(types: NSTextCheckingResult.CheckingType.date.rawValue)
 
@@ -230,20 +230,6 @@ enum RemindersService {
 
     // MARK: - Write
 
-    /// Create a reminder from `text`, then call `completion` back **on the main
-    /// thread** with the outcome. The first call shows the one-time TCC
-    /// "access Reminders" prompt; everything after the prompt runs on EventKit's
-    /// own queue, so this never blocks the caller.
-    ///
-    /// `due` is optional on purpose: a Tab override can force a line with no
-    /// parseable time into Reminders — it files as a dateless reminder (shows in
-    /// the list, just no alarm).
-    /// On success the value is a deep link to the saved reminder
-    /// (`x-apple-reminderkit://REMCDReminder/<externalID>`), so the record row can
-    /// jump back to it; `nil` when EventKit gave back no external identifier
-    /// (treated as a soft success — the reminder exists, we just can't link it).
-    /// `recurrence` overrides the repeat read from the words (`recurrenceKind`),
-    /// for a caller that was told the rule explicitly (`create_reminder`).
     /// The user's reminder list `name` names: the same name in any case, then
     /// one name inside the other, then a common word for the same list
     /// ("买菜" → Groceries). Nil when none matches.
@@ -275,6 +261,20 @@ enum RemindersService {
         ["home", "family", "家里", "家裡", "家庭", "家事", "집", "maison", "casa"],
     ]
 
+    /// Create a reminder from `text`, then call `completion` back **on the main
+    /// thread** with the outcome. The first call shows the one-time TCC
+    /// "access Reminders" prompt; everything after the prompt runs on EventKit's
+    /// own queue, so this never blocks the caller.
+    ///
+    /// `due` is optional on purpose: a Tab override can force a line with no
+    /// parseable time into Reminders — it files as a dateless reminder (shows in
+    /// the list, just no alarm).
+    /// On success the value is a deep link to the saved reminder
+    /// (`x-apple-reminderkit://REMCDReminder/<externalID>`), so the record row can
+    /// jump back to it; `nil` when EventKit gave back no external identifier
+    /// (treated as a soft success — the reminder exists, we just can't link it).
+    /// `recurrence` overrides the repeat read from the words (`recurrenceKind`),
+    /// for a caller that was told the rule explicitly (`create_reminder`).
     /// `until` is the last day a repeat runs; nil repeats with no end. `listName`
     /// files it in that list (`list(named:in:)`) instead of the default one.
     static func createReminder(_ text: String, due: Date?, recurrence: RecurrenceKind? = nil,
@@ -406,7 +406,7 @@ enum RemindersService {
 // MARK: - Chinese relative-time parser
 
 /// Deterministic Swift parser for the *relative* 中文 time phrasings NSDataDetector
-/// misses — the gap the Reminders feature kept tripping on. The OS detector is
+/// misses. The OS detector is
 /// strong on absolute and named-weekday phrasing ("周三", "明天下午三点", "1月15号")
 /// but returns nothing for offset phrasings like "三天后", "两周后", "5分钟后",
 /// "下月15号", or "月底". This fills exactly those, anchored to `Calendar.current`
@@ -416,7 +416,7 @@ enum RemindersService {
 /// handful of regexes over the phrasings users actually type. `parse` returns nil on
 /// anything unrecognized, so ordinary lines fall straight through to the detector.
 /// All matching is whole-string-cheap (a few small regexes), safe to run per
-/// keystroke from `text.didSet`.
+/// keystroke (`NotchModel.scheduleDueDetection`).
 enum ChineseRelativeDate {
     /// The first relative moment named in `text`, anchored to `now`, or nil when no
     /// recognized relative phrase is present. Day-and-larger offsets that name no
@@ -703,8 +703,7 @@ enum ChineseRelativeDate {
     /// Compile-once cache for the parser's regexes. Every pattern this enum uses is
     /// drawn from a fixed, finite set of string literals (the `unitPattern`s are
     /// themselves literals), so the pattern string is a sound cache key. Without
-    /// this each `parse()` — run synchronously on every keystroke from `text.didSet`
-    /// — recompiled a fresh `NSRegularExpression` per sub-parser, which compiles the
+    /// this each `parse()` — run on every keystroke — recompiled a fresh `NSRegularExpression` per sub-parser, which compiles the
     /// pattern each time and showed up as main-thread jank during fast (IME) typing.
     private static let regexLock = NSLock()
     private static var regexCache: [String: NSRegularExpression] = [:]

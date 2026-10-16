@@ -4,7 +4,7 @@ import Foundation
 /// in the app's preferences. Every `Provider` gets its own entry, so switching
 /// backends doesn't clobber the other one's key.
 ///
-/// Lookup order per provider (see `AppDelegate`):
+/// Lookup order per provider (see `current(for:)`):
 ///   1. The provider's env var (e.g. `MIMO_API_KEY`, `DEEPSEEK_API_KEY`) — handy
 ///      for local dev / debugging.
 ///   2. The `UserDefaults` entry the user typed into Settings.
@@ -54,8 +54,7 @@ enum APIKeyStore {
     /// all. Every install registers with the gateway at launch
     /// (see `AppDelegate`), so a fresh one already has an account and the welcome
     /// gift behind it, and the first question can be asked without connecting
-    /// anything. OpenRouter, the previous default, still needs its one-click
-    /// connect before it answers.
+    /// anything.
     static var selectedProvider: Provider {
         get {
             let raw = UserDefaults.standard.string(forKey: selectedProviderKey) ?? ""
@@ -162,9 +161,8 @@ enum APIKeyStore {
     // MARK: - Auxiliary (non-provider) service keys
 
     // Exa is a *search backend*, not an LLM provider, so its key lives outside the
-    // per-`Provider` namespace above. When present it replaces every provider's
-    // native web search with Exa (see `ToolRegistry.standard(for:)` and the
-    // server-search gate in `streamTurn`) — one good searcher for all backends.
+    // per-`Provider` namespace above. When it is the picked search backend
+    // (`resolvedSearchBackend()`), it replaces every provider's native web search.
     private static let exaDefaultsKey = "aux_key.exa"
     private static let exaEnvVar = "EXA_API_KEY"
 
@@ -192,8 +190,7 @@ enum APIKeyStore {
         return env?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
     }
 
-    /// Whether Exa search is active (a key is available from env or Settings).
-    /// Gates the per-provider native search off in favor of Exa for everyone.
+    /// Whether an Exa key is available from env or Settings.
     static var exaActive: Bool { currentExaKey() != nil }
 
     /// Save (or clear, when empty) the user's Exa key in `UserDefaults`.
@@ -214,7 +211,7 @@ enum APIKeyStore {
     private static let keenableEnvVar = "KEENABLE_API_KEY"
 
     /// The effective Keenable key right now: `KEENABLE_API_KEY` env var → stored
-    /// entry. `nil` when neither is set — then Keenable runs on its key-free tier.
+    /// entry. `nil` when neither is set.
     static func currentKeenableKey() -> String? {
         if let env = ProcessInfo.processInfo.environment[keenableEnvVar],
            !env.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -247,7 +244,7 @@ enum APIKeyStore {
         }
     }
 
-    /// Whether Keenable search is active (a key is available from env or Settings).
+    /// Whether a Keenable key is available from env or Settings.
     static var keenableActive: Bool { currentKeenableKey() != nil }
 
     // AnySearch is a standalone search backend whose REST API also supports an

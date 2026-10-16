@@ -78,7 +78,7 @@ final class UpdaterService: ObservableObject {
     private enum UpdateError: Error {
         case badResponse, badArchive, toolFailed
         /// The new bundle failed to copy in AND restoring the old one failed —
-        /// `/Applications/Notch.app` is gone. Carries both the original swap
+        /// the installed bundle is gone. Carries both the original swap
         /// failure and the rollback failure so neither is silently dropped.
         case rollbackFailed(swap: Error, rollback: Error)
     }
@@ -387,9 +387,8 @@ final class UpdaterService: ObservableObject {
     ///
     /// Not `URLSession.download(for:delegate:)`: a *per-task* delegate handed to
     /// that async call never receives `didWriteData`, so the progress the chip
-    /// draws would stay at zero for the whole transfer (verified — zero callbacks
-    /// against the real release asset). Owning the session is what makes the
-    /// progress callbacks arrive.
+    /// draws would stay at zero for the whole transfer. Owning the session is
+    /// what makes the progress callbacks arrive.
     ///
     /// The finished file is moved to a stable path inside the delegate callback,
     /// because URLSession deletes it the moment that callback returns.

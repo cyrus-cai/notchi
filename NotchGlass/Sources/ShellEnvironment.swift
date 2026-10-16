@@ -19,8 +19,8 @@ import Foundation
 /// The shell is asked with **`-ilc` — interactive *and* login**, and that is the
 /// whole trick. zsh sources `.zprofile` for login shells but `.zshrc` only for
 /// *interactive* ones, and `.zshrc` is where `export PATH=…` actually lands for
-/// most people. A plain `-lc` probe (what this code used to do) reports a PATH the
-/// user has never seen, missing exactly the dir the CLI is installed in.
+/// most people. A plain `-lc` probe reports a PATH the user has never seen,
+/// missing exactly the dir the CLI is installed in.
 ///
 /// This is the child-process twin of `ProxyConfig`, which solves the same
 /// "launchd's environment isn't the user's" problem for proxy variables.
@@ -116,9 +116,7 @@ enum ShellEnvironment {
     /// no proxy, and (for a sandboxed context) no `HOME`. That version compiles, runs
     /// fine on a machine with a system-wide node, and dies with
     /// `env: node: No such file or directory` on a machine using a version manager.
-    /// It shipped once (the agent-task spawn built its environment by hand and
-    /// skipped the PATH work), so the environment is no longer something a caller can
-    /// forget: `childEnvironment` is private, and this is the only door.
+    /// So `childEnvironment` is private, and this is the only door.
     ///
     /// Anything a spawn needs *every* time belongs here, not at the call sites.
     static func makeProcess(_ binary: String,

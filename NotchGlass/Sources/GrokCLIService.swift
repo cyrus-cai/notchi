@@ -312,10 +312,9 @@ struct GrokCLIService: AIService {
                 continuation.finish(throwing: GrokError.notSignedIn); return
             }
 
-            // Unified searcher (XII: "grok must use MY search tool"). When the
-            // user picked a client-side search backend in
-            // Settings, that promise — one searcher replaces every provider's
-            // native search — must hold for grok too. Grok's own agent loop can't
+            // Unified searcher: when the user picked a client-side search backend
+            // in Settings, that one searcher replaces every provider's native
+            // search — grok included. Grok's own agent loop can't
             // be handed a harness tool, but it CAN be handed an MCP server, so:
             //  · the workdir becomes a STABLE dir (not per-turn ephemeral) whose
             //    `.grok/config.toml` declares an MCP stdio server = this very app
@@ -329,8 +328,7 @@ struct GrokCLIService: AIService {
             //    AND onto the denylist, and the system prompt names the MCP tool
             //    (grok reaches MCP tools via its search_tool/use_tool meta-tools).
             //    web_fetch stays — reading a result URL is how search completes.
-            // With no unified backend, everything below is the pre-existing path
-            // (grok's own web pair, ephemeral cwd) — bit-for-bit.
+            // With no unified backend: grok's own web pair, ephemeral cwd.
             let unifiedBackend = APIKeyStore.resolvedSearchBackend()
 
             let workDir: URL
@@ -377,8 +375,7 @@ struct GrokCLIService: AIService {
             // filtered out, and its default `auto_background_on_timeout=true` is
             // illegal headless (`enabled_background=false`), which aborts the whole
             // session ("agent building failed: … run_terminal_cmd"). Denylisting it
-            // drops it before validation runs. Verified: allowlist alone fails,
-            // allowlist + this denylist succeeds.
+            // drops it before validation runs (allowlist alone fails).
             var args = ["--prompt-file", promptFile.path,
                         "--output-format", "streaming-json",
                         "--always-approve",
@@ -682,8 +679,8 @@ enum GrokSearchMCPServer {
 
 /// Line-buffers Grok's streaming-json stdout. Answer text arrives as
 /// `{"type":"text","data":…}` deltas; `{"type":"thought",…}` is reasoning we drop;
-/// `{"type":"error",…}` (or a non-`EndTurn` `{"type":"end",…}` with no text) is a
-/// failure. Lock-guarded — the readability and termination handlers run on
+/// `{"type":"error",…}` (or an `end` whose `stopReason` names an error, with no
+/// text) is a failure. Lock-guarded — the readability and termination handlers run on
 /// different queues. Mirrors `ClaudeStreamState`.
 private final class GrokStreamState {
     private let lock = NSLock()

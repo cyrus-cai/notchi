@@ -50,12 +50,9 @@ struct NotchBody: View {
     /// Natural (intrinsic) height of the answer text, reported by a preference
     /// reader. Used ONLY to decide whether the thread has outgrown `answerMaxHeight`
     /// and must switch to the clipped+scrolling layout — it does NOT drive the
-    /// height of the un-clipped layout. (It used to: the scroll frame tracked this
-    /// measured value, and since the measurement lags the content by a layout pass,
-    /// every streamed line nudged the frame a beat late and the spring on it
-    /// overshot — the per-line "jump". Now a short answer just sizes to its own
-    /// content with no measure→frame feedback loop, so it grows smoothly in the same
-    /// frame the text lands.)
+    /// height of the un-clipped layout: the measurement lags the content by a layout
+    /// pass, so a frame tracking it nudges a beat late on every streamed line and the
+    /// spring overshoots. A short answer sizes to its own content instead.
     @State private var measuredAnswerHeight: CGFloat = 0
     /// The oldest turn the result page mounts (see `threadWindowStart(of:)`).
     /// Pinned when the page opens, so a streaming answer can't move it; moved
@@ -102,7 +99,7 @@ struct NotchBody: View {
     @State private var giftCueHovered = false
     @State private var updateCueBarHovered = false
     /// A thread opened by a prompt shortcut keeps its follow-up input folded into a
-    /// small floating button (see `followUpButton`) until this flips — the run is a
+    /// small floating button (see `followUpChip`) until this flips — the run is a
     /// one-shot on a selection, so an always-open composer would cost a row of
     /// height nobody asked for. Reset whenever the thread changes underneath it.
     @State private var followUpExpanded = false
@@ -290,8 +287,8 @@ struct NotchBody: View {
         //
         // The rows are built only while the menu is actually up: `rows` walks every
         // provider (each one's `ready` check, then the whole catalog's fold and sort),
-        // and this modifier sits on the panel body — so an unfurl used to pay for a
-        // menu nobody asked for. The body re-runs when `showModelPicker` flips, which
+        // and this modifier sits on the panel body — so building them eagerly makes
+        // every unfurl pay for a menu nobody asked for. The body re-runs when `showModelPicker` flips, which
         // is before the presenter reads them.
         .modelMenu(isPresented: $model.showModelPicker,
                    models: model.showModelPicker ? catalog.rows(selected: selectedProvider) : [],
@@ -610,7 +607,7 @@ struct NotchBody: View {
                     }
 
                     // (The `/` command menu is NOT in this stack — it lives in its own
-                    // borderless window, hung under the input by `SlashMenuHost`. It
+                    // borderless window, hung under the input by `MenuCardWindow`. It
                     // takes no space here, moves nothing, and is free to overhang the
                     // island's edge.)
 
@@ -1388,10 +1385,8 @@ struct NotchBody: View {
     ///
     /// With nothing configured it names the gap instead — "Choose model…" in the
     /// danger ink, the one chip in the row that is reporting a problem rather than
-    /// a setting. It used to print the selected provider's *default* model there,
-    /// which meant a fresh install advertised "Gpt-5.5" with no key behind it: the
-    /// one place that should have said "set this up" was the place claiming it
-    /// already was.
+    /// a setting. Not the selected provider's *default* model: a fresh install
+    /// would then advertise a model with no key behind it.
     ///
     /// Where the tap goes then depends on what's already on the machine. A signed-in
     /// `codex` / `claude` / `grok` / `cmd` / `pi` CLI is a *working backend that
@@ -2080,11 +2075,9 @@ struct NotchBody: View {
     /// agent page must never make the island taller than the recent list does.
     private let agentDetailScrollHeight: CGFloat = 240
 
-    /// The gap the composer used to sit below the scroll in, and the runway the
-    /// trail now travels down into behind it. The floating composer's own 34pt
-    /// box plus that gap is what the scroll's viewport absorbs
-    /// (`agentDetailScrollViewport`), so the page's total height is exactly what
-    /// it was as a sibling row — the island never resizes for this change.
+    /// The gap under the scroll, and the runway the trail travels down into
+    /// behind the floating composer. The composer's own 34pt box plus this gap
+    /// is what the scroll's viewport absorbs (`agentDetailScrollViewport`).
     private let agentDetailFollowUpGap: CGFloat = 10
     private var agentDetailFollowUpReach: CGFloat {
         agentDetailFollowUpGap + NotchBody.followUpRowHeight
@@ -2207,8 +2200,6 @@ struct NotchBody: View {
                 // It FLOATS over the scroll's bottom rather than sitting under it —
                 // the same one design the result view's follow-up wears, so the trail
                 // dissolves behind the box instead of hard-cutting above a sibling row.
-                // The scroll's frame absorbed the gap + row it used to occupy, so the
-                // page is exactly as tall as it was.
                 agentDetailFollowUpRow(task)
             }
         }
@@ -2686,19 +2677,17 @@ struct NotchBody: View {
         .padding(.horizontal, 2)
     }
 
-    /// The version of a build that's downloaded and waiting, if any — what the
-    /// ordinary "Update to X" chips print, and what scopes 0.7.0's major-update
-    /// treatment. Nil at every other phase.
+    /// The version of a build that's downloaded and waiting, if any. Nil at every
+    /// other phase.
     private var pendingUpdateVersion: String? {
         if case .available(let v) = updater.phase { return v }
         return nil
     }
 
-    /// What the update chip on the bar is showing, if anything. The chip used to
-    /// exist only while a build was waiting, so taking the update made it vanish
-    /// mid-tap and the download ran with nothing on screen at all. It now stays
-    /// through the whole story — waiting, downloading, installing, failed — and
-    /// changes face in place.
+    /// What the update chip on the bar is showing, if anything. It stays through
+    /// the whole story — waiting, downloading, installing, failed — and changes
+    /// face in place, so taking the update never leaves the download running with
+    /// nothing on screen.
     enum UpdateChipFace: Equatable {
         case ready(String)      // a newer build is published
         case downloading(Double) // fetching the zip; 0…1 of the bytes
@@ -2747,8 +2736,7 @@ struct NotchBody: View {
 
     /// The upward manage menu: one small glass card holding the update action,
     /// release notes, and Settings — the two update entries pulled out here so
-    /// they're one tap away instead of buried in Settings → About. (The source
-    /// filter chips used to sit above it but were removed.) "See all history" and
+    /// they're one tap away instead of buried in Settings → About. "See all history" and
     /// Clear deliberately do NOT live here — they sit at the very END of the recent
     /// list (see `historyFooterActions`), so they're reached by scrolling the list
     /// to its bottom.
@@ -3561,9 +3549,7 @@ struct NotchBody: View {
     }
 
     /// The record's follow-up field. Submitting it adopts the record as the live
-    /// thread and sends the line into it — the same continuation the Recent row
-    /// used to give when tapping it loaded the thread into the result view. The
-    /// split layout hands off there, which is where a conversation you're still
+    /// thread and sends the line into it. The split layout hands off there, which is where a conversation you're still
     /// talking to belongs.
     private func splitFollowUpRow(_ item: NotchModel.HistoryItem) -> some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -3799,7 +3785,7 @@ struct NotchBody: View {
     /// surface flowing under the header. The manage bar floats over its bottom-left;
     /// rows run their whole height behind it. Older rows are a scroll (or ↓) away.
     /// Static so Settings can size its own body against it (see
-    /// `InlineSettingsView.settingsPaneMaxHeight`) — switching between the two
+    /// `InlineSettingsView.settingsPaneHeight`) — switching between the two
     /// must not resize the island, and two hand-tuned numbers would drift.
     static let immersiveListHeight: CGFloat = 320
 
@@ -3941,10 +3927,9 @@ struct NotchBody: View {
                     .buttonStyle(HistoryRowStyle(selected: model.highlightedHistoryIndex == index))
                     // VoiceOver: an Ask row IS its action — combine title + timestamp
                     // into one element that reopens the thread. A capture row's action
-                    // now lives on the SEPARATE trailing jump button (the row body no
-                    // longer switches apps), so keep it a container (`.contain`) whose
-                    // jump button stays independently focusable rather than folding it
-                    // into the row.
+                    // lives on the SEPARATE trailing jump button, so keep it a container
+                    // (`.contain`) whose jump button stays independently focusable
+                    // rather than folding it into the row.
                     .modifier(RecentRowAccessibility(item: item))
                     // A deleted row collapses up and fades rather than vanishing on a
                     // hard cut — the rows below slide into the gap on the same spring
@@ -4108,9 +4093,8 @@ struct NotchBody: View {
             Spacer().frame(height: 18)
             // Text-only wait line — no animated dots. Before any tool runs the
             // status is empty, so fall back to the rotating mood word — the same
-            // opening a follow-up turn shows — instead of a static "Thinking…"
-            // (the first question and a follow-up used to start differently for
-            // no reason). The elapsed suffix is a sibling, not part of the
+            // opening a follow-up turn shows — instead of a static "Thinking…".
+            // The elapsed suffix is a sibling, not part of the
             // dissolving word, so the ticking seconds never ride the word swap.
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 let label = model.thinkingStatus.isEmpty ? model.currentThinkingWord : model.thinkingStatus
@@ -4481,8 +4465,7 @@ struct NotchBody: View {
     /// a full-width capsule matching `setupModelRow`.
     ///
     /// The engine can be gone by now (uninstalled since the run), and then there's
-    /// nothing to press — so the row degrades to naming the terminal command, which
-    /// is exactly what the answer text used to carry.
+    /// nothing to press — so the row degrades to naming the terminal command.
     @ViewBuilder
     private func agentResumeRow(engine: AgentEngine,
                                 resume: NotchModel.HistoryItem.AgentResume) -> some View {
@@ -4574,9 +4557,8 @@ struct NotchBody: View {
                 // no ceiling anywhere (see `growingConversation`) — so the visible
                 // tree doubles as the measurement and the hidden probe below stays
                 // unmounted. This is the common case (most answers fit under
-                // `answerMaxHeight`), and it used to pay a second full text layout
-                // of the whole thread on every streamed flush just to feed the
-                // `clipped` switch a number the visible layout already knew.
+                // `answerMaxHeight`), so this spares a second full text layout of
+                // the whole thread on every streamed flush.
                 growingConversation
                     .background(
                         GeometryReader { geo in
@@ -4591,11 +4573,9 @@ struct NotchBody: View {
         // (above); clipped, it's the turn stack *inside* the ScrollView, which a
         // ScrollView already lays out at its full unconstrained height (see
         // `clippedConversation`). Measuring the clipped view from the OUTSIDE would
-        // report the pinned 300 and flip-flop the switch on the boundary — which is
-        // why this used to mount a whole hidden, `fixedSize`d second copy of the
-        // turn stack here. That copy re-ran the entire thread's view build and text
-        // layout on every mount, doubling the cost of opening a long agent record
-        // for a number the live scroll content already knew.
+        // report the pinned 300 and flip-flop the switch on the boundary, and a
+        // hidden `fixedSize`d second copy of the turn stack would double the cost
+        // of opening a long agent record.
         .onPreferenceChange(AnswerHeightKey.self) {
             // 0 means "the probe is unmounted" (suspended above, or a transient
             // empty pass) — never "the content shrank to nothing". Keep the last
@@ -5286,7 +5266,7 @@ struct NotchBody: View {
                 .background(EnclosingScrollViewReporter { model.threadScrollView = $0 })
             }
             // Taller than `answerMaxHeight` (300): absorbs the 24pt gap + 39pt
-            // follow-up row that no longer sit as VStack siblings, PLUS the floating
+            // follow-up row that don't sit as VStack siblings, PLUS the floating
             // header block (`resultHeaderReach`, 44pt) the clipped layout lifts out
             // of the VStack flow — keeping the panel the same total height. The
             // `isAnswerClipped` threshold stays at 300.
@@ -5331,7 +5311,7 @@ struct NotchBody: View {
                 }
             }
             // Streaming flushes write the turn silently (`LiveAnswerText`), so
-            // the follow above no longer hears them; this does.
+            // the follow above doesn't hear them; this does.
             .onReceive(model.liveAnswer.$text.dropFirst()) { _ in
                 guard model.turns.last?.streaming == true else { return }
                 withAnimation(.easeOut(duration: 0.2)) {
@@ -5633,10 +5613,9 @@ struct NotchBody: View {
         }
     }
 
-    // Trailing chips sit top-right. The back chevron leads only when the
-    // follow-up field is absent (`showsBack`); otherwise it sits beside that
-    // field. Pinning holds the panel open when the pointer leaves, so the
-    // answer can be read without hovering it (see `NotchModel.collapseOnLeave`).
+    // Trailing chips sit top-right. Pinning holds the panel open when the
+    // pointer leaves, so the answer can be read without hovering it (see
+    // `NotchModel.collapseOnLeave`).
     /// Whether the result header's trailing chips (follow-up / detach / pin) are
     /// showing: only under the pointer, while the answer is pinned, or while a
     /// card in its own window (the ⌘ menu, pickers) is open — the pointer on that
@@ -6753,8 +6732,8 @@ struct HistoryRowStyle: ButtonStyle {
 /// `.thinMaterial` plate, and a material laid over a `glassEffect` card samples
 /// the same backdrop the card already samples, so the wash all but vanishes and
 /// the row reads as having no hover at all. Plain white instead — the same
-/// treatment the other glass popover menus use (`AskRecentModelRow`,
-/// `AgentModelRow`), shaped as a full capsule around the row.
+/// treatment the other glass popover menus use — shaped as a full capsule
+/// around the row.
 struct ManageMenuRowStyle: ButtonStyle {
     @State private var hovering = false
     func makeBody(configuration: Configuration) -> some View {
@@ -6779,11 +6758,8 @@ struct ManageMenuRowStyle: ButtonStyle {
 /// bubbles. Note the Notes amber, Remind the Reminders orange, Ask a cool blue,
 /// Agent the violet; the values themselves live in `Tokens`, beside the matching
 /// `Panel.intentTint` the composer reads, so the input's colour story and the
-/// history's are literally the same table.
-///
-/// This used to be three separate copies (`filterTint` / `captureJumpTint` here,
-/// `archiveTint` over in the archive window) that happened to agree — one edit
-/// away from a source reading amber in the notch and yellow in the window.
+/// history's are literally the same table. Keep it the single copy, so a source
+/// can't read amber in the notch and yellow in the archive window.
 extension NotchModel.HistoryItem.Source {
     var tint: Color {
         switch self {
@@ -6900,10 +6876,8 @@ private struct HistoryFooterButton: View {
 
     @State private var hovering = false
 
-    /// Both footer pills read the same weight — Clear used to sit at near-white
-    /// while "See all history" was meta-dim, and the mismatch made the pair look
-    /// like two different controls rather than one row. The destructive step is
-    /// carried by the confirmation card, not by a brighter label.
+    /// Both footer pills read the same weight, so the pair reads as one row. The
+    /// destructive step is carried by the confirmation card, not by a brighter label.
     private var tint: Color {
         hovering ? Tokens.text2 : Tokens.text4
     }
@@ -7231,11 +7205,9 @@ private struct AnswerHeightKey: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         // Take the latest reported height, NOT max(). There's a single reader (the
         // scroll content's GeometryReader), so this just carries its current height
-        // through — which must be able to SHRINK, not only grow. `max` latched the
-        // measurement to the largest value ever seen (a tall earlier answer, or a
-        // transient layout pass), so when a short answer replaced a long one the
-        // scroll frame stayed tall and left a dead band under the text. Last-value
-        // lets the frame track the real content up and down.
+        // through — which must be able to SHRINK, not only grow. `max` would latch
+        // the largest value ever seen, so a short answer replacing a long one would
+        // leave a dead band under the text.
         let next = nextValue()
         if next > 0 { value = next }
     }
@@ -7401,8 +7373,7 @@ struct SetupModelButtonStyle: ButtonStyle {
 /// The idle prompt's trailing controls — the pin and the Recent disclosure. Each is
 /// its own round glass chip, in exactly the language of the recent panel's ⋯ entry
 /// (`GlassIconButton`): a translucent glass circle that brightens under the cursor.
-/// They used to share one capsule, which wrapped the lone chevron in a pill of
-/// dead space — the chip IS the target now, no padding around it.
+/// The chip IS the target, no padding around it.
 ///
 /// Engaged state (pinned, or Recent open) reads through the glyph alone — the
 /// filled, upright tack and the flipped chevron — never a wash.
@@ -7587,11 +7558,10 @@ struct IdleTrailingCluster: View {
     /// One round glass chip — the ⋯ entry's `GlassIconButton` body.
     ///
     /// Engaged (pinned / Recent open) reads through the GLYPH — the filled upright
-    /// tack, the flipped chevron — and never through a brighter ink. It used to
-    /// step from `text3` to `text2`, which broke the moment the chevron sat beside
-    /// another chip in a permanently-open state (the split rail, where Recent is
-    /// the layout rather than a toggle): the chevron burned at 0.74 next to a
-    /// 0.55 neighbour. Every chip on a rail rests at the same ink now.
+    /// tack, the flipped chevron — and never through a brighter ink: on the split
+    /// rail, where Recent is the layout rather than a toggle, an ink step would
+    /// leave the chevron burning beside its neighbour. Every chip on a rail rests
+    /// at the same ink.
     private func segment<Glyph: View>(
         _ segment: Segment, action: @escaping () -> Void,
         tooltip: String, showsTooltip: Bool = true, @ViewBuilder glyph: () -> Glyph
@@ -7746,8 +7716,7 @@ struct ResultTrailingCluster: View {
 /// The header's back chevron, wearing the panel's **Liquid Glass** language: a
 /// real glass circle (native `.glassEffect` on macOS 26+, blurred fallback below)
 /// with the signature specular rim, brightening under the cursor like every other
-/// chip in the header. It used to be a bare glyph over a flat white-wash hover
-/// pill, which read as a different material from the glass cluster opposite it.
+/// chip in the header, so it reads as the same material as the cluster opposite it.
 private struct GlassBackButton: View {
     /// 26 in the headers; the follow-up rail passes its chip size so the circle
     /// matches the box beside it.
@@ -8544,7 +8513,7 @@ private final class MenuCardAnchorView: NSView {
 /// walk it, hover moves it under the cursor, Enter/Tab land it. One index, so the
 /// row the eye is on is always the row Enter picks.
 ///
-/// The card itself knows nothing about where it is drawn — `SlashMenuHost` puts it
+/// The card itself knows nothing about where it is drawn — `MenuCardWindow` puts it
 /// in its own window.
 private struct SlashCommandMenu: View {
     @ObservedObject var model: NotchModel
@@ -8623,7 +8592,7 @@ private struct SlashCommandMenu: View {
 
 /// Unified threads replace the Ask|Agent glass pill with a plain mode word.
 /// One click switches Chat ⇄ Agent; the word itself is the current destination,
-/// "Chat" where the pill used to say "Ask".
+/// "Chat" for the Ask destination.
 private struct UnifiedComposeModeControl: View {
     @ObservedObject var model: NotchModel
     @State private var hovering = false
@@ -8694,11 +8663,9 @@ private struct BucketTogglePill: View {
     /// well below are laid out from these same numbers, which is what keeps the
     /// flip a single continuous move.
     ///
-    /// `wipeSoft` is carved out of what used to be the word's trailing padding, so
-    /// the label's clip ends in a fade instead of a razor cut — every outer
-    /// measurement stays exactly what it was (`wordPad + wipeSoft + wordTrailPad`
-    /// is still 9 + 9), only the last 8pt of the box is now a falloff instead of
-    /// dead air.
+    /// `wipeSoft` is carved out of the word's trailing padding, so the label's clip
+    /// ends in a fade instead of a razor cut without moving any outer measurement
+    /// (`wordPad + wipeSoft + wordTrailPad` is 9 + 9).
     static let iconSlot: CGFloat = 18
     static let labelGap: CGFloat = 5
     static let wordPad: CGFloat = 9
@@ -8722,9 +8689,8 @@ private struct BucketTogglePill: View {
     /// Where Enter sends the line right now, as far as the Ask half is concerned.
     /// An armed Agent bucket owns the line, so this half shows the face you'd get
     /// BACK by tapping it — the pinned mode, which is exactly what leaving the
-    /// bucket restores (`setAgentBucket(false)`). It used to hard-code Ask, so a
-    /// pinned Capture turned back into a speech bubble the moment Agent was armed
-    /// and the half advertised a destination that tapping it wouldn't give you.
+    /// bucket restores (`setAgentBucket(false)`). Not a hard-coded Ask: that would
+    /// advertise a destination tapping it wouldn't give you.
     static func destination(_ model: NotchModel) -> NotchModel.Panel {
         model.agentComposeActive ? (NotchModel.storedSubmitMode ?? .chat)
                                  : model.effectiveSubmitPanel
@@ -8747,10 +8713,9 @@ private struct BucketTogglePill: View {
 
     private var askWord: String { Self.askWord(model) }
 
-    /// …and its mark: bubble for Ask, one pencil for both faces of Capture. The
-    /// bell used to sit on Remind, and a second mark is exactly what made the two
-    /// look like separate modes — whether it rings is the suffix's job to say, not
-    /// a different icon's.
+    /// …and its mark: bubble for Ask, one pencil for both faces of Capture. A
+    /// second mark would make the two look like separate modes — whether it rings
+    /// is the suffix's job to say, not a different icon's.
     private var askMark: LucideIcons.Mark {
         switch destination {
         case .chat:              return LucideIcons.messageCircle
@@ -8824,8 +8789,7 @@ private struct BucketTogglePill: View {
         .frame(height: Tokens.Control.chip)
         .padding(.horizontal, Self.sidePad)
         // The glass takes the DESTINATION's colour, not a fixed Ask blue: the pill
-        // is the routing's face now, so Capture ambers the capsule the way the
-        // ghost used to tint its word.
+        // is the routing's face, so Capture ambers the capsule.
         .glassCapsule(in: Capsule(), brighter: false,
                       tint: agentOn ? Tokens.agentTint : destination.intentTint)
         // Fast and all but critically damped. A 30pt switch is not a panel: the
@@ -8884,7 +8848,7 @@ private struct BucketWord: View {
 
     /// The destination swap itself. Asymmetric for the same reason the wipe's ink
     /// is: share one curve and both faces sit at half opacity through the middle
-    /// of the move — the double exposure this replaced. So the old face is gone in
+    /// of the move, a double exposure. So the old face is gone in
     /// ~100ms, before it has travelled far, and the new one comes up just behind
     /// it. Up-and-out / up-and-in in one direction always: a wheel that turns one
     /// way reads as "the destination changed", where a reversible roll would keep
@@ -8912,8 +8876,8 @@ private struct BucketWord: View {
         Button(action: action) {
             content
                 .foregroundStyle(active || hovering ? Tokens.text3 : Tokens.text4)
-                // Asymmetric on purpose: the trailing 8pt the word used to pad
-                // with now lives inside the label's box as the wipe's falloff.
+                // Asymmetric on purpose: the word's trailing 8pt lives inside the
+                // label's box as the wipe's falloff.
                 .padding(.leading, BucketTogglePill.wordPad)
                 .padding(.trailing, BucketTogglePill.wordTrailPad)
                 // Fill the pill's full height so the well behind it can be inset a
@@ -8956,7 +8920,7 @@ private struct BucketWord: View {
         // menu's 55%. `weight` is grid-relative, so holding it at 2.0 through the
         // size bump is what lets the stroke ride up with the glyph rather than
         // staying pinned to the set's thinner line — deliberate, not an oversight.
-        // (The SF mark this replaced ran `.bold` for the same reason.) It takes the
+        // It takes the
         // active side's ink from the shared `foregroundStyle`, so a live mark is
         // exactly as bright as the word beside it.
         HStack(spacing: 0) {
@@ -9016,7 +8980,7 @@ private struct BucketWord: View {
                 // …and the front itself is a gradient, not a razor: the glyph
                 // crossing it rises through the falloff instead of being sliced
                 // down the middle. At rest the 8pt zone sits past the last glyph,
-                // in what used to be the word's trailing padding, so a settled
+                // in the word's trailing padding, so a settled
                 // label is fully opaque.
                 .mask(alignment: .leading) {
                     HStack(spacing: 0) {

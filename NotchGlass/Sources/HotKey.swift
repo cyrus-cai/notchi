@@ -276,17 +276,17 @@ final class ForceClickMonitor {
     /// The press started on one of Notchi's own windows, so it is not a gesture
     /// on someone else's text — see `pressIsOnOwnWindow`.
     private var pressOnOwnWindow = false
-    /// The `.hold` rung's clock: when the button went down, and the timer that
-    /// watches it. Pressure says nothing in that rung, so the press needs a
-    /// heartbeat of its own to notice the hold completing and to keep sampling
-    /// the pointer.
+    /// The hold clock: when the button went down, and the timer that watches
+    /// it. Pressure says nothing during a hold, so the press needs a heartbeat
+    /// of its own to notice the hold completing and to keep sampling the
+    /// pointer.
     private var holdStartedAt: Date?
     private var holdTimer: Timer?
 
-    /// How often the hold is sampled. The gesture is a second and a half long
-    /// and the only thing being watched is whether the pointer moved, so this
-    /// only has to be fine enough that a flick away is caught before the hold
-    /// completes.
+    /// How often the hold is sampled. The hold lasts at most about half a
+    /// second (`holdDuration`) and the only thing being watched is whether the
+    /// pointer moved, so this only has to be fine enough that a flick away is
+    /// caught before the hold completes.
     private static let holdTick: TimeInterval = 1.0 / 30
 
     /// How long a click may find the pressure stream silent before the client is
@@ -459,9 +459,8 @@ final class ForceClickMonitor {
         // Liveness is recorded before any gate: a frame arriving at all is what
         // says the client is alive, whether or not this press is one we act on.
         lastFrameAt = Date()
-        // The rung can be switched off entirely — then pressure is ignored and
-        // the herald never draws, so a plain click stays a plain click. `hold`
-        // ignores it too: that rung is decided by the clock in `tickHold`.
+        // Every level is hold-only (`usesPressure` is false): the press is
+        // decided by the clock in `tickHold`, so pressure is ignored here.
         guard ForceClickPressure.current.usesPressure else { return }
         latestPressure = pressure
         peakPressure = max(peakPressure, pressure)
@@ -528,7 +527,7 @@ final class ForceClickMonitor {
 
     // MARK: - Hold
 
-    /// Start the `.hold` clock for this press.
+    /// Start the hold clock for this press.
     private func beginHold() {
         endHold()
         holdStartedAt = Date()
@@ -910,7 +909,7 @@ private func rawTrackpadFrameCallback(
 ///   modifier, so this is detected by watching `flagsChanged` (see
 ///   `DoubleTapModifierMonitor`); `keyCode`/`modifiers` are unused.
 /// - **A chord** (`doubleTapModifier == 0`) — e.g. ⌥Space or ⌘⇧K, recorded in
-///   Settings and registered through Carbon. The original mechanism.
+///   Settings and registered through Carbon.
 struct SummonHotKey: Equatable {
     var keyCode: UInt32
     var modifiers: UInt32
@@ -1230,8 +1229,8 @@ enum PromptShortcutStore {
 
     #if DEBUG
     /// Rows for a screenshot run (`NOTCH_DEMO_FORCE=menu`), held in this process
-    /// only. Writing them to disk used to leave the demo's `prompt: "Demo"` rows
-    /// standing in the user's real shortcuts after the run ended.
+    /// only. Written to disk, the demo's `prompt: "Demo"` rows would stay in the
+    /// user's real shortcuts after the run ended.
     static var debugOverride: [PromptShortcut]?
     #endif
 
@@ -1628,8 +1627,7 @@ enum SelectedTextCapture {
     ///
     /// This is dead time the user watches: a press that lands on *no* selection
     /// never gets an answer, so it burns the whole budget before the composer is
-    /// allowed to open. The old 0.32s was set to be generous, and it is what a
-    /// force click on blank space felt like.
+    /// allowed to open.
     private static let copyProbeDeadline: TimeInterval = 0.15
     /// When to look for the first time.
     ///
@@ -1641,7 +1639,7 @@ enum SelectedTextCapture {
     /// so nothing can beat it. Looking at 15ms was therefore always a wasted pass,
     /// and looking sooner would only add more of them; the win is the opposite —
     /// start just under the floor, then sample tightly, so a 32ms answer is seen
-    /// at ~36ms instead of at the old grid's 45ms.
+    /// at ~36ms.
     private static let copyProbeFirstPoll: TimeInterval = 0.024
     private static let copyProbeInterval: TimeInterval = 0.006
 
