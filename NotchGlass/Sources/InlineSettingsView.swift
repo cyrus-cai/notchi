@@ -6679,14 +6679,10 @@ struct InlineSettingsView: View {
                                   title: L("about.followX")) {
                     LinkGate.shared.open(URL(string: "https://x.com/cyrusss_7")!)
                 }
-                // Takes exactly the width its title needs; the two flexible
-                // buttons beside it divide what's left.
                 AboutSocialButton(kind: .discord,
                                   title: L("about.discord")) {
                     LinkGate.shared.open(URL(string: "https://discord.gg/wdMH3CC9CW")!)
                 }
-                .fixedSize(horizontal: true, vertical: false)
-                Spacer(minLength: 0)
             }
 
             surveyEntry
@@ -7350,10 +7346,10 @@ struct InlineSettingsView: View {
                         .font(.sf(Tokens.TypeSize.label, weight: .medium))
                         .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
                         .lineLimit(1)
-                        // The row is narrower than three full titles. Discord's
-                        // is the one that must stay whole, so the other two give
-                        // up a little size rather than a tail of letters.
-                        .minimumScaleFactor(kind == .discord ? 1 : 0.78)
+                        // The three buttons share the row equally; a title that
+                        // doesn't fit gives up a little size rather than a tail
+                        // of letters.
+                        .minimumScaleFactor(0.78)
 
                     Spacer(minLength: 0)
                 }
