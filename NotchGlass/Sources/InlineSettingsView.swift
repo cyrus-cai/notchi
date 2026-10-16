@@ -2173,8 +2173,13 @@ struct InlineSettingsView: View {
         return NotchiModelVisibility.ordered(nonoLineupRows, id: \.id)
             .filter { $0.id.hasPrefix("auto-") || !hidden.contains($0.id) }
             .prefix(3)
-            .map { WalletCard(id: $0.id, name: $0.name,
-                              vendor: ModelRatings.vendor(for: $0.id, provider: .nono)) }
+            .map { row in
+                // The card already wears Anthropic's mark, and the full
+                // "Claude Sonnet 5.5" does not fit a third of the row.
+                let name = row.name.hasPrefix("Claude ") ? String(row.name.dropFirst(7)) : row.name
+                return WalletCard(id: row.id, name: name,
+                                  vendor: ModelRatings.vendor(for: row.id, provider: .nono))
+            }
     }
 
     /// What this balance pays for: every model the gateway serves and the
