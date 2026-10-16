@@ -226,7 +226,7 @@ struct NotchBody: View {
         model.mode == .load && model.turns.isEmpty ? 42 : NotchBody.panelPadding
     }
 
-    var body: some View {
+    private var panelContent: some View {
         VStack(alignment: .leading, spacing: 0) {
             // The idle page also stays up through a main-thread reveal — a pull,
             // or a line sent from the prompt (whose round has already moved
@@ -311,6 +311,10 @@ struct NotchBody: View {
                            model.openSettings()
                        }
                    })
+    }
+
+    private var panelWithPickerState: some View {
+        panelContent
         .onChange(of: model.showModelPicker) { _, open in
             // A menu is a snapshot of the catalog it was built from — refresh the live
             // models on open so the *next* one is current (the bundled list shows now).
@@ -356,6 +360,13 @@ struct NotchBody: View {
                 model.isModelPickerOpen = false
             }
         }
+    }
+
+    // The panel, its pickers' open-state wiring, and its focus handling are three
+    // properties rather than one modifier chain: as one chain the Release build
+    // could not type-check `body` in reasonable time.
+    var body: some View {
+        panelWithPickerState
         .onChange(of: model.open) { _, isOpen in
             if isOpen {
                 refocusInput()
