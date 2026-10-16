@@ -2027,9 +2027,10 @@ struct InlineSettingsView: View {
     private var nonoAccountRow: some View {
         let snapshot = nono.snapshot
         VStack(alignment: .leading, spacing: 0) {
+            // The label on the left, the figure and its action on the right.
             HStack(spacing: 2) {
                 Text(L("nono.credit"))
-                    .font(.sf(Tokens.TypeSize.form))
+                    .font(.sf(Tokens.TypeSize.label))
                     .foregroundStyle(Tokens.text2)
                 // How this figure is spent — prepaid, per token, no expiry —
                 // sits behind the ⓘ rather than as a line under it.
@@ -2038,22 +2039,30 @@ struct InlineSettingsView: View {
                         L(snapshot.hasGift ? "nono.lineup.billing.gift" : "nono.lineup.billing"),
                         glyph: 10, hit: 13)
                 }
+                Spacer(minLength: 8)
+                if case .working(.registering) = nono.phase {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text(L("nono.preparing"))
+                            .font(.sf(Tokens.TypeSize.meta))
+                            .foregroundStyle(Tokens.text2)
+                    }
+                } else if let snapshot {
+                    nonoCreditRow(snapshot)
+                } else if case .failed = nono.phase {
+                    EmptyView()
+                } else {
+                    // `/me` is still in flight — the first appearance after a
+                    // launch. A spinner, not a guess: drawing $0.00 tells
+                    // someone who has credit that they have none.
+                    ProgressView().controlSize(.small)
+                }
             }
+            .frame(minHeight: 30)
 
             if case .working(.registering) = nono.phase {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text(L("nono.preparing"))
-                        .font(.sf(Tokens.TypeSize.label))
-                        .foregroundStyle(Tokens.text2)
-                }
-                .frame(height: 34, alignment: .leading)
-                .padding(.top, 4)
+                EmptyView()
             } else if let snapshot {
-                // The figure, under its label.
-                nonoCreditRow(snapshot)
-                    .padding(.top, 12)
-
                 // The first three open a sub-page. Privacy leaves the app, the
                 // same page About opens, so it carries the outbound arrow.
                 HStack(spacing: 14) {
@@ -2079,13 +2088,6 @@ struct InlineSettingsView: View {
                 statusPill(ok: false, message: why)
                     .padding(.top, 6)
                     .transition(.opacity.combined(with: .move(edge: .top)))
-            } else {
-                // `/me` is still in flight — the first appearance after a
-                // launch. A spinner, not a guess: drawing $0.00 tells someone
-                // who has credit that they have none.
-                ProgressView().controlSize(.small)
-                    .frame(height: 34, alignment: .leading)
-                    .padding(.top, 4)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -2107,8 +2109,8 @@ struct InlineSettingsView: View {
             // itself for `numericText` to fire (see `StatsFigure`).
             let shownUSD = nono.rollFromUSD ?? snapshot.credit.remainingUSD
             Text(Self.money(shownUSD))
-                .font(.brand(Tokens.TypeSize.prompt))
-                .foregroundStyle(Tokens.text2)
+                .font(.sf(Tokens.TypeSize.form + 1))
+                .foregroundStyle(Tokens.text1)
                 .monospacedDigit()
                 .contentTransition(.numericText(value: shownUSD))
                 .animation(reduceMotion ? nil : .snappy(duration: 0.6), value: shownUSD)
@@ -2123,7 +2125,6 @@ struct InlineSettingsView: View {
             }
             addCreditButton(bought: snapshot.credit.grantedUSD)
                 .padding(.leading, 4)
-            Spacer(minLength: 0)
         }
         .task(id: nono.rollFromUSD != nil) {
             guard nono.rollFromUSD != nil else { return }
