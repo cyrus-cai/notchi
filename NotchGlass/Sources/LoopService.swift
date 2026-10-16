@@ -303,8 +303,7 @@ final class ChatLoopManager: ObservableObject {
     }
 
     /// A loop whose round one waits for `firstRoundAt` ("every morning at 9").
-    /// Nothing has run yet, so the thread `id` does not exist until then, and
-    /// the 7-day lifetime counts from that first round.
+    /// Nothing has run yet, and the 7-day lifetime counts from that first round.
     func register(id: UUID, prompt: String, minutes: Int, firstRoundAt: Date,
                   endsAt: Date? = nil, weekdaysOnly: Bool = false) {
         loops.removeAll { $0.id == id }
@@ -314,9 +313,21 @@ final class ChatLoopManager: ObservableObject {
         schedule(id, at: firstRoundAt)
     }
 
+    /// A loop started by manage_loop from an answer on thread `id`. Round one
+    /// runs when that answer's round finishes (`roundFinished`); the timer here
+    /// is only the fallback if that finish never lands.
+    func registerAfterCurrentRound(id: UUID, prompt: String, minutes: Int,
+                                   endsAt: Date? = nil, weekdaysOnly: Bool = false) {
+        register(id: id, prompt: prompt, minutes: minutes,
+                 firstRoundAt: Date().addingTimeInterval(Self.firstRoundFallback),
+                 endsAt: endsAt, weekdaysOnly: weekdaysOnly)
+    }
+
+    private static let firstRoundFallback: TimeInterval = 60
+
     /// A round on a loop's thread finished. `loopRound` is the round number its
     /// answer carried — nil for a follow-up the user typed into the thread,
-    /// which restarts the wait from now without counting as a round. `quietly`
+    /// which keeps the schedule and does not count as a round. `quietly`
     /// is a round superseded before it answered: the wait restarts, no banner.
     /// `done` is a round whose answer carried `LoopInterval.doneMarker`: the
     /// loop ends there.
@@ -327,6 +338,14 @@ final class ChatLoopManager: ObservableObject {
         if loopRound != nil, let started = loops[i].roundStartedAt {
             loops[i].lastRoundDuration = Date().timeIntervalSince(started)
             loops[i].roundStartedAt = nil
+        }
+        // A follow-up finishing does not move the schedule: the next round
+        // stays when it was due. A round held back while the follow-up ran
+        // (due now, or within the fallback wait) runs now.
+        if loopRound == nil {
+            let due = loops[i].nextRoundAt ?? Date()
+            schedule(threadID, at: due.timeIntervalSinceNow <= Self.firstRoundFallback ? Date() : due)
+            return
         }
         if quietly {
             schedule(threadID)
@@ -509,8 +528,8 @@ final class ChatLoopManager: ObservableObject {
             notify(loop, subtitle: L("notify.loop.ended", loop.rounds), silent: false, answer: "")
             return
         }
-        // A follow-up is streaming on the thread: let it finish. Its own finish
-        // restarts the wait; this is only the fallback if that never lands.
+        // A follow-up is streaming on the thread: let it finish. Its finish
+        // runs this round; this is only the fallback if that never lands.
         if isThreadBusy?(id) == true {
             schedule(id, after: 60)
             return

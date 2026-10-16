@@ -181,20 +181,20 @@ enum Tokens {
 
     // MARK: Prism
     //
-    // The hues glass refracts, in the order they run around a rim. Deliberately
-    // desaturated and few: real glass splits light into a narrow band, and four
-    // pale hues at low alpha read as that, where a full spectrum reads as a toy.
-    // The list closes on its first colour so an angular sweep of it has no seam.
+    // The light caught in a rim, in the order it runs around it: silver, no
+    // hue — bright and dim greys alternating, so the sweep reads as metal
+    // catching light. The list closes on its first value so an angular sweep
+    // of it has no seam.
     //
     // Two surfaces read this — the confirmation slab's edge glow and the
     // first-party aura (`BrandAura`). Both are the same idea, light caught in a
     // rim; keeping one list is what stops them drifting into two palettes.
     static let prismHues: [Color] = [
-        Color(red: 0.52, green: 0.80, blue: 1.00),   // cool blue
-        Color(red: 0.72, green: 0.58, blue: 1.00),   // violet
-        Color(red: 1.00, green: 0.62, blue: 0.78),   // rose
-        Color(red: 1.00, green: 0.84, blue: 0.60),   // warm amber
-        Color(red: 0.52, green: 0.80, blue: 1.00),   // back to the start
+        Color(white: 0.95),
+        Color(white: 0.30),
+        Color(white: 1.00),
+        Color(white: 0.22),
+        Color(white: 0.95),
     ]
 
     /// Placeholder text for the prompt — a soft, faint hint, clearly LIGHTER than
@@ -274,10 +274,29 @@ struct LowBalanceTag: View {
 /// teal. `limited` for a rate that is free now and may not stay free.
 struct FreeTag: View {
     var limited = false
+
+    var body: some View {
+        PriceTag(text: L(limited ? "nono.pricing.freeForNow" : "nono.pricing.free"))
+    }
+}
+
+/// An entry sold below the upstream host's list price in the Notchi pricing
+/// table: "50% OFF". `FreeTag`'s face.
+struct DiscountTag: View {
+    let percent: Int
+
+    var body: some View {
+        PriceTag(text: L("nono.pricing.percentOff", percent))
+    }
+}
+
+/// The face `FreeTag` and `DiscountTag` share.
+private struct PriceTag: View {
+    let text: String
     private static let teal = Color(red: 0.42, green: 0.80, blue: 0.76)
 
     var body: some View {
-        Text(L(limited ? "nono.pricing.freeForNow" : "nono.pricing.free"))
+        Text(text)
             .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
             .tracking(0.8)
             .foregroundStyle(Self.teal.opacity(0.85))
@@ -403,12 +422,11 @@ struct BrandAura<S: InsettableShape>: View {
             // The hairline itself, softened just enough to lose its drawn edge.
             shape.strokeBorder(sweep, lineWidth: lineWidth)
                 .blur(radius: lineWidth * 1.2)
-            // A wider, fainter pass that bleeds a point or two inward — the part
-            // that reads as glow rather than as border. Kept tight: spread past
-            // that and the chip stops looking lit and starts looking hazy.
-            shape.strokeBorder(sweep, lineWidth: lineWidth * 2.4)
-                .blur(radius: lineWidth * 2.6)
-                .opacity(0.3)
+            // A wider, fainter pass that bleeds inward — the part that reads as
+            // glow rather than as border.
+            shape.strokeBorder(sweep, lineWidth: lineWidth * 7)
+                .blur(radius: lineWidth * 7)
+                .opacity(0.5)
         }
         // Clipped to the shape, so the glow lives INSIDE the surface. A blurred
         // stroke otherwise spreads past the border, and what escapes gets cut by
@@ -417,7 +435,9 @@ struct BrandAura<S: InsettableShape>: View {
         // vanished along the sides and squared off at every corner.
         .clipShape(shape)
         .blendMode(.plusLighter)
-        .opacity(0.55)
+        // Spread wide and kept faint, so the silver reads as light in the
+        // glass rather than as a second border.
+        .opacity(0.6)
         .allowsHitTesting(false)
     }
 }

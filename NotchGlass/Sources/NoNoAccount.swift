@@ -305,8 +305,23 @@ final class NoNoAccount: ObservableObject {
         var cachedTokens: Int?
         var completionTokens: Int?
         var billedUSD: Double?
+        /// Which part of the app sent the request (`NoNoRequestContext`).
+        /// `nil` on lines the gateway wrote before it kept this.
+        var surface: String?
 
         var id: String { requestId }
+
+        /// The label for a request the app made on its own, not for a question
+        /// the user asked: the surface itself, untranslated. `nil` for the
+        /// user's own requests.
+        var backgroundLabel: String? {
+            switch surface {
+            case NoNoRequestContext.suggest, NoNoRequestContext.title,
+                 NoNoRequestContext.naming, NoNoRequestContext.memory:
+                return surface
+            default: return nil
+            }
+        }
 
         var date: Date { Date(timeIntervalSince1970: at / 1000) }
     }

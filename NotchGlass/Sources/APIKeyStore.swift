@@ -31,6 +31,7 @@ enum APIKeyStore {
     private static let modelKeyPrefix = "model."
     private static let selectedProviderKey = "selected_provider"
     private static let broughtProviderKey = "brought_provider"
+    private static let previousProviderKey = "previous_selected_provider"
 
     /// Built-in development keys, used only when no env var and no stored entry
     /// are present for that provider. None ship by default — every provider's key
@@ -72,11 +73,23 @@ enum APIKeyStore {
             return Provider.offered.contains(.nono) ? .nono : .openrouter
         }
         set {
+            let old = selectedProvider
+            if old != newValue {
+                UserDefaults.standard.set(old.rawValue, forKey: previousProviderKey)
+            }
             UserDefaults.standard.set(newValue.rawValue, forKey: selectedProviderKey)
             // Every switch to a backend the user brought retargets the Settings
             // Model pane too (see `broughtProvider`) — whichever surface made it.
             if !newValue.isFirstParty { broughtProvider = newValue }
         }
+    }
+
+    /// The backend that was active before the last switch. When the active
+    /// backend's account is disconnected, this is where the selection goes back
+    /// to (`ModelCatalogStore.leave`).
+    static var previousSelectedProvider: Provider? {
+        let raw = UserDefaults.standard.string(forKey: previousProviderKey) ?? ""
+        return Provider(rawValue: raw)
     }
 
     /// The backend the user brought themselves: the one Settings' Model pane

@@ -935,8 +935,8 @@ struct CaptureRequest: Sendable {
     var list: String? = nil
     /// For a repeating event: how many times in all.
     var repeatCount: Int? = nil
-    /// For an event: the IANA time zone its `due` / `end` are written in
-    /// ("America/Los_Angeles"); nil for this Mac's.
+    /// For an event or a reminder: the IANA time zone its `due` / `end` are
+    /// written in ("America/Los_Angeles"); nil for this Mac's.
     var timeZone: String? = nil
 }
 
@@ -1043,6 +1043,10 @@ struct CreateReminderTool: NotchTool {
                 "type": "string",
                 "description": "The Reminders list it goes in when the user names one (\"groceries\", \"买菜清单\", \"Work\"). Omit for their default list.",
             ],
+            "time_zone": [
+                "type": "string",
+                "description": "When the user gives the time in another place's clock (\"8am Tokyo time\", \"旧金山时间上午 9 点\"): that IANA zone, e.g. Asia/Tokyo, and `due` written on that clock. Omit for this Mac's time.",
+            ],
         ],
         "required": ["title"],
     ]
@@ -1059,11 +1063,13 @@ struct CreateReminderTool: NotchTool {
         let rule = (input["repeat"] as? String).flatMap { ["daily", "weekly", "monthly"].contains($0) ? $0 : nil }
         let until = (input["repeat_until"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let list = (input["list"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let zone = (input["time_zone"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         return try await handle(CaptureRequest(kind: .reminder, text: title,
                                                due: due?.isEmpty == false ? due : nil,
                                                repeatRule: rule,
                                                repeatUntil: rule == nil || until?.isEmpty != false ? nil : until,
-                                               list: list?.isEmpty == false ? list : nil))
+                                               list: list?.isEmpty == false ? list : nil,
+                                               timeZone: zone?.isEmpty == false ? zone : nil))
     }
 }
 
@@ -1176,7 +1182,7 @@ struct LoopRequest: Sendable {
 }
 
 /// Start, list, stop or re-time an Ask loop from the chat — the same loop a
-/// typed `/loop` starts, in a thread of its own. Each round is billed like a
+/// typed `/loop` starts, in the thread it was asked in. Each round is billed like a
 /// question, for up to a week: a loop that runs more often than hourly (up to
 /// 60 times the rounds) waits on an in-answer Confirm card; hourly or slower
 /// starts at once.
@@ -1185,7 +1191,7 @@ struct ManageLoopTool: NotchTool {
     static let toolName = "manage_loop"
     let name = toolName
     let description = """
-    Runs a prompt again on a schedule, in its own thread: every 1 minute to once \
+    Runs a prompt again on a schedule, in this thread: every 1 minute to once \
     a day, for a week, or until `ends_on` (up to 90 days) when the user names an \
     end ("until Dec 18", "到月底"); `weekdays_only` skips weekends. Each round is \
     a full answer (it can search, read \
@@ -1368,6 +1374,11 @@ struct HistoryDigestRow: Sendable {
     /// The literal question behind an Ask row, when the headline is a generated
     /// title and so doesn't already say it. `nil` for captures.
     let body: String?
+    /// The start of the answer, for one question of the main thread — that
+    /// thread is a single row otherwise, and its title says nothing about
+    /// what was asked on a given day.
+    var answer: String? = nil
+    static let answerCap = 360
 }
 
 /// The answer to one archive query: the rows that fit, plus how many actually
@@ -1591,6 +1602,7 @@ struct SearchHistoryTool: NotchTool {
         for (i, row) in rows.enumerated() {
             var line = "\(i + 1). [\(row.kind)] \(rowFormatter.string(from: row.date)) — \(row.headline)"
             if let body = row.body, !body.isEmpty { line += "\n   asked: \(body)" }
+            if let answer = row.answer, !answer.isEmpty { line += "\n   answered: \(answer)" }
             // Budget check before appending, so the cap is never overshot and the
             // count of what didn't fit stays honest. The last row needs no footer,
             // so it may use the reserve — otherwise a digest that exactly fits
@@ -2061,12 +2073,40 @@ struct AnySearchProvider: SearchProvider {
         ])
 
         let data = try await SearchServiceError.fetch(req, service: "AnySearch")
-        return try Self.parse(data, query: query)
+        let dates = await Self.pageDates(data)
+        return try Self.parse(data, query: query, dates: dates)
+    }
+
+    /// AnySearch results carry no date, so "today's AI news" was being dated
+    /// from snippets. Each result page states its own (`ReadPageTool.publishedDate`);
+    /// the pages are read side by side, each given 3 seconds, and one that
+    /// doesn't answer in time simply has no date.
+    private static func pageDates(_ data: Data) async -> [String: String] {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let results = (obj["data"] as? [String: Any])?["results"] as? [[String: Any]] else { return [:] }
+        let urls = results.prefix(maxResults).compactMap { ($0["url"] as? String).flatMap(URL.init(string:)) }
+            .filter { ["http", "https"].contains($0.scheme?.lowercased() ?? "") }
+        return await withTaskGroup(of: (String, String?).self) { group in
+            for url in urls {
+                group.addTask {
+                    var req = URLRequest(url: url)
+                    req.timeoutInterval = 3
+                    req.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
+                                 forHTTPHeaderField: "User-Agent")
+                    guard let (body, _) = try? await ProxyConfig.urlSession.data(for: req) else { return (url.absoluteString, nil) }
+                    let html = String(decoding: body.prefix(400_000), as: UTF8.self)
+                    return (url.absoluteString, ReadPageTool.publishedDate(in: html))
+                }
+            }
+            var out: [String: String] = [:]
+            for await (url, date) in group { if let date { out[url] = date } }
+            return out
+        }
     }
 
     /// Parse `{ code, message, data: { results: [{title,url,snippet,content}] } }`
     /// into the same model text + source badges used by the other searchers.
-    private static func parse(_ data: Data, query: String) throws -> (text: String, sources: [WebSource]) {
+    private static func parse(_ data: Data, query: String, dates: [String: String] = [:]) throws -> (text: String, sources: [WebSource]) {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw SearchServiceError(service: "AnySearch", detail: "unreadable response")
         }
@@ -2085,7 +2125,8 @@ struct AnySearchProvider: SearchProvider {
             let link = (r["url"] as? String).flatMap { $0.isEmpty ? nil : "\n   \($0)" } ?? ""
             var snippet = snippetText(from: r)
             if snippet.count > 500 { snippet = String(snippet.prefix(500)) + "…" }
-            return "[\(i + 1)] \(title)\n   \(snippet)\(link)"
+            let date = (r["url"] as? String).flatMap { dates[$0] }.map { " (\($0))" } ?? ""
+            return "[\(i + 1)] \(title)\(date)\n   \(snippet)\(link)"
         }
         let text = "Web search results for \"\(query)\":\n\n" + blocks.joined(separator: "\n\n")
 
@@ -2096,7 +2137,7 @@ struct AnySearchProvider: SearchProvider {
                   scheme == "http" || scheme == "https",
                   !seen.contains(link) else { return nil }
             seen.insert(link)
-            return WebSource(title: (r["title"] as? String) ?? link, url: link, date: nil)
+            return WebSource(title: (r["title"] as? String) ?? link, url: link, date: dates[link])
         }
         return (text, sources)
     }
@@ -2205,10 +2246,37 @@ struct ReadPageTool: NotchTool {
             let clipped = text.count > Self.maxChars
                 ? String(text.prefix(Self.maxChars)) + "\n\n[…page truncated…]"
                 : text
-            return "Content of \(raw):\n\n\(clipped)"
+            // The page's own date, from its metadata: search results carry
+            // none, and "today's news" was being dated from the snippet.
+            let dated = Self.publishedDate(in: html).map { "Published: \($0) (from the page's metadata)\n" } ?? ""
+            return "Content of \(raw):\n\(dated)\n\(clipped)"
         } catch {
             return "Error fetching \(url.host ?? raw): \(error.localizedDescription)"
         }
+    }
+
+    /// The publication date a page states about itself — `article:published_time`
+    /// and the like, JSON-LD `datePublished`, or the first `<time datetime>` —
+    /// as YYYY-MM-DD. Nil when it states none.
+    static func publishedDate(in html: String) -> String? {
+        let head = String(html.prefix(400_000))
+        let patterns = [
+            #"<meta[^>]+(?:property|name|itemprop)=["'](?:article:published_time|og:published_time|datePublished|pubdate|publishdate|date|DC\.date\.issued|parsely-pub-date)["'][^>]*content=["']([^"']+)["']"#,
+            #"<meta[^>]+content=["']([^"']+)["'][^>]*(?:property|name|itemprop)=["'](?:article:published_time|og:published_time|datePublished|pubdate|publishdate)["']"#,
+            #""datePublished"\s*:\s*"([^"]+)""#,
+            #"<time[^>]+datetime=["']([^"']+)["']"#,
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+                  let m = regex.firstMatch(in: head, range: NSRange(head.startIndex..., in: head)),
+                  let r = Range(m.range(at: 1), in: head) else { continue }
+            // Only the day: "2026-10-14T08:30:00+08:00" → "2026-10-14".
+            let value = String(head[r])
+            if let day = value.range(of: #"\d{4}-\d{2}-\d{2}"#, options: .regularExpression) {
+                return String(value[day])
+            }
+        }
+        return nil
     }
 
     /// Strip HTML to readable plain text. Not a full parser — a pragmatic cleaner:
@@ -2796,6 +2864,7 @@ enum AskToolIntent {
         "完成了", "标成完成", "標成完成", "做完了", "提前到",
         "cancel", "delete the reminder", "remove the reminder", "mark as done",
         "mark it done", "reschedule", "move the reminder", "push back",
+        "rename", "改名", "改标题", "改個名", "改个名",
     ]
 
     /// Questions about what the user wrote down (`read_notes`).

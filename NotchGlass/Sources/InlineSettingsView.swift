@@ -222,8 +222,9 @@ struct InlineSettingsView: View {
     /// list fetched for one surface is already warm for the other.
     @ObservedObject private var catalog = ModelCatalogStore.shared
 
-    /// Whether the custom cross-provider model picker overlay is open.
+    /// Whether the Model row's menu is open.
     @State private var modelPickerOpen = false
+
     /// The Prompt Shortcut editor uses the same model menu, but owns a separate
     /// presentation bit so opening it cannot disturb Settings' main model row.
     @State private var promptModelPickerOpen = false
@@ -558,6 +559,8 @@ struct InlineSettingsView: View {
     @State private var proxyStatus: String = ""
     /// `WeatherCity`'s storage; the row edits it in place.
     @AppStorage("weather.city") private var weatherCity: String = ""
+    /// Notchi models switched off in Models and Pricing. See `NotchiModelVisibility`.
+    @AppStorage(NotchiModelVisibility.defaultsKey) private var hiddenNotchiModels: String = ""
 
     /// Live macOS authorization state for each protected capability the app
     /// uses. Missing entries read as `.checking`. Re-read while the permissions
@@ -745,6 +748,8 @@ struct InlineSettingsView: View {
                 selectAcrossProviders(provider: .openrouter, model: pending.id)
             } else if provider == .openrouter {
                 modelID = APIKeyStore.storedModel(for: .openrouter)
+                activateIfShown(.openrouter)
+                NotificationCenter.default.post(name: .aiBackendChanged, object: nil)
             }
             test()
             Task { await refreshModels() }
@@ -880,11 +885,9 @@ struct InlineSettingsView: View {
                 // model chip inside it used to each wear their own aura, which on
                 // nono lit three rims stacked inside one another.
                 //
-                // Lit by what is ANSWERING, not by what the rows below name —
-                // those two are different questions now (see `provider`), and the
-                // rim is the card's own, so it follows the card's subject.
-                .brandAura(in: Self.modelCardShape,
-                           active: notchiActive, lineWidth: 1.2)
+                // Lit whichever backend is answering: the card is Notchi's
+                // wallet either way.
+                .brandAura(in: Self.modelCardShape, lineWidth: 1.2)
                 // Everything you bring yourself, outside the card and unadorned,
                 // in the order you set it up: which backend answers, which of
                 // its models, and the key that lets it. The caption names this
@@ -1405,7 +1408,7 @@ struct InlineSettingsView: View {
         }
 
         // Whose key this section is editing — shown only when that isn't the
-        // active provider (the ⌘⇧I picker's "Add key" aims it elsewhere).
+        // provider above (the ⌘⇧I picker's "Add key" aims it elsewhere).
         // For the ordinary case the Provider row above already says it, and
         // repeating it here would read as a second, contradicting control.
         if keyScope != provider {
@@ -1553,6 +1556,7 @@ struct InlineSettingsView: View {
         if provider == .custom { modelID = customModel }
         catalog.forget(.custom)
         testResult = nil    // the last verdict belonged to the previous endpoint
+        activateIfShown(.custom)
         NotificationCenter.default.post(name: .aiBackendChanged, object: nil)
         withAnimation(.easeOut(duration: 0.2)) { customSaved = true }
         Task { await refreshModels() }
@@ -1603,10 +1607,12 @@ struct InlineSettingsView: View {
         setKeyScope(focus)
     }
 
-    /// Switch the active backend — the provider whose model answers. Driven by the
-    /// Provider row (step one) and by a cross-provider pick arriving from the ⌘⇧I
-    /// picker. The key section always follows the backend: the only state where it
-    /// aims elsewhere is a pending model (picker "Add key"), which retargets it itself.
+    /// Point this pane at `newValue` and, when it can answer, make it the active
+    /// backend. A provider with no key yet only opens its key field: the backend
+    /// in effect stays the last one that works, and it switches once the key is
+    /// saved (`activateIfShown`). The key section follows; the only state where it
+    /// aims elsewhere is a pending model (picker "Add key"), which retargets it
+    /// itself.
     private func selectProvider(_ newValue: Provider) {
         guard newValue != provider else { return }
         // The Provider menu is a SwiftUI `Toggle` inside `Menu`. Selecting a
@@ -1621,10 +1627,17 @@ struct InlineSettingsView: View {
         transaction.disablesAnimations = true
         withTransaction(transaction) {
             provider = newValue
-            APIKeyStore.selectedProvider = newValue
-            notchiActive = false
+            APIKeyStore.broughtProvider = newValue
             modelID = APIKeyStore.storedModel(for: newValue)
-            NotificationCenter.default.post(name: .aiBackendChanged, object: nil)
+            if ModelCatalogStore.ready(newValue) {
+                APIKeyStore.selectedProvider = newValue
+                notchiActive = false
+                NotificationCenter.default.post(name: .aiBackendChanged, object: nil)
+            } else {
+                // Chosen to be set up: open its key field even while another
+                // backend answers (`setupRequired` stays false then).
+                keySectionOpen = true
+            }
             setKeyScope(newValue)
         }
         Task { await refreshModels() }
@@ -2224,7 +2237,7 @@ struct InlineSettingsView: View {
                 // the model picker heads them (`addRows`). One set of column
                 // headers over both runs, so the rates still line up across
                 // them. A lineup that is all one kind gets no headings.
-                let rows = nonoLineupRows
+                let rows = NotchiModelVisibility.ordered(nonoLineupRows, id: \.id)
                 let house = rows.filter { ModelRatings.isNonoBlend(id: $0.id, pricing: $0.pricing) }
                 let rest = rows.filter { !ModelRatings.isNonoBlend(id: $0.id, pricing: $0.pricing) }
                 if !house.isEmpty, !rest.isEmpty {
@@ -2276,6 +2289,15 @@ struct InlineSettingsView: View {
                     if ModelRatings.isNonoBlend(id: row.id, pricing: row.pricing) {
                         SettingInfo(L("nono.pricing.blendTagline"))
                     }
+                    // Sold below the upstream's list price; the gateway sends
+                    // the fraction as `savings`.
+                    if let percent = row.pricing?.percentOff {
+                        DiscountTag(percent: percent)
+                            .padding(.leading, 3)
+                        if let line = row.pricing?.saleLine {
+                            SettingInfo(line)
+                        }
+                    }
                 }
             }
             .fixedSize(horizontal: true, vertical: false)
@@ -2290,18 +2312,21 @@ struct InlineSettingsView: View {
                     .font(.sf(Tokens.TypeSize.meta))
                     .foregroundStyle(Tokens.text3)
                     .lineLimit(1)
-                HStack(spacing: 6) {
-                    if Provider.modelSupportsVision(row.id) {
-                        pricingCap("eye", title: L("model.detail.vision"))
-                    }
-                    if row.info.toolUse || Provider.nono.supportsTools {
-                        pricingCap("wrench.and.screwdriver", title: L("model.detail.toolUse"))
-                    }
-                    if row.info.reasoning {
-                        pricingCap("brain", title: L("model.detail.reasoning"))
-                    }
-                }
-                .fixedSize()
+                // Shown in the Ask chip's model menu. Auto is always there.
+                let isAuto = row.id.hasPrefix("auto-")
+                Toggle("", isOn: Binding(
+                    get: { isAuto || !NotchiModelVisibility.hidden(in: hiddenNotchiModels)
+                                          .contains(row.id) },
+                    set: { shown in
+                        Haptics.levelChange()
+                        hiddenNotchiModels = NotchiModelVisibility.setting(
+                            row.id, shown: shown, in: hiddenNotchiModels)
+                    }))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .tint(Tokens.text2)
+                    .disabled(isAuto)
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
         }
@@ -2343,14 +2368,6 @@ struct InlineSettingsView: View {
         } else {
             usageCell("—", color: Tokens.text4)
         }
-    }
-
-    private func pricingCap(_ symbol: String, title: String) -> some View {
-        Image(systemName: symbol)
-            .font(.sf(Tokens.TypeSize.meta))
-            .foregroundStyle(Tokens.text3)
-            .notchTooltip(title)
-            .accessibilityLabel(title)
     }
 
     /// How much the next purchase is for. Not a set of fixed tiers: the amount
@@ -2993,6 +3010,9 @@ struct InlineSettingsView: View {
     /// they can revoke it at openrouter.ai/settings/keys.)
     private func disconnectOpenRouter() {
         APIKeyStore.save("", for: .openrouter)   // empty clears the entry
+        // If OpenRouter was the active backend, it can't answer without its
+        // key — hand back the previous one.
+        ModelCatalogStore.leave(.openrouter)
         apiKey = ""
         testResult = nil
         orAuth.acknowledge()
@@ -3119,6 +3139,32 @@ struct InlineSettingsView: View {
         }
     }
 
+    /// The mark on a model added recently, in the Ask model menu. The
+    /// Refreshed badge's fill and size, at a regular weight.
+    struct NewBadge: View {
+        var text = L("tag.new")
+
+        var body: some View {
+            Text(text)
+                .font(.sf(Tokens.TypeSize.caption, weight: .regular))
+                .tracking(0.4)
+                .foregroundStyle(Tokens.accent)
+                .lineLimit(1)
+                .fixedSize()
+                .padding(.horizontal, 4)
+                .padding(.vertical, 1)
+                .background(Tokens.accent.opacity(0.22), in: LowBalanceTag.shape)
+        }
+
+        /// The tag's width, for a card sized by arithmetic (the Ask model menu).
+        static func width(_ text: String = L("tag.new")) -> CGFloat {
+            let font = NSFont.systemFont(ofSize: Tokens.TypeSize.caption, weight: .regular)
+            let text = NSAttributedString(string: text,
+                                          attributes: [.font: font, .kern: 0.4])
+            return ceil(text.size().width) + 8
+        }
+    }
+
     /// One tag on the Jev row. Shaped like `LowBalanceTag` — same corner, same padding, same
     /// hairline — but an outline in the CTA blue rather than that one's filled
     /// rose, because nothing here is wrong: it is an offer, not a warning.
@@ -3161,7 +3207,8 @@ struct InlineSettingsView: View {
 
     /// Step one: **which backend answers.** A menu of the backends you bring
     /// yourself, split into the ones that can answer right now and the ones that
-    /// still need a key.
+    /// still need a key. Choosing one that needs a key leaves the current backend
+    /// answering until the key is saved.
     ///
     /// Notchi is not in it. It is not one of these — every row here is a lab or
     /// an aggregator you pay somewhere else, and Notchi Balance is a wallet you
@@ -3169,9 +3216,8 @@ struct InlineSettingsView: View {
     /// the things it is an alternative to. It lives in the card above, always
     /// visible, and is picked by choosing one of its models.
     ///
-    /// Picking an unconfigured provider is a legitimate move (it's how you get to a
-    /// new vendor's key field): the switch goes through, and `keySection` unfolds
-    /// itself on the spot because `setupRequired` now holds.
+    /// Picking an unconfigured provider is how you get to a new vendor's key
+    /// field: `keySection` unfolds itself on the spot.
     ///
     /// Notchi never reaches this row — not in the menu, and not as the value it
     /// displays. `provider` is `APIKeyStore.broughtProvider`, which cannot hold it:
@@ -3206,13 +3252,9 @@ struct InlineSettingsView: View {
             + rows(unready, header: L("model.picker.unconfigured"))
     }
 
-    /// Step two: **which of that provider's models.** The picker card is the same
-    /// one the ⌘⇧I summon opens, locked to the chosen provider — its search and its
-    /// fold both work over that provider's catalog alone.
-    ///
-    /// Which also means Notchi's tiers are not in it. They are not models of the
-    /// provider named above, and they are not chosen here — the panel's own model
-    /// menu is where Notchi is picked.
+    /// Step two: **which of that provider's models.** The menu lists the chosen
+    /// provider's catalog alone. Notchi's models are not in it — the panel's own
+    /// model menu is where Notchi is picked.
     private var modelRow: some View {
         settingRow(label: L("model.label")) {
             HStack(spacing: 6) {
@@ -3227,11 +3269,9 @@ struct InlineSettingsView: View {
                 }
                 .buttonStyle(.plain).exemptsDoubleClickPin()
                 .fixedSize()
-                // The system's own menu, dropped from the chip — the provider is
-                // settled one row up, so it lists that provider's models flat.
-                // The rows are built only while the menu is up, as on the panel
-                // body: this pane's body re-runs on every account, catalog and
-                // updater publish, and `rows` walks every provider's catalog.
+                // The rows are built only while the menu is up: this pane's body
+                // re-runs on every account, catalog and updater publish, and
+                // `rows` walks every provider's catalog.
                 .modelMenu(isPresented: $modelPickerOpen,
                            models: modelPickerOpen ? catalog.rows(selected: provider) : [],
                            selectedProvider: provider,
@@ -3254,9 +3294,6 @@ struct InlineSettingsView: View {
                     // menu opens (the bundled list shows now; the refresh lands for
                     // the next open).
                     if modelPickerOpen { Task { await catalog.loadAll() } }
-                    // Suspend the panel's leave-collapse while the menu is up so
-                    // moving the pointer into it (a separate window) never folds the
-                    // settings out from under it.
                     model.isModelPickerOpen = modelPickerOpen || promptModelPickerOpen
                 }
                 // Manual refresh: the automatic paths are all cached (the curated
@@ -6838,8 +6875,15 @@ struct InlineSettingsView: View {
         GridRow {
             usageCell(line.date.formatted(.dateTime.month(.abbreviated).day().hour().minute()),
                       color: Tokens.text2)
-            usageCell(usageModelName(line.model), color: Tokens.text1)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            // A request the app made on its own (a predicted question, a
+            // thread title) says so, so it does not read as unexplained spend.
+            HStack(spacing: 6) {
+                usageCell(usageModelName(line.model), color: Tokens.text1)
+                if let label = line.backgroundLabel {
+                    ModelDetailCard.Tag(text: label)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
             usageCell(line.promptTokens.map(StatsFormat.count) ?? "—", color: Tokens.text2)
             // Counted inside the prompt figure to its left, not beside it: the
             // cost on this row is the rest of that prompt at the input rate
@@ -7827,10 +7871,19 @@ struct InlineSettingsView: View {
 
     // MARK: - Cross-provider picker
 
-    /// Pick a model from the cross-provider picker: switch the selected provider
-    /// (reusing `selectProvider`, which re-syncs every provider-scoped row), then
-    /// save the chosen model under it. Selecting a model within the *current*
-    /// provider skips the switch and just persists the model.
+    /// A key just landed for `p`. When `p` is the provider the Provider row names,
+    /// it was chosen there and left inactive only for want of a key — make it the
+    /// active backend now.
+    private func activateIfShown(_ p: Provider) {
+        guard p == provider, ModelCatalogStore.ready(p) else { return }
+        APIKeyStore.selectedProvider = p
+        notchiActive = false
+    }
+
+    /// Pick a model: point this pane at its provider (`selectProvider` re-syncs
+    /// every provider-scoped row), make it the active backend, and save the model.
+    /// Callers only pass a provider that can answer — a keyless model goes
+    /// through the pending flow and lands here once its key is saved.
     private func selectAcrossProviders(provider newProvider: Provider, model id: String) {
         pendingModel = nil   // any committed pick settles the pending ask
         if newProvider != provider {
@@ -7838,6 +7891,7 @@ struct InlineSettingsView: View {
             // override it with the id the user actually clicked.
             selectProvider(newProvider)
         }
+        APIKeyStore.selectedProvider = newProvider
         modelID = id
         APIKeyStore.saveModel(id, for: newProvider)
         // The custom endpoint's Model ID field is another view of the same stored
@@ -7883,6 +7937,7 @@ struct InlineSettingsView: View {
         if let pending = pendingModel, pending.provider == keyScope {
             selectAcrossProviders(provider: pending.provider, model: pending.id)
         } else {
+            activateIfShown(keyScope)
             NotificationCenter.default.post(name: .aiBackendChanged, object: nil)
         }
         // A newly-saved key may unlock the live model list — refresh it.

@@ -4274,8 +4274,11 @@ struct DetachedThreadView: View {
     }
     private var hasAgentMetadata: Bool {
         agentRunCaption != nil || store.agentFolderPath != nil || store.completedAt != nil
-            || threadLoopInfo != nil
+            || (threadLoopInfo != nil && loopStartedThread)
     }
+    /// The loop started this thread. A loop running in a conversation keeps
+    /// the conversation's own placeholder and has no ⌘ card here.
+    private var loopStartedThread: Bool { store.turns.first?.loopRound != nil }
     private var threadLoopInfo: LoopMenuInfo? {
         let id = store.threadID
         if let loop = agentManager.tasks.first(where: { $0.id == id })?.loop {
@@ -4768,12 +4771,12 @@ struct DetachedThreadView: View {
                     onSubmit: sendFollowUp,
                     onPasteImage: pasteFollowUpImage,
                     placeholder: {
-                        if threadLoopActive, let next = threadLoopInfo?.nextRoundAt {
+                        if threadLoopActive, loopStartedThread, let next = threadLoopInfo?.nextRoundAt {
                             TimelineView(.periodic(from: .now, by: 1)) { context in
                                 Text(L("loop.waiting",
                                        LoopInterval.countdown(next.timeIntervalSince(context.date))))
                             }
-                        } else if threadLoopActive {
+                        } else if threadLoopActive, loopStartedThread {
                             Text(L("loop.followUp"))
                         } else {
                             Text(L("result.followUp"))

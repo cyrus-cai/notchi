@@ -105,6 +105,23 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.11",
+            date: "2026-10-16",
+            features: [
+                "The model menu lists Notchi models and your own keys together, with search. Hide the ones you don't use in Settings → Models and Pricing.",
+                "Models on sale show the discount and end date.",
+            ],
+            improvements: [
+                "Reminders in another time zone ring on time, and news answers use each page's publish date.",
+                "/loop typed in a conversation runs in that conversation.",
+                "Notchi can save an image you sent to a folder.",
+                "Usage marks requests Notchi made on its own, like chat titles.",
+            ],
+            fixes: [
+                "A question that failed is no longer answered along with your next one.",
+            ]
+        ),
+        Entry(
             version: "0.9.10",
             date: "2026-10-14",
             headline: "DeepSeek Harness and Command Code, in the notch.",

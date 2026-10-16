@@ -2,6 +2,7 @@ import AppKit
 import CryptoKit
 import ImageIO
 import LinkPresentation
+import MapKit
 import SwiftUI
 
 // MARK: - Splitting an answer into bubbles
@@ -299,10 +300,19 @@ enum LinkCardSplitter {
     private static func startsNewMessage(after last: String, inList: Bool,
                                          next line: String) -> Bool {
         if last.hasSuffix(":") || last.hasSuffix("：") { return false }
-        if last.hasPrefix("#") { return false }
+        if isHeading(last) { return false }
         let next = line.trimmingCharacters(in: .whitespaces)
         if inList, isListItem(next) || isIndented(line) { return false }
         return true
+    }
+
+    /// `# Title`, or a line that is all bold: `**Title**`, `__Title__`.
+    private static func isHeading(_ s: String) -> Bool {
+        if s.hasPrefix("#") { return true }
+        for mark in ["**", "__"] where s.count > 4 && s.hasPrefix(mark) && s.hasSuffix(mark) {
+            return !s.dropFirst(2).dropLast(2).contains(mark)
+        }
+        return false
     }
 
     private static let imageRef = #/!\[[^\]]*\]\(\s*\S+?(?:\s+"[^"]*")?\s*\)/#
@@ -570,8 +580,12 @@ final class LinkCardStore {
         if failed.contains(key as String) { return nil }
         if let running = drawing[key as String] { return await running.value }
         let task = Task { () -> NSImage? in
-            let fetched = await self.pageMetadata(url)
             let local = Self.mapsDetails(url)
+            // Drawn while the page is read: reading a Maps link runs to the
+            // provider's timeout.
+            async let map: Data? = large && local != nil ? Self.mapImage(url, query: local?.title) : nil
+            let fetched = await self.pageMetadata(url)
+            let mapImage = await map
             let card = LPLinkMetadata()
             card.originalURL = url
             card.url = fetched?.url ?? url
@@ -579,7 +593,10 @@ final class LinkCardStore {
                 ?? Self.pathTitle(url)
             // A preview image switches `LPLinkView` to its tall layout; the
             // compact form carries the icon only.
-            if large, let image = fetched?.imageProvider,
+            if let mapImage {
+                card.iconProvider = local?.icon
+                card.imageProvider = NSItemProvider(item: mapImage as NSData, typeIdentifier: "public.png")
+            } else if large, let image = fetched?.imageProvider,
                let preview = await Self.previewImage(image) {
                 card.iconProvider = fetched?.iconProvider
                 card.imageProvider = preview
@@ -784,6 +801,89 @@ final class LinkCardStore {
         NSGraphicsContext.restoreGraphicsState()
         return rep.representation(using: .png, properties: [:])
     }()
+
+    /// Point size of the map a large Maps card shows, as wide as `drawWidth`.
+    private nonisolated static let mapSize = CGSize(width: 340, height: 190)
+
+    /// The map a large Maps card shows, as PNG: the place the link's `ll`
+    /// gives, else the first place Maps finds for its query, with a pin on it.
+    /// Nil when Maps finds nothing or has not drawn it within 10 s; the card
+    /// then shows the Maps icon.
+    private nonisolated static func mapImage(_ url: URL, query: String?) async -> Data? {
+        await within(10) {
+            let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            var center: CLLocationCoordinate2D?
+            var meters: CLLocationDistance = 1_200
+            if let ll = items.first(where: { $0.name == "ll" })?.value {
+                let parts = ll.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+                if parts.count == 2 { center = CLLocationCoordinate2D(latitude: parts[0], longitude: parts[1]) }
+            }
+            if center == nil, let query, let item = await TravelTimeTool.place(query) {
+                center = item.placemark.coordinate
+                // A city or a park comes with its extent; a shop, with a few
+                // hundred metres.
+                if let area = item.placemark.region as? CLCircularRegion {
+                    meters = max(meters, area.radius * 4)
+                }
+            }
+            guard let center, CLLocationCoordinate2DIsValid(center) else { return nil }
+            let options = MKMapSnapshotter.Options()
+            options.region = MKCoordinateRegion(center: center,
+                                                latitudinalMeters: meters * mapSize.height / mapSize.width,
+                                                longitudinalMeters: meters)
+            options.size = mapSize
+            options.appearance = NSAppearance(named: .darkAqua)
+            guard let shot = try? await MKMapSnapshotter(options: options).start() else { return nil }
+            return pinned(shot.image)
+        }
+    }
+
+    /// The snapshot with a pin at its centre, which is the place, as PNG at
+    /// the snapshot's own resolution.
+    private nonisolated static func pinned(_ map: NSImage) -> Data? {
+        let size = map.size
+        let pixels = map.representations.map(\.pixelsWide).max() ?? Int(size.width)
+        let scale = max(1, CGFloat(pixels) / size.width)
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil,
+                                         pixelsWide: Int(size.width * scale),
+                                         pixelsHigh: Int(size.height * scale),
+                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                         isPlanar: false, colorSpaceName: .deviceRGB,
+                                         bytesPerRow: 0, bitsPerPixel: 0),
+              let context = NSGraphicsContext(bitmapImageRep: rep)
+        else { return nil }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        context.cgContext.scaleBy(x: scale, y: scale)
+        map.draw(in: NSRect(origin: .zero, size: size))
+        let mid = NSPoint(x: size.width / 2, y: size.height / 2)
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.45)
+        shadow.shadowBlurRadius = 3
+        shadow.shadowOffset = NSSize(width: 0, height: -1)
+        shadow.set()
+        NSColor.white.setFill()
+        NSBezierPath(ovalIn: NSRect(x: mid.x - 9, y: mid.y - 9, width: 18, height: 18)).fill()
+        NSShadow().set()
+        NSColor.systemRed.setFill()
+        NSBezierPath(ovalIn: NSRect(x: mid.x - 6.5, y: mid.y - 6.5, width: 13, height: 13)).fill()
+        NSGraphicsContext.restoreGraphicsState()
+        return rep.representation(using: .png, properties: [:])
+    }
+
+    /// `work`'s result, or nil when it has not finished within `seconds`.
+    /// `work` is left to finish on its own.
+    private nonisolated static func within<T>(_ seconds: Double,
+                                              _ work: @escaping @Sendable () async -> T?) async -> T? {
+        return await withCheckedContinuation { continuation in
+            let once = ResumeOnce(continuation)
+            Task { once.finish(await work()) }
+            Task {
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                once.finish(nil)
+            }
+        }
+    }
 
     // MARK: Metadata
 
@@ -1011,6 +1111,22 @@ final class LinkCardStore {
         let fit = unsafeBitCast(view.method(for: selector), to: SizeThatFits.self)
         let size = fit(view, selector, CGSize(width: width, height: 10_000))
         return CGSize(width: ceil(min(size.width, width)), height: ceil(size.height))
+    }
+}
+
+/// Resumes its continuation with the first value it is given.
+private final class ResumeOnce<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<T?, Never>?
+
+    init(_ continuation: CheckedContinuation<T?, Never>) { self.continuation = continuation }
+
+    func finish(_ value: T?) {
+        lock.lock()
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume(returning: value)
     }
 }
 

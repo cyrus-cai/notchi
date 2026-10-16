@@ -2032,22 +2032,17 @@ struct CaptureLineLink: View {
 /// line's face, below the answer instead of above it.
 struct AnswerLineButton: View {
     let title: String
-    var systemImage: String = "arrow.up.right"
     let font: CGFloat
     let action: () -> Void
     @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 3) {
-                Text(title)
-                    .font(.sf(font))
-                    .lineLimit(1)
-                Image(systemName: systemImage)
-                    .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
-            }
-            .foregroundStyle(hovering ? Tokens.text2 : Tokens.text3)
-            .contentShape(Rectangle())
+            Text(title)
+                .font(.sf(font))
+                .lineLimit(1)
+                .foregroundStyle(hovering ? Tokens.text2 : Tokens.text3)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain).exemptsDoubleClickPin()
         .onHover { hovering = $0 }
@@ -2311,8 +2306,8 @@ private struct ConfirmationDialogGlass: View {
                 .blendMode(.plusLighter)
 
             if edgeGlow {
-                // Colour only in the RIM, and only as light: an angular sweep of
-                // pale hues, blurred so it has no drawn edge of its own and added
+                // Light only in the RIM: an angular sweep of silver,
+                // blurred so it has no drawn edge of its own and added
                 // (plusLighter) so it brightens the glass instead of painting a
                 // border on it. Two passes — a tight one that lives in the hairline
                 // and a wide, fainter one that bleeds a few points inward.
@@ -2321,11 +2316,11 @@ private struct ConfirmationDialogGlass: View {
                 shape.strokeBorder(sweep, lineWidth: 1.4)
                     .blur(radius: 2.5)
                     .blendMode(.plusLighter)
-                    .opacity(0.55)
+                    .opacity(0.9)
                 shape.strokeBorder(sweep, lineWidth: 4)
                     .blur(radius: 9)
                     .blendMode(.plusLighter)
-                    .opacity(0.22)
+                    .opacity(0.45)
             }
 
             shape.strokeBorder(
@@ -3049,7 +3044,7 @@ enum OrbEngine {
     /// through the same machinery as the source and cached once:
     ///   composing → ribbon 20 {speed 1.35,  count ×0.051, size ×1.073,
     ///                          spin 0, bandMul 4.94, wobMul 1}
-    ///   searching → globe  20 {speed 2.665, count ×0.105, size ×1.75,
+    ///   searching → globe  20 {speed 1.33,  count ×0.105, size ×1.75,
     ///                          scanMul 4.335, dimBase 0.45}
     ///   solving   → rubik  20 {speed 1.95,  count ×0.088, size ×1.9}
     ///   working   → orbits 20 {speed 3.9,   count ×0.238, size ×2.4}
@@ -3069,7 +3064,7 @@ enum OrbEngine {
 
         return [
             .composing: OrbPreset(speed: 1.35, opts: composing, draw: drawRibbon),
-            .searching: OrbPreset(speed: 2.665, opts: searching, draw: drawGlobe),
+            .searching: OrbPreset(speed: 1.33, opts: searching, draw: drawGlobe),
             .solving: OrbPreset(speed: 1.95, opts: solving, draw: drawRubik),
             .working: OrbPreset(speed: 3.9, opts: working, draw: drawOrbits),
             .connecting: OrbPreset(speed: 6.63, opts: connecting, draw: drawWeb),
@@ -3956,7 +3951,22 @@ struct AssistantTurnView: View {
     /// much, it is concentric with the pill's rounded end: the same gap on the
     /// left as on the top and bottom.
     private var waitOrbPull: CGFloat {
-        max(0, ChatBubbleChrome.horizontalPad - waitOrbInset)
+        if toolWaitOnly || readingWaitOnly { return ChatBubbleChrome.horizontalPad }
+        return max(0, ChatBubbleChrome.horizontalPad - waitOrbInset)
+    }
+
+    /// The card holds nothing but a running tool's wait line. It shows no
+    /// fill or border then, and the orb sits on the column's left edge.
+    private var toolWaitOnly: Bool {
+        showWait && toolRunning && agentTrail.isEmpty && captures.isEmpty
+    }
+
+    /// The card holds nothing but the working reading block ("Reading 6
+    /// results…" and its list). Same as `toolWaitOnly`: no fill or border, and
+    /// the orb sits on the column's left edge. The chrome returns with the
+    /// first answer text.
+    private var readingWaitOnly: Bool {
+        showsReadingBlock && streaming && !hasText && agentTrail.isEmpty && captures.isEmpty
     }
 
     /// The orb's distance from the card's top and left edges in the wait pill.
@@ -4280,7 +4290,8 @@ struct AssistantTurnView: View {
             // reading block or the work trail needs one.
             if cardHasContent || !layout.hasMore {
                 AnswerCard(visible: cardHasContent,
-                           idealAtLeast: FractionWidthLayout.minimumLineWidth(layout.lead, fontSize: cardFont)) {
+                           idealAtLeast: FractionWidthLayout.minimumLineWidth(layout.lead, fontSize: cardFont),
+                           chrome: !toolWaitOnly && !readingWaitOnly) {
                     cardContent
                 }
                     .contextMenu { answerTurnMenu }
@@ -4332,7 +4343,7 @@ struct AssistantTurnView: View {
             }
 
             if !streaming, hasText, !typing, let onContinue {
-                AnswerLineButton(title: L("result.continue"), systemImage: "arrow.down",
+                AnswerLineButton(title: L("result.continue"),
                                  font: waitFont, action: onContinue)
                     .padding(.leading, ChatBubbleChrome.horizontalPad)
                     .transition(.opacity)
@@ -4361,9 +4372,14 @@ struct AssistantTurnView: View {
     /// The typing bubble between two bubbles: the three dots, or the running
     /// tool's line when the model went back to search.
     private var typingBubble: some View {
-        AnswerCard {
+        AnswerCard(chrome: !toolRunning) {
             if toolRunning, let waitLine {
+                // No chrome around a tool line: the orb sits on the column edge.
+                // One text line tall, like the dots: the orb is taller than the
+                // line and would otherwise make this bubble taller than theirs.
                 waitRow(waitLine)
+                    .padding(.leading, -ChatBubbleChrome.horizontalPad)
+                    .frame(height: Self.lineHeight(cardFont), alignment: .leading)
             } else {
                 ThinkingDots(minHeight: Self.lineHeight(cardFont))
                     .fixedSize()
@@ -4706,6 +4722,9 @@ struct AnswerCard<Content: View>: View {
     /// A width the content's ideal width is known to reach
     /// (`FractionWidthLayout.idealAtLeast`).
     var idealAtLeast: CGFloat = 0
+    /// False hides only the fill and border; width and padding stay, so the
+    /// content does not move when the chrome fades back in.
+    var chrome: Bool = true
     @ViewBuilder let content: Content
     @State private var cardHeight: CGFloat = 0
 
@@ -4728,6 +4747,8 @@ struct AnswerCard<Content: View>: View {
                         .overlay(
                             shape.strokeBorder(visible ? Tokens.hairline : .clear, lineWidth: 1)
                         )
+                        .opacity(chrome ? 1 : 0)
+                        .animation(.easeOut(duration: 0.2), value: chrome)
                 )
                 .contentShape(shape)
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
@@ -5273,6 +5294,10 @@ enum AnswerLinks {
         }
     }
 
+    /// Shows a line under the input: whether a date from the menu below was
+    /// filed. Set by `NotchModel`.
+    @MainActor static var report: ((String) -> Void)?
+
     /// File the clicked date: a reminder at that moment, or a one-hour event
     /// (all day when no time was said). The title is the line it came from.
     @MainActor
@@ -5287,7 +5312,16 @@ enum AnswerLinks {
         let menu = NSMenu()
         let reminder = ClosureMenuItem(title: L("answerDate.reminder")) {
             RemindersService.createReminder(title, due: timed ? date : nil) { result in
-                if case .success = result { Haptics.confirm() }
+                switch result {
+                case .success:
+                    Haptics.confirm()
+                    report?(L("feedback.addedReminders", ""))
+                case .failure(let error):
+                    switch error {
+                    case .permissionDenied, .noList: report?(error.errorDescription ?? L("feedback.remindersFailed"))
+                    default: report?(L("feedback.remindersFailed"))
+                    }
+                }
             }
         }
         let event = ClosureMenuItem(title: L("answerDate.event")) {
@@ -5295,7 +5329,15 @@ enum AnswerLinks {
             let end = Calendar.current.date(byAdding: timed ? .hour : .day, value: 1, to: start) ?? start
             CalendarService.createEvent(CalendarService.Draft(title: title, start: start, end: end,
                                                               allDay: !timed, location: nil, notes: nil)) { result in
-                if case .success = result { Haptics.confirm() }
+                switch result {
+                case .success:
+                    Haptics.confirm()
+                    report?(L("agent.process.addedEvent"))
+                case .failure(.permissionDenied):
+                    report?(L("calendar.error.permission"))
+                case .failure:
+                    report?(L("feedback.calendarFailed"))
+                }
             }
         }
         menu.addItem(reminder)
@@ -8716,14 +8758,20 @@ enum MenuCard {
     /// Row top to the next row's top.
     static var rowStride: CGFloat { rowHeight + rowSpacing }
 
-    /// The two model menus — Ask's recents and the Agent card — are one control
-    /// in two modes, hung off the same compose row, so they are the same card:
-    /// one width and one list window, read from here by both.
-    /// `pickerWidth` is the CONTENT width (what the Agent card frames its rows
-    /// at); `pickerCardWidth` adds the card's own padding, which is what
-    /// `width(titles:)` returns and so what the Ask menu caps itself at.
-    static let pickerWidth: CGFloat = 160
-    static var pickerCardWidth: CGFloat { pickerWidth + cardPad * 2 }
+    /// The two model menus — Ask's and the Agent card — are one control in two
+    /// modes, hung off the same compose row, so they share these numbers: the
+    /// card's width (`pickerWidth` is its CONTENT width), the meta type size,
+    /// 8pt beside a word as in Recent's ⋯ menu, 4pt above and below it, and
+    /// 3pt each side of a rule.
+    static let pickerCardWidth: CGFloat = 180
+    static var pickerWidth: CGFloat { pickerCardWidth - cardPad * 2 }
+    static let pickerFontSize: CGFloat = Tokens.TypeSize.meta
+    static let pickerRowPad: CGFloat = ManageMenuMetrics.rowHorizontalPadding
+    static let pickerRowHeight: CGFloat = ceil(NSFont.systemFont(ofSize: pickerFontSize,
+                                                                 weight: .medium)
+        .boundingRectForFont.height) + 4 * 2
+    static var pickerRowStride: CGFloat { pickerRowHeight + rowSpacing }
+    static let pickerRuleGap: CGFloat = 3
     static let pickerListRows = 4
 
     /// Slot for a row's trailing switch (`MenuCardRow.isOn`): the mini
@@ -9002,6 +9050,9 @@ struct MenuCardRow: View {
     var accessory: String? = nil
     /// An empty Notchi balance: the NO CREDIT chip in the trailing slot.
     var lowBalance: Bool = false
+    /// Settings' "New" tag in the trailing slot, with this text: "New" on a
+    /// model added recently, "90% OFF" on one on sale.
+    var tag: String? = nil
     /// A trailing glyph that only appears under the pointer, for a row that
     /// leaves this surface rather than choosing something in it. Held in the
     /// layout at rest — same as the detail card's scoring link — so arriving on
@@ -9010,6 +9061,14 @@ struct MenuCardRow: View {
     /// Draw the word in the brand face rather than the system one. For the
     /// product's own names, which are wordmarks rather than model ids.
     var brandTitle: Bool = false
+    /// A row listed but not pickable right now (a Notchi model with no balance
+    /// to spend, or any model while Auto is on): the whole row fades and gets
+    /// no hover wash.
+    var dimmed: Bool = false
+    /// A leading check on the row in effect, for a list whose highlight follows
+    /// the pointer rather than the selection. Non-nil holds the slot, so every
+    /// row in the list starts its word at the same x; true draws the check.
+    var checkmark: Bool? = nil
     /// A row that heads a folded run of rows rather than choosing anything: the
     /// chevron is always drawn, pointing right while the run is closed and down
     /// while it is open. Nil on every ordinary row.
@@ -9018,10 +9077,12 @@ struct MenuCardRow: View {
     /// trailing slot, and a click anywhere on the row flips it. Nil on every
     /// ordinary row.
     var isOn: Bool? = nil
-    /// The row's type size and slot. Defaulted to the `/` menu's own numbers.
+    /// The row's type size, slot and side padding. Defaulted to the `/` menu's
+    /// own numbers.
     var fontSize: CGFloat = MenuCard.fontSize
     var accessoryFontSize: CGFloat = MenuCard.accessoryFontSize
     var height: CGFloat = MenuCard.rowHeight
+    var horizontalPadding: CGFloat = MenuCard.rowPad
     /// Draw the word in the emphasized weight — for menus where the highlight
     /// means "this is the one in effect" rather than "this is where the cursor is".
     var emphasized: Bool = false
@@ -9051,6 +9112,13 @@ struct MenuCardRow: View {
         let shape = Capsule(style: .continuous)
         return Button(action: action) {
             HStack(spacing: 6) {
+                if let checkmark {
+                    Image(systemName: "checkmark")
+                        .font(.sf(accessoryFontSize, weight: .semibold))
+                        .foregroundStyle(Tokens.text2)
+                        .opacity(checkmark ? 1 : 0)
+                        .frame(width: MenuCard.symbolWidth)
+                }
                 if let symbol {
                     Image(systemName: symbol)
                         .font(.sf(fontSize, weight: .regular))
@@ -9069,8 +9137,12 @@ struct MenuCardRow: View {
                     Spacer(minLength: 0)
                     LowBalanceTag()
                 }
+                if let tag, !lowBalance {
+                    Spacer(minLength: 0)
+                    InlineSettingsView.NewBadge(text: tag)
+                }
                 if let accessory {
-                    if !lowBalance { Spacer(minLength: 0) }
+                    if !lowBalance && tag == nil { Spacer(minLength: 0) }
                     Text(accessory)
                         .font(.sf(accessoryFontSize, weight: .regular))
                         .foregroundStyle(selected ? Tokens.text2 : Tokens.text4)
@@ -9110,7 +9182,10 @@ struct MenuCardRow: View {
                         .opacity(hovering ? 1 : 0)
                 }
             }
-            .padding(.horizontal, MenuCard.rowPad)
+            // Everything on a dimmed row fades together, tags included, so it
+            // reads as unavailable rather than as an unselected row.
+            .opacity(dimmed ? 0.35 : 1)
+            .padding(.horizontal, horizontalPadding)
             .frame(height: height)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background {
@@ -9121,7 +9196,7 @@ struct MenuCardRow: View {
                                               shape: shape)
                 } else if wash, selected {
                     shape.fill(Color.white.opacity(0.14))
-                } else if hovering, !selected {
+                } else if hovering, !selected, !dimmed {
                     shape.fill(Color.white.opacity(0.06))
                 }
             }

@@ -278,7 +278,7 @@ enum RemindersService {
     /// `until` is the last day a repeat runs; nil repeats with no end. `listName`
     /// files it in that list (`list(named:in:)`) instead of the default one.
     static func createReminder(_ text: String, due: Date?, recurrence: RecurrenceKind? = nil,
-                               until: Date? = nil, listName: String? = nil,
+                               until: Date? = nil, listName: String? = nil, timeZone: TimeZone? = nil,
                                completion: @escaping @MainActor (Result<String?, RemindersError>) -> Void) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -293,10 +293,26 @@ enum RemindersService {
         store.requestFullAccessToReminders { granted, _ in
             PermissionPromptGate.exit()
             let result: Result<String?, RemindersError> =
-                granted ? write(trimmed, due: due, recurrence: recurrence, until: until, listName: listName, store: store)
+                granted ? write(trimmed, due: due, recurrence: recurrence, until: until, listName: listName,
+                                timeZone: timeZone, store: store)
                     : .failure(.permissionDenied)
             Task { @MainActor in completion(result) }
         }
+    }
+
+    /// A reminder's due date as Reminders stores it. Without a zone the
+    /// components float: they read as that wall-clock time wherever the Mac is.
+    /// With one ("8am Tokyo time") they carry it, so the reminder shows and
+    /// rings at that moment even after the Mac's own zone changes.
+    static func dueComponents(_ due: Date, in zone: TimeZone?) -> DateComponents {
+        guard let zone else {
+            return Calendar.current.dateComponents([.year, .month, .day, .hour, .minute], from: due)
+        }
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = zone
+        var parts = cal.dateComponents([.year, .month, .day, .hour, .minute], from: due)
+        parts.timeZone = zone
+        return parts
     }
 
     /// Deep link that opens a specific reminder in Reminders.app, built from its
@@ -316,7 +332,8 @@ enum RemindersService {
     /// connection the access was granted on — a concurrent revoke/regrant can't
     /// swap the store out between the grant and the save.
     private static func write(_ text: String, due: Date?, recurrence: RecurrenceKind?,
-                              until: Date?, listName: String?, store: EKEventStore) -> Result<String?, RemindersError> {
+                              until: Date?, listName: String?, timeZone: TimeZone? = nil,
+                              store: EKEventStore) -> Result<String?, RemindersError> {
         if let listName, list(named: listName, in: store) == nil {
             return .failure(.noSuchList(listName, store.calendars(for: .reminder).map(\.title)))
         }
@@ -335,8 +352,7 @@ enum RemindersService {
             if !rest.isEmpty { reminder.notes = rest }
         }
         if let due {
-            reminder.dueDateComponents = Calendar.current.dateComponents(
-                [.year, .month, .day, .hour, .minute], from: due)
+            reminder.dueDateComponents = dueComponents(due, in: timeZone)
             // The due date alone shows in the list but doesn't ring; the alarm is
             // what actually notifies at that moment.
             reminder.addAlarm(EKAlarm(absoluteDate: due))

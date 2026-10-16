@@ -38,7 +38,11 @@ struct ListFilesTool: NotchTool {
     is given. Use `content` when they describe what is IN the file rather than \
     its name — "the screenshot with the 快充 times", "the PDF that mentions \
     the deposit": it searches the text inside documents and the text macOS \
-    recognized in screenshots and photos. Use folder=all when unsure where it is.
+    recognized in screenshots and photos. The search matches exact words, so \
+    the file may not use the user's wording: put the other ways it could say \
+    it in `content_any` — synonyms and the same term in Chinese and English, \
+    e.g. 押金 → ["押金", "保证金", "deposit"]. A file matches if it contains \
+    any one of them. Use folder=all when unsure where it is.
     """
     let schema: [String: Any] = [
         "type": "object",
@@ -48,6 +52,8 @@ struct ListFilesTool: NotchTool {
             "query": ["type": "string", "description": "Only files whose name contains this."],
             "content": ["type": "string",
                         "description": "Words that appear inside the file, including text in a screenshot. Several words must all appear."],
+            "content_any": ["type": "array", "items": ["type": "string"], "maxItems": 10,
+                            "description": "Alternative wordings of what is inside the file; a file matches if it contains any one. Each entry may hold several words, which must all appear. Combined with `content` as one more alternative."],
             "kind": ["type": "string", "enum": ["pdf", "image", "text", "any"],
                      "description": "Only this kind of file. Default any."],
             "limit": ["type": "integer", "minimum": 1, "maximum": 50,
@@ -63,7 +69,14 @@ struct ListFilesTool: NotchTool {
             return "Error: folder must be downloads, desktop, documents or all."
         }
         let query = (input["query"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let content = (input["content"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        var wordings: [String] = []
+        for raw in [input["content"] as? String] + ((input["content_any"] as? [Any]) ?? []).map({ $0 as? String }) {
+            guard let words = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !words.isEmpty,
+                  !wordings.contains(words) else { continue }
+            wordings.append(words)
+        }
+        wordings = Array(wordings.prefix(10))
+        let content = wordings.map { "\"\($0)\"" }.joined(separator: " or ")
         let kind = (input["kind"] as? String) ?? "any"
         let limit = min(max((input["limit"] as? NSNumber)?.intValue ?? 15, 1), 50)
         let keys: [URLResourceKey] = [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey]
@@ -71,8 +84,15 @@ struct ListFilesTool: NotchTool {
         let label = roots.count > 1 ? "Downloads, Desktop and Documents" : root.lastPathComponent
 
         var urls: [URL] = []
+        // Which wording found each file, so the model knows what to look for in it.
+        var matched: [URL: String] = [:]
         if !content.isEmpty {
-            urls = roots.flatMap { Self.spotlight(content, in: $0) }
+            for words in wordings {
+                for url in roots.flatMap({ Self.spotlight(words, in: $0) }) where matched[url] == nil {
+                    matched[url] = words
+                    urls.append(url)
+                }
+            }
             if !query.isEmpty { urls = urls.filter { $0.lastPathComponent.localizedCaseInsensitiveContains(query) } }
         } else if roots.count > 1 {
             return "Error: folder=all needs content. Pick one folder to list it."
@@ -102,17 +122,18 @@ struct ListFilesTool: NotchTool {
 
         guard !files.isEmpty else {
             return content.isEmpty ? "No matching files in \(label)."
-                : "No file in \(label) contains \"\(content)\" (as far as Spotlight has indexed)."
+                : "No file in \(label) contains \(content) (as far as Spotlight has indexed)."
         }
         let fmt = DateFormatter()
         fmt.locale = Locale(identifier: "en_US_POSIX")
         fmt.dateFormat = "yyyy-MM-dd HH:mm"
         let bytes = ByteCountFormatter()
         var lines = [content.isEmpty ? "\(label), newest first (path · size · changed):"
-            : "Files in \(label) containing \"\(content)\", newest first (path · size · changed). Read one with read_file to confirm:"]
+            : "Files in \(label) containing \(content), newest first (path · size · changed). Read one with read_file to confirm:"]
         for file in files.prefix(limit) {
             let path = (file.url.path as NSString).abbreviatingWithTildeInPath
-            lines.append("- \(path) · \(bytes.string(fromByteCount: Int64(file.size))) · \(fmt.string(from: file.date))")
+            let hit = wordings.count > 1 ? matched[file.url].map { " · has \"\($0)\"" } ?? "" : ""
+            lines.append("- \(path) · \(bytes.string(fromByteCount: Int64(file.size))) · \(fmt.string(from: file.date))\(hit)")
         }
         if files.count > limit { lines.append("…and \(files.count - limit) more.") }
         return lines.joined(separator: "\n")

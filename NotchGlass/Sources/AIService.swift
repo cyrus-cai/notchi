@@ -259,7 +259,7 @@ extension AIService {
 /// Tool-use stances are added by `notchSystemPrompt(advertisedTools:)` so a
 /// slim first turn does not describe tools that are not on the wire.
 private let notchSystemPromptBase = """
-You are a helpful assistant living in the notch of a Mac. Answer the user's \
+You are Notchi, an assistant living in the notch of a Mac. Answer the user's \
 question concisely and warmly in the user's language. Keep the answer short — \
 a few sentences is usually right — and never pad; go longer only when the \
 question genuinely needs it. Concision is a rule about the answer you write, \
@@ -395,12 +395,16 @@ English sources are thin. Then answer in the user's language as usual.
 
 private let notchSystemPromptToolStances: [(tools: Set<String>, copy: String)] = [
     (["web_search"], """
-- Facts that change over time — news, current events, prices or rates, \
-rankings, "latest"/"newest" versions, who currently holds a role, anything \
-dated this year — must be searched, never answered from memory; your training \
-data is stale and today is later than your cutoff. For these, search first and \
-answer from the results. An image you show (![…](url)) must use an address that \
+- A fact you are not sure of — news, prices, versions, rules and laws, visa \
+and tax terms, dates, figures — search first and answer from the results; \
+searching is cheap, and your training data is stale and today is later than \
+your cutoff. An image you show (![…](url)) must use an address that \
 appeared in the search results or a page you read; never compose one.
+- Results that contradict an earlier answer in this conversation win: say the \
+earlier answer was wrong, and make your pick from the results, not from it. \
+Before calling one option cheaper, faster or bigger, check that against the \
+figures you quote. When a vendor's own page and a third-party roundup \
+disagree, use the vendor's figure.
 """),
     (["read_clipboard"], """
 - What the user copied ("this", "what I copied") → read_clipboard.
@@ -466,7 +470,10 @@ local `due`. Never say it was saved until the tool result says so. After it is \
 saved, reply with one short line and nothing else. Several items to remind → \
 one create_reminder call per item, all of them, before you reply; then list \
 only the items whose result says Saved, and say plainly which ones failed. \
-Never say you added, saved or changed anything you did not call a tool for.
+Never say you added, saved or changed anything you did not call a tool for. \
+A time on another place's clock ("8am Tokyo time", "日本时间上午 10 点") → \
+write that wall-clock time as `due` and pass time_zone; never convert it \
+yourself. The same for manage_reminder reschedule.
 """),
     (["create_event"], """
 - A meeting, appointment or anything else that takes up time at a set moment → \
@@ -543,7 +550,7 @@ it so the next ask is instant. Do not lecture about it being sensitive.
 run_shell or AppleScript for notes). Deleting asks the user itself.
 """),
     (["manage_reminder"], """
-- Changing an existing reminder — done, moved, cancelled → manage_reminder \
+- Changing an existing reminder — done, moved, renamed, cancelled → manage_reminder \
 (read_reminders first when you need its id). Cancelling a reminder is \
 action=delete; the tool asks the user itself.
 """),
@@ -587,8 +594,7 @@ func notchSystemPrompt(advertisedTools: Set<String>? = nil) -> String {
         include(stance.tools) ? stance.copy : nil
     }
     if !bullets.isEmpty {
-        prompt += "\n\nCall a tool only when the answer genuinely depends on it:\n"
-            + bullets.joined(separator: "\n")
+        prompt += "\n\nTools:\n" + bullets.joined(separator: "\n")
     }
     prompt += "\n\n" + notchSystemPromptCite
     if include(["web_search"]) {
@@ -3382,6 +3388,9 @@ enum ModelCatalog {
                 let reference: Reference?
                 /// 0…1, or nil where the gateway makes no claim.
                 let savings: Double?
+                /// When the sale behind these prices ends, ISO 8601 UTC. Absent
+                /// where no sale is running, and on older payloads.
+                let promoEndsAt: String?
 
                 struct Reference: Decodable, Equatable, Sendable {
                     let vendor: String
@@ -3401,6 +3410,36 @@ enum ModelCatalog {
                 case createdAt = "created_at"
             }
         }
+    }
+}
+
+extension ModelCatalog.ModelList.Entry.NotchiPricing {
+    /// When the running sale ends. Nil with no sale, and once it has ended:
+    /// the catalog is cached for up to an hour and must not keep advertising it.
+    var saleEnd: Date? {
+        guard let promoEndsAt else { return nil }
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let end = iso.date(from: promoEndsAt) ?? ISO8601DateFormatter().date(from: promoEndsAt)
+        guard let end, end > Date() else { return nil }
+        return end
+    }
+
+    /// The whole percent below the upstream's list price, for the tag. Nil
+    /// under 1%, and once a sale that set it has ended.
+    var percentOff: Int? {
+        guard let savings, savings >= 0.01 else { return nil }
+        if promoEndsAt != nil && saleEnd == nil { return nil }
+        return Int((savings * 100).rounded())
+    }
+
+    /// "90% off until Oct 19, 8:00 AM", in local time. Nil with no running sale.
+    @MainActor var saleLine: String? {
+        guard let end = saleEnd, let percent = percentOff else { return nil }
+        let fmt = DateFormatter()
+        fmt.locale = NotchModel.localeForInterfaceLanguage()
+        fmt.setLocalizedDateFormatFromTemplate("MMMdjmm")
+        return L("nono.pricing.saleUntil", percent, fmt.string(from: end))
     }
 }
 

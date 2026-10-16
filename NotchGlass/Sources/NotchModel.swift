@@ -106,10 +106,11 @@ final class ConversationStore: ObservableObject {
         return agent
     }
 
-    /// Whether the thread is a chat loop's (`Turn.loopRound`).
+    /// Whether the loop started the thread (its first turn is round one).
+    /// A conversation a loop runs in is not one: it keeps the ordinary layout.
     var hasLoopRound: Bool {
         if let loopCache { return loopCache }
-        let loop = turns.contains { $0.loopRound != nil }
+        let loop = turns.first?.loopRound != nil
         loopCache = loop
         return loop
     }
@@ -368,10 +369,13 @@ final class NotchModel: ObservableObject {
         var title: String? = nil
         /// What the recent list should display: the generated title when available,
         /// otherwise the first user message for backward compatibility.
-        var displayTitle: String { isLoop ? q : title ?? q }
-        /// A `/loop` thread. Its row shows the loop's prompt, not a generated
-        /// title, and carries the Loop tag.
+        var displayTitle: String { loopBorn ? q : title ?? q }
+        /// A thread with loop rounds. Its row carries the Loop tag.
         var isLoop: Bool { (turns ?? []).contains { $0.loopRound != nil } }
+        /// A thread the loop itself started. Its row shows the loop's prompt,
+        /// not a generated title. A loop running in an existing conversation
+        /// keeps that conversation's title.
+        var loopBorn: Bool { turns?.first?.loopRound != nil }
 
         /// Every image attached anywhere in this conversation, in turn order — a
         /// screenshot an Ask rode in on, the shots pasted into an agent task. The
@@ -2114,57 +2118,55 @@ final class NotchModel: ObservableObject {
         }
     }
 
-    /// Enter on the Ask side with `/loop` armed. Round one runs detached, like a
-    /// torn-off window's round, and the thread joins the task list as a loop.
+    /// Enter on the Ask side with `/loop` armed. From an open thread the loop
+    /// runs in that thread; from an empty prompt round one runs detached, like a
+    /// torn-off window's round. Either way the thread joins the task list.
     private func startChatLoop(minutes: Int) {
         let q = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty else { return }
+        let openThread = !turns.isEmpty && !turns.contains(where: \.streaming)
+            && !ChatLoopManager.shared.isActive(threadHistoryID)
         if selectionContext != nil { clearSelectionContext() }
         askComposeImages = []
         droppedFiles = []
         text = ""
+        if openThread {
+            bindChatLoops()
+            let id = threadHistoryID
+            guard runChatLoopRound(threadID: id, prompt: q, round: 1,
+                                   showPrompt: true) != nil else { return }
+            LoopInterval.remember(minutes)
+            ChatLoopManager.shared.register(id: id, prompt: q, minutes: minutes)
+            return
+        }
         beginChatLoop(prompt: q, minutes: minutes)
     }
 
-    /// Start a loop thread whose round one runs now, detached. Shared by `/loop`
-    /// and `manage_loop`. Nil when the round could not start.
-    @discardableResult
-    private func beginChatLoop(prompt: String, minutes: Int,
-                               endsAt: Date? = nil, weekdaysOnly: Bool = false) -> UUID? {
+    /// Start a loop thread whose round one runs now, detached.
+    private func beginChatLoop(prompt: String, minutes: Int) {
         bindChatLoops()
-        guard let id = runChatLoopRound(threadID: nil, prompt: prompt, round: 1) else { return nil }
+        guard let id = runChatLoopRound(threadID: nil, prompt: prompt, round: 1) else { return }
         LoopInterval.remember(minutes)
-        ChatLoopManager.shared.register(id: id, prompt: prompt, minutes: minutes,
-                                        endsAt: endsAt, weekdaysOnly: weekdaysOnly)
-        return id
+        ChatLoopManager.shared.register(id: id, prompt: prompt, minutes: minutes)
     }
 
-    /// A loop whose round one waits for a time of day. Its thread is created
-    /// when that round runs, under the id the loop is registered with now.
-    private func beginScheduledChatLoop(prompt: String, minutes: Int, firstRunAt: Date,
-                                        endsAt: Date? = nil, weekdaysOnly: Bool = false) {
-        bindChatLoops()
-        LoopInterval.remember(minutes)
-        ChatLoopManager.shared.register(id: UUID(), prompt: prompt, minutes: minutes,
-                                        firstRoundAt: firstRunAt, endsAt: endsAt,
-                                        weekdaysOnly: weekdaysOnly)
-    }
-
-    /// One loop round on the thread (`nil` for round one's new thread). From
-    /// round two on the question bubble is hidden — it is the loop's own prompt,
-    /// already at the top of the record. Runs in the panel when the thread is
-    /// the one on screen, so the reader watches it arrive; detached otherwise.
+    /// One loop round on the thread (`nil` for round one's new thread). The
+    /// question bubble shows only on round one of a thread the loop started
+    /// (or when `showPrompt`, a `/loop` typed into an open thread): in any other
+    /// round it is the loop's own prompt, not something the user typed there.
+    /// Runs in the panel when the thread is the one on screen, so the reader
+    /// watches it arrive; detached otherwise.
     @discardableResult
-    func runChatLoopRound(threadID: UUID?, prompt: String, round: Int) -> UUID? {
+    func runChatLoopRound(threadID: UUID?, prompt: String, round: Int,
+                          showPrompt: Bool = false) -> UUID? {
         nextSubmitLoopRound = round
         defer { nextSubmitLoopRound = nil }
-        let hide = round > 1
         if let threadID, threadHistoryID == threadID, !turns.isEmpty {
             guard !turns.contains(where: \.streaming) else { return nil }
             let saved = (text: text, images: askComposeImages, loop: loopIntervalMinutes)
             text = prompt
             askComposeImages = []
-            submit(hideUserBubble: hide)
+            submit(hideUserBubble: !showPrompt)
             text = saved.text
             askComposeImages = saved.images
             loopIntervalMinutes = saved.loop
@@ -2178,6 +2180,7 @@ final class NotchModel: ObservableObject {
             seed[i].streaming = false
             seed[i].toolActivity = nil
         }
+        let hide = !showPrompt && (round > 1 || !seed.isEmpty)
         return runDetachedRound(threadID: threadID ?? UUID(), seed: seed,
                                 question: prompt, hideUserBubble: hide,
                                 mintsMirror: false)
@@ -3433,6 +3436,7 @@ final class NotchModel: ObservableObject {
                 refreshAI = true
             case .apiKey(let provider, let key):
                 APIKeyStore.save(key, for: provider)
+                ModelCatalogStore.leave(provider)   // no-op while it can still serve
                 refreshAI = true
             case .searchBackend(let backend):
                 APIKeyStore.preferredSearchBackend = backend
@@ -3515,21 +3519,29 @@ final class NotchModel: ObservableObject {
                     return "Cancelled. No loop was started."
                 }
             }
+            // The loop's rounds answer in the thread it was asked in. One
+            // thread holds one loop.
+            if manager.isActive(threadID) {
+                return "Error: this thread already has a running loop. Use set_interval "
+                    + "or stop on it (list gives its id)."
+            }
             let span = (request.weekdaysOnly ? " on weekdays" : "")
                 + (request.endsOn.map { ", through \(Self.captureDueDescription($0))" } ?? ", for up to 7 days")
+            bindChatLoops()
+            LoopInterval.remember(minutes)
             if let first = request.firstRunAt {
-                beginScheduledChatLoop(prompt: prompt, minutes: minutes, firstRunAt: first,
-                                       endsAt: request.endsOn, weekdaysOnly: request.weekdaysOnly)
-                return "Started. Round one runs at \(Self.captureDueDescription(first)) in its own "
+                manager.register(id: threadID, prompt: prompt, minutes: minutes,
+                                 firstRoundAt: first, endsAt: request.endsOn,
+                                 weekdaysOnly: request.weekdaysOnly)
+                return "Started. Round one runs at \(Self.captureDueDescription(first)) in this "
                     + "thread; then every \(LoopInterval.short(minutes))\(span), while "
                     + "Notchi is open. The user can stop it from the task list."
             }
-            guard beginChatLoop(prompt: prompt, minutes: minutes, endsAt: request.endsOn,
-                                weekdaysOnly: request.weekdaysOnly) != nil else {
-                return "Error: the loop could not start."
-            }
-            return "Started. Round one is running now in its own thread; then every "
-                + "\(LoopInterval.short(minutes))\(span). The user can stop it "
+            manager.registerAfterCurrentRound(id: threadID, prompt: prompt, minutes: minutes,
+                                              endsAt: request.endsOn,
+                                              weekdaysOnly: request.weekdaysOnly)
+            return "Started. Round one runs in this thread as soon as this answer ends; "
+                + "then every \(LoopInterval.short(minutes))\(span). The user can stop it "
                 + "from the task list."
 
         case .stop, .delete, .setInterval:
@@ -3650,8 +3662,15 @@ final class NotchModel: ObservableObject {
             // An explicit `due` wins; without one we fall back to the same parsers
             // a typed line goes through, so "每周一交周报" still repeats.
             let due: Date?
+            var zone: TimeZone?
+            if let name = request.timeZone {
+                guard let found = TimeZone(identifier: name) else {
+                    return "Error: time_zone \"\(name)\" is not an IANA time zone such as Asia/Tokyo."
+                }
+                zone = found
+            }
             if let raw = request.due {
-                guard let parsed = Self.parseCaptureDue(raw) else {
+                guard let parsed = Self.parseCaptureDue(raw, in: zone ?? .current) else {
                     return "Error: could not read due=\"\(raw)\". Give the user's local time as YYYY-MM-DDTHH:MM."
                 }
                 guard parsed > Date() else {
@@ -3680,7 +3699,7 @@ final class NotchModel: ObservableObject {
                 }
             }
             result = await commitReminderCapture(line, due: due, recurrence: explicit, until: until,
-                                                 list: request.list)
+                                                 list: request.list, timeZone: zone)
         }
         if let link = result.link {
             markCapture(Turn.Capture(kind: request.kind, link: link), answerID: answerID)
@@ -3794,10 +3813,11 @@ final class NotchModel: ObservableObject {
     /// shows in the list without ringing, which is honest and better than refusing.
     private func commitReminderCapture(_ line: String, due: Date?,
                                        recurrence: RemindersService.RecurrenceKind? = nil,
-                                       until: Date? = nil, list: String? = nil) async -> (message: String, link: String??) {
+                                       until: Date? = nil, list: String? = nil,
+                                       timeZone: TimeZone? = nil) async -> (message: String, link: String??) {
         let result: Result<String?, RemindersError> = await withCheckedContinuation { cont in
             RemindersService.createReminder(line, due: due, recurrence: recurrence, until: until,
-                                            listName: list) { cont.resume(returning: $0) }
+                                            listName: list, timeZone: timeZone) { cont.resume(returning: $0) }
         }
         // Say whether it repeats, so the answer never tells the user to set a
         // repeat that is already set (only a dated reminder repeats).
@@ -3821,7 +3841,11 @@ final class NotchModel: ObservableObject {
             guard let due else {
                 return ("Saved. The reminder is in the user's Reminders app, with no alarm time.\(inList)", .some(link))
             }
-            return ("Saved. The reminder is in the user's Reminders app, due \(Self.captureDueDescription(due)).\(repeats)\(inList)", .some(link))
+            // Another zone's clock: both times, so the answer can say "8:00 in
+            // Tokyo, 7:00 here" and not quote only one of them.
+            let there = timeZone.flatMap { $0 == .current ? nil : $0 }
+                .map { " (\(Self.wallClock(due, in: $0)) in \($0.identifier); it rings at that moment wherever the Mac is)" } ?? ""
+            return ("Saved. The reminder is in the user's Reminders app, due \(Self.captureDueDescription(due))\(there).\(repeats)\(inList)", .some(link))
         case .failure(let err):
             return ("Error: \(err.errorDescription ?? "couldn't create the reminder.")", nil)
         }
@@ -5622,7 +5646,10 @@ final class NotchModel: ObservableObject {
         // never bleed into it. The optional source filter can only narrow within
         // Ask / Notes / Reminders.
         if let cached = chatFilteredHistoryCache { return cached }
-        let items = filteredHistory.filter { $0.source != .agent }
+        // With unified threads on, the main thread is reached from the resting
+        // notch, not from Recent.
+        let hideMain = unifiedThreadsEnabled
+        let items = filteredHistory.filter { $0.source != .agent && !(hideMain && $0.mainThread) }
         chatFilteredHistoryCache = items
         return items
     }
@@ -5686,8 +5713,37 @@ final class NotchModel: ObservableObject {
         let upperBound = query.until
             .flatMap { cal.date(byAdding: .day, value: 1, to: cal.startOfDay(for: $0)) }
 
+        // The main thread is one row holding months of questions, and it is
+        // usually the thread being asked from, which the filter below skips.
+        // Its questions are searched one by one instead, each with its own
+        // send time: "what did we say about the Spain visa yesterday" asked in
+        // the main thread would otherwise find nothing at all.
+        var threadRows: [(date: Date, row: HistoryDigestRow)] = []
+        if query.kind == nil || query.kind == HistoryItem.Source.ask.rawValue {
+            for item in items where item.mainThread {
+                let turns = item.turns ?? []
+                // The question being answered now is not history yet.
+                let end = item.id == currentThread ? max(0, turns.count - 2) : turns.count
+                for i in 0..<end where turns[i].role == "user" && !turns[i].isLocal {
+                    guard let sent = turns[i].sentAt else { continue }
+                    if let lower = lowerBound, sent < lower { continue }
+                    if let upper = upperBound, sent >= upper { continue }
+                    let answer = i + 1 < end && turns[i + 1].role == "assistant" ? turns[i + 1].text : ""
+                    if let needle = query.text, !needle.isEmpty,
+                       !turns[i].text.localizedCaseInsensitiveContains(needle),
+                       !answer.localizedCaseInsensitiveContains(needle) { continue }
+                    let flat = { (text: String) in text.split(whereSeparator: \.isWhitespace).joined(separator: " ") }
+                    threadRows.append((sent, HistoryDigestRow(
+                        date: sent, kind: "ask",
+                        headline: String(flat(turns[i].text).prefix(HistoryDigestRow.headlineCap)),
+                        body: nil,
+                        answer: String(flat(answer).prefix(HistoryDigestRow.answerCap)))))
+                }
+            }
+        }
+
         let matches = items.lazy.filter { item in
-            guard !item.pending else { return false }
+            guard !item.pending, !item.mainThread else { return false }
             guard item.id != currentThread else { return false }
             if let kind = query.kind, item.source.rawValue != kind { return false }
             if let lower = lowerBound, item.t < lower { return false }
@@ -5700,10 +5756,11 @@ final class NotchModel: ObservableObject {
         // explicitly rather than lean on that — the digest states "newest first" to
         // the model, and a row that ever lands out of order would make it misread
         // the chronology it's summarizing.
-        let ordered = matches.sorted { $0.t > $1.t }
+        let ordered = (matches.map { ($0.t, $0.digestRow) } + threadRows.map { ($0.date, $0.row) })
+            .sorted { $0.0 > $1.0 }
         // The full match count rides along, not just the capped slice: it's what
         // lets the digest admit it was truncated (see `HistoryDigest`).
-        return HistoryDigest(rows: ordered.prefix(query.limit).map(\.digestRow),
+        return HistoryDigest(rows: ordered.prefix(query.limit).map(\.1),
                              totalMatches: ordered.count)
     }
 
@@ -5732,6 +5789,7 @@ final class NotchModel: ObservableObject {
         startClipboardSense()
         refreshAgentSkills()
         bindChatLoops()
+        AnswerLinks.report = { [weak self] in self?.flashSavedCue($0) }
         // A debounced archive write may still be pending when the user quits;
         // flush it synchronously so a ⌘Q moments after an answer can't lose the
         // newest row.
@@ -5865,7 +5923,10 @@ final class NotchModel: ObservableObject {
     /// Unified threads, always on: each question from the idle prompt is a
     /// follow-up on one main thread — one Recent row — and the idle prompt
     /// shows the end of its newest answer (`mainThreadPeek`).
-    @Published var unifiedThreadsEnabled = true
+    @Published var unifiedThreadsEnabled = true {
+        // Recent hides the main thread only while unified threads is on.
+        didSet { chatFilteredHistoryCache = nil }
+    }
 
     // MARK: - Unified threads guide
 
@@ -9262,10 +9323,21 @@ final class NotchModel: ObservableObject {
         // Round one's question (the task itself) and everything the user typed
         // always ride.
         let latestLoopRound = turns.compactMap(\.loopRound).max()
+        // A question whose answer failed (an error, or nothing came back) goes
+        // with it. Left in, the model reads a run of questions nobody answered
+        // and answers all of them under the next "hi".
+        var unanswered = Set<UUID>()
+        for i in turns.indices.dropLast() where turns[i].role == "user" {
+            let next = turns[i + 1]
+            guard next.role == "assistant", next.id != answerID else { continue }
+            if next.isError || next.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                unanswered.insert(turns[i].id)
+            }
+        }
         // Newest first and lazy: the walk below stops at the budget, so a long
         // thread's older turns are never filtered (the trim copies each answer).
         let wirable = turns.reversed().lazy.filter { turn in
-            if turn.id == answerID || turn.isLocal { return false }
+            if turn.id == answerID || turn.isLocal || unanswered.contains(turn.id) { return false }
             if let round = turn.loopRound, let latest = latestLoopRound,
                round < latest - 1, !(round == 1 && turn.role == "user") {
                 return false
@@ -9301,6 +9373,7 @@ final class NotchModel: ObservableObject {
         var messages: [ChatMessage] = []
         for turn in kept {
             var text = turn.text
+            if turn.role == "user", let note = imageLocationNote(turn.imageFiles) { text += note }
             if turn.role == "user" {
                 if let sent = turn.sentAt {
                     text = "[sent \(sentStampFormatter.string(from: sent))]\n" + text
@@ -9592,8 +9665,8 @@ final class NotchModel: ObservableObject {
         // Do not wait for the model to tell us what the user already made
         // explicit. This immediately replaces the opening mood word for search
         // requests; the real tool-call/search/read events take over afterward.
-        let initialActivity = Self.initialSearchTopic(for: q).map {
-            (label: L("agent.activity.planningSearchQuery", $0), orb: OrbState.searching)
+        let initialActivity = Self.initialSearchTopic(for: q).map { _ in
+            (label: L("agent.activity.planningSearch"), orb: OrbState.searching)
         }
         if let initialActivity {
             setThinkingActivity(initialActivity.label, orb: initialActivity.orb)
@@ -9672,6 +9745,13 @@ final class NotchModel: ObservableObject {
                     savedImageFiles = await Task.detached(priority: .utility) {
                         jpegs.compactMap { Self.storeHistoryImage($0) }
                     }.value
+                    // Where the image now lives, so "save that image to my
+                    // Downloads" is a copy the model can make.
+                    if let note = Self.imageLocationNote(savedImageFiles) {
+                        let last = context[context.count - 1]
+                        context[context.count - 1] = ChatMessage(role: last.role, content: last.content + note,
+                                                                 images: last.images)
+                    }
                     if let i = self.turns.firstIndex(where: { $0.id == questionID }) {
                         self.turns[i].imageFiles = savedImageFiles
                     }
@@ -9709,6 +9789,9 @@ final class NotchModel: ObservableObject {
             // the fractional remainder the integer step leaves behind each tick.
             var released = 0
             var releaseBudget: Double = 0
+            // The service for THIS turn: a one-shot regenerate override (XII-135)
+            // wins, else the main service. The title goes to it too.
+            let askService: AIService = overrideService ?? self.ai
             do {
                 // Push the PACED prefix of what's accumulated into the model/UI —
                 // the one place the streamed text performs @Published writes.
@@ -10012,10 +10095,8 @@ final class NotchModel: ObservableObject {
                                                     memories: memories,
                                                     provider: runProvider,
                                                     advertisedTools: advertised)
-                // The service for THIS turn: a one-shot regenerate override (XII-135)
-                // wins, else the main service. An upgraded model still gets the tool
-                // harness below (search etc.), so the override rides both paths.
-                let askService: AIService = overrideService ?? self.ai
+                // An upgraded model still gets the tool harness below (search
+                // etc.), so the override rides both paths.
                 if !imageAttached,
                    let agent = askService as? AgentCapableService,
                    runProvider.supportsTools,
@@ -10263,7 +10344,7 @@ final class NotchModel: ObservableObject {
                 // banner so the finished answer doesn't just quietly go out.
                 let walkedAway = !self.isPresented(answerID: answerID)
                 self.markFinished(id: answerID)   // no-op when detached
-                self.persistThread(thread, threadID: threadID, answer: acc)
+                self.persistThread(thread, threadID: threadID, answer: acc, service: askService)
                 if self.suggestFollowUpEnabled, loopRound == nil,
                    !acc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     self.predictNextQuestion(for: thread, answerID: answerID)
@@ -10313,7 +10394,8 @@ final class NotchModel: ObservableObject {
                         thread[i].interrupted = true
                     }
                     let walkedAway = !self.isPresented(answerID: answerID)
-                    self.persistThread(thread, threadID: threadID, answer: saved)
+                    self.persistThread(thread, threadID: threadID, answer: saved,
+                                       service: askService)
                     ChatLoopManager.shared.roundFinished(threadID: threadID,
                                                          loopRound: loopRound, failed: false,
                                                          answer: saved)
@@ -11361,8 +11443,10 @@ final class NotchModel: ObservableObject {
     /// thread's row. Skips empty results (e.g. a stream that errored before any
     /// text). The recent row shows the first question + latest answer; reopening
     /// it restores every turn.
+    /// `service` is the one that answered the round; the title is generated on
+    /// it. `nil` means the selected default.
     private func persistThread(_ thread: [Turn], threadID: UUID, answer ans: String,
-                               outOfCredit: Bool = false) {
+                               outOfCredit: Bool = false, service: AIService? = nil) {
         var thread = thread
         mergeReactions(into: &thread)
         mergeCaptures(into: &thread)
@@ -11450,10 +11534,15 @@ final class NotchModel: ObservableObject {
         // request on the round that just failed is the wrong moment for it — the
         // row falls back to the question, which is exactly what it should show.
         let atMilestone = thread.count > 2 && thread.count % 4 == 0
-        let isLoop = thread.contains { $0.loopRound != nil }
-        if !failed, !isLoop, existingTitle == nil || atMilestone {
+        // A loop round does not retitle the thread: in a loop-born thread the
+        // row shows the prompt, and in a conversation the round's topic is not
+        // the conversation's.
+        let loopTurn = thread.first?.loopRound != nil || thread.last?.loopRound != nil
+        if !failed, !loopTurn, existingTitle == nil || atMilestone {
+            let titleService = service ?? ai
             Task { [weak self] in
-                guard let self, let title = await self.generateTitle(for: thread) else { return }
+                guard let self,
+                      let title = await self.generateTitle(for: thread, service: titleService) else { return }
                 await MainActor.run {
                     guard let index = self.history.firstIndex(where: { $0.id == threadID }) else { return }
                     self.history[index].title = title
@@ -11530,11 +11619,12 @@ final class NotchModel: ObservableObject {
         }
     }
 
-    /// Ask the configured model to summarize the conversation into a short title.
-    /// Returns `nil` when offline (stub), unconfigured, or the request fails, so
-    /// the UI can always fall back to the first user message.
-    private func generateTitle(for thread: [Turn]) async -> String? {
-        guard !(ai is StubAIService) else { return nil }
+    /// Ask the model that answered the round (`service`) to summarize the
+    /// conversation into a short title. Returns `nil` when offline (stub),
+    /// unconfigured, or the request fails, so the UI can always fall back to the
+    /// first user message.
+    private func generateTitle(for thread: [Turn], service: AIService) async -> String? {
+        guard !(service is StubAIService) else { return nil }
 
         // Only the tail of the conversation, size-capped (XII-88): a title should
         // reflect where the chat *went*, so the last few rounds are the right
@@ -11552,7 +11642,6 @@ final class NotchModel: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else { return nil }
 
-        let service = ai
         do {
             var title = ""
             let chunks = NoNoRequestContext.$current.withValue(
@@ -12283,6 +12372,15 @@ final class NotchModel: ObservableObject {
 
     nonisolated static func historyImageURL(_ name: String) -> URL {
         historyImagesDirectory.appendingPathComponent(name)
+    }
+
+    /// The line a question with images carries on the wire: the files' paths
+    /// on this Mac. The model sees an image's pixels, not where it is kept,
+    /// and so used to say it could not save one.
+    nonisolated static func imageLocationNote(_ files: [String]) -> String? {
+        guard !files.isEmpty else { return nil }
+        let paths = files.map { "\"\(historyImageURL($0).path)\"" }.joined(separator: ", ")
+        return "\n\n[Attached image\(files.count == 1 ? "" : "s") saved on this Mac at \(paths); copy from there to save it elsewhere.]"
     }
 
     /// Park one already-encoded JPEG in the store. Returns the filename to stamp on

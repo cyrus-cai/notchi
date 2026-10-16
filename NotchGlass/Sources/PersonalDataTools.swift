@@ -226,7 +226,8 @@ struct ManageReminderTool: NotchTool {
     Changes one of the user's existing Apple Reminders: action=complete marks it \
     done, action=reschedule moves it to a new local `due` (YYYY-MM-DDTHH:MM), \
     action=delete removes it after the user confirms, action=move puts it in \
-    another Reminders `list`. Identify it by `id` from \
+    another Reminders `list`, action=rename changes its `title` and keeps its \
+    time, list and repeat. Identify it by `id` from \
     read_reminders, or by `query` (text in its title). If several match, the \
     result lists them with ids; call again with the right id. For "cancel the \
     reminder" use delete. Never say it changed until the result says so.
@@ -234,12 +235,14 @@ struct ManageReminderTool: NotchTool {
     let schema: [String: Any] = [
         "type": "object",
         "properties": [
-            "action": ["type": "string", "enum": ["complete", "reschedule", "delete", "move"],
+            "action": ["type": "string", "enum": ["complete", "reschedule", "delete", "move", "rename"],
                        "description": "What to do with the reminder."],
             "list": ["type": "string", "description": "move only: the list it goes to, as the user names it."],
+            "title": ["type": "string", "description": "rename only: the new title."],
             "id": ["type": "string", "description": "The reminder's id from read_reminders."],
             "query": ["type": "string", "description": "Text in the reminder's title, when there is no id."],
             "due": ["type": "string", "description": "reschedule only: the new local time, YYYY-MM-DDTHH:MM."],
+            "time_zone": ["type": "string", "description": "reschedule only: when the user gives the new time on another place's clock (\"10am Japan time\"), that IANA zone, e.g. Asia/Tokyo, with `due` on that clock."],
         ],
         "required": ["action"],
     ]
@@ -249,8 +252,8 @@ struct ManageReminderTool: NotchTool {
 
     func execute(_ input: [String: Any]) async throws -> String {
         guard let action = PersonalDataFormat.string(input["action"]),
-              ["complete", "reschedule", "delete", "move"].contains(action) else {
-            return "Error: action must be complete, reschedule, delete or move."
+              ["complete", "reschedule", "delete", "move", "rename"].contains(action) else {
+            return "Error: action must be complete, reschedule, delete, move or rename."
         }
         let store = EKEventStore()
         let granted = (try? await PermissionPromptGate.during { try await store.requestFullAccessToReminders() }) ?? false
@@ -279,10 +282,14 @@ struct ManageReminderTool: NotchTool {
             return "Error: give the reminder's id or a query."
         }
         let title = reminder.title ?? ""
+        var zone: TimeZone?
 
         switch action {
         case "complete":
             reminder.isCompleted = true
+        case "rename":
+            guard let newTitle = PersonalDataFormat.string(input["title"]) else { return "Error: give the new title." }
+            reminder.title = newTitle
         case "move":
             guard let name = PersonalDataFormat.string(input["list"]) else { return "Error: give the list to move it to." }
             guard let list = RemindersService.list(named: name, in: store) else {
@@ -291,13 +298,18 @@ struct ManageReminderTool: NotchTool {
             }
             reminder.calendar = list
         case "reschedule":
+            if let name = PersonalDataFormat.string(input["time_zone"]) {
+                guard let found = TimeZone(identifier: name) else {
+                    return "Error: time_zone \"\(name)\" is not an IANA time zone such as Asia/Tokyo."
+                }
+                zone = found
+            }
             guard let raw = PersonalDataFormat.string(input["due"]),
-                  let due = Self.parseDue(raw) else {
+                  let due = Self.parseDue(raw, in: zone ?? .current) else {
                 return "Error: give the new due time as YYYY-MM-DDTHH:MM in the user's local time."
             }
             guard due > Date() else { return "Error: that time is already past." }
-            reminder.dueDateComponents = Calendar.current.dateComponents(
-                [.year, .month, .day, .hour, .minute], from: due)
+            reminder.dueDateComponents = RemindersService.dueComponents(due, in: zone)
             reminder.alarms?.forEach { reminder.removeAlarm($0) }
             reminder.addAlarm(EKAlarm(absoluteDate: due))
         default:
@@ -320,16 +332,25 @@ struct ManageReminderTool: NotchTool {
         await mark(external.map(RemindersService.deepLink(externalID:)))
         if action == "complete" { return "Marked \"\(title)\" as done." }
         if action == "move" { return "Moved \"\(title)\" to the \"\(reminder.calendar?.title ?? "")\" list." }
+        if action == "rename" { return "Renamed \"\(title)\" to \"\(reminder.title ?? "")\"; its time, list and repeat are unchanged." }
         let due = reminder.dueDateComponents.flatMap { Calendar.current.date(from: $0) }
-        return "Moved \"\(title)\" to \(due.map(PersonalDataFormat.dayAndTime) ?? "the new time")."
+        var there = ""
+        if let due, let zone, zone != .current {
+            let f = DateFormatter()
+            f.locale = Locale(identifier: "en_US_POSIX")
+            f.timeZone = zone
+            f.dateFormat = "yyyy-MM-dd HH:mm"
+            there = " (\(f.string(from: due)) in \(zone.identifier))"
+        }
+        return "Moved \"\(title)\" to \(due.map(PersonalDataFormat.dayAndTime) ?? "the new time") this Mac's time\(there)."
     }
 
     /// Local wall-clock `YYYY-MM-DDTHH:MM` (or with a space), or a full ISO
     /// stamp.
-    private static func parseDue(_ raw: String) -> Date? {
+    private static func parseDue(_ raw: String, in zone: TimeZone = .current) -> Date? {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = .current
+        f.timeZone = zone
         for format in ["yyyy-MM-dd'T'HH:mm", "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd HH:mm"] {
             f.dateFormat = format
             if let date = f.date(from: raw) { return date }
@@ -551,7 +572,9 @@ struct TravelTimeTool: NotchTool {
     Maps: distance and minutes by car, on foot or by public transit. Leaving \
     now uses current traffic; for a trip at another time ("Friday at 6pm", \
     "to be there by 9") pass leave_at or arrive_by, and Maps uses the traffic \
-    expected then. Pass place names or addresses as the user wrote them; \
+    expected then. Where Apple Maps has no data (abroad, on a Mac set to the \
+    China region) the trip is timed on OpenStreetMap, without traffic or \
+    transit; the result says so. Pass place names or addresses as the user wrote them; \
     add the city when it is clear from the conversation. For the user's own \
     places write just home, work or here ("家", "公司", "这里" work too): \
     home and work come from their contact card or an address they gave \
@@ -600,6 +623,13 @@ struct TravelTimeTool: NotchTool {
         // Each end is searched near the other: "Avenida Benito Juárez" alone
         // finds a street in Beijing. The start goes first; when it cannot be
         // found alone, the destination is found first and the start near it.
+        // Apple Maps on a Mac set to the China region searches and routes only
+        // inside China: "1 Infinite Loop, Cupertino" comes back as a garage in
+        // Suzhou, "Gare de Lyon" as nothing. Where Apple finds nothing, or a
+        // pair implausibly far apart, or no route, OpenStreetMap is asked.
+        let osm = { (abroadOnly: Bool) in
+            await Self.openStreetMap(from: from, to: to, mode: mode, timed: leave != nil || arrive != nil, abroadOnly: abroadOnly)
+        }
         var start: MKMapItem?
         var failure: String?
         switch await Self.resolve(from) {
@@ -609,11 +639,14 @@ struct TravelTimeTool: NotchTool {
         let end: MKMapItem
         switch await Self.resolve(to, near: start?.placemark.coordinate) {
         case .found(let item): end = item
-        case .unknown(let message): return message
+        case .unknown(let message):
+            if Self.mayAskOpenStreetMap(from, to), let answer = await osm(false) { return answer }
+            return message
         }
         if start == nil {
             guard UserPlaces.kind(of: from) == nil,
                   case .found(let item) = await Self.resolve(from, near: end.placemark.coordinate) else {
+                if Self.mayAskOpenStreetMap(from, to), let answer = await osm(false) { return answer }
                 return failure ?? "Apple Maps could not find \"\(from)\"."
             }
             start = item
@@ -621,7 +654,15 @@ struct TravelTimeTool: NotchTool {
         guard let start else { return failure ?? "Apple Maps could not find \"\(from)\"." }
         let apart = CLLocation(latitude: start.placemark.coordinate.latitude, longitude: start.placemark.coordinate.longitude)
             .distance(from: CLLocation(latitude: end.placemark.coordinate.latitude, longitude: end.placemark.coordinate.longitude))
+        // Worse than nothing found: "Berlin Hauptbahnhof" comes back as Beijing
+        // Railway Station, its destination as a shop nearby, and the trip
+        // looks fine. A name with no CJK in it that Apple places in China is
+        // checked on OpenStreetMap, and timed there when it lies abroad.
+        if Self.mayAskOpenStreetMap(from, to),
+           Self.placedInChina(from, start) || Self.placedInChina(to, end),
+           let answer = await osm(true) { return answer }
         if apart > 1_000_000 {
+            if let answer = await osm(false) { return answer }
             return "The two places are \(Int(apart / 1000)) km apart: \"\(from)\" was found as \(Self.describe(start)) and "
                 + "\"\(to)\" as \(Self.describe(end)). If that is not what the user meant, add the city to the name and call again."
         }
@@ -647,8 +688,114 @@ struct TravelTimeTool: NotchTool {
             return String(format: "%@ → %@ by %@: about %d minutes, %.1f km (Apple Maps, %@).",
                           start.name ?? from, end.name ?? to, mode, minutes, km, when)
         } catch {
+            if let answer = await osm(false) { return answer }
             return "Apple Maps could not route that (\(error.localizedDescription))."
         }
+    }
+
+    // MARK: OpenStreetMap, where Apple Maps has no data
+
+    /// A missing home or work address is the user's to give, not a place to
+    /// look up; everything else may be tried on OpenStreetMap.
+    private static func mayAskOpenStreetMap(_ from: String, _ to: String) -> Bool {
+        [from, to].allSatisfy { UserPlaces.kind(of: $0) == nil || UserPlaces.kind(of: $0) == .here }
+    }
+
+    /// The trip on OpenStreetMap: Nominatim finds each end, the FOSSGIS OSRM
+    /// servers time it by car or on foot. No live or expected traffic, and no
+    /// transit, which the result says. nil when either end or the route can't
+    /// be had there either.
+    private static func placedInChina(_ query: String, _ item: MKMapItem) -> Bool {
+        guard UserPlaces.kind(of: query) == nil, item.placemark.isoCountryCode == "CN" else { return false }
+        return !query.unicodeScalars.contains {
+            (0x4E00...0x9FFF).contains($0.value) || (0x3040...0x30FF).contains($0.value) || (0xAC00...0xD7AF).contains($0.value)
+        }
+    }
+
+    /// `abroadOnly`: only when an end lies outside China, so a Latin-script
+    /// name for a place that really is in China stays with Apple Maps.
+    private static func openStreetMap(from: String, to: String, mode: String, timed: Bool,
+                                      abroadOnly: Bool = false) async -> String? {
+        guard mode != "transit" else {
+            return "Apple Maps on this Mac has no data there, and OpenStreetMap has no transit timetables. "
+                + "Call travel_time again with mode driving or walking, and tell the user it is not a transit time."
+        }
+        guard let a = await osmPoint(from) else { return nil }
+        if abroadOnly, a.country == "cn", let probe = await osmPoint(to), probe.country == "cn" { return nil }
+        // "Terminal 1" alone is anywhere; looked for near the start first.
+        var b: OSMPoint
+        if let nearby = await osmPoint(to, near: a) {
+            b = nearby
+        } else {
+            guard let anywhere = await osmPoint(to) else {
+                // The start is known abroad, so Apple's answer is no fallback.
+                return "OpenStreetMap found \"\(from)\" as \(a.name) but could not find \"\(to)\" (Apple Maps on this Mac "
+                    + "has no data there). Call again with a fuller or plainer name for it, such as \"BER Terminal 1\" or the street address."
+            }
+            // Found only far away: say where, rather than time a trip to the
+            // wrong "Terminal 1".
+            let km = CLLocation(latitude: a.lat, longitude: a.lon)
+                .distance(from: CLLocation(latitude: anywhere.lat, longitude: anywhere.lon)) / 1000
+            if km > 300 {
+                return "OpenStreetMap found \"\(to)\" only as \(anywhere.name), \(Int(km)) km from \(a.name). "
+                    + "If that is not what the user meant, call again with a fuller name, such as the place's full name and city."
+            }
+            b = anywhere
+        }
+        let profile = mode == "walking" ? "routed-foot" : "routed-car"
+        let path = String(format: "%.6f,%.6f;%.6f,%.6f", a.lon, a.lat, b.lon, b.lat)
+        guard let url = URL(string: "https://routing.openstreetmap.de/\(profile)/route/v1/driving/\(path)?overview=false"),
+              let json = await osmFetch(url) as? [String: Any],
+              json["code"] as? String == "Ok",
+              let route = (json["routes"] as? [[String: Any]])?.first,
+              let seconds = (route["duration"] as? NSNumber)?.doubleValue,
+              let meters = (route["distance"] as? NSNumber)?.doubleValue else { return nil }
+        let minutes = Int((seconds / 60).rounded())
+        let caveat = timed ? "no traffic: the time of day the user named is not counted" : "no live traffic"
+        return String(format: "%@ → %@ by %@: about %d minutes, %.1f km (OpenStreetMap, %@; Apple Maps on this Mac has no data there). "
+                        + "Tell the user it is an OpenStreetMap estimate without traffic.",
+                      a.name, b.name, mode, minutes, meters / 1000, caveat)
+    }
+
+    private struct OSMPoint { let name: String; let lat: Double; let lon: Double; var country = "" }
+
+    private static func osmPoint(_ query: String, near: OSMPoint? = nil) async -> OSMPoint? {
+        if UserPlaces.kind(of: query) == .here {
+            guard let location = await LocationService.shared.current() else { return nil }
+            return OSMPoint(name: "current location", lat: location.coordinate.latitude, lon: location.coordinate.longitude, country: "?")
+        }
+        var url = URLComponents(string: "https://nominatim.openstreetmap.org/search")!
+        url.queryItems = [
+            URLQueryItem(name: "q", value: query), URLQueryItem(name: "format", value: "jsonv2"),
+            URLQueryItem(name: "limit", value: "1"), URLQueryItem(name: "accept-language", value: "en"),
+            URLQueryItem(name: "addressdetails", value: "1"),
+        ]
+        if let near {
+            // About 150 km each way, and only results inside it.
+            let box = String(format: "%.4f,%.4f,%.4f,%.4f", near.lon - 2, near.lat + 1.4, near.lon + 2, near.lat - 1.4)
+            url.queryItems! += [URLQueryItem(name: "viewbox", value: box), URLQueryItem(name: "bounded", value: "1")]
+        }
+        guard let found = (await osmFetch(url.url!) as? [[String: Any]])?.first,
+              let lat = Double(found["lat"] as? String ?? ""), let lon = Double(found["lon"] as? String ?? "") else { return nil }
+        // "Gare de Lyon, Place Louis-Armand, Paris 12e, …, France": the first
+        // part and the country are enough to say where it landed.
+        var parts = (found["display_name"] as? String ?? query).components(separatedBy: ", ")
+        // A house number comes first on its own ("15, Rue de la Paix, …").
+        if parts.count > 2, parts[0].allSatisfy(\.isNumber) { parts[1] = "\(parts[0]) \(parts[1])"; parts.removeFirst() }
+        let name = parts.count > 1 ? "\(parts[0]), \(parts[parts.count - 1])" : parts.first ?? query
+        let country = ((found["address"] as? [String: Any])?["country_code"] as? String ?? "").lowercased()
+        return OSMPoint(name: name, lat: lat, lon: lon, country: country)
+    }
+
+    /// Both services ask for an identifying User-Agent and light use; one
+    /// request per end and one per route is that.
+    private static func osmFetch(_ url: URL) async -> Any? {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 15
+        request.setValue("Notchi/1.0 (macOS; travel_time)", forHTTPHeaderField: "User-Agent")
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        return try? JSONSerialization.jsonObject(with: data)
     }
 
     private enum Resolved {
@@ -705,8 +852,9 @@ struct TravelTimeTool: NotchTool {
         return .found(item)
     }
 
-    /// `near` limits the search to about 150 km around that point.
-    private static func place(_ query: String, near: CLLocationCoordinate2D? = nil) async -> MKMapItem? {
+    /// `near` limits the search to about 150 km around that point. Also finds
+    /// the place a Maps link's card draws its map around.
+    static func place(_ query: String, near: CLLocationCoordinate2D? = nil) async -> MKMapItem? {
         let request = MKLocalSearch.Request()
         request.naturalLanguageQuery = query
         if let near {

@@ -107,6 +107,9 @@ private struct ModelMenuPresenter: NSViewRepresentable {
         /// True from the moment a present is scheduled until the menu closes — a
         /// re-render while the menu is up must not stack a second one.
         var showing = false
+        /// The visible height of the display the menu opens on, read at present
+        /// time. A list taller than this is nested (see `addRows`).
+        private var screenHeight: CGFloat = 800
         /// The card that rides beside the menu. Built lazily so a copy that never
         /// opens the picker never makes a window.
         private let detail = ModelDetailPanel.shared
@@ -126,6 +129,8 @@ private struct ModelMenuPresenter: NSViewRepresentable {
                     self.finish()
                     return
                 }
+                self.screenHeight = (view.window?.screen ?? NSScreen.main)?
+                    .visibleFrame.height ?? 800
                 let menu = self.buildMenu()
                 // The anchor's bottom edge in its own coordinates, whichever way the
                 // view is flipped — the menu drops from there.
@@ -248,11 +253,9 @@ private struct ModelMenuPresenter: NSViewRepresentable {
             return item
         }
 
-        /// A provider's models: every model with a useful cost-efficiency score,
-        /// plus exceptionally intelligent 5/5 models even when their score is low.
-        /// Each family contributes at most five rows; unscored, low-scoring, and
-        /// overflow siblings live under "More models". If nothing meets that
-        /// bar, the remaining rows sit on this menu instead of behind a door.
+        /// A provider's models, all of them, in ranked order. Notchi's top
+        /// level holds only the Auto routers; Blend and the named models sit
+        /// under "More models".
         private func fill(_ menu: NSMenu, with models: [PickerModel]) {
             guard !models.isEmpty else {
                 let empty = NSMenuItem(title: L("model.picker.empty"), action: nil,
@@ -262,29 +265,11 @@ private struct ModelMenuPresenter: NSViewRepresentable {
                 return
             }
             let ranked = rankedWithinFamilies(models)
-            var primary: [PickerModel] = []
-            var moreModels: [PickerModel] = []
-            var visibleByFamily: [String: Int] = [:]
-            for model in ranked {
-                let family = familyKey(model)
-                // Notchi's top level holds only the Auto routers; Blend and the
-                // named models sit under "More models".
-                if model.provider == .nono {
-                    if model.info.id.hasPrefix("auto-") { primary.append(model) }
-                    else { moreModels.append(model) }
-                    continue
-                }
-                if showsOutsideMoreModels(model), visibleByFamily[family, default: 0] < 5 {
-                    primary.append(model)
-                    visibleByFamily[family, default: 0] += 1
-                } else {
-                    moreModels.append(model)
-                }
-            }
+            let isAuto = { (m: PickerModel) in m.provider == .nono && m.info.id.hasPrefix("auto-") }
+            let primary = ranked.filter { $0.provider != .nono || isAuto($0) }
+            let moreModels = ranked.filter { $0.provider == .nono && !isAuto($0) }
             addRows(primary, to: menu)
             guard !moreModels.isEmpty else { return }
-            // Nothing earned the main list — don't add a "More models" door
-            // that opens onto the whole catalog. Put those rows here.
             if primary.isEmpty {
                 addRows(moreModels, to: menu)
                 return
@@ -302,7 +287,33 @@ private struct ModelMenuPresenter: NSViewRepresentable {
         /// resells after. Label the two runs so the boundary is visible instead of
         /// implied by ordering. A menu that is all one kind — every single-vendor
         /// CLI, every keyed vendor — gets no headings.
-        private func addRows(_ models: [PickerModel], to menu: NSMenu) {
+        ///
+        /// A run taller than the display leaves rows below the screen's edge, so it
+        /// is nested the way the top level nests providers: one submenu per vendor,
+        /// and a vendor still too tall split by model series ("GPT 5.6", "GPT-6").
+        private func addRows(_ models: [PickerModel], to menu: NSMenu, depth: Int = 0) {
+            let groupings: [(PickerModel) -> (key: String, title: String)] = [vendorGroup, seriesGroup]
+            if depth < groupings.count, models.count > rowsThatFit(models) {
+                var order: [String] = []
+                var titles: [String: String] = [:]
+                var groups: [String: [PickerModel]] = [:]
+                for m in models {
+                    let g = groupings[depth](m)
+                    if groups[g.key] == nil {
+                        order.append(g.key)
+                        titles[g.key] = g.title
+                    }
+                    groups[g.key, default: []].append(m)
+                }
+                guard order.count > 1 else {
+                    addRows(models, to: menu, depth: depth + 1)
+                    return
+                }
+                for key in order {
+                    menu.addItem(groupItem(titles[key] ?? key, groups[key] ?? [], depth: depth + 1))
+                }
+                return
+            }
             let house = models.filter(isHouseModel)
             let rest = models.filter { !isHouseModel($0) }
             guard !house.isEmpty, !rest.isEmpty,
@@ -316,21 +327,59 @@ private struct ModelMenuPresenter: NSViewRepresentable {
             for m in rest { menu.addItem(modelItem(m)) }
         }
 
-        /// The main list keeps every scored model at 60 or above. Below that floor,
-        /// only a model whose displayed Intelligence meter is the full 5/5 remains;
-        /// the meter uses the measured bar first and the existing curated fallback.
-        ///
-        /// A provider's own models are exempt. The floor is a benchmark score, and
-        /// nobody publishes one for a house model — Cursor's `auto` router and its
-        /// Composer builds, xAI's own lineup behind the Grok CLI — so the rule that
-        /// keeps a hundred resold models honest was burying the ones the provider
-        /// actually makes, which for a single-vendor CLI backend is all of them.
-        private func showsOutsideMoreModels(_ model: PickerModel) -> Bool {
-            if isHouseModel(model) { return true }
-            guard let stats = Provider.modelStats(model.info.id),
-                  let value = stats.value else { return false }
-            let intelligence = stats.intelligenceBar ?? model.info.intelligence
-            return value >= 60 || intelligence == 5
+        /// How many rows fit the display's height. Rows that carry a subtitle
+        /// ("Add key", today's cap) are about twice as tall.
+        private func rowsThatFit(_ models: [PickerModel]) -> Int {
+            let tall: Bool
+            if #available(macOS 14.4, *) {
+                tall = models.contains { !$0.hasKey || $0.provider.isFirstParty }
+            } else {
+                tall = false
+            }
+            return max(8, Int((screenHeight - 40) / (tall ? 38 : 24)))
+        }
+
+        /// One nested group, drawn like `providerItem`: a tick when it holds the
+        /// model in effect, and that model as the subtitle.
+        private func groupItem(_ title: String, _ models: [PickerModel], depth: Int) -> NSMenuItem {
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            let current = models.first {
+                $0.provider == parent.selectedProvider && $0.info.id == parent.selectedID
+            }
+            item.state = current == nil ? .off : .on
+            if #available(macOS 14.4, *), let current {
+                item.subtitle = current.displayName
+            }
+            let sub = newMenu()
+            addRows(models, to: sub, depth: depth)
+            item.submenu = sub
+            return item
+        }
+
+        /// The lab behind the row — `OpenAI` for `openai/gpt-6-luna`.
+        private func vendorGroup(_ model: PickerModel) -> (key: String, title: String) {
+            let vendor = model.info.vendor.isEmpty
+                ? ModelRatings.vendor(for: model.info.id, provider: model.provider)
+                : model.info.vendor
+            return (vendor.lowercased(), vendor)
+        }
+
+        /// The model name up to its version number — "GPT 5.6" for "GPT 5.6 Luna
+        /// (Fast)". Hyphens and spaces compare equal, so "GPT-6" and "GPT 6" are
+        /// one series. A name with no number is its own first word.
+        private func seriesGroup(_ model: PickerModel) -> (key: String, title: String) {
+            let title = model.displayName.components(separatedBy: " · ").first
+                ?? model.displayName
+            let normalized = title.lowercased()
+                .replacingOccurrences(of: "-", with: " ")
+                .replacingOccurrences(of: "_", with: " ")
+            if let range = normalized.range(of: #"^[^0-9]*[0-9]+(\.[0-9]+)?"#,
+                                            options: .regularExpression) {
+                let length = normalized.distance(from: range.lowerBound, to: range.upperBound)
+                return (String(normalized[range]), String(title.prefix(length)))
+            }
+            let word = title.split(separator: " ").first.map(String.init) ?? title
+            return (word.lowercased(), word)
         }
 
         /// Whether this row is a model its provider stands behind itself, rather
@@ -687,9 +736,6 @@ struct ModelDetailCard: View {
     /// two — see `walletWell`.
     private var isFirstParty: Bool { model.provider.isFirstParty }
 
-    private var supportsVision: Bool { Provider.modelSupportsVision(model.info.id) }
-    private var supportsTools: Bool { model.info.toolUse || model.provider.supportsTools }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
             header
@@ -702,15 +748,17 @@ struct ModelDetailCard: View {
             // 3/5 intelligence bar sourced from nothing. What is true of this
             // one and of no other card is the remaining credit, so the two
             // invented bars give way to the wallet, which sits at the bottom of
-            // the card, under the capability rows.
+            // the card, under the notes.
             if !isFirstParty {
                 Meter(title: L("model.detail.speed"), level: figures.speed)
                 Meter(title: L("model.detail.intelligence"), level: figures.intelligence)
             }
 
-            capabilities
-
-            if isFirstParty { walletWell }
+            if isFirstParty {
+                prices
+                notes
+                walletWell
+            }
         }
         .padding(ModelDetailPanel.inset)
         .frame(width: ModelDetailPanel.width(showingPurchase: wallet?.offersCredit == true
@@ -740,40 +788,53 @@ struct ModelDetailCard: View {
         .environment(\.colorScheme, .dark)
     }
 
-    private var capabilities: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            // NOT `model.info.vision`. That field comes from
-            // `ModelRatings.looksVision`, a 2023-shaped allowlist that reads
-            // vision off the id ("claude", "gemini", "-vl") and therefore
-            // tells every GLM 5 model it can't see — the exact bug
-            // `Provider.modelSupportsVision` was written to replace, using the
-            // manifest's generated blocklist plus what a rejected image
-            // actually taught us.
-            Capability(symbol: "eye", title: L("model.detail.vision"),
-                       supported: supportsVision)
-            // A vendor that publishes no `supported_parameters` leaves
-            // `info.toolUse` false, which is an absence of data being rendered
-            // as a "no". The provider gate is the real answer.
-            Capability(symbol: "wrench.and.screwdriver", title: L("model.detail.toolUse"),
-                       supported: supportsTools)
-            // Only ever stated in the positive. Reasoning has no authoritative
-            // source here — `looksReasoning` matches on "thinking"/"-r1"-ish
-            // ids and misses every hybrid model that reasons without saying so
-            // in its name — so a "Reasoning Unsupported" row would be a guess
-            // printed as a fact. No row means we don't know, which is true.
-            if model.info.reasoning {
-                Capability(symbol: "brain", title: L("model.detail.reasoning"),
-                           supported: true)
+    /// What a million tokens in and out cost against the balance, in the
+    /// figures Settings → Models and Pricing prints.
+    @ViewBuilder
+    private var prices: some View {
+        if let pricing = model.info.notchiPricing {
+            VStack(alignment: .leading, spacing: 4) {
+                price(L("nono.pricing.input"), pricing.inputPerMTok)
+                price(L("nono.pricing.output"), pricing.outputPerMTok)
             }
-            if isFirstParty {
-                switch ModelRatings.nonoHost(id: model.info.id, pricing: model.info.notchiPricing) {
-                case .official:
-                    Note(symbol: "globe", title: L("model.detail.nono.host.official"))
-                case .us:
-                    Note(symbol: "globe.americas", title: L("model.detail.nono.host"))
-                case .anyRegion:
-                    Note(symbol: "globe", title: L("model.detail.nono.host.any"))
+        }
+    }
+
+    private func price(_ title: String, _ usd: Double) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(title)
+                .font(.sf(Tokens.TypeSize.meta))
+                .foregroundStyle(Tokens.text3)
+            Spacer(minLength: 4)
+            if usd == 0 {
+                FreeTag()
+            } else {
+                HStack(alignment: .firstTextBaseline, spacing: 1) {
+                    InlineSettingsView.moneyText(usd, size: Tokens.TypeSize.label)
+                        .foregroundStyle(Tokens.text1)
+                    Text("/M")
+                        .font(.sf(Tokens.TypeSize.meta))
+                        .foregroundStyle(Tokens.text4)
                 }
+                .monospacedDigit()
+                .lineLimit(1)
+            }
+        }
+    }
+
+    /// Where Notchi runs the model, and any sale on it.
+    private var notes: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            switch ModelRatings.nonoHost(id: model.info.id, pricing: model.info.notchiPricing) {
+            case .official:
+                Note(title: L("model.detail.nono.host.official"))
+            case .us:
+                Note(title: L("model.detail.nono.host"))
+            case .anyRegion:
+                Note(title: L("model.detail.nono.host.any"))
+            }
+            if let sale = model.info.notchiPricing?.saleLine {
+                Note(title: sale)
             }
         }
     }
@@ -790,14 +851,13 @@ struct ModelDetailCard: View {
                     .foregroundStyle(Tokens.text1)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
-                if let qualifier = title.qualifier {
-                    pill(qualifier)
-                } else if model.provider.isFirstParty {
-                    // The name says nothing about who makes it, and this card
-                    // wears our own mark rather than a lab's — so the maker is
-                    // written out, in the slot the engine qualifier uses.
-                    // Tappable: it is the door into that provider's Settings pane.
-                    pill(model.provider.spec.displayName, tappable: true)
+                // A model on the user's own key names the provider it runs on;
+                // the menu row only says BYOK.
+                if title.qualifier != nil || !model.provider.isFirstParty {
+                    HStack(spacing: 5) {
+                        if !model.provider.isFirstParty { pill(model.providerName) }
+                        if let qualifier = title.qualifier { pill(qualifier) }
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -861,15 +921,7 @@ struct ModelDetailCard: View {
             // Settings' wallet card, one size down: the figure, then Add
             // credit. The amount stepper stays folded until that click.
             VStack(alignment: .leading, spacing: 6) {
-                // Same label register as the Speed / Intelligence meters.
-                Text(L("model.detail.nono.balance"))
-                    .font(.sf(Tokens.TypeSize.meta))
-                    .foregroundStyle(Tokens.text3)
-                HStack(alignment: .center, spacing: 8) {
-                    balanceFigure
-                    Spacer(minLength: 4)
-                    learnMoreLink
-                }
+                billingRow
                 if wallet.offersCredit { purchaseRow }
                 if wallet.state == .cappedForToday {
                     Text(L("nono.dailyCap"))
@@ -907,28 +959,32 @@ struct ModelDetailCard: View {
     /// The balance, printed as the settings wallet prints it — the two are the
     /// same number in two places and must not disagree.
     private var balanceFigure: some View {
-        Group {
-            if wallet?.subCent == true {
-                Text("<").font(.brand(15)) + Text("$0.01").font(.brand(22))
-            } else {
-                Text(String(format: "$%.2f", wallet?.balanceUSD ?? 0)).font(.brand(22))
-            }
-        }
+        Text(wallet?.subCent == true ? "<$0.01"
+                                     : String(format: "$%.2f", wallet?.balanceUSD ?? 0))
+        .font(.sf(Tokens.TypeSize.meta, weight: .medium))
         .foregroundStyle(Tokens.text1)
         .lineLimit(1)
         .fixedSize()
     }
 
-    /// Opens this model's provider in Settings. Same door as the Notchi pill;
-    /// it sits on the balance row so the figure has somewhere to send a
-    /// question about credit.
-    private var learnMoreLink: some View {
+    /// "Billed to Balance $6.94" and the arrow, one control: a click anywhere
+    /// on the row opens this model's provider in Settings.
+    private var billingRow: some View {
         Button(action: onOpenProvider) {
-            Image(systemName: "arrow.up.right")
-                .font(.sf(Tokens.TypeSize.meta, weight: .medium))
-                .foregroundStyle(learnMoreHovered ? Tokens.text1 : Tokens.text4)
-                .padding(4)
-                .contentShape(Rectangle())
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(L("model.detail.nono.balance"))
+                    .font(.sf(Tokens.TypeSize.meta))
+                    .foregroundStyle(learnMoreHovered ? Tokens.text2 : Tokens.text3)
+                    .lineLimit(1)
+                    .fixedSize()
+                balanceFigure
+                Spacer(minLength: 4)
+                Image(systemName: "arrow.up.right")
+                    .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                    .foregroundStyle(learnMoreHovered ? Tokens.text1 : Tokens.text4)
+            }
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain).exemptsDoubleClickPin()
         .accessibilityLabel(L("model.detail.learnMore"))
@@ -1205,52 +1261,14 @@ struct ModelDetailCard: View {
         }
     }
 
-    /// A capability, present or pointedly absent. An unsupported one still gets a
-    /// row — "this model cannot do it" is the answer someone is looking for, and
-    /// an omitted row reads as "unknown".
-    struct Capability: View {
-        let symbol: String
-        let title: String
-        let supported: Bool
-
-        var body: some View {
-            HStack(spacing: 7) {
-                // The same glyph either way — the row is about a capability, and
-                // the capability doesn't change when the answer is no. Swapping in
-                // a slash made the icon column stop meaning anything, since you
-                // could no longer tell which row you were on without reading it.
-                // Dimming and the word carry the answer.
-                Image(systemName: symbol)
-                    .symbolRenderingMode(.monochrome)
-                    .font(.sf(Tokens.TypeSize.meta, weight: supported ? .medium : .regular))
-                    .frame(width: 14)
-                Text(supported ? title : L("model.detail.unsupported", title))
-                    .font(.sf(Tokens.TypeSize.meta, weight: supported ? .medium : .regular))
-            }
-            // Full contrast against a quarter of it. The first pass ran these at
-            // 0.74 and 0.40, which is a legible difference in isolation and not one
-            // you can read at a glance down a stack of three rows — the whole job
-            // of this block is to be answerable without comparing rows to
-            // each other.
-            .foregroundStyle(supported ? Tokens.text1 : Tokens.ink.opacity(0.26))
-        }
-    }
-
     struct Note: View {
-        let symbol: String
         let title: String
 
         var body: some View {
-            HStack(alignment: .firstTextBaseline, spacing: 7) {
-                Image(systemName: symbol)
-                    .symbolRenderingMode(.monochrome)
-                    .font(.sf(Tokens.TypeSize.meta))
-                    .frame(width: 14)
-                Text(title)
-                    .font(.sf(Tokens.TypeSize.meta))
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .foregroundStyle(Tokens.text3)
+            Text(title)
+                .font(.sf(Tokens.TypeSize.meta))
+                .fixedSize(horizontal: false, vertical: true)
+                .foregroundStyle(Tokens.text3)
         }
     }
 }
@@ -1968,6 +1986,20 @@ final class ModelCatalogStore: ObservableObject {
         }
     }
 
+    /// Move the active backend off `gone` once it has no credentials left:
+    /// back to the backend active before it, else Notchi, else the first provider
+    /// that can serve. Left on `gone`, the panel has no backend that answers —
+    /// the Ask chip turns into "Choose model…".
+    static func leave(_ gone: Provider) {
+        guard APIKeyStore.selectedProvider == gone, !ready(gone) else { return }
+        let candidates = [APIKeyStore.previousSelectedProvider, .nono].compactMap { $0 }
+            + Provider.offered
+        guard let next = candidates.first(where: {
+            $0 != gone && Provider.offered.contains($0) && ready($0)
+        }) else { return }
+        APIKeyStore.selectedProvider = next
+    }
+
     /// Commit a pick made outside Settings (the ⌘⇧I picker): switch the serving
     /// provider when it changed, save the model under it, and tell the backend to
     /// rebuild. Settings has its own path (`selectAcrossProviders`), which additionally
@@ -2170,7 +2202,7 @@ final class ModelCatalogStore: ObservableObject {
 
     /// The keyed (and custom-endpoint) providers' `/v1/models`, fetched in
     /// parallel. Part of `loadAll`.
-    private func loadKeyed(force: Bool) async {
+    func loadKeyed(force: Bool = false) async {
         await withTaskGroup(of: (Provider, ModelCatalog.Result?).self) { group in
             for p in Provider.offered
             where force || liveByProvider[p] == nil || seededFromDisk.contains(p) {
@@ -2298,56 +2330,88 @@ final class ModelCatalogStore: ObservableObject {
     func rows(selected: Provider) -> [PickerModel] {
         var rows: [PickerModel] = []
         for p in Provider.offered {
-            let hasKey = Self.ready(p)
-            let infos: [ModelInfo]
-            if let live = liveByProvider[p], !live.isEmpty {
-                infos = live
-            } else {
-                // The provider names the vendor for the ids that don't name their own —
-                // Codex's "codex", Claude Code's bare "opus"/"sonnet" aliases — so every
-                // row wears its vendor's mark instead of a monogram.
-                infos = p.availableModels.map {
-                    ModelInfo(id: $0, vendor: ModelRatings.vendor(for: $0, provider: p))
-                }
-            }
-            let short = shortlistIDs(for: p, infos: infos, hasKey: hasKey)
-            // Shortlisted models lead their provider's block (the menu splits the block
-            // there — picks above, "More models" below), and **within each half the
-            // newest model is first** (`newerFirst`). The vendor's own catalog order is
-            // only the last tiebreak now.
-            let ordered = infos.enumerated().sorted { a, b in
-                let af = short.contains(a.element.id), bf = short.contains(b.element.id)
-                if af != bf { return af }
-                // Notchi Balance lists the Auto entries first.
-                if p == .nono {
-                    let aa = a.element.id.hasPrefix("auto-"), ba = b.element.id.hasPrefix("auto-")
-                    if aa != ba { return aa }
-                }
-                return Self.newerFirst(a, b)
-            }.map(\.element)
-            var block: [PickerModel] = []
-            for info in ordered {
-                // A model only earns the resting shortlist if its vendor has a real logo —
-                // a monogram letter-tile in the featured list reads as ugly/broken, so the
-                // long-tail vendors without a bundled mark fold away (still reachable by
-                // search, and a selected one always shows regardless).
-                let hasLogo = VendorLogos.mark(for: info.vendor) != nil
-                block.append(PickerModel(
-                    provider: p, providerName: p.displayName, hasKey: hasKey,
-                    featured: short.contains(info.id) && hasLogo, info: info,
-                    displayName: title(for: info, provider: p)))
-            }
-            // The logo gate can zero out a whole provider's shortlist — a gateway fronting
-            // vendors we ship no mark for. Now that the fold has no "show all" escape
-            // hatch, that would strand the provider behind search, so its first row rides
-            // regardless.
-            if hasKey, !block.contains(where: \.featured), let first = block.first {
-                block[0] = PickerModel(provider: first.provider, providerName: first.providerName,
-                                       hasKey: true, featured: true, info: first.info,
-                                       displayName: first.displayName)
-            }
-            rows.append(contentsOf: block)
+            rows.append(contentsOf: block(for: p))
         }
+        return Self.order(rows, selected: selected)
+    }
+
+    /// One model's row, exactly as `rows(selected:)` would build it, without
+    /// building every other provider's block. The quick menus ask this per row
+    /// and per hover; going through `rows(selected:)` there rebuilt and sorted
+    /// the whole cross-provider catalog for each one.
+    ///
+    /// Looked up directly rather than cut from `block(for:)`: that sorts the
+    /// provider's whole catalog, hundreds of rows on a gateway, on every hover.
+    /// `featured` is the fold's flag and no reader of a single row uses it.
+    func row(provider p: Provider, id: String) -> PickerModel? {
+        guard Provider.offered.contains(p) else { return nil }
+        let info: ModelInfo
+        if let live = liveByProvider[p], !live.isEmpty {
+            guard let hit = live.first(where: { $0.id == id }) else { return nil }
+            info = hit
+        } else {
+            guard p.availableModels.contains(id) else { return nil }
+            info = ModelInfo(id: id, vendor: ModelRatings.vendor(for: id, provider: p))
+        }
+        return PickerModel(provider: p, providerName: p.displayName, hasKey: Self.ready(p),
+                           featured: false, info: info,
+                           displayName: title(for: info, provider: p))
+    }
+
+    /// One provider's rows in the order the cross-provider picker lists them.
+    private func block(for p: Provider) -> [PickerModel] {
+        let hasKey = Self.ready(p)
+        let infos: [ModelInfo]
+        if let live = liveByProvider[p], !live.isEmpty {
+            infos = live
+        } else {
+            // The provider names the vendor for the ids that don't name their own —
+            // Codex's "codex", Claude Code's bare "opus"/"sonnet" aliases — so every
+            // row wears its vendor's mark instead of a monogram.
+            infos = p.availableModels.map {
+                ModelInfo(id: $0, vendor: ModelRatings.vendor(for: $0, provider: p))
+            }
+        }
+        let short = shortlistIDs(for: p, infos: infos, hasKey: hasKey)
+        // Shortlisted models lead their provider's block (the menu splits the block
+        // there — picks above, "More models" below), and **within each half the
+        // newest model is first** (`newerFirst`). The vendor's own catalog order is
+        // only the last tiebreak now.
+        let ordered = infos.enumerated().sorted { a, b in
+            let af = short.contains(a.element.id), bf = short.contains(b.element.id)
+            if af != bf { return af }
+            // Notchi Balance lists the Auto entries first.
+            if p == .nono {
+                let aa = a.element.id.hasPrefix("auto-"), ba = b.element.id.hasPrefix("auto-")
+                if aa != ba { return aa }
+            }
+            return Self.newerFirst(a, b)
+        }.map(\.element)
+        var block: [PickerModel] = []
+        for info in ordered {
+            // A model only earns the resting shortlist if its vendor has a real logo —
+            // a monogram letter-tile in the featured list reads as ugly/broken, so the
+            // long-tail vendors without a bundled mark fold away (still reachable by
+            // search, and a selected one always shows regardless).
+            let hasLogo = VendorLogos.mark(for: info.vendor) != nil
+            block.append(PickerModel(
+                provider: p, providerName: p.displayName, hasKey: hasKey,
+                featured: short.contains(info.id) && hasLogo, info: info,
+                displayName: title(for: info, provider: p)))
+        }
+        // The logo gate can zero out a whole provider's shortlist — a gateway fronting
+        // vendors we ship no mark for. Now that the fold has no "show all" escape
+        // hatch, that would strand the provider behind search, so its first row rides
+        // regardless.
+        if hasKey, !block.contains(where: \.featured), let first = block.first {
+            block[0] = PickerModel(provider: first.provider, providerName: first.providerName,
+                                   hasKey: true, featured: true, info: first.info,
+                                   displayName: first.displayName)
+        }
+        return block
+    }
+
+    private static func order(_ rows: [PickerModel], selected: Provider) -> [PickerModel] {
         // Ours first, then usable models (the current provider's leading), then
         // greyed ones — the list reads as "the plan you can buy here", then
         // "what you can pick now", then "what a key would unlock".
@@ -2552,8 +2616,12 @@ enum AskModelMRU {
 }
 
 /// What the Ask model chip opens: the agent quick picker's little glass card, on the
-/// chat side — BYOK recents and Notchi's lineup as two fleets behind the same
-/// bottom-row menu the agent card uses for engines, not stacked in one list.
+/// chat side — one list across Notchi and the user's own keys. Notchi's Auto
+/// routers and the recently used models (either source) lead; the rest of
+/// Notchi's lineup follows below a rule. A row on the user's own key names its
+/// provider in the trailing slot; Notchi rows carry no source label. The same
+/// model on both sources is two rows. With no balance to spend, Notchi rows stay
+/// listed but grayed and cannot be picked.
 /// A click picks the model AND closes — one gesture, done. ↑/↓ still arm live
 /// for keyboard users (Return / Esc close). The armed row is mirrored in local
 /// state because a pick commits straight to UserDefaults, which re-renders
@@ -2564,27 +2632,13 @@ struct AskRecentModelPickerView: View {
         let id: String
     }
 
-    /// The two fleets this card switches between — BYOK recents (capped at ten)
-    /// and Notchi's whole lineup. Same job as `AgentEngine` on the other card.
-    private enum Source: Hashable {
-        case byok, notchi
-    }
-
-    let rows: [Row]
-    /// Notchi's lineup — shown as its own source, not pinned under the recents.
-    /// Empty when the wallet can't spend, so the switch disappears and the card
-    /// is BYOK only.
-    let pinned: [Row]
+    /// Auto routers, then recents from either source.
+    let lead: [Row]
+    /// Notchi models not already in `lead`, below the rule.
+    let rest: [Row]
     let onSelect: (Row) -> Void
-    /// The way out of the recents: open Settings' Model pane, where the full
-    /// cross-provider catalog lives. The menu closes on its own first.
-    let onMoreModels: () -> Void
     let onDone: () -> Void
 
-    @State private var source: Source
-    /// The More models submenu, open beside the card.
-    @State private var moreOpen = false
-    @State private var lastPick: [Source: Row] = [:]
     @State private var current: Row
     /// A local keyDown monitor is the only reliable way to own the arrow keys inside a
     /// popover — a focused field editor swallows them before SwiftUI sees them.
@@ -2597,6 +2651,17 @@ struct AskRecentModelPickerView: View {
     /// above are state.
     @State private var scrollOffset = OffsetBox()
     private final class OffsetBox { var value: CGFloat = 0 }
+    /// What the search row holds. The card's panel cannot become key, so the
+    /// key monitor types into it rather than a text field.
+    @State private var query = ""
+    /// Each row's searchable text, built once per row, and the last filter
+    /// result. A reference, so filling it never re-renders the card.
+    @State private var search = SearchCache()
+    private final class SearchCache {
+        var haystacks: [Row: String] = [:]
+        var key: (query: String, lead: [Row], rest: [Row])?
+        var result: (lead: [Row], rest: [Row]) = ([], [])
+    }
     /// The quick menu is a custom child panel rather than an `NSMenu`, so the
     /// shared model-detail panel cannot discover its frame from AppKit's menu
     /// windows. This probe retains the SwiftUI card's exact screen rect and lets
@@ -2607,94 +2672,111 @@ struct AskRecentModelPickerView: View {
     /// chip that opened it, and opening scrolled to the current pick parks the
     /// first rows there, under the pointer. Hover counts only inside this rect.
     @StateObject private var listAnchor = ModelDetailAnchor()
-    /// Observed so the first-party rows' wallet note follows the balance.
+    /// Observed so the first-party rows' wallet note and gray follow the balance.
     @ObservedObject private var nono = NoNoAccount.shared
 
-    init(rows: [Row], pinned: [Row] = [],
+    init(lead: [Row], rest: [Row] = [],
          selectedProvider: Provider, selectedModelID: String,
-         onSelect: @escaping (Row) -> Void, onMoreModels: @escaping () -> Void,
+         onSelect: @escaping (Row) -> Void,
          onDone: @escaping () -> Void) {
-        self.rows = rows
-        self.pinned = pinned
+        self.lead = lead
+        self.rest = rest
         self.onSelect = onSelect
-        self.onMoreModels = onMoreModels
         self.onDone = onDone
         _current = State(initialValue: Row(provider: selectedProvider, id: selectedModelID))
-        _source = State(initialValue: selectedProvider.isFirstParty && !pinned.isEmpty
-                            ? .notchi : .byok)
     }
 
-    private var visibleRows: [Row] { fleet(for: source) }
+    /// Cursor's layout: Auto is a switch above the list rather than a row in
+    /// it. On, every model below is grayed and cannot be picked; off, the pick
+    /// goes back to the first model that can serve. The router it flips is the
+    /// one in effect, else the first Auto in Notchi's lineup.
+    private var autoRow: Row? {
+        if Self.isAuto(current), lead.contains(current) { return current }
+        return lead.first(where: Self.isAuto)
+    }
 
-    private func fleet(for source: Source) -> [Row] {
-        switch source {
-        case .byok: return rows
-        case .notchi: return notchiSplit.main
+    private var autoOn: Bool { Self.isAuto(current) && current == autoRow }
+
+    static func isAuto(_ r: Row) -> Bool {
+        r.provider.isFirstParty && r.id.hasPrefix("auto-")
+    }
+
+    /// The recents under the switch — `lead` without the router the switch owns.
+    private var fullLead: [Row] { lead.filter { $0 != autoRow } }
+
+    /// Both runs narrowed to the query. Memoized on the query and the rows, so
+    /// the several reads per render filter once, and each row's text is built
+    /// once for the life of the card.
+    private var filtered: (lead: [Row], rest: [Row]) {
+        let full = fullLead
+        if query.isEmpty { return (full, rest) }
+        if let key = search.key, key.query == query, key.lead == full, key.rest == rest {
+            return search.result
         }
-    }
-
-    /// Notchi's top level leads with the Auto routers, then named models up to
-    /// the BYOK row count so the list window has no empty rows; the rest sit in
-    /// the More models submenu. With nothing left over there is no submenu.
-    private var notchiSplit: (main: [Row], more: [Row]) {
-        let auto = pinned.filter { $0.id.hasPrefix("auto-") }
-        let rest = pinned.filter { !$0.id.hasPrefix("auto-") }
-        guard !auto.isEmpty, !rest.isEmpty else { return (pinned, []) }
-        let fill = max(0, min(Self.listRows, rows.count) - auto.count)
-        return (auto + rest.prefix(fill), Array(rest.dropFirst(fill)))
-    }
-
-    /// On Notchi, More models is the submenu of named models. On BYOK it stays
-    /// the door into Settings.
-    private var showsMoreSubmenu: Bool {
-        source == .notchi && !notchiSplit.more.isEmpty
-    }
-
-    /// BYOK is always on the switch — even with no recents, it is the door into
-    /// the rest of the catalog. Notchi only when the wallet can actually serve.
-    private var sources: [Source] {
-        var out: [Source] = [.byok]
-        if !pinned.isEmpty { out.append(.notchi) }
-        return out
-    }
-
-    private var showsSourceSwitch: Bool { sources.count > 1 }
-
-    private func sourceTitle(_ source: Source) -> String {
-        switch source {
-        case .byok: return "BYOK"
-        case .notchi: return Provider.nono.displayName
+        let terms = ModelSearch.terms(query)
+        func matches(_ r: Row) -> Bool {
+            let hay: String
+            if let cached = search.haystacks[r] {
+                hay = cached
+            } else {
+                hay = ModelSearch.normalized(
+                    ModelRatings.prettyName(for: r.id, provider: r.provider)
+                    + " " + r.id + " " + r.provider.displayName)
+                search.haystacks[r] = hay
+            }
+            return terms.allSatisfy { hay.contains($0) }
         }
+        let result = (full.filter(matches), rest.filter(matches))
+        search.key = (query, full, rest)
+        search.result = result
+        return result
     }
 
-    /// The list window, in rows — the Agent card's four, because the two menus
-    /// hang off the same compose row and are read as one control in two modes.
-    /// Held at four rows on both sources: sizing to the armed fleet made the
-    /// card jump every time BYOK and Notchi didn't have the same count.
-    private static let listRows = MenuCard.pickerListRows
+    private var listLead: [Row] { filtered.lead }
+
+    private var listRest: [Row] { filtered.rest }
+
+    private var allRows: [Row] { listLead + listRest }
+
+    /// The rule between the two runs, drawn only when both have rows.
+    private var showsDivider: Bool { !listLead.isEmpty && !listRest.isEmpty }
+
+    /// The model menus' shared numbers (`MenuCard.picker…`).
+    static let fontSize: CGFloat = MenuCard.pickerFontSize
+    static let rowPad: CGFloat = MenuCard.pickerRowPad
+    static let rowHeight: CGFloat = MenuCard.pickerRowHeight
+    private static var rowStride: CGFloat { rowHeight + MenuCard.rowSpacing }
     /// How deep the list dissolves at whichever edge is mid-scroll — two thirds of
     /// a row, enough to see a row go instead of reading as a hard cut.
     private static let edgeFade: CGFloat = 18
-    /// Skip the scroll ease for one `current` change — a source flip, whose
-    /// new list should land already scrolled, not ease through the old one.
-    @State private var snapScroll = false
 
-    /// Sized by the longer of the two fleets, capped at four rows, so a flip
-    /// never resizes the card. Notchi fills up to the BYOK count from its named
-    /// models; only a BYOK list shorter than the Auto routers leaves air.
-    private var listHeight: CGFloat {
-        let longest = max(1, rows.count, fleet(for: .notchi).count)
-        return CGFloat(min(Self.listRows, longest)) * MenuCard.rowStride - MenuCard.rowSpacing
+    /// What the rows actually add up to, rule included — the other half of the
+    /// bottom-edge test (the observer reports the offset, not the remaining travel).
+    private var contentHeight: CGFloat {
+        Self.height(rows: allRows.count, divider: showsDivider)
     }
 
-    /// What the rows actually add up to — the other half of the bottom-edge test
-    /// (the observer reports the offset, not the remaining travel).
-    private var contentHeight: CGFloat {
-        CGFloat(max(1, visibleRows.count)) * MenuCard.rowStride - MenuCard.rowSpacing
+    private static func height(rows: Int, divider: Bool) -> CGFloat {
+        var h = CGFloat(max(1, rows)) * rowStride - MenuCard.rowSpacing
+        if divider { h += sectionRule + MenuCard.rowSpacing }
+        return h
+    }
+
+    /// Rows shown before the list scrolls.
+    private static let listRows = 6
+
+    /// Capped at `listRows`; a shorter list is as tall as its rows. Measured
+    /// from the unfiltered rows, so the card keeps its size while a query
+    /// narrows the list.
+    private var listHeight: CGFloat {
+        let full = fullLead
+        let h = Self.height(rows: full.count + rest.count,
+                            divider: !full.isEmpty && !rest.isEmpty)
+        return min(h, CGFloat(Self.listRows) * Self.rowStride - MenuCard.rowSpacing)
     }
 
     /// Whether the list outgrows the window and scrolls — the gate for the fades.
-    private var overflowing: Bool { visibleRows.count > Self.listRows }
+    private var overflowing: Bool { contentHeight > listHeight + 0.5 }
 
     private func updateEdgeFades() {
         let offset = scrollOffset.value
@@ -2706,12 +2788,25 @@ struct AskRecentModelPickerView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            searchRow
+            hairline
+            if let autoRow {
+                autoSwitch(autoRow)
+                hairline
+            }
             ScrollViewReader { proxy in
                 ScrollView(showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
-                        ForEach(visibleRows, id: \.self) { r in
+                    // Lazy: a BYOK catalog is hundreds of rows, and only the
+                    // window's ten are on screen.
+                    LazyVStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
+                        ForEach(listLead, id: \.self) { r in
                             modelRow(r).id(r)
                         }
+                        if showsDivider { hairline }
+                        ForEach(listRest, id: \.self) { r in
+                            modelRow(r).id(r)
+                        }
+                        if allRows.isEmpty { ModelSearchRow.noMatch }
                     }
                     // Zero-size probe on the scroll CONTENT reads the clip view's
                     // offset. Only the two CROSSINGS are stored, never the live
@@ -2723,66 +2818,33 @@ struct AskRecentModelPickerView: View {
                     }
                 }
                 // The shared dissolve at both overflow edges instead of a hard cut,
-                // gated on actual overflow so a short recents list is never dimmed.
+                // gated on actual overflow so a short list is never dimmed.
                 .scrollEdgeFade(top: overflowing && scrolledOffTop,
                                 bottom: overflowing && scrolledOffBottom,
                                 fade: Self.edgeFade)
                 .frame(height: listHeight)
                 .background(ModelDetailAnchorProbe(anchor: listAnchor))
-                // Open on the model in effect — with ten recents or the whole
-                // Notchi lineup it can sit below the fold, and a menu that
-                // opens blind to its own selection makes the user hunt.
+                // Open on the model in effect — it can sit below the fold, and a
+                // menu that opens blind to its own selection makes the user hunt.
                 .onAppear {
-                    guard visibleRows.contains(current) else { return }
+                    guard allRows.contains(current) else { return }
                     proxy.scrollTo(current, anchor: .center)
                 }
-                // ↑/↓ re-arms live, so follow the armed row. A source flip
-                // lands already scrolled (`snapScroll`); animating that one
-                // would ease through the list that just left.
-                .onChange(of: current) {
-                    let animated = !snapScroll
-                    snapScroll = false
-                    followSelection(proxy, animated: animated)
+                // ↑/↓ re-arms live, so follow the armed row.
+                .onChange(of: current) { followSelection(proxy) }
+                // A new query starts the results from the top.
+                .onChange(of: query) {
+                    if let first = allRows.first { proxy.scrollTo(first, anchor: .top) }
                 }
-                // Re-derive the fades from the real offset against the new
-                // fleet's height. Forcing both off here drew the top edge as a
-                // hard cut for a frame until the scroll notification turned the
-                // fade back on — the flash at the top of the list on a flip.
-                .onChange(of: source) { updateEdgeFades() }
-            }
-
-            // The tail row. On BYOK it leaves the recents for the whole catalog
-            // in Settings; on Notchi it opens the submenu of named models. One
-            // row on both sources so a flip cannot resize the card. It is not a
-            // model, and ↑/↓ skip it.
-            hairline
-            if showsMoreSubmenu {
-                moreModelsRow
-            } else {
-                MenuCardRow(title: L("model.picker.more"),
-                            hoverSymbol: "arrow.up.right",
-                            selected: false,
-                            haptic: false) {
-                    onDone()
-                    onMoreModels()
-                }
-            }
-            if showsSourceSwitch {
-                hairline
-                sourceRow
             }
         }
         .padding(MenuCard.cardPad)
-        // Sized by its own rows like the `/` card, capped so one long model id
-        // can't stretch the menu across the panel. Height is the chrome
-        // above, not the armed fleet: a source flip must not ask the
-        // hosting window to refit through an empty pass.
         .frame(width: cardWidth, height: cardHeight, alignment: .topLeading)
-        .animation(nil, value: source)
         .background(ModelDetailAnchorProbe(anchor: detailAnchor))
         .onAppear {
-            if rows.contains(current) { lastPick[.byok] = current }
-            if pinned.contains(current) { lastPick[.notchi] = current }
+            if !rest.isEmpty || lead.contains(where: { $0.provider.isFirstParty }) {
+                ModelCatalogStore.shared.refreshNono()
+            }
             installKeyMonitor()
         }
         .onDisappear {
@@ -2791,25 +2853,63 @@ struct AskRecentModelPickerView: View {
         }
     }
 
-    /// One model row, BYOK or Notchi — the two fleets share the row so a source
-    /// flip can't drift the list's language.
+    /// The Auto switch. A click anywhere on the row flips it and the menu stays
+    /// open, as Cursor's does. Grayed and inert when the balance cannot pay.
+    private func autoSwitch(_ r: Row) -> some View {
+        let unavailable = Self.unavailable(r)
+        return MenuCardRow(
+            title: ModelRatings.prettyName(for: r.id, provider: r.provider),
+            dimmed: unavailable,
+            isOn: autoOn,
+            fontSize: Self.fontSize,
+            height: Self.rowHeight,
+            horizontalPadding: Self.rowPad,
+            selected: true,
+            wash: false,
+            haptic: false) {
+                guard !unavailable else { return }
+                if autoOn {
+                    if let manual = allRows.first(where: {
+                        !Self.isAuto($0) && !Self.unavailable($0)
+                    }) {
+                        arm(manual)
+                    }
+                } else {
+                    arm(r)
+                }
+            }
+            .onHover { inside in
+                if inside, let frame = detailAnchor.frame {
+                    ModelDetailPanel.shared.show(Self.detailModel(for: r), beside: frame)
+                } else if !inside {
+                    ModelDetailPanel.shared.scheduleHide()
+                }
+            }
+    }
+
+    /// One model row, Notchi or the user's own key — both share the row so the
+    /// list reads as one. Grayed while Auto is on.
     private func modelRow(_ r: Row) -> some View {
-        MenuCardRow(
+        let unavailable = autoOn || Self.unavailable(r)
+        return MenuCardRow(
             title: ModelRatings.prettyName(for: r.id, provider: r.provider),
             accessory: Self.accessory(for: r),
             lowBalance: Self.lowBalance(r),
+            tag: Self.tag(for: r),
             brandTitle: Self.isHouse(r),
-            // The highlight here means "the model in effect", not "where the
-            // cursor is" — so it carries the emphasized weight, and hover
-            // does NOT move it (arming commits the pick straight to the
-            // store; the `/` menu's follow-the-pointer highlight would
-            // switch models just by sweeping past a row).
+            dimmed: unavailable,
+            fontSize: Self.fontSize,
+            height: Self.rowHeight,
+            horizontalPadding: Self.rowPad,
+            // Settings' glass menus (`GlassMenuCard`): the model in effect
+            // carries the wash and the emphasized weight, so every word starts
+            // at the same x with no check column.
             emphasized: true,
             selected: r == current,
             haptic: false) {
-                // Menu semantics: one click picks and dismisses. Always
-                // commit: a source flip only moves the highlight, and
-                // tapping that row is what writes the pick.
+                guard !unavailable else { return }
+                // Menu semantics: one click picks and dismisses.
+                if Self.showsNewTag(r) { ModelNewMarks.seen = true }
                 arm(r)
                 // The card goes with the menu, in the same click. Left to the
                 // list's `onDisappear` it hides a beat late, so the detail card
@@ -2819,7 +2919,6 @@ struct AskRecentModelPickerView: View {
             }
             .onHover { inside in
                 if inside, listAnchor.containsPointer, let frame = detailAnchor.frame {
-                    moreOpen = false
                     ModelDetailPanel.shared.show(Self.detailModel(for: r), beside: frame)
                 } else if !inside {
                     ModelDetailPanel.shared.scheduleHide()
@@ -2827,64 +2926,32 @@ struct AskRecentModelPickerView: View {
             }
     }
 
-    /// More models on Notchi: a row that opens the named models beside the
-    /// card on hover, like a native submenu, and holds the highlight while
-    /// that card is open.
-    private var moreModelsRow: some View {
-        MenuCardRow(title: L("model.picker.moreModels"),
-                    disclosure: false,
-                    selected: moreOpen,
-                    haptic: false,
-                    onHoverIn: {
-                        ModelDetailPanel.shared.scheduleHide()
-                        moreOpen = true
-                    }) {
-            moreOpen.toggle()
-        }
-        .onChange(of: moreOpen) { _, open in
-            if open { ModelCatalogStore.shared.refreshNono() }
-        }
-        .modifier(MenuCardWindow(
-            open: moreOpen && showsMoreSubmenu,
-            trailing: true,
-            onDismiss: { _ in moreOpen = false },
-            card: {
-                AnyView(AskMoreModelsCard(
-                    rows: notchiSplit.more,
-                    current: current,
-                    onPick: { r in
-                        moreOpen = false
-                        arm(r)
-                        ModelDetailPanel.shared.hide()
-                        onDone()
-                    })
-                    .preferredColorScheme(.dark)
-                    .menuCardBackground())
-            }))
-    }
+    /// The search row. Typing goes here from the key monitor while the card is
+    /// open; Delete erases, Esc clears it before it closes the card.
+    private var searchRow: some View { ModelSearchRow(query: query) }
 
-    /// The rule between the card's sections — models from More models, More
-    /// models from the source switch.
+    /// The rule between the card's sections.
     private var hairline: some View {
         Rectangle().fill(.white.opacity(0.07))
             .frame(height: 0.5)
-            .padding(.horizontal, MenuCard.rowPad)
-            // The Agent card's section rule: 7pt each side, because these
-            // separate sections of the card rather than rows inside one list.
-            .padding(.vertical, 7)
+            .padding(.horizontal, Self.rowPad)
+            .padding(.vertical, Self.ruleGap)
     }
 
-    /// Every row the ↑/↓ cursor can land on: the armed source's models. The
-    /// door out and the source switch pick no model.
-    private var armable: [Row] { visibleRows }
+    /// Every row the ↑/↓ cursor can land on: the models that can be picked now —
+    /// none while Auto is on.
+    private var armable: [Row] {
+        autoOn ? [] : allRows.filter { !Self.unavailable($0) }
+    }
 
-    /// The row's trailing word. Backends driven by the user's own signed-in
-    /// CLI wear the tag: in a list that otherwise means "a key we hold", it
-    /// says where this one actually runs and why it needed no setup. Ours
-    /// names today's cap when that is what stops it.
+    /// The row's trailing word. A row on the user's own key says BYOK, one on a
+    /// signed-in CLI says CLI, since Notchi rows sit beside them and the same
+    /// model can appear on both. Ours names today's cap when that is what
+    /// stops it.
     static func accessory(for r: Row) -> String? {
         if r.provider.isCLI { return "CLI" }
-        guard r.provider.isFirstParty, NoNoAccount.shared.snapshot != nil,
+        guard r.provider.isFirstParty else { return "BYOK" }
+        guard NoNoAccount.shared.snapshot != nil,
               ModelDetailCard.Wallet.current?.state == .cappedForToday else { return nil }
         return L("nono.dailyCap")
     }
@@ -2896,136 +2963,68 @@ struct AskRecentModelPickerView: View {
         r.provider.isFirstParty && ModelRatings.isNonoID(r.id)
     }
 
+    /// The Notchi models listed first after the recents.
+    static let featuredNotchiIDs = ["glm-5.3-flash", ModelNewMarks.modelID]
+
+    /// The row's tag: "New" on the featured model, else the percent off on a
+    /// Notchi model sold below its list price.
+    static func tag(for r: Row) -> String? {
+        if showsNewTag(r) { return L("tag.new") }
+        guard r.provider.isFirstParty,
+              let percent = detailModel(for: r).info.notchiPricing?.percentOff else { return nil }
+        return L("nono.pricing.percentOff", percent)
+    }
+
+    /// The featured Notchi model, inside its seven days and not yet clicked.
+    static func showsNewTag(_ r: Row) -> Bool {
+        r.provider.isFirstParty && r.id == ModelNewMarks.modelID && ModelNewMarks.active
+    }
+
     /// Ours, with nothing left: the row wears `LowBalanceTag`.
     static func lowBalance(_ r: Row) -> Bool {
         r.provider.isFirstParty && NoNoAccount.shared.snapshot != nil
             && ModelDetailCard.Wallet.current?.state == .empty
     }
 
-    /// Wide enough for every row whole across both sources, so flipping the
-    /// switch doesn't resize the card. The door's arrow only shows under the
-    /// pointer, but it is held in the layout at rest.
-    private var cardWidth: CGFloat {
-        var extra: [(String, String?)] = [(L("model.picker.more"), "\u{2197}")]
-        if !notchiSplit.more.isEmpty {
-            extra.append((L("model.picker.moreModels"), "\u{203A}"))
+    /// Ours, and the balance cannot pay for a turn — empty or capped for today.
+    /// Listed grayed rather than hidden; a click does nothing.
+    static func unavailable(_ r: Row) -> Bool {
+        guard r.provider.isFirstParty, let snapshot = NoNoAccount.shared.snapshot else {
+            return false
         }
-        if showsSourceSwitch {
-            extra.append((sourceTitle(.byok), nil))
-            extra.append((sourceTitle(.notchi), nil))
-        }
-        return Self.width(of: rows + fleet(for: .notchi), extra: extra)
+        return snapshot.isEmpty || snapshot.cappedForToday
     }
 
-    /// What a run of model rows needs to show whole. The cap is the Agent card's
-    /// own width, so the two menus are the same card at the same size; a long
-    /// aggregator id truncating is the cheaper trade than one list standing
-    /// wider than the other.
-    static func width(of models: [Row], extra: [(String, String?)] = []) -> CGFloat {
-        let titles = models.map {
-            (ModelRatings.prettyName(for: $0.id, provider: $0.provider), accessory(for: $0))
-        }
-        let base = MenuCard.width(titles: titles + extra)
-        // The NO CREDIT chip is a view, not a string `MenuCard.width` can measure.
-        let tagged = models.filter { lowBalance($0) }.map {
-            MenuCard.width(titles: [(ModelRatings.prettyName(for: $0.id, provider: $0.provider), nil)])
-                + MenuCard.accessoryGap + LowBalanceTag.width
-        }
-        // The house row is drawn in the brand face, which `MenuCard.width`
-        // measures in the system one.
-        let branded = models.filter(Self.isHouse).map { r -> CGFloat in
-            let name = ModelRatings.prettyName(for: r.id, provider: r.provider)
-            return MenuCard.width(titles: [(name, accessory(for: r))])
-                + MenuCard.brandOverhang(name, fontSize: MenuCard.fontSize)
-        }
-        return min(max(base, tagged.max() ?? 0, branded.max() ?? 0), MenuCard.pickerCardWidth)
-    }
+    /// A FIXED width, not one measured from the rows — the Agent card's rule
+    /// (`AgentModelPickerView.cardWidth`). The BYOK catalogs land while the
+    /// card is open, and a width measured from them grew the card under the
+    /// pointer and re-measured hundreds of names on every render. A longer
+    /// name truncates.
+    private var cardWidth: CGFloat { MenuCard.pickerCardWidth }
 
     private func arm(_ r: Row) {
         current = r
-        lastPick[r.provider.isFirstParty ? .notchi : .byok] = r
         onSelect(r)
     }
 
-    /// Flip the list to the other source, restoring what was last highlighted
-    /// there (or its first model). The pick is not committed: writing it on
-    /// the flip retitled the chip, which resized, which dragged this card
-    /// with it. A click (or Return) is what writes.
-    private func switchSource(_ next: Source) {
-        guard next != source else { return }
-        moreOpen = false
-        snapScroll = true
-        var t = Transaction()
-        t.disablesAnimations = true
-        withTransaction(t) {
-            source = next
-            if let pick = lastPick[next] ?? fleet(for: next).first {
-                current = pick
-                lastPick[next] = pick
-            }
-        }
-    }
-
-    private func followSelection(_ proxy: ScrollViewProxy, animated: Bool = true) {
-        guard visibleRows.contains(current) else { return }
-        if animated {
-            withAnimation(.easeOut(duration: 0.12)) {
-                proxy.scrollTo(current, anchor: .center)
-            }
-        } else {
+    private func followSelection(_ proxy: ScrollViewProxy) {
+        guard allRows.contains(current) else { return }
+        withAnimation(.easeOut(duration: 0.12)) {
             proxy.scrollTo(current, anchor: .center)
         }
     }
 
-    /// Hairline plus the 7pt it keeps from the rows on each side.
-    private static var sectionRule: CGFloat { 0.5 + 7 + 7 }
+    /// What the rule between sections keeps from the rows on each side.
+    private static let ruleGap: CGFloat = MenuCard.pickerRuleGap
+    /// Hairline plus `ruleGap` on each side.
+    private static var sectionRule: CGFloat { 0.5 + ruleGap * 2 }
 
-    /// The card's height with the list window and both chrome rows in place,
-    /// so a source flip cannot change `fittingSize`.
+    /// The card's height: the search row, the Auto switch, and the list window.
     private var cardHeight: CGFloat {
-        var h = listHeight + Self.sectionRule + MenuCard.rowHeight
-        if showsSourceSwitch {
-            h += Self.sectionRule + MenuCard.rowHeight
-        }
-        return h + MenuCard.cardPad * 2
-    }
-
-    /// The source switch: a Liquid Glass segmented control. The native
-    /// `.segmented` picker draws its inactive, flat-grey face here, because this
-    /// panel never becomes key. So the track is a faint capsule and the chosen
-    /// segment wears the glass capsule the compose chips use, in the caption
-    /// face. Held at a row's height so `cardHeight` still adds up.
-    private var sourceRow: some View {
-        let height: CGFloat = 22
-        let inset: CGFloat = 2
-        return GeometryReader { geo in
-            let segment = geo.size.width / CGFloat(max(1, sources.count))
-            let index = CGFloat(sources.firstIndex(of: source) ?? 0)
-            ZStack(alignment: .leading) {
-                Capsule().fill(.clear)
-                    .glassCapsule(in: Capsule(), brighter: true)
-                    .frame(width: segment - inset * 2, height: height - inset * 2)
-                    .offset(x: index * segment + inset)
-                HStack(spacing: 0) {
-                    ForEach(sources, id: \.self) { s in
-                        Button { switchSource(s) } label: {
-                            Text(sourceTitle(s))
-                                .font(.sf(MenuCard.accessoryFontSize, weight: .regular))
-                                .foregroundStyle(s == source ? Tokens.text1 : Tokens.text3)
-                                .lineLimit(1)
-                                .frame(width: segment, height: height)
-                                .contentShape(Capsule())
-                        }
-                        .buttonStyle(.plain).exemptsDoubleClickPin()
-                    }
-                }
-            }
-            .frame(width: geo.size.width, height: height)
-            .background(Capsule().fill(Color.white.opacity(0.06)))
-        }
-        .frame(height: height)
-        .frame(maxWidth: .infinity)
-        .frame(height: MenuCard.rowHeight)
+        var h = listHeight + MenuCard.cardPad * 2
+        h += Self.rowHeight + Self.sectionRule              // search row
+        if autoRow != nil { h += Self.rowHeight + Self.sectionRule }
+        return h
     }
 
     /// Reuse the catalog's full metadata whenever the recent row is still present
@@ -3033,8 +3032,7 @@ struct AskRecentModelPickerView: View {
     /// bare-id fallback; it carries the same curated speed/intelligence inference
     /// the full picker uses until richer metadata arrives.
     static func detailModel(for row: Row) -> PickerModel {
-        if let model = ModelCatalogStore.shared.rows(selected: row.provider)
-            .first(where: { $0.provider == row.provider && $0.info.id == row.id }) {
+        if let model = ModelCatalogStore.shared.row(provider: row.provider, id: row.id) {
             return model
         }
         let name = ModelRatings.prettyName(for: row.id, provider: row.provider)
@@ -3055,8 +3053,23 @@ struct AskRecentModelPickerView: View {
             switch event.keyCode {
             case 126: step(-1); return nil               // ↑
             case 125: step(1);  return nil               // ↓
-            case 36, 76, 53: onDone(); return nil        // Return / keypad Enter / Esc
-            default: return event
+            case 36, 76:                                 // Return / keypad Enter
+                // A query whose results don't hold the armed row picks the
+                // first result.
+                if !query.isEmpty, !armable.contains(current), let first = armable.first {
+                    arm(first)
+                }
+                onDone(); return nil
+            case 53:                                     // Esc
+                if query.isEmpty { onDone() } else { query = "" }
+                return nil
+            case 51:                                     // Delete
+                if !query.isEmpty { query.removeLast() }
+                return nil
+            default:
+                guard let chars = ModelSearch.typed(event) else { return event }
+                query += chars
+                return nil
             }
         }
     }
@@ -3074,85 +3087,119 @@ struct AskRecentModelPickerView: View {
     }
 }
 
-/// The Ask menu's More models submenu: Notchi's named models, in the parent
-/// card's rows, hung beside it. A click picks and closes both cards. Past
-/// eight rows the list scrolls.
-private struct AskMoreModelsCard: View {
-    typealias Row = AskRecentModelPickerView.Row
-
-    let rows: [Row]
-    let current: Row
-    let onPick: (Row) -> Void
-
-    @StateObject private var detailAnchor = ModelDetailAnchor()
-    @StateObject private var listAnchor = ModelDetailAnchor()
-    /// Observed so the rows' wallet note follows the balance.
-    @ObservedObject private var nono = NoNoAccount.shared
-    @State private var scrolledOffTop = false
-    @State private var scrolledOffBottom = false
-
-    private static let maxRows = MenuCard.pickerListRows * 2
-    private static let edgeFade: CGFloat = 18
-
-    private var overflowing: Bool { rows.count > Self.maxRows }
-
-    private var listHeight: CGFloat {
-        CGFloat(min(rows.count, Self.maxRows)) * MenuCard.rowStride - MenuCard.rowSpacing
+/// The model menus' type-to-filter: matching rules and the key monitor's
+/// reading of a keystroke.
+enum ModelSearch {
+    /// Lowercased letters and digits only, so "glm5" finds "GLM-5.3-Flash".
+    static func normalized(_ s: String) -> String {
+        String(s.lowercased().unicodeScalars.filter(CharacterSet.alphanumerics.contains)
+            .map(Character.init))
     }
 
-    private var contentHeight: CGFloat {
-        CGFloat(rows.count) * MenuCard.rowStride - MenuCard.rowSpacing
+    /// The query's words, normalized. A row matches when its text holds all of them.
+    static func terms(_ query: String) -> [String] {
+        query.split(separator: " ").map { normalized(String($0)) }.filter { !$0.isEmpty }
     }
+
+    /// The text a keystroke types, or nil for a shortcut, an arrow or a
+    /// function key.
+    static func typed(_ event: NSEvent) -> String? {
+        guard event.modifierFlags.intersection([.command, .control]).isEmpty,
+              let chars = event.characters, !chars.isEmpty,
+              chars.unicodeScalars.allSatisfy({ $0.value >= 0x20 && $0.value != 0x7F
+                  && !(0xF700...0xF8FF).contains($0.value) })
+        else { return nil }
+        return chars
+    }
+}
+
+/// The search row on top of the model menus. The menus' panels cannot become
+/// key, so their key monitors type into it rather than into a text field.
+struct ModelSearchRow: View {
+    let query: String
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView(showsIndicators: false) {
-                VStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
-                    ForEach(rows, id: \.self) { r in
-                        row(r).id(r)
-                    }
-                }
-                .onScrollOffsetChange { offset in
-                    let top = offset > 0.5
-                    if top != scrolledOffTop { scrolledOffTop = top }
-                    let bottom = offset < contentHeight - listHeight - 0.5
-                    if bottom != scrolledOffBottom { scrolledOffBottom = bottom }
-                }
-            }
-            .scrollEdgeFade(top: overflowing && scrolledOffTop,
-                            bottom: overflowing && scrolledOffBottom,
-                            fade: Self.edgeFade)
-            .frame(height: listHeight)
-            .background(ModelDetailAnchorProbe(anchor: listAnchor))
-            .onAppear {
-                if rows.contains(current) { proxy.scrollTo(current, anchor: .center) }
-            }
+        HStack(spacing: 1) {
+            if query.isEmpty { Caret(height: MenuCard.pickerFontSize + 3) }
+            Text(query.isEmpty ? L("model.picker.search") : query)
+                .font(.sf(MenuCard.pickerFontSize, weight: .regular))
+                .foregroundStyle(query.isEmpty ? Tokens.text4 : Tokens.text1)
+                .lineLimit(1)
+                .truncationMode(.head)
+            if !query.isEmpty { Caret(height: MenuCard.pickerFontSize + 3) }
         }
-        .padding(MenuCard.cardPad)
-        .frame(width: AskRecentModelPickerView.width(of: rows), alignment: .topLeading)
-        .background(ModelDetailAnchorProbe(anchor: detailAnchor))
-        .onDisappear { ModelDetailPanel.shared.scheduleHide() }
+        .padding(.horizontal, MenuCard.pickerRowPad)
+        .frame(height: MenuCard.pickerRowHeight)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func row(_ r: Row) -> some View {
-        MenuCardRow(
-            title: ModelRatings.prettyName(for: r.id, provider: r.provider),
-            accessory: AskRecentModelPickerView.accessory(for: r),
-            lowBalance: AskRecentModelPickerView.lowBalance(r),
-            brandTitle: AskRecentModelPickerView.isHouse(r),
-            emphasized: true,
-            selected: r == current,
-            haptic: false) {
-                onPick(r)
-            }
-            .onHover { inside in
-                if inside, listAnchor.containsPointer, let frame = detailAnchor.frame {
-                    ModelDetailPanel.shared.show(AskRecentModelPickerView.detailModel(for: r),
-                                                 beside: frame)
-                } else if !inside {
-                    ModelDetailPanel.shared.scheduleHide()
-                }
-            }
+    /// The text cursor: a 1pt bar blinking at the system field's rate. Its own
+    /// view, so only the bar re-renders on each blink.
+    private struct Caret: View {
+        let height: CGFloat
+        @State private var on = true
+
+        var body: some View {
+            Rectangle()
+                .fill(Tokens.text1)
+                .frame(width: 1, height: height)
+                .opacity(on ? 1 : 0)
+                .animation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true), value: on)
+                .onAppear { on = false }
+        }
+    }
+
+    /// The "no results" line, in the rows' place.
+    static var noMatch: some View {
+        Text(L("model.picker.noMatch"))
+            .font(.sf(MenuCard.pickerFontSize, weight: .regular))
+            .foregroundStyle(Tokens.text4)
+            .lineLimit(1)
+            .padding(.horizontal, MenuCard.pickerRowPad)
+            .frame(height: MenuCard.pickerRowHeight)
+    }
+}
+
+/// Notchi models the user switched off in Settings → Models and Pricing. They
+/// stay out of the Ask chip's model menu. Every model is on by default except
+/// `offByDefault`, and the Auto routers cannot be switched off. Stored as
+/// newline-separated ids so Settings can bind it with `@AppStorage`: a bare id
+/// is switched off, a `+id` is an `offByDefault` model switched on.
+enum NotchiModelVisibility {
+    static let defaultsKey = "notchi_hidden_models"
+
+    /// Off until switched on, and listed last.
+    static let offByDefault: Set<String> = ["mimo-v2.6-flash", "mimo-v2.6-pro"]
+
+    static func hidden(in raw: String) -> Set<String> {
+        let lines = raw.split(separator: "\n").map(String.init)
+        let switchedOn = Set(lines.filter { $0.hasPrefix("+") }.map { String($0.dropFirst()) })
+        return Set(lines.filter { !$0.hasPrefix("+") })
+            .union(offByDefault.subtracting(switchedOn))
+    }
+
+    static var hidden: Set<String> {
+        hidden(in: UserDefaults.standard.string(forKey: defaultsKey) ?? "")
+    }
+
+    static func isShown(_ id: String) -> Bool {
+        id.hasPrefix("auto-") || !hidden.contains(id)
+    }
+
+    /// `raw` with `id` switched on or off.
+    static func setting(_ id: String, shown: Bool, in raw: String) -> String {
+        var lines = Set(raw.split(separator: "\n").map(String.init))
+        lines.remove(id)
+        lines.remove("+" + id)
+        if shown, offByDefault.contains(id) { lines.insert("+" + id) }
+        if !shown, !offByDefault.contains(id) { lines.insert(id) }
+        return lines.sorted().joined(separator: "\n")
+    }
+
+    /// `items` with the `offByDefault` models moved to the end, otherwise in
+    /// their own order.
+    static func ordered<T>(_ items: [T], id: (T) -> String) -> [T] {
+        items.filter { !offByDefault.contains(id($0)) } + items.filter { offByDefault.contains(id($0)) }
     }
 }
 
@@ -3427,11 +3474,30 @@ struct AgentModelPickerView: View {
         return allEngineChoices.filter { !recent.contains($0) }
     }
 
+    /// What the search row holds — see the Ask menu's `query`.
+    @State private var query = ""
+
+    /// Both halves narrowed to the query, read once per render.
+    private var shown: (recent: [AgentModelChoice], other: [AgentModelChoice]) {
+        let recent = recentChoices, other = otherChoices
+        let terms = ModelSearch.terms(query)
+        guard !terms.isEmpty else { return (recent, other) }
+        func matches(_ c: AgentModelChoice) -> Bool {
+            let hay = ModelSearch.normalized(c.label + " " + (c.id ?? "") + " "
+                                             + groupTitle(for: c.engine))
+            return terms.allSatisfy { hay.contains($0) }
+        }
+        return (recent.filter(matches), other.filter(matches))
+    }
+
     /// The list's content, in the order it's drawn: recents, then the rest.
     /// Everything downstream — ↑/↓, the gliding wash's row arithmetic, the
     /// overflow fades — reads this one flat array, so the split is a rule about
     /// ORDER, not a second list to keep in sync.
-    private var engineChoices: [AgentModelChoice] { recentChoices + otherChoices }
+    private var engineChoices: [AgentModelChoice] {
+        let s = shown
+        return s.recent + s.other
+    }
 
     /// How many rows the recents section holds. Two rows past the list's own
     /// four-row window, so the section is worth scrolling into but can never
@@ -3441,7 +3507,10 @@ struct AgentModelPickerView: View {
     /// Whether the two halves both exist and so want a rule between them. A
     /// first-ever open (no history) and an engine whose whole fleet is already
     /// recent both draw one plain list.
-    private var showsDivider: Bool { !recentChoices.isEmpty && !otherChoices.isEmpty }
+    private var showsDivider: Bool {
+        let s = shown
+        return !s.recent.isEmpty && !s.other.isEmpty
+    }
 
     /// What was last armed per engine while this card is up, so flipping
     /// GPT → Claude → GPT lands back on the GPT model you had, not on the
@@ -3514,19 +3583,25 @@ struct AgentModelPickerView: View {
     /// How deep the list dissolves at whichever edge is actually mid-scroll. At
     /// the old 6pt (the card's own padding) the taper was a sliver — rows ended
     /// on what read as a hard cut. Two thirds of a row is enough to see a row go.
-    /// Rows are a fixed 25pt at 2pt spacing, so the height is pure arithmetic —
+    /// Rows are a fixed height at fixed spacing, so the height is pure arithmetic —
     /// DEMANDED explicitly rather than `.frame(maxHeight:)`, because a flexible
     /// ScrollView inside an NSPopover just accepts whatever height the popover
     /// last proposed and clips.
     private static let edgeFade: CGFloat = 18
 
     /// The window the rows are drawn in: the four-row cap, or the content when it
-    /// is shorter.
-    private var listHeight: CGFloat { min(windowHeight, contentHeight) }
+    /// is shorter. Measured from the unfiltered fleet, so the card keeps its
+    /// size while a query narrows the list.
+    private var listHeight: CGFloat {
+        let recent = recentChoices.count, all = allEngineChoices.count
+        let full = CGFloat(max(1, all)) * MenuCard.pickerRowStride - MenuCard.rowSpacing
+            + (recent > 0 && recent < all ? Self.dividerStride : 0)
+        return min(windowHeight, full)
+    }
 
     /// The cap — four rows, whatever the fleet's length.
     private var windowHeight: CGFloat {
-        CGFloat(Self.listRows) * MenuCard.rowStride - MenuCard.rowSpacing
+        CGFloat(Self.listRows) * MenuCard.pickerRowStride - MenuCard.rowSpacing
     }
 
     /// What the rows actually add up to — the list's height while it is short, and
@@ -3534,7 +3609,7 @@ struct AgentModelPickerView: View {
     /// not the remaining travel). Floored at one row so an engine whose fleet has
     /// not landed yet leaves a row of space rather than a negative frame.
     private var contentHeight: CGFloat {
-        CGFloat(max(1, engineChoices.count)) * MenuCard.rowStride - MenuCard.rowSpacing
+        CGFloat(max(1, engineChoices.count)) * MenuCard.pickerRowStride - MenuCard.rowSpacing
             + (showsDivider ? Self.dividerStride : 0)
     }
 
@@ -3547,7 +3622,10 @@ struct AgentModelPickerView: View {
         // choice you came to make to the dials that qualify it. The model list
         // leads because it's what the card is for; the engine sits last because
         // it's the rarest change and it re-fills everything above it.
+        let rows = shown
         VStack(alignment: .leading, spacing: 0) {
+            ModelSearchRow(query: query)
+            hairline
             ScrollViewReader { proxy in
                 ScrollView(showsIndicators: false) {
                     VStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
@@ -3555,12 +3633,15 @@ struct AgentModelPickerView: View {
                         // tap away in the engine switch above, so the rows stay
                         // bare names. The ones this engine actually gets run with
                         // lead; the rest of its catalog follows under a rule.
-                        ForEach(recentChoices, id: \.self, content: modelRow)
-                        if showsDivider { listDivider }
-                        ForEach(otherChoices, id: \.self, content: modelRow)
+                        ForEach(rows.recent, id: \.self, content: modelRow)
+                        if !rows.recent.isEmpty && !rows.other.isEmpty { listDivider }
+                        ForEach(rows.other, id: \.self, content: modelRow)
+                        if rows.recent.isEmpty && rows.other.isEmpty, !query.isEmpty {
+                            ModelSearchRow.noMatch
+                        }
                     }
                     // The armed wash: ONE persistent shape behind the row stack,
-                    // riding a row-index offset (rows are fixed 25pt + 2pt spacing,
+                    // riding a row-index offset (rows are a fixed height and spacing,
                     // so the position is pure arithmetic). Re-arming animates the
                     // offset — the springy glide between rows — with no
                     // matchedGeometryEffect and no per-row background insertion,
@@ -3569,7 +3650,7 @@ struct AgentModelPickerView: View {
                         if let i = engineChoices.firstIndex(where: isSelected) {
                             Capsule(style: .continuous)
                                 .fill(.white.opacity(0.14))
-                                .frame(height: MenuCard.rowHeight)
+                                .frame(height: MenuCard.pickerRowHeight)
                                 .frame(maxWidth: .infinity)
                                 .offset(y: washOffset(row: i))
                                 .animation(Self.selectionSpring, value: i)
@@ -3625,6 +3706,11 @@ struct AgentModelPickerView: View {
                 // moves (see `scrollToSelection`).
                 .onChange(of: selectedModelID) { followSelection(proxy) }
                 .onChange(of: selectedEngine) { followSelection(proxy) }
+                // A new query starts the results from the top.
+                .onChange(of: query) {
+                    syncMirrors()
+                    if let first = engineChoices.first { proxy.scrollTo(first, anchor: .top) }
+                }
             }
 
             // Thinking strength — the same native detent slider the settings
@@ -3643,7 +3729,7 @@ struct AgentModelPickerView: View {
                 effortBar
                     // Caption, slider and marks share the model rows' left edge —
                     // the card has ONE text column, not one per section.
-                    .padding(.horizontal, MenuCard.rowPad)
+                    .padding(.horizontal, MenuCard.pickerRowPad)
             }
 
             hairline
@@ -3682,7 +3768,11 @@ struct AgentModelPickerView: View {
     /// highlight here is the single gliding shape behind the stack.
     @ViewBuilder
     private func modelRow(_ c: AgentModelChoice) -> some View {
-        MenuCardRow(title: shortLabel(c), emphasized: true,
+        MenuCardRow(title: shortLabel(c),
+                    fontSize: MenuCard.pickerFontSize,
+                    height: MenuCard.pickerRowHeight,
+                    horizontalPadding: MenuCard.pickerRowPad,
+                    emphasized: true,
                     selected: isSelected(c), wash: false, haptic: false) {
             // Menu semantics, same as the Ask recents menu: one click picks the
             // model AND closes — no lingering card after the choice is made. The
@@ -3723,8 +3813,7 @@ struct AgentModelPickerView: View {
         case .pi:          provider = .piCode
         case .dsh:         provider = .dshCode
         }
-        if let model = ModelCatalogStore.shared.rows(selected: provider)
-            .first(where: { $0.provider == provider && $0.info.id == id }) {
+        if let model = ModelCatalogStore.shared.row(provider: provider, id: id) {
             return model
         }
         let info = ModelInfo(id: id,
@@ -3738,37 +3827,34 @@ struct AgentModelPickerView: View {
                            displayName: choice.label)
     }
 
-    /// The rule between the used few and the rest of the catalog. Tighter than
-    /// the card's section `hairline` (7pt of air each side would spend a quarter
-    /// of the window on a gap): this is the recents card's own tail rule — 3pt
-    /// each side — because it separates rows inside one list rather than two
-    /// sections of the card.
+    /// The rule between the used few and the rest of the catalog, at the Ask
+    /// menu's rule gap.
     private var listDivider: some View {
         Rectangle().fill(.white.opacity(0.07))
             .frame(height: 0.5)
-            .padding(.horizontal, MenuCard.rowPad)
-            .padding(.vertical, 3)
+            .padding(.horizontal, MenuCard.pickerRowPad)
+            .padding(.vertical, MenuCard.pickerRuleGap)
     }
 
     /// What the divider costs every row under it: its own height plus the extra
     /// stack spacing its insertion adds. The wash rides pure row arithmetic (it
     /// never measures the rows), so the one thing that isn't a row has to be
     /// counted by hand here and in `contentHeight`.
-    private static let dividerStride: CGFloat = 0.5 + 3 * 2 + MenuCard.rowSpacing
+    private static let dividerStride: CGFloat = 0.5 + MenuCard.pickerRuleGap * 2 + MenuCard.rowSpacing
 
     /// Where the armed wash sits: its row's offset, plus the divider once the
     /// armed row is below it.
     private func washOffset(row i: Int) -> CGFloat {
-        CGFloat(i) * MenuCard.rowStride
-            + (showsDivider && i >= recentChoices.count ? Self.dividerStride : 0)
+        CGFloat(i) * MenuCard.pickerRowStride
+            + (showsDivider && i >= shown.recent.count ? Self.dividerStride : 0)
     }
 
     /// The rule between the card's three sections — inset to the rows' own
     /// text column so it reads as a fold in the list, not a bar across the card.
     private var hairline: some View {
         Rectangle().fill(.white.opacity(0.07)).frame(height: 0.5)
-            .padding(.horizontal, MenuCard.rowPad)
-            .padding(.vertical, 7)
+            .padding(.horizontal, MenuCard.pickerRowPad)
+            .padding(.vertical, MenuCard.pickerRuleGap)
     }
 
     /// The engine switch: a plain full-width row carrying the family name, and a
@@ -3796,7 +3882,7 @@ struct AgentModelPickerView: View {
             // the old chip's "Cmd").
             HStack(spacing: 6) {
                 Text(groupTitle(for: selectedEngine))
-                    .font(.sf(MenuCard.fontSize, weight: .regular))
+                    .font(.sf(MenuCard.pickerFontSize, weight: .regular))
                     .foregroundStyle(engineHovering ? Tokens.text2 : Tokens.text4)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -3806,8 +3892,8 @@ struct AgentModelPickerView: View {
                     .foregroundStyle(Tokens.text3)
                     .opacity(engineHovering ? 1 : 0)
             }
-            .padding(.horizontal, MenuCard.rowPad)
-            .frame(height: MenuCard.rowHeight)
+            .padding(.horizontal, MenuCard.pickerRowPad)
+            .frame(height: MenuCard.pickerRowHeight)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background { if engineHovering { shape.fill(.white.opacity(0.06)) } }
             .contentShape(shape)
@@ -3927,8 +4013,24 @@ struct AgentModelPickerView: View {
             case 125: stepModel(1);  return nil          // ↓
             case 123: stepEffort(-1); return nil         // ←
             case 124: stepEffort(1);  return nil         // →
-            case 36, 76, 53: onDone(); return nil        // Return / keypad Enter / Esc
-            default: return event
+            case 36, 76:                                 // Return / keypad Enter
+                // A query whose results don't hold the armed model picks the
+                // first result.
+                let rows = choicesMirror
+                if !query.isEmpty, !rows.contains(where: isSelected), let first = rows.first {
+                    arm(first)
+                }
+                onDone(); return nil
+            case 53:                                     // Esc
+                if query.isEmpty { onDone() } else { query = "" }
+                return nil
+            case 51:                                     // Delete
+                if !query.isEmpty { query.removeLast() }
+                return nil
+            default:
+                guard let chars = ModelSearch.typed(event) else { return event }
+                query += chars
+                return nil
             }
         }
     }
@@ -3958,5 +4060,34 @@ struct AgentModelPickerView: View {
         let cur = selectedEffort.flatMap { rungs.firstIndex(of: $0) } ?? -1
         let next = min(max(cur + delta, -1), rungs.count - 1)
         onSelectEffort(next < 0 ? nil : rungs[next])
+    }
+}
+
+/// The "New" tag on one Notchi model in the Ask model menu. It shows for
+/// seven days from the first time the menu lists it, and goes after the row
+/// is clicked once.
+enum ModelNewMarks {
+    static let modelID = "claude-haiku-5.5"
+    private static let firstShownKey = "modelNewMark.\(modelID).firstShown"
+    private static let seenKey = "modelNewMark.\(modelID).seen"
+    private static let lifetime: TimeInterval = 7 * 24 * 60 * 60
+
+    static var seen: Bool {
+        get { UserDefaults.standard.bool(forKey: seenKey) }
+        set { UserDefaults.standard.set(newValue, forKey: seenKey) }
+    }
+
+    /// Starts the seven days on the first read.
+    static var active: Bool {
+        guard !seen else { return false }
+        let defaults = UserDefaults.standard
+        let first: Date
+        if let stored = defaults.object(forKey: firstShownKey) as? Date {
+            first = stored
+        } else {
+            first = Date()
+            defaults.set(first, forKey: firstShownKey)
+        }
+        return Date().timeIntervalSince(first) < lifetime
     }
 }

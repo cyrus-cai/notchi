@@ -414,6 +414,13 @@ struct NotchBody: View {
                 refocusInput()
             }
         }
+        // ⌘C on a passage of the answer offers it as a quote; the caret moves to
+        // the follow-up field so the question can be typed straight away.
+        .onChange(of: model.quoteOffer != nil) { _, offered in
+            if offered, model.open, model.mode == .result {
+                refocusInput()
+            }
+        }
         // Leaving a thread (← / ⌘N new-chat, tearing it off into a window) empties
         // `turns` while the panel — and this view — stay mounted, so neither init's
         // seed nor the measurement probe runs again: the OLD thread's measurement
@@ -1400,6 +1407,9 @@ struct NotchBody: View {
                 if NoNoAccount.shared.snapshot == nil {
                     Task { await NoNoAccount.shared.load() }
                 }
+                // The keyed providers' live catalogs, cached for an hour. Not
+                // `loadAll`: the CLI probes it also runs list nothing here.
+                Task { await catalog.loadKeyed() }
                 model.showAskModelPicker.toggle()
             } else {
                 model.settingsSection = "Model"
@@ -1416,21 +1426,14 @@ struct NotchBody: View {
             open: model.showAskModelPicker,
             onDismiss: { _ in model.showAskModelPicker = false },
             card: {
-                AnyView(AskRecentModelPickerView(
-                    rows: askRecentModelRows,
-                    pinned: askPinnedModelRows,
+                let sections = askModelSections
+                return AnyView(AskRecentModelPickerView(
+                    lead: sections.lead,
+                    rest: sections.rest,
                     selectedProvider: selectedProvider,
                     selectedModelID: selectedModelID,
                     onSelect: { row in
                         ModelCatalogStore.select(provider: row.provider, model: row.id)
-                    },
-                    // "More models…" (BYOK only) hands off to Settings' Model pane —
-                    // the full cross-provider catalog the recents menu doesn't carry.
-                    onMoreModels: {
-                        model.settingsSection = "Model"
-                        withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
-                            model.openSettings()
-                        }
                     },
                     onDone: { model.showAskModelPicker = false })
                     .preferredColorScheme(.dark)
@@ -1438,55 +1441,84 @@ struct NotchBody: View {
             }))
     }
 
-    /// BYOK rows for the Ask chip's quick menu: the selection in effect first (when
-    /// it isn't a Notchi model), then the most recently asked-through keyed/CLI
-    /// models (`AskModelMRU`), skipping duplicates and providers that can't serve
-    /// right now, capped at the MRU's ten. No padding: fewer recents than that
-    /// just means a shorter menu — every row is something the user actually used
-    /// or picked, never a catalog filler. Past four the menu keeps its height and
-    /// scrolls (see `AskRecentModelPickerView`).
+    /// The Ask chip's quick menu, one list across Notchi and the user's own keys.
+    /// `lead`: Notchi's Auto routers, then the selection in effect and the most
+    /// recently asked-through models (`AskModelMRU`) from either source, skipping
+    /// duplicates, keyed/CLI providers that can't serve right now and Notchi ids
+    /// the gateway no longer lists, capped at the MRU's ten. The same model on
+    /// Notchi and on the user's key is two rows. `rest`: the remaining Notchi
+    /// lineup, featured models first, then every model of each provider the
+    /// user has a key for (`askBYOKRows`).
     ///
     /// With nothing configured there are no recents worth listing — the "selection
     /// in effect" is a provider default nobody chose and every MRU slot is empty —
-    /// so the menu becomes the CLI offer instead: whichever of the local agent CLIs
-    /// is installed and signed in, ready to use as-is.
-    private var askRecentModelRows: [AskRecentModelPickerView.Row] {
-        guard model.isConfigured else {
-            return availableCLIProviders.map {
-                AskRecentModelPickerView.Row(provider: $0,
-                                             id: APIKeyStore.effectiveModel(for: $0)
-                                                 ?? $0.defaultModel)
+    /// so the recents become the CLI offer instead: whichever of the local agent
+    /// CLIs is installed and signed in, ready to use as-is.
+    private var askModelSections: (lead: [AskRecentModelPickerView.Row],
+                                   rest: [AskRecentModelPickerView.Row]) {
+        typealias Row = AskRecentModelPickerView.Row
+        let lineup = askNotchiLineup
+        let auto = lineup.filter { $0.id.hasPrefix("auto-") }
+        var recents: [Row] = []
+        if model.isConfigured {
+            func add(_ r: Row) {
+                guard !auto.contains(r), !recents.contains(r) else { return }
+                if r.provider.isFirstParty {
+                    guard lineup.contains(r) else { return }
+                } else {
+                    guard ModelCatalogStore.ready(r.provider) else { return }
+                }
+                recents.append(r)
+            }
+            let selected = Row(provider: selectedProvider, id: selectedModelID)
+            if !auto.contains(selected) { recents.append(selected) }
+            for e in AskModelMRU.entries { add(Row(provider: e.provider, id: e.model)) }
+            recents = Array(recents.prefix(AskModelMRU.capacity))
+        } else {
+            recents = availableCLIProviders.map {
+                Row(provider: $0, id: APIKeyStore.effectiveModel(for: $0) ?? $0.defaultModel)
             }
         }
-        var rows = [AskRecentModelPickerView.Row(provider: selectedProvider, id: selectedModelID)]
-        for e in AskModelMRU.entries {
-            let row = AskRecentModelPickerView.Row(provider: e.provider, id: e.model)
-            guard !rows.contains(row), ModelCatalogStore.ready(e.provider) else { continue }
-            rows.append(row)
+        let named = lineup.filter { !$0.id.hasPrefix("auto-") && !recents.contains($0) }
+        let featured = AskRecentModelPickerView.featuredNotchiIDs.compactMap { id in
+            named.first { $0.id == id }
         }
-        // Our own models are never recents: the whole lineup is folded under the
-        // Notchi row below, and a copy up here would read as a second model with
-        // the same name — which is what the flat list did while the gateway's
-        // catalog was still loading.
-        return Array(rows.filter { !$0.provider.isFirstParty }.prefix(AskModelMRU.capacity))
+        let byok = askBYOKRows.filter { !recents.contains($0) }
+        return (auto + recents, featured + named.filter { !featured.contains($0) } + byok)
     }
 
-    /// Notchi's lineup for the Ask chip's source switch: every model the
-    /// gateway currently serves, whether or not this account has asked
-    /// through it. An empty or capped balance cannot pay for a turn, so
-    /// it offers nothing — a row that answers with a billing error is
-    /// worse than no row. The list window scrolls past four rows.
+    /// Every model of every provider the user brought a key for, in the
+    /// provider's own catalog order: the live list once fetched, the bundled
+    /// one before. Read straight from the catalog — `rows(selected:)` sorts and
+    /// folds every provider, which on a gateway is hundreds of rows per open.
+    /// CLI backends are not keys and stay out.
+    private var askBYOKRows: [AskRecentModelPickerView.Row] {
+        guard model.isConfigured else { return [] }
+        return Provider.offered
+            .filter { !$0.isFirstParty && !$0.isCLI && ModelCatalogStore.ready($0) }
+            .flatMap { p -> [AskRecentModelPickerView.Row] in
+                let live = catalog.liveByProvider[p]?.map(\.id) ?? []
+                let ids = live.isEmpty ? p.availableModels : live
+                return ids.map { AskRecentModelPickerView.Row(provider: p, id: $0) }
+            }
+    }
+
+    /// Notchi's lineup for the Ask chip's menu: every model the gateway
+    /// currently serves, whether or not this account has asked through it.
+    /// Listed even when the balance is empty or capped — the menu grays those
+    /// rows (`AskRecentModelPickerView.unavailable`) instead of dropping them.
+    /// Models switched off in Settings (`NotchiModelVisibility`) are left out.
     ///
     /// The lineup is the live `/v1/models` snapshot (`liveByProvider`).
     /// Until that fetch lands, the bundled `auto-us` row keeps the section
     /// from being empty — never a remembered id, which would turn this
     /// into a recents list of models already used.
-    private var askPinnedModelRows: [AskRecentModelPickerView.Row] {
-        guard let snapshot = nono.snapshot, !snapshot.isEmpty, !snapshot.cappedForToday,
-              ModelCatalogStore.ready(.nono) else { return [] }
+    private var askNotchiLineup: [AskRecentModelPickerView.Row] {
+        guard ModelCatalogStore.ready(.nono) else { return [] }
         let live = catalog.liveByProvider[.nono]?.map(\.id) ?? []
         let ids = live.isEmpty ? Provider.nono.availableModels : live
-        return ids.map { AskRecentModelPickerView.Row(provider: .nono, id: $0) }
+        return NotchiModelVisibility.ordered(ids.filter(NotchiModelVisibility.isShown), id: { $0 })
+            .map { AskRecentModelPickerView.Row(provider: .nono, id: $0) }
     }
 
     /// The agent CLIs that are installed *and* signed in right now — real backends
@@ -1891,6 +1923,13 @@ struct NotchBody: View {
         }
     }
 
+    /// Whether the loop started its thread. A loop running in a conversation
+    /// carries no Loop tag. A loop whose first round has not run has no thread
+    /// yet, and will start one.
+    private func loopStartedThread(_ id: UUID) -> Bool {
+        model.history.first(where: { $0.id == id })?.loopBorn ?? true
+    }
+
     private func chatLoopRowLabel(_ loop: ChatLoopManager.ChatLoop) -> some View {
         HStack(spacing: 8) {
             AgentStatusDot(running: loop.isRunning,
@@ -1902,7 +1941,7 @@ struct NotchBody: View {
                                  : (loop.failed ? Tokens.danger.opacity(0.9) : Tokens.text2))
                 .lineLimit(1)
                 .truncationMode(.tail)
-            loopTag
+            if loopStartedThread(loop.id) { loopTag }
             Spacer(minLength: 8)
             if let started = loop.roundStartedAt {
                 TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -3835,7 +3874,7 @@ struct NotchBody: View {
                                 .lineLimit(1)
                                 .truncationMode(.tail)
                                 .layoutPriority(-1)
-                            if item.isLoop { loopTag }
+                            if item.loopBorn { loopTag }
                             Spacer(minLength: 0)
                             // Ask rows show how long ago; Note/Reminder captures
                             // show where tapping goes, in the same trailing slot —
@@ -5111,6 +5150,12 @@ struct NotchBody: View {
             || agentManager.tasks.contains { $0.id == id && $0.loopActive }
     }
 
+    /// A running loop's thread that the loop started. A loop running in a
+    /// conversation keeps the conversation's header and placeholder.
+    private var loopThreadOnScreen: Bool {
+        threadLoopActive && model.conversation.hasLoopRound
+    }
+
     /// Whether the follow-up field holds something to send. Stop takes the slot
     /// from Send only while a round is streaming.
     private var followUpHasDraft: Bool {
@@ -5412,6 +5457,10 @@ struct NotchBody: View {
         let onDelete: (() -> Void)? = thread != nil || model.threadIsAgentRun
             || model.isStreaming ? nil : { deleteTurn(turn) }
         let onEdit: (() -> Void)? = thread == nil && model.canEdit(turn) ? { editTurn(turn) } : nil
+        // Continue sits under a cut-off answer on the result page. The idle
+        // page's peek is the bottom of this same turn, so the button would be
+        // the only line on the home page.
+        let showsContinue = thread == nil
         // The turn's place in its thread, for the lookups below that walk back
         // from it.
         let index = thread == nil ? model.conversation.index(of: turn.id)
@@ -5519,7 +5568,7 @@ struct NotchBody: View {
                     },
                     onReplaceOriginal: model.replaceTargets[turn.id] == nil ? nil
                         : { model.replaceOriginal(turnID: turn.id) },
-                    onContinue: turn.interrupted && isLastTurn && !model.isStreaming
+                    onContinue: showsContinue && turn.interrupted && isLastTurn && !model.isStreaming
                         ? { model.continueAnswer(turnID: turn.id) } : nil,
                     question: index.map { thread.question(at: $0) } ?? "",
                     sharedLinks: turn.sharedLinks,
@@ -5589,7 +5638,9 @@ struct NotchBody: View {
         HStack(spacing: 10) {
             backButton()
             Spacer(minLength: 0)
-            if threadLoopActive, let info = threadLoopInfo {
+            // Only a thread the loop started shows its schedule here. A loop
+            // running in a conversation is managed from the task list.
+            if loopThreadOnScreen, let info = threadLoopInfo {
                 loopScheduleChip(minutes: info.intervalMinutes) { minutes in
                     let id = model.threadHistoryID
                     chatLoops.setInterval(id, minutes: minutes)
@@ -6185,7 +6236,8 @@ struct NotchBody: View {
                         .opacity(model.guideLocksInput ? 0.4 : 1)
                         .allowsHitTesting(!model.guideLocksInput)
 
-                    if agentFollowUpMetadata != nil || threadLoopInfo != nil {
+                    if agentFollowUpMetadata != nil
+                        || (threadLoopInfo != nil && model.conversation.hasLoopRound) {
                         GlassIconButton(systemName: "command",
                                         help: L("agent.detail"),
                                         size: Self.splitRailChip,
@@ -6358,12 +6410,12 @@ struct NotchBody: View {
                 Text(model.agentThreadTaskRunning
                     ? L("result.followUp.agentQueue", engine.displayName)
                     : L("result.followUp.agentContinue", engine.displayName))
-            } else if threadLoopActive, let next = threadLoopInfo?.nextRoundAt {
+            } else if loopThreadOnScreen, let next = threadLoopInfo?.nextRoundAt {
                 TimelineView(.periodic(from: .now, by: 1)) { context in
                     Text(L("loop.waiting",
                            LoopInterval.countdown(next.timeIntervalSince(context.date))))
                 }
-            } else if threadLoopActive {
+            } else if loopThreadOnScreen {
                 Text(L("loop.followUp"))
             } else if !model.threadIsAgentRun, let suggestion = model.followUpSuggestion {
                 Text(suggestion)
@@ -9550,13 +9602,24 @@ struct RoutinesPanel: View {
         .background {
             ZStack {
                 Rectangle().fill(.clear).nativeGlass(in: Rectangle())
-                Color.black.opacity(0.95)
+                Color.black.opacity(0.6)
             }
             .mask {
                 HStack(spacing: 0) {
                     LinearGradient(colors: [.clear, .black],
                                    startPoint: .leading, endPoint: .trailing)
                         .frame(width: Self.edgeFade)
+                    Color.black
+                }
+            }
+            // The glass draws a lit rim along its top edge, which sits on the
+            // panel's top. Fade the top out so the page meets the panel there
+            // the way the panel meets the notch: no edge.
+            .mask {
+                VStack(spacing: 0) {
+                    LinearGradient(colors: [.clear, .black],
+                                   startPoint: .top, endPoint: .bottom)
+                        .frame(height: Self.topFade)
                     Color.black
                 }
             }
@@ -9567,6 +9630,8 @@ struct RoutinesPanel: View {
 
     /// How far left of the page its background fades in.
     static let edgeFade: CGFloat = 40
+    /// How far down from the page's top its background fades in.
+    static let topFade: CGFloat = 12
 
     private func row(_ item: Item) -> some View {
         HStack(alignment: .center, spacing: 12) {
