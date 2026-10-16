@@ -1,21 +1,23 @@
 import SwiftUI
 
-/// One model card standing in the wallet: the lineup's name on the left, the
-/// vendor's mark and name on the right.
+/// One model card standing in the wallet: the vendor's mark and the lineup's
+/// name.
 struct WalletCard: Identifiable, Equatable {
     let id: String
     let name: String
     let vendor: String
 }
 
-/// Settings' credit card, drawn as a stitched pocket with the lineup's model
-/// cards standing in it. The balance is what the pocket holds; the cards are
-/// what it pays for. A thumb notch in the pocket's lip shows the front card.
+/// Settings' credit card, drawn as a pocket with the lineup's model cards
+/// standing side by side in it. The balance is what the pocket holds;
+/// the cards are what it pays for. Only each card's top edge shows, so the
+/// cards add one row of height. The pocket's top edge has a cut shaped like
+/// the MacBook notch, under the middle card.
 ///
-/// `cards` is front-first: the first entry sits nearest the pocket. Clicking a
-/// card calls `onCard`.
+/// Clicking a card calls `onCard`.
 struct WalletPocket<Content: View>: View {
     let cards: [WalletCard]
+    var cardHelp: String = ""
     var onCard: (WalletCard) -> Void
     @ViewBuilder var content: Content
 
@@ -23,18 +25,18 @@ struct WalletPocket<Content: View>: View {
     @State private var hovered: String?
     @State private var drawn = false
 
-    /// How much of each card shows above the one in front of it.
-    private static var strip: CGFloat { 26 }
-    /// Tall enough that the front card still fills the notch.
-    private static var cardHeight: CGFloat { 56 }
+    /// How much of each card shows above the pocket.
+    private static var strip: CGFloat { 28 }
+    /// Tall enough that the middle card still fills the notch.
+    private static var cardHeight: CGFloat { 50 }
     private static var cardInset: CGFloat { 12 }
 
     var body: some View {
         VStack(spacing: 0) {
-            Color.clear.frame(height: Self.strip * CGFloat(cards.count))
+            Color.clear.frame(height: cards.isEmpty ? 0 : Self.strip)
             pocket
         }
-        .background(alignment: .top) { cardStack }
+        .background(alignment: .top) { cardRow }
         .onAppear {
             guard !drawn else { return }
             if reduceMotion { drawn = true; return }
@@ -46,22 +48,16 @@ struct WalletPocket<Content: View>: View {
 
     private var pocket: some View {
         content
-            .padding(.horizontal, 16)
+            .padding(.horizontal, 14)
             .padding(.top, 14)
-            .padding(.bottom, 14)
+            .padding(.bottom, 12)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background {
                 PocketShape()
-                    .fill(LinearGradient(colors: [Color(white: 0.135), Color(white: 0.075)],
+                    // Opaque, so the cards' lower halves stay hidden behind it.
+                    .fill(LinearGradient(colors: [Color(white: 0.12), Color(white: 0.095)],
                                          startPoint: .top, endPoint: .bottom))
                     .shadow(color: .black.opacity(0.55), radius: 5, y: -2)
-            }
-            .overlay {
-                PocketShape()
-                    .inset(by: 6)
-                    .stroke(Color.white.opacity(0.16),
-                            style: StrokeStyle(lineWidth: 0.8, lineCap: .round, dash: [4, 3]))
-                    .allowsHitTesting(false)
             }
             .overlay {
                 PocketShape()
@@ -71,50 +67,47 @@ struct WalletPocket<Content: View>: View {
             .brandAura(in: PocketShape(), lineWidth: 1.2)
     }
 
-    /// Back card first in the ZStack, so the front card draws over the rest.
-    private var cardStack: some View {
-        let count = cards.count
-        return ZStack(alignment: .top) {
-            ForEach(Array(cards.enumerated().reversed()), id: \.element.id) { index, card in
-                // Row 0 is the back of the stack, at the top.
-                let row = count - 1 - index
-                let lift: CGFloat = hovered == card.id ? -6 : 0
+    private var cardRow: some View {
+        HStack(spacing: 6) {
+            ForEach(Array(cards.enumerated()), id: \.element.id) { index, card in
+                let lift: CGFloat = hovered == card.id ? -5 : 0
                 // Before the first draw every card waits inside the pocket.
-                let tucked: CGFloat = drawn ? 0 : Self.strip * CGFloat(count - row) + 6
-                cardView(card, depth: index)
+                let tucked: CGFloat = drawn ? 0 : Self.strip + 6
+                cardView(card, lit: hovered == card.id)
+                    .frame(maxWidth: .infinity)
                     .frame(height: Self.cardHeight, alignment: .top)
-                    .offset(y: Self.strip * CGFloat(row) + lift + tucked)
+                    .offset(y: lift + tucked)
+                    .animation(reduceMotion ? nil
+                               : .spring(response: 0.45, dampingFraction: 0.8)
+                                   .delay(drawn ? Double(index) * 0.05 : 0),
+                               value: drawn)
                     .onHover { inside in
                         withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.75)) {
                             hovered = inside ? card.id : (hovered == card.id ? nil : hovered)
                         }
                     }
                     .onTapGesture { onCard(card) }
+                    .help(cardHelp)
             }
         }
         .padding(.horizontal, Self.cardInset)
     }
 
-    /// `depth` 0 is the front card, the brightest; each card behind is darker.
-    private func cardView(_ card: WalletCard, depth: Int) -> some View {
-        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
-        let tone = max(0.13, 0.30 - Double(depth) * 0.07)
-        return HStack(spacing: 8) {
-            Text(card.name)
-                .font(.sf(Tokens.TypeSize.label, weight: .medium))
-                .foregroundStyle(Tokens.text1)
-                .lineLimit(1)
-            Spacer(minLength: 8)
-            Text(card.vendor.uppercased())
-                .font(.system(size: 9.5, weight: .medium, design: .monospaced))
-                .tracking(0.8)
-                .foregroundStyle(Tokens.text3)
-                .lineLimit(1)
+    private func cardView(_ card: WalletCard, lit: Bool) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 11, style: .continuous)
+        let tone = lit ? 0.31 : 0.24
+        return HStack(spacing: 6) {
             VendorLogo(vendor: card.vendor, fallback: card.name)
                 .frame(width: 12, height: 12)
-                .opacity(0.85)
+                .opacity(0.9)
+            Text(card.name)
+                .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                .foregroundStyle(lit ? Tokens.text1 : Tokens.text2)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, 10)
         .frame(height: Self.strip)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background {
@@ -127,36 +120,41 @@ struct WalletPocket<Content: View>: View {
                                       startPoint: .topTrailing, endPoint: .center))
                 .allowsHitTesting(false)
         }
-        .overlay { shape.strokeBorder(Color.white.opacity(0.14), lineWidth: 0.5) }
+        .overlay { shape.strokeBorder(Color.white.opacity(lit ? 0.24 : 0.14), lineWidth: 0.5) }
         .contentShape(shape)
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
     }
 }
 
-/// A rounded rectangle with a thumb notch dipped into the middle of its top
-/// edge, the cut a card pocket has so the card inside can be pushed out.
+/// A rounded rectangle with a cut in the middle of its top edge shaped like
+/// the MacBook notch: flared top corners, straight sides, rounded bottom.
 struct PocketShape: InsettableShape {
     var cornerRadius: CGFloat = 18
-    var notchWidth: CGFloat = 84
-    var notchDepth: CGFloat = 15
+    var notchWidth: CGFloat = 76
+    var notchDepth: CGFloat = 11
     var insetAmount: CGFloat = 0
 
     func path(in rect: CGRect) -> Path {
         let r = rect.insetBy(dx: insetAmount, dy: insetAmount)
         let radius = max(0, cornerRadius - insetAmount)
-        let depth = max(0, notchDepth - insetAmount * 0.4)
-        let half = notchWidth / 2
-        let midX = r.midX
+        let depth = max(0, notchDepth - insetAmount)
+        let flare: CGFloat = 4
+        let bottom: CGFloat = min(5, depth)
+        let left = r.midX - notchWidth / 2
+        let right = r.midX + notchWidth / 2
         var p = Path()
         p.move(to: CGPoint(x: r.minX + radius, y: r.minY))
-        p.addLine(to: CGPoint(x: midX - half, y: r.minY))
-        p.addCurve(to: CGPoint(x: midX, y: r.minY + depth),
-                   control1: CGPoint(x: midX - half * 0.45, y: r.minY),
-                   control2: CGPoint(x: midX - half * 0.55, y: r.minY + depth))
-        p.addCurve(to: CGPoint(x: midX + half, y: r.minY),
-                   control1: CGPoint(x: midX + half * 0.55, y: r.minY + depth),
-                   control2: CGPoint(x: midX + half * 0.45, y: r.minY))
+        if depth > 0 {
+            p.addArc(tangent1End: CGPoint(x: left, y: r.minY),
+                     tangent2End: CGPoint(x: left, y: r.minY + depth), radius: flare)
+            p.addArc(tangent1End: CGPoint(x: left, y: r.minY + depth),
+                     tangent2End: CGPoint(x: right, y: r.minY + depth), radius: bottom)
+            p.addArc(tangent1End: CGPoint(x: right, y: r.minY + depth),
+                     tangent2End: CGPoint(x: right, y: r.minY), radius: bottom)
+            p.addArc(tangent1End: CGPoint(x: right, y: r.minY),
+                     tangent2End: CGPoint(x: r.maxX, y: r.minY), radius: flare)
+        }
         p.addLine(to: CGPoint(x: r.maxX - radius, y: r.minY))
         p.addArc(tangent1End: CGPoint(x: r.maxX, y: r.minY),
                  tangent2End: CGPoint(x: r.maxX, y: r.minY + radius), radius: radius)
