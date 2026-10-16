@@ -21,6 +21,7 @@
 		A1000051 /* InlineSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000050 /* InlineSettingsView.swift */; };
 		A1000731 /* ModelPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000730 /* ModelPickerView.swift */; };
 		A1000741 /* VendorLogos.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000740 /* VendorLogos.swift */; };
+		A1000DA1 /* WalletPocket.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000DA0 /* WalletPocket.swift */; };
 		A1000961 /* NoNoAccount.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000960 /* NoNoAccount.swift */; };
 		A1000C71 /* ClipPrivacy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000C70 /* ClipPrivacy.swift */; };
 		A1000D91 /* LinkGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000D90 /* LinkGate.swift */; };
@@ -135,6 +136,7 @@
 		A1000050 /* InlineSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlineSettingsView.swift; sourceTree = "<group>"; };
 		A1000730 /* ModelPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelPickerView.swift; sourceTree = "<group>"; };
 		A1000740 /* VendorLogos.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VendorLogos.swift; sourceTree = "<group>"; };
+		A1000DA0 /* WalletPocket.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletPocket.swift; sourceTree = "<group>"; };
 		A1000960 /* NoNoAccount.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoNoAccount.swift; sourceTree = "<group>"; };
 		A1000C70 /* ClipPrivacy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipPrivacy.swift; sourceTree = "<group>"; };
 		A1000D90 /* LinkGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkGate.swift; sourceTree = "<group>"; };
@@ -240,6 +242,7 @@
 				A1000050 /* InlineSettingsView.swift */,
 				A1000730 /* ModelPickerView.swift */,
 				A1000740 /* VendorLogos.swift */,
+				A1000DA0 /* WalletPocket.swift */,
 				A1000960 /* NoNoAccount.swift */,
 				A1000C70 /* ClipPrivacy.swift */,
 				A1000D90 /* LinkGate.swift */,
@@ -402,6 +405,7 @@
 				A1000051 /* InlineSettingsView.swift in Sources */,
 				A1000731 /* ModelPickerView.swift in Sources */,
 				A1000741 /* VendorLogos.swift in Sources */,
+				A1000DA1 /* WalletPocket.swift in Sources */,
 				A1000961 /* NoNoAccount.swift in Sources */,
 				A1000C71 /* ClipPrivacy.swift in Sources */,
 				A1000D91 /* LinkGate.swift in Sources */,

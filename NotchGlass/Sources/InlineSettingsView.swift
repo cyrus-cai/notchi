@@ -790,10 +790,6 @@ struct InlineSettingsView: View {
     /// push its own fields past the pane's height cap.
     private static let keySectionAnchor = "settings.keySection"
 
-    /// The Model group's card. Same radius as the pane's other recessed slab
-    /// (the template detail's prompt box), so the two read as one material.
-    private static let modelCardShape = RoundedRectangle.menu
-
     /// The empty inset above the pane's first row, and the length of the top
     /// taper that dissolves into it. The taper is the longer of the two (a fade
     /// that stops at the runway's edge reads as a hard cut), so it starts well
@@ -850,17 +846,12 @@ struct InlineSettingsView: View {
                 // Notchi's own lineup sits under the figure: a list to look at,
                 // not a choice to make here — the panel's model menu is where
                 // those tiers are picked.
-                VStack(alignment: .leading, spacing: 12) {
+                // Drawn as a pocket with the lineup's cards standing in it;
+                // a card opens Models and pricing. The pocket wears the brand
+                // aura whichever backend is answering.
+                WalletPocket(cards: walletCards, onCard: { _ in open(.pricing) }) {
                     nonoAccountRow
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .recessedSurface(in: Self.modelCardShape, lit: false)
-                // The mark is said ONCE, by the card — not by the rows below it.
-                // Lit whichever backend is answering: the card is Notchi's
-                // wallet either way.
-                .brandAura(in: Self.modelCardShape, lineWidth: 1.2)
                 // Everything you bring yourself, outside the card and unadorned,
                 // in the order you set it up: which backend answers, which of
                 // its models (only once it can answer), and the key that lets
@@ -2171,6 +2162,17 @@ struct InlineSettingsView: View {
             NonoLineupRow(id: id, name: ModelRatings.prettyName(for: id, provider: .nono),
                           info: ModelInfo(id: id, vendor: ModelRatings.vendor(for: id, provider: .nono)))
         }
+    }
+
+    /// The wallet's cards: the first three models the Ask chip's menu shows,
+    /// in the menu's order, Auto in front.
+    private var walletCards: [WalletCard] {
+        let hidden = NotchiModelVisibility.hidden(in: hiddenNotchiModels)
+        return NotchiModelVisibility.ordered(nonoLineupRows, id: \.id)
+            .filter { $0.id.hasPrefix("auto-") || !hidden.contains($0.id) }
+            .prefix(3)
+            .map { WalletCard(id: $0.id, name: $0.name,
+                              vendor: ModelRatings.vendor(for: $0.id, provider: .nono)) }
     }
 
     /// What this balance pays for: every model the gateway serves and the
