@@ -6730,9 +6730,9 @@ struct InlineSettingsView: View {
                 }
                 // Takes exactly the width its title needs; the two flexible
                 // buttons beside it divide what's left.
-                AboutSocialButton(kind: .coffee,
-                                  title: L("about.buyCoffee")) {
-                    LinkGate.shared.open(URL(string: "https://buymeacoffee.com/cyrus007")!)
+                AboutSocialButton(kind: .discord,
+                                  title: L("about.discord")) {
+                    LinkGate.shared.open(URL(string: "https://discord.gg/wdMH3CC9CW")!)
                 }
                 .fixedSize(horizontal: true, vertical: false)
                 Spacer(minLength: 0)
@@ -7356,14 +7356,14 @@ struct InlineSettingsView: View {
     }
 
     private enum AboutSocialKind {
-        case github, x, coffee
+        case github, x, discord
     }
 
     /// The site's Star button translated to native SwiftUI: on hover the brand
     /// mark exits through the top while the action glyph rises from below. X
-    /// uses the same grammar with X's own like-heart red, and Buy Me a Coffee
-    /// with its own cup burst, so the three feel related without adding
-    /// decorative particles around any of the marks.
+    /// uses the same grammar with X's own like-heart red, and Discord with a
+    /// pair of chat bubbles in its blurple, so the three feel related without
+    /// adding decorative particles around any of the marks.
     private struct AboutSocialButton: View {
         let kind: AboutSocialKind
         let title: String
@@ -7373,9 +7373,11 @@ struct InlineSettingsView: View {
         @State private var hovering = false
 
         private var accent: Color {
-            kind == .github
-                ? Color(red: 245 / 255, green: 166 / 255, blue: 35 / 255)
-                : Color(red: 249 / 255, green: 24 / 255, blue: 128 / 255)
+            switch kind {
+            case .github: Color(red: 245 / 255, green: 166 / 255, blue: 35 / 255)
+            case .x: Color(red: 249 / 255, green: 24 / 255, blue: 128 / 255)
+            case .discord: Color(red: 88 / 255, green: 101 / 255, blue: 242 / 255)
+            }
         }
 
         var body: some View {
@@ -7400,10 +7402,10 @@ struct InlineSettingsView: View {
                         .font(.sf(Tokens.TypeSize.label, weight: .medium))
                         .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
                         .lineLimit(1)
-                        // The row is narrower than three full titles. Coffee's
+                        // The row is narrower than three full titles. Discord's
                         // is the one that must stay whole, so the other two give
                         // up a little size rather than a tail of letters.
-                        .minimumScaleFactor(kind == .coffee ? 1 : 0.78)
+                        .minimumScaleFactor(kind == .discord ? 1 : 0.78)
 
                     Spacer(minLength: 0)
                 }
@@ -7417,8 +7419,6 @@ struct InlineSettingsView: View {
                     Capsule()
                         .strokeBorder(.white.opacity(hovering ? 0.16 : 0.08), lineWidth: 0.5)
                 )
-                // The coffee burst is drawn wider than its slot; keep it inside
-                // the button's own edge.
                 .clipShape(Capsule())
                 .contentShape(Capsule())
             }
@@ -7451,20 +7451,16 @@ struct InlineSettingsView: View {
                     .resizable()
                     .scaledToFit()
                     .frame(width: 14, height: 14)
-            case .coffee:
-                // Buy Me a Coffee's own cup, drawn as a template like the other
-                // two marks — the artwork's colour arrives on hover.
-                Image("CoffeeMark")
+            case .discord:
+                Image("DiscordMark")
                     .renderingMode(.template)
                     .resizable()
                     .scaledToFit()
-                    .frame(width: 17, height: 16)
+                    .frame(width: 17, height: 17)
             }
         }
 
-        /// What rises from below on hover. GitHub and X answer with the glyph of
-        /// the action itself; Buy Me a Coffee answers with its own artwork, a
-        /// burst of cups, which is why this one isn't a symbol.
+        /// What rises from below on hover: the glyph of the action itself.
         @ViewBuilder
         private var actionMark: some View {
             switch kind {
@@ -7478,95 +7474,10 @@ struct InlineSettingsView: View {
                 Image(systemName: "heart.fill")
                     .font(.sf(Tokens.TypeSize.reading, weight: .semibold))
                     .foregroundStyle(accent)
-            case .coffee:
-                // Deliberately larger than the 17pt mark slot — at slot size the
-                // cups are too small to read as cups. It spills into the button's
-                // own padding, which the button clips.
-                AnimatedGIF(resource: "buy-me-a-coffee", animating: hovering)
-                    .frame(width: 40, height: 40)
-                    // The cups leave frame up and to the right, so the artwork's
-                    // weight sits right of its own centre.
-                    .offset(x: -4)
-                    .allowsHitTesting(false)
-            }
-        }
-    }
-
-    /// An animated GIF from the bundle. SwiftUI's `Image` shows a single frame,
-    /// so this hands the file to AppKit, which plays it. The frames only run
-    /// while `animating` is true — a paused hover costs nothing — and each start
-    /// rewinds to frame one.
-    private struct AnimatedGIF: NSViewRepresentable {
-        let resource: String
-        let animating: Bool
-
-        private static var cache: [String: Data] = [:]
-
-        private static func data(for resource: String) -> Data? {
-            if let hit = cache[resource] { return hit }
-            guard let url = Bundle.main.url(forResource: resource, withExtension: "gif"),
-                  let data = try? Data(contentsOf: url) else { return nil }
-            cache[resource] = data
-            return data
-        }
-
-        private func loadImage() -> NSImage? {
-            Self.data(for: resource).flatMap(NSImage.init(data:))
-        }
-
-        /// The frames of a GIF are decoded the first time each one is drawn,
-        /// which is paid for mid-playback — the opening reads as a stall. Walking
-        /// them once up front, while the panel is merely open, gets that out of
-        /// the way before any hover.
-        private static func warm(_ image: NSImage?) {
-            guard let rep = image?.representations.first as? NSBitmapImageRep,
-                  let frames = rep.value(forProperty: .frameCount) as? Int else { return }
-            for frame in 0..<frames {
-                rep.setProperty(.currentFrame, withValue: frame)
-                _ = rep.bitmapData
-            }
-            rep.setProperty(.currentFrame, withValue: 0)
-        }
-
-        private static func rewind(_ image: NSImage?) {
-            (image?.representations.first as? NSBitmapImageRep)?
-                .setProperty(.currentFrame, withValue: 0)
-        }
-
-        func makeNSView(context: Context) -> NSImageView {
-            let view = NSImageView()
-            view.imageScaling = .scaleProportionallyUpOrDown
-            let image = loadImage()
-            view.image = image
-            view.animates = animating
-            DispatchQueue.main.async { Self.warm(image) }
-            // An image view's intrinsic size is the file's own pixel size, which
-            // would otherwise draw the frames far larger than the seat they were
-            // given — the SwiftUI frame only clips, it doesn't shrink AppKit.
-            view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            view.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
-            view.setContentHuggingPriority(.defaultLow, for: .horizontal)
-            view.setContentHuggingPriority(.defaultLow, for: .vertical)
-            return view
-        }
-
-        func sizeThatFits(_ proposal: ProposedViewSize,
-                          nsView: NSImageView,
-                          context: Context) -> CGSize? {
-            CGSize(width: proposal.width ?? 24, height: proposal.height ?? 24)
-        }
-
-        func updateNSView(_ view: NSImageView, context: Context) {
-            guard view.animates != animating else { return }
-            if animating {
-                // Without the rewind a second hover would resume wherever the
-                // last one stopped. Rewinding in place keeps the already-decoded
-                // frames, which reassigning the image would throw away.
-                view.animates = false
-                Self.rewind(view.image)
-                view.animates = true
-            } else {
-                view.animates = false
+            case .discord:
+                Image(systemName: "bubble.left.and.bubble.right.fill")
+                    .font(.sf(Tokens.TypeSize.label, weight: .semibold))
+                    .foregroundStyle(accent)
             }
         }
     }
