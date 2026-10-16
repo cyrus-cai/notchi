@@ -6732,7 +6732,7 @@ struct InlineSettingsView: View {
                 // buttons beside it divide what's left.
                 AboutSocialButton(kind: .discord,
                                   title: L("about.discord")) {
-                    LinkGate.shared.open(URL(string: "https://discord.gg/vD9kha9jE")!)
+                    LinkGate.shared.open(URL(string: "https://discord.gg/wdMH3CC9CW")!)
                 }
                 .fixedSize(horizontal: true, vertical: false)
                 Spacer(minLength: 0)
