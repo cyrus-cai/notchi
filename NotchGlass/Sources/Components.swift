@@ -2604,7 +2604,7 @@ struct ForceClickLookupDialog: View {
 /// `quiet` kind carries no material at all: it's the Cancel that sits *below*
 /// stacked choices, where a third capsule would read as a third option. Brightens on
 /// hover and gives under the press, like every other glass control in the panel.
-private struct ConfirmDialogButton: View {
+struct ConfirmDialogButton: View {
     var title: String
     var kind: Kind
     var font: CGFloat = Tokens.TypeSize.form

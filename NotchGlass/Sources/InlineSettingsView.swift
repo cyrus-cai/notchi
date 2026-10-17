@@ -219,6 +219,14 @@ struct InlineSettingsView: View {
     @State private var memoryDrafts: [String: String] = [:]
     /// The memory file opened for editing on the Memory page.
     @State private var memoryOpenFile: String?
+    /// A Forget waiting on its confirmation: one file, or all of them (`file`
+    /// nil).
+    @State private var memoryForgetTarget: MemoryForgetTarget?
+    private struct MemoryForgetTarget: Equatable {
+        var file: String?
+        /// Turning Memory off, which deletes every file.
+        var turnsOff = false
+    }
     /// Memory folders folded shut in the tree.
     @State private var memoryClosedFolders: Set<String> = []
     /// The Memory page's "what to change or remove" box, and whether the
@@ -668,6 +676,43 @@ struct InlineSettingsView: View {
                 .padding(.top, -NotchBody.panelPadding)
                 .padding(.bottom, -NotchBody.panelPadding)
                 .transition(.opacity.combined(with: .scale(scale: 0.96)))
+            } else if let target = memoryForgetTarget {
+                // Forgetting cannot be undone, so it asks first.
+                ConfirmationDialogOverlay(onDismiss: { memoryForgetTarget = nil }) {
+                    VStack(spacing: 14) {
+                        Text(target.file.map { L("memory.forget.confirm", $0) } ?? L("memory.forgetAll.confirm"))
+                            .font(.sf(Tokens.TypeSize.reading, weight: .medium))
+                            .foregroundStyle(Tokens.text1)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                        HStack(spacing: 10) {
+                            ConfirmDialogButton(title: L("clear.cancel"), kind: .neutral) {
+                                memoryForgetTarget = nil
+                            }
+                            ConfirmDialogButton(title: L(target.file == nil ? "memory.clearAll" : "memory.delete"),
+                                                kind: .destructive) {
+                                memoryForgetTarget = nil
+                                withAnimation(.easeOut(duration: Tokens.hoverFade)) {
+                                    if let file = target.file {
+                                        if memoryOpenFile == file { memoryOpenFile = nil }
+                                        memory.delete(file)
+                                    } else if target.turnsOff {
+                                        memory.enabled = false   // which forgets everything
+                                    } else {
+                                        memory.deleteAll()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 18)
+                    .frame(maxWidth: 280)
+                }
+                .padding(.horizontal, -NotchBody.panelPadding)
+                .padding(.top, -NotchBody.panelPadding)
+                .padding(.bottom, -NotchBody.panelPadding)
+                .transition(.opacity.combined(with: .scale(scale: 0.96)))
             } else if model.confirmingDisconnect {
                 // Disconnecting drops the stored sign-in, and getting it back
                 // takes the browser flow again, so it asks first.
@@ -690,6 +735,7 @@ struct InlineSettingsView: View {
             }
         }
         .animation(.easeOut(duration: 0.16), value: model.confirmingDisconnect)
+        .animation(.easeOut(duration: 0.16), value: memoryForgetTarget)
         .animation(.easeOut(duration: 0.16), value: promptTemplatePickerOpen)
         .animation(.easeOut(duration: 0.16), value: presentedPromptShortcutID)
         // The Force Click gate is NOT mounted here: its scrim has to cover the
@@ -3674,6 +3720,11 @@ struct InlineSettingsView: View {
             get: { memory.enabled },
             set: { on in
                 Haptics.levelChange()
+                // Off forgets every file, so it asks first.
+                guard on || memory.entries.isEmpty else {
+                    memoryForgetTarget = MemoryForgetTarget(file: nil, turnsOff: true)
+                    return
+                }
                 memory.enabled = on
                 if on { model.scanHistoryForMemories() }
             }
@@ -3847,11 +3898,9 @@ struct InlineSettingsView: View {
     /// The Memory page's editor face: the code-block monospace at its size.
     private static let memoryMono = Font.system(size: Tokens.TypeSize.meta, design: .monospaced)
 
+    /// Asks before forgetting the file (see `memoryForgetTarget`).
     private func deleteMemoryFile(_ id: String) {
-        withAnimation(.easeOut(duration: Tokens.hoverFade)) {
-            if memoryOpenFile == id { memoryOpenFile = nil }
-            memory.delete(id)
-        }
+        memoryForgetTarget = MemoryForgetTarget(file: id)
     }
 
     /// The editor pane: the selected file's path and last update, then its
@@ -3926,7 +3975,7 @@ struct InlineSettingsView: View {
             memoryInstructField
             if !memory.entries.isEmpty {
                 Button {
-                    withAnimation(.easeOut(duration: Tokens.hoverFade)) { memory.deleteAll() }
+                    memoryForgetTarget = MemoryForgetTarget(file: nil)
                 } label: {
                     Text(L("memory.clearAll"))
                         .font(.sf(Tokens.TypeSize.label, weight: .medium))
