@@ -3854,7 +3854,7 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// The editor pane: the selected file's path, last update and ×, then its
+    /// The editor pane: the selected file's path and last update, then its
     /// whole text, editable. With nothing selected it shows the first file.
     @ViewBuilder
     private var memoryEditorPane: some View {
@@ -3869,11 +3869,9 @@ struct InlineSettingsView: View {
                         .truncationMode(.middle)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     Text(relativeTime(entry.modified))
-                        .font(.sf(Tokens.TypeSize.label))
-                        .foregroundStyle(Tokens.text3)
-                        .monospacedDigit()
+                        .font(Self.memoryMono)
+                        .foregroundStyle(Tokens.text4)
                         .fixedSize()
-                    ListRowRemoveButton(label: L("memory.delete")) { deleteMemoryFile(entry.id) }
                 }
                 .contextMenu { memoryRevealButton(entry.id) }
                 TextField("", text: Binding(
