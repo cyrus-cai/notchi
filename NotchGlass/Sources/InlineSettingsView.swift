@@ -3793,9 +3793,9 @@ struct InlineSettingsView: View {
                 Image(systemName: "chevron.right")
                     .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                     .rotationEffect(.degrees(open ? 90 : 0))
-                    .frame(width: 12)
+                    .frame(width: 14)
                 Text(folder)
-                    .font(.sf(Tokens.TypeSize.form, weight: .medium))
+                    .font(Self.memoryMono)
                     .foregroundStyle(Tokens.text2)
                     .lineLimit(1)
             }
@@ -3825,12 +3825,11 @@ struct InlineSettingsView: View {
             memoryOpenFile = entry.id
         } label: {
             HStack(spacing: 6) {
-                Image(systemName: "doc.text")
-                    .font(.sf(Tokens.TypeSize.label))
+                MarkdownMark()
                     .foregroundStyle(Tokens.text3)
-                    .frame(width: 12)
+                    .frame(width: 14, height: 9)
                 Text(name)
-                    .font(.sf(Tokens.TypeSize.form))
+                    .font(Self.memoryMono)
                     .foregroundStyle(selected ? Tokens.text1 : Tokens.text2)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -3852,6 +3851,9 @@ struct InlineSettingsView: View {
         }
     }
 
+    /// The Memory page's editor face: the code-block monospace at its size.
+    private static let memoryMono = Font.system(size: Tokens.TypeSize.meta, design: .monospaced)
+
     private func deleteMemoryFile(_ id: String) {
         withAnimation(.easeOut(duration: Tokens.hoverFade)) {
             if memoryOpenFile == id { memoryOpenFile = nil }
@@ -3868,7 +3870,7 @@ struct InlineSettingsView: View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(entry.id)
-                        .font(.sf(Tokens.TypeSize.label, weight: .medium))
+                        .font(Self.memoryMono)
                         .foregroundStyle(Tokens.text2)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -3890,7 +3892,8 @@ struct InlineSettingsView: View {
                 ), axis: .vertical)
                     .textFieldStyle(.plain)
                     .lineLimit(8...40)
-                    .font(.sf(Tokens.TypeSize.form))
+                    .font(Self.memoryMono)
+                    .lineSpacing(2)
                     .foregroundStyle(Tokens.text1)
                     // Typing here counts as activity so a drifting pointer
                     // can't fold the panel mid-edit.
@@ -9086,5 +9089,28 @@ private struct ListRowRemoveButton: View {
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
         .accessibilityLabel(label)
+    }
+}
+
+/// The Markdown mark ("M↓" in a rounded frame), as an editor's file tree shows
+/// a .md file. Drawn from the mark's own 208×128 geometry; takes the
+/// foreground style.
+private struct MarkdownMark: View {
+    var body: some View {
+        Canvas { context, size in
+            let k = min(size.width / 208, size.height / 128)
+            let ox = (size.width - 208 * k) / 2, oy = (size.height - 128 * k) / 2
+            func p(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: ox + x * k, y: oy + y * k) }
+            let frame = Path(roundedRect: CGRect(origin: p(5, 5), size: CGSize(width: 198 * k, height: 118 * k)),
+                             cornerRadius: 10 * k)
+            context.stroke(frame, with: .foreground, lineWidth: max(1, 10 * k))
+            var glyphs = Path()
+            glyphs.addLines([p(30, 98), p(30, 30), p(50, 30), p(70, 55), p(90, 30), p(110, 30),
+                             p(110, 98), p(90, 98), p(90, 59), p(70, 84), p(50, 59), p(50, 98)])
+            glyphs.closeSubpath()
+            glyphs.addLines([p(155, 98), p(125, 65), p(145, 65), p(145, 30), p(165, 30), p(165, 65), p(185, 65)])
+            glyphs.closeSubpath()
+            context.fill(glyphs, with: .foreground)
+        }
     }
 }
