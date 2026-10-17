@@ -474,7 +474,11 @@ final class NoNoAccount: ObservableObject {
     /// the on-device classifier. The caller must have run `ClipPrivacy` first.
     func sense(_ text: String) async -> SenseVerdict? {
         guard usesRemoteSense else { return nil }
-        guard var request = try? jsonRequest("/sense", body: ["text": text], authorized: true) else { return nil }
+        // `purpose: memory` asks whether the copy could be useful later (to act
+        // on or to know the person), not whether it looks like a note. A gateway
+        // that predates it ignores the field and answers the note question.
+        guard var request = try? jsonRequest("/sense", body: ["text": text, "purpose": "memory"],
+                                             authorized: true) else { return nil }
         // A hint that arrives after this is no longer about the copy just made.
         request.timeoutInterval = 5
         return try? await send(request)

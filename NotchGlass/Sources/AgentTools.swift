@@ -2783,7 +2783,8 @@ enum AskToolIntent {
         if matches(q, copiedBefore) { extra.insert(ClipboardHistoryTool.toolName) }
         if matches(q, localFiles) { extra.formUnion([ListFilesTool.toolName, ReadFileTool.toolName]) }
         if matches(q, aboutMe) {
-            extra.formUnion([RememberTool.toolName, ForgetTool.toolName, UpdateMemoryTool.toolName])
+            extra.formUnion([MemoryListTool.toolName, MemoryReadTool.toolName,
+                             MemoryWriteTool.toolName, MemoryDeleteTool.toolName])
         }
         if matches(q, settings) { extra.insert("manage_app_settings") }
         if matches(q, history) { extra.insert("search_history") }
@@ -2866,7 +2867,7 @@ enum AskToolIntent {
     ]
 
     /// The user saying something about themselves, or asking to be remembered
-    /// or forgotten (`remember`, `forget`).
+    /// or forgotten (the memory folder tools).
     private static let aboutMe = [
         "remember", "forget", "my name", "call me", "i am ", "i'm ", "i work",
         "i live", "i like", "i love", "i hate", "i prefer", "my wife", "my husband",
