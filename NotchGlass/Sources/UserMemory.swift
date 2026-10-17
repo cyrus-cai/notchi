@@ -23,19 +23,21 @@ final class UserMemory: ObservableObject {
 
     @Published private(set) var entries: [Entry] = []
     /// The master switch, off by default. Off, nothing reads or writes the
-    /// folder, copies included. Turning it on builds the memory from past
+    /// folder, copies included, and there is no clipboard history: that is
+    /// part of Memory too (`ClipboardHistory`). Turning it on builds the memory from past
     /// conversations (`NotchModel.scanHistoryForMemories`); turning it off
     /// deletes every file, so the next time it is on it builds again.
     @Published var enabled: Bool = UserDefaults.standard.object(forKey: UserMemory.enabledKey) as? Bool ?? false {
         didSet {
             UserDefaults.standard.set(enabled, forKey: Self.enabledKey)
+            ClipboardHistory.shared.enabled = enabled
             if !enabled {
                 deleteAll()
                 historyScanDone = false
             }
         }
     }
-    private static let enabledKey = "memory.enabled"
+    static let enabledKey = "memory.enabled"
     @Published private(set) var scanning = false
 
     /// The history is read once; a failed read leaves this false so the next

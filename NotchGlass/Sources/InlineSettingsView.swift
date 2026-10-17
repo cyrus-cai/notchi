@@ -374,8 +374,8 @@ struct InlineSettingsView: View {
         case pricing = "Pricing" // Blend1 per-model rates — reached from the wallet's links
         case balances = "Balances" // Blend1 gifts and purchases — reached from the wallet's links
         case privacy = "Privacy" // what happens to a Blend1 request — reached from the wallet's links
-        case memory = "Memory"   // the saved facts — reached from Chat
-        case clipboardHistory = "ClipboardHistory" // recent copies — reached from Chat
+        case memory = "Memory"   // the memory folder — reached from Chat
+        case clipboardHistory = "ClipboardHistory" // recent copies — reached from Memory
         var id: String { rawValue }
 
         /// A sub-page rather than a category: reached from a parent pane, drawn
@@ -391,7 +391,8 @@ struct InlineSettingsView: View {
             switch self {
             case .licenses, .survey: return .about
             case .usage, .pricing, .balances, .privacy: return .model
-            case .memory, .clipboardHistory: return .chat
+            case .memory: return .chat
+            case .clipboardHistory: return .memory
             default:               return nil
             }
         }
@@ -902,7 +903,6 @@ struct InlineSettingsView: View {
                     .captionLabel()
                 customInstructionsRow
                 memoryRow
-                if ClipboardHistory.available { clipboardHistoryRow }
                 suggestFollowUpRow
                 runCommandsRow
                 Text(L("chat.group.effects"))
@@ -3725,6 +3725,7 @@ struct InlineSettingsView: View {
                         .foregroundStyle(Tokens.text2)
                 }
             }
+            if memory.enabled, ClipboardHistory.available { clipboardHistoryRow }
             if !memory.scanning {
                 if memory.entries.isEmpty {
                     Text(L("memory.empty"))
@@ -3791,8 +3792,9 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// Clipboard history's chip, opening `clipboardHistoryPage`, with the
-    /// switch beside it. Laid out like `memoryRow`. Turning it off clears it.
+    /// Clipboard history's chip on the Memory page, opening
+    /// `clipboardHistoryPage`. Laid out like `memoryRow`; the Memory switch
+    /// turns it on and off.
     private var clipboardHistoryRow: some View {
         HStack(spacing: 8) {
             Button {
@@ -3831,16 +3833,6 @@ struct InlineSettingsView: View {
                 else if hoveredDisclosure == .clipboard { hoveredDisclosure = nil }
             }
             .animation(.easeOut(duration: Tokens.hoverFade), value: hoveredDisclosure)
-            SettingInfo(L("clipboardHistory.info"))
-            Toggle("", isOn: Binding(
-                get: { clipboardHistory.enabled },
-                set: { Haptics.levelChange(); clipboardHistory.enabled = $0 }
-            ))
-            .labelsHidden()
-            .toggleStyle(.switch)
-            .controlSize(.mini)
-            .tint(Tokens.text2)
-            .accessibilityLabel(L("clipboardHistory.toggle"))
         }
     }
 
