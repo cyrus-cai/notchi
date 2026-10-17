@@ -102,6 +102,8 @@ final class UserMemory: ObservableObject {
                          text: head.isEmpty ? url.lastPathComponent : "\(url.lastPathComponent) · \(head)",
                          modified: modified(url))
         }
+        // By name, so a file being edited in Settings holds its place.
+        .sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending }
     }
 
     /// A model-given file name, kept inside the folder: no directories, no

@@ -213,6 +213,9 @@ struct InlineSettingsView: View {
     /// What Notchi remembers about the user (`UserMemory`), folded like the
     /// instructions above it.
     @ObservedObject private var memory = UserMemory.shared
+    /// Memory files as edited on the Memory page, by file name. Seeded from
+    /// disk on first read; each edit is written straight back.
+    @State private var memoryDrafts: [String: String] = [:]
     @ObservedObject private var clipboardHistory = ClipboardHistory.shared
 
     /// The model catalog behind the picker — live lists, the fold, and which providers
@@ -3723,20 +3726,23 @@ struct InlineSettingsView: View {
                 }
             }
             if !memory.scanning {
-                VStack(alignment: .leading, spacing: 0) {
-                    if memory.entries.isEmpty {
-                        Text(L("memory.empty"))
-                            .font(.sf(Tokens.TypeSize.form))
-                            .foregroundStyle(Tokens.text3)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                    }
-                    ForEach(memory.entries) { entry in
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Text(entry.text)
-                                .font(.sf(Tokens.TypeSize.form))
-                                .foregroundStyle(Tokens.text1)
-                                .fixedSize(horizontal: false, vertical: true)
+                if memory.entries.isEmpty {
+                    Text(L("memory.empty"))
+                        .font(.sf(Tokens.TypeSize.form))
+                        .foregroundStyle(Tokens.text3)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .recessedSurface(in: RoundedRectangle.control, lit: false)
+                }
+                // Each file in full, editable in place: the name and its × above,
+                // the text below, written back as you type.
+                ForEach(memory.entries) { entry in
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 8) {
+                            Text(entry.id)
+                                .font(.sf(Tokens.TypeSize.label, weight: .medium))
+                                .foregroundStyle(Tokens.text2)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                             ListRowRemoveButton(label: L("memory.delete")) {
                                 withAnimation(.easeOut(duration: Tokens.hoverFade)) {
@@ -3744,12 +3750,26 @@ struct InlineSettingsView: View {
                                 }
                             }
                         }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
+                        .padding(.horizontal, 4)
+                        TextField("", text: Binding(
+                            get: { memoryDrafts[entry.id] ?? memory.read(entry.id) ?? "" },
+                            set: { text in
+                                memoryDrafts[entry.id] = text
+                                memory.write(entry.id, content: text)
+                            }
+                        ), axis: .vertical)
+                            .textFieldStyle(.plain)
+                            .lineLimit(2...24)
+                            .font(.sf(Tokens.TypeSize.form))
+                            .foregroundStyle(Tokens.text1)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            // Typing here counts as activity so a drifting pointer
+                            // can't fold the panel mid-edit.
+                            .onChange(of: memoryDrafts[entry.id]) { model.noteUserTyping() }
+                            .recessedSurface(in: RoundedRectangle.control, lit: false)
                     }
                 }
-                .padding(.vertical, 2)
-                .recessedSurface(in: RoundedRectangle.control, lit: false)
 
                 if !memory.entries.isEmpty {
                     Button {
@@ -3765,7 +3785,10 @@ struct InlineSettingsView: View {
                 }
             }
         }
-        .onAppear { model.scanHistoryForMemories() }
+        .onAppear {
+            memoryDrafts = [:]   // the model may have rewritten files since
+            model.scanHistoryForMemories()
+        }
     }
 
     /// Clipboard history's chip, opening `clipboardHistoryPage`, with the
