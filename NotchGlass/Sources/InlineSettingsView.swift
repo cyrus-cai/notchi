@@ -3742,8 +3742,19 @@ struct InlineSettingsView: View {
         }
         .onAppear {
             memoryDrafts = [:]   // the model may have rewritten files since
+            openRequestedMemoryFile()
             model.scanHistoryForMemories()
         }
+        .onChange(of: model.memoryFileToOpen) { openRequestedMemoryFile() }
+    }
+
+    /// An "Updated memory" line asked for this file: unfold its folder and
+    /// open it.
+    private func openRequestedMemoryFile() {
+        guard let file = model.memoryFileToOpen else { return }
+        model.memoryFileToOpen = nil
+        if let folder = file.split(separator: "/").dropLast().first { memoryClosedFolders.remove(String(folder)) }
+        memoryOpenFile = file
     }
 
     /// The memory files grouped by folder: top-level files first, then each

@@ -4928,6 +4928,7 @@ struct DetachedThreadView: View {
             recentCards: store.turns.recentCards(before: turn.id),
             captures: turn.captures,
             onOpenCapture: model.map { model in { model.openTurnCapture($0) } },
+            onUndoCapture: model.map { model in { model.undoTurnCapture($0) } },
             turnID: turn.id
         )
     }

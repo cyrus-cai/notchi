@@ -3542,7 +3542,8 @@ struct NotchBody: View {
                     sharedLinks: turn.sharedLinks,
                     recentCards: item.conversation.recentCards(before: turn.id),
                     captures: turn.captures,
-                    onOpenCapture: { model.openTurnCapture($0) }
+                    onOpenCapture: { model.openTurnCapture($0) },
+                    onUndoCapture: { model.undoTurnCapture($0) }
                 )
             }
         }
@@ -5566,6 +5567,7 @@ struct NotchBody: View {
                     recentCards: index.map { thread.recentCards(at: $0) } ?? [],
                     captures: turn.captures,
                     onOpenCapture: { model.openTurnCapture($0) },
+                    onUndoCapture: { model.undoTurnCapture($0) },
                     turnID: turn.id
                 )
               }

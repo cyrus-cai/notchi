@@ -3725,6 +3725,16 @@ final class NotchModel: ObservableObject {
         return before.text == nil ? "Created \(name)." : "Updated \(name)."
     }
 
+    /// The "Undo" beside an "Updated memory" line. Stays on the page.
+    func undoTurnCapture(_ capture: Turn.Capture) {
+        guard capture.kind == .memory else { return }
+        withAnimation(.spring(response: 0.36, dampingFraction: 1)) { undoMemoryUpdate(capture) }
+    }
+
+    /// A memory file for Settings → Memory to open when it next shows, set by
+    /// an "Updated memory" line.
+    @Published var memoryFileToOpen: String?
+
     /// Undo an "Updated memory" line: the file goes back as it was (or away,
     /// if it was new), and the line leaves the answer it was on, on screen and
     /// in Recent.
@@ -3775,8 +3785,13 @@ final class NotchModel: ObservableObject {
                 openApp(bundleID: "com.apple.iCal")
             }
         case .memory:
-            // Undo stays on the page: nothing to open, nothing to close.
-            withAnimation(.spring(response: 0.36, dampingFraction: 1)) { undoMemoryUpdate(capture) }
+            // The file the line names, open on Settings → Memory.
+            if let link = capture.link, let data = link.data(using: .utf8),
+               let before = try? JSONDecoder().decode(MemoryFileBefore.self, from: data) {
+                memoryFileToOpen = before.file
+            }
+            settingsSection = InlineSettingsView.Section.memory.rawValue
+            openSettings()
             return
         }
         fullClose()

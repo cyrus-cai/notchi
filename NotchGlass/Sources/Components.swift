@@ -1963,7 +1963,11 @@ struct CaptureLineLink: View {
     let capture: NotchModel.Turn.Capture
     let font: CGFloat
     let action: (() -> Void)?
+    /// "Updated memory" only: a separate "Undo" after the line, which itself
+    /// opens the file.
+    var undo: (() -> Void)? = nil
     @State private var hovering = false
+    @State private var hoveringUndo = false
 
     private var label: String {
         switch capture.kind {
@@ -1978,27 +1982,37 @@ struct CaptureLineLink: View {
     }
 
     var body: some View {
-        Button { action?() } label: {
-            HStack(spacing: 3) {
-                Text(label)
-                    .font(.sf(font))
-                    .lineLimit(1)
-                if action != nil, capture.kind == .copied {
-                } else if action != nil, capture.kind == .memory {
-                    Text("· " + L("agent.process.undo"))
+        HStack(spacing: 6) {
+            Button { action?() } label: {
+                HStack(spacing: 3) {
+                    Text(label)
                         .font(.sf(font))
-                } else if action != nil {
-                    Image(systemName: "arrow.up.right")
-                        .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                        .lineLimit(1)
+                    if action != nil, capture.kind != .copied {
+                        Image(systemName: "arrow.up.right")
+                            .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                    }
                 }
+                .foregroundStyle(hovering ? Tokens.text2 : Tokens.text3)
+                .contentShape(Rectangle())
             }
-            .foregroundStyle(hovering ? Tokens.text2 : Tokens.text3)
-            .contentShape(Rectangle())
+            .buttonStyle(.plain).exemptsDoubleClickPin()
+            .disabled(action == nil || capture.kind == .copied)
+            .onHover { hovering = $0 && action != nil && capture.kind != .copied }
+
+            if capture.kind == .memory, let undo {
+                Button(action: undo) {
+                    Text(L("agent.process.undo"))
+                        .font(.sf(font))
+                        .foregroundStyle(hoveringUndo ? Tokens.text2 : Tokens.text3)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).exemptsDoubleClickPin()
+                .onHover { hoveringUndo = $0 }
+            }
         }
-        .buttonStyle(.plain).exemptsDoubleClickPin()
-        .disabled(action == nil || capture.kind == .copied)
-        .onHover { hovering = $0 && action != nil && capture.kind != .copied }
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hoveringUndo)
     }
 }
 
@@ -3832,6 +3846,8 @@ struct AssistantTurnView: View {
     var captures: [NotchModel.Turn.Capture] = []
     /// Opens a filed note or reminder in its app. `nil` draws the line as text.
     var onOpenCapture: ((NotchModel.Turn.Capture) -> Void)? = nil
+    /// The "Undo" beside an "Updated memory" line.
+    var onUndoCapture: ((NotchModel.Turn.Capture) -> Void)? = nil
     /// The turn this is, so the bubbles after the first land at a person's
     /// pace (`BubblePacer`). `nil` shows them all at once.
     var turnID: UUID? = nil
@@ -4408,7 +4424,8 @@ struct AssistantTurnView: View {
                 HStack(spacing: 12) {
                     ForEach(Array(captures.enumerated()), id: \.offset) { _, capture in
                         CaptureLineLink(capture: capture, font: waitFont,
-                                        action: onOpenCapture.map { open in { open(capture) } })
+                                        action: onOpenCapture.map { open in { open(capture) } },
+                                        undo: onUndoCapture.map { undo in { undo(capture) } })
                     }
                 }
                 .padding(.bottom, hasLeadText ? 1 : 0)
