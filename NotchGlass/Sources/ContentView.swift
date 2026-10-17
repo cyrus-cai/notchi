@@ -580,6 +580,9 @@ private struct BackgroundWorkEars: View {
         case running(verb: String, since: Date)
     }
     let stage: Stage
+    /// The eyes show for an agent run, not for an Ask answer finishing in the
+    /// background.
+    let showsFace: Bool
     /// The drawn hardware-notch width the ears flank (content-free gap).
     let notchWidth: CGFloat
     /// The island's current ear slots (content + insets, animated by the
@@ -599,16 +602,17 @@ private struct BackgroundWorkEars: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            // Left ear — Notchi's face at the outer edge, then the verb.
+            // Left ear — Notchi's face at the outer edge (agent runs only),
+            // then the verb.
             HStack(spacing: 0) {
-                NotchiFace(expression: .think)
+                if showsFace { NotchiFace(expression: .think) }
                 ZStack {
                     leftStage
                         .id(stageKey)
                         .transition(.opacity.combined(with: .scale(scale: 0.85)))
                 }
                 .animation(.easeInOut(duration: 0.22), value: stageKey)
-                .padding(.leading, NotchIsland.faceTextGap)
+                .padding(.leading, showsFace ? NotchIsland.faceTextGap : NotchIsland.earTextPad)
                 .padding(.trailing, NotchIsland.earTextPad)
             }
             .frame(width: earLeft, alignment: .leading)
@@ -819,7 +823,8 @@ struct NotchIsland: View {
     /// never coexist (`sensing` yields to `busy`).
     private var earLeft: CGFloat {
         if busy {
-            return faceEar(workEarContent.left > 0 ? workEarContent.left : busyExtension)
+            let content = workEarContent.left > 0 ? workEarContent.left : busyExtension
+            return agentRunning ? faceEar(content) : content + senseEarPad * 2
         }
         if sensing {
             // A write narrated by the eyes alone carries no text: the ear is
@@ -1014,6 +1019,7 @@ struct NotchIsland: View {
                 if busy {
                     BackgroundWorkEars(
                         stage: .running(verb: busyVerb, since: busySince),
+                        showsFace: agentRunning,
                         notchWidth: metrics.restWidth,
                         earLeft: earLeft,
                         earRight: earRight)

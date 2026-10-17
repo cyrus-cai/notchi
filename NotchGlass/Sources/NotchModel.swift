@@ -7168,7 +7168,8 @@ final class NotchModel: ObservableObject {
         senseClassifyTask = Task { [weak self] in
             let shouldOffer: Bool
             if let verdict = await NoNoAccount.shared.sense(clip) {
-                shouldOffer = verdict.kind != "none"
+                // A copy that reads as a question is left alone.
+                shouldOffer = verdict.kind != "none" && verdict.kind != "question"
                     && verdict.saveProbability >= Self.senseRemoteFloor
             } else {
                 let reading = await IntentEngine.shared.classify(clip)
