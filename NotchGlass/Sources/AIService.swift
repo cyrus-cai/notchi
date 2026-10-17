@@ -740,16 +740,27 @@ about the world.
 - At most 20 lines. If there is nothing, reply NONE.
 """
 
+/// How the memory folder is kept, shared by every prompt that writes to it.
+let memoryOrganizationRules = """
+Keep the folder organised: a few files, grouped in one or a few folders you \
+name (for example "work/", "people/", "life/"), each file about one subject. \
+Name a file with its folder, e.g. "work/notchi.md". Every line is a current \
+fact or note, written as the fact itself: never a log of what the user \
+copied or asked, no dated history, no loose uncategorised files. Put new \
+things into the file they belong to, merging and rewriting rather than \
+appending duplicates. A text the user copied shows what they were looking at, \
+not what they believe or did; never turn it into a claim about them.
+"""
+
 /// For `NotchModel.senseRemember`: file a copied text in the memory folder.
 let memoryCopySystemPrompt = """
 You keep a memory folder of Markdown files for a user, so a later \
 conversation can draw on it. The user just copied a piece of text that may be \
-worth keeping. Decide what, if anything, to write, and into which file. You \
-choose the file names and how things are organised: add to an existing file \
-when it fits, or start a new one. Write in the user's language. Keep what the \
+worth keeping. Decide what, if anything, to write, and into which file. Write in the user's language. Keep what the \
 copy says; do not invent anything. Never keep passwords, keys, account or ID \
 numbers.
 
+\(memoryOrganizationRules)
 Reply in exactly one of two forms:
 - NONE, when nothing in it is worth keeping.
 - A first line "FILE: <name>.md", then the file's complete new text. For an \
@@ -766,8 +777,9 @@ copy on its own: keep what says something lasting about the user, their work, \
 people, plans, or things they will want again; skip the rest (code, passing \
 lookups, fragments, anything already in the folder). Never keep passwords, \
 keys, account or ID numbers. Write in the user's language and do not invent \
-anything. You choose the file names and how things are organised.
+anything.
 
+\(memoryOrganizationRules)
 Reply with one or more blocks, nothing before or after them: "FILE: <name>.md" \
 on its own line, then the file's complete new text. For an existing file, \
 repeat everything it already holds, since your text replaces the whole file. \
@@ -780,6 +792,7 @@ You keep a memory folder of Markdown files for a user. They are telling you \
 what to change or remove in it. Do exactly that and nothing else; leave every \
 other file and line as it is.
 
+\(memoryOrganizationRules)
 Reply with one or more blocks, nothing before or after them:
 - "FILE: <name>.md" on its own line, then the file's complete new text. Your \
 text replaces the whole file, so repeat everything in it that should stay.

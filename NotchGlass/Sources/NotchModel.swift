@@ -11675,6 +11675,10 @@ final class NotchModel: ObservableObject {
     /// turned on.
     func scanHistoryForMemories() {
         scanClipboardForMemories()
+        if UserMemory.shared.enabled, !UserDefaults.standard.bool(forKey: "memory.tidyV1") {
+            UserDefaults.standard.set(true, forKey: "memory.tidyV1")
+            tidyMemory()
+        }
         let memory = UserMemory.shared
         guard memory.enabled, !memory.historyScanDone, !memory.scanning, !(ai is StubAIService) else { return }
         var lines: [String] = []
@@ -11720,7 +11724,10 @@ final class NotchModel: ObservableObject {
                 guard line.hasPrefix("- ") else { return nil }
                 return String(line.dropFirst(2))
             }
-            await MainActor.run { memory.finishScan(failed ? nil : facts) }
+            await MainActor.run {
+                memory.finishScan(failed ? nil : facts)
+                if !failed, !facts.isEmpty { self.tidyMemory() }
+            }
         }
     }
 
@@ -11772,10 +11779,31 @@ final class NotchModel: ObservableObject {
                     if case .write(let file, let content) = op { memory.write(file, content: content) }
                 }
                 UserDefaults.standard.set(true, forKey: key)
+                if !ops.isEmpty { self?.tidyMemory() }
             }
         }
     }
     private var clipboardScanRunning = false
+
+    /// Reorganise the whole memory folder into a few subject files in a few
+    /// folders, with lines that only record history rewritten as the fact or
+    /// dropped. Runs after a bulk import (past conversations, clipboard
+    /// history) and once for folders written before these rules.
+    func tidyMemory() {
+        guard UserMemory.shared.enabled, !memoryTidying, !UserMemory.shared.entries.isEmpty else { return }
+        memoryTidying = true
+        Task {
+            _ = await editMemory(instruction: """
+            Reorganise the whole folder by the rules above: move every fact into \
+            the subject file and folder it belongs to, merge duplicates, rewrite \
+            lines that record what was copied or asked as the lasting fact they \
+            show, or drop them if they show none. Delete every file you emptied \
+            or merged away.
+            """)
+            memoryTidying = false
+        }
+    }
+    private var memoryTidying = false
 
     /// Ask the model that answered the round (`service`) to summarize the
     /// conversation into a short title. Returns `nil` when offline (stub),

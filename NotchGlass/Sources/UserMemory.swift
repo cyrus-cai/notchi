@@ -83,12 +83,34 @@ final class UserMemory: ObservableObject {
         try? FileManager.default.moveItem(at: old, to: old.appendingPathExtension("migrated"))
     }
 
+    /// Files at the top level and one folder down, newest first.
     private func fileURLs() -> [URL] {
-        let keys: [URLResourceKey] = [.contentModificationDateKey, .isRegularFileKey]
-        let urls = (try? FileManager.default.contentsOfDirectory(
-            at: Self.folder, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])) ?? []
-        return urls.filter { (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true }
-            .sorted { modified($0) > modified($1) }
+        let keys: [URLResourceKey] = [.contentModificationDateKey, .isRegularFileKey, .isDirectoryKey]
+        let fm = FileManager.default
+        func list(_ dir: URL) -> [URL] {
+            (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: keys,
+                                         options: [.skipsHiddenFiles])) ?? []
+        }
+        var files: [URL] = []
+        for url in list(Self.folder) {
+            let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey])
+            if values?.isDirectory == true {
+                files += list(url).filter {
+                    (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+                }
+            } else if values?.isRegularFile == true {
+                files.append(url)
+            }
+        }
+        return files.sorted { modified($0) > modified($1) }
+    }
+
+    /// A file's name as the model and Settings see it: "notes.md", or
+    /// "work/notchi.md" one folder down.
+    private func relativeName(_ url: URL) -> String {
+        let root = Self.folder.standardizedFileURL.path + "/"
+        let path = url.standardizedFileURL.path
+        return path.hasPrefix(root) ? String(path.dropFirst(root.count)) : url.lastPathComponent
     }
 
     private func modified(_ url: URL) -> Date {
@@ -104,22 +126,26 @@ final class UserMemory: ObservableObject {
             // Body text over a heading; a heading only when that is all there is.
             let line = lines.first { !$0.hasPrefix("#") } ?? lines.first ?? ""
             let preview = line.trimmingCharacters(in: CharacterSet(charactersIn: "#-* ").union(.whitespaces))
-            return Entry(id: url.lastPathComponent, preview: preview, modified: modified(url))
+            return Entry(id: relativeName(url), preview: preview, modified: modified(url))
         }
         // By name, so a file being edited in Settings holds its place.
         .sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending }
     }
 
-    /// A model-given file name, kept inside the folder: no directories, no
-    /// leading dot, `.md` added when it has no extension. Nil when unusable.
+    /// A model-given file name, kept inside the folder: at most one folder
+    /// level ("work/notchi.md"), no leading dots, `.md` added when it has no
+    /// extension. Nil when unusable.
     static func safeName(_ raw: String) -> String? {
-        var name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let slash = name.lastIndex(of: "/") { name = String(name[name.index(after: slash)...]) }
-        name = name.replacingOccurrences(of: ":", with: "-")
-        while name.hasPrefix(".") { name.removeFirst() }
-        guard !name.isEmpty, name.count <= 120 else { return nil }
-        if (name as NSString).pathExtension.isEmpty { name += ".md" }
-        return name
+        var parts = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(separator: "/").map { part -> String in
+                var p = part.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ":", with: "-")
+                while p.hasPrefix(".") { p.removeFirst() }
+                return p
+            }
+            .filter { !$0.isEmpty }
+        guard !parts.isEmpty, parts.count <= 2, parts.allSatisfy({ $0.count <= 80 }) else { return nil }
+        if (parts[parts.count - 1] as NSString).pathExtension.isEmpty { parts[parts.count - 1] += ".md" }
+        return parts.joined(separator: "/")
     }
 
     private func url(_ name: String) -> URL? {
@@ -135,7 +161,7 @@ final class UserMemory: ObservableObject {
         day.dateFormat = "yyyy-MM-dd"
         return files.map { url in
             let size = (try? String(contentsOf: url, encoding: .utf8))?.count ?? 0
-            return "- \(url.lastPathComponent) (\(size) chars, updated \(day.string(from: modified(url))))"
+            return "- \(relativeName(url)) (\(size) chars, updated \(day.string(from: modified(url))))"
         }.joined(separator: "\n")
     }
 
@@ -157,9 +183,11 @@ final class UserMemory: ObservableObject {
             return "Error: the folder holds \(Self.fileLimit) files; merge or delete some first."
         }
         do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
             try content.write(to: url, atomically: true, encoding: .utf8)
         } catch {
-            return "Error: could not write \(url.lastPathComponent)."
+            return "Error: could not write \(relativeName(url))."
         }
         reload()
         return nil
@@ -169,8 +197,17 @@ final class UserMemory: ObservableObject {
     @discardableResult
     func remove(_ name: String) -> Bool {
         guard let url = url(name), (try? FileManager.default.removeItem(at: url)) != nil else { return false }
+        removeIfEmpty(url.deletingLastPathComponent())
         reload()
         return true
+    }
+
+    /// A folder left with no files goes too; the root stays.
+    private func removeIfEmpty(_ dir: URL) {
+        guard dir.standardizedFileURL != Self.folder.standardizedFileURL,
+              let rest = try? FileManager.default.contentsOfDirectory(atPath: dir.path),
+              rest.allSatisfy({ $0.hasPrefix(".") }) else { return }
+        try? FileManager.default.removeItem(at: dir)
     }
 
     func delete(_ id: String) { remove(id) }
@@ -178,7 +215,9 @@ final class UserMemory: ObservableObject {
     /// Every file, and the clipboard history the folder is filed from.
     func deleteAll() {
         ClipboardHistory.shared.clear()
-        for url in fileURLs() { try? FileManager.default.removeItem(at: url) }
+        let items = (try? FileManager.default.contentsOfDirectory(at: Self.folder,
+                                                                 includingPropertiesForKeys: nil)) ?? []
+        for url in items { try? FileManager.default.removeItem(at: url) }
         reload()
     }
 
@@ -194,8 +233,12 @@ final class UserMemory: ObservableObject {
         guard enabled, let found else { return }
         historyScanDone = true
         guard !found.isEmpty else { return }
-        let name = "from-past-conversations.md"
-        let body = "# From past conversations\n\n" + found.map { "- \($0)" }.joined(separator: "\n") + "\n"
+        // Parked in the about file; `NotchModel.tidyMemory` then files each
+        // fact where it belongs.
+        let name = "about-user.md"
+        let current = read(name) ?? "# About the user\n"
+        let body = current.trimmingCharacters(in: .newlines) + "\n"
+            + found.map { "- \($0)" }.joined(separator: "\n") + "\n"
         write(name, content: String(body.prefix(Self.fileCharLimit)))
     }
 
@@ -206,11 +249,11 @@ final class UserMemory: ObservableObject {
         var names: [String] = []
         for url in fileURLs() {
             let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-            let block = "\n## \(url.lastPathComponent)\n\(text)"
+            let block = "\n## \(relativeName(url))\n\(text)"
             if names.isEmpty, out.count + block.count <= 16_000 {
                 out += block
             } else {
-                names.append(url.lastPathComponent)
+                names.append(relativeName(url))
             }
         }
         if !names.isEmpty { out += "\n\nOther files (not shown): " + names.joined(separator: ", ") }
@@ -224,7 +267,7 @@ final class UserMemory: ObservableObject {
         for url in fileURLs() {
             let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
             let lines = text.split(whereSeparator: \.isNewline).prefix(Self.headLines)
-            var block = "\n## \(url.lastPathComponent)\n" + lines.joined(separator: "\n")
+            var block = "\n## \(relativeName(url))\n" + lines.joined(separator: "\n")
             if text.split(whereSeparator: \.isNewline).count > Self.headLines { block += "\n…" }
             if out.count + block.count > Self.promptCharLimit {
                 out += "\n(more files: call memory_list)"
@@ -285,8 +328,7 @@ struct MemoryWriteTool: NotchTool {
     conversations on this Mac. Write whatever will help you later, in any \
     shape you like: who the user is, their work and projects, people they \
     mention, preferences, things they asked you to remember, notes on ongoing \
-    matters. Choose the file names and how to split things up; keep related \
-    things in one file and rewrite it as they change. `content` replaces the \
+    matters. \(memoryOrganizationRules) `content` replaces the \
     whole file, so read the file first when adding to it. Do not save \
     passwords, account numbers, health or financial details unless they ask. \
     Then answer as usual; mention the save only if they asked for it.
