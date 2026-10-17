@@ -3782,7 +3782,7 @@ struct InlineSettingsView: View {
                             }
                         }
                         .padding(4)
-                        .frame(width: 200, alignment: .topLeading)
+                        .frame(width: 250, alignment: .topLeading)
                         .frame(minHeight: 260, alignment: .top)
                         .recessedSurface(in: RoundedRectangle.control, lit: false)
 
@@ -3859,7 +3859,7 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// A memory file in the tree: icon and name. A tap shows it in the editor
+    /// A memory file in the tree: icon, name and last update. A tap shows it in the editor
     /// pane; the selected file keeps a lit row.
     private func memoryFileRow(_ entry: UserMemory.Entry, indented: Bool) -> some View {
         let selected = memoryOpenFile == entry.id
@@ -3877,6 +3877,11 @@ struct InlineSettingsView: View {
                     .foregroundStyle(selected ? Tokens.text1 : Tokens.text2)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text(relativeTime(entry.modified))
+                    .font(Self.memoryMono)
+                    .foregroundStyle(Tokens.text4)
+                    .fixedSize()
             }
             .padding(.leading, indented ? 26 : 8)
             .padding(.trailing, 8)
