@@ -3411,6 +3411,16 @@ extension ModelCatalog.ModelList.Entry.NotchiPricing {
         fmt.setLocalizedDateFormatFromTemplate("MMMdjmm")
         return L("nono.pricing.saleUntil", percent, fmt.string(from: end))
     }
+
+    /// `saleLine` with the day only, short enough for one line: "90% off
+    /// until Oct 19".
+    @MainActor var saleLineShort: String? {
+        guard let end = saleEnd, let percent = percentOff else { return nil }
+        let fmt = DateFormatter()
+        fmt.locale = NotchModel.localeForInterfaceLanguage()
+        fmt.setLocalizedDateFormatFromTemplate("MMMd")
+        return L("nono.pricing.saleUntil", percent, fmt.string(from: end))
+    }
 }
 
 // MARK: - Model metadata (custom picker detail panel)

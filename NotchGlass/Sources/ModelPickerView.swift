@@ -732,7 +732,7 @@ struct ModelDetailCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if isFirstParty, let sale = model.info.notchiPricing?.saleLine {
+            if isFirstParty, let sale = model.info.notchiPricing?.saleLineShort {
                 saleBanner(sale)
             }
             content
@@ -765,27 +765,26 @@ struct ModelDetailCard: View {
         .environment(\.colorScheme, .dark)
     }
 
-    /// The sale, as a strip across the top of the card rather than a note in
-    /// its body. Same teal as the picker's discount tag.
+    /// The sale, as one line of light across the top of the card that fades
+    /// into the glass below it. Same teal as the picker's discount tag.
     private func saleBanner(_ text: String) -> some View {
         let teal = Color(red: 0.42, green: 0.80, blue: 0.76)
         let radius = Tokens.Radius.modal
         return Text(text)
-            .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+            .font(.sf(Tokens.TypeSize.caption, weight: .medium))
             .foregroundStyle(teal.opacity(0.95))
-            .lineLimit(2)
-            .fixedSize(horizontal: false, vertical: true)
+            .lineLimit(1)
+            .minimumScaleFactor(0.85)
             .padding(.horizontal, ModelDetailPanel.inset)
             .padding(.top, 9)
-            .padding(.bottom, 8)
+            .padding(.bottom, 2)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(teal.opacity(0.14),
-                        in: UnevenRoundedRectangle(topLeadingRadius: radius,
-                                                   topTrailingRadius: radius,
-                                                   style: .continuous))
-            .overlay(alignment: .bottom) {
-                Rectangle().fill(teal.opacity(0.22)).frame(height: 0.5)
-            }
+            .background(
+                LinearGradient(colors: [teal.opacity(0.20), teal.opacity(0.06), .clear],
+                               startPoint: .top, endPoint: .bottom),
+                in: UnevenRoundedRectangle(topLeadingRadius: radius,
+                                           topTrailingRadius: radius,
+                                           style: .continuous))
     }
 
     private var content: some View {
