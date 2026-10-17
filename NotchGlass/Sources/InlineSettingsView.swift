@@ -1059,6 +1059,11 @@ struct InlineSettingsView: View {
             // of panes that fit (About's colophon, Stats' bottom card).
             .scrollEdgeFade(top: paneScrolledOffTop, bottom: paneOverflows,
                             topFade: Self.paneTopFade, bottomFade: 32)
+            // Memory's instruction box and Forget all stay pinned under the
+            // pane while the files scroll.
+            .overlay(alignment: .bottom) {
+                if section == .memory, !memory.scanning { memoryFooter }
+            }
             // A pane swap starts at the top again; the observer only reports on
             // the next bounds change, so clear the flag here.
             .onAppear {
@@ -3736,20 +3741,8 @@ struct InlineSettingsView: View {
                     }
                 }
 
-                memoryInstructField
-
-                if !memory.entries.isEmpty {
-                    Button {
-                        withAnimation(.easeOut(duration: Tokens.hoverFade)) { memory.deleteAll() }
-                    } label: {
-                        Text(L("memory.clearAll"))
-                            .font(.sf(Tokens.TypeSize.label, weight: .medium))
-                            .foregroundStyle(Tokens.text2)
-                            .padding(.horizontal, 12)
-                            .frame(minHeight: 28)
-                    }
-                    .buttonStyle(PromptTemplateChipStyle(shape: Capsule()))
-                }
+                // Room for the pinned footer (`memoryFooter`).
+                Color.clear.frame(height: 44)
             }
         }
         .onAppear {
@@ -3936,6 +3929,28 @@ struct InlineSettingsView: View {
             .padding(.vertical, 8)
         }
         .recessedSurface(in: RoundedRectangle.control, lit: false)
+    }
+
+    /// The instruction box and Forget all, on one line, pinned to the bottom
+    /// of the Memory pane.
+    private var memoryFooter: some View {
+        HStack(alignment: .center, spacing: 10) {
+            memoryInstructField
+            if !memory.entries.isEmpty {
+                Button {
+                    withAnimation(.easeOut(duration: Tokens.hoverFade)) { memory.deleteAll() }
+                } label: {
+                    Text(L("memory.clearAll"))
+                        .font(.sf(Tokens.TypeSize.label, weight: .medium))
+                        .foregroundStyle(Tokens.text2)
+                        .padding(.horizontal, 12)
+                        .frame(minHeight: 28)
+                }
+                .buttonStyle(PromptTemplateChipStyle(shape: Capsule()))
+                .fixedSize()
+            }
+        }
+        .padding(.bottom, 6)
     }
 
     private func submitMemoryInstruction() {
