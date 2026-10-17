@@ -3419,11 +3419,17 @@ extension ModelCatalog.ModelList.Entry.NotchiPricing {
         let fmt = DateFormatter()
         fmt.locale = NotchModel.localeForInterfaceLanguage()
         fmt.setLocalizedDateFormatFromTemplate("MMMdHHmm")
+        return L("nono.pricing.saleUntil", percent,
+                 fmt.string(from: end) + " " + (saleZone ?? ""))
+    }
+
+    /// The zone `saleLineShort` prints the end in: "GMT+8".
+    var saleZone: String? {
+        guard let end = saleEnd else { return nil }
         let zone = DateFormatter()
         zone.locale = Locale(identifier: "en_US_POSIX")
         zone.dateFormat = "O"
-        return L("nono.pricing.saleUntil", percent,
-                 fmt.string(from: end) + " " + zone.string(from: end))
+        return zone.string(from: end)
     }
 }
 

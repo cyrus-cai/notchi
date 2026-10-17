@@ -733,7 +733,7 @@ struct ModelDetailCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if isFirstParty, let sale = model.info.notchiPricing?.saleLineShort {
-                saleBanner(sale)
+                saleBanner(sale, zone: model.info.notchiPricing?.saleZone)
             }
             content
                 .padding(ModelDetailPanel.inset)
@@ -767,10 +767,16 @@ struct ModelDetailCard: View {
 
     /// The sale, as one line of light across the top of the card that fades
     /// into the glass below it. Same teal as the picker's discount tag.
-    private func saleBanner(_ text: String) -> some View {
+    /// The zone at the end sits at half strength: it qualifies the time and
+    /// shouldn't read as loud as it.
+    private func saleBanner(_ text: String, zone: String?) -> some View {
         let teal = Tokens.sale
         let radius = Tokens.Radius.modal
-        return Text(text)
+        var line = AttributedString(text)
+        if let zone, !zone.isEmpty, let range = line.range(of: zone, options: .backwards) {
+            line[range].foregroundColor = teal.opacity(0.5)
+        }
+        return Text(line)
             .font(.sf(Tokens.TypeSize.caption, weight: .light))
             .foregroundStyle(teal)
             .lineLimit(1)
