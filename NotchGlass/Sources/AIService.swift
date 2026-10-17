@@ -1571,8 +1571,9 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
 
     /// Whether this provider can run a *real* web search during a turn — either a
     /// native server-side search (`serverSearch != nil`: Anthropic / OpenAI / Kimi
-    /// / OpenRouter) or the client-side `GLMSearchProvider` (GLM). The five vendors
-    /// that have neither (DeepSeek / Gemini / Qwen / MiniMax / MiMo) return false:
+    /// / OpenRouter) or a client-side search tool (`GLMSearchProvider` for GLM,
+    /// `DeepSeekSearchProvider` for DeepSeek). The vendors that have neither
+    /// (Gemini / Qwen / MiniMax / MiMo) return false:
     /// their requests go out unchanged and the model answers only from its training
     /// data, with no way to reach current information. The Settings provider menu
     /// uses this to demote the no-search vendors into a "not recommended" submenu.
@@ -1586,8 +1587,8 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // search anywhere in it (verified against the installed build's own tool
         // directory). Claiming the chip would be the dishonest no-search behavior
         // XII-116 fought, so a pi chat answers from training data and says so.
-        serverSearch != nil || self == .glm || self == .codex || self == .claudeCode
-            || self == .grokCode || self == .cursorCode || self == .commandCode
+        serverSearch != nil || self == .glm || self == .deepseek || self == .codex
+            || self == .claudeCode || self == .grokCode || self == .cursorCode || self == .commandCode
     }
 }
 
