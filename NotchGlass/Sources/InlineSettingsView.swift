@@ -2299,6 +2299,10 @@ struct InlineSettingsView: View {
                     .controlSize(.mini)
                     .tint(Tokens.text2)
                     .disabled(isAuto)
+                    // Auto is always on, so it has no switch to show. Hidden
+                    // rather than removed, so the origin column stays aligned.
+                    .opacity(isAuto ? 0 : 1)
+                    .accessibilityHidden(isAuto)
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
         }
