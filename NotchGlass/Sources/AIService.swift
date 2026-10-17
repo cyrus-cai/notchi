@@ -757,6 +757,23 @@ existing file, repeat everything it already holds that should stay, since your \
 text replaces the whole file.
 """
 
+/// For `NotchModel.scanClipboardForMemories`: file the copies in clipboard
+/// history that are worth keeping.
+let memoryClipboardSystemPrompt = """
+You keep a memory folder of Markdown files for a user, so a later \
+conversation can draw on it. Below are texts they copied recently. Judge each \
+copy on its own: keep what says something lasting about the user, their work, \
+people, plans, or things they will want again; skip the rest (code, passing \
+lookups, fragments, anything already in the folder). Never keep passwords, \
+keys, account or ID numbers. Write in the user's language and do not invent \
+anything. You choose the file names and how things are organised.
+
+Reply with one or more blocks, nothing before or after them: "FILE: <name>.md" \
+on its own line, then the file's complete new text. For an existing file, \
+repeat everything it already holds, since your text replaces the whole file. \
+If nothing is worth keeping, reply NONE.
+"""
+
 /// For `NotchModel.editMemory`: change the memory folder as the user says.
 let memoryEditSystemPrompt = """
 You keep a memory folder of Markdown files for a user. They are telling you \

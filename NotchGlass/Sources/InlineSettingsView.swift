@@ -222,7 +222,6 @@ struct InlineSettingsView: View {
     /// model is working on it.
     @State private var memoryInstruction = ""
     @State private var memoryEditing = false
-    @ObservedObject private var clipboardHistory = ClipboardHistory.shared
 
     /// The model catalog behind the picker — live lists, the fold, and which providers
     /// are callable. Session-wide (the panel's ⌘⇧I picker reads the same store), so a
@@ -381,14 +380,13 @@ struct InlineSettingsView: View {
         case balances = "Balances" // Blend1 gifts and purchases — reached from the wallet's links
         case privacy = "Privacy" // what happens to a Blend1 request — reached from the wallet's links
         case memory = "Memory"   // the memory folder — reached from Chat
-        case clipboardHistory = "ClipboardHistory" // recent copies — reached from Memory
         var id: String { rawValue }
 
         /// A sub-page rather than a category: reached from a parent pane, drawn
         /// across the whole panel, and left through the header's back pill or Esc.
         var isDetail: Bool {
             self == .licenses || self == .survey || self == .usage || self == .pricing || self == .balances
-                || self == .privacy || self == .memory || self == .clipboardHistory
+                || self == .privacy || self == .memory
         }
 
         /// The section a sub-page sits under — where back (and ⎋) returns to.
@@ -398,7 +396,6 @@ struct InlineSettingsView: View {
             case .licenses, .survey: return .about
             case .usage, .pricing, .balances, .privacy: return .model
             case .memory: return .chat
-            case .clipboardHistory: return .memory
             default:               return nil
             }
         }
@@ -430,7 +427,6 @@ struct InlineSettingsView: View {
             case .balances:   return L("nono.balances")
             case .privacy:    return L("nono.privacy.title")
             case .memory:     return L("memory.title")
-            case .clipboardHistory: return L("clipboardHistory.toggle")
             }
         }
     }
@@ -558,7 +554,7 @@ struct InlineSettingsView: View {
 
     /// Which disclosure chip owns the pointer. Permissions and Advanced can share
     /// one pane, so a single Bool would brighten both at once.
-    private enum DisclosureHover { case keys, instructions, memory, clipboard, permissions, advanced }
+    private enum DisclosureHover { case keys, instructions, memory, permissions, advanced }
     @State private var hoveredDisclosure: DisclosureHover?
 
     /// What the proxy field resolves to right now — filled in asynchronously by
@@ -985,8 +981,6 @@ struct InlineSettingsView: View {
                 NonoPrivacyNote()
             case .memory:
                 memoryPage
-            case .clipboardHistory:
-                clipboardHistoryPage
             }
             }
             .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -3719,8 +3713,8 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// The Memory sub-page: clipboard history, the files in the memory folder,
-    /// a box to tell the model what to change, and Forget all.
+    /// The Memory sub-page: the files in the memory folder, a box to tell the
+    /// model what to change, and Forget all.
     private var memoryPage: some View {
         VStack(alignment: .leading, spacing: 12) {
             if memory.enabled, memory.scanning {
@@ -3731,7 +3725,6 @@ struct InlineSettingsView: View {
                         .foregroundStyle(Tokens.text2)
                 }
             }
-            if memory.enabled, ClipboardHistory.available { clipboardHistoryRow }
             if !memory.scanning {
                 // One row per file: name, first line, last update. A tap opens
                 // the file in place to read and edit; edits are written back as
@@ -3876,98 +3869,6 @@ struct InlineSettingsView: View {
             if ok {
                 memoryInstruction = ""
                 memoryDrafts = [:]
-            }
-        }
-    }
-
-    /// Clipboard history's chip on the Memory page, opening
-    /// `clipboardHistoryPage`. Laid out like `memoryRow`; the Memory switch
-    /// turns it on and off.
-    private var clipboardHistoryRow: some View {
-        HStack(spacing: 8) {
-            Button {
-                NotchPanel.exemptNextDoubleClick()
-                open(.clipboardHistory)
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "chevron.right")
-                        .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
-                    Text(L("clipboardHistory.toggle"))
-                        .font(.sf(Tokens.TypeSize.label, weight: .medium))
-                    if !clipboardHistory.entries.isEmpty {
-                        Text("\(clipboardHistory.entries.count)")
-                            .font(.sf(Tokens.TypeSize.label, weight: .medium))
-                            .foregroundStyle(Tokens.text3)
-                            .monospacedDigit()
-                    }
-                }
-                .foregroundStyle(Tokens.text1)
-                .padding(.horizontal, 10)
-                .frame(height: 26)
-                .background(
-                    Capsule()
-                        .fill(.white.opacity(hoveredDisclosure == .clipboard ? 0.12 : 0.06))
-                )
-                .overlay(
-                    Capsule()
-                        .strokeBorder(.white.opacity(hoveredDisclosure == .clipboard ? 0.22 : 0.12),
-                                      lineWidth: 0.5)
-                )
-                .contentShape(Capsule())
-            }
-            .buttonStyle(.plain).exemptsDoubleClickPin()
-            .onHover { inside in
-                if inside { hoveredDisclosure = .clipboard }
-                else if hoveredDisclosure == .clipboard { hoveredDisclosure = nil }
-            }
-            .animation(.easeOut(duration: Tokens.hoverFade), value: hoveredDisclosure)
-        }
-    }
-
-    /// The Clipboard history sub-page: recent copies, newest first, each with
-    /// a ×, and Clear all.
-    private var clipboardHistoryPage: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 0) {
-                if clipboardHistory.entries.isEmpty {
-                    Text(L("clipboardHistory.empty"))
-                        .font(.sf(Tokens.TypeSize.form))
-                        .foregroundStyle(Tokens.text3)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                }
-                ForEach(clipboardHistory.entries, id: \.text) { entry in
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(entry.text)
-                            .font(.sf(Tokens.TypeSize.form))
-                            .foregroundStyle(Tokens.text1)
-                            .lineLimit(3)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        ListRowRemoveButton(label: L("clipboardHistory.delete")) {
-                            withAnimation(.easeOut(duration: Tokens.hoverFade)) {
-                                clipboardHistory.delete(entry.text)
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                }
-            }
-            .padding(.vertical, 2)
-            .recessedSurface(in: RoundedRectangle.control, lit: false)
-
-            if !clipboardHistory.entries.isEmpty {
-                Button {
-                    withAnimation(.easeOut(duration: Tokens.hoverFade)) { clipboardHistory.clear() }
-                } label: {
-                    Text(L("clipboardHistory.clearAll"))
-                        .font(.sf(Tokens.TypeSize.label, weight: .medium))
-                        .foregroundStyle(Tokens.text2)
-                        .padding(.horizontal, 12)
-                        .frame(minHeight: 28)
-                }
-                .buttonStyle(PromptTemplateChipStyle(shape: Capsule()))
             }
         }
     }

@@ -175,7 +175,9 @@ final class UserMemory: ObservableObject {
 
     func delete(_ id: String) { remove(id) }
 
+    /// Every file, and the clipboard history the folder is filed from.
     func deleteAll() {
+        ClipboardHistory.shared.clear()
         for url in fileURLs() { try? FileManager.default.removeItem(at: url) }
         reload()
     }

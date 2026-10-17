@@ -11674,6 +11674,7 @@ final class NotchModel: ObservableObject {
     /// request is tried again on the next launch or the next time it is
     /// turned on.
     func scanHistoryForMemories() {
+        scanClipboardForMemories()
         let memory = UserMemory.shared
         guard memory.enabled, !memory.historyScanDone, !memory.scanning, !(ai is StubAIService) else { return }
         var lines: [String] = []
@@ -11722,6 +11723,59 @@ final class NotchModel: ObservableObject {
             await MainActor.run { memory.finishScan(failed ? nil : facts) }
         }
     }
+
+    /// When Memory is on: go through the copies already in clipboard history
+    /// once, and file the ones worth keeping in the memory folder, one by one
+    /// on the model's judgment. New copies are judged as they come
+    /// (`senseRemember`). A failed request is tried again next time.
+    func scanClipboardForMemories() {
+        let memory = UserMemory.shared
+        let key = "memory.clipboardScanDone"
+        guard memory.enabled, !UserDefaults.standard.bool(forKey: key),
+              !clipboardScanRunning, !(ai is StubAIService) else { return }
+        let entries = ClipboardHistory.shared.entries
+        guard !entries.isEmpty else {
+            UserDefaults.standard.set(true, forKey: key)
+            return
+        }
+        var lines: [String] = []
+        var total = 0
+        for entry in entries {
+            let text = String(entry.text.prefix(1_000))
+            let line = "--- copied \(entry.copiedAt.formatted(date: .abbreviated, time: .omitted))\n\(text)"
+            total += line.count
+            if total > 20_000 { break }
+            lines.append(line)
+        }
+        clipboardScanRunning = true
+        let service = ai
+        let prompt = "Memory folder:\n\(memory.promptContents)\n\nCopies:\n" + lines.joined(separator: "\n")
+        Task { [weak self] in
+            var reply = ""
+            var failed = false
+            do {
+                let chunks = NoNoRequestContext.$current.withValue(
+                    NoNoRequestContext(surface: NoNoRequestContext.memory)
+                ) {
+                    service.stream(system: memoryClipboardSystemPrompt,
+                                   messages: [ChatMessage(role: "user", content: prompt)])
+                }
+                for try await chunk in chunks { reply += chunk }
+            } catch {
+                failed = true
+            }
+            await MainActor.run {
+                self?.clipboardScanRunning = false
+                // Turned off meanwhile, or the reply is unreadable: try next time.
+                guard !failed, memory.enabled, let ops = Self.parseMemoryEdits(reply) else { return }
+                for op in ops {
+                    if case .write(let file, let content) = op { memory.write(file, content: content) }
+                }
+                UserDefaults.standard.set(true, forKey: key)
+            }
+        }
+    }
+    private var clipboardScanRunning = false
 
     /// Ask the model that answered the round (`service`) to summarize the
     /// conversation into a short title. Returns `nil` when offline (stub),
