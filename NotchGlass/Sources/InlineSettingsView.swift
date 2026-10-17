@@ -685,10 +685,10 @@ struct InlineSettingsView: View {
                             .foregroundStyle(Tokens.text1)
                             .multilineTextAlignment(.center)
                             .fixedSize(horizontal: false, vertical: true)
+                        // Cancel takes the trailing slot, where this card puts its
+                        // main action (`LinkWarningConfirm`). Forget stays the
+                        // leading risk action.
                         HStack(spacing: 10) {
-                            ConfirmDialogButton(title: L("clear.cancel"), kind: .neutral) {
-                                memoryForgetTarget = nil
-                            }
                             ConfirmDialogButton(title: L(target.file == nil ? "memory.clearAll" : "memory.delete"),
                                                 kind: .destructive) {
                                 memoryForgetTarget = nil
@@ -702,6 +702,9 @@ struct InlineSettingsView: View {
                                         memory.deleteAll()
                                     }
                                 }
+                            }
+                            ConfirmDialogButton(title: L("clear.cancel"), kind: .neutral) {
+                                memoryForgetTarget = nil
                             }
                         }
                     }
@@ -1086,6 +1089,10 @@ struct InlineSettingsView: View {
             // carry that offset into General (and vice versa) — a fresh scroll
             // always starts at the top of its own content.
             .id(section)
+            // Swap panes outright. A keyed view otherwise cross-fades, and
+            // for that beat the outgoing and incoming panes sat side by side
+            // in the columns' HStack, nudging the category column sideways.
+            .transition(.identity)
             // A required setup unfolds the key section past the pane's height
             // cap — snap the scroller to it so what just appeared is in view
             // (the anchor lives on `keySection`). The first frame of the unfold
@@ -3770,26 +3777,36 @@ struct InlineSettingsView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .recessedSurface(in: RoundedRectangle.control, lit: false)
                 } else {
+                    // Each pane scrolls on its own; together they fill the page
+                    // above the pinned footer, so the page itself holds still.
                     HStack(alignment: .top, spacing: 10) {
-                        VStack(alignment: .leading, spacing: 0) {
-                            ForEach(memoryTree, id: \.folder) { group in
-                                if !group.folder.isEmpty { memoryFolderRow(group.folder) }
-                                if group.folder.isEmpty || !memoryClosedFolders.contains(group.folder) {
-                                    ForEach(group.files) { entry in
-                                        memoryFileRow(entry, indented: !group.folder.isEmpty)
+                        ScrollView(.vertical) {
+                            VStack(alignment: .leading, spacing: 0) {
+                                ForEach(memoryTree, id: \.folder) { group in
+                                    if !group.folder.isEmpty { memoryFolderRow(group.folder) }
+                                    if group.folder.isEmpty || !memoryClosedFolders.contains(group.folder) {
+                                        ForEach(group.files) { entry in
+                                            memoryFileRow(entry, indented: !group.folder.isEmpty)
+                                        }
                                     }
                                 }
                             }
+                            .padding(4)
+                            .frame(maxWidth: .infinity, alignment: .topLeading)
                         }
-                        .padding(4)
-                        .frame(width: 250, alignment: .topLeading)
-                        .frame(minHeight: 260, alignment: .top)
+                        .scrollIndicators(.never)
+                        .frame(width: 250)
                         .recessedSurface(in: RoundedRectangle.control, lit: false)
 
-                        memoryEditorPane
-                            .frame(maxWidth: .infinity, minHeight: 260, alignment: .topLeading)
-                            .recessedSurface(in: RoundedRectangle.control, lit: false)
+                        ScrollView(.vertical) {
+                            memoryEditorPane
+                                .frame(maxWidth: .infinity, alignment: .topLeading)
+                        }
+                        .scrollIndicators(.never)
+                        .frame(maxWidth: .infinity)
+                        .recessedSurface(in: RoundedRectangle.control, lit: false)
                     }
+                    .frame(height: memoryPanesHeight)
                 }
 
                 // Room for the pinned footer (`memoryFooter`).
@@ -3903,6 +3920,12 @@ struct InlineSettingsView: View {
     /// The Memory page's editor face: the code-block monospace at its size.
     private static let memoryMono = Font.system(size: Tokens.TypeSize.meta, design: .monospaced)
 
+    /// The two Memory panes' height: the page's own, less its runways, the
+    /// pinned footer's room and the gap above it.
+    private var memoryPanesHeight: CGFloat {
+        max(160, settingsPaneHeight - Self.paneTopRunway - 20 - 44 - 12)
+    }
+
     /// Asks before forgetting the file (see `memoryForgetTarget`).
     private func deleteMemoryFile(_ id: String) {
         memoryForgetTarget = MemoryForgetTarget(file: id)
@@ -3936,7 +3959,6 @@ struct InlineSettingsView: View {
                     }
                 ), axis: .vertical)
                     .textFieldStyle(.plain)
-                    .lineLimit(8...40)
                     .font(Self.memoryMono)
                     .lineSpacing(2)
                     .foregroundStyle(Tokens.text1)

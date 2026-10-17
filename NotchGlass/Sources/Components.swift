@@ -3917,6 +3917,9 @@ struct AssistantTurnView: View {
     @State private var revealedListHeight: CGFloat = 0
     /// Chevron and list opacity, flipped in the same transaction as the height.
     @State private var listExpandedVisual = false
+    /// The settled "Searched the web" headline, same brighten as the capture
+    /// line above it (`CaptureLineLink`).
+    @State private var headerHovering = false
 
     /// The gutter the orb occupies on the block's headline while the round is
     /// still working. It CLOSES with the orb rather than being held empty: a
@@ -4180,17 +4183,27 @@ struct AssistantTurnView: View {
                         .opacity(working ? 1 : 0)
                         .padding(.trailing, working ? Self.waitOrbGap : 0)
                         .centeredOnTextGlyphs(fontSize: waitFont)
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    HStack(alignment: .firstTextBaseline, spacing: 3) {
                         CrossfadeText(text: headerLine, font: waitFont,
-                                      color: working ? Tokens.text2 : Tokens.text3,
+                                      color: (working || headerHovering) ? Tokens.text2 : Tokens.text3,
                                       shimmers: working)
                             .lineLimit(1)
                             .truncationMode(.tail)
+                        // Same arrow the capture line above wears ("Updated memory ↗").
+                        // Held in the row only once the headline has settled: while
+                        // the round is still reading, the line is a status, not a link.
+                        if !working {
+                            Image(systemName: "arrow.up.right")
+                                .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                                .foregroundStyle(headerHovering ? Tokens.text2 : Tokens.text3)
+                        }
                     }
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain).exemptsDoubleClickPin()
+            .onHover { headerHovering = $0 }
+            .animation(.easeOut(duration: Tokens.hoverFade), value: headerHovering)
             // Always mounted, opened by HEIGHT — an `if` would insert the list at
             // full size and only crossfade it, which is what made open and shut
             // read as a jump. Clipped so the rows slide out of view under the

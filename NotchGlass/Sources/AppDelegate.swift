@@ -2003,7 +2003,7 @@ enum HoverSensitivity: String, CaseIterable, Identifiable {
     /// steeper approach (coming up from the content below) still opens on
     /// contact; that direction is never a menu bar reach.
     case low
-    /// The default. Hover opens, except on a fast crossing within 25° of
+    /// The default before `.click`. Hover opens, except on a fast crossing within 25° of
     /// horizontal, which is handed to the entry watch and opens only if the
     /// pointer settles.
     case balanced
@@ -2048,11 +2048,18 @@ enum HoverSensitivity: String, CaseIterable, Identifiable {
 
     private static let key = "hoverSensitivity"
 
-    /// Defaults to `.balanced`; an unknown stored value falls back to it too.
+    /// A new install starts on `.click`; a Mac that ran Notch before keeps
+    /// `.balanced`, the earlier default. The first read writes the choice
+    /// down, so finishing the intro later cannot flip it.
     static var current: HoverSensitivity {
         get {
-            UserDefaults.standard.string(forKey: key)
-                .flatMap(HoverSensitivity.init(rawValue:)) ?? .balanced
+            if let stored = UserDefaults.standard.string(forKey: key)
+                .flatMap(HoverSensitivity.init(rawValue:)) {
+                return stored
+            }
+            let initial: HoverSensitivity = OnboardingService.hasRunBefore ? .balanced : .click
+            UserDefaults.standard.set(initial.rawValue, forKey: key)
+            return initial
         }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: key) }
     }
