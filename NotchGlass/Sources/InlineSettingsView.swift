@@ -219,6 +219,8 @@ struct InlineSettingsView: View {
     @State private var memoryDrafts: [String: String] = [:]
     /// The memory file opened for editing on the Memory page.
     @State private var memoryOpenFile: String?
+    /// Memory folders folded shut in the tree.
+    @State private var memoryClosedFolders: Set<String> = []
     /// The Memory page's "what to change or remove" box, and whether the
     /// model is working on it.
     @State private var memoryInstruction = ""
@@ -3699,9 +3701,9 @@ struct InlineSettingsView: View {
                 }
             }
             if !memory.scanning {
-                // One row per file: name, first line, last update. A tap opens
-                // the file in place to read and edit; edits are written back as
-                // you type.
+                // The folder as a file tree, like an editor's sidebar: folders
+                // fold, a file opens in place to read and edit (written back as
+                // you type), and a right-click shows either one in Finder.
                 VStack(alignment: .leading, spacing: 0) {
                     if memory.entries.isEmpty {
                         Text(L("memory.empty"))
@@ -3710,8 +3712,13 @@ struct InlineSettingsView: View {
                             .padding(.horizontal, 12)
                             .padding(.vertical, 8)
                     }
-                    ForEach(memory.entries) { entry in
-                        memoryFileRow(entry)
+                    ForEach(memoryTree, id: \.folder) { group in
+                        if !group.folder.isEmpty { memoryFolderRow(group.folder) }
+                        if group.folder.isEmpty || !memoryClosedFolders.contains(group.folder) {
+                            ForEach(group.files) { entry in
+                                memoryFileRow(entry, indented: !group.folder.isEmpty)
+                            }
+                        }
                     }
                 }
                 .padding(.vertical, 2)
@@ -3739,10 +3746,57 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// A memory file's row: name, first line and last update; a tap opens the
+    /// The memory files grouped by folder: top-level files first, then each
+    /// folder by name.
+    private var memoryTree: [(folder: String, files: [UserMemory.Entry])] {
+        let grouped = Dictionary(grouping: memory.entries) { entry -> String in
+            entry.id.contains("/") ? String(entry.id.split(separator: "/")[0]) : ""
+        }
+        return grouped.keys.sorted { a, b in
+            a.isEmpty != b.isEmpty ? a.isEmpty : a.localizedStandardCompare(b) == .orderedAscending
+        }.map { (folder: $0, files: grouped[$0] ?? []) }
+    }
+
+    /// A folder in the tree: a chevron that folds it, and its name.
+    private func memoryFolderRow(_ folder: String) -> some View {
+        let open = !memoryClosedFolders.contains(folder)
+        return Button {
+            NotchPanel.exemptNextDoubleClick()
+            withAnimation(.easeOut(duration: 0.16)) {
+                if open { memoryClosedFolders.insert(folder) } else { memoryClosedFolders.remove(folder) }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "chevron.right")
+                    .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                    .rotationEffect(.degrees(open ? 90 : 0))
+                    .frame(width: 12)
+                Text(folder)
+                    .font(.sf(Tokens.TypeSize.form, weight: .medium))
+                    .foregroundStyle(Tokens.text2)
+                    .lineLimit(1)
+            }
+            .foregroundStyle(Tokens.text3)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).exemptsDoubleClickPin()
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .contextMenu { memoryRevealButton(folder) }
+    }
+
+    private func memoryRevealButton(_ name: String) -> some View {
+        Button(L("memory.showInFinder")) {
+            NSWorkspace.shared.activateFileViewerSelecting([UserMemory.folder.appendingPathComponent(name)])
+        }
+    }
+
+    /// A memory file in the tree: icon, name and last update; a tap opens the
     /// whole file below it for editing.
-    private func memoryFileRow(_ entry: UserMemory.Entry) -> some View {
+    private func memoryFileRow(_ entry: UserMemory.Entry, indented: Bool) -> some View {
         let isOpen = memoryOpenFile == entry.id
+        let name = entry.id.split(separator: "/").last.map(String.init) ?? entry.id
         return VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Button {
@@ -3751,15 +3805,14 @@ struct InlineSettingsView: View {
                         memoryOpenFile = isOpen ? nil : entry.id
                     }
                 } label: {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(entry.id)
-                            .font(.sf(Tokens.TypeSize.form, weight: .medium))
-                            .foregroundStyle(Tokens.text1)
-                            .lineLimit(1)
-                            .fixedSize()
-                        Text(entry.preview)
-                            .font(.sf(Tokens.TypeSize.form))
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Image(systemName: "doc.text")
+                            .font(.sf(Tokens.TypeSize.label))
                             .foregroundStyle(Tokens.text3)
+                            .frame(width: 12)
+                        Text(name)
+                            .font(.sf(Tokens.TypeSize.form))
+                            .foregroundStyle(Tokens.text1)
                             .lineLimit(1)
                             .frame(maxWidth: .infinity, alignment: .leading)
                         Text(relativeTime(entry.modified))
@@ -3778,6 +3831,7 @@ struct InlineSettingsView: View {
                     }
                 }
             }
+            .contextMenu { memoryRevealButton(entry.id) }
             if isOpen {
                 TextField("", text: Binding(
                     get: { memoryDrafts[entry.id] ?? memory.read(entry.id) ?? "" },
@@ -3793,9 +3847,11 @@ struct InlineSettingsView: View {
                     // Typing here counts as activity so a drifting pointer
                     // can't fold the panel mid-edit.
                     .onChange(of: memoryDrafts[entry.id]) { model.noteUserTyping() }
+                    .padding(.leading, 18)
             }
         }
-        .padding(.horizontal, 12)
+        .padding(.leading, indented ? 30 : 12)
+        .padding(.trailing, 12)
         .padding(.vertical, 6)
     }
 
