@@ -7323,8 +7323,10 @@ final class NotchModel: ObservableObject {
         }
         history.insert(item, at: 0)
         saveHistory()
-        // The thread the panel will reopen on, kept in step.
-        if threadHistoryID == item.id { turns = item.conversation }
+        // The thread on screen, kept in step. Only while its page is up: on the
+        // idle page `turns` must stay empty, or the pull into the main thread
+        // is refused until the panel closes and clears it.
+        if mode == .result, threadHistoryID == item.id { turns = item.conversation }
         touchMainThreadPeek(item.id)
     }
 

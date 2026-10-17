@@ -479,8 +479,8 @@ private struct ClipboardSenseEars: View {
             // phrase, the dots, the verdict.
             HStack(spacing: 0) {
                 // A handled copy: the model's emoji answers in the eyes' place.
-                // The eyes close, and the emoji resolves out of a soft blur in
-                // their place; going back, it blurs away and the eyes open.
+                // The eyes close, and the emoji grows in where they were; going
+                // back, it fades and the eyes open.
                 ZStack {
                     if case .done(let emoji) = sense {
                         // Eye-sized, with the ear's own margin around it.
@@ -1591,8 +1591,9 @@ private struct PullWidthFrame: ViewModifier {
     }
 }
 
-/// The emoji's way in and out of the ear: from a soft blur, a touch small and
-/// clear, to sharp at full size. No overshoot.
+/// The emoji's way in and out of the ear: from clear and a touch small to full
+/// size. Opacity and scale only, both composited, so the notch never redraws
+/// a blur per frame (which stuttered).
 private struct SoftResolve: ViewModifier, Animatable {
     var progress: CGFloat
     var animatableData: CGFloat {
@@ -1603,7 +1604,6 @@ private struct SoftResolve: ViewModifier, Animatable {
         let p = min(max(progress, 0), 1)
         content
             .scaleEffect(1 - 0.14 * p)
-            .blur(radius: 3 * p)
             .opacity(1 - p)
     }
 }
