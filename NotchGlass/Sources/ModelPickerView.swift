@@ -731,30 +731,13 @@ struct ModelDetailCard: View {
     private var isFirstParty: Bool { model.provider.isFirstParty }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            header
-
-            // Meters for a model we rate; the wallet for the one we run.
-            //
-            // Speed and Intelligence are `ModelRatings`' read of an id, and on
-            // our own ids that read is a word in a name we chose ourselves
-            // ("flash") — a speed bar sourced from our own marketing, and an
-            // intelligence bar sourced from nothing. What is true of this
-            // one and of no other card is the remaining credit, so the two
-            // invented bars give way to the wallet, which sits at the bottom of
-            // the card, under the notes.
-            if !isFirstParty {
-                Meter(title: L("model.detail.speed"), level: figures.speed)
-                Meter(title: L("model.detail.intelligence"), level: figures.intelligence)
+        VStack(alignment: .leading, spacing: 0) {
+            if isFirstParty, let sale = model.info.notchiPricing?.saleLineShort {
+                saleBanner(sale, zone: model.info.notchiPricing?.saleZone)
             }
-
-            if isFirstParty {
-                prices
-                notes
-                walletWell
-            }
+            content
+                .padding(ModelDetailPanel.inset)
         }
-        .padding(ModelDetailPanel.inset)
         .frame(width: ModelDetailPanel.width(showingPurchase: wallet?.offersCredit == true
                                                && showingAmount),
                alignment: .leading)
@@ -782,41 +765,107 @@ struct ModelDetailCard: View {
         .environment(\.colorScheme, .dark)
     }
 
-    /// What a million tokens in and out cost against the balance, in the
-    /// figures Settings → Models and Pricing prints.
+    /// The sale, as one line of light across the top of the card that fades
+    /// into the glass below it. Same teal as the picker's discount tag.
+    /// The zone at the end sits at half strength: it qualifies the time and
+    /// shouldn't read as loud as it.
+    private func saleBanner(_ text: String, zone: String?) -> some View {
+        let teal = Tokens.sale
+        let radius = Tokens.Radius.modal
+        var line = AttributedString(text)
+        if let zone, !zone.isEmpty, let range = line.range(of: zone, options: .backwards) {
+            line[range].foregroundColor = teal.opacity(0.5)
+        }
+        return Text(line)
+            .font(.sf(Tokens.TypeSize.caption, weight: .light))
+            .foregroundStyle(teal)
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+            .padding(.horizontal, 12)
+            .padding(.top, 9)
+            .padding(.bottom, 2)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                LinearGradient(colors: [teal.opacity(0.20), teal.opacity(0.06), .clear],
+                               startPoint: .top, endPoint: .bottom),
+                in: UnevenRoundedRectangle(topLeadingRadius: radius,
+                                           topTrailingRadius: radius,
+                                           style: .continuous))
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if isFirstParty {
+            firstPartyContent
+        } else {
+            VStack(alignment: .leading, spacing: 9) {
+                header
+                Meter(title: L("model.detail.speed"), level: figures.speed)
+                Meter(title: L("model.detail.intelligence"), level: figures.intelligence)
+            }
+        }
+    }
+
+    /// Ours, kept plain: the name, one line of rates, then where it runs and
+    /// what it is billed to. No gauge and no rules, so nothing on the card
+    /// competes with the figures.
+    ///
+    /// Speed and Intelligence are `ModelRatings`' read of an id, and on our own
+    /// ids that read is a word in a name we chose ourselves ("flash"), so this
+    /// card shows the remaining credit in their place.
+    private var firstPartyContent: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                VendorLogo(vendor: model.info.vendor, fallback: model.info.id)
+                    .frame(width: 16, height: 16)
+                Text(title.name)
+                    .font(.sf(Tokens.TypeSize.form, weight: .medium))
+                    .foregroundStyle(Tokens.text1)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                if let qualifier = title.qualifier { pill(qualifier) }
+            }
+
+            prices
+
+            VStack(alignment: .leading, spacing: 2) {
+                notes
+                walletWell
+            }
+        }
+    }
+
+    /// What a million tokens in and out cost against the balance, on one line:
+    /// "In $0.04 · Out $0.20 /M".
     @ViewBuilder
     private var prices: some View {
         if let pricing = model.info.notchiPricing {
-            VStack(alignment: .leading, spacing: 4) {
-                price(L("nono.pricing.input"), pricing.inputPerMTok)
-                price(L("nono.pricing.output"), pricing.outputPerMTok)
+            HStack(alignment: .firstTextBaseline, spacing: 5) {
+                price(L("nono.pricing.in"), pricing.inputPerMTok)
+                Text("·").foregroundStyle(Tokens.text4)
+                price(L("nono.pricing.out"), pricing.outputPerMTok)
+                Text("/M").foregroundStyle(Tokens.text4)
             }
+            .font(.sf(Tokens.TypeSize.meta))
+            .lineLimit(1)
+            .fixedSize()
         }
     }
 
     private func price(_ title: String, _ usd: Double) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(title)
-                .font(.sf(Tokens.TypeSize.meta))
-                .foregroundStyle(Tokens.text3)
-            Spacer(minLength: 4)
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
+            Text(title).foregroundStyle(Tokens.text3)
             if usd == 0 {
                 FreeTag()
             } else {
-                HStack(alignment: .firstTextBaseline, spacing: 1) {
-                    InlineSettingsView.moneyText(usd, size: Tokens.TypeSize.label)
-                        .foregroundStyle(Tokens.text1)
-                    Text("/M")
-                        .font(.sf(Tokens.TypeSize.meta))
-                        .foregroundStyle(Tokens.text4)
-                }
-                .monospacedDigit()
-                .lineLimit(1)
+                InlineSettingsView.moneyText(usd, size: Tokens.TypeSize.label)
+                    .foregroundStyle(Tokens.text1)
+                    .monospacedDigit()
             }
         }
     }
 
-    /// Where Notchi runs the model, and any sale on it.
+    /// Where Notchi runs the model. Any sale is the banner at the top.
     private var notes: some View {
         VStack(alignment: .leading, spacing: 7) {
             switch ModelRatings.nonoHost(id: model.info.id, pricing: model.info.notchiPricing) {
@@ -826,9 +875,6 @@ struct ModelDetailCard: View {
                 Note(title: L("model.detail.nono.host"))
             case .anyRegion:
                 Note(title: L("model.detail.nono.host.any"))
-            }
-            if let sale = model.info.notchiPricing?.saleLine {
-                Note(title: sale)
             }
         }
     }
@@ -922,7 +968,6 @@ struct ModelDetailCard: View {
                         .foregroundStyle(Tokens.text4)
                 }
             }
-            .padding(.top, 2)
         }
     }
 
@@ -2878,6 +2923,7 @@ struct AskRecentModelPickerView: View {
             accessory: Self.accessory(for: r),
             lowBalance: Self.lowBalance(r),
             tag: Self.tag(for: r),
+            tagTint: Self.showsNewTag(r) ? Tokens.accent : Tokens.sale,
             brandTitle: Self.isHouse(r),
             dimmed: unavailable,
             fontSize: Self.fontSize,

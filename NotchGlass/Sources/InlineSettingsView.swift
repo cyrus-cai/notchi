@@ -620,6 +620,11 @@ struct InlineSettingsView: View {
                 // Columns sit on the panel's own gutter, so the selected
                 // category capsule shares its left edge with the back pill.
                 .padding(.top, 12)
+                // Pushing a sub-page drops the columns at once instead of
+                // fading them: while they faded, the panel re-laid out under
+                // them and the category column visibly lurched right for a
+                // frame. Coming back still fades them in.
+                .transition(.asymmetric(insertion: .opacity, removal: .identity))
             }
         }
         // Only soften the Settings content behind the template picker. A small
@@ -790,10 +795,6 @@ struct InlineSettingsView: View {
     /// push its own fields past the pane's height cap.
     private static let keySectionAnchor = "settings.keySection"
 
-    /// The Model group's card. Same radius as the pane's other recessed slab
-    /// (the template detail's prompt box), so the two read as one material.
-    private static let modelCardShape = RoundedRectangle.menu
-
     /// The empty inset above the pane's first row, and the length of the top
     /// taper that dissolves into it. The taper is the longer of the two (a fade
     /// that stops at the runway's edge reads as a hard cut), so it starts well
@@ -850,17 +851,12 @@ struct InlineSettingsView: View {
                 // Notchi's own lineup sits under the figure: a list to look at,
                 // not a choice to make here — the panel's model menu is where
                 // those tiers are picked.
-                VStack(alignment: .leading, spacing: 12) {
+                // Drawn as a pocket with the lineup's cards standing in it;
+                // a card opens Models and pricing. The pocket wears the brand
+                // aura whichever backend is answering.
+                WalletPocket(cards: walletCards, onCard: { _ in open(.pricing) }) {
                     nonoAccountRow
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .recessedSurface(in: Self.modelCardShape, lit: false)
-                // The mark is said ONCE, by the card — not by the rows below it.
-                // Lit whichever backend is answering: the card is Notchi's
-                // wallet either way.
-                .brandAura(in: Self.modelCardShape, lineWidth: 1.2)
                 // Everything you bring yourself, outside the card and unadorned,
                 // in the order you set it up: which backend answers, which of
                 // its models (only once it can answer), and the key that lets
@@ -2037,7 +2033,7 @@ struct InlineSettingsView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 2) {
                 Text(L("nono.credit"))
-                    .font(.sf(Tokens.TypeSize.form))
+                    .font(.sf(Tokens.TypeSize.meta, weight: .light))
                     .foregroundStyle(Tokens.text2)
                 // How this figure is spent — prepaid, per token, no expiry —
                 // sits behind the ⓘ rather than as a line under it.
@@ -2052,15 +2048,15 @@ struct InlineSettingsView: View {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
                     Text(L("nono.preparing"))
-                        .font(.sf(Tokens.TypeSize.label))
+                        .font(.sf(Tokens.TypeSize.meta))
                         .foregroundStyle(Tokens.text2)
                 }
-                .frame(height: 34, alignment: .leading)
+                .frame(height: 30, alignment: .leading)
                 .padding(.top, 4)
             } else if let snapshot {
                 // The figure, under its label.
                 nonoCreditRow(snapshot)
-                    .padding(.top, 12)
+                    .padding(.top, 8)
 
                 // The first three open a sub-page. Privacy leaves the app, the
                 // same page About opens, so it carries the outbound arrow.
@@ -2092,7 +2088,7 @@ struct InlineSettingsView: View {
                 // launch. A spinner, not a guess: drawing $0.00 tells someone
                 // who has credit that they have none.
                 ProgressView().controlSize(.small)
-                    .frame(height: 34, alignment: .leading)
+                    .frame(height: 30, alignment: .leading)
                     .padding(.top, 4)
             }
         }
@@ -2115,8 +2111,8 @@ struct InlineSettingsView: View {
             // itself for `numericText` to fire (see `StatsFigure`).
             let shownUSD = nono.rollFromUSD ?? snapshot.credit.remainingUSD
             Text(Self.money(shownUSD))
-                .font(.brand(Tokens.TypeSize.prompt))
-                .foregroundStyle(Tokens.text2)
+                .font(.sf(Tokens.TypeSize.form + 1))
+                .foregroundStyle(Tokens.text1)
                 .monospacedDigit()
                 .contentTransition(.numericText(value: shownUSD))
                 .animation(reduceMotion ? nil : .snappy(duration: 0.6), value: shownUSD)
@@ -2171,6 +2167,30 @@ struct InlineSettingsView: View {
             NonoLineupRow(id: id, name: ModelRatings.prettyName(for: id, provider: .nono),
                           info: ModelInfo(id: id, vendor: ModelRatings.vendor(for: id, provider: .nono)))
         }
+    }
+
+    /// The wallet's cards, left to right. These three when the lineup has
+    /// them; any slot the lineup lacks is filled from the Ask menu's order.
+    private static let walletCardIDs = ["claude-sonnet-5.5", "gpt-6-sol", "auto-us"]
+
+    private var walletCards: [WalletCard] {
+        let hidden = NotchiModelVisibility.hidden(in: hiddenNotchiModels)
+        let rows = nonoLineupRows
+        let picked = Self.walletCardIDs.compactMap { id in rows.first { $0.id == id } }
+        let fill = NotchiModelVisibility.ordered(rows, id: \.id)
+            .filter { row in
+                (row.id.hasPrefix("auto-") || !hidden.contains(row.id))
+                    && !picked.contains { $0.id == row.id }
+            }
+        return (picked + fill)
+            .prefix(3)
+            .map { row in
+                // The card already wears Anthropic's mark, and the full
+                // "Claude Sonnet 5.5" does not fit a third of the row.
+                let name = row.name.hasPrefix("Claude ") ? String(row.name.dropFirst(7)) : row.name
+                return WalletCard(id: row.id, name: name,
+                                  vendor: ModelRatings.vendor(for: row.id, provider: .nono))
+            }
     }
 
     /// What this balance pays for: every model the gateway serves and the
@@ -2243,7 +2263,7 @@ struct InlineSettingsView: View {
                     .frame(width: 15, height: 15)
                 HStack(spacing: 4) {
                     Text(row.name)
-                        .font(.sf(Tokens.TypeSize.label, weight: .medium))
+                        .font(.sf(Tokens.TypeSize.meta + 0.5, weight: .medium))
                         .foregroundStyle(Tokens.text1)
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
@@ -2275,6 +2295,8 @@ struct InlineSettingsView: View {
                     .font(.sf(Tokens.TypeSize.meta))
                     .foregroundStyle(Tokens.text3)
                     .lineLimit(1)
+                    // Written in full, never "US Pro…".
+                    .fixedSize(horizontal: true, vertical: false)
                 // Shown in the Ask chip's model menu. Auto is always there.
                 let isAuto = row.id.hasPrefix("auto-")
                 Toggle("", isOn: Binding(
@@ -2290,6 +2312,10 @@ struct InlineSettingsView: View {
                     .controlSize(.mini)
                     .tint(Tokens.text2)
                     .disabled(isAuto)
+                    // Auto is always on, so it has no switch to show. Hidden
+                    // rather than removed, so the origin column stays aligned.
+                    .opacity(isAuto ? 0 : 1)
+                    .accessibilityHidden(isAuto)
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
         }
@@ -3104,17 +3130,18 @@ struct InlineSettingsView: View {
     /// Refreshed badge's fill and size, at a regular weight.
     struct NewBadge: View {
         var text = L("tag.new")
+        var tint = Tokens.accent
 
         var body: some View {
             Text(text)
                 .font(.sf(Tokens.TypeSize.caption, weight: .regular))
                 .tracking(0.4)
-                .foregroundStyle(Tokens.accent)
+                .foregroundStyle(tint)
                 .lineLimit(1)
                 .fixedSize()
                 .padding(.horizontal, 4)
                 .padding(.vertical, 1)
-                .background(Tokens.accent.opacity(0.22), in: LowBalanceTag.shape)
+                .background(tint.opacity(0.22), in: LowBalanceTag.shape)
         }
 
         /// The tag's width, for a card sized by arithmetic (the Ask model menu).

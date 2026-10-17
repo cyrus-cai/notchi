@@ -8989,6 +8989,8 @@ struct MenuCardRow: View {
     /// Settings' "New" tag in the trailing slot, with this text: "New" on a
     /// model added recently, "90% OFF" on one on sale.
     var tag: String? = nil
+    /// The tag's color: Settings' blue for "New", `Tokens.sale` for a discount.
+    var tagTint: Color = Tokens.accent
     /// A trailing glyph that only appears under the pointer, for a row that
     /// leaves this surface rather than choosing something in it. Held in the
     /// layout at rest — same as the detail card's scoring link — so arriving on
@@ -9075,7 +9077,7 @@ struct MenuCardRow: View {
                 }
                 if let tag, !lowBalance {
                     Spacer(minLength: 0)
-                    InlineSettingsView.NewBadge(text: tag)
+                    InlineSettingsView.NewBadge(text: tag, tint: tagTint)
                 }
                 if let accessory {
                     if !lowBalance && tag == nil { Spacer(minLength: 0) }

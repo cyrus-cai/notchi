@@ -3411,6 +3411,26 @@ extension ModelCatalog.ModelList.Entry.NotchiPricing {
         fmt.setLocalizedDateFormatFromTemplate("MMMdjmm")
         return L("nono.pricing.saleUntil", percent, fmt.string(from: end))
     }
+
+    /// `saleLine` for the detail card's banner: 24-hour time and the zone it
+    /// is in, "90% off until Oct 19, 08:00 GMT+8".
+    @MainActor var saleLineShort: String? {
+        guard let end = saleEnd, let percent = percentOff else { return nil }
+        let fmt = DateFormatter()
+        fmt.locale = NotchModel.localeForInterfaceLanguage()
+        fmt.setLocalizedDateFormatFromTemplate("MMMdHHmm")
+        return L("nono.pricing.saleUntil", percent,
+                 fmt.string(from: end) + " " + (saleZone ?? ""))
+    }
+
+    /// The zone `saleLineShort` prints the end in: "GMT+8".
+    var saleZone: String? {
+        guard let end = saleEnd else { return nil }
+        let zone = DateFormatter()
+        zone.locale = Locale(identifier: "en_US_POSIX")
+        zone.dateFormat = "O"
+        return zone.string(from: end)
+    }
 }
 
 // MARK: - Model metadata (custom picker detail panel)
