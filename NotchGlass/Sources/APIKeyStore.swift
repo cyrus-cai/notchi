@@ -290,6 +290,9 @@ enum APIKeyStore {
         case keenable
         case exa
         case anysearch
+        /// DeepSeek's Search API. Has no key of its own: it reuses the DeepSeek
+        /// provider key.
+        case deepseek
         var id: String { rawValue }
     }
 
@@ -311,7 +314,7 @@ enum APIKeyStore {
         }
     }
 
-    /// The backend that actually runs. Exa and Keenable require a configured key;
+    /// The backend that actually runs. Exa, Keenable and DeepSeek require a configured key;
     /// AnySearch is usable anonymously and therefore resolves without one. A
     /// keyless keyed-backend pick hands back to the provider's native search.
     static func resolvedSearchBackend() -> SearchBackend? {
@@ -321,6 +324,7 @@ enum APIKeyStore {
         // AnySearch explicitly supports anonymous REST requests, so selecting it
         // is enough to make it the unified backend; a key only upgrades limits.
         case .anysearch: return .anysearch
+        case .deepseek: return current(for: .deepseek) != nil ? .deepseek : nil
         case nil:       return nil
         }
     }

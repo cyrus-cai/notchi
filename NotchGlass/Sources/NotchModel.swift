@@ -3442,6 +3442,7 @@ final class NotchModel: ObservableObject {
                 case .exa:      APIKeyStore.saveExaKey(key)
                 case .keenable: APIKeyStore.saveKeenableKey(key)
                 case .anysearch: APIKeyStore.saveAnySearchKey(key)
+                case .deepseek:  APIKeyStore.save(key, for: .deepseek)
                 }
                 refreshAI = true
             case .customProviderName(let value):
@@ -4351,13 +4352,14 @@ final class NotchModel: ObservableObject {
 
         case "search_backend":
             guard let backend = Self.parseSearchBackend(value) else {
-                throw invalidValue(setting, "native, keenable, exa, or anysearch")
+                throw invalidValue(setting, "native, keenable, exa, anysearch, or deepseek")
             }
             let shown: String
             switch backend {
             case .exa:      shown = "Exa"
             case .keenable: shown = "Keenable"
             case .anysearch: shown = "AnySearch"
+            case .deepseek:  shown = "DeepSeek"
             case nil:       shown = L("search.backend.native")
             }
             return made(setting, L("search.backend"), shown, .searchBackend(backend),
@@ -4366,13 +4368,14 @@ final class NotchModel: ObservableObject {
         case "search_api_key":
             guard let backend = Self.parseConcreteSearchBackend(scoped ?? "") else {
                 throw AppSettingValidationError.message(
-                    "search_api_key requires scope=exa, scope=keenable, or scope=anysearch.")
+                    "search_api_key requires scope=exa, scope=keenable, scope=anysearch, or scope=deepseek.")
             }
             let hasEnv: Bool
             switch backend {
             case .exa:       hasEnv = APIKeyStore.hasExaEnvOverride()
             case .keenable:  hasEnv = APIKeyStore.hasKeenableEnvOverride()
             case .anysearch: hasEnv = APIKeyStore.hasAnySearchEnvOverride()
+            case .deepseek:  hasEnv = APIKeyStore.hasEnvOverride(for: .deepseek)
             }
             guard !hasEnv else {
                 throw AppSettingValidationError.message(
@@ -4384,6 +4387,7 @@ final class NotchModel: ObservableObject {
             case .exa:       stored = APIKeyStore.storedExaKey()
             case .keenable:  stored = APIKeyStore.storedKeenableKey()
             case .anysearch: stored = APIKeyStore.storedAnySearchKey()
+            case .deepseek:  stored = APIKeyStore.stored(for: .deepseek)
             }
             let keyLabel = "\(backend.rawValue.capitalized) API key"
             return .init(key: "\(setting)[\(backend.rawValue)]",
@@ -4912,6 +4916,7 @@ final class NotchModel: ObservableObject {
         case "exa": return .some(.exa)
         case "keenable": return .some(.keenable)
         case "anysearch", "any_search": return .some(.anysearch)
+        case "deepseek": return .some(.deepseek)
         default: return nil
         }
     }
@@ -4921,6 +4926,7 @@ final class NotchModel: ObservableObject {
         case "exa": return .exa
         case "keenable": return .keenable
         case "anysearch", "any_search": return .anysearch
+        case "deepseek": return .deepseek
         default: return nil
         }
     }
