@@ -2166,12 +2166,20 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// The wallet's cards: the first three models the Ask chip's menu shows,
-    /// in the menu's order, Auto in front.
+    /// The wallet's cards, left to right. These three when the lineup has
+    /// them; any slot the lineup lacks is filled from the Ask menu's order.
+    private static let walletCardIDs = ["claude-sonnet-5.5", "gpt-6-sol", "auto-us"]
+
     private var walletCards: [WalletCard] {
         let hidden = NotchiModelVisibility.hidden(in: hiddenNotchiModels)
-        return NotchiModelVisibility.ordered(nonoLineupRows, id: \.id)
-            .filter { $0.id.hasPrefix("auto-") || !hidden.contains($0.id) }
+        let rows = nonoLineupRows
+        let picked = Self.walletCardIDs.compactMap { id in rows.first { $0.id == id } }
+        let fill = NotchiModelVisibility.ordered(rows, id: \.id)
+            .filter { row in
+                (row.id.hasPrefix("auto-") || !hidden.contains(row.id))
+                    && !picked.contains { $0.id == row.id }
+            }
+        return (picked + fill)
             .prefix(3)
             .map { row in
                 // The card already wears Anthropic's mark, and the full
