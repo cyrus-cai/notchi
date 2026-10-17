@@ -555,7 +555,7 @@ struct InlineSettingsView: View {
 
     /// Which disclosure chip owns the pointer. Permissions and Advanced can share
     /// one pane, so a single Bool would brighten both at once.
-    private enum DisclosureHover { case keys, instructions, memory, permissions, advanced }
+    private enum DisclosureHover { case keys, instructions, permissions, advanced }
     @State private var hoveredDisclosure: DisclosureHover?
 
     /// What the proxy field resolves to right now — filled in asynchronously by
@@ -911,8 +911,11 @@ struct InlineSettingsView: View {
                 Text(L("memory.title"))
                     .captionLabel()
                     .padding(.top, 2)
-                memoryRow
-                if memory.enabled, ClipboardHistory.available { memoryClipboardRow }
+                memoryEnableRow
+                if memory.enabled {
+                    if ClipboardHistory.available { memoryClipboardRow }
+                    UnderlineLink(title: L("memory.manage")) { open(.memory) }
+                }
                 Text(L("chat.group.effects"))
                     .captionLabel()
                     .padding(.top, 2)
@@ -3675,46 +3678,10 @@ struct InlineSettingsView: View {
         .accessibilityLabel(L("memory.toggle"))
     }
 
-    /// Memory's chip, opening `memoryPage`, with the master switch beside it.
-    private var memoryRow: some View {
-        HStack(spacing: 8) {
-            Button {
-                NotchPanel.exemptNextDoubleClick()
-                open(.memory)
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "chevron.right")
-                        .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
-                    Text(L("memory.title"))
-                        .font(.sf(Tokens.TypeSize.label, weight: .medium))
-                    if !memory.entries.isEmpty {
-                        Text("\(memory.entries.count)")
-                            .font(.sf(Tokens.TypeSize.label, weight: .medium))
-                            .foregroundStyle(Tokens.text3)
-                            .monospacedDigit()
-                    }
-                }
-                .foregroundStyle(Tokens.text1)
-                .padding(.horizontal, 10)
-                .frame(height: 26)
-                .background(
-                    Capsule()
-                        .fill(.white.opacity(hoveredDisclosure == .memory ? 0.12 : 0.06))
-                )
-                .overlay(
-                    Capsule()
-                        .strokeBorder(.white.opacity(hoveredDisclosure == .memory ? 0.22 : 0.12),
-                                      lineWidth: 0.5)
-                )
-                .contentShape(Capsule())
-            }
-            .buttonStyle(.plain).exemptsDoubleClickPin()
-            .onHover { inside in
-                if inside { hoveredDisclosure = .memory }
-                else if hoveredDisclosure == .memory { hoveredDisclosure = nil }
-            }
-            .animation(.easeOut(duration: Tokens.hoverFade), value: hoveredDisclosure)
-            SettingInfo(L("memory.info"))
+    /// Memory's master switch, as a plain row; the files open from the
+    /// "Manage your memories" link under the group.
+    private var memoryEnableRow: some View {
+        settingRow(label: L("memory.enable"), info: L("memory.info"), aligned: true) {
             memoryToggle
         }
     }
