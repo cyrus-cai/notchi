@@ -900,15 +900,19 @@ struct InlineSettingsView: View {
                 case .anysearch: anySearchKeyRow
                 }
             case .chat:
-                // Three groups: what the answers say and do, the sounds and
-                // reactions, and what is checked before a link opens.
+                // Four groups: what the answers say and do, what is remembered,
+                // the sounds and reactions, and what is checked before a link
+                // opens.
                 Text(L("chat.group.answers"))
                     .captionLabel()
                 customInstructionsRow
-                memoryRow
-                if memory.enabled, ClipboardHistory.available { memoryClipboardRow }
                 suggestFollowUpRow
                 runCommandsRow
+                Text(L("memory.title"))
+                    .captionLabel()
+                    .padding(.top, 2)
+                memoryRow
+                if memory.enabled, ClipboardHistory.available { memoryClipboardRow }
                 Text(L("chat.group.effects"))
                     .captionLabel()
                     .padding(.top, 2)
