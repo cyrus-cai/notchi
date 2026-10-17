@@ -771,8 +771,8 @@ struct ModelDetailCard: View {
         let teal = Color(red: 0.42, green: 0.80, blue: 0.76)
         let radius = Tokens.Radius.modal
         return Text(text)
-            .font(.sf(Tokens.TypeSize.caption, weight: .medium))
-            .foregroundStyle(teal.opacity(0.95))
+            .font(.sf(Tokens.TypeSize.caption, weight: .light))
+            .foregroundStyle(teal)
             .lineLimit(1)
             .minimumScaleFactor(0.8)
             .padding(.horizontal, 12)
@@ -845,8 +845,8 @@ struct ModelDetailCard: View {
     private var prices: some View {
         if let pricing = model.info.notchiPricing {
             VStack(alignment: .leading, spacing: 4) {
-                price(L("nono.pricing.input"), pricing.inputPerMTok)
-                price(L("nono.pricing.output"), pricing.outputPerMTok)
+                price(L("nono.pricing.in"), pricing.inputPerMTok)
+                price(L("nono.pricing.out"), pricing.outputPerMTok)
             }
         }
     }
@@ -856,6 +856,7 @@ struct ModelDetailCard: View {
             Text(title)
                 .font(.sf(Tokens.TypeSize.meta))
                 .foregroundStyle(Tokens.text3)
+                .fixedSize()
             Spacer(minLength: 4)
             if usd == 0 {
                 FreeTag()
@@ -869,6 +870,7 @@ struct ModelDetailCard: View {
                 }
                 .monospacedDigit()
                 .lineLimit(1)
+                .fixedSize()
             }
         }
     }
