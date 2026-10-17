@@ -3899,42 +3899,32 @@ struct InlineSettingsView: View {
     }
 
     /// Below the files: say what to change or remove, and the model edits the
-    /// files (`NotchModel.editMemory`). Laid out like the custom instructions
-    /// field.
+    /// files (`NotchModel.editMemory`). The app's composer (`ComposerBox`), as
+    /// the detail page's follow-up line wears it.
     private var memoryInstructField: some View {
-        ZStack(alignment: .topLeading) {
-            if memoryInstruction.isEmpty {
-                Text(L("memory.instruct"))
-                    .font(.sf(Tokens.TypeSize.form))
-                    .foregroundStyle(Tokens.text3)
-                    .allowsHitTesting(false)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-            }
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                TextField("", text: $memoryInstruction, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .lineLimit(1...3)
-                    .font(.sf(Tokens.TypeSize.form))
-                    .foregroundStyle(Tokens.text1)
-                    .disabled(memoryEditing)
-                    .onChange(of: memoryInstruction) { model.noteUserTyping() }
-                    .onSubmit { submitMemoryInstruction() }
+        ComposerBox(
+            text: $memoryInstruction,
+            onSubmit: submitMemoryInstruction,
+            placeholder: { Text(L("memory.instruct")) },
+            trailing: {
                 if memoryEditing {
                     ThinkingDots(dot: 4, spacing: 5, minHeight: 14)
                         .fixedSize()
+                        .transition(.opacity)
+                } else if !memoryInstruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    SendButton(compact: true, action: submitMemoryInstruction)
+                        .transition(.scale(scale: 0.6).combined(with: .opacity))
                 }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-        }
-        .recessedSurface(in: RoundedRectangle.control, lit: false)
+            })
+            .disabled(memoryEditing)
+            .onChange(of: memoryInstruction) { model.noteUserTyping() }
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// The instruction box and Forget all, on one line, pinned to the bottom
     /// of the Memory pane.
     private var memoryFooter: some View {
-        HStack(alignment: .center, spacing: 10) {
+        HStack(alignment: .bottom, spacing: 8) {
             memoryInstructField
             if !memory.entries.isEmpty {
                 Button {
@@ -3943,8 +3933,8 @@ struct InlineSettingsView: View {
                     Text(L("memory.clearAll"))
                         .font(.sf(Tokens.TypeSize.label, weight: .medium))
                         .foregroundStyle(Tokens.text2)
-                        .padding(.horizontal, 12)
-                        .frame(minHeight: 28)
+                        .padding(.horizontal, 14)
+                        .frame(minHeight: Tokens.Control.rail)
                 }
                 .buttonStyle(PromptTemplateChipStyle(shape: Capsule()))
                 .fixedSize()
