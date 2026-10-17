@@ -1989,7 +1989,7 @@ struct CaptureLineLink: View {
                         .font(.sf(font))
                         .lineLimit(1)
                     if action != nil, capture.kind != .copied {
-                        Image(systemName: "arrow.up.right")
+                        Image(systemName: "chevron.right")
                             .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                     }
                 }
@@ -4189,11 +4189,11 @@ struct AssistantTurnView: View {
                                       shimmers: working)
                             .lineLimit(1)
                             .truncationMode(.tail)
-                        // Same arrow the capture line above wears ("Updated memory ↗").
+                        // Same chevron the capture line above wears ("Updated memory ›").
                         // Held in the row only once the headline has settled: while
                         // the round is still reading, the line is a status, not a link.
                         if !working {
-                            Image(systemName: "arrow.up.right")
+                            Image(systemName: "chevron.right")
                                 .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                                 .foregroundStyle(headerHovering ? Tokens.text2 : Tokens.text3)
                         }

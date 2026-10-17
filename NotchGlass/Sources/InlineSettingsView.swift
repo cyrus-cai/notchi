@@ -1177,8 +1177,17 @@ struct InlineSettingsView: View {
             // update action — a quiet neutral dot, never a coloured one.
             badged: s == .about && isUpdateAvailable
         ) {
-            withAnimation(.easeOut(duration: 0.16)) { section = s }
+            showSection(s)
         }
+    }
+
+    /// Switch panes. The label column is cleared in the same update: left to
+    /// `onChange(of: section)`, the new pane's first layout still used the
+    /// old pane's widest label, came out a few points wider than the panel,
+    /// and both columns stepped right before sliding back.
+    private func showSection(_ s: Section) {
+        labelColumnWidth = 0
+        withAnimation(.easeOut(duration: 0.16)) { section = s }
     }
 
     private var isUpdateAvailable: Bool {
@@ -2276,6 +2285,7 @@ struct InlineSettingsView: View {
     }
 
     private func open(_ page: Section) {
+        labelColumnWidth = 0   // see `showSection`
         withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) { section = page }
     }
 
