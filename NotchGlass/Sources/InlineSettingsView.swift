@@ -2290,6 +2290,8 @@ struct InlineSettingsView: View {
                     .font(.sf(Tokens.TypeSize.meta))
                     .foregroundStyle(Tokens.text3)
                     .lineLimit(1)
+                    // Written in full, never "US Pro…".
+                    .fixedSize(horizontal: true, vertical: false)
                 // Shown in the Ask chip's model menu. Auto is always there.
                 let isAuto = row.id.hasPrefix("auto-")
                 Toggle("", isOn: Binding(
