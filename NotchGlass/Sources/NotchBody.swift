@@ -6856,7 +6856,7 @@ extension NotchModel.ClipboardSense {
         switch self {
         case .hinting(let panel), .saving(let panel), .saved(let panel):
             return panel.leafInk
-        case .idle, .failed, .mapHint:
+        case .idle, .failed, .mapHint, .done:
             return nil
         }
     }

@@ -5907,6 +5907,8 @@ final class NotchModel: ObservableObject {
         }
         case saving(panel: Panel)
         case saved(panel: Panel)
+        /// A copy was acted on; the ear shows the model's emoji for it.
+        case done(emoji: String)
         case failed
     }
     @Published private(set) var clipboardSense: ClipboardSense = .idle
@@ -7060,7 +7062,7 @@ final class NotchModel: ObservableObject {
         // A write is narrating (saving/saved/failed) — the strip is spoken for.
         // New copies during that beat just pass through unsensed.
         switch clipboardSense {
-        case .saving, .saved, .failed:
+        case .saving, .saved, .done, .failed:
             return
         case .mapHint where clip == senseClip:
             if let shown = senseHintShownAt,
@@ -7172,26 +7174,25 @@ final class NotchModel: ObservableObject {
                 self.senseCancelHint()
                 return
             }
-            // A copy worth keeping goes straight to the memory folder, with no
-            // offer to confirm. With Memory or its clipboard switch off,
-            // nothing is kept.
-            if ClipboardHistory.shared.recording {
-                self.senseRemember(clip)
-            } else {
-                self.senseCancelHint()
-            }
+            // A copy worth acting on is handled straight away, with no offer to
+            // confirm: reminders and events always, memory when Memory takes
+            // copies.
+            self.senseRemember(clip)
         }
     }
 
-    /// A copy worth keeping, filed in the memory folder. The model sees the
-    /// folder and decides what to write and into which file, the same way it
-    /// writes there in a conversation. Narrated saving → saved (or failed) in
-    /// the strip. No Recent row: the folder is the record.
+    /// A copy worth acting on. One model call reads it (with the memory
+    /// folder, when Memory takes copies) and decides what to do: set reminders,
+    /// add events, write memory, or nothing. The eyes think meanwhile. When
+    /// something was done, the model's own one-line reply lands in Recent as a
+    /// conversation (the copy as the question, its emoji on it), and the ear
+    /// shows that emoji in place of the eyes. A failed step shakes the eyes and
+    /// posts nothing.
     private func senseRemember(_ clip: String) {
         senseClassifyTask?.cancel()
         senseHintShownAt = nil
-        // Claim the clip now, so the same text copied again is not filed twice.
-        // Released on failure.
+        // Claim the clip now, so the same text copied again is not handled
+        // twice. Released on failure.
         senseCapturedClip = clip
         guard !(ai is StubAIService) else {
             senseWriteFailed()
@@ -7200,42 +7201,177 @@ final class NotchModel: ObservableObject {
         clipboardSense = .saving(panel: .note)
         let service = ai
         let memory = UserMemory.shared
-        let prompt = "Memory folder:\n\(memory.promptContents)\n\nThe user just copied:\n\(clip)"
+        let remembers = ClipboardHistory.shared.recording
+        let now = Date()
+        let clock = DateFormatter()
+        clock.dateFormat = "yyyy-MM-dd HH:mm EEEE"
+        let prompt = "Now: \(clock.string(from: now)) (\(TimeZone.current.identifier))\n\n"
+            + (remembers ? "Memory folder:\n\(memory.promptContents)\n\n" : "Memory: off; do not write FILE blocks.\n\n")
+            + "The user just copied:\n\(clip)"
         Task { [weak self] in
             var reply = ""
-            var failed = false
             do {
                 let chunks = NoNoRequestContext.$current.withValue(
                     NoNoRequestContext(surface: NoNoRequestContext.memory)
                 ) {
-                    service.stream(system: memoryCopySystemPrompt,
+                    service.stream(system: copyActionSystemPrompt,
                                    messages: [ChatMessage(role: "user", content: prompt)])
                 }
                 for try await chunk in chunks { reply += chunk }
             } catch {
-                failed = true
+                await MainActor.run { self?.senseWriteFailed() }
+                return
             }
-            await MainActor.run {
-                guard let self else { return }
-                guard !failed else { return self.senseWriteFailed() }
-                switch Self.parseMemoryFileReply(reply) {
-                case .none:
-                    // Nothing worth keeping after all: the strip just folds.
+            guard let self else { return }
+            guard let plan = Self.parseCopyActions(reply) else {
+                await MainActor.run { self.senseWriteFailed() }
+                return
+            }
+            guard !plan.isEmpty else {
+                // Nothing to do after all: the strip just folds.
+                await MainActor.run {
                     self.senseClip = nil
                     self.clipboardSense = .idle
-                case .write(let file, let content):
-                    if memory.write(file, content: content) == nil {
-                        self.senseClip = nil
-                        self.clipboardSense = self.copySenseEnabled ? .saved(panel: .note) : .idle
-                        self.senseDismiss(after: 1.4)
-                    } else {
-                        self.senseWriteFailed()
-                    }
-                case .unreadable:
-                    self.senseWriteFailed()
+                }
+                return
+            }
+            var captures: [Turn.Capture] = []
+            var failed = false
+            for reminder in plan.reminders {
+                let result = await withCheckedContinuation { done in
+                    RemindersService.createReminder(reminder.title, due: reminder.due) { done.resume(returning: $0) }
+                }
+                switch result {
+                case .success(let link): captures.append(Turn.Capture(kind: .reminder, link: link))
+                case .failure: failed = true
                 }
             }
+            for event in plan.events {
+                let draft = CalendarService.Draft(title: event.title, start: event.start,
+                                                  end: event.end, allDay: false,
+                                                  location: nil, notes: nil)
+                let result = await withCheckedContinuation { done in
+                    CalendarService.createEvent(draft) { done.resume(returning: $0) }
+                }
+                switch result {
+                case .success(let link): captures.append(Turn.Capture(kind: .event, link: link))
+                case .failure: failed = true
+                }
+            }
+            await MainActor.run {
+                if remembers {
+                    for (file, content) in plan.files {
+                        guard let name = UserMemory.safeName(file) else { continue }
+                        let before = MemoryFileBefore(file: name, text: memory.read(name))
+                        guard memory.write(name, content: content) == nil else { failed = true; continue }
+                        if let data = try? JSONEncoder().encode(before),
+                           let link = String(data: data, encoding: .utf8) {
+                            captures.append(Turn.Capture(kind: .memory, link: link))
+                        }
+                    }
+                }
+                guard !failed else { return self.senseWriteFailed() }
+                self.postCopyReply(clip: clip, reply: plan.reply, emoji: plan.emoji,
+                                   captures: captures, at: now)
+                self.senseClip = nil
+                self.clipboardSense = self.copySenseEnabled && !plan.emoji.isEmpty
+                    ? .done(emoji: plan.emoji) : .idle
+                self.senseDismiss(after: 3)
+            }
         }
+    }
+
+    /// The conversation a handled copy leaves in Recent: the copy as the user's
+    /// line with the model's emoji on it, and the model's one-line reply with
+    /// what it filed.
+    private func postCopyReply(clip: String, reply: String, emoji: String,
+                               captures: [Turn.Capture], at date: Date) {
+        guard !reply.isEmpty || !captures.isEmpty else { return }
+        var question = Turn(role: "user", text: clip)
+        question.sentAt = date
+        question.usedClipboard = true
+        question.reaction = emoji.isEmpty ? nil : emoji
+        var answer = Turn(role: "assistant", text: reply)
+        answer.captures = captures
+        var item = HistoryItem(q: clip, a: reply, t: Date(), turns: [question, answer])
+        item.source = .ask
+        history.insert(item, at: 0)
+        saveHistory()
+    }
+
+    struct CopyActions: Equatable {
+        struct Reminder: Equatable { var title: String; var due: Date? }
+        struct Event: Equatable { var title: String; var start: Date; var end: Date }
+        var reminders: [Reminder] = []
+        var events: [Event] = []
+        var files: [(String, String)] = []
+        var reply = ""
+        var emoji = ""
+        var isEmpty: Bool { reminders.isEmpty && events.isEmpty && files.isEmpty }
+        static func == (a: Self, b: Self) -> Bool {
+            a.reminders == b.reminders && a.events == b.events && a.reply == b.reply
+                && a.emoji == b.emoji && a.files.map(\.0) == b.files.map(\.0)
+                && a.files.map(\.1) == b.files.map(\.1)
+        }
+    }
+
+    /// `copyActionSystemPrompt`'s reply. Empty for NONE; nil when it does not
+    /// follow the format.
+    static func parseCopyActions(_ reply: String, calendar: Calendar = .current) -> CopyActions? {
+        let text = reply.trimmingCharacters(in: .whitespacesAndNewlines)
+        var plan = CopyActions()
+        if text.uppercased() == "NONE" { return plan }
+        let clock = DateFormatter()
+        clock.calendar = calendar
+        clock.timeZone = calendar.timeZone
+        clock.locale = Locale(identifier: "en_US_POSIX")
+        clock.dateFormat = "yyyy-MM-dd HH:mm"
+        func date(_ raw: Substring) -> Date? { clock.date(from: raw.trimmingCharacters(in: .whitespaces)) }
+        var file: String?
+        var body: [Substring] = []
+        func flush() {
+            guard let f = file else { return }
+            plan.files.append((f, body.joined(separator: "\n").trimmingCharacters(in: .newlines) + "\n"))
+            file = nil
+            body = []
+        }
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let head = line.trimmingCharacters(in: .whitespaces)
+            let upper = head.uppercased()
+            func value(_ key: String) -> Substring { Substring(head.dropFirst(key.count)).drop { $0 == " " } }
+            if upper.hasPrefix("REMINDER:") {
+                flush()
+                let parts = value("REMINDER:").components(separatedBy: " @ ")
+                let title = parts[0].trimmingCharacters(in: .whitespaces)
+                guard !title.isEmpty else { return nil }
+                plan.reminders.append(.init(title: title, due: parts.count > 1 ? date(Substring(parts[1])) : nil))
+            } else if upper.hasPrefix("EVENT:") {
+                flush()
+                let parts = value("EVENT:").components(separatedBy: " @ ")
+                guard parts.count == 2 else { return nil }
+                let times = parts[1].components(separatedBy: " - ")
+                guard let start = date(Substring(times[0])) else { return nil }
+                let end = times.count > 1 ? date(Substring(times[1])) ?? start.addingTimeInterval(3600)
+                                          : start.addingTimeInterval(3600)
+                plan.events.append(.init(title: parts[0].trimmingCharacters(in: .whitespaces),
+                                         start: start, end: max(end, start.addingTimeInterval(60))))
+            } else if upper.hasPrefix("REPLY:") {
+                flush()
+                plan.reply = String(value("REPLY:"))
+            } else if upper.hasPrefix("EMOJI:") {
+                flush()
+                plan.emoji = value("EMOJI:").trimmingCharacters(in: .whitespaces).first.map(String.init) ?? ""
+            } else if upper.hasPrefix("FILE:") {
+                flush()
+                file = String(value("FILE:"))
+            } else if file != nil {
+                body.append(line)
+            } else if !head.isEmpty {
+                return nil   // text outside any block
+            }
+        }
+        flush()
+        return plan
     }
 
     /// Settings → Memory's instruction box: the model rewrites or deletes the
@@ -7307,26 +7443,6 @@ final class NotchModel: ObservableObject {
         return ops.isEmpty ? nil : ops
     }
 
-    enum MemoryFileReply: Equatable {
-        case none
-        case write(file: String, content: String)
-        case unreadable
-    }
-
-    /// `memoryCopySystemPrompt`'s reply: `NONE`, or `FILE: <name>` on the first
-    /// line and the file's full text after it.
-    static func parseMemoryFileReply(_ reply: String) -> MemoryFileReply {
-        let text = reply.trimmingCharacters(in: .whitespacesAndNewlines)
-        if text.uppercased() == "NONE" { return .none }
-        guard let newline = text.firstIndex(where: \.isNewline) else { return .unreadable }
-        let first = text[..<newline].trimmingCharacters(in: .whitespaces)
-        guard first.uppercased().hasPrefix("FILE:") else { return .unreadable }
-        let file = first.dropFirst(5).trimmingCharacters(in: .whitespaces)
-        let content = text[newline...].trimmingCharacters(in: .newlines) + "\n"
-        guard !file.isEmpty, content.count > 1 else { return .unreadable }
-        return .write(file: file, content: content)
-    }
-
     private func senseWriteFailed() {
         // Release the claim: the text is still safe in the clipboard, and the
         // in-panel capture chip becomes the retry path.
@@ -7343,7 +7459,7 @@ final class NotchModel: ObservableObject {
             try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
             guard !Task.isCancelled, let self else { return }
             switch self.clipboardSense {
-            case .saved, .failed: self.clipboardSense = .idle
+            case .saved, .done, .failed: self.clipboardSense = .idle
             default: break
             }
         }

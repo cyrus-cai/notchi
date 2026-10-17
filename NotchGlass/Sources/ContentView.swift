@@ -444,6 +444,7 @@ private struct ClipboardSenseEars: View {
         case .mapHint: return "hint-map"
         case .saving: return "saving"
         case .saved: return "saved"
+        case .done(let emoji): return "done-\(emoji)"
         case .failed: return "failed"
         }
     }
@@ -472,7 +473,19 @@ private struct ClipboardSenseEars: View {
             // Left ear — Notchi's face at the outer edge, then the outcome
             // phrase, the dots, the verdict.
             HStack(spacing: 0) {
-                NotchiFace(expression: faceExpression)
+                // A handled copy: the model's emoji answers in the eyes' place.
+                ZStack {
+                    if case .done(let emoji) = sense {
+                        Text(emoji)
+                            .font(.system(size: 15))
+                            .frame(width: NotchiFace.slotWidth)
+                            .transition(.scale(scale: 0.5).combined(with: .opacity))
+                    } else {
+                        NotchiFace(expression: faceExpression)
+                            .transition(.opacity)
+                    }
+                }
+                .animation(.spring(response: 0.34, dampingFraction: 0.7), value: stageKey)
                 ZStack {
                     leftStage
                         .id(stageKey)
@@ -518,7 +531,7 @@ private struct ClipboardSenseEars: View {
                         color: ink)
             case .mapHint:
                 earText(L("sense.map"), color: ink)
-            case .saving, .saved, .failed, .idle:
+            case .saving, .saved, .done, .failed, .idle:
                 // The write is told by the eyes alone: thinking, a nod, a shake.
                 EmptyView()
             }
