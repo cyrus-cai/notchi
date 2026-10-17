@@ -456,16 +456,33 @@ private struct ClipboardSenseEars: View {
         sense.destinationInk ?? Tokens.text3
     }
 
+    /// Eyes on the offer while it stands, busy while the write runs, then the
+    /// write's verdict.
+    private var faceExpression: NotchiFace.Expression {
+        switch sense {
+        case .saving: return .think
+        case .saved: return .saved
+        case .failed: return .alert
+        default: return .offer
+        }
+    }
+
     var body: some View {
         HStack(spacing: 0) {
-            // Left ear — the outcome phrase, then the dots, then the verdict.
-            ZStack {
-                leftStage
-                    .id(stageKey)
-                    .transition(.opacity.combined(with: .scale(scale: 0.85)))
+            // Left ear — Notchi's face at the outer edge, then the outcome
+            // phrase, the dots, the verdict.
+            HStack(spacing: 0) {
+                NotchiFace(expression: faceExpression)
+                ZStack {
+                    leftStage
+                        .id(stageKey)
+                        .transition(.opacity.combined(with: .scale(scale: 0.85)))
+                }
+                .animation(.easeInOut(duration: 0.22), value: stageKey)
+                .padding(.leading, NotchIsland.faceTextGap)
+                .padding(.trailing, NotchIsland.earTextPad)
             }
-            .animation(.easeInOut(duration: 0.22), value: stageKey)
-            .frame(width: earLeft)
+            .frame(width: earLeft, alignment: .leading)
 
             // The camera gap — content-free by construction.
             Color.clear.frame(width: notchWidth)
@@ -577,14 +594,19 @@ private struct BackgroundWorkEars: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            // Left ear — the verb while running.
-            ZStack {
-                leftStage
-                    .id(stageKey)
-                    .transition(.opacity.combined(with: .scale(scale: 0.85)))
+            // Left ear — Notchi's face at the outer edge, then the verb.
+            HStack(spacing: 0) {
+                NotchiFace(expression: .think)
+                ZStack {
+                    leftStage
+                        .id(stageKey)
+                        .transition(.opacity.combined(with: .scale(scale: 0.85)))
+                }
+                .animation(.easeInOut(duration: 0.22), value: stageKey)
+                .padding(.leading, NotchIsland.faceTextGap)
+                .padding(.trailing, NotchIsland.earTextPad)
             }
-            .animation(.easeInOut(duration: 0.22), value: stageKey)
-            .frame(width: earLeft)
+            .frame(width: earLeft, alignment: .leading)
 
             // The camera gap — content-free by construction.
             Color.clear.frame(width: notchWidth)
@@ -679,6 +701,16 @@ struct NotchIsland: View {
 
     /// Breathing room on each side of an ear's content.
     private let senseEarPad: CGFloat = 11
+
+    /// The left ear's text sits between Notchi's face and the camera: this far
+    /// from the face, `earTextPad` from the housing.
+    static let faceTextGap: CGFloat = 4
+    static let earTextPad: CGFloat = 11
+
+    /// The left ear's width around `content`: face, gap, text, pad.
+    private func faceEar(_ content: CGFloat) -> CGFloat {
+        NotchiFace.slotWidth + Self.faceTextGap + content + Self.earTextPad
+    }
 
     /// The transient "entry kick" — the cursor's momentum, absorbed by the
     /// glass. Set to a small displacement in the direction of approach the
@@ -782,11 +814,10 @@ struct NotchIsland: View {
     /// never coexist (`sensing` yields to `busy`).
     private var earLeft: CGFloat {
         if busy {
-            return workEarContent.left > 0
-                ? workEarContent.left + senseEarPad * 2 : busyExtension
+            return faceEar(workEarContent.left > 0 ? workEarContent.left : busyExtension)
         }
         if sensing, senseEarContent.left > 0 {
-            return senseEarContent.left + senseEarPad * 2
+            return faceEar(senseEarContent.left)
         }
         return 0
     }
