@@ -774,8 +774,8 @@ struct ModelDetailCard: View {
             .font(.sf(Tokens.TypeSize.caption, weight: .medium))
             .foregroundStyle(teal.opacity(0.95))
             .lineLimit(1)
-            .minimumScaleFactor(0.85)
-            .padding(.horizontal, ModelDetailPanel.inset)
+            .minimumScaleFactor(0.8)
+            .padding(.horizontal, 12)
             .padding(.top, 9)
             .padding(.bottom, 2)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -787,26 +787,52 @@ struct ModelDetailCard: View {
                                            style: .continuous))
     }
 
+    @ViewBuilder
     private var content: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            header
-
-            // Meters for a model we rate; the wallet for the one we run.
-            //
-            // Speed and Intelligence are `ModelRatings`' read of an id, and on
-            // our own ids that read is a word in a name we chose ourselves
-            // ("flash") — a speed bar sourced from our own marketing, and an
-            // intelligence bar sourced from nothing. What is true of this
-            // one and of no other card is the remaining credit, so the two
-            // invented bars give way to the wallet, which sits at the bottom of
-            // the card, under the notes.
-            if !isFirstParty {
+        if isFirstParty {
+            firstPartyContent
+        } else {
+            VStack(alignment: .leading, spacing: 9) {
+                header
                 Meter(title: L("model.detail.speed"), level: figures.speed)
                 Meter(title: L("model.detail.intelligence"), level: figures.intelligence)
             }
+        }
+    }
 
-            if isFirstParty {
+    /// Ours, in three bands: the name; the two rates beside the gauge; then,
+    /// under a hairline, where it runs and what it is billed to.
+    ///
+    /// Speed and Intelligence are `ModelRatings`' read of an id, and on our own
+    /// ids that read is a word in a name we chose ourselves ("flash"), so this
+    /// card shows the remaining credit in their place.
+    private var firstPartyContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                VendorLogo(vendor: model.info.vendor, fallback: model.info.id)
+                    .frame(width: 16, height: 16)
+                Text(title.name)
+                    .font(.sf(Tokens.TypeSize.form, weight: .medium))
+                    .foregroundStyle(Tokens.text1)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                if let qualifier = title.qualifier { pill(qualifier) }
+            }
+
+            HStack(alignment: .center, spacing: 10) {
                 prices
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if Self.hasValue(model) {
+                    ValueRing(score: figures.value)
+                        .padding(.bottom, 18)
+                }
+            }
+
+            Rectangle()
+                .fill(Tokens.hairline)
+                .frame(height: 0.5)
+
+            VStack(alignment: .leading, spacing: 4) {
                 notes
                 walletWell
             }
