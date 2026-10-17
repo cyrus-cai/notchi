@@ -457,6 +457,11 @@ private struct ClipboardSenseEars: View {
         sense.destinationInk ?? Tokens.text3
     }
 
+    private var isDone: Bool {
+        if case .done = sense { return true }
+        return false
+    }
+
     /// Eyes on the offer while it stands, busy while the write runs, then the
     /// write's verdict.
     private var faceExpression: NotchiFace.Expression {
@@ -474,19 +479,33 @@ private struct ClipboardSenseEars: View {
             // phrase, the dots, the verdict.
             HStack(spacing: 0) {
                 // A handled copy: the model's emoji answers in the eyes' place.
+                // The eyes close, and the emoji resolves out of a soft blur in
+                // their place; going back, it blurs away and the eyes open.
                 ZStack {
                     if case .done(let emoji) = sense {
                         // Eye-sized, with the ear's own margin around it.
                         Text(emoji)
                             .font(.system(size: 11))
                             .frame(width: NotchiFace.slotWidth)
-                            .transition(.scale(scale: 0.5).combined(with: .opacity))
+                            .transition(.asymmetric(
+                                insertion: .modifier(active: SoftResolve(progress: 1),
+                                                     identity: SoftResolve(progress: 0))
+                                    .animation(.smooth(duration: 0.34).delay(0.1)),
+                                removal: .modifier(active: SoftResolve(progress: 1),
+                                                   identity: SoftResolve(progress: 0))
+                                    .animation(.smooth(duration: 0.22))))
                     } else {
                         NotchiFace(expression: faceExpression)
-                            .transition(.opacity)
+                            .transition(.asymmetric(
+                                insertion: .modifier(active: LidShut(progress: 1),
+                                                     identity: LidShut(progress: 0))
+                                    .animation(.smooth(duration: 0.3).delay(0.12)),
+                                removal: .modifier(active: LidShut(progress: 1),
+                                                   identity: LidShut(progress: 0))
+                                    .animation(.smooth(duration: 0.14))))
                     }
                 }
-                .animation(.spring(response: 0.34, dampingFraction: 0.7), value: stageKey)
+                .animation(.smooth(duration: 0.3), value: isDone)
                 ZStack {
                     leftStage
                         .id(stageKey)
@@ -1569,5 +1588,38 @@ private struct PullWidthFrame: ViewModifier {
         let p = min(max(live.progress, 0), 1)
         let pulled = Tokens.openWidthIdle + (Tokens.openWidthResult - Tokens.openWidthIdle) * p
         return content.frame(width: pulling ? pulled + flare * 2 : width)
+    }
+}
+
+/// The emoji's way in and out of the ear: from a soft blur, a touch small and
+/// clear, to sharp at full size. No overshoot.
+private struct SoftResolve: ViewModifier, Animatable {
+    var progress: CGFloat
+    var animatableData: CGFloat {
+        get { progress }
+        set { progress = newValue }
+    }
+    func body(content: Content) -> some View {
+        let p = min(max(progress, 0), 1)
+        content
+            .scaleEffect(1 - 0.14 * p)
+            .blur(radius: 3 * p)
+            .opacity(1 - p)
+    }
+}
+
+/// The eyes' way out and back: the lids close to a line and fade, as a blink
+/// that stays shut.
+private struct LidShut: ViewModifier, Animatable {
+    var progress: CGFloat
+    var animatableData: CGFloat {
+        get { progress }
+        set { progress = newValue }
+    }
+    func body(content: Content) -> some View {
+        let p = min(max(progress, 0), 1)
+        content
+            .scaleEffect(x: 1, y: 1 - 0.9 * p, anchor: .center)
+            .opacity(1 - p * p)
     }
 }
