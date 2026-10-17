@@ -620,6 +620,11 @@ struct InlineSettingsView: View {
                 // Columns sit on the panel's own gutter, so the selected
                 // category capsule shares its left edge with the back pill.
                 .padding(.top, 12)
+                // Pushing a sub-page drops the columns at once instead of
+                // fading them: while they faded, the panel re-laid out under
+                // them and the category column visibly lurched right for a
+                // frame. Coming back still fades them in.
+                .transition(.asymmetric(insertion: .opacity, removal: .identity))
             }
         }
         // Only soften the Settings content behind the template picker. A small
