@@ -3701,28 +3701,40 @@ struct InlineSettingsView: View {
                 }
             }
             if !memory.scanning {
-                // The folder as a file tree, like an editor's sidebar: folders
-                // fold, a file opens in place to read and edit (written back as
-                // you type), and a right-click shows either one in Finder.
-                VStack(alignment: .leading, spacing: 0) {
-                    if memory.entries.isEmpty {
-                        Text(L("memory.empty"))
-                            .font(.sf(Tokens.TypeSize.form))
-                            .foregroundStyle(Tokens.text3)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                    }
-                    ForEach(memoryTree, id: \.folder) { group in
-                        if !group.folder.isEmpty { memoryFolderRow(group.folder) }
-                        if group.folder.isEmpty || !memoryClosedFolders.contains(group.folder) {
-                            ForEach(group.files) { entry in
-                                memoryFileRow(entry, indented: !group.folder.isEmpty)
+                // Two panes, like an editor: the file tree on the left
+                // (folders fold, a right-click shows a file or folder in
+                // Finder), the selected file on the right, edited in place and
+                // written back as you type.
+                if memory.entries.isEmpty {
+                    Text(L("memory.empty"))
+                        .font(.sf(Tokens.TypeSize.form))
+                        .foregroundStyle(Tokens.text3)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .recessedSurface(in: RoundedRectangle.control, lit: false)
+                } else {
+                    HStack(alignment: .top, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(memoryTree, id: \.folder) { group in
+                                if !group.folder.isEmpty { memoryFolderRow(group.folder) }
+                                if group.folder.isEmpty || !memoryClosedFolders.contains(group.folder) {
+                                    ForEach(group.files) { entry in
+                                        memoryFileRow(entry, indented: !group.folder.isEmpty)
+                                    }
+                                }
                             }
                         }
+                        .padding(4)
+                        .frame(width: 200, alignment: .topLeading)
+                        .frame(minHeight: 260, alignment: .top)
+                        .recessedSurface(in: RoundedRectangle.control, lit: false)
+
+                        memoryEditorPane
+                            .frame(maxWidth: .infinity, minHeight: 260, alignment: .topLeading)
+                            .recessedSurface(in: RoundedRectangle.control, lit: false)
                     }
                 }
-                .padding(.vertical, 2)
-                .recessedSurface(in: RoundedRectangle.control, lit: false)
 
                 memoryInstructField
 
@@ -3792,8 +3804,8 @@ struct InlineSettingsView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain).exemptsDoubleClickPin()
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
         .contextMenu { memoryRevealButton(folder) }
     }
 
@@ -3803,47 +3815,72 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// A memory file in the tree: icon, name and last update; a tap opens the
-    /// whole file below it for editing.
+    /// A memory file in the tree: icon and name. A tap shows it in the editor
+    /// pane; the selected file keeps a lit row.
     private func memoryFileRow(_ entry: UserMemory.Entry, indented: Bool) -> some View {
-        let isOpen = memoryOpenFile == entry.id
+        let selected = memoryOpenFile == entry.id
         let name = entry.id.split(separator: "/").last.map(String.init) ?? entry.id
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Button {
-                    NotchPanel.exemptNextDoubleClick()
-                    withAnimation(.easeOut(duration: 0.16)) {
-                        memoryOpenFile = isOpen ? nil : entry.id
-                    }
-                } label: {
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Image(systemName: "doc.text")
-                            .font(.sf(Tokens.TypeSize.label))
-                            .foregroundStyle(Tokens.text3)
-                            .frame(width: 12)
-                        Text(name)
-                            .font(.sf(Tokens.TypeSize.form))
-                            .foregroundStyle(Tokens.text1)
-                            .lineLimit(1)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        Text(relativeTime(entry.modified))
-                            .font(.sf(Tokens.TypeSize.label))
-                            .foregroundStyle(Tokens.text3)
-                            .monospacedDigit()
-                            .fixedSize()
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain).exemptsDoubleClickPin()
-                ListRowRemoveButton(label: L("memory.delete")) {
-                    withAnimation(.easeOut(duration: Tokens.hoverFade)) {
-                        if isOpen { memoryOpenFile = nil }
-                        memory.delete(entry.id)
-                    }
-                }
+        return Button {
+            NotchPanel.exemptNextDoubleClick()
+            memoryOpenFile = entry.id
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "doc.text")
+                    .font(.sf(Tokens.TypeSize.label))
+                    .foregroundStyle(Tokens.text3)
+                    .frame(width: 12)
+                Text(name)
+                    .font(.sf(Tokens.TypeSize.form))
+                    .foregroundStyle(selected ? Tokens.text1 : Tokens.text2)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
-            .contextMenu { memoryRevealButton(entry.id) }
-            if isOpen {
+            .padding(.leading, indented ? 26 : 8)
+            .padding(.trailing, 8)
+            .padding(.vertical, 5)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(.white.opacity(selected ? 0.08 : 0))
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).exemptsDoubleClickPin()
+        .contextMenu {
+            memoryRevealButton(entry.id)
+            Button(L("memory.delete")) { deleteMemoryFile(entry.id) }
+        }
+    }
+
+    private func deleteMemoryFile(_ id: String) {
+        withAnimation(.easeOut(duration: Tokens.hoverFade)) {
+            if memoryOpenFile == id { memoryOpenFile = nil }
+            memory.delete(id)
+        }
+    }
+
+    /// The editor pane: the selected file's path, last update and ×, then its
+    /// whole text, editable. With nothing selected it shows the first file.
+    @ViewBuilder
+    private var memoryEditorPane: some View {
+        if let entry = memory.entries.first(where: { $0.id == memoryOpenFile })
+            ?? memoryTree.first?.files.first {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(entry.id)
+                        .font(.sf(Tokens.TypeSize.label, weight: .medium))
+                        .foregroundStyle(Tokens.text2)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Text(relativeTime(entry.modified))
+                        .font(.sf(Tokens.TypeSize.label))
+                        .foregroundStyle(Tokens.text3)
+                        .monospacedDigit()
+                        .fixedSize()
+                    ListRowRemoveButton(label: L("memory.delete")) { deleteMemoryFile(entry.id) }
+                }
+                .contextMenu { memoryRevealButton(entry.id) }
                 TextField("", text: Binding(
                     get: { memoryDrafts[entry.id] ?? memory.read(entry.id) ?? "" },
                     set: { text in
@@ -3852,18 +3889,17 @@ struct InlineSettingsView: View {
                     }
                 ), axis: .vertical)
                     .textFieldStyle(.plain)
-                    .lineLimit(2...24)
+                    .lineLimit(8...40)
                     .font(.sf(Tokens.TypeSize.form))
                     .foregroundStyle(Tokens.text1)
                     // Typing here counts as activity so a drifting pointer
                     // can't fold the panel mid-edit.
                     .onChange(of: memoryDrafts[entry.id]) { model.noteUserTyping() }
-                    .padding(.leading, 18)
             }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .onAppear { if memoryOpenFile == nil { memoryOpenFile = entry.id } }
         }
-        .padding(.leading, indented ? 30 : 12)
-        .padding(.trailing, 12)
-        .padding(.vertical, 6)
     }
 
     /// Below the files: say what to change or remove, and the model edits the
