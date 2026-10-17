@@ -731,30 +731,13 @@ struct ModelDetailCard: View {
     private var isFirstParty: Bool { model.provider.isFirstParty }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            header
-
-            // Meters for a model we rate; the wallet for the one we run.
-            //
-            // Speed and Intelligence are `ModelRatings`' read of an id, and on
-            // our own ids that read is a word in a name we chose ourselves
-            // ("flash") — a speed bar sourced from our own marketing, and an
-            // intelligence bar sourced from nothing. What is true of this
-            // one and of no other card is the remaining credit, so the two
-            // invented bars give way to the wallet, which sits at the bottom of
-            // the card, under the notes.
-            if !isFirstParty {
-                Meter(title: L("model.detail.speed"), level: figures.speed)
-                Meter(title: L("model.detail.intelligence"), level: figures.intelligence)
+        VStack(alignment: .leading, spacing: 0) {
+            if isFirstParty, let sale = model.info.notchiPricing?.saleLine {
+                saleBanner(sale)
             }
-
-            if isFirstParty {
-                prices
-                notes
-                walletWell
-            }
+            content
+                .padding(ModelDetailPanel.inset)
         }
-        .padding(ModelDetailPanel.inset)
         .frame(width: ModelDetailPanel.width(showingPurchase: wallet?.offersCredit == true
                                                && showingAmount),
                alignment: .leading)
@@ -780,6 +763,55 @@ struct ModelDetailCard: View {
                        lineWidth: 1.2)
         }
         .environment(\.colorScheme, .dark)
+    }
+
+    /// The sale, as a strip across the top of the card rather than a note in
+    /// its body. Same teal as the picker's discount tag.
+    private func saleBanner(_ text: String) -> some View {
+        let teal = Color(red: 0.42, green: 0.80, blue: 0.76)
+        let radius = Tokens.Radius.modal
+        return Text(text)
+            .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+            .foregroundStyle(teal.opacity(0.95))
+            .lineLimit(2)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, ModelDetailPanel.inset)
+            .padding(.top, 9)
+            .padding(.bottom, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(teal.opacity(0.14),
+                        in: UnevenRoundedRectangle(topLeadingRadius: radius,
+                                                   topTrailingRadius: radius,
+                                                   style: .continuous))
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(teal.opacity(0.22)).frame(height: 0.5)
+            }
+    }
+
+    private var content: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            header
+
+            // Meters for a model we rate; the wallet for the one we run.
+            //
+            // Speed and Intelligence are `ModelRatings`' read of an id, and on
+            // our own ids that read is a word in a name we chose ourselves
+            // ("flash") — a speed bar sourced from our own marketing, and an
+            // intelligence bar sourced from nothing. What is true of this
+            // one and of no other card is the remaining credit, so the two
+            // invented bars give way to the wallet, which sits at the bottom of
+            // the card, under the notes.
+            if !isFirstParty {
+                Meter(title: L("model.detail.speed"), level: figures.speed)
+                Meter(title: L("model.detail.intelligence"), level: figures.intelligence)
+            }
+
+            if isFirstParty {
+                prices
+                notes
+                walletWell
+            }
+        }
     }
 
     /// What a million tokens in and out cost against the balance, in the
@@ -816,7 +848,7 @@ struct ModelDetailCard: View {
         }
     }
 
-    /// Where Notchi runs the model, and any sale on it.
+    /// Where Notchi runs the model. Any sale is the banner at the top.
     private var notes: some View {
         VStack(alignment: .leading, spacing: 7) {
             switch ModelRatings.nonoHost(id: model.info.id, pricing: model.info.notchiPricing) {
@@ -826,9 +858,6 @@ struct ModelDetailCard: View {
                 Note(title: L("model.detail.nono.host"))
             case .anyRegion:
                 Note(title: L("model.detail.nono.host.any"))
-            }
-            if let sale = model.info.notchiPricing?.saleLine {
-                Note(title: sale)
             }
         }
     }
