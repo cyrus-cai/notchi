@@ -213,6 +213,7 @@ struct InlineSettingsView: View {
     /// What Notchi remembers about the user (`UserMemory`), folded like the
     /// instructions above it.
     @ObservedObject private var memory = UserMemory.shared
+    @ObservedObject private var clipboardHistory = ClipboardHistory.shared
     /// Memory files as edited on the Memory page, by file name. Seeded from
     /// disk on first read; each edit is written straight back.
     @State private var memoryDrafts: [String: String] = [:]
@@ -905,6 +906,7 @@ struct InlineSettingsView: View {
                     .captionLabel()
                 customInstructionsRow
                 memoryRow
+                if memory.enabled, ClipboardHistory.available { memoryClipboardRow }
                 suggestFollowUpRow
                 runCommandsRow
                 Text(L("chat.group.effects"))
@@ -4331,6 +4333,21 @@ struct InlineSettingsView: View {
             Toggle("", isOn: Binding(
                 get: { model.linkPrecheckEnabled },
                 set: { Haptics.levelChange(); model.linkPrecheckEnabled = $0 }
+            ))
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .tint(Tokens.text2)
+        }
+    }
+
+    /// Under Memory: whether copies feed it (`ClipboardHistory.enabled`). Off
+    /// clears the clipboard history.
+    private var memoryClipboardRow: some View {
+        settingRow(label: L("memory.clipboard"), aligned: true) {
+            Toggle("", isOn: Binding(
+                get: { clipboardHistory.enabled },
+                set: { Haptics.levelChange(); clipboardHistory.enabled = $0 }
             ))
             .labelsHidden()
             .toggleStyle(.switch)

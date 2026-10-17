@@ -7020,7 +7020,7 @@ final class NotchModel: ObservableObject {
         // Copy Sense: under macOS's ask mode a second check in the same tick
         // would read as a second attempt and be refused.
         var accessAllowed: Bool?
-        if count != senseLastChangeCount, ClipboardHistory.available, ClipboardHistory.shared.enabled {
+        if count != senseLastChangeCount, ClipboardHistory.available, ClipboardHistory.shared.recording {
             accessAllowed = senseClipboardAccessAllowed()
             if accessAllowed == true { recordClipboardHistory() }
         }
@@ -7174,7 +7174,7 @@ final class NotchModel: ObservableObject {
             // offer. Only an Ask still waits for the confirming copy, since it
             // opens the panel. With Memory off, nothing is kept.
             guard asks else {
-                if UserMemory.shared.enabled {
+                if ClipboardHistory.shared.recording {
                     self.senseRemember(clip)
                 } else {
                     self.senseCancelHint()
@@ -11741,7 +11741,7 @@ final class NotchModel: ObservableObject {
     func scanClipboardForMemories() {
         let memory = UserMemory.shared
         let key = "memory.clipboardScanDone"
-        guard memory.enabled, !UserDefaults.standard.bool(forKey: key),
+        guard ClipboardHistory.shared.recording, !UserDefaults.standard.bool(forKey: key),
               !clipboardScanRunning, !(ai is StubAIService) else { return }
         let entries = ClipboardHistory.shared.entries
         guard !entries.isEmpty else {
