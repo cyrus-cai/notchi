@@ -7062,15 +7062,6 @@ final class NotchModel: ObservableObject {
         switch clipboardSense {
         case .saving, .saved, .failed:
             return
-        case .hinting(let panel) where clip == senseClip:
-            // The same text copied again while its hint is up. Fast enough to be a
-            // habitual double-tap → refresh the hint; a beat later → the confirm.
-            if let shown = senseHintShownAt,
-               Date().timeIntervalSince(shown) >= Self.senseMinReaction {
-                senseConfirm(clip: clip, panel: panel)
-            } else {
-                senseHintShownAt = Date()
-            }
         case .mapHint where clip == senseClip:
             if let shown = senseHintShownAt,
                Date().timeIntervalSince(shown) >= Self.senseMinReaction {
@@ -7168,13 +7159,9 @@ final class NotchModel: ObservableObject {
         }
         senseClassifyTask = Task { [weak self] in
             let shouldOffer: Bool
-            // Only Jev reads a copy as a question; the on-device engine's `ask`
-            // fires on too much copied text (code, passages) to offer an Ask.
-            var asks = false
             if let verdict = await NoNoAccount.shared.sense(clip) {
                 shouldOffer = verdict.kind != "none"
                     && verdict.saveProbability >= Self.senseRemoteFloor
-                asks = verdict.kind == "question"
             } else {
                 let reading = await IntentEngine.shared.classify(clip)
                 shouldOffer = reading.intent == .note
@@ -7185,29 +7172,15 @@ final class NotchModel: ObservableObject {
                 self.senseCancelHint()
                 return
             }
-            // A copy worth keeping goes straight to the memory folder, no ⌘C
-            // offer. Only an Ask still waits for the confirming copy, since it
-            // opens the panel. With Memory off, nothing is kept.
-            guard asks else {
-                if ClipboardHistory.shared.recording {
-                    self.senseRemember(clip)
-                } else {
-                    self.senseCancelHint()
-                }
-                return
+            // A copy worth keeping goes straight to the memory folder, with no
+            // offer to confirm. With Memory or its clipboard switch off,
+            // nothing is kept.
+            if ClipboardHistory.shared.recording {
+                self.senseRemember(clip)
+            } else {
+                self.senseCancelHint()
             }
-            self.senseClip = clip
-            self.senseHintShownAt = Date()
-            self.clipboardSense = .hinting(panel: .chat)
         }
-    }
-
-    /// The confirm of an Ask hint: open the panel and ask the clip.
-    private func senseConfirm(clip: String, panel: Panel) {
-        senseClassifyTask?.cancel()
-        senseHintShownAt = nil
-        senseCapturedClip = clip
-        senseAsk(clip)
     }
 
     /// A copy worth keeping, filed in the memory folder. The model sees the
@@ -7352,22 +7325,6 @@ final class NotchModel: ObservableObject {
         let content = text[newline...].trimmingCharacters(in: .newlines) + "\n"
         guard !file.isEmpty, content.count > 1 else { return .unreadable }
         return .write(file: file, content: content)
-    }
-
-    /// Open the panel on a new conversation and submit the clip as the question,
-    /// the same way a prompt shortcut submits its instruction.
-    private func senseAsk(_ clip: String) {
-        senseClip = nil
-        clipboardSense = .idle
-        mode = .idle
-        openPanel(on: activeDisplay)
-        newChat()
-        // The re-copy that confirmed this moved the pasteboard past the open
-        // baseline; without this the first turn would attach the same text again
-        // as "something the user copied".
-        pasteboardChangeCountAtOpen = NSPasteboard.general.changeCount
-        text = clip
-        submit()
     }
 
     private func senseWriteFailed() {

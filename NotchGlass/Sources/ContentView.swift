@@ -518,16 +518,8 @@ private struct ClipboardSenseEars: View {
                         color: ink)
             case .mapHint:
                 earText(L("sense.map"), color: ink)
-            case .saving:
-                ThinkingDots(dot: 4, spacing: 5)
-                    .fixedSize()
-            case .saved:
-                // The write landed — the word steps back toward meta weight,
-                // keeping only enough of the hue to say where it went.
-                earText(L("sense.saved"), color: ink.opacity(0.7))
-            case .failed:
-                earText(L("sense.failed"), color: Tokens.text4)
-            case .idle:
+            case .saving, .saved, .failed, .idle:
+                // The write is told by the eyes alone: thinking, a nod, a shake.
                 EmptyView()
             }
         }
@@ -816,8 +808,11 @@ struct NotchIsland: View {
         if busy {
             return faceEar(workEarContent.left > 0 ? workEarContent.left : busyExtension)
         }
-        if sensing, senseEarContent.left > 0 {
-            return faceEar(senseEarContent.left)
+        if sensing {
+            // A write narrated by the eyes alone carries no text: the ear is
+            // just the face.
+            return senseEarContent.left > 0
+                ? faceEar(senseEarContent.left) : NotchiFace.slotWidth + 6
         }
         return 0
     }
