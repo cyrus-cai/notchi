@@ -849,8 +849,7 @@ struct InlineSettingsView: View {
                 // Drawn as a pocket with the lineup's cards standing in it;
                 // a card opens Models and pricing. The pocket wears the brand
                 // aura whichever backend is answering.
-                WalletPocket(cards: walletCards, cardHelp: L("model.pricing"),
-                             onCard: { _ in open(.pricing) }) {
+                WalletPocket(cards: walletCards, onCard: { _ in open(.pricing) }) {
                     nonoAccountRow
                 }
                 // Everything you bring yourself, outside the card and unadorned,

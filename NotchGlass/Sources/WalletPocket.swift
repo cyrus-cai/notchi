@@ -18,7 +18,6 @@ struct WalletCard: Identifiable, Equatable {
 /// Clicking a card calls `onCard`.
 struct WalletPocket<Content: View>: View {
     let cards: [WalletCard]
-    var cardHelp: String = ""
     var onCard: (WalletCard) -> Void
     @ViewBuilder var content: Content
 
@@ -146,7 +145,6 @@ struct WalletPocket<Content: View>: View {
                         }
                     }
                     .onTapGesture { onCard(card) }
-                    .help(cardHelp)
             }
         }
         .padding(.horizontal, Self.cardInset)
