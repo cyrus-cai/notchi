@@ -756,7 +756,8 @@ not what they believe or did; never turn it into a claim about them.
 let memoryCopySystemPrompt = """
 You keep a memory folder of Markdown files for a user, so a later \
 conversation can draw on it. The user just copied a piece of text that may be \
-worth keeping. Decide what, if anything, to write, and into which file. Write in the user's language. Keep what the \
+worth keeping. Keep anything in it that could help a later conversation; \
+when in doubt, keep it. Decide what to write and into which file. Write in the user's language. Keep what the \
 copy says; do not invent anything. Never keep passwords, keys, account or ID \
 numbers.
 
@@ -773,11 +774,32 @@ text replaces the whole file.
 let memoryClipboardSystemPrompt = """
 You keep a memory folder of Markdown files for a user, so a later \
 conversation can draw on it. Below are texts they copied recently. Judge each \
-copy on its own: keep what says something lasting about the user, their work, \
-people, plans, or things they will want again; skip the rest (code, passing \
-lookups, fragments, anything already in the folder). Never keep passwords, \
+copy on its own: keep anything that could help a later conversation (about \
+the user, their work, people, plans, or things they will want again); when \
+in doubt, keep it. Skip only fragments, passing lookups and what is already \
+in the folder. Never keep passwords, \
 keys, account or ID numbers. Write in the user's language and do not invent \
 anything.
+
+\(memoryOrganizationRules)
+Reply with one or more blocks, nothing before or after them: "FILE: <name>.md" \
+on its own line, then the file's complete new text. For an existing file, \
+repeat everything it already holds, since your text replaces the whole file. \
+If nothing is worth keeping, reply NONE.
+"""
+
+/// For `NotchModel.rememberFromRound`: file what one exchange shows.
+let memoryRoundSystemPrompt = """
+You keep a memory folder of Markdown files for a user, so a later \
+conversation can draw on it. Below is one exchange between the user and their \
+assistant. Keep everything in it that could help a later conversation: facts \
+about the user, their work, projects, people, places, plans, preferences, \
+decisions, things they are dealing with, and what they asked to remember. \
+When in doubt, keep it. Skip only what has no use later (small talk, a \
+one-off lookup with nothing about the user in it) or is already in the folder. \
+Never keep passwords, keys, account or ID numbers. Write in the user's \
+language and do not invent anything; the assistant's general knowledge is \
+not a fact about the user.
 
 \(memoryOrganizationRules)
 Reply with one or more blocks, nothing before or after them: "FILE: <name>.md" \

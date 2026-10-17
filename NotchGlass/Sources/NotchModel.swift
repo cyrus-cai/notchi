@@ -11642,6 +11642,9 @@ final class NotchModel: ObservableObject {
         // row shows the prompt, and in a conversation the round's topic is not
         // the conversation's.
         let loopTurn = thread.first?.loopRound != nil || thread.last?.loopRound != nil
+        if !failed, !loopTurn, item.source == .ask {
+            rememberFromRound(thread, threadID: threadID)
+        }
         if !failed, !loopTurn, existingTitle == nil || atMilestone {
             let titleService = service ?? ai
             Task { [weak self] in
@@ -11804,6 +11807,75 @@ final class NotchModel: ObservableObject {
         }
     }
     private var memoryTidying = false
+
+    /// After every finished Ask round: the model reads the exchange and files
+    /// whatever in it is worth keeping, without waiting for the answering model
+    /// to call `memory_write` itself. Each file it touches puts an "Updated
+    /// memory" line under the answer, with undo. Skipped when the round already
+    /// wrote memory.
+    private func rememberFromRound(_ thread: [Turn], threadID: UUID) {
+        let memory = UserMemory.shared
+        guard memory.enabled, !(ai is StubAIService),
+              let answer = thread.last, answer.role != "user", !answer.isError,
+              !answer.captures.contains(where: { $0.kind == .memory }),
+              let question = thread.last(where: { $0.role == "user" && !$0.isLocal }) else { return }
+        let exchange = "User: \(question.text.prefix(4_000))\n\nAssistant: \(answer.text.prefix(4_000))"
+        let prompt = "Memory folder:\n\(memory.promptContents)\n\nThe exchange:\n\(exchange)"
+        let service = ai
+        let answerID = answer.id
+        Task { [weak self] in
+            var reply = ""
+            do {
+                let chunks = NoNoRequestContext.$current.withValue(
+                    NoNoRequestContext(surface: NoNoRequestContext.memory)
+                ) {
+                    service.stream(system: memoryRoundSystemPrompt,
+                                   messages: [ChatMessage(role: "user", content: prompt)])
+                }
+                for try await chunk in chunks { reply += chunk }
+            } catch {
+                return
+            }
+            await MainActor.run {
+                guard let self, memory.enabled, let ops = Self.parseMemoryEdits(reply) else { return }
+                for op in ops {
+                    let file: String
+                    switch op {
+                    case .write(let f, _), .delete(let f): file = f
+                    }
+                    guard let name = UserMemory.safeName(file) else { continue }
+                    let before = MemoryFileBefore(file: name, text: memory.read(name))
+                    switch op {
+                    case .write(_, let content):
+                        guard memory.write(name, content: content) == nil else { continue }
+                    case .delete:
+                        guard memory.remove(name) else { continue }
+                    }
+                    if let data = try? JSONEncoder().encode(before),
+                       let link = String(data: data, encoding: .utf8) {
+                        self.attachSettledCapture(Turn.Capture(kind: .memory, link: link),
+                                                  answerID: answerID, threadID: threadID)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Add a capture line to an answer whose round already settled: on screen
+    /// if the thread is showing, and in its Recent row.
+    private func attachSettledCapture(_ capture: Turn.Capture, answerID: UUID, threadID: UUID) {
+        if let i = turns.firstIndex(where: { $0.id == answerID }) {
+            withAnimation(.spring(response: 0.36, dampingFraction: 1)) {
+                turns[i].captures.append(capture)
+            }
+        }
+        guard let h = history.firstIndex(where: { $0.id == threadID }) else { return }
+        var thread = history[h].conversation
+        guard let t = thread.firstIndex(where: { $0.id == answerID }) else { return }
+        thread[t].captures.append(capture)
+        history[h].turns = thread
+        saveHistory()
+    }
 
     /// Ask the model that answered the round (`service`) to summarize the
     /// conversation into a short title. Returns `nil` when offline (stub),
