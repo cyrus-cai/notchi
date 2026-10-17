@@ -786,8 +786,8 @@ Supported setting ids and values:
 - ai_provider: openrouter, vercel, openai, codex, claude_code, grok_code, pi_code, anthropic, gemini, deepseek, qwen, glm, kimi, minimax, mimo, custom
 - ai_model: model id or default; optional scope is a provider
 - api_key: key text or empty to remove; scope is the provider. Never read keys back.
-- search_backend: native, keenable, exa, or anysearch
-- search_api_key: key text or empty; scope must be keenable, exa, or anysearch. Never read keys back.
+- search_backend: native, keenable, exa, anysearch, or deepseek (deepseek uses the DeepSeek provider key)
+- search_api_key: key text or empty; scope must be keenable, exa, anysearch, or deepseek. Never read keys back.
 - custom_provider_name / custom_provider_url / custom_provider_model: text (empty clears it)
 """
 
@@ -1651,7 +1651,7 @@ protocol SearchProvider: Sendable {
 /// so the harness can tell a search-service failure from a model failure and
 /// tell the user which one happened.
 struct SearchServiceError: LocalizedError, Sendable {
-    /// The service's display name ("Exa", "Keenable", "AnySearch", "GLM").
+    /// The service's display name ("Exa", "Keenable", "AnySearch", "DeepSeek", "GLM").
     let service: String
     /// What failed, e.g. "HTTP 401" or the transport error's description.
     let detail: String
@@ -1830,9 +1830,10 @@ struct GLMSearchProvider: SearchProvider {
 
 /// Web search for DeepSeek via its standalone Search API
 /// (`POST /v1/tools/search`, https://api-docs.deepseek.com/zh-cn/guides/search).
-/// DeepSeek's chat API has no server-side search, so like `GLMSearchProvider`
-/// this is a client-side tool that reuses the user's DeepSeek key. Billed to
-/// that key's DeepSeek account (5 RMB per 1,000 searches that return results).
+/// A search backend the user picks in Settings, like Exa or Keenable; it is not
+/// tied to the chat provider. It reuses the user's DeepSeek provider key
+/// (`APIKeyStore.current(for: .deepseek)`), and searches are billed to that
+/// DeepSeek account (5 RMB per 1,000 searches that return results).
 /// Response: `results[]` with `title`, `url`, `summary` (600–800 chars, meant
 /// for models), `snippet`, `site_name` and `date` (RFC 3339 or null).
 struct DeepSeekSearchProvider: SearchProvider {
@@ -1841,9 +1842,6 @@ struct DeepSeekSearchProvider: SearchProvider {
     private static let maxResults = 6
     /// The API rejects queries longer than 128 Unicode characters.
     private static let maxQueryLength = 128
-
-    /// Whether the user has a DeepSeek key, so this provider can run.
-    static var available: Bool { APIKeyStore.current(for: .deepseek) != nil }
 
     func search(_ input: [String: Any]) async throws -> (text: String, sources: [WebSource]) {
         guard var query = (input["query"] as? String)?
@@ -2240,6 +2238,7 @@ extension APIKeyStore.SearchBackend {
         case .exa:       return ExaSearchProvider()
         case .keenable:  return KeenableSearchProvider()
         case .anysearch: return AnySearchProvider()
+        case .deepseek:  return DeepSeekSearchProvider()
         }
     }
 }
@@ -3025,15 +3024,13 @@ extension ToolRegistry {
     ///    client-side `GLMSearchProvider` that hits Zhipu's standalone search API.
     ///  • **Kimi** — its builtin search needs a client-side echo, so the
     ///    `$web_search` passthrough is added so the harness can echo the call back.
-    ///  • **DeepSeek** — its chat API has no search, so `DeepSeekSearchProvider`
-    ///    calls DeepSeek's standalone Search API with the user's DeepSeek key.
     ///
     /// **Unified searcher (optional, user-chosen).** A single client-side
     /// search tool can replace every provider's native search — the server-search
     /// gate in `streamTurn` and the GLM/Kimi client tools below all defer to it.
     /// Which one is the user's choice, not a hard-coded vendor preference:
     /// `APIKeyStore.resolvedSearchBackend()` maps their picked search backend
-    /// (Keenable / Exa / AnySearch) to the tool that runs and enforces key
+    /// (Keenable / Exa / AnySearch / DeepSeek) to the tool that runs and enforces key
     /// requirements where applicable. When it returns `nil`, the provider's own
     /// native search (GLM client tool / Kimi echo / server-side search) stays in play.
     static func standard(for provider: Provider) -> ToolRegistry {
@@ -3055,16 +3052,11 @@ extension ToolRegistry {
             if provider == .kimi {
                 tools.append(WebSearchTool(provider: KimiSearchProvider()))
             }
-            if provider == .deepseek {
-                tools.append(WebSearchTool(provider: DeepSeekSearchProvider()))
-            }
-            // A provider with no search of its own (Notchi's models, Gemini, …)
-            // uses DeepSeek's search when the user has a DeepSeek key, and the
-            // keyless AnySearch otherwise, so a question about today is not
-            // answered from training data alone.
+            // A provider with no search of its own (Notchi's models, DeepSeek,
+            // Gemini, …) gets the keyless AnySearch, so a question about today
+            // is not answered from training data alone.
             if !provider.supportsWebSearch {
-                tools.append(WebSearchTool(provider: DeepSeekSearchProvider.available
-                    ? DeepSeekSearchProvider() : AnySearchProvider()))
+                tools.append(WebSearchTool(provider: AnySearchProvider()))
             }
         }
         return ToolRegistry(tools)

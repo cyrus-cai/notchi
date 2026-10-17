@@ -308,6 +308,25 @@ struct InlineSettingsView: View {
             && anySearchKey != APIKeyStore.storedAnySearchKey()
     }
 
+    /// DeepSeek search has no key of its own: the row edits the DeepSeek
+    /// provider key, the same one the DeepSeek model uses.
+    @State private var deepSeekSearchKey: String = APIKeyStore.stored(for: .deepseek)
+    @State private var editingDeepSeekSearchKey = false
+    @State private var deepSeekSearchSaved = false
+    private var deepSeekSearchEnvOverride: Bool { APIKeyStore.hasEnvOverride(for: .deepseek) }
+
+    private var canSaveDeepSeekSearch: Bool {
+        guard !deepSeekSearchEnvOverride else { return false }
+        return editingDeepSeekSearchKey
+            && deepSeekSearchKey != APIKeyStore.stored(for: .deepseek)
+    }
+
+    private var maskedDeepSeekSearchKey: String {
+        let key = APIKeyStore.current(for: .deepseek) ?? ""
+        guard key.count > 12 else { return String(repeating: "•", count: max(key.count, 8)) }
+        return "\(key.prefix(4))••••••••\(key.suffix(4))"
+    }
+
     private var maskedAnySearchKey: String {
         guard let key = APIKeyStore.currentAnySearchKey(), !key.isEmpty else {
             return L("model.anysearchAnonymous")
@@ -949,6 +968,7 @@ struct InlineSettingsView: View {
                 case .keenable: keenableKeyRow
                 case .exa:      exaKeyRow
                 case .anysearch: anySearchKeyRow
+                case .deepseek:  deepSeekSearchKeyRow
                 }
             case .chat:
                 // Four groups: what the answers say and do, what is remembered,
@@ -1795,6 +1815,7 @@ struct InlineSettingsView: View {
         case .keenable: return L("search.backend.keenable")
         case .exa:      return L("search.backend.exa")
         case .anysearch: return L("search.backend.anysearch")
+        case .deepseek:  return "DeepSeek"
         }
     }
 
@@ -2048,6 +2069,90 @@ struct InlineSettingsView: View {
                     .padding(.leading, 88)
             }
         }
+    }
+
+    /// The DeepSeek search-key row. Same lifecycle as the AnySearch row, but it
+    /// reads and writes the DeepSeek provider key.
+    private var deepSeekSearchKeyRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                HStack(spacing: 3) {
+                    Text(L("model.deepseekSearchApiKey"))
+                        .font(.sf(Tokens.TypeSize.form, weight: .medium))
+                        .foregroundStyle(Tokens.text2)
+                        .lineLimit(1)
+                    if !deepSeekSearchEnvOverride {
+                        SettingInfo(deepSeekSearchHintText)
+                    }
+                }
+                .frame(width: 100, alignment: .leading)
+
+                ZStack(alignment: .leading) {
+                    if editingDeepSeekSearchKey {
+                        if deepSeekSearchKey.isEmpty {
+                            Text(L("model.deepseekSearchPasteKey"))
+                                .font(.sf(Tokens.TypeSize.form))
+                                .foregroundStyle(Tokens.text2)
+                                .allowsHitTesting(false)
+                        }
+                        TextField("", text: $deepSeekSearchKey)
+                            .textFieldStyle(.plain)
+                            .font(.sf(Tokens.TypeSize.form))
+                            .foregroundStyle(Tokens.text1)
+                            .disabled(deepSeekSearchEnvOverride)
+                            .onSubmit { saveDeepSeekSearchKey() }
+                            .onChange(of: deepSeekSearchKey) { model.noteUserTyping() }
+                    } else {
+                        Text(maskedDeepSeekSearchKey)
+                            .font(.sf(Tokens.TypeSize.form))
+                            .foregroundStyle(Tokens.text2)
+                            .lineLimit(1)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .frame(height: 34)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .recessedSurface(in: RoundedRectangle.control, lit: editingDeepSeekSearchKey)
+                .opacity(deepSeekSearchEnvOverride ? 0.5 : 1)
+
+                if editingDeepSeekSearchKey {
+                    SettingActionButton(title: L("model.cancel")) { stopEditingDeepSeekSearchKey() }
+                } else if !deepSeekSearchEnvOverride {
+                    SettingActionButton(
+                        title: APIKeyStore.stored(for: .deepseek).isEmpty
+                            ? L("model.addKey") : L("model.change")
+                    ) {
+                        deepSeekSearchKey = APIKeyStore.stored(for: .deepseek)
+                        editingDeepSeekSearchKey = true
+                    }
+                }
+                if editingDeepSeekSearchKey || canSaveDeepSeekSearch || deepSeekSearchSaved {
+                    SettingActionButton(
+                        title: deepSeekSearchSaved ? L("model.saved") : L("model.save"),
+                        tone: canSaveDeepSeekSearch || deepSeekSearchSaved ? Tokens.text2 : Tokens.text4
+                    ) { saveDeepSeekSearchKey() }
+                        .disabled(!canSaveDeepSeekSearch && !deepSeekSearchSaved)
+                        .animation(.easeOut(duration: 0.2), value: deepSeekSearchSaved)
+                }
+            }
+
+            if deepSeekSearchEnvOverride {
+                Text(L("model.footer.env", Provider.deepseek.envVarName))
+                    .font(.sf(Tokens.TypeSize.meta))
+                    .foregroundStyle(Tokens.text4)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 88)
+            }
+        }
+    }
+
+    private var deepSeekSearchHintText: AttributedString {
+        var text = AttributedString(L("model.deepseekSearchHint"))
+        var host = AttributedString(L("model.deepseekSearchHint.host"))
+        host.link = URL(string: "https://platform.deepseek.com/api_keys")
+        host.foregroundColor = Tokens.text2
+        text.append(host)
+        return text
     }
 
     private var anySearchHintText: AttributedString {
@@ -3159,6 +3264,25 @@ struct InlineSettingsView: View {
                 withAnimation(.easeOut(duration: 0.2)) { anySearchSaved = false }
             }
         }
+    }
+
+    private func saveDeepSeekSearchKey() {
+        APIKeyStore.save(deepSeekSearchKey, for: .deepseek)
+        deepSeekSearchKey = APIKeyStore.stored(for: .deepseek)
+        NotificationCenter.default.post(name: .aiBackendChanged, object: nil)
+        withAnimation(.easeOut(duration: 0.16)) { editingDeepSeekSearchKey = false }
+        withAnimation(.easeOut(duration: 0.2)) { deepSeekSearchSaved = true }
+        Task {
+            try? await Task.sleep(nanoseconds: 1_400_000_000)
+            await MainActor.run {
+                withAnimation(.easeOut(duration: 0.2)) { deepSeekSearchSaved = false }
+            }
+        }
+    }
+
+    private func stopEditingDeepSeekSearchKey() {
+        deepSeekSearchKey = APIKeyStore.stored(for: .deepseek)
+        withAnimation(.easeOut(duration: 0.16)) { editingDeepSeekSearchKey = false }
     }
 
     private func stopEditingAnySearchKey() {
