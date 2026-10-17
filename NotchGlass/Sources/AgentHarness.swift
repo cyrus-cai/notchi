@@ -1251,7 +1251,8 @@ struct AgentHarness {
             case ReadCalendarTool.toolName, ManageEventTool.toolName: return L("agent.activity.calendar")
             case ReadRemindersTool.toolName, ManageReminderTool.toolName: return L("agent.activity.reminders")
             case ReadNotesTool.toolName, EditNoteTool.toolName: return L("agent.activity.notes")
-            case RememberTool.toolName, ForgetTool.toolName, UpdateMemoryTool.toolName:
+            case MemoryListTool.toolName, MemoryReadTool.toolName, MemoryWriteTool.toolName,
+                 MemoryDeleteTool.toolName:
                 return L("agent.activity.memory")
             case CurrentContextTool.toolName: return L("agent.activity.screen")
             case ListFilesTool.toolName, RecentProjectsTool.toolName: return L("agent.activity.listFiles")

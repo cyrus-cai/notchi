@@ -559,10 +559,11 @@ read_file, and answer from its text.
 - "This page / article / email", "这篇 / 这封 / 这个页面" with nothing pasted, \
 selected or attached → current_context first, then answer from what it returns.
 """),
-    (["remember", "forget"], """
-- A lasting fact the user tells you about themselves → remember it, then answer \
-as usual. "Forget …" → forget. What they say now contradicts a remembered fact \
-(a new job, a move) → update_memory.
+    (["memory_write", "memory_delete"], """
+- Something worth keeping for later conversations (about the user, their work, \
+people, preferences, "remember …") → memory_write it into your memory folder, \
+then answer as usual. What they say now contradicts a memory file → rewrite \
+that file. "Forget …" → rewrite or memory_delete the file that holds it.
 """),
     (["manage_loop"], """
 - Work to do again on a schedule or to watch over time — "every hour check X", \
@@ -646,8 +647,9 @@ func notchSystemPromptDated(customInstructions: String? = nil,
     // What the model has remembered about the user (`UserMemory`). They change
     // rarely, so they stay above the date line, inside the cached prefix.
     if let memories, !memories.isEmpty {
-        prompt += "\n\nWhat you know about the user from earlier conversations "
-            + "(use it where it helps; do not recite it):\n\(memories)"
+        prompt += "\n\nYour memory folder: files you wrote in earlier conversations, "
+            + "each with its opening lines. Read one in full with memory_read when it "
+            + "helps; use it where it helps and do not recite it.\n\(memories)"
     }
     // Nono's model treats "default to answering directly" as license to skip
     // search on facts that have moved since training. This restates the split
@@ -736,6 +738,23 @@ Rules:
 about the world.
 - Never include passwords, account or ID numbers, health or financial details.
 - At most 20 lines. If there is nothing, reply NONE.
+"""
+
+/// For `NotchModel.senseRemember`: file a copied text in the memory folder.
+let memoryCopySystemPrompt = """
+You keep a memory folder of Markdown files for a user, so a later \
+conversation can draw on it. The user just copied a piece of text that may be \
+worth keeping. Decide what, if anything, to write, and into which file. You \
+choose the file names and how things are organised: add to an existing file \
+when it fits, or start a new one. Write in the user's language. Keep what the \
+copy says; do not invent anything. Never keep passwords, keys, account or ID \
+numbers.
+
+Reply in exactly one of two forms:
+- NONE, when nothing in it is worth keeping.
+- A first line "FILE: <name>.md", then the file's complete new text. For an \
+existing file, repeat everything it already holds that should stay, since your \
+text replaces the whole file.
 """
 
 /// System prompt for summarizing a conversation into a short recent-list title.

@@ -3710,8 +3710,8 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// The Memory sub-page: the facts `remember` saved, each with its own ×,
-    /// and Forget all.
+    /// The Memory sub-page: the files in the memory folder, each with its own
+    /// ×, and Forget all.
     private var memoryPage: some View {
         VStack(alignment: .leading, spacing: 12) {
             if memory.enabled, memory.scanning {

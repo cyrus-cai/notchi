@@ -3648,7 +3648,7 @@ final class NotchModel: ObservableObject {
             result = await commitNoteCapture(line)
         case .memory, .reminderUpdate, .mailDraft, .copied:
             // Memory, reminder changes, drafts and copies have their own tools.
-            return "Error: use update_memory or manage_reminder."
+            return "Error: use memory_write or manage_reminder."
         case .event:
             switch Self.eventDraft(line, request: request) {
             case .failure(let error): return error.message
@@ -3703,26 +3703,39 @@ final class NotchModel: ObservableObject {
         return result.message
     }
 
-    /// `update_memory` for this answer round: rewrite the fact, and mark the
+    /// A memory file as it was before `memory_write` changed it, carried in the
+    /// "Updated memory" capture's link for undo. `text` nil: the file was new.
+    private struct MemoryFileBefore: Codable {
+        var file: String
+        var text: String?
+    }
+
+    /// `memory_write` for this answer round: write the file, and mark the
     /// answer with "Updated memory", whose tap undoes it (`openTurnCapture`).
-    /// The capture's link carries the fact as it was.
-    func handleMemoryUpdate(answerID: UUID, old: String, fact: String) async -> String {
-        guard let before = UserMemory.shared.replace(matching: old, with: fact) else {
-            return "Nothing remembered contains \"\(old)\". Remembered facts:\n"
-                + UserMemory.shared.promptList
+    func handleMemoryWrite(answerID: UUID, file: String, content: String) async -> String {
+        let memory = UserMemory.shared
+        guard let name = UserMemory.safeName(file) else {
+            return "Error: give a plain file name, e.g. \"projects.md\"."
         }
+        let before = MemoryFileBefore(file: name, text: memory.read(name))
+        if let error = memory.write(name, content: content) { return error }
         if let data = try? JSONEncoder().encode(before), let link = String(data: data, encoding: .utf8) {
             markCapture(Turn.Capture(kind: .memory, link: link), answerID: answerID)
         }
-        return "Updated. Was: \(before.text)"
+        return before.text == nil ? "Created \(name)." : "Updated \(name)."
     }
 
-    /// Undo an "Updated memory" line: the fact goes back, and the line leaves
-    /// the answer it was on, on screen and in Recent.
+    /// Undo an "Updated memory" line: the file goes back as it was (or away,
+    /// if it was new), and the line leaves the answer it was on, on screen and
+    /// in Recent.
     private func undoMemoryUpdate(_ capture: Turn.Capture) {
         guard let link = capture.link, let data = link.data(using: .utf8),
-              let before = try? JSONDecoder().decode(UserMemory.Entry.self, from: data) else { return }
-        UserMemory.shared.restore(before)
+              let before = try? JSONDecoder().decode(MemoryFileBefore.self, from: data) else { return }
+        if let text = before.text {
+            UserMemory.shared.write(before.file, content: text)
+        } else {
+            UserMemory.shared.remove(before.file)
+        }
         for i in turns.indices { turns[i].captures.removeAll { $0 == capture } }
         for key in turnCaptures.keys { turnCaptures[key]?.removeAll { $0 == capture } }
         for h in history.indices where history[h].conversation.contains(where: { $0.captures.contains(capture) }) {
@@ -7157,76 +7170,104 @@ final class NotchModel: ObservableObject {
                 self.senseCancelHint()
                 return
             }
-            let due = RemindersService.futureDate(in: clip)
-                ?? RemindersService.recurrenceDate(in: clip)
-            self.senseClip = clip
-            // A note or reminder files itself: no ⌘C offer, straight to the
-            // write (saving → saved / failed). Only an Ask still waits for the
-            // confirming copy, since it opens the panel.
+            // A copy worth keeping goes straight to the memory folder, no ⌘C
+            // offer. Only an Ask still waits for the confirming copy, since it
+            // opens the panel. With Memory off, nothing is kept.
             guard asks else {
-                self.senseConfirm(clip: clip, panel: due != nil ? .reminder : .note)
+                if UserMemory.shared.enabled {
+                    self.senseRemember(clip)
+                } else {
+                    self.senseCancelHint()
+                }
                 return
             }
+            self.senseClip = clip
             self.senseHintShownAt = Date()
             self.clipboardSense = .hinting(panel: .chat)
         }
     }
 
-    /// The confirm: an Ask hint opens the panel and asks the clip (`senseAsk`);
-    /// otherwise file the clip where the hint said it would go, narrating
-    /// saving → saved (or failed) in the strip. Writes go straight to the
-    /// services — the submit-path plumbing (input-box state, saved cues) belongs
-    /// to the open panel. The Recent row still lands via `persistCapture`, so a
-    /// background capture shows up in history exactly like a chip capture.
+    /// The confirm of an Ask hint: open the panel and ask the clip.
     private func senseConfirm(clip: String, panel: Panel) {
         senseClassifyTask?.cancel()
         senseHintShownAt = nil
-        // Claim the clip now, not on success — an open-panel chip tapped during
-        // the in-flight write must not file a duplicate. Released on failure.
         senseCapturedClip = clip
-        if panel == .chat {
-            senseAsk(clip)
+        senseAsk(clip)
+    }
+
+    /// A copy worth keeping, filed in the memory folder. The model sees the
+    /// folder and decides what to write and into which file, the same way it
+    /// writes there in a conversation. Narrated saving → saved (or failed) in
+    /// the strip. No Recent row: the folder is the record.
+    private func senseRemember(_ clip: String) {
+        senseClassifyTask?.cancel()
+        senseHintShownAt = nil
+        // Claim the clip now, so the same text copied again is not filed twice.
+        // Released on failure.
+        senseCapturedClip = clip
+        guard !(ai is StubAIService) else {
+            senseWriteFailed()
             return
         }
-        clipboardSense = .saving(panel: panel)
-        switch panel {
-        case .reminder:
-            // Same past-due guard as `submitReminder`: better a reminder with no
-            // time than one that silently never rings.
-            var due = RemindersService.futureDate(in: clip)
-                ?? RemindersService.recurrenceDate(in: clip)
-            if let d = due, d <= Date() { due = nil }
-            RemindersService.createReminder(clip, due: due) { [weak self] result in
-                switch result {
-                case .success(let link):
-                    self?.senseWriteLanded(clip: clip, panel: panel, source: .reminder, link: link)
-                case .failure:
-                    self?.senseWriteFailed()
+        clipboardSense = .saving(panel: .note)
+        let service = ai
+        let memory = UserMemory.shared
+        let prompt = "Memory folder:\n\(memory.promptContents)\n\nThe user just copied:\n\(clip)"
+        Task { [weak self] in
+            var reply = ""
+            var failed = false
+            do {
+                let chunks = NoNoRequestContext.$current.withValue(
+                    NoNoRequestContext(surface: NoNoRequestContext.memory)
+                ) {
+                    service.stream(system: memoryCopySystemPrompt,
+                                   messages: [ChatMessage(role: "user", content: prompt)])
                 }
+                for try await chunk in chunks { reply += chunk }
+            } catch {
+                failed = true
             }
-        case .note, .chat:
-            // `.chat` returned above. Honor the note destination here too — a closed-notch capture is the
-            // same jot as a typed one, so it files to the same place.
-            if NoteDestination.current == .markdownFolder {
-                FileNotesService.writeNote(clip) { [weak self] result in
-                    switch result {
-                    case .success(let path):
-                        self?.senseWriteLanded(clip: clip, panel: panel, source: .note, link: path)
-                    case .failure:
-                        self?.senseWriteFailed()
+            await MainActor.run {
+                guard let self else { return }
+                guard !failed else { return self.senseWriteFailed() }
+                switch Self.parseMemoryFileReply(reply) {
+                case .none:
+                    // Nothing worth keeping after all: the strip just folds.
+                    self.senseClip = nil
+                    self.clipboardSense = .idle
+                case .write(let file, let content):
+                    if memory.write(file, content: content) == nil {
+                        self.senseClip = nil
+                        self.clipboardSense = self.copySenseEnabled ? .saved(panel: .note) : .idle
+                        self.senseDismiss(after: 1.4)
+                    } else {
+                        self.senseWriteFailed()
                     }
-                }
-            } else {
-                NotesService.writeNote(clip) { [weak self] result in
-                    switch result {
-                    case .success(let noteID):
-                        self?.senseWriteLanded(clip: clip, panel: panel, source: .note, link: noteID)
-                    case .failure:
-                        self?.senseWriteFailed()
-                    }
+                case .unreadable:
+                    self.senseWriteFailed()
                 }
             }
         }
+    }
+
+    enum MemoryFileReply: Equatable {
+        case none
+        case write(file: String, content: String)
+        case unreadable
+    }
+
+    /// `memoryCopySystemPrompt`'s reply: `NONE`, or `FILE: <name>` on the first
+    /// line and the file's full text after it.
+    static func parseMemoryFileReply(_ reply: String) -> MemoryFileReply {
+        let text = reply.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.uppercased() == "NONE" { return .none }
+        guard let newline = text.firstIndex(where: \.isNewline) else { return .unreadable }
+        let first = text[..<newline].trimmingCharacters(in: .whitespaces)
+        guard first.uppercased().hasPrefix("FILE:") else { return .unreadable }
+        let file = first.dropFirst(5).trimmingCharacters(in: .whitespaces)
+        let content = text[newline...].trimmingCharacters(in: .newlines) + "\n"
+        guard !file.isEmpty, content.count > 1 else { return .unreadable }
+        return .write(file: file, content: content)
     }
 
     /// Open the panel on a new conversation and submit the clip as the question,
@@ -7243,15 +7284,6 @@ final class NotchModel: ObservableObject {
         pasteboardChangeCountAtOpen = NSPasteboard.general.changeCount
         text = clip
         submit()
-    }
-
-    private func senseWriteLanded(clip: String, panel: Panel, source: HistoryItem.Source, link: String?) {
-        persistCapture(clip, source: source, link: link)
-        senseClip = nil
-        // If the switch was flipped off while the write was in flight, the work
-        // still landed (and Recent shows it) — just skip the cue.
-        clipboardSense = copySenseEnabled ? .saved(panel: panel) : .idle
-        senseDismiss(after: 1.4)
     }
 
     private func senseWriteFailed() {
@@ -9997,12 +10029,13 @@ final class NotchModel: ObservableObject {
                 agentTools.append(ListFilesTool())
                 agentTools.append(ReadFileTool())
                 if UserMemory.shared.enabled {
-                    agentTools.append(RememberTool())
-                    agentTools.append(ForgetTool())
-                    agentTools.append(UpdateMemoryTool { [weak self] old, fact in
+                    agentTools.append(MemoryListTool())
+                    agentTools.append(MemoryReadTool())
+                    agentTools.append(MemoryWriteTool { [weak self] file, content in
                         guard let self else { return "Error: the conversation closed." }
-                        return await self.handleMemoryUpdate(answerID: answerID, old: old, fact: fact)
+                        return await self.handleMemoryWrite(answerID: answerID, file: file, content: content)
                     })
+                    agentTools.append(MemoryDeleteTool())
                 }
                 agentTools.append(ManageReminderTool(
                     confirm: { [weak self] title in
