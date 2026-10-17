@@ -7191,8 +7191,8 @@ final class NotchModel: ObservableObject {
     /// A copy worth acting on. One model call reads it (with the memory
     /// folder, when Memory takes copies) and decides what to do: set reminders,
     /// add events, write memory, or nothing. The eyes think meanwhile. When
-    /// something was done, the model's own one-line reply lands in Recent as a
-    /// conversation (the copy as the question, its emoji on it), and the ear
+    /// something was done, the model's own one-line reply lands in the main
+    /// thread (the copy as the user's line, its emoji on it), and the ear
     /// shows that emoji in place of the eyes. A failed step shakes the eyes and
     /// posts nothing.
     private func senseRemember(_ clip: String) {
@@ -7300,10 +7300,32 @@ final class NotchModel: ObservableObject {
         question.reaction = emoji.isEmpty ? nil : emoji
         var answer = Turn(role: "assistant", text: reply)
         answer.captures = captures
-        var item = HistoryItem(q: clip, a: reply, t: Date(), turns: [question, answer])
-        item.source = .ask
+        // Into the main thread, as its newest exchange, unless a round on it is
+        // still being written; without one, it starts the main thread (the
+        // same rule the unified-threads guide follows).
+        let main = history.firstIndex(where: { row in
+            row.mainThread && row.source == .ask && !row.pending
+                && !inFlightRounds.contains(where: { $0.threadID == row.id })
+        })
+        var item: HistoryItem
+        if let main {
+            item = history.remove(at: main)
+            item.turns = item.conversation + [question, answer]
+            item.a = reply
+            item.t = Date()
+        } else {
+            item = HistoryItem(q: clip, a: reply, t: Date(), turns: [question, answer])
+            item.source = .ask
+            if unifiedThreadsEnabled
+                && !history.contains(where: { $0.mainThread && $0.source == .ask }) {
+                item.mainThread = true
+            }
+        }
         history.insert(item, at: 0)
         saveHistory()
+        // The thread the panel will reopen on, kept in step.
+        if threadHistoryID == item.id { turns = item.conversation }
+        touchMainThreadPeek(item.id)
     }
 
     struct CopyActions: Equatable {

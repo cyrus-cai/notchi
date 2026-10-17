@@ -476,8 +476,9 @@ private struct ClipboardSenseEars: View {
                 // A handled copy: the model's emoji answers in the eyes' place.
                 ZStack {
                     if case .done(let emoji) = sense {
+                        // Eye-sized, with the ear's own margin around it.
                         Text(emoji)
-                            .font(.system(size: 15))
+                            .font(.system(size: 11))
                             .frame(width: NotchiFace.slotWidth)
                             .transition(.scale(scale: 0.5).combined(with: .opacity))
                     } else {
