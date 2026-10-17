@@ -137,6 +137,9 @@ enum Tokens {
     // "Connect OpenRouter" CTA. A soft, low-saturation blue that reads as the
     // primary path without shouting against the dark glass.
     static let accent  = Color(red: 0.40, green: 0.62, blue: 1.00)
+    // Price teal — every mark about what a Notchi model costs: FREE and % OFF
+    // tags, the picker row's discount, the detail card's sale banner.
+    static let sale    = Color(red: 0.42, green: 0.80, blue: 0.76)
     // Success — the brief checkmark when a connection lands. Muted to match the
     // glass; shown only for the ~0.6s confirmation beat, never as a standing pill.
     static let success = Color(red: 0.40, green: 0.82, blue: 0.55)
@@ -288,7 +291,7 @@ struct DiscountTag: View {
 /// The face `FreeTag` and `DiscountTag` share.
 private struct PriceTag: View {
     let text: String
-    private static let teal = Color(red: 0.42, green: 0.80, blue: 0.76)
+    private static let teal = Tokens.sale
 
     var body: some View {
         Text(text)

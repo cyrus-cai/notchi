@@ -768,7 +768,7 @@ struct ModelDetailCard: View {
     /// The sale, as one line of light across the top of the card that fades
     /// into the glass below it. Same teal as the picker's discount tag.
     private func saleBanner(_ text: String) -> some View {
-        let teal = Color(red: 0.42, green: 0.80, blue: 0.76)
+        let teal = Tokens.sale
         let radius = Tokens.Radius.modal
         return Text(text)
             .font(.sf(Tokens.TypeSize.caption, weight: .light))
@@ -2917,6 +2917,7 @@ struct AskRecentModelPickerView: View {
             accessory: Self.accessory(for: r),
             lowBalance: Self.lowBalance(r),
             tag: Self.tag(for: r),
+            tagTint: Self.showsNewTag(r) ? Tokens.accent : Tokens.sale,
             brandTitle: Self.isHouse(r),
             dimmed: unavailable,
             fontSize: Self.fontSize,

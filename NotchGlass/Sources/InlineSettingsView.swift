@@ -3125,17 +3125,18 @@ struct InlineSettingsView: View {
     /// Refreshed badge's fill and size, at a regular weight.
     struct NewBadge: View {
         var text = L("tag.new")
+        var tint = Tokens.accent
 
         var body: some View {
             Text(text)
                 .font(.sf(Tokens.TypeSize.caption, weight: .regular))
                 .tracking(0.4)
-                .foregroundStyle(Tokens.accent)
+                .foregroundStyle(tint)
                 .lineLimit(1)
                 .fixedSize()
                 .padding(.horizontal, 4)
                 .padding(.vertical, 1)
-                .background(Tokens.accent.opacity(0.22), in: LowBalanceTag.shape)
+                .background(tint.opacity(0.22), in: LowBalanceTag.shape)
         }
 
         /// The tag's width, for a card sized by arithmetic (the Ask model menu).
