@@ -800,14 +800,15 @@ struct ModelDetailCard: View {
         }
     }
 
-    /// Ours, in three bands: the name; the two rates beside the gauge; then,
-    /// under a hairline, where it runs and what it is billed to.
+    /// Ours, kept plain: the name, one line of rates, then where it runs and
+    /// what it is billed to. No gauge and no rules, so nothing on the card
+    /// competes with the figures.
     ///
     /// Speed and Intelligence are `ModelRatings`' read of an id, and on our own
     /// ids that read is a word in a name we chose ourselves ("flash"), so this
     /// card shows the remaining credit in their place.
     private var firstPartyContent: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 VendorLogo(vendor: model.info.vendor, fallback: model.info.id)
                     .frame(width: 16, height: 16)
@@ -819,58 +820,41 @@ struct ModelDetailCard: View {
                 if let qualifier = title.qualifier { pill(qualifier) }
             }
 
-            HStack(alignment: .center, spacing: 10) {
-                prices
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                if Self.hasValue(model) {
-                    ValueRing(score: figures.value)
-                        .padding(.bottom, 18)
-                }
-            }
+            prices
 
-            Rectangle()
-                .fill(Tokens.hairline)
-                .frame(height: 0.5)
-
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 2) {
                 notes
                 walletWell
             }
         }
     }
 
-    /// What a million tokens in and out cost against the balance, in the
-    /// figures Settings → Models and Pricing prints.
+    /// What a million tokens in and out cost against the balance, on one line:
+    /// "In $0.04 · Out $0.20 /M".
     @ViewBuilder
     private var prices: some View {
         if let pricing = model.info.notchiPricing {
-            VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 5) {
                 price(L("nono.pricing.in"), pricing.inputPerMTok)
+                Text("·").foregroundStyle(Tokens.text4)
                 price(L("nono.pricing.out"), pricing.outputPerMTok)
+                Text("/M").foregroundStyle(Tokens.text4)
             }
+            .font(.sf(Tokens.TypeSize.meta))
+            .lineLimit(1)
+            .fixedSize()
         }
     }
 
     private func price(_ title: String, _ usd: Double) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(title)
-                .font(.sf(Tokens.TypeSize.meta))
-                .foregroundStyle(Tokens.text3)
-                .fixedSize()
-            Spacer(minLength: 4)
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
+            Text(title).foregroundStyle(Tokens.text3)
             if usd == 0 {
                 FreeTag()
             } else {
-                HStack(alignment: .firstTextBaseline, spacing: 1) {
-                    InlineSettingsView.moneyText(usd, size: Tokens.TypeSize.label)
-                        .foregroundStyle(Tokens.text1)
-                    Text("/M")
-                        .font(.sf(Tokens.TypeSize.meta))
-                        .foregroundStyle(Tokens.text4)
-                }
-                .monospacedDigit()
-                .lineLimit(1)
-                .fixedSize()
+                InlineSettingsView.moneyText(usd, size: Tokens.TypeSize.label)
+                    .foregroundStyle(Tokens.text1)
+                    .monospacedDigit()
             }
         }
     }
@@ -978,7 +962,6 @@ struct ModelDetailCard: View {
                         .foregroundStyle(Tokens.text4)
                 }
             }
-            .padding(.top, 2)
         }
     }
 
