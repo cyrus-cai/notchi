@@ -2258,7 +2258,7 @@ struct InlineSettingsView: View {
                     .frame(width: 15, height: 15)
                 HStack(spacing: 4) {
                     Text(row.name)
-                        .font(.sf(Tokens.TypeSize.label, weight: .medium))
+                        .font(.sf(Tokens.TypeSize.meta + 0.5, weight: .medium))
                         .foregroundStyle(Tokens.text1)
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
