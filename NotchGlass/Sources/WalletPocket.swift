@@ -144,25 +144,10 @@ struct WalletPocket<Content: View>: View {
                             hovered = inside ? card.id : (hovered == card.id ? nil : hovered)
                         }
                     }
-                    .onTapGesture { choose(card) }
+                    .onTapGesture { onCard(card) }
             }
         }
         .padding(.horizontal, Self.cardInset)
-    }
-
-    /// Opens the card's page from a still wallet. Left tilted and fanned, the
-    /// 3D-transformed pocket rode out with Settings' page change and the
-    /// category column beside it jumped for a frame; so the wallet snaps flat
-    /// and closed first, and the page changes on the next turn of the run loop.
-    private func choose(_ card: WalletCard) {
-        var still = Transaction()
-        still.disablesAnimations = true
-        withTransaction(still) {
-            pointer = nil
-            open = false
-            hovered = nil
-        }
-        DispatchQueue.main.async { onCard(card) }
     }
 
     private func cardView(_ card: WalletCard, lit: Bool, named: Bool) -> some View {
