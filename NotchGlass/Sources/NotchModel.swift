@@ -7160,8 +7160,15 @@ final class NotchModel: ObservableObject {
             let due = RemindersService.futureDate(in: clip)
                 ?? RemindersService.recurrenceDate(in: clip)
             self.senseClip = clip
+            // A note or reminder files itself: no ⌘C offer, straight to the
+            // write (saving → saved / failed). Only an Ask still waits for the
+            // confirming copy, since it opens the panel.
+            guard asks else {
+                self.senseConfirm(clip: clip, panel: due != nil ? .reminder : .note)
+                return
+            }
             self.senseHintShownAt = Date()
-            self.clipboardSense = .hinting(panel: asks ? .chat : due != nil ? .reminder : .note)
+            self.clipboardSense = .hinting(panel: .chat)
         }
     }
 
