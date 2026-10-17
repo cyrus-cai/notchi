@@ -216,6 +216,12 @@ struct InlineSettingsView: View {
     /// Memory files as edited on the Memory page, by file name. Seeded from
     /// disk on first read; each edit is written straight back.
     @State private var memoryDrafts: [String: String] = [:]
+    /// The memory file opened for editing on the Memory page.
+    @State private var memoryOpenFile: String?
+    /// The Memory page's "what to change or remove" box, and whether the
+    /// model is working on it.
+    @State private var memoryInstruction = ""
+    @State private var memoryEditing = false
     @ObservedObject private var clipboardHistory = ClipboardHistory.shared
 
     /// The model catalog behind the picker — live lists, the fold, and which providers
@@ -3713,8 +3719,8 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// The Memory sub-page: the files in the memory folder, each with its own
-    /// ×, and Forget all.
+    /// The Memory sub-page: clipboard history, the files in the memory folder,
+    /// a box to tell the model what to change, and Forget all.
     private var memoryPage: some View {
         VStack(alignment: .leading, spacing: 12) {
             if memory.enabled, memory.scanning {
@@ -3727,50 +3733,25 @@ struct InlineSettingsView: View {
             }
             if memory.enabled, ClipboardHistory.available { clipboardHistoryRow }
             if !memory.scanning {
-                if memory.entries.isEmpty {
-                    Text(L("memory.empty"))
-                        .font(.sf(Tokens.TypeSize.form))
-                        .foregroundStyle(Tokens.text3)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .recessedSurface(in: RoundedRectangle.control, lit: false)
-                }
-                // Each file in full, editable in place: the name and its × above,
-                // the text below, written back as you type.
-                ForEach(memory.entries) { entry in
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack(spacing: 8) {
-                            Text(entry.id)
-                                .font(.sf(Tokens.TypeSize.label, weight: .medium))
-                                .foregroundStyle(Tokens.text2)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            ListRowRemoveButton(label: L("memory.delete")) {
-                                withAnimation(.easeOut(duration: Tokens.hoverFade)) {
-                                    memory.delete(entry.id)
-                                }
-                            }
-                        }
-                        .padding(.horizontal, 4)
-                        TextField("", text: Binding(
-                            get: { memoryDrafts[entry.id] ?? memory.read(entry.id) ?? "" },
-                            set: { text in
-                                memoryDrafts[entry.id] = text
-                                memory.write(entry.id, content: text)
-                            }
-                        ), axis: .vertical)
-                            .textFieldStyle(.plain)
-                            .lineLimit(2...24)
+                // One row per file: name, first line, last update. A tap opens
+                // the file in place to read and edit; edits are written back as
+                // you type.
+                VStack(alignment: .leading, spacing: 0) {
+                    if memory.entries.isEmpty {
+                        Text(L("memory.empty"))
                             .font(.sf(Tokens.TypeSize.form))
-                            .foregroundStyle(Tokens.text1)
+                            .foregroundStyle(Tokens.text3)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 8)
-                            // Typing here counts as activity so a drifting pointer
-                            // can't fold the panel mid-edit.
-                            .onChange(of: memoryDrafts[entry.id]) { model.noteUserTyping() }
-                            .recessedSurface(in: RoundedRectangle.control, lit: false)
+                    }
+                    ForEach(memory.entries) { entry in
+                        memoryFileRow(entry)
                     }
                 }
+                .padding(.vertical, 2)
+                .recessedSurface(in: RoundedRectangle.control, lit: false)
+
+                memoryInstructField
 
                 if !memory.entries.isEmpty {
                     Button {
@@ -3789,6 +3770,113 @@ struct InlineSettingsView: View {
         .onAppear {
             memoryDrafts = [:]   // the model may have rewritten files since
             model.scanHistoryForMemories()
+        }
+    }
+
+    /// A memory file's row: name, first line and last update; a tap opens the
+    /// whole file below it for editing.
+    private func memoryFileRow(_ entry: UserMemory.Entry) -> some View {
+        let isOpen = memoryOpenFile == entry.id
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Button {
+                    NotchPanel.exemptNextDoubleClick()
+                    withAnimation(.easeOut(duration: 0.16)) {
+                        memoryOpenFile = isOpen ? nil : entry.id
+                    }
+                } label: {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(entry.id)
+                            .font(.sf(Tokens.TypeSize.form, weight: .medium))
+                            .foregroundStyle(Tokens.text1)
+                            .lineLimit(1)
+                            .fixedSize()
+                        Text(entry.preview)
+                            .font(.sf(Tokens.TypeSize.form))
+                            .foregroundStyle(Tokens.text3)
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Text(relativeTime(entry.modified))
+                            .font(.sf(Tokens.TypeSize.label))
+                            .foregroundStyle(Tokens.text3)
+                            .monospacedDigit()
+                            .fixedSize()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).exemptsDoubleClickPin()
+                ListRowRemoveButton(label: L("memory.delete")) {
+                    withAnimation(.easeOut(duration: Tokens.hoverFade)) {
+                        if isOpen { memoryOpenFile = nil }
+                        memory.delete(entry.id)
+                    }
+                }
+            }
+            if isOpen {
+                TextField("", text: Binding(
+                    get: { memoryDrafts[entry.id] ?? memory.read(entry.id) ?? "" },
+                    set: { text in
+                        memoryDrafts[entry.id] = text
+                        memory.write(entry.id, content: text)
+                    }
+                ), axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .lineLimit(2...24)
+                    .font(.sf(Tokens.TypeSize.form))
+                    .foregroundStyle(Tokens.text1)
+                    // Typing here counts as activity so a drifting pointer
+                    // can't fold the panel mid-edit.
+                    .onChange(of: memoryDrafts[entry.id]) { model.noteUserTyping() }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+    }
+
+    /// Below the files: say what to change or remove, and the model edits the
+    /// files (`NotchModel.editMemory`). Laid out like the custom instructions
+    /// field.
+    private var memoryInstructField: some View {
+        ZStack(alignment: .topLeading) {
+            if memoryInstruction.isEmpty {
+                Text(L("memory.instruct"))
+                    .font(.sf(Tokens.TypeSize.form))
+                    .foregroundStyle(Tokens.text3)
+                    .allowsHitTesting(false)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+            }
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                TextField("", text: $memoryInstruction, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .lineLimit(1...3)
+                    .font(.sf(Tokens.TypeSize.form))
+                    .foregroundStyle(Tokens.text1)
+                    .disabled(memoryEditing)
+                    .onChange(of: memoryInstruction) { model.noteUserTyping() }
+                    .onSubmit { submitMemoryInstruction() }
+                if memoryEditing {
+                    ThinkingDots(dot: 4, spacing: 5, minHeight: 14)
+                        .fixedSize()
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+        }
+        .recessedSurface(in: RoundedRectangle.control, lit: false)
+    }
+
+    private func submitMemoryInstruction() {
+        let text = memoryInstruction
+        guard !memoryEditing, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        memoryEditing = true
+        Task {
+            let ok = await model.editMemory(instruction: text)
+            memoryEditing = false
+            if ok {
+                memoryInstruction = ""
+                memoryDrafts = [:]
+            }
         }
     }
 

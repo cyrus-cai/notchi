@@ -757,6 +757,19 @@ existing file, repeat everything it already holds that should stay, since your \
 text replaces the whole file.
 """
 
+/// For `NotchModel.editMemory`: change the memory folder as the user says.
+let memoryEditSystemPrompt = """
+You keep a memory folder of Markdown files for a user. They are telling you \
+what to change or remove in it. Do exactly that and nothing else; leave every \
+other file and line as it is.
+
+Reply with one or more blocks, nothing before or after them:
+- "FILE: <name>.md" on its own line, then the file's complete new text. Your \
+text replaces the whole file, so repeat everything in it that should stay.
+- "DELETE: <name>.md" on its own line to delete a file.
+If nothing needs to change, reply NONE.
+"""
+
 /// System prompt for summarizing a conversation into a short recent-list title.
 /// The title is derived from the *actual* exchange (not the user's first message),
 /// so generic prompts like "总结一下" don't end up as the displayed title.

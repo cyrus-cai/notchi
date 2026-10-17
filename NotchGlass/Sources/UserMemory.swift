@@ -17,7 +17,7 @@ final class UserMemory: ObservableObject {
     /// One file, as Settings lists it.
     struct Entry: Identifiable, Equatable {
         let id: String          // the file name
-        var text: String        // name and first line
+        var preview: String     // the first line of body text
         var modified: Date
     }
 
@@ -97,12 +97,14 @@ final class UserMemory: ObservableObject {
 
     private func reload() {
         entries = fileURLs().map { url in
-            let first = (try? String(contentsOf: url, encoding: .utf8))?
-                .split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
-            let head = first.trimmingCharacters(in: CharacterSet(charactersIn: "# ").union(.whitespaces))
-            return Entry(id: url.lastPathComponent,
-                         text: head.isEmpty ? url.lastPathComponent : "\(url.lastPathComponent) · \(head)",
-                         modified: modified(url))
+            let lines = ((try? String(contentsOf: url, encoding: .utf8)) ?? "")
+                .split(whereSeparator: \.isNewline)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            // Body text over a heading; a heading only when that is all there is.
+            let line = lines.first { !$0.hasPrefix("#") } ?? lines.first ?? ""
+            let preview = line.trimmingCharacters(in: CharacterSet(charactersIn: "#-* ").union(.whitespaces))
+            return Entry(id: url.lastPathComponent, preview: preview, modified: modified(url))
         }
         // By name, so a file being edited in Settings holds its place.
         .sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending }

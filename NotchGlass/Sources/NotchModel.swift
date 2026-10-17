@@ -7250,6 +7250,75 @@ final class NotchModel: ObservableObject {
         }
     }
 
+    /// Settings → Memory's instruction box: the model rewrites or deletes the
+    /// memory files the way the user says. Returns false when the request
+    /// failed or the reply could not be read; nothing is changed then.
+    func editMemory(instruction: String) async -> Bool {
+        let instruction = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !instruction.isEmpty, !(ai is StubAIService) else { return false }
+        let memory = UserMemory.shared
+        let prompt = "Memory folder:\n\(memory.promptContents)\n\nThe user says:\n\(instruction)"
+        let service = ai
+        var reply = ""
+        do {
+            let chunks = NoNoRequestContext.$current.withValue(
+                NoNoRequestContext(surface: NoNoRequestContext.memory)
+            ) {
+                service.stream(system: memoryEditSystemPrompt,
+                               messages: [ChatMessage(role: "user", content: prompt)])
+            }
+            for try await chunk in chunks { reply += chunk }
+        } catch {
+            return false
+        }
+        guard let ops = Self.parseMemoryEdits(reply) else { return false }
+        for op in ops {
+            switch op {
+            case .write(let file, let content): memory.write(file, content: content)
+            case .delete(let file): memory.remove(file)
+            }
+        }
+        return true
+    }
+
+    enum MemoryEdit: Equatable {
+        case write(file: String, content: String)
+        case delete(file: String)
+    }
+
+    /// `memoryEditSystemPrompt`'s reply as file operations: `[]` for NONE, nil
+    /// when it does not follow the format.
+    static func parseMemoryEdits(_ reply: String) -> [MemoryEdit]? {
+        let text = reply.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.uppercased() == "NONE" { return [] }
+        var ops: [MemoryEdit] = []
+        var file: String?
+        var body: [Substring] = []
+        func flush() {
+            guard let f = file else { return }
+            let content = body.joined(separator: "\n").trimmingCharacters(in: .newlines)
+            ops.append(.write(file: f, content: content + "\n"))
+            file = nil
+            body = []
+        }
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let head = line.trimmingCharacters(in: .whitespaces)
+            if head.uppercased().hasPrefix("FILE:") {
+                flush()
+                file = head.dropFirst(5).trimmingCharacters(in: .whitespaces)
+            } else if head.uppercased().hasPrefix("DELETE:") {
+                flush()
+                ops.append(.delete(file: head.dropFirst(7).trimmingCharacters(in: .whitespaces)))
+            } else if file != nil {
+                body.append(line)
+            } else if !head.isEmpty {
+                return nil   // text outside any block
+            }
+        }
+        flush()
+        return ops.isEmpty ? nil : ops
+    }
+
     enum MemoryFileReply: Equatable {
         case none
         case write(file: String, content: String)
