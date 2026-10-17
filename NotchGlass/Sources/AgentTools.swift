@@ -1828,6 +1828,88 @@ struct GLMSearchProvider: SearchProvider {
     }
 }
 
+/// Web search for DeepSeek via its standalone Search API
+/// (`POST /v1/tools/search`, https://api-docs.deepseek.com/zh-cn/guides/search).
+/// DeepSeek's chat API has no server-side search, so like `GLMSearchProvider`
+/// this is a client-side tool that reuses the user's DeepSeek key. Billed to
+/// that key's DeepSeek account (5 RMB per 1,000 searches that return results).
+/// Response: `results[]` with `title`, `url`, `summary` (600–800 chars, meant
+/// for models), `snippet`, `site_name` and `date` (RFC 3339 or null).
+struct DeepSeekSearchProvider: SearchProvider {
+    private static let endpoint = URL(string: "https://api.deepseek.com/v1/tools/search")!
+    private static let timeout: TimeInterval = 15
+    private static let maxResults = 6
+    /// The API rejects queries longer than 128 Unicode characters.
+    private static let maxQueryLength = 128
+
+    /// Whether the user has a DeepSeek key, so this provider can run.
+    static var available: Bool { APIKeyStore.current(for: .deepseek) != nil }
+
+    func search(_ input: [String: Any]) async throws -> (text: String, sources: [WebSource]) {
+        guard var query = (input["query"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !query.isEmpty else {
+            return ("Error: empty search query.", [])
+        }
+        if query.count > Self.maxQueryLength { query = String(query.prefix(Self.maxQueryLength)) }
+        guard let key = APIKeyStore.current(for: .deepseek) else {
+            return ("Error: no DeepSeek API key configured, can't search.", [])
+        }
+
+        var req = URLRequest(url: Self.endpoint)
+        req.httpMethod = "POST"
+        req.timeoutInterval = Self.timeout
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "query": query,
+            "count": Self.maxResults,
+        ] as [String: Any])
+
+        let data = try await SearchServiceError.fetch(req, service: "DeepSeek")
+        return Self.parse(data, query: query)
+    }
+
+    static func parse(_ data: Data, query: String) -> (text: String, sources: [WebSource]) {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let results = obj["results"] as? [[String: Any]], !results.isEmpty else {
+            return (SearchMiss.modelText(query: query), [])
+        }
+        let top = results.prefix(maxResults)
+        let blocks = top.enumerated().map { (i, r) -> String in
+            let title = nonEmpty(r["title"]) ?? "(untitled)"
+            let site = nonEmpty(r["site_name"]).map { " · \($0)" } ?? ""
+            let date = day(r["date"]).map { " (\($0))" } ?? ""
+            let link = nonEmpty(r["url"]).map { "\n   \($0)" } ?? ""
+            var snippet = nonEmpty(r["summary"]) ?? nonEmpty(r["snippet"]) ?? ""
+            if snippet.count > 800 { snippet = String(snippet.prefix(800)) + "…" }
+            return "[\(i + 1)] \(title)\(site)\(date)\n   \(snippet)\(link)"
+        }
+        let text = "Web search results for \"\(query)\":\n\n" + blocks.joined(separator: "\n\n")
+
+        var seen = Set<String>()
+        let sources: [WebSource] = top.compactMap { r in
+            guard let link = nonEmpty(r["url"]),
+                  let scheme = URL(string: link)?.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https",
+                  !seen.contains(link) else { return nil }
+            seen.insert(link)
+            return WebSource(title: nonEmpty(r["title"]) ?? link, url: link, date: day(r["date"]))
+        }
+        return (text, sources)
+    }
+
+    private static func nonEmpty(_ value: Any?) -> String? {
+        guard let s = (value as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !s.isEmpty else { return nil }
+        return s
+    }
+
+    /// `2026-10-17T08:00:00Z` → `2026-10-17`.
+    private static func day(_ value: Any?) -> String? {
+        nonEmpty(value).map { String($0.prefix(10)) }
+    }
+}
+
 /// Provider-agnostic web search via **Exa** (`https://api.exa.ai/search`). Unlike
 /// `GLMSearchProvider` (which reuses the GLM provider's key and only exists because
 /// GLM's in-chat search silently no-ops), Exa is a standalone search backend with
@@ -2943,6 +3025,8 @@ extension ToolRegistry {
     ///    client-side `GLMSearchProvider` that hits Zhipu's standalone search API.
     ///  • **Kimi** — its builtin search needs a client-side echo, so the
     ///    `$web_search` passthrough is added so the harness can echo the call back.
+    ///  • **DeepSeek** — its chat API has no search, so `DeepSeekSearchProvider`
+    ///    calls DeepSeek's standalone Search API with the user's DeepSeek key.
     ///
     /// **Unified searcher (optional, user-chosen).** A single client-side
     /// search tool can replace every provider's native search — the server-search
@@ -2971,11 +3055,16 @@ extension ToolRegistry {
             if provider == .kimi {
                 tools.append(WebSearchTool(provider: KimiSearchProvider()))
             }
-            // A provider with no search of its own (Notchi's models, DeepSeek,
-            // Gemini, …) gets the keyless AnySearch, so a question about today
-            // is not answered from training data alone.
+            if provider == .deepseek {
+                tools.append(WebSearchTool(provider: DeepSeekSearchProvider()))
+            }
+            // A provider with no search of its own (Notchi's models, Gemini, …)
+            // uses DeepSeek's search when the user has a DeepSeek key, and the
+            // keyless AnySearch otherwise, so a question about today is not
+            // answered from training data alone.
             if !provider.supportsWebSearch {
-                tools.append(WebSearchTool(provider: AnySearchProvider()))
+                tools.append(WebSearchTool(provider: DeepSeekSearchProvider.available
+                    ? DeepSeekSearchProvider() : AnySearchProvider()))
             }
         }
         return ToolRegistry(tools)
