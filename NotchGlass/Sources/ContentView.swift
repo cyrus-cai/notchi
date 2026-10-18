@@ -842,6 +842,25 @@ struct NotchIsland: View {
     /// (phrase → dots → verdict), sized to its measured content. The occupants
     /// never coexist (`sensing` yields to `busy`).
     private var earLeft: CGFloat {
+        let content = earLeftContent
+        return content > 0 ? content + drawnEdgeInset : 0
+    }
+
+    private var earRight: CGFloat {
+        let content = earRightContent
+        return content > 0 ? content + drawnEdgeInset : 0
+    }
+
+    /// On a screen without a camera housing the island draws its own shoulder
+    /// flares, which pull each straight side in by `topFlare` at the top. The
+    /// ears get that much extra room, padded on the outer edge, so their
+    /// content keeps the same margin it has inside a hardware notch instead of
+    /// running up against the curve.
+    private var drawnEdgeInset: CGFloat {
+        metrics.hasHardwareNotch ? 0 : min(Tokens.notchShoulderFlare, metrics.restHeight / 2)
+    }
+
+    private var earLeftContent: CGFloat {
         if busy {
             let content = workEarContent.left > 0 ? workEarContent.left : busyExtension
             return agentRunning ? faceEar(content) : content + senseEarPad * 2
@@ -858,7 +877,7 @@ struct NotchIsland: View {
     /// The resting notch's RIGHT flex — the busy elapsed clock while work runs,
     /// or the copy-sense ⌘C ear while the offer stands (it folds shut on
     /// confirm).
-    private var earRight: CGFloat {
+    private var earRightContent: CGFloat {
         if busy {
             return workEarContent.right > 0
                 ? workEarContent.right + senseEarPad * 2 : 0
@@ -1041,8 +1060,10 @@ struct NotchIsland: View {
                         stage: .running(verb: busyVerb, since: busySince),
                         showsFace: agentRunning,
                         notchWidth: metrics.restWidth,
-                        earLeft: earLeft,
-                        earRight: earRight)
+                        earLeft: max(0, earLeft - drawnEdgeInset),
+                        earRight: max(0, earRight - drawnEdgeInset))
+                        .padding(.leading, earLeft > 0 ? drawnEdgeInset : 0)
+                        .padding(.trailing, earRight > 0 ? drawnEdgeInset : 0)
                         .offset(y: topBleed / 2)
                         .transition(.opacity)
                 }
@@ -1056,8 +1077,10 @@ struct NotchIsland: View {
                 if sensing {
                     ClipboardSenseEars(sense: model.clipboardSense,
                                        notchWidth: metrics.restWidth,
-                                       earLeft: earLeft,
-                                       earRight: earRight)
+                                       earLeft: max(0, earLeft - drawnEdgeInset),
+                                       earRight: max(0, earRight - drawnEdgeInset))
+                        .padding(.leading, earLeft > 0 ? drawnEdgeInset : 0)
+                        .padding(.trailing, earRight > 0 ? drawnEdgeInset : 0)
                         .offset(y: topBleed / 2)
                         .transition(.opacity)
                 }
