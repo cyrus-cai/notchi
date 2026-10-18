@@ -7180,10 +7180,11 @@ final class NotchModel: ObservableObject {
             }
             guard !Task.isCancelled, let self, !self.open, self.copySenseEnabled else { return }
             guard shouldOffer else {
+                Self.copyTiming.notice("skipped \(Date().timeIntervalSince(startedAt), format: .fixed(precision: 2))s")
                 self.senseCancelHint()
                 return
             }
-            Self.copyTiming.info("sense \(Date().timeIntervalSince(startedAt), format: .fixed(precision: 2))s")
+            Self.copyTiming.notice("sense \(Date().timeIntervalSince(startedAt), format: .fixed(precision: 2))s")
             // A copy worth acting on is handled straight away, with no offer to
             // confirm: reminders and events always, memory when Memory takes
             // copies.
@@ -7199,7 +7200,7 @@ final class NotchModel: ObservableObject {
     /// thread (the copy as the user's line, its emoji on it), and the ear
     /// shows that emoji in place of the eyes. A failed step shakes the eyes and
     /// posts nothing.
-    /// Durations only, never content: `log stream --predicate 'category == "copy-timing"'`.
+    /// Durations only, never content: `log show --predicate 'category == "copy-timing"'`.
     static let copyTiming = Logger(subsystem: "com.notchglass.app", category: "copy-timing")
 
     private func senseRemember(_ clip: String, startedAt: Date = Date()) {
@@ -7242,7 +7243,7 @@ final class NotchModel: ObservableObject {
                     // lands, while the rest is still being written.
                     if !shownEmoji, let emoji = Self.leadingEmoji(reply) {
                         shownEmoji = true
-                        Self.copyTiming.info("emoji \(Date().timeIntervalSince(startedAt), format: .fixed(precision: 2))s")
+                        Self.copyTiming.notice("emoji \(Date().timeIntervalSince(startedAt), format: .fixed(precision: 2))s")
                         await MainActor.run {
                             guard let self, self.copySenseEnabled, !self.open else { return }
                             self.clipboardSense = .done(emoji: emoji)
@@ -7296,7 +7297,7 @@ final class NotchModel: ObservableObject {
                 }
             }
             await MainActor.run {
-                Self.copyTiming.info("done \(Date().timeIntervalSince(startedAt), format: .fixed(precision: 2))s")
+                Self.copyTiming.notice("done \(Date().timeIntervalSince(startedAt), format: .fixed(precision: 2))s")
                 if remembers {
                     for (file, content, appends) in plan.files {
                         guard let name = UserMemory.safeName(file) else { continue }
