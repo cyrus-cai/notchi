@@ -4634,7 +4634,7 @@ struct InlineSettingsView: View {
     /// Under Memory: whether copies feed it (`ClipboardHistory.enabled`). Off
     /// clears the clipboard history.
     private var memoryClipboardRow: some View {
-        settingRow(label: L("memory.clipboard"), aligned: true) {
+        settingRow(label: L("memory.clipboard"), info: L("memory.clipboard.info"), aligned: true) {
             Toggle("", isOn: Binding(
                 get: { clipboardHistory.enabled },
                 set: { Haptics.levelChange(); clipboardHistory.enabled = $0 }
