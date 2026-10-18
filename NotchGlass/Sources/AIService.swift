@@ -772,9 +772,12 @@ to the user at once, before the rest):
 - APPEND: <name>.md on its own line, then the lines to add to the end of that \
 file (an existing one, or a new one). Only when Memory is on. The folder \
 shows only each file's opening lines; add to the file a line belongs in.
+- ASK on its own line when the copy is a question the user wants answered. \
+Do not answer it yourself: it is asked in their conversation, where it gets a \
+full answer. Write no REPLY with ASK.
 - REPLY: one short sentence to the user, in their language, saying what you \
-did, written for this case. Required whenever you write an EMOJI line: an \
-emoji always comes with a reply.
+did, written for this case. Required whenever you write an EMOJI line without \
+ASK: an emoji always comes with a reply.
 If nothing is worth doing, reply NONE (and no EMOJI line), unless told the \
 user has already seen an emoji; then always reply.
 """
