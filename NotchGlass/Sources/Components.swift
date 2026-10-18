@@ -1989,7 +1989,7 @@ struct CaptureLineLink: View {
                         .font(.sf(font))
                         .lineLimit(1)
                     if action != nil, capture.kind != .copied {
-                        Image(systemName: "chevron.right")
+                        Image(systemName: "arrow.up.right")
                             .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                     }
                 }
@@ -4189,7 +4189,8 @@ struct AssistantTurnView: View {
                                       shimmers: working)
                             .lineLimit(1)
                             .truncationMode(.tail)
-                        // Same chevron the capture line above wears ("Updated memory ›").
+                        // A chevron, not the capture line's outward arrow: this one
+                        // unfolds the sources in place rather than opening anything.
                         // Held in the row only once the headline has settled: while
                         // the round is still reading, the line is a status, not a link.
                         if !working {
