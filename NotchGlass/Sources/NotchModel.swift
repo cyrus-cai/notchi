@@ -7168,6 +7168,10 @@ final class NotchModel: ObservableObject {
         }
         let startedAt = Date()
         senseClassifyTask = Task { [weak self] in
+            // Jev's tapback for the copy, asked alongside the sense verdict: once
+            // the copy passes, the emoji shows at once instead of waiting for
+            // the text model to write one.
+            async let tapback = NoNoAccount.shared.react(to: clip, previous: "")
             let shouldOffer: Bool
             if let verdict = await NoNoAccount.shared.sense(clip) {
                 // A copy that reads as a question is left alone.
@@ -7185,10 +7189,16 @@ final class NotchModel: ObservableObject {
                 return
             }
             Self.copyTiming.notice("sense \(Date().timeIntervalSince(startedAt), format: .fixed(precision: 2))s")
+            let emoji = await tapback?.emoji
+            guard !Task.isCancelled, !self.open else { return }
+            if let emoji {
+                Self.copyTiming.notice("emoji \(Date().timeIntervalSince(startedAt), format: .fixed(precision: 2))s (jev)")
+                self.clipboardSense = .done(emoji: emoji)
+            }
             // A copy worth acting on is handled straight away, with no offer to
             // confirm: reminders and events always, memory when Memory takes
             // copies.
-            self.senseRemember(clip, startedAt: startedAt)
+            self.senseRemember(clip, startedAt: startedAt, shownEmoji: emoji)
         }
     }
 
@@ -7203,7 +7213,7 @@ final class NotchModel: ObservableObject {
     /// Durations only, never content: `log show --predicate 'category == "copy-timing"'`.
     static let copyTiming = Logger(subsystem: "com.notchglass.app", category: "copy-timing")
 
-    private func senseRemember(_ clip: String, startedAt: Date = Date()) {
+    private func senseRemember(_ clip: String, startedAt: Date = Date(), shownEmoji: String? = nil) {
         senseClassifyTask?.cancel()
         senseHintShownAt = nil
         // Claim the clip now, so the same text copied again is not handled
@@ -7236,11 +7246,11 @@ final class NotchModel: ObservableObject {
                     service.stream(system: copyActionSystemPrompt,
                                    messages: [ChatMessage(role: "user", content: prompt)])
                 }
-                var shownEmoji = false
+                // Jev's emoji already showing wins; otherwise the reply's first
+                // line, shown the moment it lands.
+                var shownEmoji = shownEmoji != nil
                 for try await chunk in chunks {
                     reply += chunk
-                    // The emoji is the reply's first line: show it the moment it
-                    // lands, while the rest is still being written.
                     if !shownEmoji, let emoji = Self.leadingEmoji(reply) {
                         shownEmoji = true
                         Self.copyTiming.notice("emoji \(Date().timeIntervalSince(startedAt), format: .fixed(precision: 2))s")
@@ -7314,11 +7324,13 @@ final class NotchModel: ObservableObject {
                     }
                 }
                 guard !failed else { return self.senseWriteFailed() }
-                self.postCopyReply(clip: clip, reply: plan.reply, emoji: plan.emoji,
+                // The emoji already on the notch stays the copy's answer.
+                let emoji = shownEmoji ?? plan.emoji
+                self.postCopyReply(clip: clip, reply: plan.reply, emoji: emoji,
                                    captures: captures, at: now)
                 self.senseClip = nil
-                self.clipboardSense = self.copySenseEnabled && !plan.emoji.isEmpty
-                    ? .done(emoji: plan.emoji) : .idle
+                self.clipboardSense = self.copySenseEnabled && !emoji.isEmpty
+                    ? .done(emoji: emoji) : .idle
                 self.senseDismiss(after: 3)
             }
         }
