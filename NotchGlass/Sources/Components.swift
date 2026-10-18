@@ -4193,9 +4193,15 @@ struct AssistantTurnView: View {
                         // unfolds the sources in place rather than opening anything.
                         // Held in the row only once the headline has settled: while
                         // the round is still reading, the line is a status, not a link.
+                        // It turns down when the sources are open, about the
+                        // centre of a fixed square, so it rotates in place and
+                        // never shifts.
                         if !working {
                             Image(systemName: "chevron.right")
                                 .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                                .frame(width: 9, height: 9)
+                                .rotationEffect(.degrees(expanded ? 90 : 0))
+                                .animation(.easeOut(duration: 0.2), value: expanded)
                                 .foregroundStyle(headerHovering ? Tokens.text2 : Tokens.text3)
                         }
                     }
