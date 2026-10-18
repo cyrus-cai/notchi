@@ -7334,17 +7334,39 @@ final class NotchModel: ObservableObject {
                     }
                 }
                 guard !failed else { return self.senseWriteFailed() }
+
                 // The emoji already on the notch stays the copy's answer. A reply
                 // always comes with one, so a model that skipped its EMOJI line
                 // still gets a plain acknowledgement.
                 let emoji = shownEmoji ?? (plan.emoji.isEmpty ? "👌" : plan.emoji)
-                self.postCopyReply(clip: clip, reply: plan.reply, emoji: emoji,
-                                   captures: captures, at: now)
+                if plan.ask {
+                    // A question is answered in the main thread by a real round
+                    // (tools, search, the user's model); that answer is the
+                    // reply, so no separate line is posted.
+                    self.askCopyInMainThread(clip)
+                } else {
+                    self.postCopyReply(clip: clip, reply: plan.reply, emoji: emoji,
+                                       captures: captures, at: now)
+                }
                 self.senseClip = nil
                 self.clipboardSense = self.copySenseEnabled && !emoji.isEmpty
                     ? .done(emoji: emoji) : .idle
                 self.senseDismiss(after: 3)
             }
+        }
+    }
+
+    /// Ask a copied question in the main thread, headless: the round streams
+    /// there like one typed at the notch, with the resting notch's busy ear.
+    private func askCopyInMainThread(_ clip: String) {
+        if let main = history.first(where: { $0.mainThread && $0.source == .ask && !$0.pending }),
+           !inFlightRounds.contains(where: { $0.threadID == main.id }) {
+            runDetachedRound(threadID: main.id, seed: main.conversation, question: clip)
+        } else {
+            if !history.contains(where: { $0.mainThread && $0.source == .ask }) {
+                nextSubmitMainThread = true
+            }
+            runDetachedRound(threadID: UUID(), seed: [], question: clip)
         }
     }
 
@@ -7399,9 +7421,12 @@ final class NotchModel: ObservableObject {
         var files: [(String, String, Bool)] = []
         var reply = ""
         var emoji = ""
-        var isEmpty: Bool { reminders.isEmpty && events.isEmpty && files.isEmpty }
+        /// The copy is a question to answer: it is asked in the main thread
+        /// as a normal round, which is its reply.
+        var ask = false
+        var isEmpty: Bool { reminders.isEmpty && events.isEmpty && files.isEmpty && !ask }
         static func == (a: Self, b: Self) -> Bool {
-            a.reminders == b.reminders && a.events == b.events && a.reply == b.reply
+            a.reminders == b.reminders && a.events == b.events && a.reply == b.reply && a.ask == b.ask
                 && a.emoji == b.emoji && a.files.map(\.0) == b.files.map(\.0)
                 && a.files.map(\.1) == b.files.map(\.1) && a.files.map(\.2) == b.files.map(\.2)
         }
@@ -7457,6 +7482,9 @@ final class NotchModel: ObservableObject {
                                           : start.addingTimeInterval(3600)
                 plan.events.append(.init(title: parts[0].trimmingCharacters(in: .whitespaces),
                                          start: start, end: max(end, start.addingTimeInterval(60))))
+            } else if upper == "ASK" {
+                flush()
+                plan.ask = true
             } else if upper.hasPrefix("REPLY:") {
                 flush()
                 plan.reply = String(value("REPLY:"))
