@@ -7190,7 +7190,8 @@ final class NotchModel: ObservableObject {
 
     /// A copy worth acting on. One model call reads it (with the memory
     /// folder, when Memory takes copies) and decides what to do: set reminders,
-    /// add events, write memory, or nothing. The eyes think meanwhile. When
+    /// add events, write memory, or nothing. The eyes come out only once it
+    /// decided to do something, and think while that runs. When
     /// something was done, the model's own one-line reply lands in the main
     /// thread (the copy as the user's line, its emoji on it), and the ear
     /// shows that emoji in place of the eyes. A failed step shakes the eyes and
@@ -7205,7 +7206,8 @@ final class NotchModel: ObservableObject {
             senseWriteFailed()
             return
         }
-        clipboardSense = .saving(panel: .note)
+        // No eyes while the model decides: a copy it then leaves alone must not
+        // light the notch for nothing. They come out once there is work to do.
         let service = ai
         let memory = UserMemory.shared
         let remembers = ClipboardHistory.shared.recording
@@ -7226,12 +7228,13 @@ final class NotchModel: ObservableObject {
                 }
                 for try await chunk in chunks { reply += chunk }
             } catch {
-                await MainActor.run { self?.senseWriteFailed() }
+                // Nothing was shown yet, so nothing to take back: just let go.
+                await MainActor.run { self?.senseLetGo() }
                 return
             }
             guard let self else { return }
             guard let plan = Self.parseCopyActions(reply) else {
-                await MainActor.run { self.senseWriteFailed() }
+                await MainActor.run { self.senseLetGo() }
                 return
             }
             guard !plan.isEmpty else {
@@ -7242,6 +7245,7 @@ final class NotchModel: ObservableObject {
                 }
                 return
             }
+            await MainActor.run { self.clipboardSense = .saving(panel: .note) }
             var captures: [Turn.Capture] = []
             var failed = false
             for reminder in plan.reminders {
@@ -7472,6 +7476,14 @@ final class NotchModel: ObservableObject {
         }
         flush()
         return ops.isEmpty ? nil : ops
+    }
+
+    /// The judgment itself failed before anything showed: release the clip so
+    /// a later copy of it is judged again, and keep the notch still.
+    private func senseLetGo() {
+        senseCapturedClip = nil
+        senseClip = nil
+        clipboardSense = .idle
     }
 
     private func senseWriteFailed() {
