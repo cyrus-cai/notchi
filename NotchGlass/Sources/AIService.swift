@@ -773,8 +773,10 @@ to the user at once, before the rest):
 file (an existing one, or a new one). Only when Memory is on. The folder \
 shows only each file's opening lines; add to the file a line belongs in.
 - REPLY: one short sentence to the user, in their language, saying what you \
-did, written for this case.
-If nothing is worth doing, reply NONE (and no EMOJI line).
+did, written for this case. Required whenever you write an EMOJI line: an \
+emoji always comes with a reply.
+If nothing is worth doing, reply NONE (and no EMOJI line), unless told the \
+user has already seen an emoji; then always reply.
 """
 
 /// For `NotchModel.scanClipboardForMemories`: file the copies in clipboard

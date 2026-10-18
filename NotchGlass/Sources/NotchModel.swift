@@ -7236,9 +7236,17 @@ final class NotchModel: ObservableObject {
             // file in full: a short prompt is what makes the first line (the
             // emoji) come back quickly. New lines go in with APPEND.
             + (remembers ? "Memory folder:\n\(memory.promptList)\n\n" : "Memory: off; do not write FILE or APPEND blocks.\n\n")
+            // Jev's emoji is already up: the user saw an answer begin, so there
+            // has to be a reply to go with it.
+            + (shownEmoji != nil
+               ? "The user has already seen an emoji for this copy. Do not reply NONE: write a REPLY, and do whatever is useful.\n\n"
+               : "")
             + "The user just copied:\n\(clip)"
         Task { [weak self] in
             var reply = ""
+            // An emoji on the notch promises a reply. If the reply cannot come,
+            // the eyes shake in its place instead of the emoji just vanishing.
+            var emojiOnScreen = shownEmoji != nil
             do {
                 let chunks = NoNoRequestContext.$current.withValue(
                     NoNoRequestContext(surface: NoNoRequestContext.memory)
@@ -7253,6 +7261,7 @@ final class NotchModel: ObservableObject {
                     reply += chunk
                     if !shownEmoji, let emoji = Self.leadingEmoji(reply) {
                         shownEmoji = true
+                        emojiOnScreen = true
                         Self.copyTiming.notice("emoji \(Date().timeIntervalSince(startedAt), format: .fixed(precision: 2))s")
                         await MainActor.run {
                             guard let self, self.copySenseEnabled, !self.open else { return }
@@ -7261,20 +7270,21 @@ final class NotchModel: ObservableObject {
                     }
                 }
             } catch {
-                // Nothing was shown yet, so nothing to take back: just let go.
-                await MainActor.run { self?.senseLetGo() }
+                let shown = emojiOnScreen
+                await MainActor.run { shown ? self?.senseWriteFailed() : self?.senseLetGo() }
                 return
             }
             guard let self else { return }
+            let shown = emojiOnScreen
             guard let plan = Self.parseCopyActions(reply) else {
-                await MainActor.run { self.senseLetGo() }
+                await MainActor.run { shown ? self.senseWriteFailed() : self.senseLetGo() }
                 return
             }
-            guard !plan.isEmpty else {
-                // Nothing to do after all: the strip just folds.
+            guard !plan.isEmpty || !plan.reply.isEmpty else {
+                // Nothing to do. Unseen, the notch simply stays still; with an
+                // emoji up and no reply to back it, the eyes shake instead.
                 await MainActor.run {
-                    self.senseClip = nil
-                    self.clipboardSense = .idle
+                    if shown { self.senseWriteFailed() } else { self.senseLetGo() }
                 }
                 return
             }
@@ -7324,8 +7334,10 @@ final class NotchModel: ObservableObject {
                     }
                 }
                 guard !failed else { return self.senseWriteFailed() }
-                // The emoji already on the notch stays the copy's answer.
-                let emoji = shownEmoji ?? plan.emoji
+                // The emoji already on the notch stays the copy's answer. A reply
+                // always comes with one, so a model that skipped its EMOJI line
+                // still gets a plain acknowledgement.
+                let emoji = shownEmoji ?? (plan.emoji.isEmpty ? "👌" : plan.emoji)
                 self.postCopyReply(clip: clip, reply: plan.reply, emoji: emoji,
                                    captures: captures, at: now)
                 self.senseClip = nil
