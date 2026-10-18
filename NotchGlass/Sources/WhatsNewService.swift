@@ -104,6 +104,21 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.12",
+            date: "2026-10-18",
+            headline: "Notchi can now search the web with the DeepSeek Search API.",
+            heroAssetName: "WhatsNew0912Promo",
+            features: [
+                "Memory is now a folder of notes that Notchi writes and organizes itself.",
+                "A copied question is answered in the conversation, with search and tools.",
+            ],
+            improvements: [
+                "A copied note or reminder is saved right away, without a second copy.",
+                "DeepSeek search is available in Settings → Search, using your DeepSeek key. Free until November 1, 2026, per DeepSeek's pricing.",
+                "Settings has a redesigned wallet and model detail card.",
+            ]
+        ),
+        Entry(
             version: "0.9.11",
             date: "2026-10-16",
             features: [
