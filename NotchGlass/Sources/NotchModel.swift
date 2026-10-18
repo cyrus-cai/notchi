@@ -7226,7 +7226,19 @@ final class NotchModel: ObservableObject {
                     service.stream(system: copyActionSystemPrompt,
                                    messages: [ChatMessage(role: "user", content: prompt)])
                 }
-                for try await chunk in chunks { reply += chunk }
+                var shownEmoji = false
+                for try await chunk in chunks {
+                    reply += chunk
+                    // The emoji is the reply's first line: show it the moment it
+                    // lands, while the rest is still being written.
+                    if !shownEmoji, let emoji = Self.leadingEmoji(reply) {
+                        shownEmoji = true
+                        await MainActor.run {
+                            guard let self, self.copySenseEnabled, !self.open else { return }
+                            self.clipboardSense = .done(emoji: emoji)
+                        }
+                    }
+                }
             } catch {
                 // Nothing was shown yet, so nothing to take back: just let go.
                 await MainActor.run { self?.senseLetGo() }
@@ -7245,7 +7257,11 @@ final class NotchModel: ObservableObject {
                 }
                 return
             }
-            await MainActor.run { self.clipboardSense = .saving(panel: .note) }
+            await MainActor.run {
+                // The emoji usually came out with the first line; without one,
+                // the eyes think while the work runs.
+                if case .done = self.clipboardSense {} else { self.clipboardSense = .saving(panel: .note) }
+            }
             var captures: [Turn.Capture] = []
             var failed = false
             for reminder in plan.reminders {
@@ -7348,6 +7364,15 @@ final class NotchModel: ObservableObject {
                 && a.emoji == b.emoji && a.files.map(\.0) == b.files.map(\.0)
                 && a.files.map(\.1) == b.files.map(\.1)
         }
+    }
+
+    /// The emoji on a reply's first line, once that line is complete.
+    static func leadingEmoji(_ reply: String) -> String? {
+        let text = reply.drop { $0.isWhitespace }
+        guard let end = text.firstIndex(where: \.isNewline) else { return nil }
+        let line = text[..<end].trimmingCharacters(in: .whitespaces)
+        guard line.uppercased().hasPrefix("EMOJI:") else { return nil }
+        return line.dropFirst(6).trimmingCharacters(in: .whitespaces).first.map(String.init)
     }
 
     /// `copyActionSystemPrompt`'s reply. Empty for NONE; nil when it does not
