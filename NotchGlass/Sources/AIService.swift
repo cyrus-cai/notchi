@@ -769,8 +769,9 @@ to the user at once, before the rest):
 - EMOJI: one emoji that answers them, matching what you are doing.
 - REMINDER: <title> @ <yyyy-MM-dd HH:mm>   (omit " @ …" when there is no time)
 - EVENT: <title> @ <yyyy-MM-dd HH:mm> - <yyyy-MM-dd HH:mm>
-- FILE: <name>.md on its own line, then the file's complete new text (it \
-replaces the whole file, so repeat what should stay). Only when Memory is on.
+- APPEND: <name>.md on its own line, then the lines to add to the end of that \
+file (an existing one, or a new one). Only when Memory is on. The folder \
+shows only each file's opening lines; add to the file a line belongs in.
 - REPLY: one short sentence to the user, in their language, saying what you \
 did, written for this case.
 If nothing is worth doing, reply NONE (and no EMOJI line).

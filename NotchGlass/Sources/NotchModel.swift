@@ -6,6 +6,7 @@ import UniformTypeIdentifiers   // UTType — is a pasted file URL an image? (ag
 import PDFKit   // the text of a PDF dropped on the island
 import Vision   // the text of a screen area, for a model that cannot read images
 import AudioToolbox   // MessageTone — system sounds
+import os             // copyTiming — how long each step of a handled copy takes
 
 /// Images loaded back out of the history store (`NotchModel.historyImage(named:)`),
 /// keyed by filename. File-scope rather than a static on the (main-actor) model, so
@@ -7165,6 +7166,7 @@ final class NotchModel: ObservableObject {
             clipboardSense = .mapHint
             return
         }
+        let startedAt = Date()
         senseClassifyTask = Task { [weak self] in
             let shouldOffer: Bool
             if let verdict = await NoNoAccount.shared.sense(clip) {
@@ -7181,10 +7183,11 @@ final class NotchModel: ObservableObject {
                 self.senseCancelHint()
                 return
             }
+            Self.copyTiming.info("sense \(Date().timeIntervalSince(startedAt), format: .fixed(precision: 2))s")
             // A copy worth acting on is handled straight away, with no offer to
             // confirm: reminders and events always, memory when Memory takes
             // copies.
-            self.senseRemember(clip)
+            self.senseRemember(clip, startedAt: startedAt)
         }
     }
 
@@ -7196,7 +7199,10 @@ final class NotchModel: ObservableObject {
     /// thread (the copy as the user's line, its emoji on it), and the ear
     /// shows that emoji in place of the eyes. A failed step shakes the eyes and
     /// posts nothing.
-    private func senseRemember(_ clip: String) {
+    /// Durations only, never content: `log stream --predicate 'category == "copy-timing"'`.
+    static let copyTiming = Logger(subsystem: "com.notchglass.app", category: "copy-timing")
+
+    private func senseRemember(_ clip: String, startedAt: Date = Date()) {
         senseClassifyTask?.cancel()
         senseHintShownAt = nil
         // Claim the clip now, so the same text copied again is not handled
@@ -7215,7 +7221,10 @@ final class NotchModel: ObservableObject {
         let clock = DateFormatter()
         clock.dateFormat = "yyyy-MM-dd HH:mm EEEE"
         let prompt = "Now: \(clock.string(from: now)) (\(TimeZone.current.identifier))\n\n"
-            + (remembers ? "Memory folder:\n\(memory.promptContents)\n\n" : "Memory: off; do not write FILE blocks.\n\n")
+            // The folder's file list with each file's opening lines, not every
+            // file in full: a short prompt is what makes the first line (the
+            // emoji) come back quickly. New lines go in with APPEND.
+            + (remembers ? "Memory folder:\n\(memory.promptList)\n\n" : "Memory: off; do not write FILE or APPEND blocks.\n\n")
             + "The user just copied:\n\(clip)"
         Task { [weak self] in
             var reply = ""
@@ -7233,6 +7242,7 @@ final class NotchModel: ObservableObject {
                     // lands, while the rest is still being written.
                     if !shownEmoji, let emoji = Self.leadingEmoji(reply) {
                         shownEmoji = true
+                        Self.copyTiming.info("emoji \(Date().timeIntervalSince(startedAt), format: .fixed(precision: 2))s")
                         await MainActor.run {
                             guard let self, self.copySenseEnabled, !self.open else { return }
                             self.clipboardSense = .done(emoji: emoji)
@@ -7286,11 +7296,16 @@ final class NotchModel: ObservableObject {
                 }
             }
             await MainActor.run {
+                Self.copyTiming.info("done \(Date().timeIntervalSince(startedAt), format: .fixed(precision: 2))s")
                 if remembers {
-                    for (file, content) in plan.files {
+                    for (file, content, appends) in plan.files {
                         guard let name = UserMemory.safeName(file) else { continue }
-                        let before = MemoryFileBefore(file: name, text: memory.read(name))
-                        guard memory.write(name, content: content) == nil else { failed = true; continue }
+                        let current = memory.read(name)
+                        let before = MemoryFileBefore(file: name, text: current)
+                        let text = appends && current != nil
+                            ? current!.trimmingCharacters(in: .newlines) + "\n" + content
+                            : content
+                        guard memory.write(name, content: text) == nil else { failed = true; continue }
                         if let data = try? JSONEncoder().encode(before),
                            let link = String(data: data, encoding: .utf8) {
                             captures.append(Turn.Capture(kind: .memory, link: link))
@@ -7355,14 +7370,15 @@ final class NotchModel: ObservableObject {
         struct Event: Equatable { var title: String; var start: Date; var end: Date }
         var reminders: [Reminder] = []
         var events: [Event] = []
-        var files: [(String, String)] = []
+        /// File, text, and whether the text is added to the file's end.
+        var files: [(String, String, Bool)] = []
         var reply = ""
         var emoji = ""
         var isEmpty: Bool { reminders.isEmpty && events.isEmpty && files.isEmpty }
         static func == (a: Self, b: Self) -> Bool {
             a.reminders == b.reminders && a.events == b.events && a.reply == b.reply
                 && a.emoji == b.emoji && a.files.map(\.0) == b.files.map(\.0)
-                && a.files.map(\.1) == b.files.map(\.1)
+                && a.files.map(\.1) == b.files.map(\.1) && a.files.map(\.2) == b.files.map(\.2)
         }
     }
 
@@ -7388,10 +7404,11 @@ final class NotchModel: ObservableObject {
         clock.dateFormat = "yyyy-MM-dd HH:mm"
         func date(_ raw: Substring) -> Date? { clock.date(from: raw.trimmingCharacters(in: .whitespaces)) }
         var file: String?
+        var appending = false
         var body: [Substring] = []
         func flush() {
             guard let f = file else { return }
-            plan.files.append((f, body.joined(separator: "\n").trimmingCharacters(in: .newlines) + "\n"))
+            plan.files.append((f, body.joined(separator: "\n").trimmingCharacters(in: .newlines) + "\n", appending))
             file = nil
             body = []
         }
@@ -7424,6 +7441,11 @@ final class NotchModel: ObservableObject {
             } else if upper.hasPrefix("FILE:") {
                 flush()
                 file = String(value("FILE:"))
+                appending = false
+            } else if upper.hasPrefix("APPEND:") {
+                flush()
+                file = String(value("APPEND:"))
+                appending = true
             } else if file != nil {
                 body.append(line)
             } else if !head.isEmpty {
