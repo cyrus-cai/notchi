@@ -1963,7 +1963,11 @@ struct CaptureLineLink: View {
     let capture: NotchModel.Turn.Capture
     let font: CGFloat
     let action: (() -> Void)?
+    /// "Updated memory" only: a separate "Undo" after the line, which itself
+    /// opens the file.
+    var undo: (() -> Void)? = nil
     @State private var hovering = false
+    @State private var hoveringUndo = false
 
     private var label: String {
         switch capture.kind {
@@ -1978,27 +1982,37 @@ struct CaptureLineLink: View {
     }
 
     var body: some View {
-        Button { action?() } label: {
-            HStack(spacing: 3) {
-                Text(label)
-                    .font(.sf(font))
-                    .lineLimit(1)
-                if action != nil, capture.kind == .copied {
-                } else if action != nil, capture.kind == .memory {
-                    Text("· " + L("agent.process.undo"))
+        HStack(spacing: 6) {
+            Button { action?() } label: {
+                HStack(spacing: 3) {
+                    Text(label)
                         .font(.sf(font))
-                } else if action != nil {
-                    Image(systemName: "arrow.up.right")
-                        .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                        .lineLimit(1)
+                    if action != nil, capture.kind != .copied {
+                        Image(systemName: "arrow.up.right")
+                            .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                    }
                 }
+                .foregroundStyle(hovering ? Tokens.text2 : Tokens.text3)
+                .contentShape(Rectangle())
             }
-            .foregroundStyle(hovering ? Tokens.text2 : Tokens.text3)
-            .contentShape(Rectangle())
+            .buttonStyle(.plain).exemptsDoubleClickPin()
+            .disabled(action == nil || capture.kind == .copied)
+            .onHover { hovering = $0 && action != nil && capture.kind != .copied }
+
+            if capture.kind == .memory, let undo {
+                Button(action: undo) {
+                    Text(L("agent.process.undo"))
+                        .font(.sf(font))
+                        .foregroundStyle(hoveringUndo ? Tokens.text2 : Tokens.text3)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).exemptsDoubleClickPin()
+                .onHover { hoveringUndo = $0 }
+            }
         }
-        .buttonStyle(.plain).exemptsDoubleClickPin()
-        .disabled(action == nil || capture.kind == .copied)
-        .onHover { hovering = $0 && action != nil && capture.kind != .copied }
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hoveringUndo)
     }
 }
 
@@ -2590,7 +2604,7 @@ struct ForceClickLookupDialog: View {
 /// `quiet` kind carries no material at all: it's the Cancel that sits *below*
 /// stacked choices, where a third capsule would read as a third option. Brightens on
 /// hover and gives under the press, like every other glass control in the panel.
-private struct ConfirmDialogButton: View {
+struct ConfirmDialogButton: View {
     var title: String
     var kind: Kind
     var font: CGFloat = Tokens.TypeSize.form
@@ -3832,6 +3846,8 @@ struct AssistantTurnView: View {
     var captures: [NotchModel.Turn.Capture] = []
     /// Opens a filed note or reminder in its app. `nil` draws the line as text.
     var onOpenCapture: ((NotchModel.Turn.Capture) -> Void)? = nil
+    /// The "Undo" beside an "Updated memory" line.
+    var onUndoCapture: ((NotchModel.Turn.Capture) -> Void)? = nil
     /// The turn this is, so the bubbles after the first land at a person's
     /// pace (`BubblePacer`). `nil` shows them all at once.
     var turnID: UUID? = nil
@@ -3901,6 +3917,9 @@ struct AssistantTurnView: View {
     @State private var revealedListHeight: CGFloat = 0
     /// Chevron and list opacity, flipped in the same transaction as the height.
     @State private var listExpandedVisual = false
+    /// The settled "Searched the web" headline, same brighten as the capture
+    /// line above it (`CaptureLineLink`).
+    @State private var headerHovering = false
 
     /// The gutter the orb occupies on the block's headline while the round is
     /// still working. It CLOSES with the orb rather than being held empty: a
@@ -4164,17 +4183,34 @@ struct AssistantTurnView: View {
                         .opacity(working ? 1 : 0)
                         .padding(.trailing, working ? Self.waitOrbGap : 0)
                         .centeredOnTextGlyphs(fontSize: waitFont)
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    HStack(alignment: .firstTextBaseline, spacing: 3) {
                         CrossfadeText(text: headerLine, font: waitFont,
-                                      color: working ? Tokens.text2 : Tokens.text3,
+                                      color: (working || headerHovering) ? Tokens.text2 : Tokens.text3,
                                       shimmers: working)
                             .lineLimit(1)
                             .truncationMode(.tail)
+                        // A chevron, not the capture line's outward arrow: this one
+                        // unfolds the sources in place rather than opening anything.
+                        // Held in the row only once the headline has settled: while
+                        // the round is still reading, the line is a status, not a link.
+                        // It turns down when the sources are open, about the
+                        // centre of a fixed square, so it rotates in place and
+                        // never shifts.
+                        if !working {
+                            Image(systemName: "chevron.right")
+                                .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                                .frame(width: 9, height: 9)
+                                .rotationEffect(.degrees(expanded ? 90 : 0))
+                                .animation(.easeOut(duration: 0.2), value: expanded)
+                                .foregroundStyle(headerHovering ? Tokens.text2 : Tokens.text3)
+                        }
                     }
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain).exemptsDoubleClickPin()
+            .onHover { headerHovering = $0 }
+            .animation(.easeOut(duration: Tokens.hoverFade), value: headerHovering)
             // Always mounted, opened by HEIGHT — an `if` would insert the list at
             // full size and only crossfade it, which is what made open and shut
             // read as a jump. Clipped so the rows slide out of view under the
@@ -4408,7 +4444,8 @@ struct AssistantTurnView: View {
                 HStack(spacing: 12) {
                     ForEach(Array(captures.enumerated()), id: \.offset) { _, capture in
                         CaptureLineLink(capture: capture, font: waitFont,
-                                        action: onOpenCapture.map { open in { open(capture) } })
+                                        action: onOpenCapture.map { open in { open(capture) } },
+                                        undo: onUndoCapture.map { undo in { undo(capture) } })
                     }
                 }
                 .padding(.bottom, hasLeadText ? 1 : 0)

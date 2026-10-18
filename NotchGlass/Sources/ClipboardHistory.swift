@@ -6,7 +6,9 @@ import Foundation
 /// Recorded by the resting clipboard watcher (`NotchModel.senseTick`) with the
 /// same exclusions Copy Sense uses: nothing a password manager marks concealed
 /// or transient, nothing that looks like a credential, nothing Notchi wrote.
-/// Settings → Chat turns it off and clears it.
+/// It feeds Memory: Settings → Chat → "Use clipboard to enhance memory"
+/// turns it on and off, under the Memory switch, and off clears it. With
+/// Memory off it records nothing (`recording`).
 @MainActor
 final class ClipboardHistory: ObservableObject {
     static let shared = ClipboardHistory()
@@ -22,13 +24,16 @@ final class ClipboardHistory: ObservableObject {
     }
 
     @Published private(set) var entries: [Entry] = []
-    @Published var enabled: Bool = UserDefaults.standard.object(forKey: ClipboardHistory.enabledKey) as? Bool ?? false {
+    @Published var enabled: Bool = UserDefaults.standard.object(forKey: ClipboardHistory.enabledKey) as? Bool ?? true {
         didSet {
             UserDefaults.standard.set(enabled, forKey: Self.enabledKey)
             if !enabled { clear() }
         }
     }
     private static let enabledKey = "clipboardHistory.enabled"
+
+    /// Copies are recorded, and judged for memory, only with both switches on.
+    var recording: Bool { enabled && UserMemory.shared.enabled }
 
     static let entryLimit = 50
     static let textLimit = 5000

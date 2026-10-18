@@ -214,6 +214,25 @@ struct InlineSettingsView: View {
     /// instructions above it.
     @ObservedObject private var memory = UserMemory.shared
     @ObservedObject private var clipboardHistory = ClipboardHistory.shared
+    /// Memory files as edited on the Memory page, by file name. Seeded from
+    /// disk on first read; each edit is written straight back.
+    @State private var memoryDrafts: [String: String] = [:]
+    /// The memory file opened for editing on the Memory page.
+    @State private var memoryOpenFile: String?
+    /// A Forget waiting on its confirmation: one file, or all of them (`file`
+    /// nil).
+    @State private var memoryForgetTarget: MemoryForgetTarget?
+    private struct MemoryForgetTarget: Equatable {
+        var file: String?
+        /// Turning Memory off, which deletes every file.
+        var turnsOff = false
+    }
+    /// Memory folders folded shut in the tree.
+    @State private var memoryClosedFolders: Set<String> = []
+    /// The Memory page's "what to change or remove" box, and whether the
+    /// model is working on it.
+    @State private var memoryInstruction = ""
+    @State private var memoryEditing = false
 
     /// The model catalog behind the picker — live lists, the fold, and which providers
     /// are callable. Session-wide (the panel's ⌘⇧I picker reads the same store), so a
@@ -390,15 +409,14 @@ struct InlineSettingsView: View {
         case pricing = "Pricing" // Blend1 per-model rates — reached from the wallet's links
         case balances = "Balances" // Blend1 gifts and purchases — reached from the wallet's links
         case privacy = "Privacy" // what happens to a Blend1 request — reached from the wallet's links
-        case memory = "Memory"   // the saved facts — reached from Chat
-        case clipboardHistory = "ClipboardHistory" // recent copies — reached from Chat
+        case memory = "Memory"   // the memory folder — reached from Chat
         var id: String { rawValue }
 
         /// A sub-page rather than a category: reached from a parent pane, drawn
         /// across the whole panel, and left through the header's back pill or Esc.
         var isDetail: Bool {
             self == .licenses || self == .survey || self == .usage || self == .pricing || self == .balances
-                || self == .privacy || self == .memory || self == .clipboardHistory
+                || self == .privacy || self == .memory
         }
 
         /// The section a sub-page sits under — where back (and ⎋) returns to.
@@ -407,7 +425,7 @@ struct InlineSettingsView: View {
             switch self {
             case .licenses, .survey: return .about
             case .usage, .pricing, .balances, .privacy: return .model
-            case .memory, .clipboardHistory: return .chat
+            case .memory: return .chat
             default:               return nil
             }
         }
@@ -439,7 +457,6 @@ struct InlineSettingsView: View {
             case .balances:   return L("nono.balances")
             case .privacy:    return L("nono.privacy.title")
             case .memory:     return L("memory.title")
-            case .clipboardHistory: return L("clipboardHistory.toggle")
             }
         }
     }
@@ -567,7 +584,7 @@ struct InlineSettingsView: View {
 
     /// Which disclosure chip owns the pointer. Permissions and Advanced can share
     /// one pane, so a single Bool would brighten both at once.
-    private enum DisclosureHover { case keys, instructions, memory, clipboard, permissions, advanced }
+    private enum DisclosureHover { case keys, instructions, permissions, advanced }
     @State private var hoveredDisclosure: DisclosureHover?
 
     /// What the proxy field resolves to right now — filled in asynchronously by
@@ -678,6 +695,46 @@ struct InlineSettingsView: View {
                 .padding(.top, -NotchBody.panelPadding)
                 .padding(.bottom, -NotchBody.panelPadding)
                 .transition(.opacity.combined(with: .scale(scale: 0.96)))
+            } else if let target = memoryForgetTarget {
+                // Forgetting cannot be undone, so it asks first.
+                ConfirmationDialogOverlay(onDismiss: { memoryForgetTarget = nil }) {
+                    VStack(spacing: 14) {
+                        Text(target.file.map { L("memory.forget.confirm", $0) } ?? L("memory.forgetAll.confirm"))
+                            .font(.sf(Tokens.TypeSize.reading, weight: .medium))
+                            .foregroundStyle(Tokens.text1)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                        // Cancel takes the trailing slot, where this card puts its
+                        // main action (`LinkWarningConfirm`). Forget stays the
+                        // leading risk action.
+                        HStack(spacing: 10) {
+                            ConfirmDialogButton(title: L(target.file == nil ? "memory.clearAll" : "memory.delete"),
+                                                kind: .destructive) {
+                                memoryForgetTarget = nil
+                                withAnimation(.easeOut(duration: Tokens.hoverFade)) {
+                                    if let file = target.file {
+                                        if memoryOpenFile == file { memoryOpenFile = nil }
+                                        memory.delete(file)
+                                    } else if target.turnsOff {
+                                        memory.enabled = false   // which forgets everything
+                                    } else {
+                                        memory.deleteAll()
+                                    }
+                                }
+                            }
+                            ConfirmDialogButton(title: L("clear.cancel"), kind: .neutral) {
+                                memoryForgetTarget = nil
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 18)
+                    .frame(maxWidth: 280)
+                }
+                .padding(.horizontal, -NotchBody.panelPadding)
+                .padding(.top, -NotchBody.panelPadding)
+                .padding(.bottom, -NotchBody.panelPadding)
+                .transition(.opacity.combined(with: .scale(scale: 0.96)))
             } else if model.confirmingDisconnect {
                 // Disconnecting drops the stored sign-in, and getting it back
                 // takes the browser flow again, so it asks first.
@@ -700,6 +757,7 @@ struct InlineSettingsView: View {
             }
         }
         .animation(.easeOut(duration: 0.16), value: model.confirmingDisconnect)
+        .animation(.easeOut(duration: 0.16), value: memoryForgetTarget)
         .animation(.easeOut(duration: 0.16), value: promptTemplatePickerOpen)
         .animation(.easeOut(duration: 0.16), value: presentedPromptShortcutID)
         // The Force Click gate is NOT mounted here: its scrim has to cover the
@@ -913,15 +971,22 @@ struct InlineSettingsView: View {
                 case .deepseek:  deepSeekSearchKeyRow
                 }
             case .chat:
-                // Three groups: what the answers say and do, the sounds and
-                // reactions, and what is checked before a link opens.
+                // Four groups: what the answers say and do, what is remembered,
+                // the sounds and reactions, and what is checked before a link
+                // opens.
                 Text(L("chat.group.answers"))
                     .captionLabel()
                 customInstructionsRow
-                memoryRow
-                if ClipboardHistory.available { clipboardHistoryRow }
                 suggestFollowUpRow
                 runCommandsRow
+                Text(L("memory.title"))
+                    .captionLabel()
+                    .padding(.top, 2)
+                memoryEnableRow
+                if memory.enabled {
+                    if ClipboardHistory.available { memoryClipboardRow }
+                    UnderlineLink(title: L("memory.manage")) { open(.memory) }
+                }
                 Text(L("chat.group.effects"))
                     .captionLabel()
                     .padding(.top, 2)
@@ -996,8 +1061,6 @@ struct InlineSettingsView: View {
                 NonoPrivacyNote()
             case .memory:
                 memoryPage
-            case .clipboardHistory:
-                clipboardHistoryPage
             }
             }
             .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -1046,6 +1109,10 @@ struct InlineSettingsView: View {
             // carry that offset into General (and vice versa) — a fresh scroll
             // always starts at the top of its own content.
             .id(section)
+            // Swap panes outright. A keyed view otherwise cross-fades, and
+            // for that beat the outgoing and incoming panes sat side by side
+            // in the columns' HStack, nudging the category column sideways.
+            .transition(.identity)
             // A required setup unfolds the key section past the pane's height
             // cap — snap the scroller to it so what just appeared is in view
             // (the anchor lives on `keySection`). The first frame of the unfold
@@ -1065,6 +1132,11 @@ struct InlineSettingsView: View {
             // of panes that fit (About's colophon, Stats' bottom card).
             .scrollEdgeFade(top: paneScrolledOffTop, bottom: paneOverflows,
                             topFade: Self.paneTopFade, bottomFade: 32)
+            // Memory's instruction box and Forget all stay pinned under the
+            // pane while the files scroll.
+            .overlay(alignment: .bottom) {
+                if section == .memory, !memory.scanning { memoryFooter }
+            }
             // A pane swap starts at the top again; the observer only reports on
             // the next bounds change, so clear the flag here.
             .onAppear {
@@ -1105,8 +1177,17 @@ struct InlineSettingsView: View {
             // update action — a quiet neutral dot, never a coloured one.
             badged: s == .about && isUpdateAvailable
         ) {
-            withAnimation(.easeOut(duration: 0.16)) { section = s }
+            showSection(s)
         }
+    }
+
+    /// Switch panes. The label column is cleared in the same update: left to
+    /// `onChange(of: section)`, the new pane's first layout still used the
+    /// old pane's widest label, came out a few points wider than the panel,
+    /// and both columns stepped right before sliding back.
+    private func showSection(_ s: Section) {
+        labelColumnWidth = 0
+        withAnimation(.easeOut(duration: 0.16)) { section = s }
     }
 
     private var isUpdateAvailable: Bool {
@@ -2204,6 +2285,7 @@ struct InlineSettingsView: View {
     }
 
     private func open(_ page: Section) {
+        labelColumnWidth = 0   // see `showSection`
         withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) { section = page }
     }
 
@@ -3779,6 +3861,11 @@ struct InlineSettingsView: View {
             get: { memory.enabled },
             set: { on in
                 Haptics.levelChange()
+                // Off forgets every file, so it asks first.
+                guard on || memory.entries.isEmpty else {
+                    memoryForgetTarget = MemoryForgetTarget(file: nil, turnsOff: true)
+                    return
+                }
                 memory.enabled = on
                 if on { model.scanHistoryForMemories() }
             }
@@ -3790,52 +3877,16 @@ struct InlineSettingsView: View {
         .accessibilityLabel(L("memory.toggle"))
     }
 
-    /// Memory's chip, opening `memoryPage`, with the master switch beside it.
-    private var memoryRow: some View {
-        HStack(spacing: 8) {
-            Button {
-                NotchPanel.exemptNextDoubleClick()
-                open(.memory)
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "chevron.right")
-                        .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
-                    Text(L("memory.title"))
-                        .font(.sf(Tokens.TypeSize.label, weight: .medium))
-                    if !memory.entries.isEmpty {
-                        Text("\(memory.entries.count)")
-                            .font(.sf(Tokens.TypeSize.label, weight: .medium))
-                            .foregroundStyle(Tokens.text3)
-                            .monospacedDigit()
-                    }
-                }
-                .foregroundStyle(Tokens.text1)
-                .padding(.horizontal, 10)
-                .frame(height: 26)
-                .background(
-                    Capsule()
-                        .fill(.white.opacity(hoveredDisclosure == .memory ? 0.12 : 0.06))
-                )
-                .overlay(
-                    Capsule()
-                        .strokeBorder(.white.opacity(hoveredDisclosure == .memory ? 0.22 : 0.12),
-                                      lineWidth: 0.5)
-                )
-                .contentShape(Capsule())
-            }
-            .buttonStyle(.plain).exemptsDoubleClickPin()
-            .onHover { inside in
-                if inside { hoveredDisclosure = .memory }
-                else if hoveredDisclosure == .memory { hoveredDisclosure = nil }
-            }
-            .animation(.easeOut(duration: Tokens.hoverFade), value: hoveredDisclosure)
-            SettingInfo(L("memory.info"))
+    /// Memory's master switch, as a plain row; the files open from the
+    /// "Manage your memories" link under the group.
+    private var memoryEnableRow: some View {
+        settingRow(label: L("memory.enable"), info: L("memory.info"), aligned: true) {
             memoryToggle
         }
     }
 
-    /// The Memory sub-page: the facts `remember` saved, each with its own ×,
-    /// and Forget all.
+    /// The Memory sub-page: the files in the memory folder, a box to tell the
+    /// model what to change, and Forget all.
     private var memoryPage: some View {
         VStack(alignment: .leading, spacing: 12) {
             if memory.enabled, memory.scanning {
@@ -3847,148 +3898,269 @@ struct InlineSettingsView: View {
                 }
             }
             if !memory.scanning {
-                VStack(alignment: .leading, spacing: 0) {
-                    if memory.entries.isEmpty {
-                        Text(L("memory.empty"))
-                            .font(.sf(Tokens.TypeSize.form))
-                            .foregroundStyle(Tokens.text3)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                    }
-                    ForEach(memory.entries) { entry in
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Text(entry.text)
-                                .font(.sf(Tokens.TypeSize.form))
-                                .foregroundStyle(Tokens.text1)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            ListRowRemoveButton(label: L("memory.delete")) {
-                                withAnimation(.easeOut(duration: Tokens.hoverFade)) {
-                                    memory.delete(entry.id)
-                                }
-                            }
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                    }
-                }
-                .padding(.vertical, 2)
-                .recessedSurface(in: RoundedRectangle.control, lit: false)
-
-                if !memory.entries.isEmpty {
-                    Button {
-                        withAnimation(.easeOut(duration: Tokens.hoverFade)) { memory.deleteAll() }
-                    } label: {
-                        Text(L("memory.clearAll"))
-                            .font(.sf(Tokens.TypeSize.label, weight: .medium))
-                            .foregroundStyle(Tokens.text2)
-                            .padding(.horizontal, 12)
-                            .frame(minHeight: 28)
-                    }
-                    .buttonStyle(PromptTemplateChipStyle(shape: Capsule()))
-                }
-            }
-        }
-        .onAppear { model.scanHistoryForMemories() }
-    }
-
-    /// Clipboard history's chip, opening `clipboardHistoryPage`, with the
-    /// switch beside it. Laid out like `memoryRow`. Turning it off clears it.
-    private var clipboardHistoryRow: some View {
-        HStack(spacing: 8) {
-            Button {
-                NotchPanel.exemptNextDoubleClick()
-                open(.clipboardHistory)
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "chevron.right")
-                        .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
-                    Text(L("clipboardHistory.toggle"))
-                        .font(.sf(Tokens.TypeSize.label, weight: .medium))
-                    if !clipboardHistory.entries.isEmpty {
-                        Text("\(clipboardHistory.entries.count)")
-                            .font(.sf(Tokens.TypeSize.label, weight: .medium))
-                            .foregroundStyle(Tokens.text3)
-                            .monospacedDigit()
-                    }
-                }
-                .foregroundStyle(Tokens.text1)
-                .padding(.horizontal, 10)
-                .frame(height: 26)
-                .background(
-                    Capsule()
-                        .fill(.white.opacity(hoveredDisclosure == .clipboard ? 0.12 : 0.06))
-                )
-                .overlay(
-                    Capsule()
-                        .strokeBorder(.white.opacity(hoveredDisclosure == .clipboard ? 0.22 : 0.12),
-                                      lineWidth: 0.5)
-                )
-                .contentShape(Capsule())
-            }
-            .buttonStyle(.plain).exemptsDoubleClickPin()
-            .onHover { inside in
-                if inside { hoveredDisclosure = .clipboard }
-                else if hoveredDisclosure == .clipboard { hoveredDisclosure = nil }
-            }
-            .animation(.easeOut(duration: Tokens.hoverFade), value: hoveredDisclosure)
-            SettingInfo(L("clipboardHistory.info"))
-            Toggle("", isOn: Binding(
-                get: { clipboardHistory.enabled },
-                set: { Haptics.levelChange(); clipboardHistory.enabled = $0 }
-            ))
-            .labelsHidden()
-            .toggleStyle(.switch)
-            .controlSize(.mini)
-            .tint(Tokens.text2)
-            .accessibilityLabel(L("clipboardHistory.toggle"))
-        }
-    }
-
-    /// The Clipboard history sub-page: recent copies, newest first, each with
-    /// a ×, and Clear all.
-    private var clipboardHistoryPage: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 0) {
-                if clipboardHistory.entries.isEmpty {
-                    Text(L("clipboardHistory.empty"))
+                // Two panes, like an editor: the file tree on the left
+                // (folders fold, a right-click shows a file or folder in
+                // Finder), the selected file on the right, edited in place and
+                // written back as you type.
+                if memory.entries.isEmpty {
+                    Text(L("memory.empty"))
                         .font(.sf(Tokens.TypeSize.form))
                         .foregroundStyle(Tokens.text3)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
-                }
-                ForEach(clipboardHistory.entries, id: \.text) { entry in
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(entry.text)
-                            .font(.sf(Tokens.TypeSize.form))
-                            .foregroundStyle(Tokens.text1)
-                            .lineLimit(3)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        ListRowRemoveButton(label: L("clipboardHistory.delete")) {
-                            withAnimation(.easeOut(duration: Tokens.hoverFade)) {
-                                clipboardHistory.delete(entry.text)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .recessedSurface(in: RoundedRectangle.control, lit: false)
+                } else {
+                    // Each pane scrolls on its own; together they fill the page
+                    // above the pinned footer, so the page itself holds still.
+                    HStack(alignment: .top, spacing: 10) {
+                        ScrollView(.vertical) {
+                            VStack(alignment: .leading, spacing: 0) {
+                                ForEach(memoryTree, id: \.folder) { group in
+                                    if !group.folder.isEmpty { memoryFolderRow(group.folder) }
+                                    if group.folder.isEmpty || !memoryClosedFolders.contains(group.folder) {
+                                        ForEach(group.files) { entry in
+                                            memoryFileRow(entry, indented: !group.folder.isEmpty)
+                                        }
+                                    }
+                                }
                             }
+                            .padding(4)
+                            .frame(maxWidth: .infinity, alignment: .topLeading)
                         }
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                }
-            }
-            .padding(.vertical, 2)
-            .recessedSurface(in: RoundedRectangle.control, lit: false)
+                        .scrollIndicators(.never)
+                        .frame(width: 250)
+                        .recessedSurface(in: RoundedRectangle.control, lit: false)
 
-            if !clipboardHistory.entries.isEmpty {
+                        ScrollView(.vertical) {
+                            memoryEditorPane
+                                .frame(maxWidth: .infinity, alignment: .topLeading)
+                        }
+                        .scrollIndicators(.never)
+                        .frame(maxWidth: .infinity)
+                        .recessedSurface(in: RoundedRectangle.control, lit: false)
+                    }
+                    .frame(height: memoryPanesHeight)
+                }
+
+                // Room for the pinned footer (`memoryFooter`).
+                Color.clear.frame(height: 44)
+            }
+        }
+        .onAppear {
+            memoryDrafts = [:]   // the model may have rewritten files since
+            openRequestedMemoryFile()
+            model.scanHistoryForMemories()
+        }
+        .onChange(of: model.memoryFileToOpen) { openRequestedMemoryFile() }
+    }
+
+    /// An "Updated memory" line asked for this file: unfold its folder and
+    /// open it.
+    private func openRequestedMemoryFile() {
+        guard let file = model.memoryFileToOpen else { return }
+        model.memoryFileToOpen = nil
+        if let folder = file.split(separator: "/").dropLast().first { memoryClosedFolders.remove(String(folder)) }
+        memoryOpenFile = file
+    }
+
+    /// The memory files grouped by folder: top-level files first, then each
+    /// folder by name.
+    private var memoryTree: [(folder: String, files: [UserMemory.Entry])] {
+        let grouped = Dictionary(grouping: memory.entries) { entry -> String in
+            entry.id.contains("/") ? String(entry.id.split(separator: "/")[0]) : ""
+        }
+        return grouped.keys.sorted { a, b in
+            a.isEmpty != b.isEmpty ? a.isEmpty : a.localizedStandardCompare(b) == .orderedAscending
+        }.map { (folder: $0, files: grouped[$0] ?? []) }
+    }
+
+    /// A folder in the tree: a chevron that folds it, and its name.
+    private func memoryFolderRow(_ folder: String) -> some View {
+        let open = !memoryClosedFolders.contains(folder)
+        return Button {
+            NotchPanel.exemptNextDoubleClick()
+            withAnimation(.easeOut(duration: 0.16)) {
+                if open { memoryClosedFolders.insert(folder) } else { memoryClosedFolders.remove(folder) }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "chevron.right")
+                    .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                    .rotationEffect(.degrees(open ? 90 : 0))
+                    .frame(width: 14)
+                Text(folder)
+                    .font(Self.memoryMono)
+                    .foregroundStyle(Tokens.text2)
+                    .lineLimit(1)
+            }
+            .foregroundStyle(Tokens.text3)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).exemptsDoubleClickPin()
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .contextMenu { memoryRevealButton(folder) }
+    }
+
+    private func memoryRevealButton(_ name: String) -> some View {
+        Button(L("memory.showInFinder")) {
+            NSWorkspace.shared.activateFileViewerSelecting([UserMemory.folder.appendingPathComponent(name)])
+        }
+    }
+
+    /// A memory file in the tree: icon, name and last update. A tap shows it in the editor
+    /// pane; the selected file keeps a lit row.
+    private func memoryFileRow(_ entry: UserMemory.Entry, indented: Bool) -> some View {
+        let selected = memoryOpenFile == entry.id
+        let name = entry.id.split(separator: "/").last.map(String.init) ?? entry.id
+        return Button {
+            NotchPanel.exemptNextDoubleClick()
+            memoryOpenFile = entry.id
+        } label: {
+            HStack(spacing: 6) {
+                MarkdownMark()
+                    .foregroundStyle(Tokens.text3)
+                    .frame(width: 14, height: 9)
+                Text(name)
+                    .font(Self.memoryMono)
+                    .foregroundStyle(selected ? Tokens.text1 : Tokens.text2)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text(relativeTime(entry.modified))
+                    .font(Self.memoryMono)
+                    .foregroundStyle(Tokens.text4)
+                    .fixedSize()
+            }
+            .padding(.leading, indented ? 26 : 8)
+            .padding(.trailing, 8)
+            .padding(.vertical, 5)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(.white.opacity(selected ? 0.08 : 0))
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).exemptsDoubleClickPin()
+        .contextMenu {
+            memoryRevealButton(entry.id)
+            Button(L("memory.delete")) { deleteMemoryFile(entry.id) }
+        }
+    }
+
+    /// The Memory page's editor face: the code-block monospace at its size.
+    private static let memoryMono = Font.system(size: Tokens.TypeSize.meta, design: .monospaced)
+
+    /// The two Memory panes' height: the page's own, less its runways, the
+    /// pinned footer's room and the gap above it.
+    private var memoryPanesHeight: CGFloat {
+        max(160, settingsPaneHeight - Self.paneTopRunway - 20 - 44 - 12)
+    }
+
+    /// Asks before forgetting the file (see `memoryForgetTarget`).
+    private func deleteMemoryFile(_ id: String) {
+        memoryForgetTarget = MemoryForgetTarget(file: id)
+    }
+
+    /// The editor pane: the selected file's path and last update, then its
+    /// whole text, editable. With nothing selected it shows the first file.
+    @ViewBuilder
+    private var memoryEditorPane: some View {
+        if let entry = memory.entries.first(where: { $0.id == memoryOpenFile })
+            ?? memoryTree.first?.files.first {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(entry.id)
+                        .font(Self.memoryMono)
+                        .foregroundStyle(Tokens.text2)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Text(relativeTime(entry.modified))
+                        .font(Self.memoryMono)
+                        .foregroundStyle(Tokens.text4)
+                        .fixedSize()
+                }
+                .contextMenu { memoryRevealButton(entry.id) }
+                TextField("", text: Binding(
+                    get: { memoryDrafts[entry.id] ?? memory.read(entry.id) ?? "" },
+                    set: { text in
+                        memoryDrafts[entry.id] = text
+                        memory.write(entry.id, content: text)
+                    }
+                ), axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(Self.memoryMono)
+                    .lineSpacing(2)
+                    .foregroundStyle(Tokens.text1)
+                    // Typing here counts as activity so a drifting pointer
+                    // can't fold the panel mid-edit.
+                    .onChange(of: memoryDrafts[entry.id]) { model.noteUserTyping() }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .onAppear { if memoryOpenFile == nil { memoryOpenFile = entry.id } }
+        }
+    }
+
+    /// Below the files: say what to change or remove, and the model edits the
+    /// files (`NotchModel.editMemory`). The app's composer (`ComposerBox`), as
+    /// the detail page's follow-up line wears it.
+    private var memoryInstructField: some View {
+        ComposerBox(
+            text: $memoryInstruction,
+            onSubmit: submitMemoryInstruction,
+            placeholder: { Text(L("memory.instruct")) },
+            trailing: {
+                if memoryEditing {
+                    ThinkingDots(dot: 4, spacing: 5, minHeight: 14)
+                        .fixedSize()
+                        .transition(.opacity)
+                } else if !memoryInstruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    SendButton(compact: true, action: submitMemoryInstruction)
+                        .transition(.scale(scale: 0.6).combined(with: .opacity))
+                }
+            })
+            .disabled(memoryEditing)
+            .onChange(of: memoryInstruction) { model.noteUserTyping() }
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The instruction box and Forget all, on one line, pinned to the bottom
+    /// of the Memory pane.
+    private var memoryFooter: some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            memoryInstructField
+            if !memory.entries.isEmpty {
                 Button {
-                    withAnimation(.easeOut(duration: Tokens.hoverFade)) { clipboardHistory.clear() }
+                    memoryForgetTarget = MemoryForgetTarget(file: nil)
                 } label: {
-                    Text(L("clipboardHistory.clearAll"))
+                    Text(L("memory.clearAll"))
                         .font(.sf(Tokens.TypeSize.label, weight: .medium))
                         .foregroundStyle(Tokens.text2)
-                        .padding(.horizontal, 12)
-                        .frame(minHeight: 28)
+                        .padding(.horizontal, 14)
+                        .frame(minHeight: Tokens.Control.rail)
                 }
                 .buttonStyle(PromptTemplateChipStyle(shape: Capsule()))
+                .fixedSize()
+            }
+        }
+        .padding(.bottom, 6)
+    }
+
+    private func submitMemoryInstruction() {
+        let text = memoryInstruction
+        guard !memoryEditing, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        memoryEditing = true
+        Task {
+            let ok = await model.editMemory(instruction: text)
+            memoryEditing = false
+            if ok {
+                memoryInstruction = ""
+                memoryDrafts = [:]
             }
         }
     }
@@ -4451,6 +4623,21 @@ struct InlineSettingsView: View {
             Toggle("", isOn: Binding(
                 get: { model.linkPrecheckEnabled },
                 set: { Haptics.levelChange(); model.linkPrecheckEnabled = $0 }
+            ))
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .tint(Tokens.text2)
+        }
+    }
+
+    /// Under Memory: whether copies feed it (`ClipboardHistory.enabled`). Off
+    /// clears the clipboard history.
+    private var memoryClipboardRow: some View {
+        settingRow(label: L("memory.clipboard"), info: L("memory.clipboard.info"), aligned: true) {
+            Toggle("", isOn: Binding(
+                get: { clipboardHistory.enabled },
+                set: { Haptics.levelChange(); clipboardHistory.enabled = $0 }
             ))
             .labelsHidden()
             .toggleStyle(.switch)
@@ -9115,5 +9302,28 @@ private struct ListRowRemoveButton: View {
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
         .accessibilityLabel(label)
+    }
+}
+
+/// The Markdown mark ("M↓" in a rounded frame), as an editor's file tree shows
+/// a .md file. Drawn from the mark's own 208×128 geometry; takes the
+/// foreground style.
+private struct MarkdownMark: View {
+    var body: some View {
+        Canvas { context, size in
+            let k = min(size.width / 208, size.height / 128)
+            let ox = (size.width - 208 * k) / 2, oy = (size.height - 128 * k) / 2
+            func p(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: ox + x * k, y: oy + y * k) }
+            let frame = Path(roundedRect: CGRect(origin: p(5, 5), size: CGSize(width: 198 * k, height: 118 * k)),
+                             cornerRadius: 10 * k)
+            context.stroke(frame, with: .foreground, lineWidth: max(1, 10 * k))
+            var glyphs = Path()
+            glyphs.addLines([p(30, 98), p(30, 30), p(50, 30), p(70, 55), p(90, 30), p(110, 30),
+                             p(110, 98), p(90, 98), p(90, 59), p(70, 84), p(50, 59), p(50, 98)])
+            glyphs.closeSubpath()
+            glyphs.addLines([p(155, 98), p(125, 65), p(145, 65), p(145, 30), p(165, 30), p(165, 65), p(185, 65)])
+            glyphs.closeSubpath()
+            context.fill(glyphs, with: .foreground)
+        }
     }
 }

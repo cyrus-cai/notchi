@@ -444,6 +444,7 @@ private struct ClipboardSenseEars: View {
         case .mapHint: return "hint-map"
         case .saving: return "saving"
         case .saved: return "saved"
+        case .done(let emoji): return "done-\(emoji)"
         case .failed: return "failed"
         }
     }
@@ -456,16 +457,65 @@ private struct ClipboardSenseEars: View {
         sense.destinationInk ?? Tokens.text3
     }
 
+    private var isDone: Bool {
+        if case .done = sense { return true }
+        return false
+    }
+
+    /// Eyes on the offer while it stands, busy while the write runs, then the
+    /// write's verdict.
+    private var faceExpression: NotchiFace.Expression {
+        switch sense {
+        case .saving: return .think
+        case .saved: return .saved
+        case .failed: return .alert
+        default: return .offer
+        }
+    }
+
     var body: some View {
         HStack(spacing: 0) {
-            // Left ear — the outcome phrase, then the dots, then the verdict.
-            ZStack {
-                leftStage
-                    .id(stageKey)
-                    .transition(.opacity.combined(with: .scale(scale: 0.85)))
+            // Left ear — Notchi's face at the outer edge, then the outcome
+            // phrase, the dots, the verdict.
+            HStack(spacing: 0) {
+                // A handled copy: the model's emoji answers in the eyes' place.
+                // The eyes close, and the emoji grows in where they were; going
+                // back, it fades and the eyes open.
+                ZStack {
+                    if case .done(let emoji) = sense {
+                        // Eye-sized, with the ear's own margin around it.
+                        Text(emoji)
+                            .font(.system(size: 11))
+                            .frame(width: NotchiFace.slotWidth)
+                            .transition(.asymmetric(
+                                insertion: .modifier(active: SoftResolve(progress: 1),
+                                                     identity: SoftResolve(progress: 0))
+                                    .animation(.smooth(duration: 0.34).delay(0.1)),
+                                removal: .modifier(active: SoftResolve(progress: 1),
+                                                   identity: SoftResolve(progress: 0))
+                                    .animation(.smooth(duration: 0.22))))
+                    } else {
+                        NotchiFace(expression: faceExpression)
+                            .transition(.asymmetric(
+                                insertion: .modifier(active: LidShut(progress: 1),
+                                                     identity: LidShut(progress: 0))
+                                    .animation(.smooth(duration: 0.3).delay(0.12)),
+                                removal: .modifier(active: LidShut(progress: 1),
+                                                   identity: LidShut(progress: 0))
+                                    .animation(.smooth(duration: 0.14))))
+                    }
+                }
+                .animation(.smooth(duration: 0.3), value: isDone)
+                ZStack {
+                    leftStage
+                        .id(stageKey)
+                        .transition(.opacity.combined(with: .scale(scale: 0.85)))
+                }
+                .animation(.easeInOut(duration: 0.22), value: stageKey)
+                .padding(.leading, NotchIsland.faceTextGap)
+                .padding(.trailing, NotchIsland.earTextPad)
             }
-            .animation(.easeInOut(duration: 0.22), value: stageKey)
-            .frame(width: earLeft)
+            .frame(width: earLeft, alignment: .leading)
 
             // The camera gap — content-free by construction.
             Color.clear.frame(width: notchWidth)
@@ -501,16 +551,8 @@ private struct ClipboardSenseEars: View {
                         color: ink)
             case .mapHint:
                 earText(L("sense.map"), color: ink)
-            case .saving:
-                ThinkingDots(dot: 4, spacing: 5)
-                    .fixedSize()
-            case .saved:
-                // The write landed — the word steps back toward meta weight,
-                // keeping only enough of the hue to say where it went.
-                earText(L("sense.saved"), color: ink.opacity(0.7))
-            case .failed:
-                earText(L("sense.failed"), color: Tokens.text4)
-            case .idle:
+            case .saving, .saved, .done, .failed, .idle:
+                // The write is told by the eyes alone: thinking, a nod, a shake.
                 EmptyView()
             }
         }
@@ -558,6 +600,9 @@ private struct BackgroundWorkEars: View {
         case running(verb: String, since: Date)
     }
     let stage: Stage
+    /// The eyes show for an agent run, not for an Ask answer finishing in the
+    /// background.
+    let showsFace: Bool
     /// The drawn hardware-notch width the ears flank (content-free gap).
     let notchWidth: CGFloat
     /// The island's current ear slots (content + insets, animated by the
@@ -577,14 +622,20 @@ private struct BackgroundWorkEars: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            // Left ear — the verb while running.
-            ZStack {
-                leftStage
-                    .id(stageKey)
-                    .transition(.opacity.combined(with: .scale(scale: 0.85)))
+            // Left ear — Notchi's face at the outer edge (agent runs only),
+            // then the verb.
+            HStack(spacing: 0) {
+                if showsFace { NotchiFace(expression: .think) }
+                ZStack {
+                    leftStage
+                        .id(stageKey)
+                        .transition(.opacity.combined(with: .scale(scale: 0.85)))
+                }
+                .animation(.easeInOut(duration: 0.22), value: stageKey)
+                .padding(.leading, showsFace ? NotchIsland.faceTextGap : NotchIsland.earTextPad)
+                .padding(.trailing, NotchIsland.earTextPad)
             }
-            .animation(.easeInOut(duration: 0.22), value: stageKey)
-            .frame(width: earLeft)
+            .frame(width: earLeft, alignment: .leading)
 
             // The camera gap — content-free by construction.
             Color.clear.frame(width: notchWidth)
@@ -679,6 +730,16 @@ struct NotchIsland: View {
 
     /// Breathing room on each side of an ear's content.
     private let senseEarPad: CGFloat = 11
+
+    /// The left ear's text sits between Notchi's face and the camera: this far
+    /// from the face, `earTextPad` from the housing.
+    static let faceTextGap: CGFloat = 4
+    static let earTextPad: CGFloat = 11
+
+    /// The left ear's width around `content`: face, gap, text, pad.
+    private func faceEar(_ content: CGFloat) -> CGFloat {
+        NotchiFace.slotWidth + Self.faceTextGap + content + Self.earTextPad
+    }
 
     /// The transient "entry kick" — the cursor's momentum, absorbed by the
     /// glass. Set to a small displacement in the direction of approach the
@@ -781,12 +842,34 @@ struct NotchIsland: View {
     /// (phrase → dots → verdict), sized to its measured content. The occupants
     /// never coexist (`sensing` yields to `busy`).
     private var earLeft: CGFloat {
+        let content = earLeftContent
+        return content > 0 ? content + drawnEdgeInset : 0
+    }
+
+    private var earRight: CGFloat {
+        let content = earRightContent
+        return content > 0 ? content + drawnEdgeInset : 0
+    }
+
+    /// On a screen without a camera housing the island draws its own shoulder
+    /// flares, which pull each straight side in by `topFlare` at the top. The
+    /// ears get that much extra room, padded on the outer edge, so their
+    /// content keeps the same margin it has inside a hardware notch instead of
+    /// running up against the curve.
+    private var drawnEdgeInset: CGFloat {
+        metrics.hasHardwareNotch ? 0 : min(Tokens.notchShoulderFlare, metrics.restHeight / 2)
+    }
+
+    private var earLeftContent: CGFloat {
         if busy {
-            return workEarContent.left > 0
-                ? workEarContent.left + senseEarPad * 2 : busyExtension
+            let content = workEarContent.left > 0 ? workEarContent.left : busyExtension
+            return agentRunning ? faceEar(content) : content + senseEarPad * 2
         }
-        if sensing, senseEarContent.left > 0 {
-            return senseEarContent.left + senseEarPad * 2
+        if sensing {
+            // A write narrated by the eyes alone carries no text: the ear is
+            // just the face.
+            return senseEarContent.left > 0
+                ? faceEar(senseEarContent.left) : NotchiFace.slotWidth + 6
         }
         return 0
     }
@@ -794,7 +877,7 @@ struct NotchIsland: View {
     /// The resting notch's RIGHT flex — the busy elapsed clock while work runs,
     /// or the copy-sense ⌘C ear while the offer stands (it folds shut on
     /// confirm).
-    private var earRight: CGFloat {
+    private var earRightContent: CGFloat {
         if busy {
             return workEarContent.right > 0
                 ? workEarContent.right + senseEarPad * 2 : 0
@@ -975,9 +1058,12 @@ struct NotchIsland: View {
                 if busy {
                     BackgroundWorkEars(
                         stage: .running(verb: busyVerb, since: busySince),
+                        showsFace: agentRunning,
                         notchWidth: metrics.restWidth,
-                        earLeft: earLeft,
-                        earRight: earRight)
+                        earLeft: max(0, earLeft - drawnEdgeInset),
+                        earRight: max(0, earRight - drawnEdgeInset))
+                        .padding(.leading, earLeft > 0 ? drawnEdgeInset : 0)
+                        .padding(.trailing, earRight > 0 ? drawnEdgeInset : 0)
                         .offset(y: topBleed / 2)
                         .transition(.opacity)
                 }
@@ -991,8 +1077,10 @@ struct NotchIsland: View {
                 if sensing {
                     ClipboardSenseEars(sense: model.clipboardSense,
                                        notchWidth: metrics.restWidth,
-                                       earLeft: earLeft,
-                                       earRight: earRight)
+                                       earLeft: max(0, earLeft - drawnEdgeInset),
+                                       earRight: max(0, earRight - drawnEdgeInset))
+                        .padding(.leading, earLeft > 0 ? drawnEdgeInset : 0)
+                        .padding(.trailing, earRight > 0 ? drawnEdgeInset : 0)
                         .offset(y: topBleed / 2)
                         .transition(.opacity)
                 }
@@ -1523,5 +1611,38 @@ private struct PullWidthFrame: ViewModifier {
         let p = min(max(live.progress, 0), 1)
         let pulled = Tokens.openWidthIdle + (Tokens.openWidthResult - Tokens.openWidthIdle) * p
         return content.frame(width: pulling ? pulled + flare * 2 : width)
+    }
+}
+
+/// The emoji's way in and out of the ear: from clear and a touch small to full
+/// size. Opacity and scale only, both composited, so the notch never redraws
+/// a blur per frame (which stuttered).
+private struct SoftResolve: ViewModifier, Animatable {
+    var progress: CGFloat
+    var animatableData: CGFloat {
+        get { progress }
+        set { progress = newValue }
+    }
+    func body(content: Content) -> some View {
+        let p = min(max(progress, 0), 1)
+        content
+            .scaleEffect(1 - 0.14 * p)
+            .opacity(1 - p)
+    }
+}
+
+/// The eyes' way out and back: the lids close to a line and fade, as a blink
+/// that stays shut.
+private struct LidShut: ViewModifier, Animatable {
+    var progress: CGFloat
+    var animatableData: CGFloat {
+        get { progress }
+        set { progress = newValue }
+    }
+    func body(content: Content) -> some View {
+        let p = min(max(progress, 0), 1)
+        content
+            .scaleEffect(x: 1, y: 1 - 0.9 * p, anchor: .center)
+            .opacity(1 - p * p)
     }
 }
