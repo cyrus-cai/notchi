@@ -104,6 +104,18 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.13",
+            date: "2026-10-19",
+            features: [
+                "Answers to copied questions, and notes or reminders saved from copies, go to a separate thread, From copies.",
+                "A line under an answer shows what your copies did after it. Click it to open them beside the conversation.",
+            ],
+            improvements: [
+                "Routines and copies are two tabs of one page beside the conversation.",
+                "Routines lists stopped routines, so you can resume them.",
+            ]
+        ),
+        Entry(
             version: "0.9.12",
             date: "2026-10-18",
             headline: "Notchi can now search the web with the DeepSeek Search API.",
