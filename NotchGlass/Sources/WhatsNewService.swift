@@ -104,6 +104,16 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.14",
+            date: "2026-10-19",
+            features: [
+                "Suggested next question works with your own key or CLI, using the model that answered.",
+            ],
+            improvements: [
+                "Conversation titles, shortcut names, Memory and suggested questions no longer use your Notchi Balance.",
+            ]
+        ),
+        Entry(
             version: "0.9.13",
             date: "2026-10-19",
             features: [
