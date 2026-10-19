@@ -6563,7 +6563,7 @@ final class NotchModel: ObservableObject {
         return !showSettings && !showWhatsNew && !showHistory
             && agentDetailTaskID == nil && !fromPromptShortcut
             && visibleAskError == nil && openAgentResume == nil && isConfigured
-            && !isResultMoreMenuOpen && !agentComposeActive
+            && !isResultMoreMenuOpen && !agentComposeActive && !showRoutines
             && promptShortcutMode == nil && loopIntervalMinutes == nil
             && askComposeImages.isEmpty && recallPosition == nil
             && !noteSaving && lastSavedNote == nil
@@ -7391,6 +7391,15 @@ final class NotchModel: ObservableObject {
             return round.thread
         }
         return copyThreadIndex.map { history[$0].conversation } ?? []
+    }
+
+    /// The newest copy in the copy thread, when the page on screen is the
+    /// main thread: the main thread links to the copy thread with it.
+    var copyThreadEntry: String? {
+        guard mode == .result, isMainThread(threadHistoryID), copyThreadIndex != nil,
+              let copy = copyThreadConversation.last(where: { $0.role == "user" })
+        else { return nil }
+        return copy.text
     }
 
     /// Ask a copied question in the copy thread, headless: the round streams

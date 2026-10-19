@@ -4658,6 +4658,15 @@ struct NotchBody: View {
                                 offersSeparate: model.unifiedThreadsEnabled,
                                 previousName: intro.previous?.name)
             }
+            // The main thread's way to the copy thread, under its last turn.
+            // Off during a pull: the peek it folds into doesn't draw it.
+            if let latest = model.copyThreadEntry, !model.showRoutines,
+               model.threadPullProgress == nil {
+                QuoteOfferChip(text: latest, icon: "doc.on.clipboard",
+                               title: L("copyThread.title"),
+                               accept: { toggleSidePage(.copies) })
+                    .transition(.opacity)
+            }
         }
     }
 
@@ -7100,18 +7109,21 @@ struct SelectionContextChip: View {
 /// turns it into the follow-up's quote, in the selection chip's glass.
 private struct QuoteOfferChip: View {
     let text: String
+    var icon = "text.quote"
+    var title = L("quote.followUp")
     let accept: () -> Void
-    let dismiss: () -> Void
+    /// Nil leaves the × off.
+    var dismiss: (() -> Void)? = nil
     @State private var hovering = false
 
     var body: some View {
         HStack(spacing: 5) {
             Button(action: accept) {
                 HStack(spacing: 5) {
-                    Image(systemName: "text.quote")
+                    Image(systemName: icon)
                         .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                         .foregroundStyle(Tokens.text4)
-                    Text(L("quote.followUp"))
+                    Text(title)
                         .font(.sf(Tokens.TypeSize.meta, weight: .medium))
                         .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
                         .lineLimit(1)
@@ -7119,17 +7131,19 @@ private struct QuoteOfferChip: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            Button(action: dismiss) {
-                Image(systemName: "xmark")
-                    .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
-                    .foregroundStyle(Tokens.text4)
-                    .frame(width: 14, height: 14)
-                    .contentShape(Circle())
+            if let dismiss {
+                Button(action: dismiss) {
+                    Image(systemName: "xmark")
+                        .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                        .foregroundStyle(Tokens.text4)
+                        .frame(width: 14, height: 14)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(GlassPressStyle())
             }
-            .buttonStyle(GlassPressStyle())
         }
         .padding(.leading, 10)
-        .padding(.trailing, 5)
+        .padding(.trailing, dismiss == nil ? 10 : 5)
         .frame(height: 24)
         .glassCapsule(in: Capsule(), brighter: hovering)
         .notchTooltip(String(text.prefix(140)))
