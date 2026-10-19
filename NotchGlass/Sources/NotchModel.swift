@@ -789,10 +789,10 @@ final class NotchModel: ObservableObject {
     }
 
     /// Whether a finished answer gets a predicted next question in the reply
-    /// field (`predictNextQuestion`), billed to the Notchi Balance. Off by
-    /// default; the feature nudge offers it.
+    /// field (`predictNextQuestion`). On for new installs; existing ones are
+    /// offered it by the feature nudge.
     @Published var suggestFollowUpEnabled: Bool =
-        UserDefaults.standard.object(forKey: "suggestFollowUpEnabled") as? Bool ?? false {
+        OnboardingService.firstRunDefault("suggestFollowUpEnabled", fresh: true, existing: false) {
         didSet {
             UserDefaults.standard.set(suggestFollowUpEnabled, forKey: "suggestFollowUpEnabled")
             if !suggestFollowUpEnabled { nextQuestions = [:] }
@@ -805,9 +805,10 @@ final class NotchModel: ObservableObject {
         didSet { UserDefaults.standard.set(linkPrecheckEnabled, forKey: LinkGate.defaultsKey) }
     }
 
-    /// Whether the chat model gets `run_shell`. A Lab setting, off by default.
+    /// Whether the chat model gets `run_shell`. A Lab setting, on for new
+    /// installs, off for existing ones.
     @Published var shellToolEnabled: Bool =
-        UserDefaults.standard.object(forKey: "shellToolEnabled") as? Bool ?? false {
+        OnboardingService.firstRunDefault("shellToolEnabled", fresh: true, existing: false) {
         didSet { UserDefaults.standard.set(shellToolEnabled, forKey: "shellToolEnabled") }
     }
 
@@ -2544,7 +2545,7 @@ final class NotchModel: ObservableObject {
                 name = try await NoNoRequestContext.$current.withValue(
                     NoNoRequestContext(surface: NoNoRequestContext.naming)
                 ) {
-                    try await self.ai.complete(prompt: """
+                    try await self.backgroundService(self.ai).complete(prompt: """
                     Give this prompt shortcut a short, single-phrase display name for a \
                     command menu. Reply with ONLY the name — no quotes, no prefix, no \
                     explanation, under 4 words. Prompt: \(instruction)
@@ -5951,7 +5952,7 @@ final class NotchModel: ObservableObject {
     /// flat for agent runs AND detached Ask rounds alike. The finished-count
     /// badge, the agent card and the completion notification are all unaffected.
     @Published var liveActivityEnabled: Bool =
-        UserDefaults.standard.object(forKey: NotchModel.liveActivityKey) as? Bool ?? true
+        OnboardingService.firstRunDefault(NotchModel.liveActivityKey, fresh: false, existing: true)
     {
         didSet {
             UserDefaults.standard.set(liveActivityEnabled,
@@ -6321,12 +6322,11 @@ final class NotchModel: ObservableObject {
         case .emojiReactions: isOn = emojiReactionsEnabled
         case .linkPrecheck: isOn = linkPrecheckEnabled
         case .suggestFollowUp: isOn = suggestFollowUpEnabled
+        case .memory: isOn = UserMemory.shared.enabled
+        case .runCommands: isOn = shellToolEnabled
         }
         guard !isOn, Provider.offered.contains(.nono), NoNoAccount.shared.hasToken
         else { return false }
-        if feature == .suggestFollowUp, NoNoAccount.shared.snapshot?.isEmpty == true {
-            return false
-        }
         return requires.allSatisfy { condition in
             switch condition {
             case "gift": return NoNoAccount.shared.snapshot?.hasGift == true
@@ -6361,6 +6361,10 @@ final class NotchModel: ObservableObject {
         case .emojiReactions: emojiReactionsEnabled = true
         case .linkPrecheck: linkPrecheckEnabled = true
         case .suggestFollowUp: suggestFollowUpEnabled = true
+        case .memory:
+            UserMemory.shared.enabled = true
+            scanHistoryForMemories()
+        case .runCommands: shellToolEnabled = true
         }
 
         var invite = Turn(role: "assistant", text: nudge.invite)
@@ -7234,7 +7238,7 @@ final class NotchModel: ObservableObject {
         }
         // No eyes while the model decides: a copy it then leaves alone must not
         // light the notch for nothing. They come out once there is work to do.
-        let service = ai
+        let service = backgroundService(ai)
         let memory = UserMemory.shared
         let remembers = ClipboardHistory.shared.recording
         let now = Date()
@@ -7639,7 +7643,7 @@ final class NotchModel: ObservableObject {
         guard !instruction.isEmpty, !(ai is StubAIService) else { return false }
         let memory = UserMemory.shared
         let prompt = "Memory folder:\n\(memory.promptContents)\n\nThe user says:\n\(instruction)"
-        let service = ai
+        let service = backgroundService(ai)
         var reply = ""
         do {
             let chunks = NoNoRequestContext.$current.withValue(
@@ -10804,7 +10808,7 @@ final class NotchModel: ObservableObject {
                 self.persistThread(thread, threadID: threadID, answer: acc, service: askService)
                 if self.suggestFollowUpEnabled, loopRound == nil,
                    !acc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    self.predictNextQuestion(for: thread, answerID: answerID)
+                    self.predictNextQuestion(for: thread, answerID: answerID, answeredBy: askService)
                 }
                 // A loop round's banner is the loop's own (`ChatLoopManager`).
                 if walkedAway, loopRound == nil {
@@ -12000,7 +12004,7 @@ final class NotchModel: ObservableObject {
         }
         // The copy thread keeps its fixed title.
         if !failed, !loopTurn, threadID != copyThreadID, existingTitle == nil || atMilestone {
-            let titleService = service ?? ai
+            let titleService = backgroundService(service ?? ai)
             Task { [weak self] in
                 guard let self,
                       let title = await self.generateTitle(for: thread, service: titleService) else { return }
@@ -12060,7 +12064,7 @@ final class NotchModel: ObservableObject {
             return
         }
         memory.beginScan()
-        let service = ai
+        let service = backgroundService(ai)
         let prompt = lines.joined(separator: "\n")
         Task {
             var reply = ""
@@ -12112,7 +12116,7 @@ final class NotchModel: ObservableObject {
             lines.append(line)
         }
         clipboardScanRunning = true
-        let service = ai
+        let service = backgroundService(ai)
         let prompt = "Memory folder:\n\(memory.promptContents)\n\nCopies:\n" + lines.joined(separator: "\n")
         Task { [weak self] in
             var reply = ""
@@ -12175,7 +12179,7 @@ final class NotchModel: ObservableObject {
               let question = thread.last(where: { $0.role == "user" && !$0.isLocal }) else { return }
         let exchange = "User: \(question.text.prefix(4_000))\n\nAssistant: \(answer.text.prefix(4_000))"
         let prompt = "Memory folder:\n\(memory.promptContents)\n\nThe exchange:\n\(exchange)"
-        let service = ai
+        let service = backgroundService(ai)
         let answerID = answer.id
         Task { [weak self] in
             var reply = ""
@@ -12235,6 +12239,15 @@ final class NotchModel: ObservableObject {
     /// conversation into a short title. Returns `nil` when offline (stub),
     /// unconfigured, or the request fails, so the UI can always fall back to the
     /// first user message.
+    /// The service for work the app does on its own: titles, shortcut names,
+    /// memory. On Notchi Balance it runs on `NoNoAccount.backgroundModel`,
+    /// which the gateway does not bill for these surfaces, so it works with an
+    /// empty balance. Any other provider runs it on the service as given.
+    private func backgroundService(_ service: AIService) -> AIService {
+        guard let nono = service as? OpenAICompatAIService, nono.provider == .nono else { return service }
+        return AppDelegate.makeService(provider: .nono, apiKey: nono.apiKey, model: NoNoAccount.backgroundModel)
+    }
+
     private func generateTitle(for thread: [Turn], service: AIService) async -> String? {
         guard !(service is StubAIService) else { return nil }
 
@@ -12278,16 +12291,21 @@ final class NotchModel: ObservableObject {
     }
 
     /// Predict the user's next question after a finished round and store it in
-    /// `nextQuestions` under that answer, on screen or not. Always billed to the Notchi Balance on its default model,
-    /// whatever model answered the round, so a BYOK user with a balance gets it
-    /// too and their own key's rate limit is never spent on it. Needs a token
-    /// and a balance not known to be empty. Jev (free) is asked first whether
-    /// the exchange is worth it, and a `skip` ends here without the billed
-    /// request; no verdict (failure, or a credential in the text) generates
-    /// anyway. Failure or an empty reply leaves the default placeholder.
-    private func predictNextQuestion(for thread: [Turn], answerID: UUID) {
+    /// `nextQuestions` under that answer, on screen or not.
+    ///
+    /// A round answered by Notchi's own models runs on the free background model
+    /// (`NoNoAccount.backgroundModel`), and Jev is asked first whether the
+    /// exchange is worth it: a `skip` ends here, and no verdict (failure, or a
+    /// credential in the text) generates anyway. A round answered by the user's
+    /// own key or CLI (`answeredBy`) runs on that same model, with no Jev and
+    /// nothing through the gateway: the prompt tells the model to output
+    /// nothing when the exchange reads as finished. Failure or an empty reply
+    /// leaves the default placeholder.
+    private func predictNextQuestion(for thread: [Turn], answerID: UUID, answeredBy: AIService) {
+        guard !(answeredBy is StubAIService) else { return }
         let account = NoNoAccount.shared
-        guard account.hasToken, account.snapshot?.isEmpty != true else { return }
+        let ownModel = (answeredBy as? OpenAICompatAIService)?.provider != .nono
+        guard ownModel || account.hasToken else { return }
         var transcript = ""
         for turn in thread.suffix(6) {
             let body = turn.text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -12306,11 +12324,13 @@ final class NotchModel: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let jevQuestion = String(lastQuestion.prefix(1500))
         let jevAnswer = String(lastAnswer.suffix(1500))
-        let askJev = !jevQuestion.isEmpty && !jevAnswer.isEmpty
+        let askJev = !ownModel && !jevQuestion.isEmpty && !jevAnswer.isEmpty
             && !ClipPrivacy.containsSecret(jevQuestion) && !ClipPrivacy.containsSecret(jevAnswer)
 
-        let service = AppDelegate.makeService(provider: .nono, apiKey: account.token,
-                                              model: Provider.nono.defaultModel)
+        let service = ownModel
+            ? answeredBy
+            : AppDelegate.makeService(provider: .nono, apiKey: account.token,
+                                      model: NoNoAccount.backgroundModel)
         Task { [weak self] in
             if askJev, let verdict = await account.checkFollowUp(question: jevQuestion,
                                                                  answer: jevAnswer),

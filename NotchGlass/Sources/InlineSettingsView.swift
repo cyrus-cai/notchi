@@ -3854,7 +3854,7 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// Memory's master switch (`UserMemory.enabled`), off by default, beside
+    /// Memory's master switch (`UserMemory.enabled`), on for new installs, beside
     /// the Memory disclosure chip.
     private var memoryToggle: some View {
         Toggle("", isOn: Binding(

@@ -40,6 +40,18 @@ final class OnboardingService: ObservableObject {
             || defaults.bool(forKey: legacyGuideKey)
     }
 
+    /// A switch whose default differs between new and existing installs. Unset
+    /// on a Mac that ran Notch before → `existing`, left unwritten so the
+    /// feature nudges still read it as never touched. Unset on a first run →
+    /// `fresh`, written down so finishing the intro cannot flip it later.
+    nonisolated static func firstRunDefault(_ key: String, fresh: Bool, existing: Bool) -> Bool {
+        let defaults = UserDefaults.standard
+        if let stored = defaults.object(forKey: key) as? Bool { return stored }
+        guard !hasRunBefore else { return existing }
+        defaults.set(fresh, forKey: key)
+        return fresh
+    }
+
     /// Debug switch: when on, the intro plays at every launch and never records
     /// "done", so it can be inspected any number of times. Off by default. Flip it
     /// without a rebuild via either:

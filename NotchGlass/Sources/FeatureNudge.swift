@@ -10,6 +10,8 @@ enum NudgeFeature: String, CaseIterable {
     case emojiReactions
     case linkPrecheck
     case suggestFollowUp
+    case memory
+    case runCommands
 }
 
 // MARK: - Policy
@@ -224,6 +226,8 @@ final class FeatureNudges {
         case .emojiReactions: return "emojiReactionsEnabled"
         case .linkPrecheck: return LinkGate.defaultsKey
         case .suggestFollowUp: return "suggestFollowUpEnabled"
+        case .memory: return UserMemory.enabledKey
+        case .runCommands: return "shellToolEnabled"
         }
     }
 

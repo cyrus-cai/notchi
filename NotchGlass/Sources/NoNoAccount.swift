@@ -65,6 +65,11 @@ struct NoNoRequestContext: Sendable {
 /// pages Stripe hosts; the app only opens a URL the gateway produced.
 @MainActor
 final class NoNoAccount: ObservableObject {
+    /// The model the app's own background work runs on (the `title`,
+    /// `suggest`, `naming` and `memory` surfaces). The gateway does not bill
+    /// those surfaces on this model (`isFreeBackground` in `backend/src/index.ts`).
+    static let backgroundModel = "auto-us"
+
     static let shared = NoNoAccount()
 
     /// What the gateway says about this account. `nil` until the first refresh

@@ -22,12 +22,12 @@ final class UserMemory: ObservableObject {
     }
 
     @Published private(set) var entries: [Entry] = []
-    /// The master switch, off by default. Off, nothing reads or writes the
+    /// The master switch, on for new installs, off for existing ones. Off, nothing reads or writes the
     /// folder, copies included, and no clipboard history is kept
     /// (`ClipboardHistory.recording`). Turning it on builds the memory from past
     /// conversations (`NotchModel.scanHistoryForMemories`); turning it off
     /// deletes every file, so the next time it is on it builds again.
-    @Published var enabled: Bool = UserDefaults.standard.object(forKey: UserMemory.enabledKey) as? Bool ?? false {
+    @Published var enabled: Bool = OnboardingService.firstRunDefault(UserMemory.enabledKey, fresh: true, existing: false) {
         didSet {
             UserDefaults.standard.set(enabled, forKey: Self.enabledKey)
             if !enabled {

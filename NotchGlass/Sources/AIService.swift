@@ -872,8 +872,10 @@ something the answer already covered.
 - Is specific to this conversation. Never a generic line like "Tell me more" \
 or "详细说说".
 
-If the conversation reads as finished (the user thanked the assistant or \
-closed the topic), output nothing.
+If the conversation reads as finished, output nothing: the user thanked the \
+assistant, said goodbye, or confirmed; the answer is a single fact, a short \
+acknowledgement, a translation, a rewrite, or a saved note or reminder; or the \
+message was small talk.
 
 Output only the message text — no quotes, labels, or explanation.
 """
