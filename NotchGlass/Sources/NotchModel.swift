@@ -7343,7 +7343,7 @@ final class NotchModel: ObservableObject {
                     // A question is answered in the main thread by a real round
                     // (tools, search, the user's model); that answer is the
                     // reply, so no separate line is posted.
-                    self.askCopyInMainThread(clip)
+                    self.askCopyInCopyThread(clip)
                 } else {
                     self.postCopyReply(clip: clip, reply: plan.reply, emoji: emoji,
                                        captures: captures, at: now)
@@ -7358,21 +7358,59 @@ final class NotchModel: ObservableObject {
 
     /// Ask a copied question in the main thread, headless: the round streams
     /// there like one typed at the notch, with the resting notch's busy ear.
-    private func askCopyInMainThread(_ clip: String) {
-        if let main = history.first(where: { $0.mainThread && $0.source == .ask && !$0.pending }),
-           !inFlightRounds.contains(where: { $0.threadID == main.id }) {
-            runDetachedRound(threadID: main.id, seed: main.conversation, question: clip)
+    /// The one thread everything a copy triggers goes into: quick answers,
+    /// what was saved or set. It is a thread of its own in Recent, kept apart
+    /// from the main thread, under a fixed title.
+    private static let copyThreadKey = "copyThreadID"
+    var copyThreadID: UUID? {
+        get { UserDefaults.standard.string(forKey: Self.copyThreadKey).flatMap(UUID.init(uuidString:)) }
+        set { UserDefaults.standard.set(newValue?.uuidString, forKey: Self.copyThreadKey) }
+    }
+
+    /// The copy thread's row, when it still exists.
+    private var copyThreadIndex: Int? {
+        guard let id = copyThreadID else { return nil }
+        return history.firstIndex(where: { $0.id == id && !$0.pending })
+    }
+
+    /// Whether there is a copy thread to open from here (it exists, and it is
+    /// not the thread on screen).
+    var canOpenCopyThread: Bool {
+        guard let index = copyThreadIndex else { return false }
+        return !(mode == .result && threadHistoryID == history[index].id)
+    }
+
+    /// Open the copy thread, attaching its round if one is still writing.
+    func openCopyThread() {
+        guard let id = copyThreadID else { return }
+        showRoutines = false
+        openLoopThread(id: id)
+    }
+
+    /// Ask a copied question in the copy thread, headless: the round streams
+    /// there like one typed at the notch (tools, search, the user's model),
+    /// with the resting notch's busy ear.
+    private func askCopyInCopyThread(_ clip: String) {
+        if let index = copyThreadIndex,
+           !inFlightRounds.contains(where: { $0.threadID == history[index].id }) {
+            let item = history[index]
+            runDetachedRound(threadID: item.id, seed: item.conversation, question: clip)
         } else {
-            if !history.contains(where: { $0.mainThread && $0.source == .ask }) {
-                nextSubmitMainThread = true
+            nextSubmitMainThread = false
+            if let id = runDetachedRound(threadID: UUID(), seed: [], question: clip), copyThreadID == nil
+                || copyThreadIndex == nil {
+                copyThreadID = id
+                if let index = history.firstIndex(where: { $0.id == id }) {
+                    history[index].title = L("copyThread.title")
+                    saveHistory()
+                }
             }
-            runDetachedRound(threadID: UUID(), seed: [], question: clip)
         }
     }
 
-    /// The conversation a handled copy leaves in Recent: the copy as the user's
-    /// line with the model's emoji on it, and the model's one-line reply with
-    /// what it filed.
+    /// A handled copy's exchange in the copy thread: the copy as the user's
+    /// line with the emoji on it, and the model's one-line reply with what it
+    /// filed.
     private func postCopyReply(clip: String, reply: String, emoji: String,
                                captures: [Turn.Capture], at date: Date) {
         guard !reply.isEmpty || !captures.isEmpty else { return }
@@ -7382,34 +7420,25 @@ final class NotchModel: ObservableObject {
         question.reaction = emoji.isEmpty ? nil : emoji
         var answer = Turn(role: "assistant", text: reply)
         answer.captures = captures
-        // Into the main thread, as its newest exchange, unless a round on it is
-        // still being written; without one, it starts the main thread (the
-        // same rule the unified-threads guide follows).
-        let main = history.firstIndex(where: { row in
-            row.mainThread && row.source == .ask && !row.pending
-                && !inFlightRounds.contains(where: { $0.threadID == row.id })
-        })
+        // Into the copy thread, unless a round on it is still being written
+        // (then a thread of its own, so the round is not overwritten).
         var item: HistoryItem
-        if let main {
-            item = history.remove(at: main)
+        if let index = copyThreadIndex,
+           !inFlightRounds.contains(where: { $0.threadID == history[index].id }) {
+            item = history.remove(at: index)
             item.turns = item.conversation + [question, answer]
             item.a = reply
             item.t = Date()
         } else {
             item = HistoryItem(q: clip, a: reply, t: Date(), turns: [question, answer])
             item.source = .ask
-            if unifiedThreadsEnabled
-                && !history.contains(where: { $0.mainThread && $0.source == .ask }) {
-                item.mainThread = true
-            }
+            item.title = L("copyThread.title")
+            if copyThreadIndex == nil { copyThreadID = item.id }
         }
         history.insert(item, at: 0)
         saveHistory()
-        // The thread on screen, kept in step. Only while its page is up: on the
-        // idle page `turns` must stay empty, or the pull into the main thread
-        // is refused until the panel closes and clears it.
+        // The thread on screen, kept in step while its page is up.
         if mode == .result, threadHistoryID == item.id { turns = item.conversation }
-        touchMainThreadPeek(item.id)
     }
 
     struct CopyActions: Equatable {
@@ -11876,7 +11905,8 @@ final class NotchModel: ObservableObject {
         if !failed, !loopTurn, item.source == .ask {
             rememberFromRound(thread, threadID: threadID)
         }
-        if !failed, !loopTurn, existingTitle == nil || atMilestone {
+        // The copy thread keeps its fixed title.
+        if !failed, !loopTurn, threadID != copyThreadID, existingTitle == nil || atMilestone {
             let titleService = service ?? ai
             Task { [weak self] in
                 guard let self,

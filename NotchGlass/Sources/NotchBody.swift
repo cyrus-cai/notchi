@@ -5671,7 +5671,14 @@ struct NotchBody: View {
                         withAnimation(.spring(response: 0.4, dampingFraction: 0.86)) {
                             model.showRoutines.toggle()
                         }
-                    }
+                    },
+                    openCopyThread: model.canOpenCopyThread
+                        ? {
+                            withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                                model.openCopyThread()
+                            }
+                        }
+                        : nil as (() -> Void)?
                 )
             }
             // These are buttons sitting on the header's tear-off grip, which pushes
@@ -7651,6 +7658,9 @@ struct ResultTrailingCluster: View {
     /// toggles it directly; otherwise it is a row in the ⋯ menu.
     var routinesOpen = false
     var toggleRoutines: (() -> Void)? = nil
+    /// The thread copies answer in (`NotchModel.copyThreadID`), a row in the
+    /// ⋯ menu beside Routines. Nil when there is none, or it is on screen.
+    var openCopyThread: (() -> Void)? = nil
 
     var body: some View {
         GlassSegmentCluster(segments: {
@@ -7685,6 +7695,7 @@ struct ResultTrailingCluster: View {
         let title = Self.actionTitle("detached.open")
         let chord = AppShortcutStore.chord(for: .detach).displayString
         let routines = L("routines.title")
+        let copies = L("copyThread.title")
         return VStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
             MenuCardRow(title: title, accessory: chord, selected: false) {
                 moreOpen = false
@@ -7696,9 +7707,15 @@ struct ResultTrailingCluster: View {
                     toggleRoutines?()
                 }
             }
+            if let openCopyThread {
+                MenuCardRow(title: copies, selected: false) {
+                    moreOpen = false
+                    openCopyThread()
+                }
+            }
         }
         .padding(MenuCard.cardPad)
-        .frame(width: MenuCard.width(titles: [(title, chord), (routines, "")]))
+        .frame(width: MenuCard.width(titles: [(title, chord), (routines, ""), (copies, "")]))
         .manageMenuCardBackground()
     }
 
