@@ -638,7 +638,6 @@ final class NotchModel: ObservableObject {
         // so the next thread opens without it.
         didSet {
             if mode == .idle, showRoutines { showRoutines = false }
-            if mode == .idle, showCopies { showCopies = false }
         }
     }
 
@@ -768,11 +767,11 @@ final class NotchModel: ObservableObject {
     /// The result header's more menu (detach lives here). Same child-window
     /// problem as the metadata card: the pointer leaves the island to use it.
     @Published var isResultMoreMenuOpen = false
-    /// The Routines column beside the result page, from the header's ⋯.
+    /// The page beside the result page, from the header's ⋯. It has two
+    /// tabs (`sidePageTab`): Routines, and the thread copies answer in.
     @Published var showRoutines = false
-    /// The copies page beside the result page, from the header's ⋯: what each
-    /// copy triggered, the copy thread read as a list.
-    @Published var showCopies = false
+    @Published var sidePageTab: SidePageTab = .routines
+    enum SidePageTab { case routines, copies }
 
     /// Whether the message tones play: sending, each reply bubble landing, and
     /// a reaction. One switch for the whole app — the notch and every detached
@@ -1047,8 +1046,12 @@ final class NotchModel: ObservableObject {
     /// must not invalidate the tree on every chunk.
     @Published private var mainThreadPeekRevision = 0
 
+    /// Also bumped for the copy thread while its tab is on screen
+    /// (`copyThreadConversation`).
     private func touchMainThreadPeek(_ threadID: UUID) {
-        guard open, mode == .idle, turns.isEmpty, isMainThread(threadID) else { return }
+        let peek = open && mode == .idle && turns.isEmpty && isMainThread(threadID)
+        let copies = open && showRoutines && sidePageTab == .copies && threadID == copyThreadID
+        guard peek || copies else { return }
         mainThreadPeekRevision &+= 1
     }
 
@@ -7379,19 +7382,15 @@ final class NotchModel: ObservableObject {
         return history.firstIndex(where: { $0.id == id && !$0.pending })
     }
 
-    /// Whether there is a copy thread to open from here (it exists, and it is
-    /// not the thread on screen).
-    /// The copy thread's turns, oldest first; empty when there is none.
+    /// The copy thread's turns, oldest first, with a round still being
+    /// written; empty when there is none.
     var copyThreadConversation: [Turn] {
-        copyThreadIndex.map { history[$0].conversation } ?? []
-    }
-
-    /// Open the whole copy thread, attaching its round if one is still writing.
-    func openCopyThread() {
-        guard let id = copyThreadID else { return }
-        showRoutines = false
-        showCopies = false
-        openLoopThread(id: id)
+        _ = mainThreadPeekRevision
+        if let id = copyThreadID,
+           let round = inFlightRounds.last(where: { $0.threadID == id }) {
+            return round.thread
+        }
+        return copyThreadIndex.map { history[$0].conversation } ?? []
     }
 
     /// Ask a copied question in the copy thread, headless: the round streams
@@ -8196,7 +8195,6 @@ final class NotchModel: ObservableObject {
         isResultMetadataMenuOpen = false
         isResultMoreMenuOpen = false
         showRoutines = false
-        showCopies = false
         text = ""; turns = []
         replyTarget = nil
         editTarget = nil

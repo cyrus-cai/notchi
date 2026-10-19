@@ -250,33 +250,19 @@ struct NotchBody: View {
                 // two view identities, so every round tore the whole thread down
                 // and rebuilt it when its first text flipped `.load` → `.result`
                 // (and a follow-up's `.result` → `.load` did it once more).
-                // The Routines page covers the thread's right half, edge to
-                // edge of the glass, and closes from its own ×. It never widens
+                // The side page (Routines, and the copy thread in its second
+                // tab) covers the thread's right half, edge to edge of the
+                // glass, and closes from its own ×. It never widens
                 // or heightens the panel.
                 resultView
                     .overlay {
-                        if model.showCopies {
-                            GeometryReader { geo in
-                                CopiesPanel(model: model, onClose: {
-                                    withAnimation(.spring(response: 0.4, dampingFraction: 0.86)) {
-                                        model.showCopies = false
-                                    }
-                                })
-                                .frame(width: geo.size.width / 2)
-                                .frame(maxWidth: .infinity, alignment: .trailing)
-                            }
-                            .padding(.trailing, -NotchBody.panelPadding)
-                            .padding(.top, -NotchBody.panelPadding)
-                            .padding(.bottom, -panelBottomPadding)
-                            .transition(.move(edge: .trailing).combined(with: .opacity))
-                        }
                         if model.showRoutines {
                             GeometryReader { geo in
-                                RoutinesPanel(onClose: {
+                                RoutinesPanel(tab: $model.sidePageTab, onClose: {
                                     withAnimation(.spring(response: 0.4, dampingFraction: 0.86)) {
                                         model.showRoutines = false
                                     }
-                                })
+                                }, copies: { AnyView(copyThreadTab) })
                                 .frame(width: geo.size.width / 2)
                                 .frame(maxWidth: .infinity, alignment: .trailing)
                             }
@@ -4675,6 +4661,63 @@ struct NotchBody: View {
         }
     }
 
+    /// The ⋯ menu's Routines and From copies rows: open the side page on
+    /// that tab, switch to it, or close the page when it is already showing.
+    private func toggleSidePage(_ tab: NotchModel.SidePageTab) {
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.86)) {
+            if model.showRoutines, model.sidePageTab == tab {
+                model.showRoutines = false
+            } else {
+                model.sidePageTab = tab
+                model.showRoutines = true
+            }
+        }
+    }
+
+    /// The side page's From copies tab: the one thread everything a copy
+    /// triggers goes into, read like any thread. Each copy with its emoji,
+    /// then the reply with the lines for the reminder, event or memory it
+    /// filed, or the answer to a copied question as it is written.
+    @ViewBuilder
+    private var copyThreadTab: some View {
+        let turns = model.copyThreadConversation.filter(\.isDrawn)
+        if turns.isEmpty {
+            Text(L("copyThread.empty"))
+                .font(.sf(Tokens.TypeSize.label))
+                .foregroundStyle(Tokens.text4)
+                .multilineTextAlignment(.center)
+                .padding(.top, 8)
+            Spacer(minLength: 0)
+        } else {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    ForEach(turns) { turn in
+                        turnView(turn, thread: turns)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .padding(.bottom, NotchBody.panelPadding)
+            }
+            .scrollIndicators(.never)
+            .modifier(SidePageScrollAnchor())
+        }
+    }
+
+    /// The copy thread tab's scroll: a short thread sits under the tabs; a
+    /// long one opens at its newest copy and follows an answer as it is
+    /// written.
+    private struct SidePageScrollAnchor: ViewModifier {
+        func body(content: Content) -> some View {
+            if #available(macOS 15.0, *) {
+                content
+                    .defaultScrollAnchor(.bottom, for: .initialOffset)
+                    .defaultScrollAnchor(.bottom, for: .sizeChanges)
+            } else {
+                content
+            }
+        }
+    }
+
     // MARK: - Turn window
 
     /// How much of a thread the result page mounts at a time, counted back from
@@ -5681,20 +5724,10 @@ struct NotchBody: View {
                             model.openDetachedWindow()
                         }
                         : nil as (() -> Void)?,
-                    routinesOpen: model.showRoutines,
-                    toggleRoutines: {
-                        withAnimation(.spring(response: 0.4, dampingFraction: 0.86)) {
-                            model.showCopies = false
-                            model.showRoutines.toggle()
-                        }
-                    },
-                    copiesOpen: model.showCopies,
-                    toggleCopies: {
-                        withAnimation(.spring(response: 0.4, dampingFraction: 0.86)) {
-                            model.showRoutines = false
-                            model.showCopies.toggle()
-                        }
-                    }
+                    routinesOpen: model.showRoutines && model.sidePageTab == .routines,
+                    toggleRoutines: { toggleSidePage(.routines) },
+                    copiesOpen: model.showRoutines && model.sidePageTab == .copies,
+                    toggleCopies: { toggleSidePage(.copies) }
                 )
             }
             // These are buttons sitting on the header's tear-off grip, which pushes
@@ -7674,7 +7707,7 @@ struct ResultTrailingCluster: View {
     /// toggles it directly; otherwise it is a row in the ⋯ menu.
     var routinesOpen = false
     var toggleRoutines: (() -> Void)? = nil
-    /// The copies page (`CopiesPanel`), a row in the ⋯ menu under Routines.
+    /// The side page on its From copies tab, a row in the ⋯ menu under Routines.
     var copiesOpen = false
     var toggleCopies: (() -> Void)? = nil
 
@@ -9523,7 +9556,11 @@ struct RoutinesPanel: View {
     @ObservedObject private var chatLoops = ChatLoopManager.shared
     @ObservedObject private var agentManager = AgentTaskManager.shared
 
+    @Binding var tab: NotchModel.SidePageTab
     var onClose: () -> Void
+    /// The From copies tab's content, drawn by `NotchBody` (it reads the
+    /// thread the way the result page does).
+    var copies: () -> AnyView
 
     private struct Item: Identifiable {
         let id: UUID
@@ -9546,7 +9583,9 @@ struct RoutinesPanel: View {
                         active: loop.active, agent: true, startedAt: loop.startedAt,
                         runningSince: task.isRunning ? task.startedAt : nil)
         }
-        let askLoops = chatLoops.listed.map { loop in
+        // Every loop, the ones cleared from the idle list too: this page is
+        // where a stopped loop is found again and resumed.
+        let askLoops = chatLoops.loops.map { loop in
             Item(id: loop.id, title: loop.prompt, intervalMinutes: loop.intervalMinutes,
                  weekdaysOnly: loop.weekdaysOnly, nextRoundAt: loop.nextRoundAt,
                  active: loop.active, agent: false, startedAt: loop.startedAt,
@@ -9557,7 +9596,21 @@ struct RoutinesPanel: View {
 
     var body: some View {
         VStack(spacing: 14) {
-            SidePageHeader(title: L("routines.title"), onClose: onClose)
+            SidePageHeader(tabs: [(.routines, L("routines.title")), (.copies, L("copyThread.title"))],
+                           selected: $tab, onClose: onClose)
+            Group {
+                if tab == .routines { routines } else { copies() }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .transition(.opacity)
+            .id(tab)
+        }
+        .modifier(SidePageChrome())
+        .animation(.easeOut(duration: 0.18), value: tab)
+    }
+
+    @ViewBuilder
+    private var routines: some View {
             let rows = items
             if rows.isEmpty {
                 Text(L("routines.empty"))
@@ -9587,8 +9640,6 @@ struct RoutinesPanel: View {
                 }
                 .scrollIndicators(.never)
             }
-        }
-        .modifier(SidePageChrome())
     }
 
     private func row(_ item: Item) -> some View {
@@ -9663,19 +9714,37 @@ struct RoutinesPanel: View {
     }
 }
 
-/// A side page's top row, the header's height: its tab, and × where ⋯ was.
+/// A side page's top row, the header's height: its tabs, and × where ⋯ was.
+/// The selected tab sits on a lit capsule that slides between them.
 struct SidePageHeader: View {
-    var title: String
+    var tabs: [(NotchModel.SidePageTab, String)]
+    @Binding var selected: NotchModel.SidePageTab
     var onClose: () -> Void
 
+    @Namespace private var capsule
+
     var body: some View {
-        HStack {
-            Text(title)
-                .font(.sf(Tokens.TypeSize.label, weight: .medium))
-                .foregroundStyle(Tokens.text1)
-                .padding(.horizontal, 12)
-                .frame(height: 28)
-                .background(Capsule().fill(Tokens.recessFillLit))
+        HStack(spacing: 2) {
+            ForEach(tabs, id: \.0) { tab, title in
+                Button {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { selected = tab }
+                } label: {
+                    Text(title)
+                        .font(.sf(Tokens.TypeSize.label, weight: .medium))
+                        .foregroundStyle(selected == tab ? Tokens.text1 : Tokens.text3)
+                        .padding(.horizontal, 12)
+                        .frame(height: 28)
+                        .background {
+                            if selected == tab {
+                                Capsule().fill(Tokens.recessFillLit)
+                                    .matchedGeometryEffect(id: "tab", in: capsule)
+                            }
+                        }
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .exemptsDoubleClickPin()
+            }
             Spacer(minLength: 0)
             GlassSegmentCluster(segments: [
                 .init(id: "close", tooltip: L("detached.close"), action: onClose) {
@@ -9734,105 +9803,3 @@ struct SidePageChrome: ViewModifier {
     }
 }
 
-/// The copies page over the thread's right half, laid out like Routines: what
-/// each copy triggered, newest first. A row is the copy with its emoji, the
-/// reply, and the lines for what it filed; tapping the reply opens the whole
-/// copy thread.
-struct CopiesPanel: View {
-    @ObservedObject var model: NotchModel
-    var onClose: () -> Void
-
-    private struct Exchange: Identifiable {
-        let copy: NotchModel.Turn
-        let reply: NotchModel.Turn?
-        var id: UUID { copy.id }
-    }
-
-    private var exchanges: [Exchange] {
-        let turns = model.copyThreadConversation
-        var out: [Exchange] = []
-        for (i, turn) in turns.enumerated() where turn.role == "user" {
-            let next = turns.indices.contains(i + 1) && turns[i + 1].role != "user" ? turns[i + 1] : nil
-            out.append(Exchange(copy: turn, reply: next))
-        }
-        return out.reversed()
-    }
-
-    var body: some View {
-        VStack(spacing: 14) {
-            SidePageHeader(title: L("copyThread.title"), onClose: onClose)
-            let rows = exchanges
-            if rows.isEmpty {
-                Text(L("copyThread.empty"))
-                    .font(.sf(Tokens.TypeSize.label))
-                    .foregroundStyle(Tokens.text4)
-                    .multilineTextAlignment(.center)
-                    .padding(.top, 8)
-                Spacer(minLength: 0)
-            } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(rows.enumerated()), id: \.element.id) { index, exchange in
-                            if index > 0 {
-                                Rectangle().fill(Tokens.hairline).frame(height: 0.5)
-                                    .padding(.horizontal, 12)
-                            }
-                            row(exchange)
-                        }
-                    }
-                    .background(
-                        RoundedRectangle(cornerRadius: Tokens.Radius.menu, style: .continuous)
-                            .fill(Tokens.recessFill)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: Tokens.Radius.menu, style: .continuous)
-                                    .strokeBorder(Tokens.recessRim, lineWidth: 0.5)))
-                    .padding(.bottom, NotchBody.panelPadding)
-                }
-                .scrollIndicators(.never)
-            }
-        }
-        .modifier(SidePageChrome())
-    }
-
-    private func row(_ exchange: Exchange) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                if let emoji = exchange.copy.reaction {
-                    Text(emoji).font(.system(size: 11))
-                }
-                Text(exchange.copy.text)
-                    .font(.sf(Tokens.TypeSize.label))
-                    .foregroundStyle(Tokens.text3)
-                    .lineLimit(2)
-            }
-            if let reply = exchange.reply {
-                if !reply.text.isEmpty {
-                    Text(reply.text)
-                        .font(.sf(Tokens.TypeSize.label))
-                        .foregroundStyle(Tokens.text1)
-                        .lineLimit(6)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .contentShape(Rectangle())
-                        .onTapGesture { model.openCopyThread() }
-                }
-                if !reply.captures.isEmpty {
-                    HStack(spacing: 12) {
-                        ForEach(Array(reply.captures.enumerated()), id: \.offset) { _, capture in
-                            CaptureLineLink(capture: capture, font: Tokens.TypeSize.meta,
-                                            action: { model.openTurnCapture(capture) },
-                                            undo: { model.undoTurnCapture(capture) })
-                        }
-                    }
-                }
-            }
-            if let sent = exchange.copy.sentAt {
-                Text(relativeTime(sent))
-                    .font(.sf(Tokens.TypeSize.meta))
-                    .foregroundStyle(Tokens.text4)
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
