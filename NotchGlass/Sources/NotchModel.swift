@@ -636,7 +636,10 @@ final class NotchModel: ObservableObject {
     @Published var mode: Mode = .idle {
         // Leaving the thread (swipe up, back, a close) folds the Routines card,
         // so the next thread opens without it.
-        didSet { if mode == .idle, showRoutines { showRoutines = false } }
+        didSet {
+            if mode == .idle, showRoutines { showRoutines = false }
+            if mode == .idle, showCopies { showCopies = false }
+        }
     }
 
     /// The user pinned the current answer's card (the pin button in `resultHeader`).
@@ -767,6 +770,9 @@ final class NotchModel: ObservableObject {
     @Published var isResultMoreMenuOpen = false
     /// The Routines column beside the result page, from the header's ⋯.
     @Published var showRoutines = false
+    /// The copies page beside the result page, from the header's ⋯: what each
+    /// copy triggered, the copy thread read as a list.
+    @Published var showCopies = false
 
     /// Whether the message tones play: sending, each reply bubble landing, and
     /// a reaction. One switch for the whole app — the notch and every detached
@@ -7375,15 +7381,16 @@ final class NotchModel: ObservableObject {
 
     /// Whether there is a copy thread to open from here (it exists, and it is
     /// not the thread on screen).
-    var canOpenCopyThread: Bool {
-        guard let index = copyThreadIndex else { return false }
-        return !(mode == .result && threadHistoryID == history[index].id)
+    /// The copy thread's turns, oldest first; empty when there is none.
+    var copyThreadConversation: [Turn] {
+        copyThreadIndex.map { history[$0].conversation } ?? []
     }
 
-    /// Open the copy thread, attaching its round if one is still writing.
+    /// Open the whole copy thread, attaching its round if one is still writing.
     func openCopyThread() {
         guard let id = copyThreadID else { return }
         showRoutines = false
+        showCopies = false
         openLoopThread(id: id)
     }
 
@@ -8189,6 +8196,7 @@ final class NotchModel: ObservableObject {
         isResultMetadataMenuOpen = false
         isResultMoreMenuOpen = false
         showRoutines = false
+        showCopies = false
         text = ""; turns = []
         replyTarget = nil
         editTarget = nil
