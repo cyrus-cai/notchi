@@ -589,6 +589,37 @@ final class NoNoAccount: ObservableObject {
         return try? await send(request)
     }
 
+    // MARK: - Web search
+
+    /// One result of `POST /v1/search`.
+    struct SearchResult: Decodable, Sendable {
+        var title: String
+        var url: String
+        var description: String
+        var date: String?
+    }
+
+    private struct SearchResults: Decodable {
+        var results: [SearchResult]
+    }
+
+    /// Run one web search on the gateway (`POST /v1/search`), billed to this
+    /// account per search. Throws `SearchServiceError` on any failure.
+    func search(_ query: String) async throws -> [SearchResult] {
+        guard hasToken else { throw SearchServiceError(service: "Notchi", detail: L("nono.error.unreachable")) }
+        var request = try jsonRequest("/search", body: ["query": query], authorized: true)
+        request.timeoutInterval = 20
+        for (field, value) in NoNoRequestContext.headers { request.setValue(value, forHTTPHeaderField: field) }
+        do {
+            let decoded: SearchResults = try await send(request)
+            return decoded.results
+        } catch Failed.api(let status, _, let message) {
+            throw SearchServiceError(service: "Notchi", detail: message.isEmpty ? "HTTP \(status)" : message)
+        } catch {
+            throw SearchServiceError(service: "Notchi", detail: error.localizedDescription)
+        }
+    }
+
     // MARK: - Transport
 
     /// The gateway's API root — the chat endpoint minus its method path, so the

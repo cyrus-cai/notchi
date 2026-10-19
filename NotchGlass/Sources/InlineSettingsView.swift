@@ -7189,6 +7189,8 @@ struct InlineSettingsView: View {
     }
 
     private func usageModelName(_ id: String) -> String {
+        // A web search is billed as its own line (`/v1/search`).
+        if id == "web-search" { return L("usage.webSearch") }
         return ModelRatings.nonoDisplayName(for: id) ?? id
     }
 

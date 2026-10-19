@@ -469,8 +469,10 @@ struct LinkCardView: View {
         knownSize = LinkCardStore.knownSize(url: url, title: title, large: large)
     }
 
+    @Environment(\.cardWidthFraction) private var cardWidthFraction
+
     var body: some View {
-        FractionWidthLayout(fraction: AnswerCard<EmptyView>.widthFraction, hugs: true) {
+        FractionWidthLayout(fraction: cardWidthFraction, hugs: true) {
             if let still {
                 Button {
                     LinkGate.shared.open(url)

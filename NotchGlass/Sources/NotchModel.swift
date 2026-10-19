@@ -6563,7 +6563,7 @@ final class NotchModel: ObservableObject {
         return !showSettings && !showWhatsNew && !showHistory
             && agentDetailTaskID == nil && !fromPromptShortcut
             && visibleAskError == nil && openAgentResume == nil && isConfigured
-            && !isResultMoreMenuOpen && !agentComposeActive
+            && !isResultMoreMenuOpen && !agentComposeActive && !showRoutines
             && promptShortcutMode == nil && loopIntervalMinutes == nil
             && askComposeImages.isEmpty && recallPosition == nil
             && !noteSaving && lastSavedNote == nil
@@ -7391,6 +7391,93 @@ final class NotchModel: ObservableObject {
             return round.thread
         }
         return copyThreadIndex.map { history[$0].conversation } ?? []
+    }
+
+    /// One line in the main thread for the copies after one round: the copied
+    /// text, and what the copy thread did with them.
+    struct CopyMark: Equatable, Identifiable {
+        var id: UUID
+        var copies: [String]
+        /// The sentence form, for VoiceOver.
+        var summary: String
+        /// What the replies did, by kind ("answer", "memory", …), in display order.
+        var counts: [Count]
+
+        struct Count: Equatable {
+            var kind: String
+            var n: Int
+        }
+    }
+
+    /// The copy marks for the main thread on screen, keyed by the turn they
+    /// follow: the last turn of the round asked before the copies. Copies
+    /// older than the thread's first question are left out.
+    func copyThreadMarks(for drawn: [Turn]) -> [UUID: CopyMark] {
+        guard mode == .result else { return [:] }
+        return copyThreadMarks(for: drawn, in: threadHistoryID)
+    }
+
+    /// The same marks for `threadID`'s turns, for a pull that is opening it.
+    func copyThreadMarks(for drawn: [Turn], in threadID: UUID?) -> [UUID: CopyMark] {
+        guard let threadID, isMainThread(threadID), copyThreadIndex != nil,
+              let lastID = drawn.last?.id else { return [:] }
+        // Each main turn with the time its round was asked.
+        var anchors: [(id: UUID, at: Date)] = []
+        var roundAt: Date?
+        for turn in drawn {
+            if turn.role == "user", let at = turn.sentAt { roundAt = at }
+            if let roundAt { anchors.append((turn.id, roundAt)) }
+        }
+        // Each copy with what its reply did.
+        struct Exchange { var id: UUID; var copy: String; var at: Date?; var counts: [String: Int] = [:] }
+        var exchanges: [Exchange] = []
+        for turn in copyThreadConversation {
+            if turn.role == "user" {
+                exchanges.append(Exchange(id: turn.id, copy: turn.text, at: turn.sentAt))
+            } else if !exchanges.isEmpty, !turn.isError {
+                if !turn.captures.isEmpty {
+                    for capture in turn.captures {
+                        exchanges[exchanges.count - 1].counts[capture.kind.rawValue, default: 0] += 1
+                    }
+                } else if turn.streaming
+                    || !turn.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    exchanges[exchanges.count - 1].counts["answer", default: 0] += 1
+                }
+            }
+        }
+        // One group per turn.
+        struct Group { var id: UUID; var copies: [String]; var counts: [String: Int] }
+        var groups: [UUID: Group] = [:]
+        for exchange in exchanges where !exchange.counts.isEmpty {
+            let anchor: UUID?
+            if anchors.isEmpty {
+                anchor = lastID
+            } else if let at = exchange.at {
+                anchor = anchors.last(where: { $0.at <= at })?.id
+            } else {
+                anchor = nil
+            }
+            guard let anchor else { continue }
+            if groups[anchor] == nil {
+                groups[anchor] = Group(id: exchange.id, copies: [], counts: [:])
+            }
+            groups[anchor]!.copies.append(exchange.copy)
+            groups[anchor]!.counts.merge(exchange.counts, uniquingKeysWith: +)
+        }
+        let order = ["answer", "memory", "note", "reminder", "reminderUpdate",
+                     "event", "mailDraft", "copied"]
+        return groups.mapValues { group in
+            let counts = order.compactMap { kind -> CopyMark.Count? in
+                guard let n = group.counts[kind], n > 0 else { return nil }
+                return CopyMark.Count(kind: kind, n: n)
+            }
+            let parts = counts.map { c in
+                c.n == 1 ? L("copyMark.\(c.kind).one") : L("copyMark.\(c.kind).many", c.n)
+            }
+            return CopyMark(id: group.id, copies: group.copies,
+                            summary: L("copyMark.format", parts.joined(separator: L("copyMark.join"))),
+                            counts: counts)
+        }
     }
 
     /// Ask a copied question in the copy thread, headless: the round streams

@@ -30,6 +30,13 @@ struct NotchBody: View {
     /// relaxes the first.
     /// The round a loop record's round column has picked; nil follows the newest.
     @State private var loopRoundSelection: Int? = nil
+    /// When a control on the thread last opened or switched the side page, so
+    /// the click on the thread that closes the page leaves that click alone.
+    @State private var sidePageToggledAt: Date = .distantPast
+    /// The oldest turn the side page's thread tab mounts; nil for the newest
+    /// page. Mounting all of a long copy thread on open held the main thread
+    /// for half a second.
+    @State private var copyWindowStartID: UUID? = nil
     /// Which agent status row the pointer is over. The row's trailing slot rests
     /// as an elapsed clock and only becomes the ✕ under the pointer, so a list of
     /// runs reads as durations at a glance and never as a row of close buttons.
@@ -71,6 +78,9 @@ struct NotchBody: View {
     /// draws. The result page scrolls such a thread however short the drawn
     /// turns are (see `isAnswerClipped`), so the pull opens to that layout.
     @State private var revealThreadPartial = false
+    /// The height a copy mark under the newest turn adds to the thread: the
+    /// stack's spacing and the line. Measured from the reveal's tail.
+    @State private var copyMarkTailHeight: CGFloat = 0
     @State private var revealHeaderHeight: CGFloat = 26
     @State private var idleBottomHeight: CGFloat = 0
     /// The idle prompt + bucket row's latest height, read during a pull too.
@@ -251,10 +261,19 @@ struct NotchBody: View {
                 // and rebuilt it when its first text flipped `.load` → `.result`
                 // (and a follow-up's `.result` → `.load` did it once more).
                 // The side page (Routines, and the copy thread in its second
-                // tab) covers the thread's right half, edge to edge of the
+                // tab) covers the right of the thread, edge to edge of the
                 // glass, and closes from its own ×. It never widens
-                // or heightens the panel.
+                // or heightens the panel. A click on the thread to its left
+                // closes it too.
                 resultView
+                    .simultaneousGesture(TapGesture().onEnded {
+                        DispatchQueue.main.async {
+                            guard Date().timeIntervalSince(sidePageToggledAt) > 0.3 else { return }
+                            withAnimation(.spring(response: 0.4, dampingFraction: 0.86)) {
+                                model.showRoutines = false
+                            }
+                        }
+                    }, including: model.showRoutines ? .all : .subviews)
                     .overlay {
                         if model.showRoutines {
                             GeometryReader { geo in
@@ -263,7 +282,7 @@ struct NotchBody: View {
                                         model.showRoutines = false
                                     }
                                 }, copies: { AnyView(copyThreadTab) })
-                                .frame(width: geo.size.width / 2)
+                                .frame(width: geo.size.width * 0.58)
                                 .frame(maxWidth: .infinity, alignment: .trailing)
                             }
                             .padding(.trailing, -NotchBody.panelPadding)
@@ -837,21 +856,45 @@ struct NotchBody: View {
     /// the pull hands over to mounts in the same layout.
     private func revealThread(_ turns: [NotchModel.Turn], in thread: [NotchModel.Turn],
                               measures: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
-            ForEach(turns) { turn in
-                turnView(turn, thread: thread)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .id(turn.id)
-            }
-        }
-        .fixedSize(horizontal: false, vertical: true)
-        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
-            guard measures else { return }
+        // A pull draws the copy marks the result page draws. The one under the
+        // newest turn is not in the peek, so it grows in with the pull below
+        // the stack (`RevealCopyMarkTail`) and the turns above rise to make room.
+        let marks = measures && !model.threadPullSubmitting
+            ? model.copyThreadMarks(for: thread.filter(\.isDrawn), in: model.threadPullItemID) : [:]
+        let lastID = turns.last?.id
+        let tail = lastID.flatMap { marks[$0] }
+        let record = { (height: CGFloat) in
             revealThreadPartial = turns.count < thread.filter(\.isDrawn).count
             revealThreadHeight = height
             measuredAnswerHeight = height
             model.lastMeasuredAnswerHeight = height
             model.threadPullMeasured()
+        }
+        return VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 16) {
+                ForEach(turns) { turn in
+                    turnView(turn, thread: thread)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .id(turn.id)
+                    if turn.id != lastID, let mark = marks[turn.id] {
+                        CopyMarkLine(mark: mark, engaged: false) {}
+                    }
+                }
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                guard measures else { return }
+                record(height + (tail == nil ? 0 : copyMarkTailHeight))
+            }
+            if let tail {
+                RevealCopyMarkTail(live: model.threadPullLive, mark: tail) { height in
+                    guard copyMarkTailHeight != height else { return }
+                    copyMarkTailHeight = height
+                    if measures, revealThreadHeight > 0 {
+                        record(revealThreadHeight + height)
+                    }
+                }
+            }
         }
         .padding(.trailing, 8)
     }
@@ -4638,6 +4681,10 @@ struct NotchBody: View {
             let lastID = model.turns.last?.id
             let visible = model.conversation.drawnTurns
             let end = mountedEnd(of: visible)
+            // What copies did in the copy thread, under the round they came
+            // after. Off during a pull: the peek it folds into doesn't draw it.
+            let copyMarks = model.threadPullProgress == nil
+                ? model.copyThreadMarks(for: visible) : [:]
             ForEach(visible[min(mountedStart(of: visible), end)..<end]) { turn in
                 let live = turn.streaming || turn.id == lastID
                 FarTurnStandIn(id: turn.id, keepsContent: live,
@@ -4650,6 +4697,13 @@ struct NotchBody: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .id(turn.id)
+                if let mark = copyMarks[turn.id] {
+                    CopyMarkLine(mark: mark,
+                                 engaged: model.showRoutines && model.sidePageTab == .copies) {
+                        toggleSidePage(.copies)
+                    }
+                        .transition(.opacity)
+                }
             }
             // The unified threads guide's ending, under its answer.
             if let intro = model.unifiedIntro, let answerID = intro.answerID,
@@ -4664,6 +4718,8 @@ struct NotchBody: View {
     /// The ⋯ menu's Routines and From copies rows: open the side page on
     /// that tab, switch to it, or close the page when it is already showing.
     private func toggleSidePage(_ tab: NotchModel.SidePageTab) {
+        sidePageToggledAt = Date()
+        if !model.showRoutines { copyWindowStartID = nil }
         withAnimation(.spring(response: 0.4, dampingFraction: 0.86)) {
             if model.showRoutines, model.sidePageTab == tab {
                 model.showRoutines = false
@@ -4689,18 +4745,32 @@ struct NotchBody: View {
                 .padding(.top, 8)
             Spacer(minLength: 0)
         } else {
+            let start = copyWindowStart(of: turns)
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    ForEach(turns) { turn in
+                    ForEach(turns[start...]) { turn in
                         turnView(turn, thread: turns)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
                 .padding(.bottom, NotchBody.panelPadding)
+                .background(OlderTurnsLoader(hasOlder: start > 0, load: {
+                    let current = copyWindowStart(of: turns)
+                    guard current > 0 else { return }
+                    copyWindowStartID = turns[Self.threadWindowStart(of: turns, before: current)].id
+                }))
             }
             .scrollIndicators(.never)
             .modifier(SidePageScrollAnchor())
+            // The column is narrow: bubbles and cards run to its right edge.
+            .environment(\.cardWidthFraction, 1)
         }
+    }
+
+    /// The index in `turns` of the oldest turn the copy thread tab mounts.
+    private func copyWindowStart(of turns: [NotchModel.Turn]) -> Int {
+        if let id = copyWindowStartID, let i = turns.firstIndex(where: { $0.id == id }) { return i }
+        return Self.threadWindowStart(of: turns, before: turns.endIndex)
     }
 
     /// The copy thread tab's scroll: a short thread sits under the tabs; a
@@ -7096,6 +7166,98 @@ struct SelectionContextChip: View {
     }
 }
 
+
+/// The copies after one round of the main thread, under that round: what
+/// the copy thread did with them ("Thread updated 3 memories"). Plain grey text like the
+/// "Based on what you copied" caption; opens the Thread tab.
+private struct CopyMarkLine: View {
+    let mark: NotchModel.CopyMark
+    /// The page it opens is showing: drawn as hovered.
+    let engaged: Bool
+    let open: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: open) {
+            HStack(spacing: 5) {
+                Image(systemName: "arrow.turn.down.right")
+                    .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                HStack(spacing: 10) {
+                    ForEach(mark.counts, id: \.kind) { count in
+                        HStack(spacing: 3) {
+                            Image(systemName: Self.symbol(count.kind))
+                                .font(.sf(Tokens.TypeSize.badge, weight: .medium))
+                            Text("\(count.n)")
+                                .font(.sf(Tokens.TypeSize.meta))
+                                .monospacedDigit()
+                        }
+                    }
+                }
+                .lineLimit(1)
+                Image(systemName: "chevron.right")
+                    .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                    .offset(x: hovering ? 2 : 0)
+            }
+            .foregroundStyle(hovering || engaged ? Tokens.text2 : Tokens.text4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.leading, 12)   // matches the bubble's horizontal inset
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+        .animation(.easeOut(duration: Tokens.hoverFade), value: engaged)
+        .accessibilityLabel(mark.summary)
+    }
+
+    /// The glyph for one kind of thing a copy's reply did.
+    private static func symbol(_ kind: String) -> String {
+        switch kind {
+        case "answer":                     return "bubble.left"
+        case "memory":                     return "brain"
+        case "note":                       return "doc.text"
+        case "reminder":                   return "checklist"
+        case "reminderUpdate":             return "checklist.checked"
+        case "event":                      return "calendar"
+        case "mailDraft":                  return "envelope"
+        default:                           return "doc.on.doc"
+        }
+    }
+}
+/// The copy mark under the newest turn during a pull: its slot grows from
+/// nothing at progress 0 (the peek has no mark) to its full height at 1 (the
+/// result page draws it), fading in as it grows. Reads the progress itself,
+/// so a pull frame re-runs this view alone.
+private struct RevealCopyMarkTail: View {
+    @ObservedObject var live: ThreadPullLive
+    let mark: NotchModel.CopyMark
+    let measured: (CGFloat) -> Void
+
+    var body: some View {
+        let p = min(max(live.progress, 0), 1)
+        VStack(alignment: .leading, spacing: 0) {
+            Color.clear.frame(height: 16)   // the thread stack's spacing
+            CopyMarkLine(mark: mark, engaged: false) {}
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { measured($0) }
+        .opacity(p)
+        .modifier(RevealTailHeight(progress: p))
+    }
+}
+
+/// Clips the tail to `progress` of its height, top-aligned.
+private struct RevealTailHeight: ViewModifier {
+    let progress: CGFloat
+    @State private var full: CGFloat = 0
+
+    func body(content: Content) -> some View {
+        content
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { full = $0 }
+            .frame(height: full > 0 ? full * progress : 0, alignment: .top)
+            .clipped()
+    }
+}
+
 /// "Follow up on this" for a passage copied out of an answer: the chip that
 /// turns it into the follow-up's quote, in the selection chip's glass.
 private struct QuoteOfferChip: View {
@@ -7720,7 +7882,7 @@ struct ResultTrailingCluster: View {
                 PinStateGlyph(pinned: pinned, size: 12, weight: .light)
             })
             if detach != nil || toggleRoutines != nil {
-                segs.append(.init(id: "more",
+                var more = GlassSegmentCluster.Segment(id: "more",
                                   engaged: moreOpen || (detach == nil && routinesOpen),
                                   tooltip: detach == nil ? L("routines.title") : L("recent.manage"),
                                   action: {
@@ -7728,7 +7890,9 @@ struct ResultTrailingCluster: View {
                                   }) {
                     Image(systemName: "ellipsis")
                         .font(.sf(15, weight: .bold))
-                })
+                }
+                more.showsTooltip = false
+                segs.append(more)
             }
             return segs
         }(), showsTooltips: !moreOpen && !(detach == nil && routinesOpen))
@@ -7744,7 +7908,7 @@ struct ResultTrailingCluster: View {
         let title = Self.actionTitle("detached.open")
         let chord = AppShortcutStore.chord(for: .detach).displayString
         let routines = L("routines.title")
-        let copies = L("copyThread.title")
+        let copies = L("copyThread.tab")
         return VStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
             MenuCardRow(title: title, accessory: chord, selected: false) {
                 moreOpen = false
@@ -7976,8 +8140,10 @@ struct UserQuestionBubble: View {
 
     /// Capped at the answer card's column, so a long question wraps at the
     /// same width as the reply under it.
+    @Environment(\.cardWidthFraction) private var cardWidthFraction
+
     var body: some View {
-        FractionWidthLayout(fraction: AnswerCard<EmptyView>.widthFraction, hugs: true) {
+        FractionWidthLayout(fraction: cardWidthFraction, hugs: true) {
             bubble
         }
     }
@@ -9596,7 +9762,7 @@ struct RoutinesPanel: View {
 
     var body: some View {
         VStack(spacing: 14) {
-            SidePageHeader(tabs: [(.routines, L("routines.title")), (.copies, L("copyThread.title"))],
+            SidePageHeader(tabs: [(.routines, L("routines.title")), (.copies, L("copyThread.tab"))],
                            selected: $tab, onClose: onClose)
             Group {
                 if tab == .routines { routines } else { copies() }

@@ -2117,6 +2117,39 @@ struct KeenableSearchProvider: SearchProvider {
     }
 }
 
+/// Web search for Notchi Balance, run by the Notchi gateway (`POST /v1/search`)
+/// and billed to the user's Notchi balance per search. It is the `.nono`
+/// provider's own search, used when no unified search backend is picked, the
+/// same place GLM's and Kimi's searches sit.
+struct NotchiSearchProvider: SearchProvider {
+    private static let maxSnippetChars = 500
+
+    func search(_ input: [String: Any]) async throws -> (text: String, sources: [WebSource]) {
+        guard let query = (input["query"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !query.isEmpty else {
+            return ("Error: empty search query.", [])
+        }
+        let results = try await NoNoAccount.shared.search(query)
+        guard !results.isEmpty else { return (SearchMiss.modelText(query: query), []) }
+
+        let blocks = results.enumerated().map { (i, r) -> String in
+            let date = r.date.map { " (\($0.prefix(10)))" } ?? ""
+            var snippet = r.description.trimmingCharacters(in: .whitespacesAndNewlines)
+            if snippet.count > Self.maxSnippetChars { snippet = String(snippet.prefix(Self.maxSnippetChars)) + "…" }
+            return "[\(i + 1)] \(r.title)\(date)\n   \(snippet)\n   \(r.url)"
+        }
+        let text = "Web search results for \"\(query)\":\n\n" + blocks.joined(separator: "\n\n")
+
+        var seen = Set<String>()
+        let sources: [WebSource] = results.compactMap { r in
+            guard !seen.contains(r.url) else { return nil }
+            seen.insert(r.url)
+            return WebSource(title: r.title, url: r.url, date: r.date.map { String($0.prefix(10)) })
+        }
+        return (text, sources)
+    }
+}
+
 /// Provider-agnostic web search via **AnySearch**
 /// (`https://api.anysearch.com/v1/search`). AnySearch supports anonymous REST
 /// access, so this tool is active as soon as the backend is selected; an optional

@@ -1657,6 +1657,8 @@ struct GlassSegmentCluster: View {
         var id: String?
         var engaged: Bool
         var tooltip: String
+        /// Off for a segment that opens a menu: the menu names what it holds.
+        var showsTooltip = true
         var action: () -> Void
         var glyph: (Bool) -> AnyView
 
@@ -1747,7 +1749,7 @@ struct GlassSegmentCluster: View {
         HStack(spacing: glass ? 2 : 6) {
             ForEach(identifiedSegments) { item in
                 let seg = item.segment
-                if showsTooltips {
+                if showsTooltips && seg.showsTooltip {
                     segmentButton(id: item.id, segment: seg)
                         .notchTooltip(seg.tooltip, edge: tipEdge)
                         .accessibilityLabel(seg.tooltip)
@@ -3766,6 +3768,7 @@ private struct ReadingSourceList: View {
 /// keeps a layer mounted across every fade, so there's no frame where the slot is
 /// momentarily empty (the "空白帧" between questions).
 struct AssistantTurnView: View {
+    @Environment(\.cardWidthFraction) private var cardWidthFraction
     let text: String
     /// Still in flight. Gates the wait overlay until real answer text lands.
     var streaming: Bool = false
@@ -4322,7 +4325,7 @@ struct AssistantTurnView: View {
                     .contextMenu { answerTurnMenu }
                     .transition(Self.landing)
                 case .media(let body):
-                    FractionWidthLayout(fraction: AnswerCard<EmptyView>.widthFraction) {
+                    FractionWidthLayout(fraction: cardWidthFraction) {
                         MarkdownBlocks(source: body, baseFont: cardFont, color: color)
                     }
                     .contextMenu { answerTurnMenu }
@@ -4731,8 +4734,7 @@ struct AnswerCard<Content: View>: View {
     var chrome: Bool = true
     @ViewBuilder let content: Content
     @State private var cardHeight: CGFloat = 0
-
-    static var widthFraction: CGFloat { 3.0 / 4.0 }
+    @Environment(\.cardWidthFraction) private var widthFraction
 
     private var radius: CGFloat {
         visible ? ChatBubbleChrome.radius(forHeight: cardHeight) : 0
@@ -4740,7 +4742,7 @@ struct AnswerCard<Content: View>: View {
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
-        FractionWidthLayout(fraction: visible ? Self.widthFraction : 1,
+        FractionWidthLayout(fraction: visible ? widthFraction : 1,
                             hugs: visible && hugs, idealAtLeast: idealAtLeast) {
             content
                 .padding(.horizontal, visible ? ChatBubbleChrome.horizontalPad : 0)
@@ -5008,6 +5010,19 @@ extension EnvironmentValues {
     var threadSearchHighlight: String? {
         get { self[ThreadSearchHighlightKey.self] }
         set { self[ThreadSearchHighlightKey.self] = newValue }
+    }
+}
+
+private struct CardWidthFractionKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 3.0 / 4.0
+}
+
+extension EnvironmentValues {
+    /// The share of the thread's width a bubble or answer card may take. The
+    /// side page's narrow column sets it higher.
+    var cardWidthFraction: CGFloat {
+        get { self[CardWidthFractionKey.self] }
+        set { self[CardWidthFractionKey.self] = newValue }
     }
 }
 
