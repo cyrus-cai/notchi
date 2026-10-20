@@ -9856,7 +9856,12 @@ final class NotchModel: ObservableObject {
     }
 
     /// The gap between two of the user's messages that starts a new sitting.
-    private static let sittingGap: TimeInterval = 6 * 60 * 60
+    /// On the real main thread (2026-10-20, 416 questions) every one of the 65
+    /// gaps of 30 minutes or more opened an unrelated topic. At 6 hours, a
+    /// question about animal names was answered in terms of a slang word asked
+    /// about three hours earlier, and kept being after the user said it was
+    /// unrelated.
+    private static let sittingGap: TimeInterval = 30 * 60
 
     /// Where the current sitting of a main thread begins, as an index into `turns`.
     ///

@@ -668,6 +668,7 @@ func notchSystemPromptDated(customInstructions: String? = nil,
     // each user message; this line says what to do with it. Same text every day,
     // so it stays above the date and inside the cached prefix.
     prompt += "\n\n" + sentTimeStance
+    prompt += "\n\n" + newestMessageStance
     if let provider { prompt += "\n\n" + modelIdentityStance(provider: provider) }
     prompt += "\n\n" + selectedTextStance
     // Last, for the prefix-cache reason in this function's doc comment.
@@ -708,6 +709,17 @@ time they were sent; the newest one is now. Earlier messages and your earlier \
 answers may be days old: "today", "tomorrow", "now" or "this holiday" in them \
 refer to when they were said, not to today. Work out dates from the date below \
 and the newest message's time, not from what earlier turns said.
+"""
+
+/// Questions typed on the idle prompt all land on one main thread, so the turns
+/// before the newest message are often other topics. Without this the model
+/// reads a new question as continuing the last one.
+let newestMessageStance = """
+Earlier turns in this conversation may be unrelated questions the user asked \
+before. Answer the newest message on its own. Use an earlier turn only when the \
+newest message continues it: it refers back ("that", "那…呢", "it"), or cannot \
+be understood without it. Do not bring up an earlier topic the newest message \
+does not mention.
 """
 
 /// Extra stance for Nono only — see `notchSystemPromptDated` and
@@ -1193,8 +1205,9 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
                 signupURL: "https://cursor.com/docs/cli/overview",
                 envVarName: "CURSOR_CLI_UNUSED")
         case .commandCode:
-            // Not an HTTP backend — `CommandCodeCLIService` shells out to the local
-            // `cmd` binary; `endpoint` is a never-used placeholder. The single
+            // `CommandCodeCLIService` calls the CLI's gateway itself
+            // (`CommandCodeCLIService.gatewayURL`); `endpoint` is a never-used
+            // placeholder. The single
             // "commandcode" model id is a sentinel meaning "the CLI's own default
             // model" (no `-m` flag); the real list is the catalog `cmd --list-models`
             // prints. The `signupURL` points at the install/sign-in docs — there's no
@@ -1496,8 +1509,9 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         // reasoning, file access), so Notch's tool harness must stay out of their
         // way — the turn dispatcher takes the plain `stream` path for them. Every
         // other provider exposes a function-calling API the harness can drive.
+        // Command Code's chat calls its gateway directly, so the harness drives it.
         switch self {
-        case .codex, .claudeCode, .grokCode, .cursorCode, .commandCode, .piCode, .dshCode:
+        case .codex, .claudeCode, .grokCode, .cursorCode, .piCode, .dshCode:
             return false
         default:
             return true

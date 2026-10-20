@@ -1,49 +1,28 @@
 import Foundation
 
-/// A model backend that shells out to the user's locally-installed **Command Code
-/// CLI** (`cmd -p --output-format json`) and streams its answer back — the
-/// commandcode.ai twin of `CodexCLIService` / `ClaudeCLIService` / `GrokCLIService`.
+/// A chat backend on the user's own **Command Code** account (commandcode.ai), plus
+/// the CLI-side plumbing the agent engine and the picker use.
 ///
-/// Like the other CLI backends, Command Code carries **no API key of ours**: it reuses the
-/// sign-in the user already did (`cmd login` → browser OAuth, key cached in
-/// `~/.commandcode/auth.json`), or the `COMMAND_CODE_API_KEY` env var if they set
-/// one. Usage bills against the user's own Command Code plan — the whole point of a
-/// "use the CLI I already pay for" backend.
+/// Notch holds no key of its own: a chat turn uses the key `cmd login` stored in
+/// `~/.commandcode/auth.json` (or `COMMAND_CODE_API_KEY`) and bills against the
+/// user's own plan. Sign-in stays in the user's terminal: `cmd login` is an
+/// interactive TUI, so the account row tells the user to run it there.
 ///
-/// What makes it different from its siblings: Command Code is an **aggregator**
-/// (one account fronts ~50 models across Anthropic / OpenAI / Google / xAI / Qwen /
-/// Kimi / GLM / DeepSeek / …), so its model list is the interesting surface, not a
-/// single vendor's lineup. That list comes from the CLI itself — `cmd --list-models`
-/// prints the catalog the installed build actually accepts — never a table bundled
-/// here that would rot the day they ship a model.
+/// Command Code is an **aggregator** (one account fronts ~50 models across
+/// Anthropic / OpenAI / Google / xAI / Qwen / Kimi / GLM / DeepSeek / …). The model
+/// list comes from the installed CLI (`cmd --list-models`), never a bundled table.
 ///
-/// **Compliance posture (mirrors the other CLI backends):** only the official binary
-/// is ever executed. Notch speaks no HTTP to commandcode.ai, never reads the key in
-/// `~/.commandcode/auth.json` (sign-in detection is a presence check on the file's
-/// `apiKey` marker, never its value), and offers **no in-app sign-in**: `cmd login`
-/// renders an interactive terminal UI (an ink app reading a real TTY), so unlike
-/// `grok login` it cannot be driven headlessly — the account row tells the user to
-/// run it in their own terminal, exactly like the Claude Code row.
+/// **Chat goes straight to the gateway.** A turn is one `POST /alpha/generate`, the
+/// endpoint `cmd` itself calls (the Go plan has no Provider API access), with the
+/// conversation as real messages, Notch's system prompt as `system`, and Notch's
+/// own tools driven by `AgentHarness`. The earlier shape, one `cmd -p` process per
+/// turn, cost a Node boot (~1.1s) and wrapped every question in the CLI's agent
+/// prompt (~14k input tokens for "say hi"); measured 2026-10-20 on
+/// `deepseek-v4.1-flash`, first text came at 7–30s through `cmd -p` against ~2s
+/// direct. Same approach as `@jiesou/dsh-commandcode-go-provider`.
 ///
-/// Shape of the integration (mirrors the twins):
-///  · one turn = one `cmd -p` process; the running conversation is folded into a
-///    single stdin prompt. There is no `--system-prompt` flag, so the persona rides
-///    at the head of that prompt (`CodexCLIService.composePrompt`, the Codex shape).
-///  · `--output-format json` prints NDJSON: `{"type":"event","event":{…}}` frames —
-///    including token-level `text_delta` deltas, so this stream yields as it types —
-///    and one terminal `{"type":"result",…}` line carrying `subtype` / `finalText`.
-///  · headless mode already denies file writes and shell commands by default; an
-///    explicit `--permission-mode standard` keeps that true whatever the user's
-///    `settings.json` says, so a chat turn keeps exactly the read-only tools
-///    (including `web_search` / `web_fetch`, which is how a time-sensitive question
-///    gets answered). `--no-skills` and an ephemeral `cwd` isolate the turn from the
-///    user's skills / AGENTS.md / project config; `--no-session` keeps quick chats
-///    out of their session history; `--trust` and `--skip-onboarding` stop it
-///    blocking on a prompt no one is there to answer.
-///
-/// Command Code runs its own agent loop (search, reasoning, tools) internally, so
-/// this conforms to `AIService` only — like the twins it deliberately does NOT adopt
-/// the tool harness, so Notch's tools stay out of its way.
+/// The agent engine (`AgentEngine.commandCode`) still runs the CLI: there the
+/// CLI's own agent loop, tools and sessions are the point.
 struct CommandCodeCLIService: AIService {
     /// The `--model` (`-m`) to pass. `nil` means "Command Code's own default model" —
     /// always valid whatever the account exposes.
@@ -168,6 +147,31 @@ struct CommandCodeCLIService: AIService {
             // has a real answer to redraw with.
             DispatchQueue.main.async {
                 NotificationCenter.default.post(name: .cliAvailabilityResolved, object: nil)
+            }
+        }
+    }
+
+    /// Manual re-detection (the arrow on the Settings account row). The resolution is
+    /// otherwise cached for the whole process, so a CLI installed or repaired after
+    /// launch stays invisible until a relaunch. This probes the candidates again off
+    /// the main thread and swaps the answer in only once it lands, so the row keeps
+    /// showing the old state during the multi-second `--list-models` spawn.
+    static func redetect(completion: @escaping () -> Void) {
+        guard !isRetired else { completion(); return }
+        primeFromDisk()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let found = locateBinary()
+            resolveLock.lock()
+            cachedBinary = .some(found)
+            seededFromDisk = false
+            resolveLock.unlock()
+            if found == nil {
+                modelLock.lock(); cachedModels = nil; modelLock.unlock()
+                forgetStored()
+            }
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .cliAvailabilityResolved, object: nil)
+                completion()
             }
         }
     }
@@ -667,195 +671,540 @@ struct CommandCodeCLIService: AIService {
         UserDefaults.standard.removeObject(forKey: storedEffortsFingerprintKey)
     }
 
-    // MARK: - Streaming
+    // MARK: - Streaming (direct gateway)
 
-    /// How long a single turn may run before we terminate it. Command Code is agentic
-    /// (it may search and read), so this is generous — the real stop signal is the
-    /// surrounding `Task` being cancelled when the panel closes.
-    private static let timeout: TimeInterval = 180
+    /// The gateway every Command Code plan answers on. The Go plan has no Provider
+    /// API access (`/provider/v1/*` answers 403 `upgrade_required`), so a chat turn
+    /// goes to the CLI's own `POST /alpha/generate`, as `cmd` itself does.
+    static let gatewayURL = URL(string: "https://api.commandcode.ai/alpha/generate")!
+
+    /// `x-command-code-version` when the installed CLI's `package.json` can't be
+    /// read. The gateway refuses a request without a version.
+    private static let fallbackCLIVersion = "1.84.0"
+
+    /// Output ceiling sent on every request. The gateway's request schema carries
+    /// `max_tokens`, and on a reasoning model it covers reasoning plus answer, so it
+    /// is set high enough that nothing reaches it (the CLI sends the same 64000).
+    private static let maxTokens = 64_000
+
+    /// How long the response may go without a byte. The gateway holds the
+    /// connection open while a reasoning model thinks before its first delta.
+    private static let idleTimeout: TimeInterval = 180
 
     func stream(system: String, messages: [ChatMessage]) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
-            guard let binary = Self.resolveBinary() else {
-                continuation.finish(throwing: CommandCodeError.notInstalled); return
-            }
-            guard Self.authExists() else {
-                continuation.finish(throwing: CommandCodeError.notSignedIn); return
-            }
-
-            // No --system-prompt flag exists, so the persona leads the folded prompt
-            // (the Codex shape, system included).
-            let prompt = CodexCLIService.composePrompt(system: system, messages: messages)
-            let workDir = URL(fileURLWithPath: NSTemporaryDirectory())
-                .appendingPathComponent("notch-commandcode-\(UUID().uuidString)", isDirectory: true)
-            try? FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
-
-            // Everything explicit — never inherited from the user's own settings:
-            // `standard` is headless's read-only permission set (file writes and
-            // shell denied, reads / grep / web search allowed), `--no-skills` and the
-            // empty cwd keep their skills and AGENTS.md out of the turn, `--no-session`
-            // keeps a quick chat out of their history, and `--trust` /
-            // `--skip-onboarding` stop it waiting on a prompt with no TTY to answer at.
-            var args = ["-p",
-                        "--output-format", "json",
-                        "--permission-mode", "standard",
-                        "--no-session", "--no-skills",
-                        "--skip-onboarding", "--trust",
-                        "--no-auto-update"]
-            if let model { args += ["-m", model] }
-
-            let process = ShellEnvironment.makeProcess(binary, args, cwd: workDir)
-
-            let outPipe = Pipe(), inPipe = Pipe(), errPipe = Pipe()
-            process.standardOutput = outPipe
-            process.standardInput = inPipe
-            process.standardError = errPipe
-
-            let state = CommandCodeStreamState()
-
-            outPipe.fileHandleForReading.readabilityHandler = { handle in
-                let data = handle.availableData
-                guard !data.isEmpty else { return }
-                for text in state.ingest(data) {
-                    continuation.yield(text)
+            let task = Task {
+                do {
+                    for try await event in gatewayTurn(system: system,
+                                                       wireMessages: Self.wireMessages(messages),
+                                                       tools: []) {
+                        if case .text(let t) = event { continuation.yield(t) }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
                 }
             }
-            errPipe.fileHandleForReading.readabilityHandler = { handle in
-                let data = handle.availableData
-                if !data.isEmpty { state.appendStderr(data) }
-            }
-
-            let watchdog = DispatchWorkItem { if process.isRunning { process.terminate() } }
-            DispatchQueue.global().asyncAfter(deadline: .now() + Self.timeout, execute: watchdog)
-
-            process.terminationHandler = { proc in
-                watchdog.cancel()
-                outPipe.fileHandleForReading.readabilityHandler = nil
-                errPipe.fileHandleForReading.readabilityHandler = nil
-                try? FileManager.default.removeItem(at: workDir)
-
-                let snapshot = state.finish()
-                if let msg = snapshot.failure {
-                    continuation.finish(
-                        throwing: CommandCodeError.classify(msg, exitCode: proc.terminationStatus))
-                } else if snapshot.yieldedAny {
-                    continuation.finish()
-                } else if let tail = snapshot.finalText, !tail.isEmpty {
-                    // A run whose answer never arrived as deltas (a short reply the
-                    // provider returned whole) still has its text on the result line.
-                    continuation.yield(tail)
-                    continuation.finish()
-                } else if proc.terminationStatus != 0 {
-                    continuation.finish(
-                        throwing: CommandCodeError.classify(snapshot.stderrTail,
-                                                            exitCode: proc.terminationStatus))
-                } else {
-                    continuation.finish(throwing: CommandCodeError.noOutput)
-                }
-            }
-
-            continuation.onTermination = { _ in
-                if process.isRunning { process.terminate() }
-            }
-
-            do {
-                try process.run()
-            } catch {
-                try? FileManager.default.removeItem(at: workDir)
-                continuation.finish(throwing: CommandCodeError.spawnFailed(error.localizedDescription))
-                return
-            }
-
-            // `-p` with no query argument reads the prompt from stdin (it times out
-            // after 30s of silence, so this write must not be deferred).
-            let writer = inPipe.fileHandleForWriting
-            writer.write(Data(prompt.utf8))
-            try? writer.close()
+            continuation.onTermination = { _ in task.cancel() }
         }
     }
-}
 
-// MARK: - Stream state (thread-safe)
-
-/// Line-buffers Command Code's NDJSON stdout. Answer text arrives as
-/// `{"type":"event","event":{"type":"text_delta","delta":…}}` (token-level, so this
-/// stream yields as it types); `thinking_delta` is reasoning we drop; the terminal
-/// `{"type":"result",…}` line carries the verdict (`subtype`), the whole answer
-/// (`finalText`) and, on failure, `error`. Lock-guarded — the readability and
-/// termination handlers run on different queues. Mirrors `GrokStreamState`.
-private final class CommandCodeStreamState {
-    private let lock = NSLock()
-    private var stdoutBuffer = Data()
-    private var stderrTail = ""
-    private var yieldedAny = false
-    private var failure: String?
-    private var finalText: String?
-
-    struct Snapshot {
-        let yieldedAny: Bool
-        let failure: String?
-        let finalText: String?
-        let stderrTail: String
+    func streamEvents(system: String, messages: [ChatMessage]) -> AsyncThrowingStream<ChatStreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    for try await event in gatewayTurn(system: system,
+                                                       wireMessages: Self.wireMessages(messages),
+                                                       tools: []) {
+                        switch event {
+                        case .text(let t): continuation.yield(.text(t))
+                        case .reasoningDelta(let t): continuation.yield(.reasoning(t))
+                        default: break
+                        }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
     }
 
-    /// Append `data` and return the answer-text deltas in newly-completed lines.
-    func ingest(_ data: Data) -> [String] {
-        lock.lock(); defer { lock.unlock() }
-        stdoutBuffer.append(data)
-        var out: [String] = []
-        while let nl = stdoutBuffer.firstIndex(of: 0x0A) {
-            let line = stdoutBuffer.subdata(in: stdoutBuffer.startIndex..<nl)
-            stdoutBuffer.removeSubrange(stdoutBuffer.startIndex...nl)
-            guard !line.isEmpty,
-                  let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
-                  let type = obj["type"] as? String
-            else { continue }
-            switch type {
-            case "event":
-                guard let event = obj["event"] as? [String: Any] else { continue }
-                // One `model_request_end` per model call, carrying that call's
-                // real usage — Stats' token figure is the sum of these and
-                // nothing else (see `TokenMeter`).
-                if event["type"] as? String == "model_request_end",
-                   let usage = event["usage"] as? [String: Any] {
-                    TokenMeter.shared.record(input: usage["inputTokens"] as? Int ?? 0,
-                                             output: usage["outputTokens"] as? Int ?? 0)
+    /// One `/alpha/generate` round trip, as harness events. Retries the connect /
+    /// first-event phase on a transient failure, only while nothing has reached
+    /// the caller (same rule as `AnthropicAIService.streamTurn`).
+    fileprivate func gatewayTurn(system: String,
+                                 wireMessages: [[String: Any]],
+                                 tools: [ToolSpec]) -> AsyncThrowingStream<TurnEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                guard let apiKey = Self.apiKey() else {
+                    continuation.finish(throwing: CommandCodeError.notSignedIn); return
                 }
-                guard event["type"] as? String == "text_delta",
-                      let delta = event["delta"] as? String, !delta.isEmpty
-                else { continue }
-                yieldedAny = true
-                out.append(delta)
-            case "result":
-                finalText = obj["finalText"] as? String
-                let subtype = obj["subtype"] as? String
-                if subtype == "error" {
-                    failure = (obj["error"] as? String)
-                        .flatMap { $0.isEmpty ? nil : $0 } ?? "unknown error"
+                guard let picked = Self.requestModel(model) else {
+                    continuation.finish(throwing: CommandCodeError.runFailed("no model")); return
                 }
-            default:
-                break   // forward-compatible: unknown top-level shapes are ignored
+                let modelID = await Self.wireModelID(picked, apiKey: apiKey)
+                let schemas = Dictionary(tools.map { ($0.name, $0.schema) },
+                                         uniquingKeysWith: { a, _ in a })
+                var emittedAny = false
+                var attempt = 0
+                while true {
+                    do {
+                        var req = URLRequest(url: Self.gatewayURL)
+                        req.httpMethod = "POST"
+                        req.timeoutInterval = Self.idleTimeout
+                        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                        req.setValue(Self.cliVersion, forHTTPHeaderField: "x-command-code-version")
+                        req.setValue("production", forHTTPHeaderField: "x-cli-environment")
+                        req.setValue("false", forHTTPHeaderField: "x-co-flag")
+                        req.httpBody = try JSONSerialization.data(
+                            withJSONObject: Self.requestBody(model: modelID, system: system,
+                                                             messages: wireMessages, tools: tools),
+                            options: [.sortedKeys])
+
+                        let (bytes, response) = try await ProxyConfig.urlSession.bytes(for: req)
+                        guard let http = response as? HTTPURLResponse else {
+                            throw OpenAICompatAIService.ServiceError.malformedResponse(provider: "Command Code")
+                        }
+                        guard (200..<300).contains(http.statusCode) else {
+                            let body = await OpenAICompatAIService.drainErrorBody(bytes.lines)
+                            throw Self.httpError(status: http.statusCode, body: body, response: http)
+                        }
+
+                        var reportedReasoning = false
+                        var finishReason: String?
+                        var terminated = false
+                        for try await line in bytes.lines {
+                            if Task.isCancelled { break }
+                            let trimmed = line.trimmingCharacters(in: .whitespaces)
+                            guard !trimmed.isEmpty, !trimmed.hasPrefix(":"),
+                                  let data = trimmed.data(using: .utf8),
+                                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                                  let type = obj["type"] as? String
+                            else { continue }
+                            switch type {
+                            case "text-delta":
+                                if let t = obj["text"] as? String, !t.isEmpty {
+                                    emittedAny = true
+                                    continuation.yield(.text(t))
+                                }
+                            case "reasoning-delta":
+                                if let t = obj["text"] as? String, !t.isEmpty {
+                                    if !reportedReasoning {
+                                        reportedReasoning = true
+                                        continuation.yield(.reasoningStarted)
+                                    }
+                                    continuation.yield(.reasoningDelta(t))
+                                }
+                            case "tool-call":
+                                // The gateway sends each call whole, arguments included.
+                                let name = obj["toolName"] as? String ?? ""
+                                guard !name.isEmpty else { break }
+                                let id = (obj["toolCallId"] as? String) ?? (obj["id"] as? String)
+                                    ?? "call_\(UUID().uuidString.prefix(8))"
+                                var input: [String: Any] = [:]
+                                if let dict = (obj["input"] ?? obj["args"]) as? [String: Any] {
+                                    input = dict
+                                } else if let raw = (obj["input"] ?? obj["arguments"]) as? String,
+                                          let d = raw.data(using: .utf8),
+                                          let dict = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
+                                    input = dict
+                                }
+                                if let schema = schemas[name] {
+                                    input = Self.dropNullArguments(input, schema: schema) as? [String: Any] ?? input
+                                }
+                                emittedAny = true
+                                continuation.yield(.toolCallStarted(name: name))
+                                continuation.yield(.toolCall(id: id, name: name, input: input))
+                            case "finish":
+                                if let usage = obj["totalUsage"] as? [String: Any] ?? obj["usage"] as? [String: Any] {
+                                    TokenMeter.shared.record(input: usage["inputTokens"] as? Int ?? 0,
+                                                             output: usage["outputTokens"] as? Int ?? 0)
+                                }
+                                finishReason = (obj["finishReason"] as? String)
+                                    ?? (obj["rawFinishReason"] as? String)
+                                terminated = true
+                            case "error":
+                                throw Self.streamError(obj)
+                            default:
+                                break
+                            }
+                            if terminated { break }
+                        }
+                        if Task.isCancelled { continuation.finish(); return }
+                        if !terminated {
+                            throw OpenAICompatAIService.ServiceError.cutOff(provider: "Command Code")
+                        }
+                        if !emittedAny {
+                            if attempt < StreamRetry.maxRetries {
+                                attempt += 1
+                                try await StreamRetry.waitBeforeRetry(attempt)
+                                continue
+                            }
+                            throw CommandCodeError.noOutput
+                        }
+                        continuation.yield(.finished(stopReason: Self.harnessStopReason(finishReason)))
+                        continuation.finish()
+                        return
+                    } catch is CancellationError {
+                        continuation.finish()
+                        return
+                    } catch {
+                        if !emittedAny, attempt < StreamRetry.maxRetries,
+                           StreamRetry.isRetryable(error) {
+                            attempt += 1
+                            do { try await StreamRetry.waitBeforeRetry(attempt, after: error) }
+                            catch { continuation.finish(); return }
+                            continue
+                        }
+                        continuation.finish(throwing: error)
+                        return
+                    }
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    // MARK: Request
+
+    /// The key `cmd login` stored, or `COMMAND_CODE_API_KEY`. Read per request so a
+    /// re-login takes effect on the next turn.
+    private static func apiKey() -> String? {
+        if let key = ProcessInfo.processInfo.environment["COMMAND_CODE_API_KEY"]?
+            .trimmingCharacters(in: .whitespaces), !key.isEmpty {
+            return key
+        }
+        guard let data = FileManager.default.contents(atPath: "\(commandCodeHome)/auth.json"),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let key = (json["apiKey"] as? String)?.trimmingCharacters(in: .whitespaces),
+              !key.isEmpty
+        else { return nil }
+        return key
+    }
+
+    /// The model id to send. The sentinel means the CLI's default: the catalog's
+    /// `(default)` row, else the model in `~/.commandcode/config.json`.
+    private static func requestModel(_ picked: String?) -> String? {
+        if let picked { return picked }
+        let catalog = defaultModel
+        if catalog != defaultSentinel { return catalog }
+        guard let data = FileManager.default.contents(atPath: "\(commandCodeHome)/config.json"),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let m = json["model"] as? String, !m.isEmpty
+        else { return nil }
+        return m
+    }
+
+    // MARK: Wire model ids
+
+    /// `cmd --list-models` prints ids lowercased (`moonshotai/kimi-k2.6`) while the
+    /// gateway matches them case-sensitively (`moonshotai/Kimi-K2.6`); a lowercased
+    /// id answers 403 "Model/provider not recognized". The gateway's own model list
+    /// has the exact spelling, so ids are looked up there, case-insensitively.
+    static let modelsURL = URL(string: "https://api.commandcode.ai/provider/v1/models")!
+    private static let wireIDsKey = "commandcode.wireModelIDs"
+    private static let wireIDLock = NSLock()
+    /// lowercased id → gateway id. Seeded from the last launch's list.
+    private static var wireIDs: [String: String] =
+        UserDefaults.standard.dictionary(forKey: wireIDsKey) as? [String: String] ?? [:]
+    private static var wireIDsFetched = false
+
+    /// The id the gateway accepts for `id`. Fetches the gateway's list on the first
+    /// turn of a process: awaited when nothing is stored yet, otherwise in the
+    /// background while the stored list answers. Unknown ids go out unchanged.
+    private static func wireModelID(_ id: String, apiKey: String) async -> String {
+        let (known, needsFetch) = wireIDLock.withLock {
+            defer { wireIDsFetched = true }
+            return (wireIDs, !wireIDsFetched)
+        }
+        if needsFetch {
+            if known.isEmpty {
+                await fetchWireIDs(apiKey: apiKey)
+            } else {
+                Task.detached(priority: .utility) { await fetchWireIDs(apiKey: apiKey) }
+            }
+        }
+        return wireIDLock.withLock { wireIDs[id.lowercased()] } ?? id
+    }
+
+    private static func fetchWireIDs(apiKey: String) async {
+        var req = URLRequest(url: modelsURL)
+        req.timeoutInterval = 10
+        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        req.setValue(cliVersion, forHTTPHeaderField: "x-command-code-version")
+        guard let (data, response) = try? await ProxyConfig.urlSession.data(for: req),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rows = json["data"] as? [[String: Any]]
+        else {
+            // Try again on the next turn.
+            wireIDLock.withLock { wireIDsFetched = false }
+            return
+        }
+        var map: [String: String] = [:]
+        for row in rows {
+            if let id = row["id"] as? String, !id.isEmpty { map[id.lowercased()] = id }
+        }
+        guard !map.isEmpty else { return }
+        wireIDLock.withLock { wireIDs = map }
+        UserDefaults.standard.set(map, forKey: wireIDsKey)
+    }
+
+    private static let versionLock = NSLock()
+    private static var cachedVersion: String?
+
+    /// The installed CLI's version, from the `package.json` next to its entry
+    /// script, so the gateway sees the same client version `cmd` itself sends.
+    private static var cliVersion: String {
+        versionLock.lock(); defer { versionLock.unlock() }
+        if let cachedVersion { return cachedVersion }
+        var version = fallbackCLIVersion
+        if let binary = resolvedBinaryIfReady() {
+            var dir = URL(fileURLWithPath: binary).resolvingSymlinksInPath().deletingLastPathComponent()
+            for _ in 0..<3 {
+                let pkg = dir.appendingPathComponent("package.json")
+                if let data = FileManager.default.contents(atPath: pkg.path),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   json["name"] as? String == "command-code",
+                   let v = json["version"] as? String, !v.isEmpty {
+                    version = v
+                    break
+                }
+                dir = dir.deletingLastPathComponent()
+            }
+        }
+        cachedVersion = version
+        return version
+    }
+
+    /// The `/alpha/generate` envelope, in the shape the CLI sends. The `config`
+    /// block describes an empty workspace: Notch has no project to report.
+    private static func requestBody(model: String, system: String,
+                                    messages: [[String: Any]], tools: [ToolSpec]) -> [String: Any] {
+        #if arch(arm64)
+        let environment = "darwin-arm64"
+        #else
+        let environment = "darwin-x64"
+        #endif
+        let day = ISO8601DateFormatter.string(from: Date(), timeZone: .current,
+                                              formatOptions: [.withFullDate])
+        let wireTools: [[String: Any]] = tools.map {
+            ["name": $0.name, "description": $0.description,
+             "input_schema": clientSchema($0.schema)]
+        }
+        return [
+            "config": [
+                "workingDir": NSTemporaryDirectory(),
+                "date": day,
+                "environment": environment,
+                "structure": [String](),
+                "isGitRepo": false,
+                "currentBranch": "",
+                "mainBranch": "",
+                "gitStatus": "",
+                "recentCommits": [String](),
+            ] as [String: Any],
+            "memory": "",
+            "taste": "",
+            "skills": NSNull(),
+            "permissionMode": "standard",
+            "params": [
+                "model": model,
+                "messages": messages,
+                "tools": wireTools,
+                "system": system,
+                "max_tokens": maxTokens,
+                "stream": true,
+            ] as [String: Any],
+        ]
+    }
+
+    /// Plain chat turns as gateway messages. A text-only turn is a flat string; a
+    /// turn with pasted images is a part list, images as data URIs.
+    fileprivate static func wireMessages(_ messages: [ChatMessage]) -> [[String: Any]] {
+        messages.map { m in
+            guard m.role == "user", !m.images.isEmpty else {
+                return ["role": m.role, "content": m.content]
+            }
+            var parts: [[String: Any]] = m.images.map {
+                ["type": "image",
+                 "image": "data:\($0.mediaType);base64,\($0.base64)",
+                 "mimeType": $0.mediaType]
+            }
+            if !m.content.isEmpty { parts.append(["type": "text", "text": m.content]) }
+            return ["role": "user", "content": parts]
+        }
+    }
+
+    /// Harness conversation as gateway messages. A tool call is an assistant
+    /// `tool-call` part; its result is a `tool` turn whose `tool-result` names the
+    /// same call id and tool.
+    fileprivate static func wireMessages(_ messages: [AgentMessage]) -> [[String: Any]] {
+        var out: [[String: Any]] = []
+        var toolNames: [String: String] = [:]
+        for m in messages {
+            switch m.kind {
+            case .text(let role, let text):
+                out.append(["role": role, "content": text])
+            case .assistantToolCalls(let text, let calls):
+                var parts: [[String: Any]] = []
+                if !text.isEmpty { parts.append(["type": "text", "text": text]) }
+                for c in calls {
+                    toolNames[c.id] = c.name
+                    parts.append(["type": "tool-call", "toolCallId": c.id,
+                                  "toolName": c.name, "input": c.input])
+                }
+                out.append(["role": "assistant", "content": parts])
+            case .toolResults(let results):
+                let parts: [[String: Any]] = results.map { r in
+                    let value = r.result.isEmpty ? (r.isError ? "Execution denied" : "(no output)") : r.result
+                    return ["type": "tool-result", "toolCallId": r.id,
+                            "toolName": toolNames[r.id] ?? r.name,
+                            "output": ["type": r.isError ? "error-text" : "text", "value": value]]
+                }
+                out.append(["role": "tool", "content": parts])
             }
         }
         return out
     }
 
-    func appendStderr(_ data: Data) {
-        guard let s = String(data: data, encoding: .utf8) else { return }
-        lock.lock(); defer { lock.unlock() }
-        stderrTail += s
-        if stderrTail.count > 2000 { stderrTail = String(stderrTail.suffix(2000)) }
+    // MARK: Tool schemas
+
+    /// The gateway forwards tools to OpenAI-style function calling with `strict`
+    /// left at its default (true), so the upstream treats every declared property
+    /// as required and invents values for optional ones. Optional properties are
+    /// therefore sent as nullable, and `dropNullArguments` removes the nulls from
+    /// the model's call. Ported from `@jiesou/dsh-commandcode-go-provider`.
+    private static let nullArgumentHint =
+        "Leave this out by passing null unless you need a value other than the default."
+
+    private static func allowsNull(_ schema: Any) -> Bool {
+        guard let s = schema as? [String: Any] else { return false }
+        if let t = s["type"] as? String, t == "null" { return true }
+        if let t = s["type"] as? [String], t.contains("null") { return true }
+        if s.keys.contains("const"), s["const"] is NSNull { return true }
+        if let e = s["enum"] as? [Any], e.contains(where: { $0 is NSNull }) { return true }
+        if let any = s["anyOf"] as? [Any] { return any.contains(where: allowsNull) }
+        return false
     }
 
-    func finish() -> Snapshot {
-        lock.lock(); defer { lock.unlock() }
-        let tail = stderrTail
-            .split(separator: "\n")
-            .map(String.init)
-            .last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })
-            ?? ""
-        return Snapshot(yieldedAny: yieldedAny, failure: failure,
-                        finalText: finalText, stderrTail: tail)
+    private static func optionalAsNull(_ property: [String: Any]) -> [String: Any] {
+        var described = property
+        if let d = property["description"] as? String, !d.isEmpty {
+            described["description"] = "\(d) \(nullArgumentHint)"
+        } else {
+            described["description"] = nullArgumentHint
+        }
+        return ["anyOf": [described,
+                          ["type": "null", "description": "Use null when you do not need this argument."]]]
+    }
+
+    static func clientSchema(_ parameters: Any) -> Any {
+        guard let params = parameters as? [String: Any] else { return parameters }
+        var schema = params
+        if let properties = params["properties"] as? [String: Any] {
+            let required = Set(params["required"] as? [String] ?? [])
+            var out: [String: Any] = [:]
+            for (name, property) in properties {
+                let declared = clientSchema(property)
+                if !required.contains(name), let dict = declared as? [String: Any], !allowsNull(dict) {
+                    out[name] = optionalAsNull(dict)
+                } else {
+                    out[name] = declared
+                }
+            }
+            schema["properties"] = out
+        }
+        if let items = params["items"] { schema["items"] = clientSchema(items) }
+        if let any = params["anyOf"] as? [Any] { schema["anyOf"] = any.map(clientSchema) }
+        return schema
+    }
+
+    static func dropNullArguments(_ value: Any, schema: Any?) -> Any {
+        let s = schema as? [String: Any]
+        if let array = value as? [Any] {
+            return array.map { dropNullArguments($0, schema: s?["items"]) }
+        }
+        guard let dict = value as? [String: Any] else { return value }
+        let properties = s?["properties"] as? [String: Any]
+        let required = Set(s?["required"] as? [String] ?? [])
+        var out: [String: Any] = [:]
+        for (name, entry) in dict {
+            if entry is NSNull, let declared = properties?[name],
+               !required.contains(name), !allowsNull(declared) {
+                continue
+            }
+            out[name] = dropNullArguments(entry, schema: properties?[name])
+        }
+        return out
+    }
+
+    // MARK: Response
+
+    /// The gateway's finish reasons in the spelling the harness checks.
+    private static func harnessStopReason(_ raw: String?) -> String? {
+        switch raw {
+        case "tool-calls": return "tool_calls"
+        case "max-output-tokens", "max_tokens": return "max_tokens"
+        default: return raw
+        }
+    }
+
+    /// The readable part of a gateway error body: `{"error":{"message","code"}}`,
+    /// or the body itself when it is not that shape (an edge HTML page is dropped).
+    private static func errorDetail(_ body: String) -> String {
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let data = trimmed.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return trimmed.hasPrefix("<") ? "" : String(trimmed.prefix(400)) }
+        let envelope = json["error"] as? [String: Any] ?? json
+        if let m = envelope["message"] as? String, !m.isEmpty { return m }
+        if let m = json["error"] as? String, !m.isEmpty { return m }
+        return String(trimmed.prefix(400))
+    }
+
+    /// A non-2xx answer. 429 and 5xx stay `ServiceError.http` so `StreamRetry`
+    /// retries them; the rest map to the Command Code cases the UI already explains.
+    private static func httpError(status: Int, body: String, response: HTTPURLResponse) -> Error {
+        let detail = errorDetail(body)
+        switch status {
+        case 401: return CommandCodeError.authExpired
+        case 402: return CommandCodeError.outOfCredits
+        case 429, 500..<600:
+            return OpenAICompatAIService.ServiceError.http(provider: "Command Code", status: status,
+                                                           body: body,
+                                                           retryAfter: StreamRetry.retryAfter(response))
+        default:
+            if CommandCodeError.isAuthFailure(detail) { return CommandCodeError.authExpired }
+            return CommandCodeError.runFailed(detail.isEmpty ? "HTTP \(status)" : detail)
+        }
+    }
+
+    /// An in-stream `{"type":"error","error":{message,statusCode,responseBody}}`,
+    /// sent when the upstream fails after the headers went out.
+    private static func streamError(_ event: [String: Any]) -> Error {
+        let error = event["error"] as? [String: Any] ?? event
+        let status = error["statusCode"] as? Int
+        var message = (error["message"] as? String) ?? ""
+        if message.isEmpty, let body = error["responseBody"] as? String { message = errorDetail(body) }
+        if status == 429 { return CommandCodeError.rateLimited }
+        if status == 402 { return CommandCodeError.outOfCredits }
+        if status == 401 || CommandCodeError.isAuthFailure(message) { return CommandCodeError.authExpired }
+        return CommandCodeError.runFailed(message.isEmpty ? "unknown error" : message)
+    }
+}
+
+extension CommandCodeCLIService: AgentCapableService {
+    /// `requiredTool` is ignored: the gateway envelope has no `tool_choice` field.
+    func streamTurn(system: String,
+                    messages: [AgentMessage],
+                    tools: [ToolSpec],
+                    requiredTool: String?) -> AsyncThrowingStream<TurnEvent, Error> {
+        gatewayTurn(system: system, wireMessages: Self.wireMessages(messages), tools: tools)
     }
 }
 

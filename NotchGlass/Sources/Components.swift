@@ -4433,6 +4433,19 @@ struct AssistantTurnView: View {
         }?.title ?? label
     }
 
+    /// `captures` split by kind, in the order each kind first appears.
+    private static func captureGroups(_ captures: [NotchModel.Turn.Capture]) -> [[NotchModel.Turn.Capture]] {
+        var groups: [[NotchModel.Turn.Capture]] = []
+        for capture in captures {
+            if let i = groups.firstIndex(where: { $0.first?.kind == capture.kind }) {
+                groups[i].append(capture)
+            } else {
+                groups.append([capture])
+            }
+        }
+        return groups
+    }
+
     /// Everything inside the answer card: the agent's work trail or the reading
     /// block and thinking fold, then the answer and its live activity row.
     @ViewBuilder
@@ -4444,12 +4457,19 @@ struct AssistantTurnView: View {
             }
             // What this answer filed, in the settled headline's face. Each
             // entry opens its note or reminder, like a Recent capture row's jump.
+            // Captures of one kind share a line: it opens the first, and its
+            // Undo takes back all of them, newest first, so two edits to one
+            // file restore what was there before the first.
             if !captures.isEmpty {
                 HStack(spacing: 12) {
-                    ForEach(Array(captures.enumerated()), id: \.offset) { _, capture in
-                        CaptureLineLink(capture: capture, font: waitFont,
-                                        action: onOpenCapture.map { open in { open(capture) } },
-                                        undo: onUndoCapture.map { undo in { undo(capture) } })
+                    ForEach(Self.captureGroups(captures), id: \.first?.kind) { group in
+                        if let first = group.first {
+                            CaptureLineLink(capture: first, font: waitFont,
+                                            action: onOpenCapture.map { open in { open(first) } },
+                                            undo: onUndoCapture.map { undo in {
+                                                group.reversed().forEach(undo)
+                                            } })
+                        }
                     }
                 }
                 .padding(.bottom, hasLeadText ? 1 : 0)

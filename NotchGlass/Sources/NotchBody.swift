@@ -1317,6 +1317,7 @@ struct NotchBody: View {
                     }
                     if let pending {
                         updateCue(face: pending, height: Tokens.Control.chip,
+                                  flat: model.unifiedThreadsEnabled,
                                   hovered: $updateCueIdleHovered)
                             .transition(.scale(scale: 0.7).combined(with: .opacity))
                     }
@@ -2741,7 +2742,9 @@ struct NotchBody: View {
 
     private var updateChipFace: UpdateChipFace? {
         switch updater.phase {
-        case .available(let v): return .ready(v)
+        // Shown only once the zip is downloaded, so the tap goes straight to
+        // the swap and relaunch.
+        case .available(let v): return updater.prefetchedVersion == v ? .ready(v) : nil
         case .updating:
             if case .downloading(let f) = updater.stage { return .downloading(f) }
             return .installing
@@ -5129,12 +5132,20 @@ struct NotchBody: View {
         let heights: TurnHeights
         @ViewBuilder let content: () -> Content
         @State private var near = true
+        /// The newest answer of the near test, written as it is computed.
+        @State private var latest = LatestNear()
+
+        final class LatestNear { var value = true }
+
+        /// How long a turn must stay far before it is swapped for its stand-in.
+        private static var farDelay: TimeInterval { 0.2 }
 
         /// How far past the viewport's top and bottom edges a turn still counts
         /// as near, in viewport heights.
         private var reach: CGFloat { 1.5 }
 
         var body: some View {
+            let latest = latest
             Group {
                 if near || keepsContent || heights[id] == nil {
                     content()
@@ -5146,9 +5157,22 @@ struct NotchBody: View {
             .onGeometryChange(for: Bool.self) { geo in
                 guard let viewport = geo.bounds(of: .scrollView) else { return true }
                 let margin = max(viewport.height, 300) * reach
-                return viewport.insetBy(dx: 0, dy: -margin)
+                let r = viewport.insetBy(dx: 0, dy: -margin)
                     .intersects(CGRect(origin: .zero, size: geo.size))
-            } action: { near = $0 }
+                latest.value = r
+                return r
+            } action: { isNear in
+                // Inserting a page of older turns moves every row by the page's
+                // height for one layout pass, before `OlderTurnsLoader` moves
+                // the scroll offset by the same amount. A turn on screen reads
+                // far, then near again, and SwiftUI can drop the action for the
+                // second change, which left the turn blank on screen. So a turn
+                // goes far only if the newest test still says far a moment later.
+                if isNear { near = true; return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.farDelay) {
+                    if !latest.value { near = false }
+                }
+            }
         }
     }
 
@@ -6233,7 +6257,7 @@ struct NotchBody: View {
     ///
     /// `height` matches whichever row hosts it — 30 on the bucket row, 34 on the
     /// manage bar — so the chip lines up with the chevron / ⋯ beside it.
-    private func updateCue(face: UpdateChipFace, height: CGFloat,
+    private func updateCue(face: UpdateChipFace, height: CGFloat, flat: Bool = false,
                            hovered: Binding<Bool>) -> some View {
         // Only the two resting faces are actions. A running update ignores taps
         // (there's nothing a second one would do) but keeps the hover-free glass
@@ -6266,21 +6290,23 @@ struct NotchBody: View {
             case .downloading, .installing: break
             }
         } label: {
-            HStack(spacing: 5) {
+            HStack(spacing: flat ? 4 : 5) {
                 // The same arrow throughout, failure included — the red is
                 // already the signal, and a second mark beside it only adds
                 // something to decode.
-                LucideIcon(mark: LucideIcons.circleFadingArrowUp, size: 12)
+                LucideIcon(mark: LucideIcons.circleFadingArrowUp, size: flat ? 11 : 12)
                 Text(updateCueLabel(face))
-                    .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                    .font(.sf(Tokens.TypeSize.meta, weight: flat ? .regular : .medium))
                     .lineLimit(1)
             }
             .foregroundStyle(failed ? Tokens.danger.opacity(0.92)
                                     : (hovered.wrappedValue ? Tokens.text1 : Tokens.text2))
-            .padding(.horizontal, 10)
-            .frame(height: height)
-            .glassCapsule(in: Capsule(), brighter: hovered.wrappedValue && !working,
-                          tint: failed ? Tokens.danger : nil)
+            .padding(.horizontal, flat ? 7 : 10)
+            .frame(height: flat ? Tokens.Control.inline : height)
+            // In the unified-threads row it draws like the ⋯ chip beside it,
+            // the same as `giftCue`.
+            .modifier(UpdateCueSurface(flat: flat, hovering: hovered.wrappedValue && !working,
+                                       failed: failed))
             // The progress wash rides on top of the glass and under nothing —
             // a brighter run of the same white the capsule is already lit with,
             // so a filling chip reads as the same object gaining light rather
@@ -6291,11 +6317,11 @@ struct NotchBody: View {
                         .fill(.white.opacity(0.13))
                         .frame(width: max(0, geo.size.width * fill))
                 }
-                .clipShape(Capsule())
+                .clipShape(flat ? AnyShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                : AnyShape(Capsule()))
                 .allowsHitTesting(false)
                 .opacity(working ? 1 : 0)
             }
-            .contentShape(Capsule())
         }
         .buttonStyle(GlassPressStyle())
         .allowsHitTesting(!working)
@@ -7806,6 +7832,25 @@ struct IdleTrailingCluster: View {
     }
 }
 
+/// The update chip's backing: the cluster chip's surface when flat, otherwise
+/// the glass capsule, red-tinted after a failure.
+private struct UpdateCueSurface: ViewModifier {
+    var flat: Bool
+    var hovering: Bool
+    var failed: Bool
+
+    func body(content: Content) -> some View {
+        if flat {
+            content.modifier(ClusterChipSurface(flat: true, hovering: hovering, shape: Capsule()))
+        } else {
+            content
+                .glassCapsule(in: Capsule(), brighter: hovering,
+                              tint: failed ? Tokens.danger : nil)
+                .contentShape(Capsule())
+        }
+    }
+}
+
 /// The cluster chip's backing: glass in `shape`, or — flat — the Chat chip's
 /// wash at its rest and hover opacities, in an 8pt rounded rect.
 private struct ClusterChipSurface<S: InsettableShape>: ViewModifier {
@@ -8144,9 +8189,16 @@ struct UserQuestionBubble: View {
 
     var body: some View {
         FractionWidthLayout(fraction: cardWidthFraction, hugs: true) {
+            // The reaction hangs `reactionOverhang` past the trailing edge.
+            // Counted in the bubble's width so a bubble that runs to the
+            // column's edge (the side page sets the fraction to 1) leaves room
+            // for it inside the scroll view's clip.
             bubble
+                .padding(.trailing, reaction == nil ? 0 : Self.reactionOverhang)
         }
     }
+
+    private static let reactionOverhang: CGFloat = 9
 
     private var bubble: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -8207,7 +8259,7 @@ struct UserQuestionBubble: View {
                             .fill(.ultraThinMaterial)
                             .overlay(Circle().strokeBorder(Tokens.hairline, lineWidth: 1))
                     )
-                    .offset(x: 9, y: -9)
+                    .offset(x: Self.reactionOverhang, y: -Self.reactionOverhang)
                     .transition(.scale(scale: 0.4).combined(with: .opacity))
             }
         }

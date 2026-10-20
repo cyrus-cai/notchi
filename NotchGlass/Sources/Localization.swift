@@ -532,6 +532,7 @@ enum Strings {
 
         "commandcode.status.connected": "Signed in to Command Code",
         "commandcode.status.signedOut": "Not signed in",
+        "commandcode.action.redetect": "Check again",
         "commandcode.status.get": "Get Command Code",
         "commandcode.status.hint.ready": "Notchi runs your local Command Code CLI — answers are billed to your Command Code plan.",
         "commandcode.status.hint.login": "Command Code is installed. Run `cmd login` in Terminal (or set COMMAND_CODE_API_KEY), then reopen Settings.",
@@ -1493,6 +1494,7 @@ enum Strings {
 
         "commandcode.status.connected": "已登录 Command Code",
         "commandcode.status.signedOut": "尚未登录",
+        "commandcode.action.redetect": "重新检测",
         "commandcode.status.get": "获取 Command Code",
         "commandcode.status.hint.ready": "Notchi 调用本机的 Command Code CLI，用量计入你的 Command Code 套餐。",
         "commandcode.status.hint.login": "已检测到 Command Code。请在终端运行 `cmd login` 登录，或设置 COMMAND_CODE_API_KEY，然后重新打开设置。",
@@ -2425,6 +2427,7 @@ enum Strings {
 
         "commandcode.status.connected": "已登入 Command Code",
         "commandcode.status.signedOut": "尚未登入",
+        "commandcode.action.redetect": "重新偵測",
         "commandcode.status.get": "取得 Command Code",
         "commandcode.status.hint.ready": "Notchi 呼叫本機的 Command Code CLI，用量計入你的 Command Code 方案。",
         "commandcode.status.hint.login": "已偵測到 Command Code。請在終端機執行 `cmd login` 登入，或設定 COMMAND_CODE_API_KEY，然後重新開啟設定。",
@@ -3333,6 +3336,7 @@ enum Strings {
 
         "commandcode.status.connected": "Command Code にサインイン済み",
         "commandcode.status.signedOut": "サインインしていません",
+        "commandcode.action.redetect": "再検出",
         "commandcode.status.get": "Command Code を入手",
         "commandcode.status.hint.ready": "Notchi はこの Mac の Command Code CLI を呼び出します。利用分は Command Code プランに計上されます。",
         "commandcode.status.hint.login": "Command Code はインストール済みです。ターミナルで `cmd login` を実行（または COMMAND_CODE_API_KEY を設定）してから、ここを開き直してください。",
@@ -4268,6 +4272,7 @@ enum Strings {
 
         "commandcode.status.connected": "Command Code에 로그인됨",
         "commandcode.status.signedOut": "로그인되지 않음",
+        "commandcode.action.redetect": "다시 확인",
         "commandcode.status.get": "Command Code 받기",
         "commandcode.status.hint.ready": "Notchi는 이 Mac의 Command Code CLI를 실행합니다. 사용량은 Command Code 요금제로 청구됩니다.",
         "commandcode.status.hint.login": "Command Code가 설치돼 있습니다. 터미널에서 `cmd login`을 실행하거나 COMMAND_CODE_API_KEY를 설정한 뒤 여기를 다시 열어 주세요.",

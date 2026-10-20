@@ -39,6 +39,10 @@ final class UpdaterService: ObservableObject {
 
     @Published private(set) var stage: Stage = .downloading(0)
 
+    /// The version whose zip is already downloaded. The update chip waits for
+    /// this, so tapping it only swaps the bundle and relaunches.
+    @Published private(set) var prefetchedVersion: String?
+
     /// A user-initiated "Check for updates" in flight, and its momentary result.
     /// Separate from `phase` so the manual button can show a spinner and a brief
     /// "up to date" confirmation without touching the silent auto-check contract
@@ -127,6 +131,7 @@ final class UpdaterService: ObservableObject {
                 : .upToDate
             // Settings runs this on every open; publish only a real change.
             if phase != next { phase = next }
+            prefetch()
         }
     }
 
@@ -157,6 +162,7 @@ final class UpdaterService: ObservableObject {
             if Self.isNewer(latest, than: Self.currentVersion) {
                 phase = .available(latest)
                 manualCheck = .idle       // the Update button now carries the signal
+                prefetch()
             } else {
                 phase = .upToDate
                 manualCheck = .upToDate    // the UI clears this back to .idle after a beat
@@ -185,6 +191,7 @@ final class UpdaterService: ObservableObject {
     func _debugPinAvailable(_ version: String) {
         demoPinned = true
         phase = .available(version)
+        prefetchedVersion = version
     }
     private var demoPinned = false
 
@@ -206,6 +213,7 @@ final class UpdaterService: ObservableObject {
         demoSim = version
         demoSimFails = failing
         phase = .available(version)
+        prefetchedVersion = version
         guard auto else { return }
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 4_000_000_000)
@@ -276,6 +284,8 @@ final class UpdaterService: ObservableObject {
                 // goes straight to the swap: the download is what the prompt
                 // waited out before it showed.
                 if let zip = takePrefetchedZip(for: version) {
+                    // The swap deletes the zip, whether or not it succeeds.
+                    prefetchedVersion = nil
                     stage = .installing
                     let dest = Bundle.main.bundleURL
                     try await Task.detached(priority: .userInitiated) {
@@ -348,8 +358,11 @@ final class UpdaterService: ObservableObject {
     /// failure leaves nothing behind and the next call tries again. Any zip of
     /// another version is removed first.
     func prefetch() {
-        guard !prefetching, case .available(let version) = phase,
-              !hasPrefetched(version) else { return }
+        guard !prefetching, case .available(let version) = phase else { return }
+        if hasPrefetched(version) {
+            if prefetchedVersion != version { prefetchedVersion = version }
+            return
+        }
         prefetching = true
         Task {
             defer { prefetching = false }
@@ -366,9 +379,11 @@ final class UpdaterService: ObservableObject {
                 return
             }
             try? fm.removeItem(at: Self.prefetchDir)
+            prefetchedVersion = nil
             do {
                 try fm.createDirectory(at: Self.prefetchDir, withIntermediateDirectories: true)
                 try fm.moveItem(at: zip, to: Self.prefetchURL(for: version))
+                prefetchedVersion = version
             } catch {
                 try? fm.removeItem(at: zip)
             }

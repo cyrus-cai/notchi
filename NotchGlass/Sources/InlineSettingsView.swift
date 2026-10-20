@@ -2913,6 +2913,29 @@ struct InlineSettingsView: View {
                                message: L(signedIn ? "commandcode.status.connected"
                                                    : "commandcode.status.signedOut"))
                 }
+                Spacer(minLength: 8)
+                // Detection is cached for the whole launch; this re-runs it. Same
+                // chip as the model row's refresh arrow.
+                Button {
+                    commandCodeRedetecting = true
+                    CommandCodeCLIService.redetect { commandCodeRedetecting = false }
+                } label: {
+                    ZStack {
+                        if commandCodeRedetecting {
+                            ProgressView()
+                                .controlSize(.small)
+                                .scaleEffect(0.8)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
+                                .foregroundStyle(Tokens.text3)
+                        }
+                    }
+                    .frame(width: Tokens.Control.chip, height: Tokens.Control.chip)
+                }
+                .buttonStyle(ShortcutChipStyle(rest: 0.055, restStroke: 0.1))
+                .disabled(commandCodeRedetecting)
+                .notchTooltip(L("commandcode.action.redetect"))
             }
 
             Text(installed
@@ -2923,7 +2946,15 @@ struct InlineSettingsView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.leading, 76)
         }
+        // The probe lands on a background queue; `cliTick` is the redraw.
+        .onReceive(NotificationCenter.default.publisher(for: .cliAvailabilityResolved)) { _ in
+            cliTick &+= 1
+        }
+        .id(cliTick)
     }
+
+    /// The Command Code row's re-detect arrow is running its probe.
+    @State private var commandCodeRedetecting = false
 
     // MARK: - pi sign-in status
 
