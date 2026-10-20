@@ -104,6 +104,17 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.16",
+            date: "2026-10-20",
+            heroAssetName: "WhatsNew0916Promo",
+            improvements: [
+                "Command Code starts answering in about 2 seconds and can use Notchi's tools.",
+            ],
+            fixes: [
+                "Fixed messages sometimes going blank when scrolling up in long conversations.",
+            ]
+        ),
+        Entry(
             version: "0.9.15",
             date: "2026-10-20",
             fixes: [
