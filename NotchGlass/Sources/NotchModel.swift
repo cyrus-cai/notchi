@@ -7183,8 +7183,11 @@ final class NotchModel: ObservableObject {
         senseClassifyTask = Task { [weak self] in
             // Jev's tapback for the copy, asked alongside the sense verdict: once
             // the copy passes, the emoji shows at once instead of waiting for
-            // the text model to write one.
-            async let tapback = NoNoAccount.shared.react(to: clip, previous: "")
+            // the text model to write one. A separate Task, not `async let`: an
+            // optimized build aborted here with "freed pointer was not the last
+            // allocation" (the task allocator's stack order).
+            let tapback = Task { await NoNoAccount.shared.react(to: clip, previous: "") }
+            defer { tapback.cancel() }
             let shouldOffer: Bool
             if let verdict = await NoNoAccount.shared.sense(clip) {
                 // A copy that reads as a question is left alone.
@@ -7202,7 +7205,7 @@ final class NotchModel: ObservableObject {
                 return
             }
             Self.copyTiming.notice("sense \(Date().timeIntervalSince(startedAt), format: .fixed(precision: 2))s")
-            let emoji = await tapback?.emoji
+            let emoji = await tapback.value?.emoji
             guard !Task.isCancelled, !self.open else { return }
             if let emoji {
                 Self.copyTiming.notice("emoji \(Date().timeIntervalSince(startedAt), format: .fixed(precision: 2))s (jev)")

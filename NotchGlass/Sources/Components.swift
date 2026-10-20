@@ -4203,6 +4203,7 @@ struct AssistantTurnView: View {
                             Image(systemName: "chevron.right")
                                 .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
                                 .frame(width: 9, height: 9)
+                                .centeredOnTextGlyphs(fontSize: waitFont)
                                 .rotationEffect(.degrees(expanded ? 90 : 0))
                                 .animation(.easeOut(duration: 0.2), value: expanded)
                                 .foregroundStyle(headerHovering ? Tokens.text2 : Tokens.text3)
