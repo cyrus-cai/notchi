@@ -262,7 +262,7 @@ struct ManageReminderTool: NotchTool {
         let reminder: EKReminder
         if let id = PersonalDataFormat.string(input["id"]) {
             guard let found = store.calendarItem(withIdentifier: id) as? EKReminder else {
-                return "Error: no reminder has id \(id). Call read_reminders for current ids."
+                return "Error: no reminder has id \(id). Call reminders action=list for current ids."
             }
             reminder = found
         } else if let query = PersonalDataFormat.string(input["query"])?.lowercased() {
@@ -405,7 +405,7 @@ struct ManageEventTool: NotchTool {
         let event: EKEvent
         if let id = PersonalDataFormat.string(input["id"]) {
             guard let found = store.event(withIdentifier: id) else {
-                return "Error: no event has id \(id). Call read_calendar for current ids."
+                return "Error: no event has id \(id). Call calendar action=list for current ids."
             }
             event = found
         } else if let query = PersonalDataFormat.string(input["query"])?.lowercased() {

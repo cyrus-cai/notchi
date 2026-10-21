@@ -129,7 +129,7 @@ struct ListFilesTool: NotchTool {
         fmt.dateFormat = "yyyy-MM-dd HH:mm"
         let bytes = ByteCountFormatter()
         var lines = [content.isEmpty ? "\(label), newest first (path · size · changed):"
-            : "Files in \(label) containing \(content), newest first (path · size · changed). Read one with read_file to confirm:"]
+            : "Files in \(label) containing \(content), newest first (path · size · changed). Read one with files action=read to confirm:"]
         for file in files.prefix(limit) {
             let path = (file.url.path as NSString).abbreviatingWithTildeInPath
             let hit = wordings.count > 1 ? matched[file.url].map { " · has \"\($0)\"" } ?? "" : ""
@@ -195,7 +195,7 @@ struct ReadFileTool: NotchTool {
             return "Error: only files in Downloads, Desktop or Documents can be read."
         }
         guard FileManager.default.fileExists(atPath: url.path) else {
-            return "Error: there is no file at \(raw). Call list_files to find it."
+            return "Error: there is no file at \(raw). Find it with files action=list."
         }
         let type = UTType(filenameExtension: url.pathExtension)
         let text: String?

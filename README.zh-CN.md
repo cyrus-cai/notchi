@@ -48,27 +48,21 @@ curl -fsSL https://raw.githubusercontent.com/cyrus-cai/notchi/master/install.sh 
 
 输入的内容默认交给提问。按 Tab 或以冒号开头则改为记录：带时间的一句话（比如“明天早上 9 点给妈妈打电话”）会加入 Apple 提醒事项，其他内容存进 Apple 备忘录（或 Markdown 文件夹）。
 
-| ![已添加到备忘录](.github/shots/verb-note-saved.jpg) | ![已添加到提醒事项](.github/shots/verb-remind-saved.jpg) |
-| --- | --- |
-
 ### 提一个问题
 
 答案以对话的形式出现在刘海里，可以接着问。它能联网搜索并给出来源，读取复制的截图，做精确计算。Notchi 记得你说过什么，也记得是哪天说的。
 
-<img src=".github/shots/verb-ask.jpg" width="860" alt="在刘海中提问：答案在输入框下方流式显示。" />
+<img src=".github/shots/onboarding.jpg" width="860" alt="在刘海里提问，联网搜索后给出回答。" />
 
-| ![带来源引用的网络搜索回答](.github/shots/power-search.jpg) | ![根据复制内容回答的问题](.github/shots/power-vision.jpg) |
-| --- | --- |
+你告诉 Notchi 值得记住的事，它会存进记忆，并在回复里注明。点撤销即可删除。
 
-<img src=".github/shots/power-math.jpg" width="860" alt="精确计算：小费三人平分。" />
+<img src=".github/shots/memory-updated.jpg" width="240" alt="已更新记忆，带撤销按钮。" />
 
 ### 派一个任务
 
 选一个项目文件夹，在后台运行 **Codex**、**Claude Code**、**Cursor**、**Grok** 或 **pi**。收起的刘海会显示进度和已用时间，运行结束后可以继续追加指令。
 
-<img src=".github/shots/agent-compose.jpg" width="860" alt="将任务交给 Agent：输入框下方显示项目文件夹和引擎。" />
-
-<img src=".github/shots/agent-answer.jpg" width="860" alt="运行完成：Agent 的调用记录列在答案上方，下方有追问输入框。" />
+<img src=".github/shots/agent-compose.jpg" width="860" alt="Code 模式：描述任务、选择文件夹和模型。" />
 
 ### 选中文字就能用
 
@@ -82,6 +76,14 @@ App 免费。按量付费，或者用你自己的。
 - **自己的密钥**：OpenRouter、Vercel AI Gateway、OpenAI、Anthropic、Google Gemini、DeepSeek、Qwen、Kimi、GLM、MiniMax、MiMo，或任意 OpenAI 兼容端点（Ollama、LM Studio、vLLM、自建网关）。
 - **已登录的 CLI**：Codex、Claude Code、Cursor、Grok 或 pi，用你自己的套餐。
 
+在刘海里就能切换模型。选择器会显示每个模型每百万 token 的价格和折扣。
+
+<img src=".github/shots/model-picker.jpg" width="860" alt="输入框下方的模型选择器，旁边是所选模型的价格卡片。" />
+
+设置 → 模型 显示余额，也可以填自己的密钥。
+
+<img src=".github/shots/settings-model.jpg" width="860" alt="设置 → 模型：Notchi 模型与余额，以及自己密钥的服务商和模型。" />
+
 模型价格和详情见[定价](https://notch.website/pricing)。
 
 ## 隐私
@@ -90,12 +92,20 @@ App 免费。按量付费，或者用你自己的。
 - **不保存提问内容。** 发给 Notchi 自有模型的请求会经过 Notchi 的网关，网关只记录模型、token 数和扣费，不记录你问了什么、模型答了什么。
 - **自己的密钥或 CLI 直连。** 这些请求从你的 Mac 直接发到对应服务商，由服务商计费。
 - 笔记、提醒、本地历史、剪贴板内容和本地文件都留在你的 Mac 上。
+- 记忆和使用统计存在你的 Mac 上。记忆可以在 设置 → 对话 中关闭。
+
+| ![设置 → 对话：记忆开关](.github/shots/settings-chat.jpg) | ![设置 → 统计：只在本机统计的使用数据](.github/shots/settings-stats.jpg) |
+| --- | --- |
 
 完整政策见 [notch.website/privacy](https://notch.website/privacy)。
 
 ## 设计
 
 Notchi 用 macOS Liquid Glass 绘制，包括 macOS 26 原生风格的边缘光感和物理动效。
+
+设置 → 外观 中可以选择刘海在点击、悬停还是按住时展开，以及显示在哪些屏幕上。
+
+<img src=".github/shots/settings-appearance.jpg" width="860" alt="设置 → 外观：悬停和按住灵敏度、实时活动、显示器。" />
 
 ## 常见问题
 
@@ -114,6 +124,12 @@ App 免费且开源。唯一需要付费的是 Notchi 自有模型，从 Notchi 
 **为什么 Notchi 要请求系统权限？**
 
 每项权限都在功能第一次需要时才请求：辅助功能（读取选中的文字）、备忘录自动化、提醒事项、通知，以及复制感知用到的剪贴板。Notchi 不请求屏幕录制、麦克风、摄像头和定位。设置 → 通用会显示每项授权状态。详见[权限说明](https://notch.website/permissions)。
+
+**怎么看更新了什么？**
+
+刘海里的“新功能”列出每个版本的改动。同样的内容也在[更新日志](https://notch.website/releases)。
+
+<img src=".github/shots/whats-new.jpg" width="860" alt="刘海里的新功能页面：当前版本的更新说明。" />
 
 **如何卸载 Notchi？**
 

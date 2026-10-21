@@ -269,7 +269,7 @@ final class UserMemory: ObservableObject {
             var block = "\n## \(relativeName(url))\n" + lines.joined(separator: "\n")
             if text.split(whereSeparator: \.isNewline).count > Self.headLines { block += "\n…" }
             if out.count + block.count > Self.promptCharLimit {
-                out += "\n(more files: call memory_list)"
+                out += "\n(more files: call memory action=list)"
                 break
             }
             out += block

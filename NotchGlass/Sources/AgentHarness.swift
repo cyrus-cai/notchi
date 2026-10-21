@@ -356,11 +356,43 @@ protocol SourcedTool: NotchTool {
 /// agent loop).
 struct ToolRegistry: Sendable {
     let tools: [NotchTool]
+    /// The tools held back from the wire until `load_tools` (or a call by
+    /// name) loads them. Nil when nothing is held.
+    private let loadout: ToolLoadout?
 
-    init(_ tools: [NotchTool]) { self.tools = tools }
+    /// `deferring` names the tools to hold back (`ToolCatalog.deferred`); any
+    /// of them present adds `load_tools` at the end of the list.
+    init(_ tools: [NotchTool], deferring: Set<String> = []) {
+        let held = tools.map(\.name).filter { deferring.contains($0) }
+        if held.isEmpty {
+            self.tools = tools
+            loadout = nil
+        } else {
+            let loadout = ToolLoadout(held: held)
+            self.tools = tools + [LoadToolsTool(loadout: loadout)]
+            self.loadout = loadout
+        }
+    }
 
     var isEmpty: Bool { tools.isEmpty }
-    var specs: [ToolSpec] { tools.map(\.spec) }
+
+    /// What goes on the wire this turn: every tool not held back, in order,
+    /// then the ones loaded so far, in load order. Within a run the list only
+    /// grows, so each turn's prefix repeats the previous turn's.
+    var specs: [ToolSpec] {
+        guard let loadout else { return tools.map(\.spec) }
+        let held = Set(loadout.held)
+        let open = tools.filter { !held.contains($0.name) }
+        let loaded = loadout.loaded.compactMap { name in tools.first { $0.name == name } }
+        return (open + loaded).map(\.spec)
+    }
+
+    /// The tool names on the wire before anything is loaded, which the system
+    /// prompt describes.
+    var advertisedNames: Set<String> {
+        let held = Set(loadout?.held ?? [])
+        return Set(tools.map(\.name).filter { !held.contains($0) })
+    }
 
     func tool(named name: String) -> NotchTool? {
         tools.first { $0.name == name }
@@ -377,6 +409,9 @@ struct ToolRegistry: Sendable {
             out.isError = true
             return out
         }
+        // A held-back tool called by name runs, and stays on the wire from
+        // the next turn, so the call has a tool to match.
+        if let loadout, loadout.isHeld(call.name) { loadout.load([call.name]) }
         do {
             if let sourced = tool as? SourcedTool {
                 let (text, sources) = try await sourced.runSourced(call.input)
@@ -1230,7 +1265,7 @@ struct AgentHarness {
     /// Falls back to a generic line for unmapped tools.
     private func activityLabel(for calls: [ToolInvocation], isRepeatRound: Bool) -> String {
         if let first = calls.first, calls.count == 1 {
-            switch first.name {
+            switch first.capability {
             case WebSearchTool.toolName:
                 // Name what it's actually looking up once the arguments have
                 // landed — the same move `read_page` makes with its host. At
@@ -1248,15 +1283,24 @@ struct AgentHarness {
             case "calculate": return L("agent.activity.calc")
             case "search_history": return L("agent.activity.history")
             case "create_note": return L("input.saving")
-            case ReadCalendarTool.toolName, ManageEventTool.toolName: return L("agent.activity.calendar")
-            case ReadRemindersTool.toolName, ManageReminderTool.toolName: return L("agent.activity.reminders")
-            case ReadNotesTool.toolName, EditNoteTool.toolName: return L("agent.activity.notes")
+            // A grouped call whose `action` has not streamed in yet is named by
+            // its group.
+            case ReadCalendarTool.toolName, ManageEventTool.toolName, ToolCatalog.calendar.name:
+                return L("agent.activity.calendar")
+            case ReadRemindersTool.toolName, ManageReminderTool.toolName, ToolCatalog.reminders.name:
+                return L("agent.activity.reminders")
+            case ReadNotesTool.toolName, EditNoteTool.toolName, ToolCatalog.notes.name:
+                return L("agent.activity.notes")
             case MemoryListTool.toolName, MemoryReadTool.toolName, MemoryWriteTool.toolName,
-                 MemoryDeleteTool.toolName:
+                 MemoryDeleteTool.toolName, ToolCatalog.memory.name:
                 return L("agent.activity.memory")
             case CurrentContextTool.toolName: return L("agent.activity.screen")
-            case ListFilesTool.toolName, RecentProjectsTool.toolName: return L("agent.activity.listFiles")
-            case ReadPhotosTool.toolName, ReadMailTool.toolName, DraftMailTool.toolName: return L("agent.activity.readFile")
+            case ListFilesTool.toolName, RecentProjectsTool.toolName, ToolCatalog.files.name:
+                return L("agent.activity.listFiles")
+            case ReadPhotosTool.toolName, ReadMailTool.toolName, DraftMailTool.toolName, ToolCatalog.mail.name:
+                return L("agent.activity.readFile")
+            case ToolCatalog.clipboard.name: return L("agent.activity.clipboard")
+            case LoadToolsTool.toolName: return L("agent.activity.working")
             case ClipboardHistoryTool.toolName: return L("agent.activity.clipboardHistory")
             case WeatherTool.toolName: return L("agent.activity.weather")
             case WiFiStatusTool.toolName: return L("agent.activity.wifi")

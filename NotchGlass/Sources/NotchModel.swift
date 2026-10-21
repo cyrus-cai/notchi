@@ -279,6 +279,10 @@ final class NotchModel: ObservableObject {
         /// above the answer, like "Searched the web", that opens the item in
         /// its app. Persisted.
         var captures: [Capture] = []
+        /// The first-run guide's example card this *assistant* turn draws in
+        /// place of text (`WelcomeExample`). Persisted, so the guide's thread
+        /// reads the same when reopened.
+        var example: WelcomeExample? = nil
         /// When the user sent this *user* turn. `wireContext` writes it on the
         /// message, so a model reading a thread that spans days can tell an old
         /// "明天" from today's. Nil on assistant turns and on turns saved before
@@ -305,7 +309,7 @@ final class NotchModel: ObservableObject {
             guard role == "assistant", !streaming, !isError else { return true }
             return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 || !sources.isEmpty || !sharedLinks.isEmpty
-                || !(agentLog ?? []).isEmpty || !captures.isEmpty
+                || !(agentLog ?? []).isEmpty || !captures.isEmpty || example != nil
         }
 
         init(id: UUID = UUID(), role: String, text: String,
@@ -322,7 +326,7 @@ final class NotchModel: ObservableObject {
         // its whole thread down with it. `decodeIfPresent` + defaults is what keeps old saved conversations
         // loadable. `role`/`text` are required — every saved turn has them.
         // `toolActivity` is deliberately absent: it's runtime-only UI state.
-        enum CodingKeys: String, CodingKey { case id, role, text, streaming, hidesUserBubble, usedClipboard, sources, isError, regenModel, answerModel, imageFiles, isAgent, agentLog, reasoning, loopRound, reaction, sharedLinks, isLocal, captures, sentAt, interrupted }
+        enum CodingKeys: String, CodingKey { case id, role, text, streaming, hidesUserBubble, usedClipboard, sources, isError, regenModel, answerModel, imageFiles, isAgent, agentLog, reasoning, loopRound, reaction, sharedLinks, isLocal, captures, sentAt, interrupted, example }
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -349,6 +353,7 @@ final class NotchModel: ObservableObject {
             captures     = (try? c.decodeIfPresent([Capture].self, forKey: .captures)) ?? []
             sentAt       = try c.decodeIfPresent(Date.self, forKey: .sentAt)
             interrupted  = try c.decodeIfPresent(Bool.self, forKey: .interrupted) ?? false
+            example      = try? c.decodeIfPresent(WelcomeExample.self, forKey: .example)
         }
     }
 
@@ -3660,7 +3665,7 @@ final class NotchModel: ObservableObject {
             result = await commitNoteCapture(line)
         case .memory, .reminderUpdate, .mailDraft, .copied:
             // Memory, reminder changes, drafts and copies have their own tools.
-            return "Error: use memory_write or manage_reminder."
+            return "Error: use the memory or reminders tool."
         case .event:
             switch Self.eventDraft(line, request: request) {
             case .failure(let error): return error.message
@@ -5647,9 +5652,16 @@ final class NotchModel: ObservableObject {
 
     private var bucketCounts: (chat: Int, agent: Int) {
         if let cached = historyBucketCounts { return cached }
+        // Chat counts what Recent lists: with unified threads on, the main
+        // thread is left out there, so a first run whose only row is the main
+        // thread has nothing to disclose.
+        let hideMain = unifiedThreadsEnabled
         var agent = 0
-        for item in history where item.source == .agent { agent += 1 }
-        let counts = (chat: history.count - agent, agent: agent)
+        var main = 0
+        for item in history {
+            if item.source == .agent { agent += 1 } else if hideMain && item.mainThread { main += 1 }
+        }
+        let counts = (chat: history.count - agent - main, agent: agent)
         historyBucketCounts = counts
         return counts
     }
@@ -5967,7 +5979,10 @@ final class NotchModel: ObservableObject {
     /// shows the end of its newest answer (`mainThreadPeek`).
     @Published var unifiedThreadsEnabled = true {
         // Recent hides the main thread only while unified threads is on.
-        didSet { chatFilteredHistoryCache = nil }
+        didSet {
+            chatFilteredHistoryCache = nil
+            historyBucketCounts = nil
+        }
     }
 
     // MARK: - Unified threads guide
@@ -6015,7 +6030,7 @@ final class NotchModel: ObservableObject {
     /// off. Shown once per install; `NOTCH_DEMO_UNIFIED_INTRO=1` shows it on
     /// every launch, and `=thread` also presses Start.
     func maybeStartUnifiedIntro() {
-        guard unifiedIntro == nil else { return }
+        guard unifiedIntro == nil, welcomeGuide == nil else { return }
         let demo = ProcessInfo.processInfo.environment["NOTCH_DEMO_UNIFIED_INTRO"]
         let forced = demo == "1" || demo == "thread"
         if !forced {
@@ -6253,6 +6268,283 @@ final class NotchModel: ObservableObject {
         NotificationCenter.default.post(name: .aiBackendChanged, object: nil)
     }
 
+    // MARK: - Welcome guide
+
+    /// The first-run guide, offered once the intro animation has landed. It
+    /// starts as an invitation in the peek's slot, drawn like the unified
+    /// threads guide's. Start opens a main thread the app writes itself, one
+    /// message at a time: how to open Notchi, what it can do with an example
+    /// card for each, the welcome gift, then the settings still off with Turn
+    /// on and Skip, and a last line as it steps back. Nil when not showing.
+    /// Ends after that line, on × before Start, or on the next question sent
+    /// to the main thread.
+    struct WelcomeGuide: Equatable {
+        /// The settings still off when the guide was offered, in order.
+        var offers: [WelcomeOffer]
+        /// The guide's thread, once Start was pressed.
+        var threadID: UUID?
+        /// The offer the choices hang under, once it has landed.
+        var answerID: UUID?
+        /// The answer the choices have been shown under, once their pause after
+        /// it has passed.
+        var choicesShownFor: UUID?
+        /// Messages are still landing; the follow-up field waits for them.
+        var landing = false
+
+        var offer: WelcomeOffer? { offers.first }
+    }
+
+    enum WelcomeOffer: CaseIterable {
+        case launchAtLogin
+
+        var question: String {
+            switch self {
+            case .launchAtLogin: return L("welcome.offer.login")
+            }
+        }
+
+        var done: String {
+            switch self {
+            case .launchAtLogin: return L("welcome.done.login")
+            }
+        }
+    }
+
+    /// What the guide shows Notchi doing, each as a question and the answer it
+    /// would get, drawn with the answer's own marks (`WelcomeExampleCard`).
+    enum WelcomeExample: String, Codable, CaseIterable {
+        case search, memory, commands
+
+        var intro: String { L("welcome.b.\(rawValue)") }
+        var question: String { L("welcome.ex.\(rawValue).q") }
+        var answer: String { L("welcome.ex.\(rawValue).a") }
+
+        /// The search answer ends on a page of its results, which the answer
+        /// draws as a link card.
+        var link: String? { self == .search ? L("welcome.ex.search.link") : nil }
+
+        var sources: [WebSource] {
+            guard self == .search else { return [] }
+            return [WebSource(title: "Wikipedia", url: link ?? "", date: nil),
+                    WebSource(title: "japan-guide.com", url: "https://www.japan-guide.com", date: nil),
+                    WebSource(title: "kyoto.travel", url: "https://kyoto.travel", date: nil)]
+        }
+
+        var captures: [Turn.Capture] {
+            self == .memory ? [Turn.Capture(kind: .memory, link: nil)] : []
+        }
+    }
+
+    @Published private(set) var welcomeGuide: WelcomeGuide?
+
+    /// Example cards whose link card is still held back while they land
+    /// (`WelcomeExampleCard`). Runtime only: a reopened guide shows them whole.
+    @Published private(set) var welcomeHeldLinks: Set<UUID> = []
+
+    /// How long a landing example holds its link card back.
+    private static let welcomeLinkDelay: TimeInterval = 1.5
+
+    private static let welcomeGuideShownKey = "welcomeGuideShown"
+
+    /// Offer the guide, once per install. Called when the intro hands back; with
+    /// the intro's debug switch on it is offered every time the intro plays.
+    /// With `NOTCH_OPEN=1`, `NOTCH_DEMO_WELCOME=1` offers it on every launch,
+    /// settings already on included: the login item is the system's, and
+    /// outlives a reset.
+    func offerWelcomeGuide() {
+        guard welcomeGuide == nil else { return }
+        let forced = OnboardingService.alwaysShow
+            || ProcessInfo.processInfo.environment["NOTCH_DEMO_WELCOME"] != nil
+        if !forced {
+            guard !UserDefaults.standard.bool(forKey: Self.welcomeGuideShownKey) else { return }
+            UserDefaults.standard.set(true, forKey: Self.welcomeGuideShownKey)
+        }
+        unifiedIntro = nil
+        featureNudge = nil
+        let offers = forced ? WelcomeOffer.allCases : WelcomeOffer.allCases.filter { !isOn($0) }
+        welcomeGuide = WelcomeGuide(offers: offers)
+    }
+
+    private func isOn(_ offer: WelcomeOffer) -> Bool {
+        switch offer {
+        case .launchAtLogin: return LaunchAtLogin.isEnabled
+        }
+    }
+
+    /// Whether the guide's thread is on screen with its messages still landing.
+    var welcomeGuideLocksInput: Bool {
+        guard let guide = welcomeGuide, guide.landing, let threadID = guide.threadID else { return false }
+        return threadHistoryID == threadID && mode == .result
+    }
+
+    /// The invitation's ×: close it without the guide.
+    func dismissWelcomeGuide() {
+        guard welcomeGuide?.threadID == nil else { return }
+        welcomeGuide = nil
+    }
+
+    /// The invitation's Start: open the guide's thread as the main thread and
+    /// let its messages land one at a time.
+    func startWelcomeGuide() {
+        guard var guide = welcomeGuide, guide.threadID == nil else { return }
+        var invite = Turn(role: "assistant", text: L("welcome.invite"))
+        invite.isLocal = true
+        var start = Turn(role: "user", text: L("unifiedIntro.start"))
+        start.isLocal = true
+
+        for i in history.indices where history[i].mainThread { history[i].mainThread = false }
+        let id = UUID()
+        var item = HistoryItem(id: id, q: start.text, a: invite.text, t: Date(),
+                               turns: [invite, start])
+        item.title = L("welcome.title")
+        item.mainThread = unifiedThreadsEnabled
+        history.insert(item, at: 0)
+        saveHistory()
+
+        turns = [invite, start]
+        threadHistoryID = id
+        mode = .result
+        guide.threadID = id
+        guide.landing = true
+        welcomeGuide = guide
+        reactToGuideLine(start.id, threadID: id, emoji: "👌")
+
+        // Each message with the wait before it: a topic's example follows its
+        // line closely; a new topic waits until the last one could be read,
+        // then a pause.
+        var messages: [(turn: Turn, delay: TimeInterval)] = []
+        func next(_ turn: Turn, sameTopic: Bool = false) {
+            guard let last = messages.last?.turn else {
+                messages.append((turn, 1.0))
+                return
+            }
+            let delay = sameTopic ? Self.welcomeTopicGap.within
+                : Self.welcomeReadingTime(last) + Self.welcomeTopicGap.between
+            messages.append((turn, delay))
+        }
+        next(Self.welcomeLine(L("welcome.b.open")))
+        for example in WelcomeExample.allCases {
+            next(Self.welcomeLine(example.intro))
+            var card = Turn(role: "assistant", text: "")
+            card.isLocal = true
+            card.example = example
+            next(card, sameTopic: true)
+        }
+        if let gift = NoNoAccount.shared.snapshot?.gift, gift.remainingUSD > 0 {
+            next(Self.welcomeLine(L("welcome.gift", InlineSettingsView.moneyCharged(gift.remainingUSD))))
+        }
+        next(Self.welcomeLine(guide.offer?.question ?? L("welcome.bye")))
+        landWelcomeMessages(messages[...], threadID: id)
+    }
+
+    /// The pause before an example that belongs to the line above it, and the
+    /// pause added after reading time before a new topic.
+    private static let welcomeTopicGap = (within: 0.5 as TimeInterval, between: 1.2 as TimeInterval)
+
+    /// How long a guide message takes to take in: a line by its length, an
+    /// example card a fixed look.
+    private static func welcomeReadingTime(_ turn: Turn) -> TimeInterval {
+        guard let example = turn.example else { return unifiedIntroReadingTime(turn.text) }
+        return example.link != nil ? 2.5 + welcomeLinkDelay : 2.5
+    }
+
+    private static func welcomeLine(_ text: String) -> Turn {
+        var turn = Turn(role: "assistant", text: text)
+        turn.isLocal = true
+        return turn
+    }
+
+    /// Append the guide's messages one at a time, each after its own wait.
+    /// After the last: the choices go under it when an offer is open,
+    /// otherwise the guide ends.
+    private func landWelcomeMessages(_ messages: ArraySlice<(turn: Turn, delay: TimeInterval)>,
+                                     threadID: UUID) {
+        guard let (next, delay) = messages.first else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, var guide = self.welcomeGuide, guide.threadID == threadID else { return }
+            if next.example?.link != nil {
+                self.welcomeHeldLinks.insert(next.id)
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.welcomeLinkDelay) { [weak self] in
+                    withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
+                        _ = self?.welcomeHeldLinks.remove(next.id)
+                    }
+                }
+            }
+            withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
+                self.appendWelcomeTurns([next], threadID: threadID)
+            }
+            let rest = messages.dropFirst()
+            guard rest.isEmpty else {
+                self.landWelcomeMessages(rest, threadID: threadID)
+                return
+            }
+            if guide.offer == nil {
+                self.welcomeGuide = nil
+            } else {
+                guide.landing = false
+                guide.answerID = next.id
+                self.welcomeGuide = guide
+            }
+        }
+    }
+
+    /// Add the guide's turns to the end of its thread, on screen when it is.
+    private func appendWelcomeTurns(_ added: [Turn], threadID: UUID) {
+        if let i = history.firstIndex(where: { $0.id == threadID }) {
+            let settled = added.map { turn -> Turn in
+                var turn = turn
+                turn.streaming = false
+                return turn
+            }
+            history[i].turns = (history[i].turns ?? []) + settled
+            if let last = settled.last(where: { $0.role == "assistant" && !$0.text.isEmpty }) {
+                history[i].a = last.text
+            }
+            saveHistory()
+        }
+        if threadHistoryID == threadID { turns += added }
+    }
+
+    /// Show the guide's choices under `answerID`.
+    func showWelcomeChoices(_ answerID: UUID) {
+        guard var guide = welcomeGuide, guide.answerID == answerID else { return }
+        guide.choicesShownFor = answerID
+        welcomeGuide = guide
+    }
+
+    /// Turn on or Skip for the current offer. The choice goes into the thread
+    /// as the user's line, and the app answers with what changed and the next
+    /// offer. After the last, it says it is stepping back and the guide ends.
+    func answerWelcomeOffer(turnOn: Bool) {
+        guard var guide = welcomeGuide, let threadID = guide.threadID,
+              let offer = guide.offer else { return }
+        var turnedOn = false
+        if turnOn {
+            switch offer {
+            case .launchAtLogin: turnedOn = (try? LaunchAtLogin.setEnabled(true)) != nil
+            }
+        }
+        guide.offers.removeFirst()
+        var bubbles: [String] = []
+        if turnOn { bubbles.append(turnedOn ? offer.done : L("welcome.failed.login")) }
+        bubbles.append(guide.offer?.question ?? L("welcome.bye"))
+
+        var line = Turn(role: "user", text: L(turnOn ? "welcome.turnOn" : "welcome.skip"))
+        line.isLocal = true
+        var reply = Turn(role: "assistant", text: bubbles.joined(separator: "\n\n"), streaming: true)
+        reply.isLocal = true
+        appendWelcomeTurns([line, reply], threadID: threadID)
+        settleUnifiedIntroTurn(reply.id)
+        if turnedOn { reactToGuideLine(line.id, threadID: threadID, emoji: "👌") }
+        if guide.offer == nil {
+            welcomeGuide = nil
+        } else {
+            guide.answerID = reply.id
+            guide.choicesShownFor = nil
+            welcomeGuide = guide
+        }
+    }
+
     // MARK: - Feature nudge
 
     /// An invitation to turn on a feature that is off, chosen by
@@ -6287,7 +6579,7 @@ final class NotchModel: ObservableObject {
     /// that file's first entry on every launch, and `NOTCH_DEMO_NUDGE_START=1`
     /// also presses confirm.
     func maybeStartFeatureNudge() {
-        guard featureNudge == nil, unifiedIntro == nil else { return }
+        guard featureNudge == nil, unifiedIntro == nil, welcomeGuide == nil else { return }
         let nudges = FeatureNudges.shared
         if !nudges.forced {
             guard open, mode == .idle, turns.isEmpty,
@@ -6344,7 +6636,9 @@ final class NotchModel: ObservableObject {
     }
 
     /// Either guide is writing its thread on screen.
-    var guideLocksInput: Bool { unifiedIntroLocksInput || featureNudgeLocksInput }
+    var guideLocksInput: Bool {
+        unifiedIntroLocksInput || featureNudgeLocksInput || welcomeGuideLocksInput
+    }
 
     /// The invitation's ×: close it, and never offer this feature again.
     func dismissFeatureNudge() {
@@ -6547,6 +6841,7 @@ final class NotchModel: ObservableObject {
     /// guide's invitation holds the pull until Start or × answers it.
     private var threadPullPageClear: Bool {
         open && mode == .idle && turns.isEmpty && unifiedIntro == nil && featureNudge == nil
+            && (welcomeGuide == nil || welcomeGuide?.threadID != nil)
             && !showSettings && !showWhatsNew && !showHistory
             && agentDetailTaskID == nil && !agentComposeActive
             && promptShortcutContext == nil && promptShortcutMode == nil
@@ -6582,9 +6877,11 @@ final class NotchModel: ObservableObject {
             && scroll.contentView.bounds.maxY >= document.frame.height - 2
     }
 
-    /// Scroll events reach the pull through one app-wide monitor, installed the
-    /// first time the panel body mounts. It consumes a gesture only once that
-    /// gesture has become a pull; everything else passes through.
+    /// Scroll events reach the pull through one app-wide monitor, installed at
+    /// launch. It consumes a gesture only once that gesture has become a pull;
+    /// everything else passes through. Installed from the peek's first
+    /// appearance, a first run had no swipe up to close until a main thread
+    /// had been peeked: its first thread opens straight from the prompt.
     func installThreadPullMonitor() {
         guard threadPullMonitor == nil else { return }
         threadPullMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
@@ -6703,8 +7000,13 @@ final class NotchModel: ObservableObject {
         }
     }
 
+    /// Judged from where the pointer is, not from `pointerInside`: when the
+    /// island resizes under a resting pointer (the split list folding back to
+    /// the idle prompt), AppKit sends an exit with no enter after it, and the
+    /// hover flag stays false until the pointer leaves and comes back.
     private func pullTargetsPanel(_ event: NSEvent) -> Bool {
-        event.window is NotchPanel && pointerInside
+        guard event.window is NotchPanel else { return false }
+        return pointerInsideIsland(on: activeDisplay, slop: 2) ?? pointerInside
     }
 
     /// One tracked step: the pull follows the fingers point for point. Reaching
@@ -7561,11 +7863,21 @@ final class NotchModel: ObservableObject {
         }
     }
 
+    /// A line of a keyed reply ("REPLY: …", "FILE: …"), trimmed, with a
+    /// full-width colon after the key read as ":". A model answering in
+    /// Chinese writes "REPLY：".
+    static func keyedLine<S: StringProtocol>(_ line: S) -> String {
+        let head = line.trimmingCharacters(in: .whitespaces)
+        guard let colon = head.firstIndex(of: "："), colon > head.startIndex,
+              head[..<colon].allSatisfy({ $0.isASCII && $0.isLetter }) else { return head }
+        return head.replacingCharacters(in: colon...colon, with: ":")
+    }
+
     /// The emoji on a reply's first line, once that line is complete.
     static func leadingEmoji(_ reply: String) -> String? {
         let text = reply.drop { $0.isWhitespace }
         guard let end = text.firstIndex(where: \.isNewline) else { return nil }
-        let line = text[..<end].trimmingCharacters(in: .whitespaces)
+        let line = keyedLine(text[..<end])
         guard line.uppercased().hasPrefix("EMOJI:") else { return nil }
         return line.dropFirst(6).trimmingCharacters(in: .whitespaces).first.map(String.init)
     }
@@ -7592,7 +7904,7 @@ final class NotchModel: ObservableObject {
             body = []
         }
         for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            let head = line.trimmingCharacters(in: .whitespaces)
+            let head = keyedLine(line)
             let upper = head.uppercased()
             func value(_ key: String) -> Substring { Substring(head.dropFirst(key.count)).drop { $0 == " " } }
             if upper.hasPrefix("REMINDER:") {
@@ -7690,7 +8002,7 @@ final class NotchModel: ObservableObject {
             body = []
         }
         for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            let head = line.trimmingCharacters(in: .whitespaces)
+            let head = keyedLine(line)
             if head.uppercased().hasPrefix("FILE:") {
                 flush()
                 file = head.dropFirst(5).trimmingCharacters(in: .whitespaces)
@@ -9986,6 +10298,7 @@ final class NotchModel: ObservableObject {
         // closes the reactions guide's invitation, left unanswered.
         if unifiedIntro != nil, joinsMainThread { unifiedIntro = nil }
         if featureNudge != nil, featureNudge?.threadID == nil, joinsMainThread { featureNudge = nil }
+        if welcomeGuide != nil, joinsMainThread { welcomeGuide = nil }
         // Clear any prior error state — this attempt replaces it (XII-85).
         askError = nil
         // One-shot regenerate-with-model override (XII-135): build a service pinned
@@ -10425,10 +10738,8 @@ final class NotchModel: ObservableObject {
                 //    round's question card;
                 //  · `manage_loop` — starts loops through `ChatLoopManager`, after
                 //    a Confirm on this round's question card.
-                // Blend1 then drops the extras whose words are not in this
-                // question — a 26B thinking model spends the first seconds of
-                // every turn walking the tool list, and most Ask rounds never
-                // need settings / notes / history / ask_user. See `AskToolIntent`.
+                // `ToolCatalog` then folds them into grouped tools and holds the
+                // rarely needed ones behind `load_tools`.
                 var agentTools = ToolRegistry.standard(for: runProvider).tools
                 agentTools.append(ManageAppSettingsTool { [weak self] request in
                     guard let self else { throw CancellationError() }
@@ -10539,25 +10850,17 @@ final class NotchModel: ObservableObject {
                     guard let self else { return .empty }
                     return await MainActor.run { self.searchArchive(query, offWire: offWire) }
                 })
-                // Blend1 only, and deliberately not the whole nono provider.
-                // The filter keeps a 26B thinking model from walking a long tool
-                // list, and it pays for that with a tool set that changes with the
-                // words in the question. On a Workers AI entry that is the wrong
-                // trade: its prompt cache matches on a prefix, the tool schemas
-                // are rendered into that prefix, and a set that changes per turn
-                // re-prefills the whole prompt every time. A named entry gets the
-                // same tools on every turn, so the prefix repeats and the input is
-                // billed at the cached rate.
-                if runProvider == .nono, ModelRatings.isNonoID(runModel) {
-                    agentTools = AskToolIntent.filter(agentTools, for: q)
-                }
-                let registry = ToolRegistry(agentTools)
-                // Prompt stances match the tools on the wire this turn, so a
-                // slim Blend1 round does not describe tools it cannot call.
+                // Every provider starts a run with the same list, so a prompt
+                // cache that matches on a prefix keeps matching from one
+                // question to the next.
+                let registry = ToolRegistry(ToolCatalog.assemble(agentTools),
+                                            deferring: ToolCatalog.deferredNames)
+                // Prompt stances match the tools a run starts with; a loaded
+                // tool's stance comes back in the `load_tools` result.
                 // Image / non-tool backends advertise none.
                 let advertised: Set<String> =
                     (!imageAttached && runProvider.supportsTools && !registry.isEmpty)
-                    ? Set(registry.tools.map(\.name)) : []
+                    ? registry.advertisedNames : []
                 let memories = !UserMemory.shared.enabled || UserMemory.shared.entries.isEmpty
                     ? nil : UserMemory.shared.promptList
                 let system = notchSystemPromptDated(customInstructions: customInstructions,
@@ -10587,7 +10890,7 @@ final class NotchModel: ObservableObject {
                               acc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                               !completed.isEmpty,
                               completed.allSatisfy({
-                                  $0.name == "create_note" && !$0.isError
+                                  $0.capability == "create_note" && !$0.isError
                                       && $0.result.hasPrefix("Saved.")
                               })
                         else { return false }

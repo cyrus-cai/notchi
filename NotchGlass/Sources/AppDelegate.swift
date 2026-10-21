@@ -387,11 +387,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // Read the nudge policy now, so the first open can decide from it.
                 await FeatureNudges.shared.refreshIfDue()
                 model.maybeStartFeatureNudge()
-                if NoNoAccount.shared.hasToken { break }
+                if NoNoAccount.shared.hasToken {
+                    await ModelCatalogStore.shared.loadNono()
+                    break
+                }
             }
         }
 
         rebuildPanels()
+        model.installThreadPullMonitor()
 
         // The one and only first run: the screen goes black, the mark becomes a
         // real 3D object, spins once and flies into the notch — and the panel
@@ -419,6 +423,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }) {
                     OnboardingService.shared.markIntroDone()
                     withAnimation(.spring(response: 0.46, dampingFraction: 0.78)) {
+                        self.model.offerWelcomeGuide()
                         self.model.mode = .idle
                         self.model.openPanel(on: screen.displayID)
                     }
@@ -541,6 +546,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let env = ProcessInfo.processInfo.environment
         if env["NOTCH_OPEN"] == "1" {
             model.openPanel(on: preferredScreen()?.displayID)
+            if env["NOTCH_DEMO_WELCOME"] != nil { model.offerWelcomeGuide() }
             if env["NOTCH_DEMO"] == "1" {
                 // NOTCH_DEMO_TEXT lets us seed arbitrary markdown for inspecting
                 // the answer renderer; falls back to the original one-liner.

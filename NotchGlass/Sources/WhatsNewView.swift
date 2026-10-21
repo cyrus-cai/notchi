@@ -305,11 +305,10 @@ struct WhatsNewView: View {
                             .resizable()
                             .aspectRatio(contentMode: .fit)
                             .frame(maxWidth: .infinity)
+                            // No hairline: promos since 0.8.3 bake in their own
+                            // larger rounded corners, and a stroke at the window
+                            // radius shows outside them.
                             .clipShape(RoundedRectangle.window)
-                            .overlay(
-                                RoundedRectangle.window
-                                    .strokeBorder(Tokens.hairline, lineWidth: 1)
-                            )
                             .accessibilityHidden(true)
                     }
 

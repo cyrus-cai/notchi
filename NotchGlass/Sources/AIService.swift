@@ -399,8 +399,15 @@ Before calling one option cheaper, faster or bigger, check that against the \
 figures you quote. When a vendor's own page and a third-party roundup \
 disagree, use the vendor's figure.
 """),
-    (["read_clipboard"], """
-- What the user copied ("this", "what I copied") → read_clipboard.
+    (["clipboard"], """
+- What the user copied ("this", "what I copied") → clipboard action=read; \
+something copied earlier, not on the clipboard now → action=history; "copy …", \
+"put … on my clipboard", "复制到剪贴板" → action=copy with exactly the text to \
+paste.
+"""),
+    (["load_tools"], """
+- A request that needs a tool listed under load_tools → load_tools first, then \
+use it. Never say you cannot do something on that list.
 """),
     (["calculate"], """
 - Exact arithmetic → calculate.
@@ -428,7 +435,7 @@ open that section rather than listing alternatives in text.
 ports, disk or battery state, installed tools, opening or quitting an app, a \
 git repository → run_shell. The same goes for what the user keeps in their Mac \
 apps — contacts, mail, the playing song, and calendar, reminders or notes when \
-read_calendar / read_reminders / read_notes are not available: read it with \
+the calendar / reminders / notes tools are not available: read it with \
 osascript and answer from the result. Never reply that you cannot see their \
 calendar or files while this tool is available; run the command first, and give it a longer \
 timeout_seconds when an app is slow to answer. When a command is likely to take \
@@ -451,44 +458,44 @@ usually someone else's.
 conversation is already in front of you; only reach for it to see beyond this \
 thread.
 """),
-    (["create_note"], """
+    (["notes"], """
 - A message that is something to keep rather than a question or a request — a \
 todo, an idea, a fact to remember, a snippet, "note this", "记一下" → \
-create_note with the user's words. If it could be a question, answer it \
+notes action=create with the user's words. If it could be a question, answer it \
 instead. After a note is saved, reply with one short line and nothing else.
 """),
-    (["create_reminder"], """
-- A named moment in time to be reminded of → create_reminder with an absolute \
-local `due`. Never say it was saved until the tool result says so. After it is \
+    (["reminders"], """
+- A named moment in time to be reminded of → reminders action=create with an \
+absolute local `due`. Never say it was saved until the tool result says so. After it is \
 saved, reply with one short line and nothing else. Several items to remind → \
-one create_reminder call per item, all of them, before you reply; then list \
+one action=create call per item, all of them, before you reply; then list \
 only the items whose result says Saved, and say plainly which ones failed. \
 Never say you added, saved or changed anything you did not call a tool for. \
 A time on another place's clock ("8am Tokyo time", "日本时间上午 10 点") → \
 write that wall-clock time as `due` and pass time_zone; never convert it \
-yourself. The same for manage_reminder reschedule.
+yourself. The same for action=reschedule.
 """),
-    (["create_event"], """
+    (["calendar"], """
 - A meeting, appointment or anything else that takes up time at a set moment → \
-create_event with an absolute local `start`. When the time is given in another \
+calendar action=create with an absolute local `start`. When the time is given in another \
 place's or person's zone ("9h cdmx", "21h en Barcelona", "9am PT", "东京时间 10 \
 点"), write that wall-clock time and pass time_zone; never convert it yourself. \
 "Weekly, three times", "every weekday" → repeat (with repeat_count or \
 repeat_until), one event, not several. Never say it was added until the tool \
 result says so. After it is added, reply with one short line and nothing else.
 """),
-    (["read_calendar", "read_reminders", "read_notes"], """
-- The user's own schedule, to-dos and notes → read_calendar, read_reminders, \
-read_notes, then answer from what they return. Never say you cannot see their \
+    (["calendar", "reminders", "notes"], """
+- The user's own schedule, to-dos and notes → calendar, reminders, notes with \
+action=list, then answer from what they return. Never say you cannot see their \
 calendar, reminders or notes while these are available. "When am I free" is \
 the gaps between events, inside sensible waking hours. "What should I care about \
 today / 今天有什么要我关心的" → read both today's events and the open reminders \
 due today or overdue, then list them in time order; say so plainly when both \
 are empty.
 """),
-    (["manage_event"], """
-- Moving, renaming or cancelling an existing calendar event → manage_event \
-(read_calendar first when you need its id). Never create a second event \
+    (["calendar"], """
+- Moving, renaming or cancelling an existing calendar event → calendar \
+action=move, update or delete (action=list first when you need its id). Never create a second event \
 instead of moving one.
 """),
     (["schedule_action"], """
@@ -496,9 +503,9 @@ instead of moving one.
 → do the first part with run_shell and schedule the second with \
 schedule_action. Say it runs only while the app stays open.
 """),
-    (["read_mail", "draft_mail"], """
-- The user's email → read_mail (unread, search, read). A reply or new message \
-they want written → draft_mail; it only saves a draft, never sends — say so.
+    (["mail"], """
+- The user's email → mail (unread, search, read). A reply or new message \
+they want written → mail action=draft; it only saves a draft, never sends — say so.
 """),
     (["account_usage"], """
 - What the user spent or has left on Notchi → account_usage, then answer with \
@@ -521,10 +528,6 @@ where the user is. Not web_search, not run_shell.
     (["wifi_status"], """
 - Which Wi-Fi network, signal strength → wifi_status.
 """),
-    (["copy_to_clipboard"], """
-- "Copy …", "put … on my clipboard", "复制到剪贴板" → copy_to_clipboard with \
-exactly the text to paste.
-"""),
     (["recent_songs"], """
 - What the user listened to lately → recent_songs (the Music app only).
 """),
@@ -533,47 +536,54 @@ exactly the text to paste.
 → read_photos with the date range they mean, then answer from its text.
 - The user's own ID numbers — passport, 身份证, driver's licence: they want \
 them found and kept. Use a remembered one if there is one. Otherwise search \
-their files (list_files folder=all with content such as 护照, PASSPORT or \
+their files (files action=list folder=all with content such as 护照, PASSPORT or \
 P<CHN) and their photos (read_photos query=PASSPORT scope=all), read the \
 number off the document, say which file or photo it came from, and remember \
 it so the next ask is instant. Do not lecture about it being sensitive.
 """),
-    (["edit_note"], """
-- Tagging, rewriting or deleting a note the user saved → edit_note (never \
+    (["notes"], """
+- Tagging, rewriting or deleting a note the user saved → notes action=add_tag, \
+replace or delete (never \
 run_shell or AppleScript for notes). Deleting asks the user itself.
 """),
-    (["manage_reminder"], """
-- Changing an existing reminder — done, moved, renamed, cancelled → manage_reminder \
-(read_reminders first when you need its id). Cancelling a reminder is \
-action=delete; the tool asks the user itself.
+    (["reminders"], """
+- Changing an existing reminder — done, moved, renamed, cancelled → reminders \
+action=complete, reschedule, move, rename or delete (action=list first when you \
+need its id). Cancelling a reminder is action=delete; the tool asks the user itself.
 """),
-    (["clipboard_history"], """
-- Something they copied earlier, not what is on the clipboard now → \
-clipboard_history.
-"""),
-    (["list_files", "read_file"], """
-- A file in their Downloads, Desktop or Documents → list_files to find it, then \
-read_file, and answer from its text.
+    (["files"], """
+- A file in their Downloads, Desktop or Documents → files action=list to find \
+it, then action=read, and answer from its text.
 """),
     (["current_context"], """
 - "This page / article / email", "这篇 / 这封 / 这个页面" with nothing pasted, \
 selected or attached → current_context first, then answer from what it returns.
 """),
-    (["memory_write", "memory_delete"], """
+    (["memory"], """
 - Something worth keeping for later conversations (about the user, their work, \
-people, preferences, "remember …") → memory_write it into your memory folder, \
-then answer as usual. What they say now contradicts a memory file → rewrite \
-that file. "Forget …" → rewrite or memory_delete the file that holds it.
+people, preferences, "remember …") → memory action=write it into your memory \
+folder, then answer as usual. What they say now contradicts a memory file → \
+rewrite that file. "Forget …" → rewrite it, or memory action=delete the file \
+that holds it.
 """),
     (["manage_loop"], """
 - Work to do again on a schedule or to watch over time — "every hour check X", \
 "tell me when Y changes", "每天早上总结…" → manage_loop action=start with a \
 self-contained prompt and an interval; "weekdays" / "工作日" → weekdays_only, \
 an end ("until Dec 18", "到月底") → ends_on. An alert at a set time with no work in \
-it is create_reminder. Never say a loop started until the result says so, and then reply with one short line. To stop, \
+it is a reminder. Never say a loop started until the result says so, and then reply with one short line. To stop, \
 delete or re-time one, action=list first. A stopped loop can still be deleted.
 """),
 ]
+
+/// The stances for `tools` alone, for `load_tools` to hand over with the tools
+/// it loads: the system prompt carries only those of the tools a run starts with.
+func notchToolStances(for tools: Set<String>) -> String {
+    notchSystemPromptToolStances
+        .filter { !$0.tools.isDisjoint(with: tools) }
+        .map(\.copy)
+        .joined(separator: "\n")
+}
 
 /// The persona plus the stances for tools actually advertised this turn.
 /// `advertisedTools == nil` includes every stance (eval / `complete`).
@@ -648,7 +658,7 @@ func notchSystemPromptDated(customInstructions: String? = nil,
     // rarely, so they stay above the date line, inside the cached prefix.
     if let memories, !memories.isEmpty {
         prompt += "\n\nYour memory folder: files you wrote in earlier conversations, "
-            + "each with its opening lines. Read one in full with memory_read when it "
+            + "each with its opening lines. Read one in full with memory action=read when it "
             + "helps; use it where it helps and do not recite it.\n\(memories)"
     }
     // Nono's model treats "default to answering directly" as license to skip

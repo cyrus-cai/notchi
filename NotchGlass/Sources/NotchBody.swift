@@ -30,6 +30,8 @@ struct NotchBody: View {
     /// relaxes the first.
     /// The round a loop record's round column has picked; nil follows the newest.
     @State private var loopRoundSelection: Int? = nil
+    /// The compact Recent list's measured content height (`historyList`).
+    @State private var compactContentHeight: CGFloat? = nil
     /// When a control on the thread last opened or switched the side page, so
     /// the click on the thread that closes the page leaves that click alone.
     @State private var sidePageToggledAt: Date = .distantPast
@@ -571,7 +573,10 @@ struct NotchBody: View {
                 // result page — see `mainThreadReveal`.
                 // The unified threads guide's invitation holds the peek's slot
                 // until Start, or until a question goes to the main thread.
-                if showsUnifiedIntroInvite {
+                if showsWelcomeInvite {
+                    WelcomeGuideInvite(model: model)
+                        .transition(moduleTransition)
+                } else if showsUnifiedIntroInvite {
                     UnifiedIntroInvite(model: model)
                         .transition(moduleTransition)
                 } else if let nudge = featureNudgeInvite {
@@ -622,7 +627,7 @@ struct NotchBody: View {
                 // `ThreadRevealBottom`); at rest the box adds nothing.
                 VStack(alignment: .leading, spacing: 0) {
                     // The invitation takes the prompt's place until Start or ×.
-                    if !showsUnifiedIntroInvite && featureNudgeInvite == nil {
+                    if !showsWelcomeInvite && !showsUnifiedIntroInvite && featureNudgeInvite == nil {
                         idleInputRow
                     }
 
@@ -727,14 +732,20 @@ struct NotchBody: View {
     /// The unified threads guide's invitation, in the peek's slot and in place
     /// of the prompt.
     private var showsUnifiedIntroInvite: Bool {
-        guard showsMainThreadPeek, let intro = model.unifiedIntro else { return false }
+        guard showsMainThreadPeek, !showsWelcomeInvite, let intro = model.unifiedIntro else { return false }
         return intro.threadID == nil
+    }
+
+    /// The first-run guide's invitation, in the same slot, ahead of the others.
+    private var showsWelcomeInvite: Bool {
+        guard showsMainThreadPeek, let guide = model.welcomeGuide else { return false }
+        return guide.threadID == nil
     }
 
     /// A feature nudge's invitation, in the same slot, after the unified
     /// threads guide's.
     private var featureNudgeInvite: NotchModel.FeatureNudge? {
-        guard showsMainThreadPeek, !showsUnifiedIntroInvite,
+        guard showsMainThreadPeek, !showsWelcomeInvite, !showsUnifiedIntroInvite,
               let nudge = model.featureNudge, nudge.threadID == nil else { return nil }
         return nudge
     }
@@ -1002,18 +1013,13 @@ struct NotchBody: View {
             && recentBucketsNeedImmersiveLayout
     }
 
-    /// Chat Recent is the left page and Agent Recent is the right page. Keep both
-    /// pages on the same compact/immersive rail for the lifetime of an open Recent
-    /// view, otherwise a bucket switch with (say) 20 Chat rows and 3 Agent rows also
-    /// swaps the entire vertical layout and makes the pages appear to fly up/down.
+    /// Whether the open bucket has more than 6 rows. Only the bucket on screen
+    /// counts: a Chat page with one row stays compact and as tall as that row,
+    /// even when Agent has 20.
     private var recentBucketsNeedImmersiveLayout: Bool {
-        let chatOverflows = model.history.lazy
-            .filter { $0.source != .agent }
-            .prefix(7).count > 6
-        let agentOverflows = model.history.lazy
-            .filter { $0.source == .agent }
-            .prefix(7).count + agentManager.tasks.prefix(7).count > 6
-        return chatOverflows || agentOverflows
+        let rows = model.recentScopeHistoryCount
+            + (model.agentComposeActive ? agentManager.tasks.count : 0)
+        return rows > 6
     }
 
     /// Whether the active bucket has anything to disclose. Agent tasks belong only
@@ -4038,6 +4044,10 @@ struct NotchBody: View {
             // (always present — the immersive layout only mounts for an overflowing
             // list). Compact: the edgeFade reserve, only when actually overflowing.
             .padding(.bottom, immersive ? immersiveBottomReach : (overflowing ? edgeFade : 0))
+            // The rows' real height, which the compact frame shrinks to.
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                if !immersive { compactContentHeight = height }
+            }
             // A real AppKit scroll-offset observer catches trackpad and mouse-wheel
             // scrolling on macOS 14. As soon as the Recent content moves under the
             // popup, fold the popup out of the way.
@@ -4070,9 +4080,15 @@ struct NotchBody: View {
             Color.clear.frame(height: immersive ? immersiveTopReach : 0)
         }
         // Immersive: a tall surface that fills the whole panel; the manage bar floats
-        // over its bottom-left. Compact: ~6 rows before the list scrolls, so a short
-        // Recent list doesn't reserve a tall empty band. Older rows are a scroll away.
-        .frame(maxHeight: immersive ? Self.immersiveListHeight : compactListHeight)
+        // over its bottom-left. Compact: as tall as its rows, up to ~6 before the
+        // list scrolls. A ScrollView fills whatever height it is offered, so the
+        // cap alone left a short list a band of empty space under its rows. Until
+        // the rows are measured, the estimate above stands in. The max-height frame
+        // is immersive only: a frame with a max takes the height it is offered, so
+        // in compact it grew back to 220 and centred the short list inside it.
+        .frame(height: immersive ? nil
+               : min(compactContentHeight ?? contentHeight, compactListHeight))
+        .frame(maxHeight: immersive ? Self.immersiveListHeight : nil)
         .scrollIndicators(.never)
         // BOTH edges taper in either layout — the top dissolves rows sliding up under
         // the header (immersive: the floating input), the bottom dissolves rows sliding
@@ -4714,6 +4730,11 @@ struct NotchBody: View {
                 UnifiedIntroEnd(model: model, answerID: answerID,
                                 offersSeparate: model.unifiedThreadsEnabled,
                                 previousName: intro.previous?.name)
+            }
+            // The first-run guide's choices, under its newest answer.
+            if let guide = model.welcomeGuide, let answerID = guide.answerID,
+               guide.threadID == model.threadHistoryID {
+                WelcomeGuideChoices(model: model, answerID: answerID)
             }
         }
     }
@@ -5610,7 +5631,10 @@ struct NotchBody: View {
         let index = thread == nil ? model.conversation.index(of: turn.id)
             : thread?.lastIndex(where: { $0.id == turn.id })
         let thread = thread ?? model.turns
-        if turn.role == "user" {
+        if let example = turn.example {
+            WelcomeExampleCard(example: example,
+                               showsLink: !model.welcomeHeldLinks.contains(turn.id))
+        } else if turn.role == "user" {
             VStack(alignment: .leading, spacing: 5) {
                 // Permanent clipboard trace: when this question's message was enriched
                 // with what the user copied, a quiet line says so — sitting right above
@@ -9611,6 +9635,118 @@ private struct UnifiedIntroInvite: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.bottom, 12)
+    }
+}
+
+/// The first-run guide's invitation (`NotchModel.welcomeGuide`), drawn like
+/// `UnifiedIntroInvite`: a message from Notchi, Start, and × to dismiss it.
+private struct WelcomeGuideInvite: View {
+    @ObservedObject var model: NotchModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            AssistantTurnView(text: L("welcome.invite"), showsFooterMetadata: false)
+            HStack(spacing: 6) {
+                GlassTextButton(title: L("unifiedIntro.start"),
+                                tint: NotchModel.Panel.chat.intentTint) {
+                    withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                        model.startWelcomeGuide()
+                    }
+                }
+                GlassIconButton(systemName: "xmark", help: L("unifiedIntro.dismiss"),
+                                size: Tokens.Control.header,
+                                glyphSize: Tokens.TypeSize.caption,
+                                showsTooltip: false) {
+                    withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) {
+                        model.dismissWelcomeGuide()
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.bottom, 12)
+    }
+}
+
+/// One of the first-run guide's examples (`NotchModel.WelcomeExample`): a
+/// question and the answer it would get, drawn with the thread's own bubble
+/// and answer views so the answer carries its real marks ("Searched the web",
+/// "Updated memory"). No frame of its own: a quiet "Example" above it, in the
+/// "Based on what you copied" style, is what sets it apart. Inert: it is a
+/// picture of an answer, not one the user had.
+private struct WelcomeExampleCard: View {
+    let example: NotchModel.WelcomeExample
+    /// The search example's link card lands a beat after its answer.
+    var showsLink = true
+
+    private var answer: String {
+        guard showsLink, let link = example.link else { return example.answer }
+        return example.answer + "\n\n" + link
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(L("welcome.example"))
+                .font(.sf(Tokens.TypeSize.meta))
+                .tracking(0.2)
+                .foregroundStyle(Tokens.text4)
+                .padding(.leading, 12)   // matches the bubble's horizontal inset
+            UserQuestionBubble(text: example.question)
+            AssistantTurnView(text: answer,
+                              sources: example.sources,
+                              showsFooterMetadata: false,
+                              captures: example.captures)
+                .padding(.top, 9)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .allowsHitTesting(false)
+    }
+}
+
+/// The first-run guide's choices under an offer, once it has landed and the
+/// pause after it has passed: Turn on and Skip. Drawn like `UnifiedIntroEnd`.
+private struct WelcomeGuideChoices: View {
+    @ObservedObject var model: NotchModel
+    let answerID: UUID
+    @ObservedObject private var pacer = BubblePacer.shared
+
+    var body: some View {
+        if !pacer.typing(answerID),
+           !(model.turns.first(where: { $0.id == answerID })?.streaming ?? true) {
+            if model.welcomeGuide?.choicesShownFor == answerID {
+                choices
+            } else {
+                Color.clear
+                    .frame(height: 0)
+                    .task(id: answerID) {
+                        try? await Task.sleep(for: .seconds(NotchModel.unifiedIntroEndPause))
+                        guard !Task.isCancelled else { return }
+                        withAnimation(.easeOut(duration: 0.3)) {
+                            model.showWelcomeChoices(answerID)
+                        }
+                    }
+            }
+        }
+    }
+
+    private var choices: some View {
+        HStack(spacing: 8) {
+            GlassTextButton(title: L("welcome.turnOn"),
+                            fontSize: Tokens.TypeSize.form,
+                            tint: NotchModel.Panel.chat.intentTint) {
+                act { model.answerWelcomeOffer(turnOn: true) }
+            }
+            GlassTextButton(title: L("welcome.skip"),
+                            fontSize: Tokens.TypeSize.form) {
+                act { model.answerWelcomeOffer(turnOn: false) }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .transition(.opacity)
+    }
+
+    private func act(_ change: @escaping () -> Void) {
+        withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) { change() }
     }
 }
 

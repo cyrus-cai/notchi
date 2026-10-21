@@ -2098,6 +2098,16 @@ final class ModelCatalogStore: ObservableObject {
     }
     private var nonoRefreshInFlight = false
 
+    /// Notchi's lineup through `ModelCatalog`'s hourly cache, asked at launch
+    /// once the account has a token. A new install has no lineup on disk, and
+    /// without this every surface shows only the bundled Auto row until a model
+    /// menu is opened.
+    func loadNono() async {
+        guard let key = APIKeyStore.current(for: .nono),
+              let result = await ModelCatalog.fetch(for: .nono, apiKey: key) else { return }
+        adopt(result, for: .nono)
+    }
+
     /// Forget everything cached for `p`, session cache and catalog cache alike, so
     /// the next picker open refetches. Used when a provider's *endpoint* changes
     /// under it — only the custom one can (see `CustomProvider`).
