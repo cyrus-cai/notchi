@@ -104,6 +104,19 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.17",
+            date: "2026-10-21",
+            features: [
+                "New users get a short guided tour on first launch.",
+            ],
+            fixes: [
+                "Fixed new installs listing only Auto until the model menu was opened.",
+                "Fixed swipe up to close not working on the first run.",
+                "Fixed empty space under a short Recent list.",
+                "Fixed Copy Sense sometimes offering no actions for Chinese text.",
+            ]
+        ),
+        Entry(
             version: "0.9.16",
             date: "2026-10-20",
             heroAssetName: "WhatsNew0916Promo",
