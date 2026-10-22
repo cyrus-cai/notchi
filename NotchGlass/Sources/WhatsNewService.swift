@@ -104,6 +104,22 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.18",
+            date: "2026-10-22",
+            features: [
+                "GLM-5.3-Flash stays 90% off until October 31.",
+            ],
+            improvements: [
+                "A new button in the conversation header opens the side page on its Thread tab.",
+                "Auto is now a regular choice at the top of the model menu.",
+            ],
+            fixes: [
+                "Fixed tips and tours replacing text you had started typing.",
+                "Fixed pulling down to open the conversation not working after a tour was left unfinished.",
+                "Fixed results from copied text showing under Notchi's tour messages.",
+            ]
+        ),
+        Entry(
             version: "0.9.17",
             date: "2026-10-21",
             features: [
