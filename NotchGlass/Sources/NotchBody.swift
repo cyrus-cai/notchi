@@ -579,6 +579,9 @@ struct NotchBody: View {
                 } else if showsUnifiedIntroInvite {
                     UnifiedIntroInvite(model: model)
                         .transition(moduleTransition)
+                } else if showsAutoRetireInvite {
+                    AutoRetireInvite(model: model)
+                        .transition(moduleTransition)
                 } else if let nudge = featureNudgeInvite {
                     FeatureNudgeInvite(model: model, nudge: nudge)
                         .transition(moduleTransition)
@@ -627,7 +630,8 @@ struct NotchBody: View {
                 // `ThreadRevealBottom`); at rest the box adds nothing.
                 VStack(alignment: .leading, spacing: 0) {
                     // The invitation takes the prompt's place until Start or ×.
-                    if !showsWelcomeInvite && !showsUnifiedIntroInvite && featureNudgeInvite == nil {
+                    if !showsWelcomeInvite && !showsUnifiedIntroInvite && !showsAutoRetireInvite
+                        && featureNudgeInvite == nil {
                         idleInputRow
                     }
 
@@ -742,10 +746,18 @@ struct NotchBody: View {
         return guide.threadID == nil
     }
 
+    /// The Auto retirement guide's invitation, in the same slot.
+    private var showsAutoRetireInvite: Bool {
+        guard showsMainThreadPeek, !showsWelcomeInvite, !showsUnifiedIntroInvite,
+              let guide = model.autoRetire else { return false }
+        return guide.threadID == nil
+    }
+
     /// A feature nudge's invitation, in the same slot, after the unified
     /// threads guide's.
     private var featureNudgeInvite: NotchModel.FeatureNudge? {
         guard showsMainThreadPeek, !showsWelcomeInvite, !showsUnifiedIntroInvite,
+              !showsAutoRetireInvite,
               let nudge = model.featureNudge, nudge.threadID == nil else { return nil }
         return nudge
     }
@@ -4731,6 +4743,11 @@ struct NotchBody: View {
                                 offersSeparate: model.unifiedThreadsEnabled,
                                 previousName: intro.previous?.name)
             }
+            // The Auto retirement guide's choices, under its answer.
+            if let guide = model.autoRetire, let answerID = guide.answerID,
+               guide.threadID == model.threadHistoryID {
+                AutoRetireEnd(model: model, answerID: answerID)
+            }
             // The first-run guide's choices, under its newest answer.
             if let guide = model.welcomeGuide, let answerID = guide.answerID,
                guide.threadID == model.threadHistoryID {
@@ -7952,19 +7969,25 @@ struct ResultTrailingCluster: View {
             })
             if detach != nil || toggleRoutines != nil {
                 var more = GlassSegmentCluster.Segment(id: "more",
-                                  engaged: moreOpen || (detach == nil && routinesOpen),
-                                  tooltip: detach == nil ? L("routines.title") : L("recent.manage"),
+                                  engaged: moreOpen || (detach == nil && copiesOpen),
+                                  tooltip: detach == nil ? L("copyThread.tab") : L("recent.manage"),
                                   action: {
-                                      if detach == nil { toggleRoutines?() } else { moreOpen.toggle() }
+                                      if detach == nil { toggleCopies?() } else { moreOpen.toggle() }
                                   }) {
-                    Image(systemName: "ellipsis")
-                        .font(.sf(15, weight: .bold))
+                    if detach == nil {
+                        // The pin's stroke weight, so the two marks match.
+                        Image(systemName: "sidebar.right")
+                            .font(.sf(13, weight: .light))
+                    } else {
+                        Image(systemName: "ellipsis")
+                            .font(.sf(15, weight: .bold))
+                    }
                 }
                 more.showsTooltip = false
                 segs.append(more)
             }
             return segs
-        }(), showsTooltips: !moreOpen && !(detach == nil && routinesOpen))
+        }(), showsTooltips: !moreOpen && !(detach == nil && copiesOpen))
         .modifier(MenuCardWindow(
             open: moreOpen,
             lowerTrailing: true,
@@ -9750,6 +9773,161 @@ private struct WelcomeGuideChoices: View {
     }
 }
 
+/// The Auto retirement guide's invitation (`NotchModel.autoRetire`), drawn
+/// like `UnifiedIntroInvite`: a message from Notchi, Continue, and ×.
+private struct AutoRetireInvite: View {
+    @ObservedObject var model: NotchModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            AssistantTurnView(text: L("autoRetire.invite"), showsFooterMetadata: false)
+            HStack(spacing: 6) {
+                GlassTextButton(title: L("autoRetire.continue"),
+                                tint: NotchModel.Panel.chat.intentTint) {
+                    withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                        model.startAutoRetire()
+                    }
+                }
+                GlassIconButton(systemName: "xmark", help: L("unifiedIntro.dismiss"),
+                                size: Tokens.Control.header,
+                                glyphSize: Tokens.TypeSize.caption,
+                                showsTooltip: false) {
+                    withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) {
+                        model.dismissAutoRetire()
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.bottom, 12)
+    }
+}
+
+/// The Auto retirement guide's choices under its answer, once the last
+/// bubble has landed: the card to the pricing page, then a button per model,
+/// a sale's tag inside its button. Drawn like `UnifiedIntroEnd`.
+private struct AutoRetireEnd: View {
+    @ObservedObject var model: NotchModel
+    let answerID: UUID
+    @ObservedObject private var pacer = BubblePacer.shared
+
+    var body: some View {
+        if !pacer.typing(answerID),
+           !(model.turns.first(where: { $0.id == answerID })?.streaming ?? true) {
+            if model.autoRetire?.endShownFor == answerID {
+                choices
+            } else {
+                Color.clear
+                    .frame(height: 0)
+                    .task(id: answerID) {
+                        try? await Task.sleep(for: .seconds(NotchModel.unifiedIntroEndPause))
+                        guard !Task.isCancelled else { return }
+                        withAnimation(.easeOut(duration: 0.3)) {
+                            model.showAutoRetireEnd(answerID)
+                        }
+                    }
+            }
+        }
+    }
+
+    private var choices: some View {
+        // A sale line on either card keeps the same line, empty, on the other,
+        // so the two stand the same height.
+        let saleLine = NotchModel.autoRetireModels.contains {
+            AutoRetireModelCard.pricing(for: $0)?.saleLine != nil
+        }
+        return HStack(alignment: .top, spacing: 8) {
+            ForEach(NotchModel.autoRetireModels, id: \.self) { id in
+                AutoRetireModelCard(modelID: id, reservesSaleLine: saleLine) {
+                    withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) {
+                        model.finishAutoRetire(id)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .transition(.opacity)
+    }
+}
+
+/// One model the Auto retirement guide offers, drawn like
+/// `UnifiedIntroLearnMoreCard`: the name, what a million tokens in and out
+/// cost (the model detail card's price line) and any sale under it, the
+/// model's mark on the right. A click makes it the default.
+private struct AutoRetireModelCard: View {
+    let modelID: String
+    /// Draw the sale line's height when this model has no sale.
+    var reservesSaleLine = false
+    let action: () -> Void
+    @State private var hovering = false
+
+    static func pricing(for id: String) -> ModelCatalog.ModelList.Entry.NotchiPricing? {
+        ModelCatalogStore.shared.liveByProvider[.nono]?
+            .first(where: { $0.id == id })?.notchiPricing
+    }
+
+    private var pricing: ModelCatalog.ModelList.Entry.NotchiPricing? { Self.pricing(for: modelID) }
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: ChatBubbleChrome.cardRadius, style: .continuous)
+        Button(action: action) {
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(NotchModel.autoRetireName(modelID))
+                        .font(.sf(Tokens.TypeSize.label, weight: .semibold))
+                        .foregroundStyle(Tokens.text1)
+                        .lineLimit(1)
+                    if let pricing {
+                        HStack(alignment: .firstTextBaseline, spacing: 5) {
+                            price(L("nono.pricing.in"), pricing.inputPerMTok)
+                            Text("·").foregroundStyle(Tokens.text4)
+                            price(L("nono.pricing.out"), pricing.outputPerMTok)
+                            Text("/M").foregroundStyle(Tokens.text4)
+                        }
+                        .font(.sf(Tokens.TypeSize.meta))
+                        .lineLimit(1)
+                        if let sale = pricing.saleLine {
+                            Text(sale)
+                                .font(.sf(Tokens.TypeSize.meta))
+                                .foregroundStyle(Tokens.sale.opacity(0.85))
+                                .lineLimit(1)
+                        } else if reservesSaleLine {
+                            Text(" ")
+                                .font(.sf(Tokens.TypeSize.meta))
+                                .accessibilityHidden(true)
+                        }
+                    }
+                }
+                VendorLogo(vendor: ModelRatings.vendor(for: modelID, provider: .nono),
+                           fallback: modelID)
+                    .frame(width: 16, height: 16)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .fixedSize()
+            .background(shape.fill(Color.white.opacity(hovering ? 0.12 : 0.08)))
+            .overlay(shape.strokeBorder(Tokens.hairline, lineWidth: 1))
+            .contentShape(shape)
+        }
+        .buttonStyle(.plain).exemptsDoubleClickPin()
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+    }
+
+    private func price(_ title: String, _ usd: Double) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
+            Text(title).foregroundStyle(Tokens.text3)
+            if usd == 0 {
+                FreeTag()
+            } else {
+                InlineSettingsView.moneyText(usd, size: Tokens.TypeSize.label)
+                    .foregroundStyle(Tokens.text1)
+                    .monospacedDigit()
+            }
+        }
+    }
+}
+
 /// A feature nudge's invitation (`NotchModel.featureNudge`), drawn like
 /// `UnifiedIntroInvite`: a message from Notchi, the confirm button, and × to
 /// decline.
@@ -9950,7 +10128,7 @@ struct RoutinesPanel: View {
 
     var body: some View {
         VStack(spacing: 14) {
-            SidePageHeader(tabs: [(.routines, L("routines.title")), (.copies, L("copyThread.tab"))],
+            SidePageHeader(tabs: [(.copies, L("copyThread.tab")), (.routines, L("routines.title"))],
                            selected: $tab, onClose: onClose)
             Group {
                 if tab == .routines { routines } else { copies() }
@@ -9971,8 +10149,7 @@ struct RoutinesPanel: View {
                     .font(.sf(Tokens.TypeSize.label))
                     .foregroundStyle(Tokens.text4)
                     .multilineTextAlignment(.center)
-                    .padding(.top, 8)
-                Spacer(minLength: 0)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {

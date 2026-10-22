@@ -775,7 +775,7 @@ final class NotchModel: ObservableObject {
     /// The page beside the result page, from the header's ⋯. It has two
     /// tabs (`sidePageTab`): Routines, and the thread copies answer in.
     @Published var showRoutines = false
-    @Published var sidePageTab: SidePageTab = .routines
+    @Published var sidePageTab: SidePageTab = .copies
     enum SidePageTab { case routines, copies }
 
     /// Whether the message tones play: sending, each reply bubble landing, and
@@ -6030,11 +6030,12 @@ final class NotchModel: ObservableObject {
     /// off. Shown once per install; `NOTCH_DEMO_UNIFIED_INTRO=1` shows it on
     /// every launch, and `=thread` also presses Start.
     func maybeStartUnifiedIntro() {
-        guard unifiedIntro == nil, welcomeGuide == nil else { return }
+        guard unifiedIntro == nil, welcomeGuide == nil, autoRetire == nil else { return }
         let demo = ProcessInfo.processInfo.environment["NOTCH_DEMO_UNIFIED_INTRO"]
         let forced = demo == "1" || demo == "thread"
         if !forced {
             guard !UserDefaults.standard.bool(forKey: Self.unifiedIntroDoneKey),
+                  !promptHasDraft,
                   !unifiedThreadsEnabled,
                   !OnboardingService.shared.showIntro,
                   Provider.offered.contains(.nono),
@@ -6082,6 +6083,9 @@ final class NotchModel: ObservableObject {
         invite.isLocal = true
         var start = Turn(role: "user", text: L("unifiedIntro.start"))
         start.isLocal = true
+        // A round of its own, so copies made before it are not drawn
+        // under it (`copyThreadMarks`).
+        start.sentAt = Date()
         let bubbles = [
             L("unifiedIntro.b1", version),
             L("unifiedIntro.b2"),
@@ -6229,6 +6233,7 @@ final class NotchModel: ObservableObject {
 
         var question = Turn(role: "user", text: line)
         question.isLocal = true
+        question.sentAt = Date()
         var answer = Turn(role: "assistant", text: reply, streaming: true)
         answer.isLocal = true
         if let i = history.firstIndex(where: { $0.id == threadID }) {
@@ -6266,6 +6271,159 @@ final class NotchModel: ObservableObject {
         APIKeyStore.selectedProvider = previous.provider
         APIKeyStore.saveModel(previous.storedModel, for: previous.provider)
         NotificationCenter.default.post(name: .aiBackendChanged, object: nil)
+    }
+
+    // MARK: - Auto retirement guide
+
+    /// The guide that takes Ask off Auto. It starts as an invitation in the
+    /// peek's slot, drawn like the unified threads guide's. Continue writes the
+    /// guide at the end of the main thread (a thread of its own when there is
+    /// none): why Auto goes, the model it runs, and a choice of default model
+    /// under the last message. Nil when not showing. Offered once per install,
+    /// on the idle prompt of the open notch, while Ask is on Auto.
+    struct AutoRetire: Equatable {
+        var threadID: UUID?
+        var answerID: UUID?
+        /// The answer the choices have been shown under, once their pause after
+        /// its last bubble has passed.
+        var endShownFor: UUID?
+    }
+
+    @Published private(set) var autoRetire: AutoRetire?
+
+    /// The models the guide offers, the first one leading.
+    static let autoRetireModels = ["glm-5.3-flash", "claude-haiku-5.5"]
+    /// The model behind Auto, named in the guide.
+    static let autoRetireAutoUpstream = "glm-5.3-flash"
+
+    /// A model's name as the catalog gives it.
+    static func autoRetireName(_ id: String) -> String {
+        ModelCatalogStore.shared.liveByProvider[.nono]?.first(where: { $0.id == id })?.name
+            ?? ModelRatings.prettyName(for: id, provider: .nono)
+    }
+
+    private static let autoRetireShownKey = "autoRetireShown"
+
+    /// Whether Ask is on Auto, under its id or one of the older ones that now
+    /// run it.
+    private var askIsOnAuto: Bool {
+        let provider = APIKeyStore.selectedProvider
+        guard provider == .nono else { return false }
+        let id = APIKeyStore.effectiveModel(for: provider) ?? provider.defaultModel
+        return id.hasPrefix("auto-") || ModelRatings.isNonoID(id)
+    }
+
+    func maybeStartAutoRetire() {
+        guard autoRetire == nil, unifiedIntro == nil, welcomeGuide == nil,
+              featureNudge == nil,
+              !UserDefaults.standard.bool(forKey: Self.autoRetireShownKey),
+              open, mode == .idle, turns.isEmpty, !promptHasDraft,
+              !showSettings, !showWhatsNew, !showHistory,
+              agentDetailTaskID == nil, !agentComposeActive,
+              !OnboardingService.shared.showIntro,
+              Provider.offered.contains(.nono), askIsOnAuto
+        else { return }
+        UserDefaults.standard.set(true, forKey: Self.autoRetireShownKey)
+        autoRetire = AutoRetire()
+    }
+
+    /// Whether the guide's thread is on screen with the guide still running.
+    var autoRetireLocksInput: Bool {
+        guard let threadID = autoRetire?.threadID else { return false }
+        return threadHistoryID == threadID && mode == .result
+    }
+
+    /// The invitation's ×.
+    func dismissAutoRetire() {
+        guard autoRetire?.threadID == nil else { return }
+        autoRetire = nil
+    }
+
+    /// The invitation's Continue: write the guide into the main thread with its
+    /// answer landing bubble by bubble.
+    func startAutoRetire() {
+        guard var guide = autoRetire, guide.threadID == nil else { return }
+        var invite = Turn(role: "assistant", text: L("autoRetire.invite"))
+        invite.isLocal = true
+        var start = Turn(role: "user", text: L("autoRetire.continue"))
+        start.isLocal = true
+        start.sentAt = Date()
+        let bubbles = [
+            L("autoRetire.b1"),
+            L("autoRetire.b2", Self.autoRetireName(Self.autoRetireAutoUpstream)),
+            L("autoRetire.choose"),
+        ]
+        var answer = Turn(role: "assistant", text: bubbles[..<2].joined(separator: "\n\n"),
+                          streaming: true)
+        answer.isLocal = true
+        var settled = answer
+        settled.text = bubbles.joined(separator: "\n\n")
+        settled.streaming = false
+
+        // As a feature nudge: the main thread takes the guide as its newest
+        // turns, unless a round on it is still being written.
+        let main = unifiedThreadsEnabled
+            ? history.firstIndex(where: { row in
+                row.mainThread && row.source == .ask && !row.pending
+                    && !inFlightRounds.contains(where: { $0.threadID == row.id })
+            })
+            : nil
+        let prior = main.map { history[$0].conversation } ?? []
+        var item: HistoryItem
+        if let main {
+            item = history.remove(at: main)
+            item.turns = prior + [invite, start, settled]
+            item.a = settled.text
+            item.t = Date()
+        } else {
+            item = HistoryItem(q: start.text, a: settled.text, t: Date(),
+                               turns: [invite, start, settled])
+            item.title = L("autoRetire.invite")
+            if unifiedThreadsEnabled
+                && !history.contains(where: { $0.mainThread && $0.source == .ask }) {
+                item.mainThread = true
+            }
+        }
+        history.insert(item, at: 0)
+        saveHistory()
+
+        turns = prior + [invite, start, answer]
+        threadHistoryID = item.id
+        mode = .result
+        guide.threadID = item.id
+        guide.answerID = answer.id
+        autoRetire = guide
+        streamUnifiedIntro(answer.id, bubbles: bubbles, written: 2)
+    }
+
+    /// Show the guide's choices under `answerID`.
+    func showAutoRetireEnd(_ answerID: UUID) {
+        guard var guide = autoRetire, guide.answerID == answerID else { return }
+        guide.endShownFor = answerID
+        autoRetire = guide
+    }
+
+    /// A model picked under the guide: Ask moves to it, and the pick goes into
+    /// the thread as the user's line, with the app's reply.
+    func finishAutoRetire(_ modelID: String) {
+        guard let guide = autoRetire, let threadID = guide.threadID else { return }
+        ModelCatalogStore.select(provider: .nono, model: modelID)
+        let name = Self.autoRetireName(modelID)
+        var question = Turn(role: "user", text: L("autoRetire.use", name))
+        question.isLocal = true
+        question.sentAt = Date()
+        var answer = Turn(role: "assistant", text: L("autoRetire.reply", name), streaming: true)
+        answer.isLocal = true
+        if let i = history.firstIndex(where: { $0.id == threadID }) {
+            var settled = answer
+            settled.streaming = false
+            history[i].turns = (history[i].turns ?? []) + [question, settled]
+            history[i].a = settled.text
+            saveHistory()
+        }
+        autoRetire = nil
+        if threadHistoryID == threadID { turns += [question, answer] }
+        settleUnifiedIntroTurn(answer.id)
     }
 
     // MARK: - Welcome guide
@@ -6391,6 +6549,7 @@ final class NotchModel: ObservableObject {
         invite.isLocal = true
         var start = Turn(role: "user", text: L("unifiedIntro.start"))
         start.isLocal = true
+        start.sentAt = Date()
 
         for i in history.indices where history[i].mainThread { history[i].mainThread = false }
         let id = UUID()
@@ -6531,6 +6690,7 @@ final class NotchModel: ObservableObject {
 
         var line = Turn(role: "user", text: L(turnOn ? "welcome.turnOn" : "welcome.skip"))
         line.isLocal = true
+        line.sentAt = Date()
         var reply = Turn(role: "assistant", text: bubbles.joined(separator: "\n\n"), streaming: true)
         reply.isLocal = true
         appendWelcomeTurns([line, reply], threadID: threadID)
@@ -6579,10 +6739,11 @@ final class NotchModel: ObservableObject {
     /// that file's first entry on every launch, and `NOTCH_DEMO_NUDGE_START=1`
     /// also presses confirm.
     func maybeStartFeatureNudge() {
-        guard featureNudge == nil, unifiedIntro == nil, welcomeGuide == nil else { return }
+        guard featureNudge == nil, unifiedIntro == nil, welcomeGuide == nil,
+              autoRetire == nil else { return }
         let nudges = FeatureNudges.shared
         if !nudges.forced {
-            guard open, mode == .idle, turns.isEmpty,
+            guard open, mode == .idle, turns.isEmpty, !promptHasDraft,
                   !showSettings, !showWhatsNew, !showHistory,
                   agentDetailTaskID == nil, !agentComposeActive,
                   !OnboardingService.shared.showIntro
@@ -6635,9 +6796,19 @@ final class NotchModel: ObservableObject {
         return threadHistoryID == threadID && mode == .result
     }
 
+    /// Whether the prompt holds something the user put there: typed text, a
+    /// pasted image or a dropped file. A guide's invitation takes the prompt's
+    /// place, so none is offered over a draft; it is decided again on the next
+    /// open.
+    private var promptHasDraft: Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !askComposeImages.isEmpty || !droppedFiles.isEmpty
+    }
+
     /// Either guide is writing its thread on screen.
     var guideLocksInput: Bool {
         unifiedIntroLocksInput || featureNudgeLocksInput || welcomeGuideLocksInput
+            || autoRetireLocksInput
     }
 
     /// The invitation's ×: close it, and never offer this feature again.
@@ -6665,6 +6836,7 @@ final class NotchModel: ObservableObject {
         invite.isLocal = true
         var start = Turn(role: "user", text: nudge.confirm)
         start.isLocal = true
+        start.sentAt = Date()
         let bubbles = nudge.messages
         // A single message has nothing to land after it.
         let paced = bubbles.count > 1
@@ -6840,7 +7012,9 @@ final class NotchModel: ObservableObject {
     /// The idle prompt with nothing else on the page. The unified threads
     /// guide's invitation holds the pull until Start or × answers it.
     private var threadPullPageClear: Bool {
-        open && mode == .idle && turns.isEmpty && unifiedIntro == nil && featureNudge == nil
+        open && mode == .idle && turns.isEmpty && featureNudge == nil
+            && (unifiedIntro == nil || unifiedIntro?.threadID != nil)
+            && (autoRetire == nil || autoRetire?.threadID != nil)
             && (welcomeGuide == nil || welcomeGuide?.threadID != nil)
             && !showSettings && !showWhatsNew && !showHistory
             && agentDetailTaskID == nil && !agentComposeActive
@@ -10299,6 +10473,7 @@ final class NotchModel: ObservableObject {
         if unifiedIntro != nil, joinsMainThread { unifiedIntro = nil }
         if featureNudge != nil, featureNudge?.threadID == nil, joinsMainThread { featureNudge = nil }
         if welcomeGuide != nil, joinsMainThread { welcomeGuide = nil }
+        if autoRetire != nil, joinsMainThread { autoRetire = nil }
         // Clear any prior error state — this attempt replaces it (XII-85).
         askError = nil
         // One-shot regenerate-with-model override (XII-135): build a service pinned

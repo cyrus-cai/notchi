@@ -2723,23 +2723,22 @@ struct AskRecentModelPickerView: View {
         _current = State(initialValue: Row(provider: selectedProvider, id: selectedModelID))
     }
 
-    /// Cursor's layout: Auto is a switch above the list rather than a row in
-    /// it. On, every model below is grayed and cannot be picked; off, the pick
-    /// goes back to the first model that can serve. The router it flips is the
-    /// one in effect, else the first Auto in Notchi's lineup.
+    /// Auto, a row like the others, kept first in the list: the router in
+    /// effect, else the first Auto in Notchi's lineup.
     private var autoRow: Row? {
         if Self.isAuto(current), lead.contains(current) { return current }
         return lead.first(where: Self.isAuto)
     }
 
-    private var autoOn: Bool { Self.isAuto(current) && current == autoRow }
-
     static func isAuto(_ r: Row) -> Bool {
         r.provider.isFirstParty && r.id.hasPrefix("auto-")
     }
 
-    /// The recents under the switch — `lead` without the router the switch owns.
-    private var fullLead: [Row] { lead.filter { $0 != autoRow } }
+    /// The recents, Auto first.
+    private var fullLead: [Row] {
+        guard let autoRow else { return lead }
+        return [autoRow] + lead.filter { $0 != autoRow }
+    }
 
     /// Both runs narrowed to the query. Memoized on the query and the rows, so
     /// the several reads per render filter once, and each row's text is built
@@ -2827,10 +2826,6 @@ struct AskRecentModelPickerView: View {
         VStack(alignment: .leading, spacing: 0) {
             searchRow
             hairline
-            if let autoRow {
-                autoSwitch(autoRow)
-                hairline
-            }
             ScrollViewReader { proxy in
                 ScrollView(showsIndicators: false) {
                     // Lazy: a BYOK catalog is hundreds of rows, and only the
@@ -2890,44 +2885,10 @@ struct AskRecentModelPickerView: View {
         }
     }
 
-    /// The Auto switch. A click anywhere on the row flips it and the menu stays
-    /// open, as Cursor's does. Grayed and inert when the balance cannot pay.
-    private func autoSwitch(_ r: Row) -> some View {
-        let unavailable = Self.unavailable(r)
-        return MenuCardRow(
-            title: ModelRatings.prettyName(for: r.id, provider: r.provider),
-            dimmed: unavailable,
-            isOn: autoOn,
-            fontSize: Self.fontSize,
-            height: Self.rowHeight,
-            horizontalPadding: Self.rowPad,
-            selected: true,
-            wash: false,
-            haptic: false) {
-                guard !unavailable else { return }
-                if autoOn {
-                    if let manual = allRows.first(where: {
-                        !Self.isAuto($0) && !Self.unavailable($0)
-                    }) {
-                        arm(manual)
-                    }
-                } else {
-                    arm(r)
-                }
-            }
-            .onHover { inside in
-                if inside, let frame = detailAnchor.frame {
-                    ModelDetailPanel.shared.show(Self.detailModel(for: r), beside: frame)
-                } else if !inside {
-                    ModelDetailPanel.shared.scheduleHide()
-                }
-            }
-    }
-
     /// One model row, Notchi or the user's own key — both share the row so the
-    /// list reads as one. Grayed while Auto is on.
+    /// list reads as one.
     private func modelRow(_ r: Row) -> some View {
-        let unavailable = autoOn || Self.unavailable(r)
+        let unavailable = Self.unavailable(r)
         return MenuCardRow(
             title: ModelRatings.prettyName(for: r.id, provider: r.provider),
             accessory: Self.accessory(for: r),
@@ -2976,10 +2937,9 @@ struct AskRecentModelPickerView: View {
             .padding(.vertical, Self.ruleGap)
     }
 
-    /// Every row the ↑/↓ cursor can land on: the models that can be picked now —
-    /// none while Auto is on.
+    /// Every row the ↑/↓ cursor can land on: the models that can be picked now.
     private var armable: [Row] {
-        autoOn ? [] : allRows.filter { !Self.unavailable($0) }
+        allRows.filter { !Self.unavailable($0) }
     }
 
     /// The row's trailing word. A row on the user's own key says BYOK, one on a
@@ -3057,11 +3017,10 @@ struct AskRecentModelPickerView: View {
     /// Hairline plus `ruleGap` on each side.
     private static var sectionRule: CGFloat { 0.5 + ruleGap * 2 }
 
-    /// The card's height: the search row, the Auto switch, and the list window.
+    /// The card's height: the search row and the list window.
     private var cardHeight: CGFloat {
         var h = listHeight + MenuCard.cardPad * 2
         h += Self.rowHeight + Self.sectionRule              // search row
-        if autoRow != nil { h += Self.rowHeight + Self.sectionRule }
         return h
     }
 
