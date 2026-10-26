@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 // MARK: - Digest
@@ -210,85 +211,51 @@ struct StatsDigest: Equatable {
     }
 }
 
-// MARK: - Type
-
-extension Font {
-    /// The one face every figure on this pane wears: **Prompt**, the bundled
-    /// wordmark family, at display size.
-    ///
-    /// This is the only place in the app besides the About masthead that reaches
-    /// for `.brand` — and it is the same argument. The wordmark is the app's
-    /// voice for *the name of a thing*; a sheet of figures is the one other place
-    /// where the number IS the content rather than a label on it, and San
-    /// Francisco at semibold reads there as UI chrome. Prompt's geometric
-    /// numerals give the sheet a face without inventing one.
-    ///
-    /// Everything else on the pane sits on three rungs and no more: figures here,
-    /// `.sf(Tokens.TypeSize.meta)` for the label under a figure, `.sf(Tokens.TypeSize.badge)` for the grid's rails.
-    /// 18 — the same size the About masthead sets the wordmark at, which is not a
-    /// coincidence worth breaking: Prompt sets noticeably taller than San
-    /// Francisco at equal point size, and every step above this pushed the
-    /// activity card's bottom rim past the pane's fold.
-    static var statsFigure: Font { .brand(18) }
-}
-
 // MARK: - Pane
 
-/// Settings → **Stats**: what the archive adds up to. A read-only pane — four
-/// headline numbers over one activity card — in the same recessed-card / token
-/// vocabulary the rest of Settings is built from.
-///
-/// Everything here is derived from the local archive at display time; nothing is
-/// counted, stored or sent anywhere else, which is why there is no state to reset
-/// and no control on the pane.
+/// Settings → **Audit**'s footer line: the record this page draws from never
+/// leaves the Mac. The figures that used to sit beside it (messages, tokens,
+/// active days) live in About now, with the activity grid they describe.
 struct StatsPane: View {
-    let digest: StatsDigest
-    /// The token odometer's reading. Not part of the digest on purpose: every
-    /// other figure here is folded from the archive, and this one is counted from
-    /// what providers reported — see `TokenMeter`.
-    let tokens: TokenMeter.Reading
-    /// Owned by the settings view: the day under the pointer is announced in the
-    /// panel header, beside the back pill, where there is room for it and nothing
-    /// it can push around.
-    @Binding var hovered: StatsHoverDay?
-
-    /// The gap between this pane's blocks, in step with the settings pane's own
-    /// row rhythm rather than a tighter one.
-    private static let blockGap: CGFloat = 12
+    @State private var hoveringReveal = false
 
     var body: some View {
-        if digest.isEmpty {
-            emptyState
-        } else {
-            VStack(alignment: .leading, spacing: Self.blockGap) {
-                privacyLine
-                // What was done, over the grid it was done on; the streaks — which
-                // are a property of the grid, not of the archive — read below it as
-                // its caption.
-                StatsActivityCard(digest: digest, tokens: tokens, hovered: $hovered)
-                streaks
+        HStack(spacing: 14) {
+            privacyLine
+            // The request log is a file on this Mac; this opens it where it is,
+            // right after the line that says it stays here.
+            if let url = RequestAudit.shared.fileURL {
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                } label: {
+                    Text(L("audit.viewRawData"))
+                        .font(.sf(Tokens.TypeSize.meta))
+                        .foregroundStyle(hoveringReveal ? Tokens.text1 : Tokens.text4.opacity(0.8))
+                        .lineLimit(1)
+                        .fixedSize()
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).exemptsDoubleClickPin()
+                .onHover { hoveringReveal = $0 }
             }
         }
     }
 
-    /// A pane full of counts about what someone does all day is exactly where
-    /// "who else sees this?" gets asked, so it's answered over the cards rather
-    /// than three taps away in About → Privacy. One line, with the handling — and
-    /// the policy behind it — under the same ⓘ the token tile carries.
+    /// "Who else sees this?" — answered on the page that shows the requests.
     private var privacyLine: some View {
         HStack(spacing: 2) {
             Text(L("stats.privacy"))
                 .font(.sf(Tokens.TypeSize.meta))
-                .foregroundStyle(Tokens.text4)
+                .foregroundStyle(Tokens.text4.opacity(0.8))
                 .lineLimit(1)
                 .fixedSize()
-            SettingInfo(privacyHint, glyph: 10, hit: 13)
+            SettingInfo(privacyHint, glyph: 11, hit: 14)
                 .accessibilityHidden(true)
         }
         .padding(.leading, 2)
     }
 
-    /// The note, with the words "privacy policy" inside its last sentence carrying
+    /// The note, with the words "privacy policy" inside its second sentence carrying
     /// the link — the phrase is localized separately only so the range can be found
     /// in the sentence it already reads as part of. Underlined because the popover's
     /// body is already `text2`, so colour alone would make the link invisible.
@@ -301,307 +268,148 @@ struct StatsPane: View {
         }
         return text
     }
-
-    /// The rhythm figures, on their own row under the grid they summarize: three
-    /// about *which days*, and — in the quarter the three of them left empty —
-    /// one about what time of day.
-    private var streaks: some View {
-        HStack(spacing: 0) {
-            StatsStreak(value: digest.activeDays, label: L("stats.activeDays"))
-            StatsStreak(value: digest.currentStreak, label: L("stats.currentStreak"))
-            StatsStreak(value: digest.longestStreak, label: L("stats.longestStreak"))
-            if let peakHour = digest.peakHour {
-                StatsStreak(fixed: StatsFormat.hour(peakHour), label: L("stats.peakHour"))
-            }
-        }
-        .padding(10)
-        .recessedSurface(in: RoundedRectangle.control,
-                         lit: false)
-    }
-
-    /// Same shape as the archive window's empty list — a light glyph over one
-    /// line — so "nothing here yet" reads the same wherever the app says it.
-    private var emptyState: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "chart.bar")
-                .font(.sf(Tokens.TypeSize.figure, weight: .light))
-                .foregroundStyle(Tokens.text4)
-            Text(L("stats.empty"))
-                .font(.sf(Tokens.TypeSize.form))
-                .foregroundStyle(Tokens.text3)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 48)
-    }
 }
 
-/// Whether the headline figures roll up from zero when the pane appears.
-///
-/// True everywhere the pane is looked at. False for `ImageRenderer`, which draws
-/// one body pass and never fires `onAppear` — a snapshot taken through it would
-/// otherwise catch the tiles at the zero they start from.
-private struct StatsFigureRollKey: EnvironmentKey {
-    static let defaultValue = true
-}
-
-extension EnvironmentValues {
-    var statsFigureRoll: Bool {
-        get { self[StatsFigureRollKey.self] }
-        set { self[StatsFigureRollKey.self] = newValue }
-    }
-}
-
-/// Every figure on the pane, in the pane's one figure face — rolled up from zero
-/// the first time it is looked at, with the native digit transition the island's
-/// running chip already uses.
-///
-/// `value` is the number, not the string it ends on: an odometer interpolates a
-/// quantity. A `nil` value is a reading that isn't one — the peak hour is a clock
-/// time, and nothing counts up to 1 PM — which prints `fixed` and stays put.
-private struct StatsFigure: View {
-    var value: Int? = nil
-    var format: (Int) -> String = StatsFormat.count
-    var fixed: String = ""
-
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.statsFigureRoll) private var roll
-
-    /// What is on screen right now, as opposed to `value`, which is where it is
-    /// headed. Zero until the pane appears.
-    @State private var shown = 0
-
-    /// The settled text: what the figure reads once the roll lands, and what
-    /// VoiceOver is given — it must not read whatever frame it happened to catch.
-    var settled: String { value.map(format) ?? fixed }
-
-    var body: some View {
-        Text(value.map { format(roll ? shown : $0) } ?? fixed)
-            .font(.statsFigure)
-            .foregroundStyle(Tokens.text1)
-            .lineLimit(1)
-            .minimumScaleFactor(0.75)
-            .contentTransition(.numericText(value: Double(shown)))
-            // The animation has to ride the Text itself for `numericText` to
-            // fire; on an enclosing stack it only moves the layout.
-            .animation(reduceMotion ? nil : .snappy(duration: 0.5), value: shown)
-            .onAppear { shown = value ?? 0 }
-            .onChange(of: value) { _, new in shown = new ?? 0 }
-    }
-}
-
-/// One headline number: its bucket's mark and the figure on one line, the label
-/// under it. The mark is the same Lucide glyph that bucket wears in the composer
-/// and in Recent, so the column is recognizable before the label is read.
-private struct StatsTotal: View {
-    let icon: LucideIcons.Mark
-    let value: Int
-    let format: (Int) -> String
-    let label: String
-    /// Only the token tile carries one — it's the single figure here the reader
-    /// can't verify by counting their own rows, so a ⓘ beside its label says
-    /// where it came from. The three bucket counts are exactly what they claim
-    /// and stay silent.
-    var note: String? = nil
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 5) {
-                // At 11 the mark read as a stray dot beside an 18pt Prompt figure.
-                LucideIcon(mark: icon, size: 12)
-                    .foregroundStyle(Tokens.text4)
-                StatsFigure(value: value, format: format)
-            }
-            // A long localized label can be wider than a quarter of the
-            // panel; it shrinks rather than truncating, because a
-            // clipped label on a four-column sheet reads as a layout bug.
-            // The label row is pinned to the height the label alone would take
-            // (13 at `.sf(Tokens.TypeSize.meta)`) so the ⓘ can't set it. Left to size itself, the
-            // button's own metrics made this one column's label sit a point and a
-            // half below the three beside it — on a row of four tiles that reads
-            // as a misprint.
-            HStack(spacing: 2) {
-                Text(label)
-                    .font(.sf(Tokens.TypeSize.meta))
-                    .foregroundStyle(Tokens.text3)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-                // Same ⓘ the settings rows collapse their captions behind, at the
-                // smaller of its two sizes — this one trails a label inside a
-                // quarter-width column, not a full row.
-                if let note {
-                    SettingInfo(note, glyph: 10, hit: 13)
-                        .accessibilityHidden(true)
-                }
-            }
-            .frame(height: 13)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(note.map { "\(label): \(format(value)). \($0)" }
-                            ?? "\(label): \(format(value))")
-    }
-}
-
-/// The rhythm block: the three lifetime totals over the day grid they were built
-/// from, and the arrows that walk that grid back through the archive.
-private struct StatsActivityCard: View {
+/// The archive's lifetime figures, as two muted lines, for About: what was done,
+/// then the rhythm it was done at. They sit under the activity grid that shows
+/// the same days one square at a time.
+struct StatsSummaryLines: View {
     let digest: StatsDigest
+    /// The token odometer's reading. Not part of the digest on purpose: every
+    /// other figure here is folded from the archive, and this one is counted from
+    /// what providers reported — see `TokenMeter`.
     let tokens: TokenMeter.Reading
 
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 2) {
+                Text(L("stats.line.totals",
+                       StatsFormat.total(digest.chatMessages),
+                       StatsFormat.total(digest.captures),
+                       StatsFormat.total(digest.agentMessages),
+                       StatsFormat.compact(tokens.total)))
+                // The token figure is the only one here the reader can't verify
+                // by counting their own rows, so it keeps its ⓘ.
+                SettingInfo(L("stats.tokens.info"), glyph: 10, hit: 13)
+                    .accessibilityHidden(true)
+            }
+            Text(L("stats.line.days",
+                   StatsFormat.total(digest.activeDays),
+                   StatsFormat.total(digest.currentStreak),
+                   digest.peakHour.map { StatsFormat.hour($0) } ?? "—"))
+        }
+        .font(.sf(Tokens.TypeSize.meta))
+        .foregroundStyle(Tokens.text4)
+        .lineLimit(1)
+        .minimumScaleFactor(0.75)
+        .padding(.leading, 2)
+    }
+}
+
+/// The archive's day grid on its own, for About: the heatmap the activity card
+/// used to carry, with no card around it — the pane it hangs in is already a
+/// surface, and a grid inside a second card there read as a widget dropped into
+/// a settings page.
+struct StatsActivityGrid: View {
+    let digest: StatsDigest
     @Binding var hovered: StatsHoverDay?
 
-    /// How far back the grid is scrolled, in half-year steps — 0 is the window
-    /// ending this week, which is where the pane always opens.
+    /// How far back the grid is paged, in half-year steps. This is the grid's
+    /// time control: a calendar's cells are days, so the useful question is
+    /// "which months", and stepping the window beats narrowing it to a handful
+    /// of gigantic squares.
     @State private var page = 0
+    @State private var width: CGFloat = 0
+    @State private var hoveringEarlier = false
+    @State private var hoveringLater = false
+    @State private var range: Range = .all
 
-    /// The card's own content width, measured once, so the arrows can be asked
-    /// the same question the grid answers with its geometry: how many weeks fit.
-    @State private var contentWidth: CGFloat = 0
+    /// The stretches the grid can be narrowed to. Months, not days: a calendar
+    /// cell is a day, and "last 7 days" would be one column of squares.
+    enum Range: CaseIterable {
+        case threeMonths, sixMonths, all
 
-    /// How many steps the archive actually reaches back *beyond* the window the
-    /// grid already shows. Zero on a young archive, which is when the arrows stay
-    /// away entirely rather than sitting there greyed out over a grid that has
-    /// nothing older to show.
+        var days: Int? {
+            switch self {
+            case .threeMonths: return 90
+            case .sixMonths:   return 180
+            case .all:         return nil
+            }
+        }
+
+        var label: String {
+            switch self {
+            case .threeMonths: return "3M"
+            case .sixMonths:   return "6M"
+            case .all:         return L("audit.range.all")
+            }
+        }
+    }
+
     private var maxPage: Int {
         digest.pagesBack(step: StatsHeatmap.pageStep,
-                         windowWeeks: StatsHeatmap.weeks(inCard: contentWidth))
+                         windowWeeks: StatsHeatmap.weeks(inCard: width))
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            // A real gutter between the columns, not just the labels' natural gap:
-            // "Notes & reminders" beside "Agent messages" read as one run-on line
-            // at spacing 0.
-            HStack(alignment: .top, spacing: 8) {
-                StatsTotal(icon: LucideIcons.messageCircle,
-                           value: digest.chatMessages,
-                           format: StatsFormat.total,
-                           label: L("stats.conversations"))
-                StatsTotal(icon: LucideIcons.pencilLine,
-                           value: digest.captures,
-                           format: StatsFormat.total,
-                           label: L("stats.captures"))
-                StatsTotal(icon: LucideIcons.codeXml,
-                           value: digest.agentMessages,
-                           format: StatsFormat.total,
-                           label: L("stats.agentRuns"))
-                // The mark is `hash` rather than a bucket glyph on purpose: the
-                // other three name *which* bucket they counted, and this one is a
-                // measure taken across all of them. It is also the one figure here that
-                // starts at zero on an old archive, so it carries the ⓘ that
-                // says why.
-                StatsTotal(icon: LucideIcons.hash,
-                           value: tokens.total,
-                           format: StatsFormat.compact,
-                           label: L("stats.tokens"),
-                           note: L("stats.tokens.info"))
-                pager
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 12) {
+                ForEach(Range.allCases, id: \.self) { option in
+                    Button { range = option } label: {
+                        Text(option.label)
+                            .font(.system(size: 9, weight: option == range ? .semibold : .regular,
+                                          design: .monospaced))
+                            .foregroundStyle(option == range ? Tokens.text1 : Tokens.text4)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain).exemptsDoubleClickPin()
+                }
+                Spacer(minLength: 0)
+                arrow("‹", help: L("stats.earlier"),
+                      enabled: page < maxPage, hovering: $hoveringEarlier) {
+                    turn(to: page + 1)
+                }
+                arrow("›", help: L("stats.later"),
+                      enabled: page > 0, hovering: $hoveringLater) {
+                    turn(to: page - 1)
+                }
             }
-            StatsHeatmap(digest: digest, page: min(page, maxPage), hovered: $hovered)
+            // Kept in place on a young archive so the grid never jumps when the
+            // first page of history appears.
+            .opacity(maxPage > 0 ? 1 : 0)
+            .allowsHitTesting(maxPage > 0)
+
+            StatsHeatmap(digest: digest, page: min(page, maxPage),
+                         rangeDays: range.days, hovered: $hovered)
         }
         .background {
             GeometryReader { geo in
                 Color.clear
-                    .onAppear { contentWidth = geo.size.width }
-                    .onChange(of: geo.size.width) { _, width in contentWidth = width }
+                    .onAppear { width = geo.size.width }
+                    .onChange(of: geo.size.width) { _, next in width = next }
             }
-        }
-        .padding(10)
-        .recessedSurface(in: RoundedRectangle.control,
-                         lit: false)
-    }
-
-    /// ‹ › over the newest column, on the card's top row rather than under the
-    /// grid: the pane's bottom 32pt is the settings viewport's taper, and a
-    /// control put there fades out exactly when it is reached for.
-    @ViewBuilder
-    private var pager: some View {
-        if maxPage > 0 {
-            HStack(spacing: 0) {
-                StatsPagerButton(symbol: "chevron.left",
-                                 help: L("stats.earlier"),
-                                 enabled: page < maxPage) { turn(to: page + 1) }
-                StatsPagerButton(symbol: "chevron.right",
-                                 help: L("stats.later"),
-                                 enabled: page > 0) { turn(to: page - 1) }
-            }
-            .frame(width: 44, alignment: .trailing)
         }
     }
 
-    /// Turning the page moves every square under the pointer, so the ring and the
-    /// header readout it feeds are cleared rather than left naming a day that has
-    /// slid out from under the mouse.
     private func turn(to next: Int) {
         hovered = nil
         page = max(0, min(maxPage, next))
     }
 
-}
-
-/// One rhythm figure: a bare number over its label, no mark. The streaks are
-/// counts of *days*, not of any one bucket, so there is no glyph that belongs to
-/// them the way `messageCircle` belongs to a chat.
-private struct StatsStreak: View {
-    /// A count of days, which rolls up like the totals above it — or `nil` for
-    /// the peak hour, which prints `fixed`. See `StatsFigure`.
-    var value: Int? = nil
-    var fixed: String = ""
-    let label: String
-
-    private var figure: StatsFigure { StatsFigure(value: value, fixed: fixed) }
-
-    var body: some View {
-        // No "days" unit beside the figure: the streak labels under it already end
-        // in the word, and printing it twice is the reference screenshot's one
-        // redundancy, not something to copy.
-        VStack(alignment: .leading, spacing: 2) {
-            figure
-            // Four columns instead of three leaves a quarter of the card per
-            // label; the longest of them ("Longest streak", "Hora punta") shrinks
-            // rather than truncating, the same way the totals row's labels do.
-            Text(label)
-                .font(.sf(Tokens.TypeSize.meta))
-                .foregroundStyle(Tokens.text3)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(label): \(figure.settled)")
-    }
-}
-
-/// One of the grid's two page arrows. Same chevron the panel's back pill wears —
-/// same glyph, same size, same hover brighten — without the capsule, which inside
-/// an already-recessed card would read as a second surface.
-private struct StatsPagerButton: View {
-    let symbol: String
-    let help: String
-    let enabled: Bool
-    let action: () -> Void
-
-    @State private var hovering = false
-
-    var body: some View {
+    private func arrow(_ glyph: String, help: String, enabled: Bool,
+                       hovering: Binding<Bool>,
+                       action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: symbol)
-                .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
-                .foregroundStyle(tint)
-                .frame(width: Tokens.Control.inline, height: Tokens.Control.inline)
+            Text(glyph)
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .foregroundStyle(enabled ? Tokens.text3 : Tokens.text4.opacity(0.35))
+                .frame(width: 12, height: 12)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain).exemptsDoubleClickPin()
         .disabled(!enabled)
-        .onHover { hovering = $0 }
-        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
-        .notchTooltip(help)
+        .onHover { hovering.wrappedValue = $0 }
         .accessibilityLabel(help)
-    }
-
-    private var tint: Color {
-        guard enabled else { return Tokens.text4.opacity(0.4) }
-        return hovering ? Tokens.text1 : Tokens.text3
     }
 }
 
@@ -626,21 +434,26 @@ private struct StatsHeatmap: View {
     let digest: StatsDigest
     /// Windows back from the present, in `pageStep` steps.
     let page: Int
+    /// How many days of the window carry data, counted back from its right
+    /// edge. `nil` draws the whole window. Filtering the grid this way keeps the
+    /// calendar's geometry — the squares stay where the dates are — instead of
+    /// shrinking a month into a handful of giant cells.
+    var rangeDays: Int? = nil
 
     /// Cell side and the *minimum* gutter between columns. Small enough that half
     /// a year fits the settings pane, large enough that a single day is still a
     /// target the pointer can rest on.
-    private static let cell: CGFloat = 9
+    private static let cell: CGFloat = 11
     private static let gap: CGFloat = 3
     private static let column: CGFloat = cell + gap
-    private static let radius: CGFloat = 2.5
+    private static let radius: CGFloat = 3
     /// Room for the weekday rail on the left.
     private static let railWidth: CGFloat = 14
     /// Roughly ten months — past that the columns are only meaningful on a
     /// window far wider than this panel will ever be.
     private static let maxWeeks = 44
     /// How far one press of ‹ / › travels: half a year. Deliberately shorter than
-    /// the window itself (~33 weeks at this panel width), so consecutive pages
+    /// the window itself (~28 weeks at this panel width), so consecutive pages
     /// overlap by a couple of months instead of butting up against each other —
     /// paging back and forth then reads as sliding one grid rather than cutting
     /// to an unrelated one. Fixed rather than "one windowful" so the card can
@@ -777,10 +590,14 @@ private struct StatsHeatmap: View {
                         let day = calendar.date(byAdding: .day,
                                                 value: week * 7 + row,
                                                 to: start) ?? start
-                        // Days that haven't happened yet leave a hole rather than
-                        // an empty well — an unlived day is not a quiet one.
+                        // Days outside the filter and days that haven't happened
+                        // yet leave a hole rather than an empty well — neither is
+                        // a quiet day.
+                        let outOfRange = cutoff(from: start, grid: grid).map { day < $0 } ?? false
                         RoundedRectangle(cornerRadius: Self.radius, style: .continuous)
-                            .fill(day > today ? Color.clear : Self.fill(digest.levels[day] ?? 0))
+                            .fill(day > today || outOfRange
+                                  ? Color.clear
+                                  : Self.fill(digest.levels[day] ?? 0))
                             .frame(width: Self.cell, height: Self.cell)
                     }
                 }
@@ -817,6 +634,7 @@ private struct StatsHeatmap: View {
         // time the pointer crossed a 3pt gap, which is most of a sweep.
         guard let day = calendar.date(byAdding: .day, value: week * 7 + row, to: start),
               day <= calendar.startOfDay(for: Date()) else { return nil }
+        if let cutoff = cutoff(from: start, grid: grid), day < cutoff { return nil }
         return StatsHoverDay(week: week, row: row, day: day)
     }
 
@@ -844,6 +662,16 @@ private struct StatsHeatmap: View {
     /// The first cell of the grid: the start of the week `weeks - 1` weeks before
     /// this one — plus however many pages back the reader has walked, so the
     /// newest column is the current week only while `page` is 0.
+    /// The oldest day the range keeps, measured from the window's own right end
+    /// (never from after today), so paging back a year and filtering to three
+    /// months still shows that window's last three months.
+    private func cutoff(from start: Date, grid: Grid) -> Date? {
+        guard let rangeDays else { return nil }
+        let end = calendar.date(byAdding: .day, value: grid.weeks * 7 - 1, to: start) ?? start
+        let anchor = min(end, calendar.startOfDay(for: Date()))
+        return calendar.date(byAdding: .day, value: -rangeDays + 1, to: anchor)
+    }
+
     private func gridStart(weeks: Int) -> Date {
         let today = calendar.startOfDay(for: Date())
         let weekday = calendar.component(.weekday, from: today)
@@ -1078,17 +906,42 @@ enum StatsSnapshot {
         // rather than the pane's full unrolled height.
         let fit = env["NOTCH_STATS_SNAPSHOT_FIT"] == "1"
         let viewport: CGFloat = NotchBody.immersiveListHeight - (12 + 26 + 4 + 12)
-        let content = StatsPane(digest: digest, tokens: tokens, hovered: .constant(nil))
+        // The pane as Stats actually composes it: the request chart over the
+        // archive's footnote. `NOTCH_AUDIT_SIM=<days>` swaps the real request log
+        // for a synthetic one of that age, so the long-history case can be looked
+        // at before the log has actually been running that long.
+        let audit: [RequestAudit.Entry]
+        if let days = env["NOTCH_AUDIT_SIM"].flatMap(Int.init), days > 0 {
+            audit = demoAudit(days: days)
+        } else {
+            audit = Array(RequestAudit.shared.recent.reversed())
+        }
+        // `NOTCH_GRID_SNAPSHOT=1` draws only the About pane's activity grid, the
+        // one piece of that pane with geometry of its own.
+        let gridOnly = env["NOTCH_GRID_SNAPSHOT"] == "1"
+        let content = Group {
+            if gridOnly {
+                VStack(alignment: .leading, spacing: 8) {
+                    StatsActivityGrid(digest: digest, hovered: .constant(nil))
+                    StatsSummaryLines(digest: digest, tokens: tokens)
+                }
+                .padding(16)
+            } else {
+                VStack(alignment: .leading, spacing: 12) {
+                    if !audit.isEmpty {
+                        AuditPane(entries: audit, hovered: .constant(nil))
+                    }
+                    StatsPane()
+                }
+                .padding(.top, fit ? 14 : 16)
+                .padding(.bottom, fit ? 0 : 16)
+                .frame(height: fit ? viewport : nil, alignment: .top)
+            }
+        }
             .frame(width: width, alignment: .topLeading)
-            .padding(.top, fit ? 14 : 16)
-            .padding(.bottom, fit ? 0 : 16)
-            .frame(height: fit ? viewport : nil, alignment: .top)
             .clipped()
             .background(Color(red: 0.055, green: 0.055, blue: 0.06))
             .environment(\.colorScheme, .dark)
-            // One body pass, no `onAppear`: the tiles print their settled figures
-            // rather than the zero the roll starts from.
-            .environment(\.statsFigureRoll, false)
 
         let renderer = ImageRenderer(content: content)
         renderer.scale = 2
@@ -1099,6 +952,63 @@ enum StatsSnapshot {
             try? png.write(to: URL(fileURLWithPath: path))
         }
         NSApp.terminate(nil)
+    }
+
+    /// A synthetic request log: `days` of working-day bursts, newest first. The
+    /// shape matters more than the numbers — bursts of a few requests with idle
+    /// time between them, a few failures, a few tool runs, the odd Jev call.
+    private static func demoAudit(days: Int) -> [RequestAudit.Entry] {
+        let calendar = Calendar.current
+        let providers = [("Notchi", "api.notch.website"), ("Command Code", "api.commandcode.ai"),
+                         ("Anthropic", "api.anthropic.com")]
+        let models = ["auto-us", "deepseek/deepseek-v4.1-flash", "claude-sonnet-5", "gpt-5.6-sol"]
+        var entries: [RequestAudit.Entry] = []
+        let now = Date()
+        for offset in stride(from: days - 1, through: 0, by: -1) {
+            guard let day = calendar.date(byAdding: .day, value: -offset, to: now) else { continue }
+            for burst in 0..<Int.random(in: 2...4) {
+                guard let start = calendar.date(bySettingHour: 9 + burst * 3,
+                                                minute: Int.random(in: 0...55),
+                                                second: 0, of: day), start < now else { continue }
+                var cursor = start
+                for _ in 0..<Int.random(in: 4...16) {
+                    let kindRoll = Int.random(in: 0...100)
+                    let transport: RequestAudit.Transport
+                    if kindRoll < 8 { transport = .tool }
+                    else if kindRoll < 14 { transport = .jev }
+                    else { transport = .http }
+                    let milliseconds = Int.random(in: 300...12000)
+                    let firstToken = transport == .tool ? nil
+                        : min(milliseconds, Int.random(in: 200...5000))
+                    let failed = Int.random(in: 0...28) == 0
+                    let provider = transport == .tool ? ("Tool", "") : providers.randomElement()!
+                    entries.append(RequestAudit.Entry(
+                        id: UUID(),
+                        at: cursor,
+                        provider: transport == .jev ? "Jev"
+                            : (transport == .tool ? "Tool" : provider.0),
+                        model: transport == .tool ? ["run_shell", "read_file", "web_search"].randomElement()!
+                            : (transport == .jev ? ["sense", "react", "linkcheck"].randomElement()!
+                                                 : models.randomElement()!),
+                        host: provider.1,
+                        transport: transport,
+                        outcome: failed ? .failed : .ok,
+                        status: transport == .jev || transport == .tool ? (failed ? 500 : 200)
+                            : (failed ? [429, 500, 402].randomElement()! : 200),
+                        kind: failed ? "http" : nil,
+                        milliseconds: milliseconds,
+                        firstToken: firstToken,
+                        inputTokens: transport == .tool || transport == .jev ? 0
+                            : Int.random(in: 400...9000),
+                        outputTokens: transport == .tool || transport == .jev ? 0
+                            : Int.random(in: 5...600),
+                        attempts: failed ? 3 : 1))
+                    cursor = cursor.addingTimeInterval(Double(milliseconds) / 1000
+                                                       + Double.random(in: 0.4...8))
+                }
+            }
+        }
+        return entries.sorted { $0.at > $1.at }
     }
 
     /// Nine months of plausible activity — enough to exercise a full grid, the

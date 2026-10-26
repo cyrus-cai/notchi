@@ -444,12 +444,19 @@ struct ClaudeCLIService: AIService {
             process.standardInput = inPipe
             process.standardError = errPipe
 
+            let audit = RequestAudit.shared.begin(provider: Provider.claudeCode.displayName,
+                                                  model: model ?? "",
+                                                  host: "claude",
+                                                  transport: .cli)
+            audit.attempt()
             let state = ClaudeStreamState()
+            state.audit = audit
 
             outPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
                 guard !data.isEmpty else { return }
                 for text in state.ingest(data) {
+                    audit.firstToken()
                     continuation.yield(text)
                 }
             }
@@ -469,26 +476,33 @@ struct ClaudeCLIService: AIService {
 
                 let snapshot = state.finish()
                 if let msg = snapshot.failure {
+                    audit.finish(.failed, kind: "cli")
                     continuation.finish(throwing: ClaudeCodeError.classify(msg))
                 } else if !snapshot.yieldedAny {
+                    audit.finish(.failed, kind: "cli")
                     if proc.terminationStatus != 0 {
                         continuation.finish(throwing: ClaudeCodeError.classify(snapshot.stderrTail))
                     } else {
                         continuation.finish(throwing: ClaudeCodeError.noOutput)
                     }
                 } else {
+                    audit.finish(.ok)
                     continuation.finish()
                 }
             }
 
             continuation.onTermination = { _ in
-                if process.isRunning { process.terminate() }
+                if process.isRunning {
+                    audit.finish(.cancelled)
+                    process.terminate()
+                }
             }
 
             do {
                 try process.run()
             } catch {
                 try? FileManager.default.removeItem(at: workDir)
+                audit.finish(.failed, kind: "spawn")
                 continuation.finish(throwing: ClaudeCodeError.spawnFailed(error.localizedDescription))
                 return
             }
@@ -507,6 +521,9 @@ struct ClaudeCLIService: AIService {
 /// `result` event carries `is_error` + a failure description. Lock-guarded —
 /// the readability and termination handlers run on different queues.
 private final class ClaudeStreamState {
+    /// The request this stream is answering, so reported usage lands on its
+    /// audit record as well as the running token total.
+    var audit: RequestAudit.Ticket?
     private let lock = NSLock()
     private var stdoutBuffer = Data()
     private var stderrTail = ""
@@ -540,7 +557,7 @@ private final class ClaudeStreamState {
                 // `result` event's own total is deliberately left alone, since
                 // taking both would count the same call twice.
                 if let usage = message["usage"] as? [String: Any] {
-                    AnthropicUsage.record(usage)
+                    AnthropicUsage.record(usage, audit: audit)
                 }
                 for block in content where block["type"] as? String == "text" {
                     if let text = block["text"] as? String, !text.isEmpty {

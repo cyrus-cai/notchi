@@ -746,11 +746,16 @@ struct CommandCodeCLIService: AIService {
                     continuation.finish(throwing: CommandCodeError.runFailed("no model")); return
                 }
                 let modelID = await Self.wireModelID(picked, apiKey: apiKey)
+                let audit = RequestAudit.shared.begin(provider: Provider.commandCode.displayName,
+                                                      model: modelID,
+                                                      host: Self.gatewayURL.host ?? "commandcode",
+                                                      transport: .http)
                 let schemas = Dictionary(tools.map { ($0.name, $0.schema) },
                                          uniquingKeysWith: { a, _ in a })
                 var emittedAny = false
                 var attempt = 0
                 while true {
+                    audit.attempt()
                     do {
                         var req = URLRequest(url: Self.gatewayURL)
                         req.httpMethod = "POST"
@@ -769,6 +774,7 @@ struct CommandCodeCLIService: AIService {
                         guard let http = response as? HTTPURLResponse else {
                             throw OpenAICompatAIService.ServiceError.malformedResponse(provider: "Command Code")
                         }
+                        audit.status(http.statusCode)
                         guard (200..<300).contains(http.statusCode) else {
                             let body = await OpenAICompatAIService.drainErrorBody(bytes.lines)
                             throw Self.httpError(status: http.statusCode, body: body, response: http)
@@ -789,10 +795,12 @@ struct CommandCodeCLIService: AIService {
                             case "text-delta":
                                 if let t = obj["text"] as? String, !t.isEmpty {
                                     emittedAny = true
+                                    audit.firstToken()
                                     continuation.yield(.text(t))
                                 }
                             case "reasoning-delta":
                                 if let t = obj["text"] as? String, !t.isEmpty {
+                                    audit.firstToken()
                                     if !reportedReasoning {
                                         reportedReasoning = true
                                         continuation.yield(.reasoningStarted)
@@ -821,8 +829,10 @@ struct CommandCodeCLIService: AIService {
                                 continuation.yield(.toolCall(id: id, name: name, input: input))
                             case "finish":
                                 if let usage = obj["totalUsage"] as? [String: Any] ?? obj["usage"] as? [String: Any] {
-                                    TokenMeter.shared.record(input: usage["inputTokens"] as? Int ?? 0,
-                                                             output: usage["outputTokens"] as? Int ?? 0)
+                                    let input = usage["inputTokens"] as? Int ?? 0
+                                    let output = usage["outputTokens"] as? Int ?? 0
+                                    TokenMeter.shared.record(input: input, output: output)
+                                    audit.tokens(input: input, output: output)
                                 }
                                 finishReason = (obj["finishReason"] as? String)
                                     ?? (obj["rawFinishReason"] as? String)
@@ -834,7 +844,11 @@ struct CommandCodeCLIService: AIService {
                             }
                             if terminated { break }
                         }
-                        if Task.isCancelled { continuation.finish(); return }
+                        if Task.isCancelled {
+                            audit.finish(.cancelled)
+                            continuation.finish()
+                            return
+                        }
                         if !terminated {
                             throw OpenAICompatAIService.ServiceError.cutOff(provider: "Command Code")
                         }
@@ -846,10 +860,12 @@ struct CommandCodeCLIService: AIService {
                             }
                             throw CommandCodeError.noOutput
                         }
+                        audit.finish(.ok)
                         continuation.yield(.finished(stopReason: Self.harnessStopReason(finishReason)))
                         continuation.finish()
                         return
                     } catch is CancellationError {
+                        audit.finish(.cancelled)
                         continuation.finish()
                         return
                     } catch {
@@ -857,9 +873,16 @@ struct CommandCodeCLIService: AIService {
                            StreamRetry.isRetryable(error) {
                             attempt += 1
                             do { try await StreamRetry.waitBeforeRetry(attempt, after: error) }
-                            catch { continuation.finish(); return }
+                            catch {
+                                audit.finish(.failed, error: error,
+                                             status: (error as? OpenAICompatAIService.ServiceError)?.httpStatus)
+                                continuation.finish()
+                                return
+                            }
                             continue
                         }
+                        audit.finish(.failed, error: error,
+                                     status: (error as? OpenAICompatAIService.ServiceError)?.httpStatus)
                         continuation.finish(throwing: error)
                         return
                     }

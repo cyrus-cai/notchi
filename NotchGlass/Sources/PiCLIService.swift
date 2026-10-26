@@ -629,12 +629,19 @@ struct PiCLIService: AIService {
             process.standardInput = inPipe
             process.standardError = errPipe
 
+            let audit = RequestAudit.shared.begin(provider: Provider.piCode.displayName,
+                                                  model: model ?? "",
+                                                  host: "pi",
+                                                  transport: .cli)
+            audit.attempt()
             let state = PiStreamState()
+            state.audit = audit
 
             outPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
                 guard !data.isEmpty else { return }
                 for text in state.ingest(data) {
+                    audit.firstToken()
                     continuation.yield(text)
                 }
             }
@@ -654,29 +661,39 @@ struct PiCLIService: AIService {
 
                 let snapshot = state.finish()
                 if let msg = snapshot.failure {
+                    audit.finish(.failed, kind: "cli")
                     continuation.finish(throwing: PiError.classify(msg))
                 } else if snapshot.yieldedAny {
+                    audit.finish(.ok)
                     continuation.finish()
                 } else if let tail = snapshot.finalText, !tail.isEmpty {
                     // A run whose answer never arrived as deltas (a short reply the
                     // provider returned whole) still has its text on the final message.
+                    audit.firstToken()
                     continuation.yield(tail)
+                    audit.finish(.ok)
                     continuation.finish()
                 } else if proc.terminationStatus != 0 {
+                    audit.finish(.failed, kind: "cli")
                     continuation.finish(throwing: PiError.classify(snapshot.stderrTail))
                 } else {
+                    audit.finish(.failed, kind: "cli")
                     continuation.finish(throwing: PiError.noOutput)
                 }
             }
 
             continuation.onTermination = { _ in
-                if process.isRunning { process.terminate() }
+                if process.isRunning {
+                    audit.finish(.cancelled)
+                    process.terminate()
+                }
             }
 
             do {
                 try process.run()
             } catch {
                 try? FileManager.default.removeItem(at: workDir)
+                audit.finish(.failed, kind: "spawn")
                 continuation.finish(throwing: PiError.spawnFailed(error.localizedDescription))
                 return
             }
@@ -699,6 +716,9 @@ struct PiCLIService: AIService {
 /// `errorMessage`. Lock-guarded: the readability and termination handlers run on
 /// different queues. Mirrors `CommandCodeStreamState`.
 private final class PiStreamState {
+    /// The request this stream is answering, so reported usage lands on its
+    /// audit record as well as the running token total.
+    var audit: RequestAudit.Ticket?
     private let lock = NSLock()
     private var stdoutBuffer = Data()
     private var stderrTail = ""
@@ -740,8 +760,10 @@ private final class PiStreamState {
                 // One `message_end` per model call, carrying that call's real usage —
                 // Stats' token figure is the sum of these and nothing else.
                 if let usage = message["usage"] as? [String: Any] {
-                    TokenMeter.shared.record(input: usage["input"] as? Int ?? 0,
-                                             output: usage["output"] as? Int ?? 0)
+                    let input = usage["input"] as? Int ?? 0
+                    let output = usage["output"] as? Int ?? 0
+                    TokenMeter.shared.record(input: input, output: output)
+                    audit?.tokens(input: input, output: output)
                 }
                 if let text = Self.text(in: message["content"]), !text.isEmpty {
                     finalText = text

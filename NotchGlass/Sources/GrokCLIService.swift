@@ -403,12 +403,19 @@ struct GrokCLIService: AIService {
             process.standardInput = FileHandle.nullDevice
             process.standardError = errPipe
 
+            let audit = RequestAudit.shared.begin(provider: Provider.grokCode.displayName,
+                                                  model: model ?? "",
+                                                  host: "grok",
+                                                  transport: .cli)
+            audit.attempt()
             let state = GrokStreamState()
+            state.audit = audit
 
             outPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
                 guard !data.isEmpty else { return }
                 for text in state.ingest(data) {
+                    audit.firstToken()
                     continuation.yield(text)
                 }
             }
@@ -434,26 +441,33 @@ struct GrokCLIService: AIService {
                 cleanup()
 
                 if let msg = snapshot.failure {
+                    audit.finish(.failed, kind: "cli")
                     continuation.finish(throwing: GrokError.classify(msg))
                 } else if !snapshot.yieldedAny {
+                    audit.finish(.failed, kind: "cli")
                     if proc.terminationStatus != 0 {
                         continuation.finish(throwing: GrokError.classify(snapshot.stderrTail))
                     } else {
                         continuation.finish(throwing: GrokError.noOutput)
                     }
                 } else {
+                    audit.finish(.ok)
                     continuation.finish()
                 }
             }
 
             continuation.onTermination = { _ in
-                if process.isRunning { process.terminate() }
+                if process.isRunning {
+                    audit.finish(.cancelled)
+                    process.terminate()
+                }
             }
 
             do {
                 try process.run()
             } catch {
                 cleanup()
+                audit.finish(.failed, kind: "spawn")
                 continuation.finish(throwing: GrokError.spawnFailed(error.localizedDescription))
             }
         }
@@ -683,6 +697,9 @@ enum GrokSearchMCPServer {
 /// text) is a failure. Lock-guarded — the readability and termination handlers run on
 /// different queues. Mirrors `ClaudeStreamState`.
 private final class GrokStreamState {
+    /// The request this stream is answering, so reported usage lands on its
+    /// audit record as well as the running token total.
+    var audit: RequestAudit.Ticket?
     private let lock = NSLock()
     private var stdoutBuffer = Data()
     private var stderrTail = ""
@@ -725,8 +742,10 @@ private final class GrokStreamState {
             case "end":
                 // The turn's real token cost, when the CLI reports it.
                 if let usage = obj["usage"] as? [String: Any] {
-                    TokenMeter.shared.record(input: usage["input_tokens"] as? Int ?? 0,
-                                             output: usage["output_tokens"] as? Int ?? 0)
+                    let input = usage["input_tokens"] as? Int ?? 0
+                    let output = usage["output_tokens"] as? Int ?? 0
+                    TokenMeter.shared.record(input: input, output: output)
+                    audit?.tokens(input: input, output: output)
                 }
                 // A terminal event whose stopReason names an error, with no text
                 // produced, is a failure worth surfacing (auth, quota, refusal).

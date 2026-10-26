@@ -5654,12 +5654,14 @@ final class NotchModel: ObservableObject {
         if let cached = historyBucketCounts { return cached }
         // Chat counts what Recent lists: with unified threads on, the main
         // thread is left out there, so a first run whose only row is the main
-        // thread has nothing to disclose.
+        // thread has nothing to disclose. The From copies thread is left out too.
         let hideMain = unifiedThreadsEnabled
+        let copies = copyThreadID
         var agent = 0
         var main = 0
         for item in history {
-            if item.source == .agent { agent += 1 } else if hideMain && item.mainThread { main += 1 }
+            if item.source == .agent { agent += 1 }
+            else if (hideMain && item.mainThread) || item.id == copies { main += 1 }
         }
         let counts = (chat: history.count - agent - main, agent: agent)
         historyBucketCounts = counts
@@ -5699,9 +5701,12 @@ final class NotchModel: ObservableObject {
         // Ask / Notes / Reminders.
         if let cached = chatFilteredHistoryCache { return cached }
         // With unified threads on, the main thread is reached from the resting
-        // notch, not from Recent.
+        // notch, not from Recent. The From copies thread opens from the ⋯ menu.
         let hideMain = unifiedThreadsEnabled
-        let items = filteredHistory.filter { $0.source != .agent && !(hideMain && $0.mainThread) }
+        let copies = copyThreadID
+        let items = filteredHistory.filter {
+            $0.source != .agent && !(hideMain && $0.mainThread) && $0.id != copies
+        }
         chatFilteredHistoryCache = items
         return items
     }
@@ -6516,6 +6521,8 @@ final class NotchModel: ObservableObject {
         if !forced {
             guard !UserDefaults.standard.bool(forKey: Self.welcomeGuideShownKey) else { return }
             UserDefaults.standard.set(true, forKey: Self.welcomeGuideShownKey)
+            // The guide has its own line about Audit.
+            UserDefaults.standard.set(true, forKey: Self.auditIntroDoneKey)
         }
         unifiedIntro = nil
         featureNudge = nil
@@ -6589,6 +6596,7 @@ final class NotchModel: ObservableObject {
             card.example = example
             next(card, sameTopic: true)
         }
+        next(Self.welcomeLine(L("welcome.b.audit")))
         if let gift = NoNoAccount.shared.snapshot?.gift, gift.remainingUSD > 0 {
             next(Self.welcomeLine(L("welcome.gift", InlineSettingsView.moneyCharged(gift.remainingUSD))))
         }
@@ -6703,6 +6711,53 @@ final class NotchModel: ObservableObject {
             guide.choicesShownFor = nil
             welcomeGuide = guide
         }
+    }
+
+    // MARK: - Audit note
+
+    /// The one-time note to an updated install that Settings → Audit exists,
+    /// written as an ordinary message from Notchi at the end of the main thread
+    /// (a thread of its own when there is none), so the peek shows it like any
+    /// answer. A first install hears the same from the welcome guide instead.
+    private static let auditIntroDoneKey = "auditIntroShown"
+    /// The release the note introduces.
+    static let auditIntroVersion = "0.9.19"
+
+    /// Write the note once per install. `NOTCH_DEMO_AUDIT_INTRO=1` writes it on
+    /// every launch.
+    func maybeStartAuditIntro() {
+        let forced = ProcessInfo.processInfo.environment["NOTCH_DEMO_AUDIT_INTRO"] == "1"
+        if !forced {
+            guard !UserDefaults.standard.bool(forKey: Self.auditIntroDoneKey),
+                  OnboardingService.hasRunBefore,
+                  !OnboardingService.shared.showIntro,
+                  welcomeGuide == nil
+            else { return }
+        }
+        // Not into a round still being written.
+        let main = history.firstIndex(where: { row in
+            row.mainThread && row.source == .ask && !row.pending
+                && !inFlightRounds.contains(where: { $0.threadID == row.id })
+        })
+        if main == nil, history.contains(where: { $0.mainThread && $0.source == .ask }) { return }
+        UserDefaults.standard.set(true, forKey: Self.auditIntroDoneKey)
+
+        var note = Turn(role: "assistant", text: L("auditIntro.invite", Self.auditIntroVersion))
+        note.isLocal = true
+        var item: HistoryItem
+        if let main {
+            item = history.remove(at: main)
+            item.turns = item.conversation + [note]
+            item.a = note.text
+            item.t = Date()
+        } else {
+            item = HistoryItem(q: "", a: note.text, t: Date(), turns: [note])
+            item.title = L("sidebar.audit")
+            item.mainThread = unifiedThreadsEnabled
+        }
+        history.insert(item, at: 0)
+        saveHistory()
+        if threadHistoryID == item.id { turns.append(note) }
     }
 
     // MARK: - Feature nudge
@@ -7738,7 +7793,7 @@ final class NotchModel: ObservableObject {
             var reply = ""
             // An emoji on the notch promises a reply. If the reply cannot come,
             // the eyes shake in its place instead of the emoji just vanishing.
-            var emojiOnScreen = shownEmoji != nil
+            var emojiOnScreen = shownEmoji
             do {
                 let chunks = NoNoRequestContext.$current.withValue(
                     NoNoRequestContext(surface: NoNoRequestContext.memory)
@@ -7753,7 +7808,7 @@ final class NotchModel: ObservableObject {
                     reply += chunk
                     if !shownEmoji, let emoji = Self.leadingEmoji(reply) {
                         shownEmoji = true
-                        emojiOnScreen = true
+                        emojiOnScreen = emoji
                         Self.copyTiming.notice("emoji \(Date().timeIntervalSince(startedAt), format: .fixed(precision: 2))s")
                         await MainActor.run {
                             guard let self, self.copySenseEnabled, !self.open else { return }
@@ -7762,21 +7817,23 @@ final class NotchModel: ObservableObject {
                     }
                 }
             } catch {
-                let shown = emojiOnScreen
+                let shown = emojiOnScreen != nil
                 await MainActor.run { shown ? self?.senseWriteFailed() : self?.senseLetGo() }
                 return
             }
             guard let self else { return }
-            let shown = emojiOnScreen
-            guard let plan = Self.parseCopyActions(reply) else {
-                await MainActor.run { shown ? self.senseWriteFailed() : self.senseLetGo() }
-                return
-            }
-            guard !plan.isEmpty || !plan.reply.isEmpty else {
-                // Nothing to do. Unseen, the notch simply stays still; with an
-                // emoji up and no reply to back it, the eyes shake instead.
+            let shown = emojiOnScreen != nil
+            guard let plan = Self.parseCopyActions(reply), !plan.isEmpty || !plan.reply.isEmpty else {
+                // Nothing to do, or a reply that does not follow the format.
+                // Unseen, the notch simply stays still. With an emoji up, the
+                // copy still gets a reply; only when that fails do the eyes shake.
+                guard let emoji = emojiOnScreen,
+                      let line = await Self.copyNothingDoneReply(clip, service: service) else {
+                    await MainActor.run { shown ? self.senseWriteFailed() : self.senseLetGo() }
+                    return
+                }
                 await MainActor.run {
-                    if shown { self.senseWriteFailed() } else { self.senseLetGo() }
+                    self.senseAnswered(clip: clip, reply: line, emoji: emoji, captures: [], at: now)
                 }
                 return
             }
@@ -7808,7 +7865,10 @@ final class NotchModel: ObservableObject {
                 case .failure: failed = true
                 }
             }
-            await MainActor.run {
+            let earlier = (captures: captures, failed: failed)
+            let written = await MainActor.run { () -> (captures: [Turn.Capture], failed: Bool) in
+                var captures = earlier.captures
+                var failed = earlier.failed
                 Self.copyTiming.notice("done \(Date().timeIntervalSince(startedAt), format: .fixed(precision: 2))s")
                 if remembers {
                     for (file, content, appends) in plan.files {
@@ -7825,27 +7885,75 @@ final class NotchModel: ObservableObject {
                         }
                     }
                 }
-                guard !failed else { return self.senseWriteFailed() }
+                return (captures, failed)
+            }
+            guard !written.failed else {
+                await MainActor.run { self.senseWriteFailed() }
+                return
+            }
 
-                // The emoji already on the notch stays the copy's answer. A reply
-                // always comes with one, so a model that skipped its EMOJI line
-                // still gets a plain acknowledgement.
-                let emoji = shownEmoji ?? (plan.emoji.isEmpty ? "👌" : plan.emoji)
+            // The emoji already on the notch stays the copy's answer. A reply
+            // always comes with one, so a model that skipped its EMOJI line
+            // still gets a plain acknowledgement.
+            let emoji = emojiOnScreen ?? (plan.emoji.isEmpty ? "👌" : plan.emoji)
+            var line = plan.reply
+            if !plan.ask, line.isEmpty, written.captures.isEmpty {
+                // Nothing was filed (Memory off, or no usable file name) and no
+                // reply was written: the emoji still needs one.
+                guard let made = await Self.copyNothingDoneReply(clip, service: service) else {
+                    await MainActor.run { self.senseWriteFailed() }
+                    return
+                }
+                line = made
+            }
+            await MainActor.run {
                 if plan.ask {
                     // A question is answered in the main thread by a real round
                     // (tools, search, the user's model); that answer is the
                     // reply, so no separate line is posted.
                     self.askCopyInCopyThread(clip)
+                    self.senseClip = nil
+                    self.clipboardSense = self.copySenseEnabled && !emoji.isEmpty
+                        ? .done(emoji: emoji) : .idle
+                    self.senseDismiss(after: 3)
                 } else {
-                    self.postCopyReply(clip: clip, reply: plan.reply, emoji: emoji,
-                                       captures: captures, at: now)
+                    self.senseAnswered(clip: clip, reply: line, emoji: emoji,
+                                       captures: written.captures, at: now)
                 }
-                self.senseClip = nil
-                self.clipboardSense = self.copySenseEnabled && !emoji.isEmpty
-                    ? .done(emoji: emoji) : .idle
-                self.senseDismiss(after: 3)
             }
         }
+    }
+
+    /// Post a handled copy's reply and leave its emoji on the notch for a moment.
+    private func senseAnswered(clip: String, reply: String, emoji: String,
+                               captures: [Turn.Capture], at date: Date) {
+        postCopyReply(clip: clip, reply: reply, emoji: emoji, captures: captures, at: date)
+        senseClip = nil
+        clipboardSense = copySenseEnabled && !emoji.isEmpty ? .done(emoji: emoji) : .idle
+        senseDismiss(after: 3)
+    }
+
+    /// One sentence for a copy that shows an emoji but had nothing done with
+    /// it (`copyNothingDoneSystemPrompt`). Nil when the request fails.
+    private static func copyNothingDoneReply(_ clip: String, service: AIService) async -> String? {
+        var text = ""
+        do {
+            let chunks = NoNoRequestContext.$current.withValue(
+                NoNoRequestContext(surface: NoNoRequestContext.memory)
+            ) {
+                service.stream(system: copyNothingDoneSystemPrompt,
+                               messages: [ChatMessage(role: "user", content: "The user copied:\n\(clip)")])
+            }
+            for try await chunk in chunks { text += chunk }
+        } catch {
+            return nil
+        }
+        // A model that kept the keyed format answers "REPLY: …".
+        var line = keyedLine(text.trimmingCharacters(in: .whitespacesAndNewlines))
+        if line.uppercased().hasPrefix("REPLY:") {
+            line = line.dropFirst(6).trimmingCharacters(in: .whitespaces)
+        }
+        return line.isEmpty ? nil : line
     }
 
     /// Ask a copied question in the main thread, headless: the round streams
@@ -8345,10 +8453,12 @@ final class NotchModel: ObservableObject {
             // already shows the invitation; decided again after the refresh
             // for an account that was not read yet.
             maybeStartUnifiedIntro()
+            maybeStartAuditIntro()
             Task {
                 await NoNoAccount.shared.refreshIfStale()
                 await FeatureNudges.shared.refreshIfDue()
                 maybeStartUnifiedIntro()
+                maybeStartAuditIntro()
                 maybeStartFeatureNudge()
             }
             if mode == .idle, turns.isEmpty, let round = inFlightRounds.last {

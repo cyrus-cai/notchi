@@ -486,7 +486,7 @@ final class NoNoAccount: ObservableObject {
                                              authorized: true) else { return nil }
         // A hint that arrives after this is no longer about the copy just made.
         request.timeoutInterval = 5
-        return try? await send(request)
+        return try? await jev("sense") { try await send(request) as SenseVerdict }
     }
 
     // MARK: - Reactions
@@ -550,7 +550,7 @@ final class NoNoAccount: ObservableObject {
         guard var request = try? jsonRequest("/react", body: ["text": text, "previous": previous],
                                              authorized: true) else { return nil }
         request.timeoutInterval = 5
-        return try? await send(request)
+        return try? await jev("react") { try await send(request) as ReactVerdict }
     }
 
     // MARK: - Link pre-check
@@ -570,7 +570,7 @@ final class NoNoAccount: ObservableObject {
                                              authorized: true) else { return nil }
         // The click is waiting on this.
         request.timeoutInterval = 3
-        return try? await send(request)
+        return try? await jev("linkcheck") { try await send(request) as LinkVerdict }
     }
 
     // MARK: - Follow-up check
@@ -591,7 +591,7 @@ final class NoNoAccount: ObservableObject {
         guard var request = try? jsonRequest("/followup", body: ["question": question, "answer": answer],
                                              authorized: true) else { return nil }
         request.timeoutInterval = 4
-        return try? await send(request)
+        return try? await jev("followup") { try await send(request) as FollowUpVerdict }
     }
 
     // MARK: - Web search
@@ -653,6 +653,26 @@ final class NoNoAccount: ObservableObject {
         if authorized { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         return request
+    }
+
+    /// Run one Jev call with its own record on Settings → Stats' request chart.
+    /// The gateway route is what the chart labels the call with ("sense",
+    /// "react", "linkcheck", "followup") — there is no model id here, because
+    /// the model behind these routes is the gateway's own business.
+    private func jev<T>(_ surface: String, _ run: () async throws -> T) async throws -> T {
+        let audit = RequestAudit.shared.beginJev(surface: surface,
+                                                 host: URL(string: base)?.host ?? "notch.website")
+        audit.attempt()
+        do {
+            let value = try await run()
+            audit.finish(.ok)
+            return value
+        } catch {
+            var status: Int?
+            if let failure = error as? Failed, case let .api(code, _, _) = failure { status = code }
+            audit.finish(.failed, error: error, status: status)
+            throw error
+        }
     }
 
     private func send<T: Decodable>(_ request: URLRequest) async throws -> T {

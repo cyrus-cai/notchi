@@ -26,6 +26,7 @@
 		A1000C71 /* ClipPrivacy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000C70 /* ClipPrivacy.swift */; };
 		A1000D91 /* LinkGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000D90 /* LinkGate.swift */; };
 		A1000D93 /* FeatureNudge.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000D92 /* FeatureNudge.swift */; };
+		A1000E91 /* VisualBlocks.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000E90 /* VisualBlocks.swift */; };
 		A1000C81 /* LinkCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000C80 /* LinkCard.swift */; };
 		A1000C21 /* ImageStack.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000C20 /* ImageStack.swift */; };
 		A10007E1 /* LucideIcons.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10007E0 /* LucideIcons.swift */; };
@@ -66,6 +67,8 @@
 		A1000080 /* WhatsNewService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000081 /* WhatsNewService.swift */; };
 		A1000340 /* StatsPane.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000341 /* StatsPane.swift */; };
 		A1000342 /* TokenMeter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000343 /* TokenMeter.swift */; };
+		A1000EA0 /* AuditPane.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000EA1 /* AuditPane.swift */; };
+		A1000EA2 /* RequestAudit.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000EA3 /* RequestAudit.swift */; };
 		A1000DC0 /* ToolCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000DC1 /* ToolCatalog.swift */; };
 		A10000C0 /* OnboardingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000C1 /* OnboardingService.swift */; };
 		A10000C2 /* IntroAnimation.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000C3 /* IntroAnimation.swift */; };
@@ -124,6 +127,8 @@
 		A1000081 /* WhatsNewService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhatsNewService.swift; sourceTree = "<group>"; };
 		A1000341 /* StatsPane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatsPane.swift; sourceTree = "<group>"; };
 		A1000343 /* TokenMeter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenMeter.swift; sourceTree = "<group>"; };
+		A1000EA1 /* AuditPane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuditPane.swift; sourceTree = "<group>"; };
+		A1000EA3 /* RequestAudit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RequestAudit.swift; sourceTree = "<group>"; };
 		A1000DC1 /* ToolCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolCatalog.swift; sourceTree = "<group>"; };
 		A10000C1 /* OnboardingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingService.swift; sourceTree = "<group>"; };
 		A10000C3 /* IntroAnimation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntroAnimation.swift; sourceTree = "<group>"; };
@@ -145,6 +150,7 @@
 		A1000C70 /* ClipPrivacy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipPrivacy.swift; sourceTree = "<group>"; };
 		A1000D90 /* LinkGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkGate.swift; sourceTree = "<group>"; };
 		A1000D92 /* FeatureNudge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeatureNudge.swift; sourceTree = "<group>"; };
+		A1000E90 /* VisualBlocks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisualBlocks.swift; sourceTree = "<group>"; };
 		A1000C80 /* LinkCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkCard.swift; sourceTree = "<group>"; };
 		A1000C20 /* ImageStack.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageStack.swift; sourceTree = "<group>"; };
 		A10007E0 /* LucideIcons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LucideIcons.swift; sourceTree = "<group>"; };
@@ -231,6 +237,8 @@
 				A1000081 /* WhatsNewService.swift */,
 				A1000341 /* StatsPane.swift */,
 				A1000343 /* TokenMeter.swift */,
+				A1000EA1 /* AuditPane.swift */,
+				A1000EA3 /* RequestAudit.swift */,
 				A1000DC1 /* ToolCatalog.swift */,
 				A10000C1 /* OnboardingService.swift */,
 				A10000C3 /* IntroAnimation.swift */,
@@ -253,6 +261,7 @@
 				A1000C70 /* ClipPrivacy.swift */,
 				A1000D90 /* LinkGate.swift */,
 				A1000D92 /* FeatureNudge.swift */,
+				A1000E90 /* VisualBlocks.swift */,
 				A1000C80 /* LinkCard.swift */,
 				A1000C20 /* ImageStack.swift */,
 				A10007E0 /* LucideIcons.swift */,
@@ -396,6 +405,8 @@
 				A1000080 /* WhatsNewService.swift in Sources */,
 				A1000340 /* StatsPane.swift in Sources */,
 				A1000342 /* TokenMeter.swift in Sources */,
+				A1000EA0 /* AuditPane.swift in Sources */,
+				A1000EA2 /* RequestAudit.swift in Sources */,
 				A1000DC0 /* ToolCatalog.swift in Sources */,
 				A10000C0 /* OnboardingService.swift in Sources */,
 				A10000C2 /* IntroAnimation.swift in Sources */,
@@ -418,6 +429,7 @@
 				A1000C71 /* ClipPrivacy.swift in Sources */,
 				A1000D91 /* LinkGate.swift in Sources */,
 				A1000D93 /* FeatureNudge.swift in Sources */,
+				A1000E91 /* VisualBlocks.swift in Sources */,
 				A1000C81 /* LinkCard.swift in Sources */,
 				A1000C21 /* ImageStack.swift in Sources */,
 				A10007E1 /* LucideIcons.swift in Sources */,
@@ -497,7 +509,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.9.18;
+				MARKETING_VERSION = 0.9.19;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -520,7 +532,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.9.18;
+				MARKETING_VERSION = 0.9.19;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;

@@ -412,6 +412,9 @@ struct ToolRegistry: Sendable {
         // A held-back tool called by name runs, and stays on the wire from
         // the next turn, so the call has a tool to match.
         if let loadout, loadout.isHeld(call.name) { loadout.load([call.name]) }
+        // The tool's run is part of the turn's processing flow, so it lands on
+        // Settings → Audit's chart beside the model calls that asked for it.
+        let audit = RequestAudit.shared.beginTool(call.name)
         do {
             if let sourced = tool as? SourcedTool {
                 let (text, sources) = try await sourced.runSourced(call.input)
@@ -420,13 +423,16 @@ struct ToolRegistry: Sendable {
             } else {
                 out.result = try await tool.execute(call.input)
             }
+            audit.finish(.ok)
         } catch let failure as SearchServiceError {
             out.result = failure.modelText
             out.isError = true
             out.searchFailure = failure
+            audit.finish(.failed, kind: "tool")
         } catch {
             out.result = "Error: \(error.localizedDescription)"
             out.isError = true
+            audit.finish(.failed, kind: "tool")
         }
         return out
     }

@@ -4495,7 +4495,8 @@ struct AssistantTurnView: View {
             // scrolling answer; the jump-free guarantee matters more.)
             MarkdownBlocks(source: linkLayout.lead, baseFont: cardFont, color: color,
                            onInAppCopy: onInAppCopy,
-                           streamingTail: streaming && !linkLayout.hasMore)
+                           streamingTail: streaming && !linkLayout.hasMore,
+                           streaming: streaming)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textSelection(.enabled)
                 .contextMenu { answerTurnMenu }
@@ -6564,6 +6565,10 @@ struct MarkdownBlocks: View {
     /// False everywhere else — settled answers and non-answer contexts render
     /// plain.
     var streamingTail: Bool = false
+    /// True while the answer is still being written. Only the last block can be
+    /// incomplete then, and a visual fence that cannot parse yet becomes a
+    /// skeleton rather than a code island.
+    var streaming: Bool = false
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -6592,7 +6597,8 @@ struct MarkdownBlocks: View {
                     // `.equatable()` — see the row's `Equatable` conformance for why.
                     MarkdownBlockRow(block: block, baseFont: baseFont, color: color,
                                      onInAppCopy: onInAppCopy,
-                                     fadeTail: streamingTail && !reduceMotion && i == parsed.count - 1)
+                                     fadeTail: streamingTail && !reduceMotion && i == parsed.count - 1,
+                                     isStreamingTail: streaming && i == parsed.count - 1)
                         .equatable()
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -6841,6 +6847,11 @@ struct MarkdownBlockRow: View, Equatable {
     /// appends, the previous tail's content is unchanged but this flag flips,
     /// and the row must re-evaluate to drop the fade renderer.
     var fadeTail: Bool = false
+    /// True on the final block of a streaming answer, whether or not the tail
+    /// fade is on. A `viz`/`card` fence parses as a code block until its closing
+    /// fence lands, so this is what tells the row to hold a skeleton instead of
+    /// flashing half a JSON object.
+    var isStreamingTail: Bool = false
     /// The row-level diff gate (used via `.equatable()` at every call site).
     /// `onInAppCopy` is a closure, and a closure field defeats SwiftUI's
     /// synthesized memberwise diff — without this, EVERY row of an answer
@@ -6851,7 +6862,7 @@ struct MarkdownBlockRow: View, Equatable {
     /// thread, so a row whose block/font/colour are unchanged renders identically.
     static func == (lhs: MarkdownBlockRow, rhs: MarkdownBlockRow) -> Bool {
         lhs.block == rhs.block && lhs.baseFont == rhs.baseFont && lhs.color == rhs.color
-            && lhs.fadeTail == rhs.fadeTail
+            && lhs.fadeTail == rhs.fadeTail && lhs.isStreamingTail == rhs.isStreamingTail
     }
 
     /// Only linear text rows fade; code and tables render whole (fading a code
@@ -6939,8 +6950,24 @@ struct MarkdownBlockRow: View, Equatable {
                 .textSelection(.enabled)
 
         case .code(let language, let text):
-            CodeBlockView(text: text, language: language, baseFont: baseFont, color: color,
-                          onInAppCopy: onInAppCopy)
+            // A `viz` / `card` fence is a visual block, not code. While the
+            // fence is still open the JSON is half-written, so the row holds a
+            // skeleton instead of rendering the fragment; once it closes, a
+            // spec that fails validation falls back to the code island, so no
+            // answer ever loses text to a bad block.
+            if VisualSpecParser.isVisual(language) {
+                if let spec = VisualSpecParser.parse(text, language: language), !spec.isEmpty {
+                    VisualBlockView(spec: spec, baseFont: baseFont)
+                } else if isStreamingTail {
+                    VisualSkeletonView()
+                } else {
+                    CodeBlockView(text: text, language: language, baseFont: baseFont,
+                                  color: color, onInAppCopy: onInAppCopy)
+                }
+            } else {
+                CodeBlockView(text: text, language: language, baseFont: baseFont, color: color,
+                              onInAppCopy: onInAppCopy)
+            }
 
         case .table(let header, let rows):
             MarkdownTableView(header: header, rows: rows, baseFont: baseFont, color: color)

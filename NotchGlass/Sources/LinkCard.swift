@@ -303,6 +303,10 @@ enum LinkCardSplitter {
         if isHeading(last) { return false }
         let next = line.trimmingCharacters(in: .whitespaces)
         if inList, isListItem(next) || isIndented(line) { return false }
+        // A chart or a card belongs to the sentence that introduces it: the
+        // blank line in front of its fence is breathing room, not a new bubble.
+        if next.hasPrefix("```") || next.hasPrefix("~~~"),
+           VisualSpecParser.isVisual(String(next.dropFirst(3))) { return false }
         return true
     }
 

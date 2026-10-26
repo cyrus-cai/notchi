@@ -326,7 +326,13 @@ extension DshCLIService {
             process.standardInput = inPipe
             process.standardError = errPipe
 
+            let audit = RequestAudit.shared.begin(provider: Provider.dshCode.displayName,
+                                                  model: model ?? "",
+                                                  host: "dsh",
+                                                  transport: .cli)
+            audit.attempt()
             let state = DshChatStreamState()
+            state.audit = audit
             outPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
                 if !data.isEmpty { state.ingest(data) }
@@ -349,27 +355,36 @@ extension DshCLIService {
 
                 let snapshot = state.finish()
                 if let msg = snapshot.failure {
+                    audit.finish(.failed, kind: "cli")
                     continuation.finish(throwing: DshError.classify(msg))
                 } else if !snapshot.answer.isEmpty {
                     // dsh's `--json` carries whole blocks, not token deltas, so the
                     // answer arrives in one piece.
+                    audit.firstToken()
                     continuation.yield(snapshot.answer)
+                    audit.finish(.ok)
                     continuation.finish()
                 } else if proc.terminationStatus != 0 {
+                    audit.finish(.failed, kind: "cli")
                     continuation.finish(throwing: DshError.classify(snapshot.stderrTail))
                 } else {
+                    audit.finish(.failed, kind: "cli")
                     continuation.finish(throwing: DshError.noOutput)
                 }
             }
 
             continuation.onTermination = { _ in
-                if process.isRunning { process.terminate() }
+                if process.isRunning {
+                    audit.finish(.cancelled)
+                    process.terminate()
+                }
             }
 
             do {
                 try process.run()
             } catch {
                 try? FileManager.default.removeItem(at: workDir)
+                audit.finish(.failed, kind: "spawn")
                 continuation.finish(throwing: DshError.spawnFailed(error.localizedDescription))
                 return
             }
@@ -386,6 +401,9 @@ extension DshCLIService {
 /// text; a failed turn ends with an empty `final` and an error `turn_end` reason,
 /// and a failure outside a turn writes an `error` event instead.
 private final class DshChatStreamState: @unchecked Sendable {
+    /// The request this stream is answering, so reported usage lands on its
+    /// audit record as well as the running token total.
+    var audit: RequestAudit.Ticket?
     private let lock = NSLock()
     private var buffer = Data()
     private var stderrTail = ""
@@ -418,6 +436,7 @@ private final class DshChatStreamState: @unchecked Sendable {
                         + (usage["cacheWriteTokens"] as? Int ?? 0)
                     TokenMeter.shared.record(input: input,
                                              output: usage["outputTokens"] as? Int ?? 0)
+                    audit?.tokens(input: input, output: usage["outputTokens"] as? Int ?? 0)
                 } else if obj["phase"] as? String == "turn_end" {
                     let reason = obj["reason"] as? [String: Any]
                     switch reason?["kind"] as? String {

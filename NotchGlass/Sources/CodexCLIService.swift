@@ -413,12 +413,19 @@ struct CodexCLIService: AIService {
             // All mutable stream state lives behind a lock — the stdout/stderr
             // readability handlers and the termination handler fire on separate
             // queues, so a plain captured `var` would be a data race.
+            let audit = RequestAudit.shared.begin(provider: Provider.codex.displayName,
+                                                  model: model ?? "",
+                                                  host: "codex",
+                                                  transport: .cli)
+            audit.attempt()
             let state = StreamState()
+            state.audit = audit
 
             outPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
                 guard !data.isEmpty else { return }
                 for text in state.ingest(data) {
+                    audit.firstToken()
                     continuation.yield(text)
                 }
             }
@@ -439,29 +446,36 @@ struct CodexCLIService: AIService {
 
                 let snapshot = state.finish()
                 if let msg = snapshot.failure {
+                    audit.finish(.failed, kind: "cli")
                     continuation.finish(throwing: CodexError.runFailed(msg))
                 } else if !snapshot.yieldedAny {
                     // No answer text: a non-zero exit is a real failure (surface the
                     // stderr tail); a clean exit with nothing is an empty response.
+                    audit.finish(.failed, kind: "cli")
                     if proc.terminationStatus != 0 {
                         continuation.finish(throwing: CodexError.runFailed(snapshot.stderrTail))
                     } else {
                         continuation.finish(throwing: CodexError.noOutput)
                     }
                 } else {
+                    audit.finish(.ok)
                     continuation.finish()
                 }
             }
 
             continuation.onTermination = { _ in
                 // Panel collapsed / round superseded → kill the process.
-                if process.isRunning { process.terminate() }
+                if process.isRunning {
+                    audit.finish(.cancelled)
+                    process.terminate()
+                }
             }
 
             do {
                 try process.run()
             } catch {
                 try? FileManager.default.removeItem(at: workDir)
+                audit.finish(.failed, kind: "spawn")
                 continuation.finish(throwing: CodexError.spawnFailed(error.localizedDescription))
                 return
             }
@@ -504,6 +518,9 @@ struct CodexCLIService: AIService {
 /// because the readability/termination handlers run on different queues. `ingest`
 /// returns the answer chunks parsed out of the data just read.
 private final class StreamState {
+    /// The request this stream is answering, so reported usage lands on its
+    /// audit record as well as the running token total.
+    var audit: RequestAudit.Ticket?
     private let lock = NSLock()
     private var stdoutBuffer = Data()
     private var stderrTail = ""
@@ -537,8 +554,10 @@ private final class StreamState {
             case "turn.completed":
                 // The turn's real token cost, as codex reports it.
                 if let usage = obj["usage"] as? [String: Any] {
-                    TokenMeter.shared.record(input: usage["input_tokens"] as? Int ?? 0,
-                                             output: usage["output_tokens"] as? Int ?? 0)
+                    let input = usage["input_tokens"] as? Int ?? 0
+                    let output = usage["output_tokens"] as? Int ?? 0
+                    TokenMeter.shared.record(input: input, output: output)
+                    audit?.tokens(input: input, output: output)
                 }
             case "error":
                 if let msg = obj["message"] as? String { failure = msg }

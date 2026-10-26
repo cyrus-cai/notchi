@@ -917,12 +917,19 @@ struct CursorCLIService: AIService {
             process.standardInput = FileHandle.nullDevice
             process.standardError = errPipe
 
+            let audit = RequestAudit.shared.begin(provider: Provider.cursorCode.displayName,
+                                                  model: model ?? "",
+                                                  host: "cursor-agent",
+                                                  transport: .cli)
+            audit.attempt()
             let state = CursorStreamState()
+            state.audit = audit
 
             outPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
                 guard !data.isEmpty else { return }
                 for text in state.ingest(data) {
+                    audit.firstToken()
                     continuation.yield(text)
                 }
             }
@@ -942,8 +949,10 @@ struct CursorCLIService: AIService {
 
                 let snapshot = state.finish()
                 if let msg = snapshot.failure {
+                    audit.finish(.failed, kind: "cli")
                     continuation.finish(throwing: CursorError.classify(msg))
                 } else if !snapshot.yieldedAny {
+                    audit.finish(.failed, kind: "cli")
                     if proc.terminationStatus != 0 {
                         continuation.finish(throwing: CursorError.classify(snapshot.stderrTail))
                     } else {
@@ -957,18 +966,23 @@ struct CursorCLIService: AIService {
                         }
                     }
                 } else {
+                    audit.finish(.ok)
                     continuation.finish()
                 }
             }
 
             continuation.onTermination = { _ in
-                if process.isRunning { process.terminate() }
+                if process.isRunning {
+                    audit.finish(.cancelled)
+                    process.terminate()
+                }
             }
 
             do {
                 try process.run()
             } catch {
                 try? FileManager.default.removeItem(at: workDir)
+                audit.finish(.failed, kind: "spawn")
                 continuation.finish(throwing: CursorError.spawnFailed(error.localizedDescription))
             }
         }
@@ -984,6 +998,9 @@ struct CursorCLIService: AIService {
 /// Lock-guarded — the readability and termination handlers run on different
 /// queues. Mirrors `ClaudeStreamState`.
 private final class CursorStreamState {
+    /// The request this stream is answering, so reported usage lands on its
+    /// audit record as well as the running token total.
+    var audit: RequestAudit.Ticket?
     private let lock = NSLock()
     private var stdoutBuffer = Data()
     /// Non-JSON stdout, kept for the one failure mode that reports itself there: a
@@ -1043,8 +1060,10 @@ private final class CursorStreamState {
                 // cache columns (the CLI subtracts them before printing), so it is
                 // taken as-is.
                 if let usage = obj["usage"] as? [String: Any] {
-                    TokenMeter.shared.record(input: usage["inputTokens"] as? Int ?? 0,
-                                             output: usage["outputTokens"] as? Int ?? 0)
+                    let input = usage["inputTokens"] as? Int ?? 0
+                    let output = usage["outputTokens"] as? Int ?? 0
+                    TokenMeter.shared.record(input: input, output: output)
+                    audit?.tokens(input: input, output: output)
                 }
                 // The run's verdict. On failure the `result` string (or subtype) is
                 // the best human-readable reason available.

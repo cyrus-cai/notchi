@@ -3159,9 +3159,9 @@ struct ModelSearchRow: View {
 
 /// Notchi models the user switched off in Settings → Models and Pricing. They
 /// stay out of the Ask chip's model menu. Every model is on by default except
-/// `offByDefault`, and the Auto routers cannot be switched off. Stored as
-/// newline-separated ids so Settings can bind it with `@AppStorage`: a bare id
-/// is switched off, a `+id` is an `offByDefault` model switched on.
+/// `offByDefault`. Stored as newline-separated ids so Settings can bind it with
+/// `@AppStorage`: a bare id is switched off, a `+id` is an `offByDefault` model
+/// switched on.
 enum NotchiModelVisibility {
     static let defaultsKey = "notchi_hidden_models"
 
@@ -3180,7 +3180,7 @@ enum NotchiModelVisibility {
     }
 
     static func isShown(_ id: String) -> Bool {
-        id.hasPrefix("auto-") || !hidden.contains(id)
+        !hidden.contains(id)
     }
 
     /// `raw` with `id` switched on or off.

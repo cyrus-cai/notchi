@@ -335,6 +335,38 @@ line, at most three, and don't also link it in the text. The app shows each \
 such line as a preview card and drops a line whose page does not open.
 """
 
+/// How an answer hands over a chart or a card: one fenced block the renderer
+/// turns into a visual (`VisualBlocks.swift`). The schema is small on purpose —
+/// the model fills five known marks rather than inventing markup, and a block
+/// that fails to parse is shown as code rather than swallowed.
+private let notchSystemPromptVisuals = """
+When an answer's point is a set of numbers, draw it instead of listing it. Put \
+one fenced block on its own line, after the sentence that introduces it:
+
+```viz
+{"type":"barh","title":"磁盘占用","total":"共 214 GB","items":[{"label":"Xcode","value":48.2,"note":"48 GB"},{"label":"照片","value":31,"note":"31 GB"}]}
+```
+
+`barh` ranks values largest first (a row named 其他 stays last); `line` shows a \
+trend over ordered labels (`points` instead of `items`); `donut` shows shares; \
+`stat` shows one figure, as `{"type":"stat","label":"本周专注时长","value":"12.4 h","delta":"+8%"}`.
+
+When an answer is about one thing with named attributes — a place, an event, a \
+product, a file — a card reads better than a paragraph:
+
+```card
+{"type":"card","icon":"calendar","title":"产品评审","subtitle":"明天 10:00 – 11:00","facts":[["参与人","6 人"],["议程","0.10 发布范围"]]}
+```
+
+`icon` is an SF Symbol name. An `action` of `{"label":"在地图中打开","url":"https://…"}` \
+adds one link.
+
+At most one block per answer, and only where it replaces numbers or facts you \
+would otherwise list. Use only numbers that already appear in the answer or a \
+tool result — never estimate to fill a chart. Do not repeat those numbers in \
+prose as well. A plain answer gets no block.
+"""
+
 /// What the user asked for is the thing done, not the message answered. Read
 /// back through the history (2026-10), the misses were all one shape: the model
 /// had the tools or the context to finish and handed the work back instead —
@@ -594,6 +626,7 @@ func notchSystemPrompt(advertisedTools: Set<String>? = nil) -> String {
     }
     var prompt = notchSystemPromptBase
     prompt += "\n\n" + notchSystemPromptLinkLine
+    prompt += "\n\n" + notchSystemPromptVisuals
     let bullets = notchSystemPromptToolStances.compactMap { stance -> String? in
         include(stance.tools) ? stance.copy : nil
     }
@@ -802,6 +835,15 @@ did, written for this case. Required whenever you write an EMOJI line without \
 ASK: an emoji always comes with a reply.
 If nothing is worth doing, reply NONE (and no EMOJI line), unless told the \
 user has already seen an emoji; then always reply.
+"""
+
+/// For `NotchModel.senseRemember`: the reply for a copy that already shows
+/// an emoji but had nothing saved or set.
+let copyNothingDoneSystemPrompt = """
+You are Notchi, a Mac assistant. The user copied the text below and already \
+saw your emoji for it, but nothing was saved or set. Write one short sentence \
+to the user, in their language, about this copy: what it is, and that nothing \
+from it needed keeping. Reply with the sentence only.
 """
 
 /// For `NotchModel.scanClipboardForMemories`: file the copies in clipboard
@@ -1908,6 +1950,10 @@ struct OpenAICompatAIService: AIService {
 
     func streamEvents(system: String, messages: [ChatMessage]) -> AsyncThrowingStream<ChatStreamEvent, Error> {
         AsyncThrowingStream { continuation in
+            let audit = RequestAudit.shared.begin(provider: provider.displayName,
+                                                  model: model,
+                                                  host: endpoint.host ?? endpoint.absoluteString,
+                                                  transport: .http)
             let task = Task {
                 // System prompt first, then the running conversation verbatim —
                 // so a follow-up is answered with every prior turn in context.
@@ -1924,6 +1970,7 @@ struct OpenAICompatAIService: AIService {
                 var yieldedAny = false
                 var attempt = 0
                 while true {
+                    audit.attempt()
                     do {
                         var req = URLRequest(url: endpoint)
                         req.httpMethod = "POST"
@@ -1949,6 +1996,7 @@ struct OpenAICompatAIService: AIService {
                         guard let http = response as? HTTPURLResponse else {
                             throw ServiceError.malformedResponse(provider: provider.displayName)
                         }
+                        audit.status(http.statusCode)
                         guard (200..<300).contains(http.statusCode) else {
                             // Drain the error body (capped) for a useful message.
                             let bodyText = await Self.drainErrorBody(bytes.lines)
@@ -2003,17 +2051,24 @@ struct OpenAICompatAIService: AIService {
                             // below drops everything that isn't a delta.
                             if let usage = chunk.usage {
                                 TokenMeter.shared.record(input: usage.input, output: usage.output)
+                                audit.tokens(input: usage.input, output: usage.output)
                             }
                             let delta = chunk.choices.first?.delta
                             if let thought = delta?.thinking, !thought.isEmpty {
                                 reportedReasoning = true
+                                audit.firstToken()
                                 continuation.yield(.reasoning(thought))
                             }
                             guard let piece = delta?.content, !piece.isEmpty else { continue }
                             yieldedAny = true
+                            audit.firstToken()
                             continuation.yield(.text(piece))
                         }
-                        if Task.isCancelled { continuation.finish(); return }
+                        if Task.isCancelled {
+                            audit.finish(.cancelled)
+                            continuation.finish()
+                            return
+                        }
                         // A clean finish that produced no text is a transient empty
                         // response (free models do this): retry it like a failure
                         // while we still can, otherwise surface it as an error so the
@@ -2039,9 +2094,11 @@ struct OpenAICompatAIService: AIService {
                         if !terminated {
                             throw ServiceError.cutOff(provider: provider.displayName)
                         }
+                        audit.finish(.ok)
                         continuation.finish()
                         return
                     } catch is CancellationError {
+                        audit.finish(.cancelled)
                         continuation.finish()
                         return
                     } catch {
@@ -2052,9 +2109,16 @@ struct OpenAICompatAIService: AIService {
                            StreamRetry.isRetryable(error) {
                             attempt += 1
                             do { try await StreamRetry.waitBeforeRetry(attempt, after: error) }
-                            catch { continuation.finish(); return }
+                            catch {
+                                audit.finish(.failed, error: error,
+                                             status: (error as? ServiceError)?.httpStatus)
+                                continuation.finish()
+                                return
+                            }
                             continue
                         }
+                        audit.finish(.failed, error: error,
+                                     status: (error as? ServiceError)?.httpStatus)
                         continuation.finish(throwing: error)
                         return
                     }
@@ -2270,6 +2334,11 @@ struct AnthropicAIService: AIService {
 
     func streamEvents(system: String, messages: [ChatMessage]) -> AsyncThrowingStream<ChatStreamEvent, Error> {
         AsyncThrowingStream { continuation in
+            let audit = RequestAudit.shared.begin(provider: provider.displayName,
+                                                  model: model,
+                                                  host: provider.endpoint.host
+                                                      ?? provider.endpoint.absoluteString,
+                                                  transport: .http)
             let task = Task {
                 // See `OpenAICompatAIService.stream` for the retry rationale: ride
                 // out a transient connect/first-token blip, but only ever before
@@ -2280,6 +2349,7 @@ struct AnthropicAIService: AIService {
                 // without the attachments. See `VisionProbe`.
                 var dropImages = false
                 while true {
+                    audit.attempt()
                     do {
                         var req = URLRequest(url: provider.endpoint)
                         req.httpMethod = "POST"
@@ -2308,6 +2378,7 @@ struct AnthropicAIService: AIService {
                         guard let http = response as? HTTPURLResponse else {
                             throw OpenAICompatAIService.ServiceError.malformedResponse(provider: provider.displayName)
                         }
+                        audit.status(http.statusCode)
                         guard (200..<300).contains(http.statusCode) else {
                             let bodyText = await OpenAICompatAIService.drainErrorBody(bytes.lines)
                             // Same bargain as the OpenAI-compatible path: an image
@@ -2348,20 +2419,28 @@ struct AnthropicAIService: AIService {
                             // wire — Anthropic reports usage on every stream.
                             if let usage = event.message?.usage {
                                 TokenMeter.shared.record(input: usage.input, output: 0)
+                                audit.tokens(input: usage.input, output: 0)
                             } else if let usage = event.usage {
                                 TokenMeter.shared.record(input: 0, output: usage.output)
+                                audit.tokens(input: 0, output: usage.output)
                             }
                             guard event.type == "content_block_delta" else { continue }
                             if event.delta?.type == "thinking_delta",
                                let thought = event.delta?.thinking, !thought.isEmpty {
+                                audit.firstToken()
                                 continuation.yield(.reasoning(thought))
                                 continue
                             }
                             guard let piece = event.delta?.text, !piece.isEmpty else { continue }
                             yieldedAny = true
+                            audit.firstToken()
                             continuation.yield(.text(piece))
                         }
-                        if Task.isCancelled { continuation.finish(); return }
+                        if Task.isCancelled {
+                            audit.finish(.cancelled)
+                            continuation.finish()
+                            return
+                        }
                         if !yieldedAny && attempt < StreamRetry.maxRetries {
                             attempt += 1
                             try await StreamRetry.waitBeforeRetry(attempt)
@@ -2373,9 +2452,11 @@ struct AnthropicAIService: AIService {
                         if !terminated {
                             throw OpenAICompatAIService.ServiceError.cutOff(provider: provider.displayName)
                         }
+                        audit.finish(.ok)
                         continuation.finish()
                         return
                     } catch is CancellationError {
+                        audit.finish(.cancelled)
                         continuation.finish()
                         return
                     } catch {
@@ -2383,9 +2464,16 @@ struct AnthropicAIService: AIService {
                            StreamRetry.isRetryable(error) {
                             attempt += 1
                             do { try await StreamRetry.waitBeforeRetry(attempt, after: error) }
-                            catch { continuation.finish(); return }
+                            catch {
+                                audit.finish(.failed, error: error,
+                                             status: (error as? OpenAICompatAIService.ServiceError)?.httpStatus)
+                                continuation.finish()
+                                return
+                            }
                             continue
                         }
+                        audit.finish(.failed, error: error,
+                                     status: (error as? OpenAICompatAIService.ServiceError)?.httpStatus)
                         continuation.finish(throwing: error)
                         return
                     }
@@ -2483,9 +2571,9 @@ struct AnthropicUsage: Decodable {
     /// and output sides are both final. That's what the CLI dialects hand back
     /// (they report per finished API call, as `[String: Any]` rather than
     /// something decoded), and what a non-streaming response carries.
-    static func record(_ usage: [String: Any]) {
-        recordInput(usage)
-        recordOutput(usage)
+    static func record(_ usage: [String: Any], audit: RequestAudit.Ticket? = nil) {
+        recordInput(usage, audit: audit)
+        recordOutput(usage, audit: audit)
     }
 
     /// A streaming turn splits its accounting across two events: `message_start`
@@ -2493,16 +2581,18 @@ struct AnthropicUsage: Decodable {
     /// side is taken from exactly one of them — `message_start` also carries a
     /// partial `output_tokens` (usually 1), and counting that as well would
     /// inflate every answer by a token or two.
-    static func recordInput(_ usage: [String: Any]) {
-        TokenMeter.shared.record(
-            input: (usage["input_tokens"] as? Int ?? 0)
-                + (usage["cache_read_input_tokens"] as? Int ?? 0)
-                + (usage["cache_creation_input_tokens"] as? Int ?? 0),
-            output: 0)
+    static func recordInput(_ usage: [String: Any], audit: RequestAudit.Ticket? = nil) {
+        let input = (usage["input_tokens"] as? Int ?? 0)
+            + (usage["cache_read_input_tokens"] as? Int ?? 0)
+            + (usage["cache_creation_input_tokens"] as? Int ?? 0)
+        TokenMeter.shared.record(input: input, output: 0)
+        audit?.tokens(input: input, output: 0)
     }
 
-    static func recordOutput(_ usage: [String: Any]) {
-        TokenMeter.shared.record(input: 0, output: usage["output_tokens"] as? Int ?? 0)
+    static func recordOutput(_ usage: [String: Any], audit: RequestAudit.Ticket? = nil) {
+        let output = usage["output_tokens"] as? Int ?? 0
+        TokenMeter.shared.record(input: 0, output: output)
+        audit?.tokens(input: 0, output: output)
     }
 }
 
@@ -4790,6 +4880,10 @@ extension OpenAICompatAIService: AgentCapableService {
                     tools: [ToolSpec],
                     requiredTool: String?) -> AsyncThrowingStream<TurnEvent, Error> {
         AsyncThrowingStream { continuation in
+            let audit = RequestAudit.shared.begin(provider: provider.displayName,
+                                                  model: model,
+                                                  host: endpoint.host ?? endpoint.absoluteString,
+                                                  transport: .http)
             let task = Task {
                 // Retry the connect/first-event phase on a transient blip, only
                 // while nothing meaningful has reached the harness yet. For a tool
@@ -4802,6 +4896,7 @@ extension OpenAICompatAIService: AgentCapableService {
                 // learned about) — see `ToolReasoningOptOut`.
                 var noReasoning = false
                 while true {
+                    audit.attempt()
                     do {
                         var req = URLRequest(url: endpoint)
                         req.httpMethod = "POST"
@@ -4902,6 +4997,7 @@ extension OpenAICompatAIService: AgentCapableService {
                         guard let http = response as? HTTPURLResponse else {
                             throw ServiceError.malformedResponse(provider: provider.displayName)
                         }
+                        audit.status(http.statusCode)
                         guard (200..<300).contains(http.statusCode) else {
                             let bodyText = await Self.drainErrorBody(bytes.lines)
                             // The vendor telling us this model won't run tools while
@@ -4950,9 +5046,10 @@ extension OpenAICompatAIService: AgentCapableService {
                             // The usage trailer is a chunk with no `choices` at
                             // all, so it is read before the guard that requires one.
                             if let usage = obj["usage"] as? [String: Any] {
-                                TokenMeter.shared.record(
-                                    input: usage["prompt_tokens"] as? Int ?? 0,
-                                    output: usage["completion_tokens"] as? Int ?? 0)
+                                let input = usage["prompt_tokens"] as? Int ?? 0
+                                let output = usage["completion_tokens"] as? Int ?? 0
+                                TokenMeter.shared.record(input: input, output: output)
+                                audit.tokens(input: input, output: output)
                             }
                             // Search-grounded chat models such as Perplexity Sonar
                             // carry the source map beside the ordinary OpenAI
@@ -4991,6 +5088,7 @@ extension OpenAICompatAIService: AgentCapableService {
                             let rawReasoning = (delta["reasoning_content"] as? String)
                                 ?? (delta["reasoning"] as? String)
                             if let rawReasoning, !rawReasoning.isEmpty {
+                                audit.firstToken()
                                 if !reportedReasoning {
                                     reportedReasoning = true
                                     continuation.yield(.reasoningStarted)
@@ -5018,6 +5116,7 @@ extension OpenAICompatAIService: AgentCapableService {
                             if let content = delta["content"] as? String, !content.isEmpty {
                                 yieldedText = true
                                 emittedAny = true
+                                audit.firstToken()
                                 continuation.yield(.text(content))
                             }
                             if let toolCalls = delta["tool_calls"] as? [[String: Any]] {
@@ -5032,6 +5131,7 @@ extension OpenAICompatAIService: AgentCapableService {
                                             // are still streaming. Announce it now so the
                                             // activity line doesn't wait for the JSON tail.
                                             if entry.name.isEmpty {
+                                                audit.firstToken()
                                                 continuation.yield(.toolCallStarted(name: n))
                                             }
                                             entry.name = n
@@ -5042,7 +5142,11 @@ extension OpenAICompatAIService: AgentCapableService {
                                 }
                             }
                         }
-                        if Task.isCancelled { continuation.finish(); return }
+                        if Task.isCancelled {
+                            audit.finish(.cancelled)
+                            continuation.finish()
+                            return
+                        }
 
                         let namedCalls = callsByIndex.keys.sorted().compactMap { idx -> (id: String, name: String, args: String)? in
                             let c = callsByIndex[idx]!
@@ -5072,6 +5176,7 @@ extension OpenAICompatAIService: AgentCapableService {
                             // worth one more try — that one IS transient. Silence on
                             // an intact stream is not.
                             if reportedReasoning, terminated || attempt >= StreamRetry.maxRetries {
+                                audit.finish(.ok)
                                 continuation.yield(.finished(stopReason: finishReason))
                                 continuation.finish()
                                 return
@@ -5097,10 +5202,12 @@ extension OpenAICompatAIService: AgentCapableService {
                             continuation.yield(.toolCall(id: c.id, name: c.name,
                                                          input: AgentWire.decodeArgs(c.args)))
                         }
+                        audit.finish(.ok)
                         continuation.yield(.finished(stopReason: finishReason))
                         continuation.finish()
                         return
                     } catch is CancellationError {
+                        audit.finish(.cancelled)
                         continuation.finish()
                         return
                     } catch {
@@ -5108,9 +5215,16 @@ extension OpenAICompatAIService: AgentCapableService {
                            StreamRetry.isRetryable(error) {
                             attempt += 1
                             do { try await StreamRetry.waitBeforeRetry(attempt, after: error) }
-                            catch { continuation.finish(); return }
+                            catch {
+                                audit.finish(.failed, error: error,
+                                             status: (error as? ServiceError)?.httpStatus)
+                                continuation.finish()
+                                return
+                            }
                             continue
                         }
+                        audit.finish(.failed, error: error,
+                                     status: (error as? ServiceError)?.httpStatus)
                         continuation.finish(throwing: error)
                         return
                     }
@@ -5281,6 +5395,11 @@ extension AnthropicAIService: AgentCapableService {
                     tools: [ToolSpec],
                     requiredTool: String?) -> AsyncThrowingStream<TurnEvent, Error> {
         AsyncThrowingStream { continuation in
+            let audit = RequestAudit.shared.begin(provider: provider.displayName,
+                                                  model: model,
+                                                  host: provider.endpoint.host
+                                                      ?? provider.endpoint.absoluteString,
+                                                  transport: .http)
             let task = Task {
                 // Retry the connect/first-event phase on a transient blip, only
                 // while nothing meaningful (text OR a tool call) has reached the
@@ -5290,6 +5409,7 @@ extension AnthropicAIService: AgentCapableService {
                 var emittedAny = false
                 var attempt = 0
                 while true {
+                    audit.attempt()
                     do {
                         var req = URLRequest(url: provider.endpoint)
                         req.httpMethod = "POST"
@@ -5337,6 +5457,7 @@ extension AnthropicAIService: AgentCapableService {
                         guard let http = response as? HTTPURLResponse else {
                             throw OpenAICompatAIService.ServiceError.malformedResponse(provider: provider.displayName)
                         }
+                        audit.status(http.statusCode)
                         guard (200..<300).contains(http.statusCode) else {
                             let bodyText = await OpenAICompatAIService.drainErrorBody(bytes.lines)
                             throw OpenAICompatAIService.ServiceError.http(provider: provider.displayName,
@@ -5375,7 +5496,7 @@ extension AnthropicAIService: AgentCapableService {
                                 // half lands on `message_delta` below.
                                 if let message = obj["message"] as? [String: Any],
                                    let usage = message["usage"] as? [String: Any] {
-                                    AnthropicUsage.recordInput(usage)
+                                    AnthropicUsage.recordInput(usage, audit: audit)
                                 }
                             case "content_block_start":
                                 let idx = obj["index"] as? Int ?? 0
@@ -5387,6 +5508,7 @@ extension AnthropicAIService: AgentCapableService {
                                     // the arguments stream behind it — announce the
                                     // call now so the activity line doesn't wait.
                                     if !name.isEmpty {
+                                        audit.firstToken()
                                         continuation.yield(.toolCallStarted(name: name))
                                     }
                                     blocks[idx] = (id: id, name: name, partialJSON: "")
@@ -5398,6 +5520,7 @@ extension AnthropicAIService: AgentCapableService {
                                 case "thinking_delta":
                                     if let thinking = delta["thinking"] as? String,
                                        !thinking.isEmpty {
+                                        audit.firstToken()
                                         if !reportedReasoning {
                                             reportedReasoning = true
                                             continuation.yield(.reasoningStarted)
@@ -5407,6 +5530,7 @@ extension AnthropicAIService: AgentCapableService {
                                 case "text_delta":
                                     if let t = delta["text"] as? String, !t.isEmpty {
                                         emittedAny = true
+                                        audit.firstToken()
                                         continuation.yield(.text(t))
                                     }
                                 case "input_json_delta":
@@ -5432,7 +5556,7 @@ extension AnthropicAIService: AgentCapableService {
                                     stopReason = sr
                                 }
                                 if let usage = obj["usage"] as? [String: Any] {
-                                    AnthropicUsage.recordOutput(usage)
+                                    AnthropicUsage.recordOutput(usage, audit: audit)
                                 }
                             case "message_stop":
                                 terminated = true
@@ -5440,7 +5564,11 @@ extension AnthropicAIService: AgentCapableService {
                                 break
                             }
                         }
-                        if Task.isCancelled { continuation.finish(); return }
+                        if Task.isCancelled {
+                            audit.finish(.cancelled)
+                            continuation.finish()
+                            return
+                        }
 
                         // A turn that produced neither text nor a tool call is an
                         // empty response — retry like a transient failure while we
@@ -5456,10 +5584,12 @@ extension AnthropicAIService: AgentCapableService {
                         if !terminated {
                             throw OpenAICompatAIService.ServiceError.cutOff(provider: provider.displayName)
                         }
+                        audit.finish(.ok)
                         continuation.yield(.finished(stopReason: stopReason))
                         continuation.finish()
                         return
                     } catch is CancellationError {
+                        audit.finish(.cancelled)
                         continuation.finish()
                         return
                     } catch {
@@ -5467,9 +5597,16 @@ extension AnthropicAIService: AgentCapableService {
                            StreamRetry.isRetryable(error) {
                             attempt += 1
                             do { try await StreamRetry.waitBeforeRetry(attempt, after: error) }
-                            catch { continuation.finish(); return }
+                            catch {
+                                audit.finish(.failed, error: error,
+                                             status: (error as? OpenAICompatAIService.ServiceError)?.httpStatus)
+                                continuation.finish()
+                                return
+                            }
                             continue
                         }
+                        audit.finish(.failed, error: error,
+                                     status: (error as? OpenAICompatAIService.ServiceError)?.httpStatus)
                         continuation.finish(throwing: error)
                         return
                     }

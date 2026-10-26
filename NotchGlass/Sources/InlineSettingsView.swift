@@ -401,7 +401,7 @@ struct InlineSettingsView: View {
         case appearance = "Appearance" // notch style, interaction, and display placement
         case shortcuts = "Shortcuts" // editable keyboard controls + copy sensing, its own top-level settings category
         case general = "General" // language, app presence, note destination, permissions, + Advanced (proxy)
-        case stats = "Stats"     // what the archive adds up to — read-only
+        case stats = "Stats"     // what the archive adds up to, and the requests behind it — read-only
         case about = "About"     // version + self-update
         case licenses = "Licenses" // third-party attribution and licences
         case survey = "Survey"   // the About pane's survey
@@ -448,7 +448,7 @@ struct InlineSettingsView: View {
             case .general:    return L("sidebar.general")
             case .shortcuts:  return L("sidebar.shortcuts")
             case .appearance: return L("sidebar.appearance")
-            case .stats:      return L("sidebar.stats")
+            case .stats:      return L("sidebar.audit")
             case .about:      return L("sidebar.about")
             case .licenses:   return L("about.licenses")
             case .survey:     return L("survey.title")
@@ -610,6 +610,16 @@ struct InlineSettingsView: View {
     @State private var stats: StatsDigest?
     /// The token odometer's reading, refreshed alongside the digest.
     @State private var statsTokens = TokenMeter.Reading(total: 0)
+
+    /// What Settings → Audit draws, newest first. Read from `RequestAudit` and
+    /// refreshed whenever it files a request, so a reply landing while the pane
+    /// is open shows up on it.
+    @State private var auditEntries: [RequestAudit.Entry] = []
+    /// The bar under the pointer on the Audit chart. Lives here for the same
+    /// reason `statsHover` does: the line that names it is drawn in the header.
+    @State private var auditHover: RequestAudit.Entry?
+    /// Whether the sidebar's Audit row has been clicked; its New tag goes then.
+    @State private var auditSeen = SettingsNewMarks.auditSeen
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -1175,8 +1185,13 @@ struct InlineSettingsView: View {
             // The gear's update dot continues here: it leads to settings,
             // then the About entry carries it the rest of the way to the
             // update action — a quiet neutral dot, never a coloured one.
-            badged: s == .about && isUpdateAvailable
+            badged: s == .about && isUpdateAvailable,
+            isNew: s == .stats && !auditSeen
         ) {
+            if s == .stats, !auditSeen {
+                auditSeen = true
+                SettingsNewMarks.auditSeen = true
+            }
             showSection(s)
         }
     }
@@ -1187,6 +1202,7 @@ struct InlineSettingsView: View {
     /// and both columns stepped right before sliding back.
     private func showSection(_ s: Section) {
         labelColumnWidth = 0
+        auditHover = nil
         withAnimation(.easeOut(duration: 0.16)) { section = s }
     }
 
@@ -1201,6 +1217,7 @@ struct InlineSettingsView: View {
         var title: String
         var selected: Bool
         var badged: Bool
+        var isNew = false
         var action: () -> Void
 
         @State private var hovering = false
@@ -1233,6 +1250,9 @@ struct InlineSettingsView: View {
                     Circle()
                         .fill(Tokens.text2)
                         .frame(width: 5, height: 5)
+                }
+                if isNew {
+                    NewBadge()
                 }
                 Spacer(minLength: 0)
             }
@@ -1316,7 +1336,8 @@ struct InlineSettingsView: View {
     /// square under the pointer has already said the rest.
     @ViewBuilder
     private var statsReadout: some View {
-        if section == .stats, let day = statsHover?.day, let stats {
+        if section == .stats || section == .about,
+           let day = statsHover?.day, let stats {
             let buckets = StatsFormat.dayBreakdown(stats.breakdown[day] ?? .init())
             Text(buckets.map { L("stats.dayTip", StatsFormat.day(day), $0) }
                  ?? StatsFormat.day(day))
@@ -2364,9 +2385,10 @@ struct InlineSettingsView: View {
         let hidden = NotchiModelVisibility.hidden(in: hiddenNotchiModels)
         let rows = nonoLineupRows
         let picked = Self.walletCardIDs.compactMap { id in rows.first { $0.id == id } }
+            .filter { !hidden.contains($0.id) }
         let fill = NotchiModelVisibility.ordered(rows, id: \.id)
             .filter { row in
-                (row.id.hasPrefix("auto-") || !hidden.contains(row.id))
+                !hidden.contains(row.id)
                     && !picked.contains { $0.id == row.id }
             }
         return (picked + fill)
@@ -2484,10 +2506,9 @@ struct InlineSettingsView: View {
                     .lineLimit(1)
                     // Written in full, never "US Pro…".
                     .fixedSize(horizontal: true, vertical: false)
-                // Shown in the Ask chip's model menu. Auto is always there.
-                let isAuto = row.id.hasPrefix("auto-")
+                // Shown in the Ask chip's model menu.
                 Toggle("", isOn: Binding(
-                    get: { isAuto || !NotchiModelVisibility.hidden(in: hiddenNotchiModels)
+                    get: { !NotchiModelVisibility.hidden(in: hiddenNotchiModels)
                                           .contains(row.id) },
                     set: { shown in
                         Haptics.levelChange()
@@ -2498,11 +2519,6 @@ struct InlineSettingsView: View {
                     .toggleStyle(.switch)
                     .controlSize(.mini)
                     .tint(Tokens.text2)
-                    .disabled(isAuto)
-                    // Auto is always on, so it has no switch to show. Hidden
-                    // rather than removed, so the origin column stays aligned.
-                    .opacity(isAuto ? 0 : 1)
-                    .accessibilityHidden(isAuto)
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
         }
@@ -6826,23 +6842,37 @@ struct InlineSettingsView: View {
 
     // MARK: - About
 
+    // MARK: - Audit
+
+    private func reloadAudit() {
+        auditEntries = Array(RequestAudit.shared.recent.reversed())
+    }
+
     // MARK: - Stats
 
-    /// Settings → **Stats**. The pane is a pure function of the archive, so this
-    /// holds nothing but the folded digest and refreshes it when the archive
-    /// grows under it (an answer can land while the pane is open).
+    /// Settings → **Stats**: what the archive adds up to, then the requests that
+    /// produced the tokens beside it. One pane because they answer one question —
+    /// the totals say how much, the flow chart says over what.
     private var statsSection: some View {
-        Group {
-            if let stats {
-                StatsPane(digest: stats, tokens: statsTokens, hovered: $statsHover)
-            } else {
-                // Deliberately blank until the first fold lands: the archive
-                // decodes asynchronously at launch, and flashing "no activity
-                // yet" for a frame before the numbers arrive reads as a bug.
-                Color.clear.frame(height: 1)
+        VStack(alignment: .leading, spacing: 12) {
+            // The request chart leads: it is the page's one live picture, and
+            // its detail footer has to be on screen without scrolling — the
+            // archive's own totals below it are already steady numbers.
+            // Where the record lives sits above it, at the top right.
+            HStack {
+                Spacer(minLength: 0)
+                StatsPane()
+            }
+            .padding(.bottom, 6)
+            if !auditEntries.isEmpty {
+                AuditPane(entries: auditEntries, hovered: $auditHover)
             }
         }
         .task(id: statsFingerprint) { await refreshStats() }
+        .onAppear { reloadAudit() }
+        .onReceive(NotificationCenter.default.publisher(for: RequestAudit.didChange)) { _ in
+            reloadAudit()
+        }
     }
 
     /// What has to change for the digest to be stale. Not `history.count` alone:
@@ -6931,6 +6961,7 @@ struct InlineSettingsView: View {
             }
             .padding(.top, 2)
         }
+        .task(id: statsFingerprint) { await refreshStats() }
     }
 
     /// The whole update story in one slot, right under the version number where
@@ -7052,6 +7083,16 @@ struct InlineSettingsView: View {
                                   title: L("about.discord")) {
                     LinkGate.shared.open(URL(string: "https://discord.gg/wdMH3CC9CW")!)
                 }
+            }
+
+            // The archive's day grid, moved out of Stats: a year of use is a
+            // thing About can say, and it says it without a card around it.
+            if let stats, !stats.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    StatsActivityGrid(digest: stats, hovered: $statsHover)
+                    StatsSummaryLines(digest: stats, tokens: statsTokens)
+                }
+                .padding(.top, 14)
             }
 
             surveyEntry
@@ -9307,6 +9348,13 @@ private struct HotKeyRecorder: NSViewRepresentable {
 /// The "New" marks on the settings pane, and whether they have been answered.
 enum SettingsNewMarks {
     private static let copySenseKey = "settingsCopySenseSeen"
+    private static let auditKey = "settingsAuditSeen"
+
+    /// The sidebar's Audit row, until it is first clicked.
+    static var auditSeen: Bool {
+        get { UserDefaults.standard.bool(forKey: auditKey) }
+        set { UserDefaults.standard.set(newValue, forKey: auditKey) }
+    }
 
     static var copySenseSeen: Bool {
         get { UserDefaults.standard.bool(forKey: copySenseKey) }

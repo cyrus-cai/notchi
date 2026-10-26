@@ -87,7 +87,7 @@ final class DiagnosticsLog: @unchecked Sendable {
     /// Map a raw error to a short, payload-free category. URLError cases become
     /// network categories; everything else is "unknown". Crucially this reads only
     /// the error's *type/code*, never any attached message that might carry content.
-    private static func categorize(_ error: Error?) -> String {
+    static func categorize(_ error: Error?) -> String {
         guard let error else { return "unknown" }
         if error is CancellationError { return "cancelled" }
         if let urlError = error as? URLError {

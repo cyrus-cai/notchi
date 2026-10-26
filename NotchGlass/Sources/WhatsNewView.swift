@@ -361,6 +361,10 @@ struct WhatsNewView: View {
             case .forceClickPressure:
                 model.settingsSection = InlineSettingsView.Section.appearance.rawValue
                 model.openSettings()
+            case .audit:
+                SettingsNewMarks.auditSeen = true
+                model.settingsSection = InlineSettingsView.Section.stats.rawValue
+                model.openSettings()
             }
         } label: {
             Text(action.title)
@@ -377,6 +381,8 @@ struct WhatsNewView: View {
         switch action {
         case .forceClickPressure:
             !model.forceClickPressure.isEnabled
+        case .audit:
+            true
         }
     }
 
@@ -405,6 +411,8 @@ struct WhatsNewView: View {
                             .strokeBorder(Tokens.hairline, lineWidth: 0.75)
                     )
                     .accessibilityHidden(true)
+            case .audit:
+                EmptyView()
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
