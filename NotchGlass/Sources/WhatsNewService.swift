@@ -53,10 +53,13 @@ final class WhatsNewService: ObservableObject {
         enum Action: String, Equatable {
             /// Settings → Appearance, where Force click pressure lives.
             case forceClickPressure
+            /// Settings → Audit, the request record.
+            case audit
 
             var title: String {
                 switch self {
                 case .forceClickPressure: L("whatsnew.action.forceClick")
+                case .audit: L("whatsnew.action.audit")
                 }
             }
         }
@@ -103,6 +106,23 @@ final class WhatsNewService: ObservableObject {
     /// English-only by design. Order doesn't matter — `sorted` puts the newest
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
+        Entry(
+            version: "0.9.19",
+            date: "2026-10-26",
+            headline: "You can now review every request Notchi sends.",
+            heroAssetName: "WhatsNew0919Promo",
+            features: [
+                "Settings → Audit lists every request Notchi sends: the model, where it was sent, how long it took, and the tokens it used.",
+                "Answers can show numbers as charts and details as cards.",
+            ],
+            improvements: [
+                "Auto can now be turned off in the model list.",
+                "Copy Sense replies in one line when a copy needs nothing saved.",
+                "The Thread tab on the side page is now called Sub-thread.",
+            ],
+            action: .audit,
+            actionAfter: 0
+        ),
         Entry(
             version: "0.9.18",
             date: "2026-10-22",
