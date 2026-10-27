@@ -4623,6 +4623,25 @@ final class NotchModel: ObservableObject {
         }
     }
 
+    /// The card before an MCP tool that changes something runs: which tool,
+    /// from which server, with what arguments.
+    func confirmMCPCall(answerID: UUID, server: String, tool: String,
+                        input: [String: Any]) async throws -> Bool {
+        let copy = shellConfirmationCopy()
+        var detail = ""
+        if !input.isEmpty, JSONSerialization.isValidJSONObject(input),
+           let data = try? JSONSerialization.data(withJSONObject: input, options: [.sortedKeys]) {
+            detail = String(decoding: data, as: UTF8.self)
+            if detail.count > 600 { detail = detail.prefix(600) + "…" }
+        }
+        let choice = try await awaitUserChoice(
+            answerID: answerID,
+            question: L("mcp.confirm", tool, server) + (detail.isEmpty ? "" : "\n" + detail),
+            options: [copy.cancel, copy.run],
+            inlineOptions: true)
+        return choice == "The user chose: \"\(copy.run)\""
+    }
+
     /// The card a command flagged by `ShellRisk` waits on: what an `osascript`
     /// send or delete will do (`scriptActionCopy`), the command as written,
     /// then Cancel / Run. Anything but Run — Cancel, or the card timing
@@ -11135,11 +11154,22 @@ final class NotchModel: ObservableObject {
                     guard let self else { return .empty }
                     return await MainActor.run { self.searchArchive(query, offWire: offWire) }
                 })
+                // The user's MCP servers come last, so the built-in prefix of
+                // the list stays the same with or without them. Past
+                // `MCPHub.advertiseLimit` they wait behind `load_tools`.
+                MCPHub.shared.reloadIfChanged()
+                let mcpTools = MCPHub.shared.agentTools { [weak self] server, tool, input in
+                    guard let self else { throw CancellationError() }
+                    return try await self.confirmMCPCall(answerID: answerID, server: server,
+                                                         tool: tool, input: input)
+                }
+                agentTools += mcpTools
+                let mcpHeld = mcpTools.count > MCPHub.advertiseLimit ? Set(mcpTools.map(\.name)) : []
                 // Every provider starts a run with the same list, so a prompt
                 // cache that matches on a prefix keeps matching from one
                 // question to the next.
                 let registry = ToolRegistry(ToolCatalog.assemble(agentTools),
-                                            deferring: ToolCatalog.deferredNames)
+                                            deferring: ToolCatalog.deferredNames.union(mcpHeld))
                 // Prompt stances match the tools a run starts with; a loaded
                 // tool's stance comes back in the `load_tools` result.
                 // Image / non-tool backends advertise none.

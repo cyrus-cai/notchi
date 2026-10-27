@@ -68,6 +68,21 @@ curl -fsSL https://raw.githubusercontent.com/cyrus-cai/notchi/master/install.sh 
 
 在任意 App 里长按（用力点按）选中的文字，或按下绑定的快捷键，就能翻译、润色、回复，或对它运行任意提示词。答案显示在指针旁边。
 
+### 接入你的 MCP 服务器
+
+提问时可以用任何 [Model Context Protocol](https://modelcontextprotocol.io) 服务器的工具。把服务器写进 `~/Library/Application Support/Notchi/mcp.json`（设置 → 聊天 → MCP 服务器 → 编辑 mcp.json），格式和 Claude Desktop 一样：
+
+```json
+{
+  "mcpServers": {
+    "filesystem": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "~/Documents"] },
+    "remote": { "url": "https://example.com/mcp", "headers": { "Authorization": "Bearer <token>" } }
+  }
+}
+```
+
+本地服务器（`command`）和 streamable HTTP 服务器（`url`）都支持。`tools` 和 `exclude` 用通配符挑选提供哪些工具。服务器标为只读的工具直接运行，其他工具会先问你，除非匹配 `autoApprove`。写上 `"disabled": true` 可以关掉一个服务器。改完文件，下一个问题就生效。
+
 ## 用我们的模型，或用你自己的
 
 App 免费。按量付费，或者用你自己的。

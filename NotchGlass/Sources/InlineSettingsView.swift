@@ -213,6 +213,7 @@ struct InlineSettingsView: View {
     /// What Notchi remembers about the user (`UserMemory`), folded like the
     /// instructions above it.
     @ObservedObject private var memory = UserMemory.shared
+    @ObservedObject private var mcp = MCPHub.shared
     @ObservedObject private var clipboardHistory = ClipboardHistory.shared
     /// Memory files as edited on the Memory page, by file name. Seeded from
     /// disk on first read; each edit is written straight back.
@@ -989,6 +990,10 @@ struct InlineSettingsView: View {
                 customInstructionsRow
                 suggestFollowUpRow
                 runCommandsRow
+                Text(L("mcp.title"))
+                    .captionLabel()
+                    .padding(.top, 2)
+                mcpSection
                 Text(L("memory.title"))
                     .captionLabel()
                     .padding(.top, 2)
@@ -4724,6 +4729,68 @@ struct InlineSettingsView: View {
             .toggleStyle(.switch)
             .controlSize(.mini)
             .tint(Tokens.text2)
+        }
+    }
+
+    /// Chat: the MCP servers in `mcp.json`, each with its state, and the file
+    /// itself one click away. Opening the pane picks up an edited file.
+    private var mcpSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            settingRow(label: L("mcp.title"), info: L("mcp.hint"), aligned: true) {
+                HStack(spacing: 12) {
+                    UnderlineLink(title: L("mcp.edit")) {
+                        MCPConfig.ensureFile()
+                        if !NSWorkspace.shared.open(MCPConfig.fileURL) {
+                            NSWorkspace.shared.activateFileViewerSelecting([MCPConfig.fileURL])
+                        }
+                    }
+                    UnderlineLink(title: L("mcp.reload")) { mcp.reload() }
+                }
+            }
+            if let error = mcp.configError {
+                Text(error)
+                    .font(.sf(Tokens.TypeSize.meta))
+                    .foregroundStyle(Tokens.danger)
+            } else if mcp.servers.isEmpty {
+                Text(L("mcp.empty"))
+                    .font(.sf(Tokens.TypeSize.meta))
+                    .foregroundStyle(Tokens.text3)
+            }
+            ForEach(mcp.servers) { server in
+                mcpServerLine(server)
+            }
+        }
+        .onAppear { mcp.reloadIfChanged() }
+    }
+
+    private func mcpServerLine(_ server: MCPHub.Server) -> some View {
+        let (color, detail): (Color, String) = {
+            switch server.status {
+            case .starting: return (Tokens.text3, L("mcp.starting"))
+            case .ready(let tools): return (Tokens.success, L("mcp.tools", tools))
+            case .failed(let reason): return (Tokens.danger, reason)
+            case .off: return (Tokens.text3.opacity(0.5), L("mcp.off"))
+            }
+        }()
+        return HStack(alignment: .center, spacing: 6) {
+            Circle()
+                .fill(color)
+                .frame(width: 6, height: 6)
+            Text(server.name)
+                .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                .foregroundStyle(Tokens.text2)
+                .lineLimit(1)
+                .fixedSize()
+            Text(detail)
+                .font(.sf(Tokens.TypeSize.meta))
+                .foregroundStyle(Tokens.text3)
+                .lineLimit(2)
+                .textSelection(.enabled)
+            if case .failed = server.status {
+                UnderlineLink(title: L("mcp.retry")) { mcp.restart(server.name) }
+                    .fixedSize()
+            }
+            Spacer(minLength: 0)
         }
     }
 

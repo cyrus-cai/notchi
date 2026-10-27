@@ -342,6 +342,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         CommandCodeCLIService.warmUp()
         PiCLIService.warmUp()
         DshCLIService.warmUp()
+        // Start the user's MCP servers now, so their tools are ready by the
+        // first question (an `npx` server's first run downloads it).
+        MCPHub.shared.reload()
         // Same reason: resolving the proxy may spawn a login shell, and the first
         // agent run must not wait on it.
         ProxyConfig.warmUp()
