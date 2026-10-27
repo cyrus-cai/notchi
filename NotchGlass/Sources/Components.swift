@@ -7654,7 +7654,7 @@ private struct AnswerPDFView: View {
 /// viewport, so a corner-pinned button scrolls away with the block's first line and
 /// the copy affordance disappears exactly when the block is big enough to need it.
 /// See `stickyOffset(in:)`.
-private struct CodeBlockView: View {
+struct CodeBlockView: View {
     let text: String
     /// The fence's language tag, which picks the colours (`CodeHighlighter`).
     var language: String? = nil
@@ -7663,6 +7663,9 @@ private struct CodeBlockView: View {
     /// Fired after the in-app pasteboard write so the owner can re-baseline the
     /// clipboard and keep this copy from being re-injected into the next Ask.
     let onInAppCopy: (() -> Void)?
+    /// What the copy button copies when it differs from what is shown (a
+    /// display copy cut short for layout). Nil copies `text`.
+    var copyText: String? = nil
 
     @Environment(\.stickyScrollTopInset) private var stickyTopInset
 
@@ -7742,7 +7745,7 @@ private struct CodeBlockView: View {
     private var copyButton: some View {
         Button {
             NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(text, forType: .string)
+            NSPasteboard.general.setString(copyText ?? text, forType: .string)
             onInAppCopy?()
             Haptics.confirm()
             withAnimation(.easeOut(duration: 0.15)) { copied = true }

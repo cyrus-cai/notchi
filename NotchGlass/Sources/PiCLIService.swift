@@ -634,6 +634,7 @@ struct PiCLIService: AIService {
                                                   host: "pi",
                                                   transport: .cli)
             audit.attempt()
+            audit.command(binary, args, stdin: prompt)
             let state = PiStreamState()
             state.audit = audit
 

@@ -922,6 +922,7 @@ struct CursorCLIService: AIService {
                                                   host: "cursor-agent",
                                                   transport: .cli)
             audit.attempt()
+            audit.command(binary, args, stdin: nil)
             let state = CursorStreamState()
             state.audit = audit
 

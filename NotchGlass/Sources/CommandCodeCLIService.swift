@@ -770,6 +770,8 @@ struct CommandCodeCLIService: AIService {
                                                              messages: wireMessages, tools: tools),
                             options: [.sortedKeys])
 
+                        audit.request(req)
+
                         let (bytes, response) = try await ProxyConfig.urlSession.bytes(for: req)
                         guard let http = response as? HTTPURLResponse else {
                             throw OpenAICompatAIService.ServiceError.malformedResponse(provider: "Command Code")

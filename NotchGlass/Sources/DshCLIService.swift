@@ -331,6 +331,7 @@ extension DshCLIService {
                                                   host: "dsh",
                                                   transport: .cli)
             audit.attempt()
+            audit.command(binary, ["--profile", "headless", "--json"] + Self.modelArgs(for: model), stdin: prompt)
             let state = DshChatStreamState()
             state.audit = audit
             outPipe.fileHandleForReading.readabilityHandler = { handle in

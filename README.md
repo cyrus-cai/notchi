@@ -68,6 +68,21 @@ Point Notchi at a project folder and run **Codex**, **Claude Code**, **Cursor**,
 
 Long press (force click) selected text in any app, or press a bound shortcut, to translate, proofread, reply, or run any prompt on it. The answer opens beside the pointer.
 
+### Your MCP servers
+
+Ask can use the tools of any [Model Context Protocol](https://modelcontextprotocol.io) server. List them in `~/Library/Application Support/Notchi/mcp.json` (Settings → Chat → MCP servers → Edit mcp.json), in the same format as Claude Desktop:
+
+```json
+{
+  "mcpServers": {
+    "filesystem": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "~/Documents"] },
+    "remote": { "url": "https://example.com/mcp", "headers": { "Authorization": "Bearer <token>" } }
+  }
+}
+```
+
+Local servers (`command`) and streamable HTTP servers (`url`) both work. `tools` and `exclude` take glob patterns that choose which tools are offered. A tool the server marks read-only runs directly. Any other tool asks you first, unless it matches `autoApprove`. Set `"disabled": true` to turn a server off. Changes to the file apply on the next question.
+
 ## Our models, or yours
 
 The app is free. Pay per use, or bring your own.

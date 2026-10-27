@@ -418,6 +418,7 @@ struct CodexCLIService: AIService {
                                                   host: "codex",
                                                   transport: .cli)
             audit.attempt()
+            audit.command(binary, args, stdin: prompt)
             let state = StreamState()
             state.audit = audit
 

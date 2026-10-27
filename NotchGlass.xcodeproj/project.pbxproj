@@ -70,6 +70,7 @@
 		A1000EA0 /* AuditPane.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000EA1 /* AuditPane.swift */; };
 		A1000EA2 /* RequestAudit.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000EA3 /* RequestAudit.swift */; };
 		A1000DC0 /* ToolCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000DC1 /* ToolCatalog.swift */; };
+		A1000EB0 /* MCPService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000EB1 /* MCPService.swift */; };
 		A10000C0 /* OnboardingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000C1 /* OnboardingService.swift */; };
 		A10000C2 /* IntroAnimation.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000C3 /* IntroAnimation.swift */; };
 		A1000DB0 /* NotchiFace.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000DB1 /* NotchiFace.swift */; };
@@ -130,6 +131,7 @@
 		A1000EA1 /* AuditPane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuditPane.swift; sourceTree = "<group>"; };
 		A1000EA3 /* RequestAudit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RequestAudit.swift; sourceTree = "<group>"; };
 		A1000DC1 /* ToolCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolCatalog.swift; sourceTree = "<group>"; };
+		A1000EB1 /* MCPService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPService.swift; sourceTree = "<group>"; };
 		A10000C1 /* OnboardingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingService.swift; sourceTree = "<group>"; };
 		A10000C3 /* IntroAnimation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntroAnimation.swift; sourceTree = "<group>"; };
 		A1000DB1 /* NotchiFace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotchiFace.swift; sourceTree = "<group>"; };
@@ -240,6 +242,7 @@
 				A1000EA1 /* AuditPane.swift */,
 				A1000EA3 /* RequestAudit.swift */,
 				A1000DC1 /* ToolCatalog.swift */,
+				A1000EB1 /* MCPService.swift */,
 				A10000C1 /* OnboardingService.swift */,
 				A10000C3 /* IntroAnimation.swift */,
 				A1000DB1 /* NotchiFace.swift */,
@@ -408,6 +411,7 @@
 				A1000EA0 /* AuditPane.swift in Sources */,
 				A1000EA2 /* RequestAudit.swift in Sources */,
 				A1000DC0 /* ToolCatalog.swift in Sources */,
+				A1000EB0 /* MCPService.swift in Sources */,
 				A10000C0 /* OnboardingService.swift in Sources */,
 				A10000C2 /* IntroAnimation.swift in Sources */,
 				A1000DB0 /* NotchiFace.swift in Sources */,
@@ -501,7 +505,7 @@
 				CODE_SIGN_ENTITLEMENTS = NotchGlass/Resources/NotchGlass.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 18;
+				CURRENT_PROJECT_VERSION = 19;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = NotchGlass/Resources/Info.plist;
@@ -509,7 +513,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.9.19;
+				MARKETING_VERSION = 0.9.20;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -524,7 +528,7 @@
 				CODE_SIGN_ENTITLEMENTS = NotchGlass/Resources/NotchGlass.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 18;
+				CURRENT_PROJECT_VERSION = 19;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = NotchGlass/Resources/Info.plist;
@@ -532,7 +536,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.9.19;
+				MARKETING_VERSION = 0.9.20;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;

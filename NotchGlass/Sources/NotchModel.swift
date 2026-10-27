@@ -643,6 +643,9 @@ final class NotchModel: ObservableObject {
         // so the next thread opens without it.
         didSet {
             if mode == .idle, showRoutines { showRoutines = false }
+            if mode == .idle, oldValue != .idle, !stayQueue.isEmpty {
+                DispatchQueue.main.async { [weak self] in self?.drainStayQueue() }
+            }
         }
     }
 
@@ -4623,6 +4626,25 @@ final class NotchModel: ObservableObject {
         }
     }
 
+    /// The card before an MCP tool that changes something runs: which tool,
+    /// from which server, with what arguments.
+    func confirmMCPCall(answerID: UUID, server: String, tool: String,
+                        input: [String: Any]) async throws -> Bool {
+        let copy = shellConfirmationCopy()
+        var detail = ""
+        if !input.isEmpty, JSONSerialization.isValidJSONObject(input),
+           let data = try? JSONSerialization.data(withJSONObject: input, options: [.sortedKeys]) {
+            detail = String(decoding: data, as: UTF8.self)
+            if detail.count > 600 { detail = detail.prefix(600) + "…" }
+        }
+        let choice = try await awaitUserChoice(
+            answerID: answerID,
+            question: L("mcp.confirm", tool, server) + (detail.isEmpty ? "" : "\n" + detail),
+            options: [copy.cancel, copy.run],
+            inlineOptions: true)
+        return choice == "The user chose: \"\(copy.run)\""
+    }
+
     /// The card a command flagged by `ShellRisk` waits on: what an `osascript`
     /// send or delete will do (`scriptActionCopy`), the command as written,
     /// then Cancel / Run. Anything but Run — Cancel, or the card timing
@@ -7458,6 +7480,12 @@ final class NotchModel: ObservableObject {
         }
     }
 
+    /// The main thread can't be deleted: Clear, row Delete and deleting its
+    /// last message all leave it in place.
+    func isProtectedMainThread(_ item: HistoryItem) -> Bool {
+        unifiedThreadsEnabled && item.mainThread
+    }
+
     /// Whether `threadID`'s row is the main thread and the lab is on.
     private func isMainThread(_ threadID: UUID) -> Bool {
         unifiedThreadsEnabled && (history.first(where: { $0.id == threadID })?.mainThread ?? false)
@@ -7795,11 +7823,14 @@ final class NotchModel: ObservableObject {
             // the eyes shake in its place instead of the emoji just vanishing.
             var emojiOnScreen = shownEmoji
             do {
-                let chunks = NoNoRequestContext.$current.withValue(
-                    NoNoRequestContext(surface: NoNoRequestContext.memory)
-                ) {
-                    service.stream(system: copyActionSystemPrompt,
-                                   messages: [ChatMessage(role: "user", content: prompt)])
+                // Bills as memory; the audit log names it a reply to a copy.
+                let chunks = RequestAudit.$purpose.withValue("copy") {
+                    NoNoRequestContext.$current.withValue(
+                        NoNoRequestContext(surface: NoNoRequestContext.memory)
+                    ) {
+                        service.stream(system: copyActionSystemPrompt,
+                                       messages: [ChatMessage(role: "user", content: prompt)])
+                    }
                 }
                 // Jev's emoji already showing wins; otherwise the reply's first
                 // line, shown the moment it lands.
@@ -7938,11 +7969,13 @@ final class NotchModel: ObservableObject {
     private static func copyNothingDoneReply(_ clip: String, service: AIService) async -> String? {
         var text = ""
         do {
-            let chunks = NoNoRequestContext.$current.withValue(
-                NoNoRequestContext(surface: NoNoRequestContext.memory)
-            ) {
-                service.stream(system: copyNothingDoneSystemPrompt,
-                               messages: [ChatMessage(role: "user", content: "The user copied:\n\(clip)")])
+            let chunks = RequestAudit.$purpose.withValue("copy") {
+                NoNoRequestContext.$current.withValue(
+                    NoNoRequestContext(surface: NoNoRequestContext.memory)
+                ) {
+                    service.stream(system: copyNothingDoneSystemPrompt,
+                                   messages: [ChatMessage(role: "user", content: "The user copied:\n\(clip)")])
+                }
             }
             for try await chunk in chunks { text += chunk }
         } catch {
@@ -10187,21 +10220,60 @@ final class NotchModel: ObservableObject {
         return s < 60 ? "\(s)s" : String(format: "%dm %02ds", s / 60, s % 60)
     }
 
-    /// ⌘↵: submit the current line to the *other family* — the one-key flip for
-    /// when the effective destination reads the line wrong. There are two families:
-    /// **Ask** (send to the AI) and **Capture** (keep for yourself). Flipping
-    /// ask→capture picks the leaf by the same structural rule auto-routing uses —
-    /// a named future time makes it a Reminder, otherwise a Note — so a manual
-    /// flip can never file differently than the classifier would have. Either
-    /// capture leaf flips back to Ask. Tab stays the precise three-way pick
-    /// (`toggleSubmitPanel`); this is the coarse, no-look correction.
-    func submitOtherFamily() {
-        switch effectiveSubmitPanel {
-        case .chat:
-            if detectedDue != nil { submitReminder() } else { submitNote() }
-        case .note, .reminder:
-            submit()
+    /// ⌘↵ on the idle prompt: ask the line, then return to the prompt instead of
+    /// showing the answer. The line joins the same thread plain Return would
+    /// (with unified threads on, the main thread); the round streams on
+    /// detached, the same as backing out with `newChat`. Unlike `newChat`,
+    /// nothing else on the page is cleared, so the next question can be typed
+    /// right away.
+    ///
+    /// Two rounds must never stream into one thread at once: each persists its
+    /// own snapshot, so the later one would overwrite the earlier answer. A line
+    /// sent while a main-thread round is still streaming waits in
+    /// `stayQueue` and goes out when that round ends (`drainStayQueue`).
+    func submitAndStay() {
+        if unifiedThreadsEnabled,
+           inFlightRounds.contains(where: { isMainThread($0.threadID) }) {
+            let line = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty else { return }
+            stayQueue.append(line)
+            text = ""
+            MessageTone.play(MessageTone.sent)
+            return
         }
+        submit()
+        guard mode != .idle else { return }
+        task = nil
+        resetThreadPull()
+        lastMeasuredAnswerHeight = 0
+        turns = []
+        replyTarget = nil
+        mode = .idle
+    }
+
+    /// Lines sent with ⌘↵ while the main thread was busy, oldest first.
+    private var stayQueue: [String] = []
+    private var drainingStayQueue = false
+
+    /// Send the next queued ⌘↵ line once the main thread is free. Only from the
+    /// idle prompt: `submit` works on whatever thread is on screen, so with
+    /// another page open the line waits for the next return to the prompt. The
+    /// draft, pasted images and quote card on the prompt are put back after.
+    private func drainStayQueue() {
+        guard !stayQueue.isEmpty, mode == .idle, turns.isEmpty,
+              !inFlightRounds.contains(where: { isMainThread($0.threadID) })
+        else { return }
+        let draft = text
+        let images = askComposeImages
+        let offer = quoteOffer
+        text = stayQueue.removeFirst()
+        askComposeImages = []
+        drainingStayQueue = true
+        submitAndStay()
+        drainingStayQueue = false
+        text = draft
+        askComposeImages = images
+        quoteOffer = offer
     }
 
     /// The clipboard string that's *available* as fresh outside context, or `nil`
@@ -10563,7 +10635,8 @@ final class NotchModel: ObservableObject {
         quoteOffer = nil
         // Messages' send tone for a line that actually goes out — not for a
         // regenerate re-running the same question, or a /loop round.
-        if !isRegenerate, loopRound == nil { MessageTone.play(MessageTone.sent) }
+        // A queued ⌘↵ line already played it when it was queued.
+        if !isRegenerate, loopRound == nil, !drainingStayQueue { MessageTone.play(MessageTone.sent) }
         // A follow-up on an agent thread whose CLI session is still resumable
         // goes back to the AGENT, not the chat model: the result view is the
         // run's conversation, so Enter there means "next instruction". Only
@@ -10777,6 +10850,7 @@ final class NotchModel: ObservableObject {
                 self.roundsInFlight -= 1
                 self.inFlightRounds.removeAll { $0.answerID == answerID }
                 self.touchMainThreadPeek(threadID)
+                self.drainStayQueue()
                 self.compactRoundTasks[threadID] = nil
                 // Don't let the last round's tool label / write phase outlive
                 // it on the collapsed notch's busy ear.
@@ -11135,11 +11209,24 @@ final class NotchModel: ObservableObject {
                     guard let self else { return .empty }
                     return await MainActor.run { self.searchArchive(query, offWire: offWire) }
                 })
+                // MCP is switched off for now.
+                // // The user's MCP servers come last, so the built-in prefix of
+                // // the list stays the same with or without them. Past
+                // // `MCPHub.advertiseLimit` they wait behind `load_tools`.
+                // MCPHub.shared.reloadIfChanged()
+                // let mcpTools = MCPHub.shared.agentTools { [weak self] server, tool, input in
+                //     guard let self else { throw CancellationError() }
+                //     return try await self.confirmMCPCall(answerID: answerID, server: server,
+                //                                          tool: tool, input: input)
+                // }
+                // agentTools += mcpTools
+                // let mcpHeld = mcpTools.count > MCPHub.advertiseLimit ? Set(mcpTools.map(\.name)) : []
+                let mcpHeld: Set<String> = []
                 // Every provider starts a run with the same list, so a prompt
                 // cache that matches on a prefix keeps matching from one
                 // question to the next.
                 let registry = ToolRegistry(ToolCatalog.assemble(agentTools),
-                                            deferring: ToolCatalog.deferredNames)
+                                            deferring: ToolCatalog.deferredNames.union(mcpHeld))
                 // Prompt stances match the tools a run starts with; a loaded
                 // tool's stance comes back in the `load_tools` result.
                 // Image / non-tool backends advertise none.
@@ -12220,6 +12307,8 @@ final class NotchModel: ObservableObject {
         if replyTarget?.turnID == turnID { replyTarget = nil }
 
         guard thread.contains(where: { !($0.role == "user" && $0.hidesUserBubble) }) else {
+            // The main thread keeps its last message.
+            if isMainThread(threadID) { return }
             deleteHistory(id: threadID)
             detachedThreadStores[threadID]?.turns = []
             if onScreen { newChat() }
@@ -12488,6 +12577,12 @@ final class NotchModel: ObservableObject {
     private func settlePending(_ threadID: UUID) {
         guard let i = history.firstIndex(where: { $0.id == threadID }), history[i].pending
         else { return }
+        // A main thread with earlier rounds was only flagged pending by
+        // `parkPending`; clear the flag instead of dropping the thread.
+        if isProtectedMainThread(history[i]), !history[i].conversation.isEmpty {
+            history[i].pending = false
+            return
+        }
         history.remove(at: i)
     }
 
@@ -13470,6 +13565,7 @@ final class NotchModel: ObservableObject {
         return history.lazy.filter {
             $0.t >= cutoff
                 && (self.agentComposeActive ? $0.source == .agent : $0.source != .agent)
+                && !self.isProtectedMainThread($0)
         }.count
     }
 
@@ -13495,15 +13591,15 @@ final class NotchModel: ObservableObject {
 
         let doomed = history.filter {
             $0.t >= cutoff && (scope == .agent ? $0.source == .agent : $0.source != .agent)
+                && !isProtectedMainThread($0)
         }
         guard !doomed.isEmpty || !historyLoaded || scope == .chat || scope == .agent else { return }
         // The rows go, so their attachments go with them. (A clear that lands before
         // the load only sees what's in memory; the rest of the store is swept by the
         // prune in `mergeLoadedHistory`, which then finds nothing referencing it.)
         Self.deleteHistoryImages(doomed.flatMap(\.imageFiles))
-        history.removeAll {
-            $0.t >= cutoff && (scope == .agent ? $0.source == .agent : $0.source != .agent)
-        }
+        let doomedIDs = Set(doomed.map(\.id))
+        history.removeAll { doomedIDs.contains($0.id) }
         saveHistory()
 
         // The keyboard highlight indexes into the *visible* slice, and a partial
@@ -13522,7 +13618,8 @@ final class NotchModel: ObservableObject {
     /// recompute it against the shortened visible slice — clamping to the last row,
     /// or releasing the highlight (and folding the list) once it's empty.
     func deleteHistory(id: UUID) {
-        guard let item = history.first(where: { $0.id == id }) else { return }
+        guard let item = history.first(where: { $0.id == id }),
+              !isProtectedMainThread(item) else { return }
         let removedVisibleIndex = recentVisible.firstIndex(where: { $0.id == id })
         Self.deleteHistoryImages(item.imageFiles)
         history.removeAll { $0.id == id }
@@ -13722,7 +13819,7 @@ final class NotchModel: ObservableObject {
         // bucket's rows it never got to see. Apply both scopes independently so
         // neither clear can erase the sibling bucket.
         var surviving = chatHistoryClearedBeforeLoad.map { cutoff in
-            loaded.filter { $0.source == .agent || $0.t < cutoff }
+            loaded.filter { $0.source == .agent || $0.t < cutoff || isProtectedMainThread($0) }
         } ?? loaded
         if agentHistoryClearedBeforeLoad {
             surviving.removeAll { $0.source == .agent }

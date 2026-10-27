@@ -402,7 +402,7 @@ private struct HistoryArchiveView: View {
                         item: item,
                         selected: selection == item.id,
                         select: { selection = item.id },
-                        delete: {
+                        delete: model.isProtectedMainThread(item) ? nil : {
                             if selection == item.id { selection = nil }
                             model.deleteHistory(id: item.id)
                         },
@@ -499,7 +499,8 @@ private struct HistoryArchiveRow: View {
     let item: NotchModel.HistoryItem
     let selected: Bool
     let select: () -> Void
-    let delete: () -> Void
+    /// Nil for a row that can't be deleted (the main thread).
+    let delete: (() -> Void)?
     let jump: () -> Void
 
     var body: some View {
@@ -524,7 +525,9 @@ private struct HistoryArchiveRow: View {
         }
         .buttonStyle(HistoryRowStyle(selected: selected))
         .contextMenu {
-            Button(L("recent.delete"), role: .destructive, action: delete)
+            if let delete {
+                Button(L("recent.delete"), role: .destructive, action: delete)
+            }
         }
     }
 

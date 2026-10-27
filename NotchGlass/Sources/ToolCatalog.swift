@@ -82,6 +82,13 @@ enum ToolCatalog {
         deferred.first { $0.name == name }?.summary
     }
 
+    /// A description's first sentence, cut to one line for `load_tools`.
+    static func brief(_ description: String) -> String {
+        let line = description.split(whereSeparator: \.isNewline).first.map(String.init) ?? description
+        let sentence = line.range(of: ". ").map { String(line[..<$0.lowerBound]) } ?? line
+        return sentence.count > 160 ? sentence.prefix(160) + "…" : sentence
+    }
+
     /// Members replaced by their group, which takes the place of the first
     /// member in the list. A group with no member present is left out; one
     /// with some members present offers only their actions.
@@ -372,9 +379,9 @@ struct LoadToolsTool: NotchTool {
     let schema: [String: Any]
     let loadout: ToolLoadout
 
-    init(loadout: ToolLoadout) {
+    init(loadout: ToolLoadout, summaries: [String: String] = [:]) {
         self.loadout = loadout
-        let lines = loadout.held.map { "- \($0): \(ToolCatalog.summary(of: $0) ?? $0)" }
+        let lines = loadout.held.map { "- \($0): \(summaries[$0] ?? ToolCatalog.summary(of: $0) ?? $0)" }
         description = """
         Adds tools you do not have yet. When the request needs one of these, call \
         load_tools first with the ones it needs; they can be called from your next step:

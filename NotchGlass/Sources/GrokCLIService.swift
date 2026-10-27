@@ -408,6 +408,7 @@ struct GrokCLIService: AIService {
                                                   host: "grok",
                                                   transport: .cli)
             audit.attempt()
+            audit.command(binary, args, stdin: nil, files: [promptFile.path: prompt])
             let state = GrokStreamState()
             state.audit = audit
 

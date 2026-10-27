@@ -1992,6 +1992,8 @@ struct OpenAICompatAIService: AIService {
                         )
                         req.httpBody = try JSONEncoder().encode(body)
 
+                        audit.request(req)
+
                         let (bytes, response) = try await ProxyConfig.urlSession.bytes(for: req)
                         guard let http = response as? HTTPURLResponse else {
                             throw ServiceError.malformedResponse(provider: provider.displayName)
@@ -2373,6 +2375,8 @@ struct AnthropicAIService: AIService {
                             stream: true
                         )
                         req.httpBody = try JSONEncoder().encode(body)
+
+                        audit.request(req)
 
                         let (bytes, response) = try await ProxyConfig.urlSession.bytes(for: req)
                         guard let http = response as? HTTPURLResponse else {
@@ -4993,6 +4997,8 @@ extension OpenAICompatAIService: AgentCapableService {
                         if askingForUsage { body["stream_options"] = ["include_usage": true] }
                         req.httpBody = try AgentWire.body(body)
 
+                        audit.request(req)
+
                         let (bytes, response) = try await ProxyConfig.urlSession.bytes(for: req)
                         guard let http = response as? HTTPURLResponse else {
                             throw ServiceError.malformedResponse(provider: provider.displayName)
@@ -5452,6 +5458,8 @@ extension AnthropicAIService: AgentCapableService {
                             }
                         }
                         req.httpBody = try AgentWire.body(body)
+
+                        audit.request(req)
 
                         let (bytes, response) = try await ProxyConfig.urlSession.bytes(for: req)
                         guard let http = response as? HTTPURLResponse else {

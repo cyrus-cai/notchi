@@ -213,6 +213,7 @@ struct InlineSettingsView: View {
     /// What Notchi remembers about the user (`UserMemory`), folded like the
     /// instructions above it.
     @ObservedObject private var memory = UserMemory.shared
+    @ObservedObject private var mcp = MCPHub.shared
     @ObservedObject private var clipboardHistory = ClipboardHistory.shared
     /// Memory files as edited on the Memory page, by file name. Seeded from
     /// disk on first read; each edit is written straight back.
@@ -575,6 +576,11 @@ struct InlineSettingsView: View {
     /// category has its own set of labels, and General's longest must not stretch
     /// Appearance's column.
     @State private var labelColumnWidth: CGFloat = 0
+    /// Each pane's last measured column width. A pane switch starts from this
+    /// instead of 0, so a pane seen before lays out aligned on its first frame
+    /// rather than drawing every control against its label for one frame.
+    /// Static so it outlives closing and reopening Settings.
+    @MainActor private static var labelColumnWidths: [Section: CGFloat] = [:]
 
     /// Whether the General pane's folded Advanced block is open.
     @State private var advancedSectionOpen = false
@@ -611,13 +617,6 @@ struct InlineSettingsView: View {
     /// The token odometer's reading, refreshed alongside the digest.
     @State private var statsTokens = TokenMeter.Reading(total: 0)
 
-    /// What Settings → Audit draws, newest first. Read from `RequestAudit` and
-    /// refreshed whenever it files a request, so a reply landing while the pane
-    /// is open shows up on it.
-    @State private var auditEntries: [RequestAudit.Entry] = []
-    /// The bar under the pointer on the Audit chart. Lives here for the same
-    /// reason `statsHover` does: the line that names it is drawn in the header.
-    @State private var auditHover: RequestAudit.Entry?
     /// Whether the sidebar's Audit row has been clicked; its New tag goes then.
     @State private var auditSeen = SettingsNewMarks.auditSeen
 
@@ -989,6 +988,11 @@ struct InlineSettingsView: View {
                 customInstructionsRow
                 suggestFollowUpRow
                 runCommandsRow
+                // MCP is switched off for now.
+                // Text(L("mcp.title"))
+                //     .captionLabel()
+                //     .padding(.top, 2)
+                // mcpSection
                 Text(L("memory.title"))
                     .captionLabel()
                     .padding(.top, 2)
@@ -1108,6 +1112,7 @@ struct InlineSettingsView: View {
             }
             .onPreferenceChange(LabelColumnWidthKey.self) { width in
                 if abs(width - labelColumnWidth) > 0.5 { labelColumnWidth = width }
+                if width > 0 { Self.labelColumnWidths[section] = width }
             }
             .scrollIndicators(.never)
             // One fixed height for every pane (see `settingsPaneHeight`) — the
@@ -1123,6 +1128,11 @@ struct InlineSettingsView: View {
             // for that beat the outgoing and incoming panes sat side by side
             // in the columns' HStack, nudging the category column sideways.
             .transition(.identity)
+            // An identity transition still keeps the outgoing pane in the tree
+            // until the switch's animation ends, so for 0.16s both panes drew on
+            // top of each other and their labels fed one shared column width.
+            // The swap itself is not animated; the sidebar highlight still is.
+            .animation(nil, value: section)
             // A required setup unfolds the key section past the pane's height
             // cap — snap the scroller to it so what just appeared is in view
             // (the anchor lives on `keySection`). The first frame of the unfold
@@ -1160,7 +1170,7 @@ struct InlineSettingsView: View {
                 // The new pane measures its own longest label; keeping the old
                 // pane's number would indent the first frame by a width no row
                 // here asked for.
-                labelColumnWidth = 0
+                labelColumnWidth = Self.labelColumnWidths[section] ?? 0
             }
         }
     }
@@ -1201,8 +1211,7 @@ struct InlineSettingsView: View {
     /// old pane's widest label, came out a few points wider than the panel,
     /// and both columns stepped right before sliding back.
     private func showSection(_ s: Section) {
-        labelColumnWidth = 0
-        auditHover = nil
+        labelColumnWidth = Self.labelColumnWidths[s] ?? 0
         withAnimation(.easeOut(duration: 0.16)) { section = s }
     }
 
@@ -2227,44 +2236,53 @@ struct InlineSettingsView: View {
     /// the user never sees it, because it is not something they chose or can
     /// usefully copy.
     ///
-    /// **This is not a settings row.** Every other line in this card is a
-    /// choice, laid out label-then-control on one line; this one reports a
-    /// number and offers one action, and forcing it into the form's shape put
-    /// the balance, a stepper and a button shoulder to shoulder at the same
-    /// weight, with nothing telling the eye which of the three it came for.
-    ///
-    /// So it is a block: the credit as a labelled figure.
+    /// One line, label left, figure and its action right — the shape every
+    /// other row in the pane already takes. The links stay under it: they are a
+    /// way out of the pane, not part of the balance.
     @ViewBuilder
     private var nonoAccountRow: some View {
         let snapshot = nono.snapshot
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 2) {
-                Text(L("nono.credit"))
-                    .font(.sf(Tokens.TypeSize.meta, weight: .light))
-                    .foregroundStyle(Tokens.text2)
-                // How this figure is spent — prepaid, per token, no expiry —
-                // sits behind the ⓘ rather than as a line under it.
-                if let snapshot {
-                    SettingInfo(
-                        L(snapshot.hasGift ? "nono.lineup.billing.gift" : "nono.lineup.billing"),
-                        glyph: 10, hit: 13)
+            HStack(alignment: .center, spacing: 10) {
+                HStack(spacing: 2) {
+                    Text(L("nono.credit"))
+                        .font(.sf(Tokens.TypeSize.meta, weight: .light))
+                        .foregroundStyle(Tokens.text2)
+                        .lineLimit(1)
+                    // How this figure is spent — prepaid, per token, no expiry —
+                    // sits behind the ⓘ rather than as a line under it.
+                    if let snapshot {
+                        SettingInfo(
+                            L(snapshot.hasGift ? "nono.lineup.billing.gift" : "nono.lineup.billing"),
+                            glyph: 10, hit: 13)
+                    }
+                }
+                .fixedSize()
+
+                Spacer(minLength: 10)
+
+                if nonoRegistering {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text(L("nono.preparing"))
+                            .font(.sf(Tokens.TypeSize.meta))
+                            .foregroundStyle(Tokens.text2)
+                    }
+                } else if let snapshot {
+                    nonoCreditRow(snapshot)
+                } else if case .failed(let why) = nono.phase {
+                    statusPill(ok: false, message: why)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                } else {
+                    // `/me` is still in flight — the first appearance after a
+                    // launch. A spinner, not a guess: drawing $0.00 tells someone
+                    // who has credit that they have none.
+                    ProgressView().controlSize(.small)
+                        .frame(height: 30)
                 }
             }
 
-            if case .working(.registering) = nono.phase {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text(L("nono.preparing"))
-                        .font(.sf(Tokens.TypeSize.meta))
-                        .foregroundStyle(Tokens.text2)
-                }
-                .frame(height: 30, alignment: .leading)
-                .padding(.top, 4)
-            } else if let snapshot {
-                // The figure, under its label.
-                nonoCreditRow(snapshot)
-                    .padding(.top, 8)
-
+            if let snapshot, !nonoRegistering {
                 // The first three open a sub-page. Privacy leaves the app, the
                 // same page About opens, so it carries the outbound arrow.
                 HStack(spacing: 14) {
@@ -2286,17 +2304,6 @@ struct InlineSettingsView: View {
                         .foregroundStyle(Tokens.text4)
                         .padding(.top, 6)
                 }
-            } else if case .failed(let why) = nono.phase {
-                statusPill(ok: false, message: why)
-                    .padding(.top, 6)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
-            } else {
-                // `/me` is still in flight — the first appearance after a
-                // launch. A spinner, not a guess: drawing $0.00 tells someone
-                // who has credit that they have none.
-                ProgressView().controlSize(.small)
-                    .frame(height: 30, alignment: .leading)
-                    .padding(.top, 4)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -2305,8 +2312,15 @@ struct InlineSettingsView: View {
         .task { await nono.load() }
     }
 
+    /// Whether the first `/me` is still registering the account — the moment
+    /// when there is no balance worth drawing yet.
+    private var nonoRegistering: Bool {
+        if case .working(.registering) = nono.phase { return true }
+        return false
+    }
+
     private func open(_ page: Section) {
-        labelColumnWidth = 0   // see `showSection`
+        labelColumnWidth = Self.labelColumnWidths[page] ?? 0   // see `showSection`
         withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) { section = page }
     }
 
@@ -2335,7 +2349,6 @@ struct InlineSettingsView: View {
             }
             addCreditButton(bought: snapshot.credit.grantedUSD)
                 .padding(.leading, 4)
-            Spacer(minLength: 0)
         }
         .task(id: nono.rollFromUSD != nil) {
             guard nono.rollFromUSD != nil else { return }
@@ -4727,6 +4740,93 @@ struct InlineSettingsView: View {
         }
     }
 
+    /// Chat: the MCP servers in `mcp.json` and in other apps' settings, each
+    /// with its state and where it came from, and `mcp.json` one click away.
+    /// Opening the pane picks up an edited file.
+    private var mcpSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            settingRow(label: L("mcp.title"), info: L("mcp.hint"), aligned: true) {
+                HStack(spacing: 12) {
+                    UnderlineLink(title: L("mcp.edit")) {
+                        MCPConfig.ensureFile()
+                        if !NSWorkspace.shared.open(MCPConfig.fileURL) {
+                            NSWorkspace.shared.activateFileViewerSelecting([MCPConfig.fileURL])
+                        }
+                    }
+                    UnderlineLink(title: L("mcp.reload")) { mcp.reload() }
+                }
+            }
+            if let error = mcp.configError {
+                Text(error)
+                    .font(.sf(Tokens.TypeSize.meta))
+                    .foregroundStyle(Tokens.danger)
+            } else if mcp.servers.isEmpty {
+                Text(L("mcp.empty"))
+                    .font(.sf(Tokens.TypeSize.meta))
+                    .foregroundStyle(Tokens.text3)
+            }
+            ForEach(mcp.servers) { server in
+                mcpServerLine(server)
+            }
+        }
+        .onAppear { mcp.reloadIfChanged() }
+    }
+
+    /// One server, laid out like `memoryFileRow`: dot and name, the state
+    /// beside the name, the app it came from at the right edge. A failure's
+    /// reason goes on its own line under the name, with Restart after it.
+    private func mcpServerLine(_ server: MCPHub.Server) -> some View {
+        let (color, state): (Color, String?) = {
+            switch server.status {
+            case .starting: return (Tokens.text3, L("mcp.starting"))
+            case .ready(let tools): return (Tokens.success, L("mcp.tools", tools))
+            case .failed: return (Tokens.danger, nil)
+            case .off: return (Tokens.text3.opacity(0.5), L("mcp.off"))
+            }
+        }()
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(color)
+                    .frame(width: 6, height: 6)
+                Text(server.name)
+                    .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                    .foregroundStyle(Tokens.text2)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if let state {
+                    Text(state)
+                        .font(.sf(Tokens.TypeSize.meta))
+                        .foregroundStyle(Tokens.text3)
+                        .lineLimit(1)
+                        .fixedSize()
+                }
+                Spacer(minLength: 12)
+                if let source = server.source {
+                    Text(source)
+                        .font(.sf(Tokens.TypeSize.meta))
+                        .foregroundStyle(Tokens.text4)
+                        .lineLimit(1)
+                        .fixedSize()
+                }
+            }
+            if case .failed(let reason) = server.status {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text(reason)
+                        .font(.sf(Tokens.TypeSize.meta))
+                        .foregroundStyle(Tokens.text3)
+                        .lineLimit(2)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    UnderlineLink(title: L("mcp.retry")) { mcp.restart(server.name) }
+                        .fixedSize()
+                }
+                .padding(.leading, 14)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
     /// The collapsed-by-default tail of the General pane: plumbing nobody should
     /// have to walk past to reach the everyday rows. Same quiet disclosure line as
     /// `keySection` — it stays folded until the user opens it, whatever the proxy
@@ -6842,12 +6942,6 @@ struct InlineSettingsView: View {
 
     // MARK: - About
 
-    // MARK: - Audit
-
-    private func reloadAudit() {
-        auditEntries = Array(RequestAudit.shared.recent.reversed())
-    }
-
     // MARK: - Stats
 
     /// Settings → **Stats**: what the archive adds up to, then the requests that
@@ -6864,15 +6958,9 @@ struct InlineSettingsView: View {
                 StatsPane()
             }
             .padding(.bottom, 6)
-            if !auditEntries.isEmpty {
-                AuditPane(entries: auditEntries, hovered: $auditHover)
-            }
+            AuditPane(onInAppCopy: { model.rebaselineClipboardAfterInAppWrite() })
         }
         .task(id: statsFingerprint) { await refreshStats() }
-        .onAppear { reloadAudit() }
-        .onReceive(NotificationCenter.default.publisher(for: RequestAudit.didChange)) { _ in
-            reloadAudit()
-        }
     }
 
     /// What has to change for the digest to be stale. Not `history.count` alone:

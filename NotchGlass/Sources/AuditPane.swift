@@ -20,18 +20,39 @@ private enum AuditType {
 /// the card's own footer; with nothing under it the newest request is shown, so
 /// the card always names a concrete request instead of staying a picture.
 struct AuditPane: View {
-    /// Newest first, as the pane holds them. Empty draws nothing: the chart
-    /// rides under Stats, and a session with no requests leaves the pane as the
-    /// archive's own sheet.
-    let entries: [RequestAudit.Entry]
-    /// The bar under the pointer. Owned by the settings view: the header also
-    /// names it, beside the Stats hover readout.
-    @Binding var hovered: RequestAudit.Entry?
+    /// Re-baselines the clipboard after the sent-data copy button writes to it.
+    private let onInAppCopy: (() -> Void)?
+
+    /// Newest first. Held here rather than by the settings view, so a request
+    /// finishing while the pane is open redraws the chart and nothing else.
+    @State private var entries: [RequestAudit.Entry] = []
+    /// A fixed log instead of the live one, for the offscreen snapshot
+    /// (`ImageRenderer` runs no `onAppear`, so it is laid out up front).
+    private let preset: [RequestAudit.Entry]?
+
+    init(onInAppCopy: (() -> Void)? = nil, preset: [RequestAudit.Entry]? = nil) {
+        self.onInAppCopy = onInAppCopy
+        self.preset = preset
+        if let preset { _entries = State(initialValue: preset) }
+    }
 
     var body: some View {
-        if !entries.isEmpty {
-            AuditFlow(entries: entries, hovered: $hovered)
+        // Empty draws nothing: the chart rides under Stats, and a session with
+        // no requests leaves the pane as the archive's own sheet.
+        VStack(spacing: 0) {
+            if !entries.isEmpty {
+                AuditFlow(entries: entries, onInAppCopy: onInAppCopy, laidOut: preset != nil)
+            }
         }
+        .onAppear { reload() }
+        .onReceive(NotificationCenter.default.publisher(for: RequestAudit.didChange)) { _ in
+            reload()
+        }
+    }
+
+    private func reload() {
+        guard preset == nil else { return }
+        entries = Array(RequestAudit.shared.recent.reversed())
     }
 }
 
@@ -47,19 +68,32 @@ struct AuditPane: View {
 private struct AuditFlow: View {
     /// Newest first.
     let entries: [RequestAudit.Entry]
-    @Binding var hovered: RequestAudit.Entry?
+    let onInAppCopy: (() -> Void)?
+    /// The bar under the pointer. Kept here, not in the settings view: every
+    /// pointer move over the lanes changes it, and only the chart and its card
+    /// depend on it.
+    @State private var hovered: RequestAudit.Entry?
+    /// Everything the lanes draw, rebuilt only when the records, the page or
+    /// the lanes' width change — never on a hover or a scroll step.
+    @State private var chart = Chart.empty
+
+    init(entries: [RequestAudit.Entry], onInAppCopy: (() -> Void)?, laidOut: Bool = false) {
+        self.entries = entries
+        self.onInAppCopy = onInAppCopy
+        if laidOut { _chart = State(initialValue: Chart(entries: entries, page: 0, viewport: 0)) }
+    }
 
     /// Points per second on the compressed axis. Fixed, so a bar of the same
     /// width is the same duration on every day; a day longer than the pane
     /// scrolls sideways instead of being squeezed to fit.
-    private static let pointsPerSecond: CGFloat = 2
+    fileprivate static let pointsPerSecond: CGFloat = 2
     private static let laneHeight: CGFloat = 14
     private static let laneGap: CGFloat = 5
     /// Idle gaps are drawn no wider than this. Without the cap, a chart of a
     /// working day is a few ticks at either end with an hour of nothing between
     /// them — and the gap worth seeing is the one between two requests in the
     /// same burst.
-    private static let maxGap: TimeInterval = 10
+    fileprivate static let maxGap: TimeInterval = 10
 
     /// Which day is on screen: 0 is the newest day with records, and each step
     /// back is the next earlier day the log holds.
@@ -102,24 +136,22 @@ private struct AuditFlow: View {
         back = min(max(0, back + delta), max(0, contentWidth - viewport))
     }
 
-    /// The days that have records, newest first (the entries already are).
-    private var days: [Date] {
-        var seen = Set<Date>()
-        var out: [Date] = []
-        for entry in entries {
-            let day = Calendar.current.startOfDay(for: entry.at)
-            if seen.insert(day).inserted { out.append(day) }
-        }
-        return out
+    private var pageCount: Int { max(1, chart.dayCount) }
+    private var items: [RequestAudit.Entry] { chart.items }
+    private var placements: [Placement] { chart.placements }
+    private var axisLength: TimeInterval { chart.axisLength }
+
+    /// What `chart` was built from. The records are compared by count and
+    /// newest id: the log only ever appends at the new end and prunes the old.
+    private struct ChartKey: Equatable {
+        let count: Int
+        let newest: UUID?
+        let page: Int
+        let viewport: CGFloat
     }
 
-    private var pageCount: Int { max(1, days.count) }
-
-    /// The selected day's records, oldest first.
-    private var items: [RequestAudit.Entry] {
-        let days = self.days
-        guard page < days.count else { return [] }
-        return entries.filter { Calendar.current.isDate($0.at, inSameDayAs: days[page]) }.reversed()
+    private var chartKey: ChartKey {
+        ChartKey(count: entries.count, newest: entries.first?.id, page: page, viewport: viewport)
     }
 
     /// Paging back clears the selection: the bar it named may not be on the page
@@ -165,19 +197,16 @@ private struct AuditFlow: View {
                     GeometryReader { geo in
                         let width = max(geo.size.width,
                                         CGFloat(axisLength) * Self.pointsPerSecond)
+                        let start = max(0, width - geo.size.width - back)
                         VStack(alignment: .leading, spacing: Self.laneGap) {
-                            lane(inputSegments(width: width), width: width)
-                            lane(generationSegments(notchi: false, width: width), width: width)
-                            lane(generationSegments(notchi: true, width: width), width: width)
-                            lane(toolSegments(width: width), width: width)
+                            ForEach(0..<4, id: \.self) { index in
+                                lane(chart.lanes[index], start: start, viewport: geo.size.width)
+                            }
                         }
-                        .offset(x: -max(0, width - geo.size.width - back))
                         .frame(width: geo.size.width, alignment: .leading)
-                        .clipped()
                         // An edge with more of the day past it fades out, which
                         // is the cue that the lanes scroll sideways.
-                        .mask(edgeFade(leading: width - geo.size.width - back > 0.5,
-                                       trailing: back > 0.5))
+                        .mask(edgeFade(leading: start > 0.5, trailing: back > 0.5))
                         .onAppear { viewport = geo.size.width }
                         .onChange(of: geo.size.width) { _, next in viewport = next }
                     }
@@ -189,12 +218,13 @@ private struct AuditFlow: View {
             }
             axis
             if let current {
-                AuditDetail(entry: current)
+                AuditDetail(entry: current, onInAppCopy: onInAppCopy)
             }
         }
         .accessibilityElement(children: .contain)
-        .onChange(of: pageCount) { _, new in
-            if page >= new { page = max(0, new - 1) }
+        .onChange(of: chartKey, initial: true) { _, key in
+            chart = Chart(entries: entries, page: key.page, viewport: key.viewport)
+            if page >= pageCount { page = max(0, pageCount - 1) }
         }
     }
 
@@ -208,28 +238,46 @@ private struct AuditFlow: View {
             .frame(height: Self.laneHeight)
     }
 
-    /// One lane. The whole lane is the hover surface, not the bars: a 40 ms
-    /// request is a three-point sliver, and asking the pointer to land on it
-    /// would make "hover a request for details" a game of skill. The bar nearest
-    /// the pointer's x wins, so the lane answers wherever it is touched.
-    private func lane(_ segments: [Segment], width: CGFloat) -> some View {
-        ZStack(alignment: .topLeading) {
+    /// One lane, drawn as one `Canvas` over the visible stretch only: a busy
+    /// day is hundreds of bars, and a view per bar meant re-diffing all of them
+    /// on every hover and scroll step.
+    ///
+    /// The whole lane is the hover surface, not the bars: a 40 ms request is a
+    /// three-point sliver, and asking the pointer to land on it would make
+    /// "hover a request for details" a game of skill. The bar nearest the
+    /// pointer's x wins, so the lane answers wherever it is touched.
+    private func lane(_ segments: [Segment], start: CGFloat, viewport: CGFloat) -> some View {
+        let selected = hovered?.id
+        return Canvas { context, size in
             // A faint track, so an empty lane still reads as a lane.
-            RoundedRectangle(cornerRadius: 3)
-                .fill(.white.opacity(0.05))
-                .frame(width: width, height: Self.laneHeight)
-            ForEach(segments) { segment in
-                bar(segment)
+            let track = CGRect(x: -start, y: 0, width: max(size.width + start, contentWidth),
+                               height: size.height)
+            context.fill(Path(roundedRect: track, cornerRadius: 3), with: .color(.white.opacity(0.05)))
+            // With one bar selected the rest step back, so the card below and
+            // the bar it describes are unmistakably the same request.
+            for segment in segments where segment.x + segment.width >= start
+                                       && segment.x <= start + size.width {
+                let rect = CGRect(x: segment.x - start, y: 0, width: segment.width, height: size.height)
+                let path = Path(roundedRect: rect, cornerRadius: 3)
+                let isSelected = segment.entry.id == selected
+                let ink = isSelected ? 1 : (selected == nil ? 0.78 : 0.32)
+                context.fill(path, with: .color(segment.color.opacity(ink)))
+                if isSelected {
+                    context.stroke(Path(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), cornerRadius: 2.5),
+                                   with: .color(.white.opacity(0.85)), lineWidth: 1)
+                }
             }
         }
-        .frame(width: width, height: Self.laneHeight, alignment: .topLeading)
+        .frame(width: viewport, height: Self.laneHeight)
         .contentShape(Rectangle())
         .onContinuousHover { phase in
             guard case .active(let point) = phase,
-                  let segment = nearest(in: segments, to: point.x),
+                  let segment = nearest(in: segments, to: point.x + start),
                   hovered?.id != segment.entry.id else { return }
             hovered = segment.entry
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(segments.last.map { barLabel($0.entry) } ?? "")
     }
 
     /// The bar closest to the pointer on x. Distance is measured to the bar's
@@ -246,24 +294,6 @@ private struct AuditFlow: View {
             }
         }
         return bestDistance <= 14 ? best : nil
-    }
-
-    private func bar(_ segment: Segment) -> some View {
-        let isHovered = hovered?.id == segment.entry.id
-        // With one bar selected the rest step back, so the card below and the
-        // bar it describes are unmistakably the same request.
-        let ink = isHovered ? 1 : (hovered == nil ? 0.78 : 0.32)
-        return RoundedRectangle(cornerRadius: 3)
-            .fill(segment.color.opacity(ink))
-            .overlay {
-                if isHovered {
-                    RoundedRectangle(cornerRadius: 3)
-                        .strokeBorder(.white.opacity(0.85), lineWidth: 1)
-                }
-            }
-            .frame(width: segment.width, height: Self.laneHeight)
-            .offset(x: segment.x)
-            .accessibilityLabel(barLabel(segment.entry))
     }
 
     /// The times at the two visible ends of the lanes, and the pager between days.
@@ -324,105 +354,104 @@ private struct AuditFlow: View {
         let seconds: TimeInterval
     }
 
-    /// Walk the records oldest first, charging each idle gap at most `maxGap`.
-    /// The absolute clock is gone after this — only the two ends are printed,
-    /// and the note says the middle was squeezed.
-    private var placements: [Placement] {
-        var out: [Placement] = []
-        var cursor: TimeInterval = 0
-        var previousEnd: TimeInterval = 0
-        var started = false
-        for entry in items {
-            let real = entry.at.timeIntervalSinceReferenceDate
-            if started {
-                cursor += min(max(real - previousEnd, 0), Self.maxGap)
-            }
-            started = true
-            let seconds = max(Double(entry.milliseconds) / 1000, 0.001)
-            out.append(Placement(entry: entry, start: cursor, seconds: seconds))
-            cursor += seconds
-            previousEnd = real + seconds
-        }
-        return out
-    }
-
-    private var axisLength: TimeInterval {
-        max(placements.last.map { $0.start + $0.seconds } ?? 1, 0.001)
-    }
-
-    private struct Segment: Identifiable {
-        let id: String
+    private struct Segment {
         let entry: RequestAudit.Entry
         let x: CGFloat
         let width: CGFloat
         let color: Color
     }
 
-    /// A request's share of the input lane: send → first token. Jev calls have
-    /// no stream to wait on — one round trip, no first token — so they appear in
-    /// the Notchi lane alone.
-    private func inputSegments(width: CGFloat) -> [Segment] {
-        placements.filter { $0.entry.transport == .http || $0.entry.transport == .cli }.map { placement in
-            let wait = min(Double(placement.entry.firstToken ?? placement.entry.milliseconds) / 1000,
-                           placement.seconds)
-            return segment(id: "input-\(placement.entry.id)", placement: placement,
-                           from: placement.start, length: wait,
-                           width: width, color: color(for: placement.entry))
+    /// The selected day laid out once: its records, their placements on the
+    /// compressed axis, and the four lanes' bars in content points.
+    private struct Chart {
+        var dayCount = 0
+        var items: [RequestAudit.Entry] = []
+        var placements: [Placement] = []
+        var axisLength: TimeInterval = 1
+        /// Input, Customize Models, Notchi Models, Tools.
+        var lanes: [[Segment]] = [[], [], [], []]
+
+        static let empty = Chart()
+
+        private init() {}
+
+        init(entries: [RequestAudit.Entry], page: Int, viewport: CGFloat) {
+            // One pass over the log: the days it holds, newest first, and the
+            // selected day's records. `startOfDay` is the costly call, so a run
+            // of records on the same day reuses the last answer.
+            let calendar = Calendar.current
+            var dayIndex = -1
+            var dayEnd = Date.distantFuture
+            var dayStart = Date.distantFuture
+            var picked: [RequestAudit.Entry] = []
+            for entry in entries {
+                if entry.at < dayStart || entry.at >= dayEnd {
+                    dayStart = calendar.startOfDay(for: entry.at)
+                    dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) ?? dayStart
+                    dayIndex += 1
+                }
+                if dayIndex == page { picked.append(entry) }
+            }
+            dayCount = dayIndex + 1
+            items = picked.reversed()
+
+            // Walk the records oldest first, charging each idle gap at most
+            // `maxGap`. The absolute clock is gone after this — only the two
+            // ends are printed.
+            var cursor: TimeInterval = 0
+            var previousEnd: TimeInterval = 0
+            for (index, entry) in items.enumerated() {
+                let real = entry.at.timeIntervalSinceReferenceDate
+                if index > 0 { cursor += min(max(real - previousEnd, 0), AuditFlow.maxGap) }
+                let seconds = max(Double(entry.milliseconds) / 1000, 0.001)
+                placements.append(Placement(entry: entry, start: cursor, seconds: seconds))
+                cursor += seconds
+                previousEnd = real + seconds
+            }
+            axisLength = max(placements.last.map { $0.start + $0.seconds } ?? 1, 0.001)
+
+            let width = max(viewport, CGFloat(axisLength) * AuditFlow.pointsPerSecond)
+            for placement in placements {
+                let entry = placement.entry
+                let ink = AuditFlow.color(for: entry)
+                func bar(_ from: TimeInterval, _ length: TimeInterval) -> Segment {
+                    let lo = min(max(0, CGFloat(from) * AuditFlow.pointsPerSecond), width)
+                    let hi = min(max(0, CGFloat(from + length) * AuditFlow.pointsPerSecond), width)
+                    // A 40 ms request still has to be visible: three points is the floor.
+                    let barWidth = min(width, max(3, hi - lo))
+                    return Segment(entry: entry, x: min(lo, max(0, width - barWidth)),
+                                   width: barWidth, color: ink)
+                }
+                switch entry.transport {
+                case .tool:
+                    // Tool runs sit in their own lane, one bar per run.
+                    lanes[3].append(bar(placement.start, placement.seconds))
+                case .jev:
+                    // One round trip, no stream to wait on: the Notchi lane alone.
+                    lanes[2].append(bar(placement.start, placement.seconds))
+                case .http, .cli:
+                    // Send → first token in Input; first token → end in the lane
+                    // of whose model answered. No token means it never reached
+                    // generation.
+                    let wait = min(Double(entry.firstToken ?? entry.milliseconds) / 1000,
+                                   placement.seconds)
+                    lanes[0].append(bar(placement.start, wait))
+                    if let ttft = entry.firstToken {
+                        let length = placement.seconds - Double(ttft) / 1000
+                        if length > 0 {
+                            lanes[AuditFlow.isNotchi(entry) ? 2 : 1]
+                                .append(bar(placement.start + Double(ttft) / 1000, length))
+                        }
+                    }
+                }
+            }
         }
     }
 
     /// Whether the request went to Notchi's own models (Notchi Balance, Auto,
     /// Jev) rather than to a key or CLI the user set up.
-    private static func isNotchi(_ entry: RequestAudit.Entry) -> Bool {
+    fileprivate static func isNotchi(_ entry: RequestAudit.Entry) -> Bool {
         entry.transport == .jev || entry.provider == Provider.nono.displayName
-    }
-
-    /// The two generation lanes, split by whose model answered: first token →
-    /// end for a streamed request, the whole round trip for a Jev call. A
-    /// request that never got a token occupies the input lane only — it never
-    /// reached generation.
-    private func generationSegments(notchi: Bool, width: CGFloat) -> [Segment] {
-        placements.compactMap { placement in
-            let entry = placement.entry
-            guard entry.transport != .tool, Self.isNotchi(entry) == notchi else { return nil }
-            if entry.transport == .jev {
-                return segment(id: "model-\(entry.id)", placement: placement,
-                               from: placement.start, length: placement.seconds,
-                               width: width, color: color(for: entry))
-            }
-            guard let ttft = entry.firstToken else { return nil }
-            let start = placement.start + Double(ttft) / 1000
-            let length = placement.seconds - Double(ttft) / 1000
-            guard length > 0 else { return nil }
-            return segment(id: "model-\(entry.id)", placement: placement,
-                           from: start, length: length,
-                           width: width, color: color(for: entry))
-        }
-    }
-
-    /// Tool runs sit in their own lane, one bar per run, in the same ink.
-    private func toolSegments(width: CGFloat) -> [Segment] {
-        placements.filter { $0.entry.transport == .tool }.map { placement in
-            segment(id: "tool-\(placement.entry.id)", placement: placement,
-                    from: placement.start, length: placement.seconds,
-                    width: width, color: color(for: placement.entry))
-        }
-    }
-
-    private func segment(id: String, placement: Placement,
-                         from start: TimeInterval, length: TimeInterval,
-                         width: CGFloat, color: Color) -> Segment {
-        let from = x(for: start, width: width)
-        let to = x(for: start + length, width: width)
-        // A 40 ms request still has to be visible: three points is the floor.
-        let barWidth = min(width, max(3, to - from))
-        let origin = min(max(0, from), max(0, width - barWidth))
-        return Segment(id: id, entry: placement.entry, x: origin,
-                       width: barWidth, color: color)
-    }
-
-    private func x(for seconds: TimeInterval, width: CGFloat) -> CGFloat {
-        min(max(0, CGFloat(seconds) * Self.pointsPerSecond), width)
     }
 
     // MARK: Color
@@ -431,7 +460,7 @@ private struct AuditFlow: View {
     /// a rainbow of hues makes the reader hunt for a legend that doesn't exist,
     /// and every provider's bar would mean the same thing anyway. The one color
     /// that carries information is the failure red; a stopped request fades out.
-    private func color(for entry: RequestAudit.Entry) -> Color {
+    fileprivate static func color(for entry: RequestAudit.Entry) -> Color {
         switch entry.outcome {
         case .failed:    return Tokens.danger
         case .cancelled: return Tokens.text4
@@ -448,21 +477,50 @@ private struct AuditFlow: View {
 
 // MARK: - Detail
 
+/// One record's sent copy, prepared off the main thread. `shown` caps each line
+/// and the line count: a chat body's system prompt is a single JSON string of
+/// many thousands of characters, and laying that out in the card is what made
+/// it slow. Copy takes `full`.
+private struct AuditPayload {
+    let id: UUID
+    let full: String
+    let shown: String
+
+    private static let lineLimit = 1_000
+    private static let maxLines = 400
+
+    init(id: UUID, full: String) {
+        self.id = id
+        self.full = full
+        var lines: [Substring] = []
+        for line in full.split(separator: "\n", omittingEmptySubsequences: false) {
+            if lines.count == Self.maxLines { lines.append("…"); break }
+            lines.append(line.count > Self.lineLimit ? line.prefix(Self.lineLimit) + "…" : line)
+        }
+        shown = lines.joined(separator: "\n")
+    }
+}
+
 /// The card's footer, laid out like the harness's request panel: a **Summary** of
 /// what was asked and what came back, and the **Request timing** that says where
 /// the wait went. Two columns rather than two stacked sections because the pane
 /// is a settings column, not a window — the whole card has to stay on screen.
 ///
-/// There is no payload here by design: `RequestAudit` never stores a prompt, an
-/// answer or a response body, so the reference's Preview has nothing to show.
+/// Details ends with the copy of what went out (`RequestAudit.payload(for:)`),
+/// in the answer's code block so it copies the same way. Answers are never
+/// kept, so there is no response half to show.
 private struct AuditDetail: View {
     let entry: RequestAudit.Entry
+    let onInAppCopy: (() -> Void)?
 
     /// Whether the secondary half is unfolded. Closed by default: the facts that
     /// matter for every request are on screen, the rest is one click away instead
     /// of competing with them.
     @State private var detailed = false
     @State private var hoveringDetails = false
+    /// The payload of `entry`, read from disk while Details is open: the
+    /// whole of it for Copy, and the capped copy the block shows.
+    @State private var payload: AuditPayload?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -471,13 +529,21 @@ private struct AuditDetail: View {
             // request's own name is the first row's value, so it lines up with
             // the rest instead of sitting above them in a style of its own.
             Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
-                field(kindLabel, nameText)
+                field(kindLabel, nameText, sizesColumn: true)
+                if let callText {
+                    field(callLabel, callText, lines: 2)
+                }
+                if let surfaceText {
+                    field(L("audit.from"), surfaceText)
+                }
                 field(L("audit.status"), statusText, tint: statusTint)
                 field(L("audit.duration"), Self.duration(entry.milliseconds))
                 if entry.transport != .tool, entry.tokens > 0 {
                     field(L("audit.tokens"), tokensText)
                 }
-                field(L("audit.source"), sourceText)
+                if entry.transport != .tool {
+                    field(L("audit.source"), sourceText)
+                }
                 if detailed {
                     field(L("audit.started"), startText)
                     if let ttft = entry.firstToken {
@@ -487,30 +553,90 @@ private struct AuditDetail: View {
                     if let rate = throughputText {
                         field(L("audit.throughput"), rate)
                     }
+                    if entry.transport != .tool, !entry.model.isEmpty, entry.model != nameText {
+                        field(L("audit.modelID"), entry.model)
+                    }
+                    if entry.attempts > 1 {
+                        field(L("audit.attempts"), "\(entry.attempts)")
+                    }
+                    if let error = entry.error {
+                        field(L("audit.error"), error, tint: Tokens.danger, lines: 3)
+                    }
                 }
             }
             .transition(.opacity)
 
-            HStack(spacing: 16) {
-                Button {
-                    withAnimation(.easeOut(duration: 0.12)) { detailed.toggle() }
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "chevron.right")
-                            .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
-                            .rotationEffect(.degrees(detailed ? 90 : 0))
-                        Text(L("audit.details"))
-                            .font(AuditType.text(Tokens.TypeSize.meta))
-                    }
-                    .foregroundStyle(hoveringDetails ? Tokens.text2 : Tokens.text4)
-                    .contentShape(Rectangle())
+            Button {
+                withAnimation(.easeOut(duration: 0.12)) { detailed.toggle() }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "chevron.right")
+                        .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                        .rotationEffect(.degrees(detailed ? 90 : 0))
+                    Text(L("audit.details"))
+                        .font(AuditType.text(Tokens.TypeSize.meta))
                 }
-                .buttonStyle(.plain).exemptsDoubleClickPin()
-                .onHover { hoveringDetails = $0 }
-                .accessibilityLabel(L("audit.details"))
+                .foregroundStyle(hoveringDetails ? Tokens.text2 : Tokens.text4)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain).exemptsDoubleClickPin()
+            .onHover { hoveringDetails = $0 }
+            .accessibilityLabel(L("audit.details"))
 
+            if detailed, let payload, payload.id == entry.id {
+                CodeBlockView(text: payload.shown, language: "json",
+                              baseFont: Tokens.TypeSize.meta + 0.5,
+                              color: Tokens.text2,
+                              onInAppCopy: onInAppCopy,
+                              copyText: payload.full)
+                    .transition(.opacity)
             }
         }
+        // The card follows the selected bar, so the copy follows it too. Read
+        // off the main thread, and only once the pointer settles: sweeping
+        // across a row of bars with Details open would otherwise read and lay
+        // out every payload it passes.
+        .task(id: detailed ? entry.id : nil) {
+            guard detailed, entry.hasPayload == true, payload?.id != entry.id else { return }
+            try? await Task.sleep(for: .milliseconds(90))
+            guard !Task.isCancelled else { return }
+            let id = entry.id
+            let loaded = await Task.detached(priority: .userInitiated) {
+                RequestAudit.shared.payload(for: id).map { AuditPayload(id: id, full: $0) }
+            }.value
+            guard !Task.isCancelled else { return }
+            payload = loaded
+        }
+    }
+
+    /// What the call asked for — the search query, the page, the command, the
+    /// file — when the record kept it. Only a tool run has one: a request's own
+    /// content is in its payload, and the payload is not parsed for the card.
+    private var callText: String? {
+        guard entry.transport == .tool else { return nil }
+        return entry.call
+    }
+
+    /// The label for that argument, in the tool's own name for it: a search is a
+    /// query, a page is a URL, a shell run is a command.
+    private var callLabel: String {
+        switch entry.callName {
+        case "query":             return L("audit.call.query")
+        case "url":               return L("audit.call.url")
+        case "command":           return L("audit.call.command")
+        case "file_path", "path": return L("audit.call.path")
+        case "pattern":           return L("audit.call.pattern")
+        default:                  return L("audit.call.input")
+        }
+    }
+
+    /// The call site in words. A surface this build has no name for is shown
+    /// as the identifier itself rather than hidden.
+    private var surfaceText: String? {
+        guard let surface = entry.surface, !surface.isEmpty else { return nil }
+        let key = "audit.surface.\(surface)"
+        let name = L(key)
+        return name == key ? surface : name
     }
 
     /// What the selected bar is: a tool run, or a request (to a model or to Jev).
@@ -530,18 +656,24 @@ private struct AuditDetail: View {
     private static let labelKeys = [
         "audit.detail.request", "audit.detail.tool", "audit.status", "audit.duration",
         "audit.tokens", "audit.source", "audit.started", "audit.ttfb",
-        "audit.generation", "audit.throughput",
+        "audit.generation", "audit.throughput", "audit.from", "audit.modelID",
+        "audit.attempts", "audit.error", "audit.call.query", "audit.call.url",
+        "audit.call.command", "audit.call.path", "audit.call.pattern", "audit.call.input",
     ]
 
     private func field(_ label: String, _ value: String, tint: Color = Tokens.text1,
-                       weight: Font.Weight = .light) -> some View {
+                       weight: Font.Weight = .light, lines: Int = 1,
+                       sizesColumn: Bool = false) -> some View {
         GridRow(alignment: .firstTextBaseline) {
-            // Every label the card can show sits hidden underneath, so the label
-            // column is as wide collapsed as expanded and the values don't shift
-            // when Details opens.
+            // Every label the card can show sits hidden under the first row's,
+            // so the label column is as wide collapsed as expanded and the
+            // values don't shift when Details opens. One row is enough: a grid
+            // column is as wide as its widest cell.
             ZStack(alignment: .leading) {
-                ForEach(Self.labelKeys, id: \.self) { key in
-                    Text(L(key)).hidden()
+                if sizesColumn {
+                    ForEach(Self.labelKeys, id: \.self) { key in
+                        Text(L(key)).hidden()
+                    }
                 }
                 Text(label)
             }
@@ -551,8 +683,8 @@ private struct AuditDetail: View {
             Text(value)
                 .font(AuditType.text(Tokens.TypeSize.meta + 0.5, weight: weight))
                 .foregroundStyle(tint)
-                .lineLimit(1)
-                .truncationMode(.middle)
+                .lineLimit(lines)
+                .truncationMode(lines == 1 ? .middle : .tail)
         }
     }
 
@@ -560,6 +692,9 @@ private struct AuditDetail: View {
     /// the tool's own name for a tool run.
     private var sourceText: String {
         if entry.transport == .tool { return entry.model }
+        if let url = entry.url, let parts = URLComponents(string: url), let host = parts.host {
+            return host + parts.path
+        }
         return entry.host.isEmpty ? entry.provider : entry.host
     }
 

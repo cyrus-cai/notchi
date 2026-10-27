@@ -369,7 +369,13 @@ struct ToolRegistry: Sendable {
             loadout = nil
         } else {
             let loadout = ToolLoadout(held: held)
-            self.tools = tools + [LoadToolsTool(loadout: loadout)]
+            // A held tool the catalog has no line for (an MCP server's) is
+            // listed by the first sentence of its own description.
+            var summaries: [String: String] = [:]
+            for tool in tools where deferring.contains(tool.name) {
+                summaries[tool.name] = ToolCatalog.summary(of: tool.name) ?? ToolCatalog.brief(tool.description)
+            }
+            self.tools = tools + [LoadToolsTool(loadout: loadout, summaries: summaries)]
             self.loadout = loadout
         }
     }
@@ -415,6 +421,7 @@ struct ToolRegistry: Sendable {
         // The tool's run is part of the turn's processing flow, so it lands on
         // Settings → Audit's chart beside the model calls that asked for it.
         let audit = RequestAudit.shared.beginTool(call.name)
+        audit.input(call.input)
         do {
             if let sourced = tool as? SourcedTool {
                 let (text, sources) = try await sourced.runSourced(call.input)
@@ -962,7 +969,11 @@ struct AgentHarness {
             let shownAt = Date()
             onActivity(activityLabel(for: pendingCalls, isRepeatRound: didTool),
                        Self.orbState(for: pendingCalls, isRepeatRound: didTool))
-            let completed = await runConcurrently(pendingCalls)
+            // Under the turn's context, so each tool run's record names the
+            // part of the app that asked for it.
+            let completed = await NoNoRequestContext.$current.withValue(requestContext) {
+                await runConcurrently(pendingCalls)
+            }
             for call in completed where Self.isSearchTool(call.name) {
                 if let failure = call.searchFailure {
                     searchFailure = failure

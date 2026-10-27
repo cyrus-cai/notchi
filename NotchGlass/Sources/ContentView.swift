@@ -119,10 +119,9 @@ struct ContentView: View {
                 return true
             }
             // In Agent, ⌘↵ starts this task and opens its live detail page.
-            // Outside Agent it keeps its original meaning: submit the current line
-            // to the *other family* — Ask ⇄ Capture (Note/Remind) — as the
-            // one-key correction for a misread intent. Fresh prompt only; intent
-            // routing never applies to follow-ups. keyCode 36 is Return.
+            // Outside Agent it asks the line in the background and leaves the
+            // prompt on screen for the next question (`submitAndStay`). Fresh
+            // prompt only. keyCode 36 is Return.
             if ReservedAppShortcut.sendOther.matches(event),
                model.mode == .idle,
                !model.showSettings, !model.showWhatsNew, !model.showHistory,
@@ -131,7 +130,7 @@ struct ContentView: View {
                     return model.submitAgentAndOpenDetail()
                 }
                 if model.hasText {
-                    model.submitOtherFamily()
+                    model.submitAndStay()
                     return true
                 }
             }

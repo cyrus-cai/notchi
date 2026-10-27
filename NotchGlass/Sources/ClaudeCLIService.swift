@@ -449,6 +449,7 @@ struct ClaudeCLIService: AIService {
                                                   host: "claude",
                                                   transport: .cli)
             audit.attempt()
+            audit.command(binary, args, stdin: prompt)
             let state = ClaudeStreamState()
             state.audit = audit
 

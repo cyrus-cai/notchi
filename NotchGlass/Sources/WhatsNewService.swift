@@ -107,6 +107,17 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.20",
+            date: "2026-10-27",
+            features: [
+                "Audit now shows exactly what each request sent, and you can copy it.",
+                "⌘↵ asks in the background and keeps the prompt open for the next question.",
+            ],
+            improvements: [
+                "The main thread can no longer be deleted.",
+            ]
+        ),
+        Entry(
             version: "0.9.19",
             date: "2026-10-26",
             headline: "You can now review every request Notchi sends.",

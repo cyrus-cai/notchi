@@ -929,7 +929,7 @@ enum StatsSnapshot {
             } else {
                 VStack(alignment: .leading, spacing: 12) {
                     if !audit.isEmpty {
-                        AuditPane(entries: audit, hovered: .constant(nil))
+                        AuditPane(preset: audit)
                     }
                     StatsPane()
                 }

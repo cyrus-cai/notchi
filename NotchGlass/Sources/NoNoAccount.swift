@@ -664,7 +664,7 @@ final class NoNoAccount: ObservableObject {
                                                  host: URL(string: base)?.host ?? "notch.website")
         audit.attempt()
         do {
-            let value = try await run()
+            let value = try await RequestAudit.$current.withValue(audit) { try await run() }
             audit.finish(.ok)
             return value
         } catch {
@@ -683,6 +683,7 @@ final class NoNoAccount: ObservableObject {
         for (field, value) in NoNoRequestContext.headers where field == "X-Notchi-Version" {
             request.setValue(value, forHTTPHeaderField: field)
         }
+        RequestAudit.current?.request(request)
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw Failed.transport }
         guard (200..<300).contains(http.statusCode) else {
