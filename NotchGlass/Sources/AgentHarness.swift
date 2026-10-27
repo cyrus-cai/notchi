@@ -369,7 +369,13 @@ struct ToolRegistry: Sendable {
             loadout = nil
         } else {
             let loadout = ToolLoadout(held: held)
-            self.tools = tools + [LoadToolsTool(loadout: loadout)]
+            // A held tool the catalog has no line for (an MCP server's) is
+            // listed by the first sentence of its own description.
+            var summaries: [String: String] = [:]
+            for tool in tools where deferring.contains(tool.name) {
+                summaries[tool.name] = ToolCatalog.summary(of: tool.name) ?? ToolCatalog.brief(tool.description)
+            }
+            self.tools = tools + [LoadToolsTool(loadout: loadout, summaries: summaries)]
             self.loadout = loadout
         }
     }
