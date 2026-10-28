@@ -3481,6 +3481,16 @@ struct NotchBody: View {
                             savedTurnView(turn, item: item)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
+                        // A follow-up still being answered: the record holds the
+                        // question but not the answer yet, so show the same
+                        // waiting bubble the live thread shows under it.
+                        if item.conversation.last(where: \.isDrawn)?.role == "user",
+                           model.isAnswering(threadID: item.id) {
+                            AssistantTurnView(text: "", streaming: true,
+                                              baseFont: Tokens.TypeSize.reading)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .transition(.opacity)
+                        }
                     }
                     .environment(\.answerMediaBaseDirectory,
                                  item.source == .agent
@@ -7458,30 +7468,15 @@ private struct RecallSlide: ViewModifier {
     }
 }
 
-/// A compact three-dot wave for a Recent row whose answer is still streaming —
-/// the same calm cadence as `ThinkingDots`, sized down to sit in the trailing
-/// slot where the timestamp lands once the answer settles. Sits in the row at
-/// `.firstTextBaseline`, so the dots align with the title rather than floating.
+/// A Recent row whose answer is still streaming: Notchi's mark, small and
+/// quiet, in the trailing slot where the timestamp lands once the answer
+/// settles. Sits in the row at `.firstTextBaseline`, so the mark aligns with
+/// the title rather than floating.
 struct RecentPendingDots: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var phase = false
     var body: some View {
-        HStack(spacing: 3.5) {
-            ForEach(0..<3, id: \.self) { i in
-                Circle()
-                    .fill(Tokens.text4)
-                    .frame(width: 3.5, height: 3.5)
-                    .opacity(reduceMotion ? 0.55 : (phase ? 0.9 : 0.25))
-                    .animation(
-                        reduceMotion ? nil : .easeInOut(duration: 0.62)
-                            .repeatForever(autoreverses: true)
-                            .delay(Double(i) * 0.16),
-                        value: phase
-                    )
-            }
-        }
-        .onAppear { if !reduceMotion { phase = true } }
-        .accessibilityLabel(L("recent.answering"))
+        NotchiMark(mood: .waiting, eyeHeight: 5.5, dim: 0.45)
+            .accessibilityElement()
+            .accessibilityLabel(L("recent.answering"))
     }
 }
 

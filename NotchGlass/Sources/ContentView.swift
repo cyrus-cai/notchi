@@ -574,34 +574,64 @@ private struct ClipboardSenseEars: View {
     }
 }
 
-/// Same two-shoulder measurement as `SenseEarWidthsKey`, on its own key so the
-/// background-work readout and the copy-sense hint can't smear widths into each
-/// other while one crossfades out and the other in.
-private struct WorkEarWidthsKey: PreferenceKey {
-    static let defaultValue = SenseEarWidths()
-    static func reduce(value: inout SenseEarWidths, nextValue: () -> SenseEarWidths) {
-        let next = nextValue()
-        value = SenseEarWidths(left: max(value.left, next.left),
-                               right: max(value.right, next.right))
+/// A finished background task, shown on the resting notch for a few seconds
+/// in place of the system banner: an Ask round that finished after the panel
+/// folded, or an agent run. `show` returns false when the notch can't show it
+/// (panel open, live activity off, screen locked), and the caller posts the
+/// banner instead.
+@MainActor
+final class RestingResult: ObservableObject {
+    static let shared = RestingResult()
+
+    struct Item: Equatable {
+        let id = UUID()
+        let text: String
+        let failed: Bool
+    }
+
+    @Published private(set) var item: Item?
+    weak var model: NotchModel?
+
+    /// How long the result stays on the notch.
+    private static let hold: TimeInterval = 3
+    private var clearWork: DispatchWorkItem?
+
+    @discardableResult
+    func show(_ text: String, failed: Bool) -> Bool {
+        guard let model, !model.open, model.liveActivityEnabled, !Self.screenLocked
+        else { return false }
+        let line = text.split(whereSeparator: \.isNewline).first.map(String.init)?
+            .trimmingCharacters(in: .whitespaces) ?? ""
+        guard !line.isEmpty else { return false }
+        item = Item(text: line, failed: failed)
+        clearWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.item = nil }
+        clearWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.hold, execute: work)
+        return true
+    }
+
+    func dismiss() {
+        clearWork?.cancel()
+        item = nil
+    }
+
+    private static var screenLocked: Bool {
+        guard let session = CGSessionCopyCurrentDictionary() as? [String: Any] else { return false }
+        return (session["CGSSessionScreenIsLocked"] as? Bool) == true
     }
 }
 
-/// The resting notch's background-work readout, in the same two-eared compact
-/// idiom as `ClipboardSenseEars`. Running: the live doing-word on the left
-/// shoulder — the chat round's actual tool line ("Searching the web…",
-/// "Reading github.com…"), or a per-action verb for an agent run — and a
-/// once-a-second elapsed clock on the right, the collapsed twin of the agent
-/// card's clock (the ticking time is the "it's alive" signal).
-/// When the work settles the ears fold flat — the notification banner already
-/// said what finished; the resting notch keeps no tally.
+/// The resting notch's background-work readout: Notchi alone, no text.
+/// Running: NotchiMark on the left shoulder, playing the same mood as the
+/// panel's wait line. Finished: the eyes' verdict for a few seconds
+/// (`RestingResult`), then the ears fold flat.
 private struct BackgroundWorkEars: View {
     enum Stage: Equatable {
-        case running(verb: String, since: Date)
+        case running(mood: NotchiMark.Mood)
+        case finished(failed: Bool)
     }
     let stage: Stage
-    /// The eyes show for an agent run, not for an Ask answer finishing in the
-    /// background.
-    let showsFace: Bool
     /// The drawn hardware-notch width the ears flank (content-free gap).
     let notchWidth: CGFloat
     /// The island's current ear slots (content + insets, animated by the
@@ -609,90 +639,36 @@ private struct BackgroundWorkEars: View {
     let earLeft: CGFloat
     let earRight: CGFloat
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    /// A stable identity per verb, so SwiftUI crossfades one doing-word into the
-    /// next instead of morphing the text in place.
-    private var stageKey: String {
-        switch stage {
-        case .running(let verb, _): return "run-\(verb)"
-        }
+    private var isFinished: Bool {
+        if case .finished = stage { return true }
+        return false
     }
 
     var body: some View {
         HStack(spacing: 0) {
-            // Left ear — Notchi's face at the outer edge (agent runs only),
-            // then the verb.
+            // Left ear — NotchiMark, or the finished verdict, at the outer edge.
             HStack(spacing: 0) {
-                if showsFace { NotchiFace(expression: .think) }
                 ZStack {
-                    leftStage
-                        .id(stageKey)
-                        .transition(.opacity.combined(with: .scale(scale: 0.85)))
+                    switch stage {
+                    case .running(let mood):
+                        NotchiMark(mood: mood, eyeHeight: 8, shared: .work)
+                            .transition(.opacity)
+                    case .finished(let failed):
+                        NotchiFace(expression: failed ? .alert : .saved)
+                            .transition(.opacity)
+                    }
                 }
-                .animation(.easeInOut(duration: 0.22), value: stageKey)
-                .padding(.leading, showsFace ? NotchIsland.faceTextGap : NotchIsland.earTextPad)
-                .padding(.trailing, NotchIsland.earTextPad)
+                .frame(width: NotchiFace.slotWidth)
+                .animation(.smooth(duration: 0.3), value: isFinished)
             }
             .frame(width: earLeft, alignment: .leading)
 
             // The camera gap — content-free by construction.
             Color.clear.frame(width: notchWidth)
 
-            // Right ear — the elapsed clock, only while running.
-            ZStack {
-                if case .running(_, let since) = stage {
-                    TimelineView(.periodic(from: .now, by: 1)) { context in
-                        // Each tick rolls the changed digits with the system's
-                        // numeric-text transition (the blurred flip Apple uses
-                        // for its own clocks) instead of hard-cutting: only the
-                        // digits that actually changed move.
-                        let seconds = max(0, Int(context.date.timeIntervalSince(since)))
-                        Text(NotchModel.formatAgentElapsed(TimeInterval(seconds)))
-                            .font(.sf(Tokens.TypeSize.meta))
-                            .monospacedDigit()
-                            .contentTransition(.numericText(value: Double(seconds)))
-                            .animation(reduceMotion ? nil : .snappy(duration: 0.3),
-                                       value: seconds)
-                            .foregroundStyle(Tokens.text4)
-                            .lineLimit(1)
-                            .fixedSize()
-                    }
-                    .background(GeometryReader { proxy in
-                        Color.clear.preference(
-                            key: WorkEarWidthsKey.self,
-                            value: SenseEarWidths(right: proxy.size.width))
-                    })
-                    .transition(.opacity)
-                }
-            }
-            .animation(.easeInOut(duration: 0.22), value: stageKey)
-            .frame(width: earRight)
+            Color.clear.frame(width: earRight)
         }
         .frame(minHeight: 22)
-    }
-
-    @ViewBuilder
-    private var leftStage: some View {
-        Group {
-            switch stage {
-            case .running(let verb, _):
-                // Deliberately faint, matching the copy-sense ears — a status,
-                // not an announcement. `fixedSize` so the text never truncates:
-                // while its slot is still settling it overflows (hidden by the
-                // island's clip) instead of drawing half a line.
-                Text(verb)
-                    .font(.sf(Tokens.TypeSize.meta, weight: .regular))
-                    .tracking(0.3)
-                    .foregroundStyle(Tokens.text3)
-                    .lineLimit(1)
-                    .fixedSize()
-            }
-        }
-        .background(GeometryReader { proxy in
-            Color.clear.preference(key: WorkEarWidthsKey.self,
-                                   value: SenseEarWidths(left: proxy.size.width))
-        })
     }
 }
 
@@ -704,28 +680,19 @@ struct NotchIsland: View {
     @ObservedObject private var agentManager = AgentTaskManager.shared
     /// The update card the resting notch unfolds into (`UpdatePrompt`).
     @ObservedObject private var updatePrompt = UpdatePrompt.shared
+    /// A finished task the resting notch shows for a few seconds.
+    @ObservedObject private var restingResult = RestingResult.shared
     @Environment(\.notchMetrics) private var metrics
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// How far the black bleeds above the screen's top edge, guaranteeing no gap.
     private let topBleed: CGFloat = 6
 
-    /// Fallback width for the busy left ear on the first frame, before the
-    /// verb's measured width lands (via `WorkEarWidthsKey`) — roughly what a
-    /// short verb needs, so the ear doesn't blink open from zero.
-    private let busyExtension: CGFloat = 48
-
     /// The copy-sense ears' measured content widths (via `SenseEarWidthsKey`),
     /// so each shoulder of the flex fits its own content — the phrase/dots/
     /// verdict on the left, the ⌘C key on the right — in whatever language and
     /// stage is showing.
     @State private var senseEarContent = SenseEarWidths()
-
-    /// The background-work ears' measured content widths (via
-    /// `WorkEarWidthsKey`) — the verb on the left, the elapsed
-    /// clock on the right — kept apart from the copy-sense measurements so the
-    /// two occupants can't smear widths into each other mid-crossfade.
-    @State private var workEarContent = SenseEarWidths()
 
     /// Breathing room on each side of an ear's content.
     private let senseEarPad: CGFloat = 11
@@ -765,15 +732,15 @@ struct NotchIsland: View {
 
     private var showsPrompt: Bool { promptShowing != nil }
 
-    /// True when the panel is fully closed (on every display) but background
-    /// work is still running — a detached Ask round streaming, or an agent
-    /// run working in its folder. The resting notch flexes into the busy
-    /// ears: verb left, elapsed clock right. Gated on the GLOBAL `open`, not
-    /// this display's `isOpen`: while the panel is open anywhere the work is on
-    /// screen there, and the other displays' resting notches shouldn't claim it.
+    /// True when the panel is fully closed (on every display) and background
+    /// work is running or has just finished — a detached Ask round, or an
+    /// agent run working in its folder. The resting notch flexes into the work
+    /// ears. Gated on the GLOBAL `open`, not this display's `isOpen`: while the
+    /// panel is open anywhere the work is on screen there, and the other
+    /// displays' resting notches shouldn't claim it.
     private var busy: Bool {
         !model.open && !showsPrompt && model.liveActivityEnabled
-            && (model.roundsInFlight > 0 || agentRunning)
+            && (model.roundsInFlight > 0 || agentRunning || restingResult.item != nil)
     }
 
     /// An agent run the resting notch reports. Whether it shows AT ALL is
@@ -784,50 +751,34 @@ struct NotchIsland: View {
         agentManager.isRunning
     }
 
-    /// The busy left ear's label — what the work is ACTUALLY doing right now,
-    /// not a frozen verb. An agent run outranks the chat line (the
-    /// longer, heavier task defines the notch's mood): its activity stream
-    /// maps to a verb per action kind. A chat round shows the same live
-    /// tool-activity line the panel's detail row would ("Searching the web…",
-    /// "Reading github.com…"), falling back to "Thinking" only between tools.
-    private var busyVerb: String {
+    /// What the work ears show. A finished result outranks running work for
+    /// its few seconds, so a run that ends while another continues still
+    /// reports itself.
+    private var workStage: BackgroundWorkEars.Stage {
+        if let item = restingResult.item {
+            return .finished(failed: item.failed)
+        }
+        return .running(mood: busyMood)
+    }
+
+    /// NotchiMark's mood for the running work: the same mood the panel's wait
+    /// line plays. An agent run outranks the chat round (the longer, heavier
+    /// task defines the notch's mood).
+    private var busyMood: NotchiMark.Mood {
         if agentRunning {
-            // With parallel runs, the ear voices the freshest activity any of
-            // them reported — one verb for the whole fleet.
             let running = agentManager.runningTasks
-            if let task = running.last(where: { $0.activity != nil }) ?? running.first {
-                return Self.agentVerb(for: task.activity)
-            }
+            let activity = (running.last(where: { $0.activity != nil }) ?? running.first)?.activity
+            return Self.agentMood(for: activity)
         }
-        if let activity = model.backgroundActivity, !activity.isEmpty {
-            return activity
-        }
-        return L(model.backgroundWriting ? "busy.writing" : "busy.thinking")
+        return NotchiMark.Mood(model.backgroundOrb)
     }
 
-    /// Map the agent's activity line to an ear-sized verb: the raw lines
-    /// ("$ npm test", "Editing Foo.swift") run long and jitter the ear's width,
-    /// so the ear names the *kind* of action and leaves the detail to the card.
-    private static func agentVerb(for activity: String?) -> String {
-        guard let activity, !activity.isEmpty else { return L("busy.working") }
-        if activity.hasPrefix("$ ")         { return L("busy.running") }
-        if activity.hasPrefix("Editing ")   { return L("busy.editing") }
-        if activity.hasPrefix("Searching ") { return L("busy.searching") }
-        if activity.hasPrefix("Reading ")   { return L("busy.searching") }
-        if activity == L("agent.thinking") { return L("busy.thinking") }
-        return L("busy.working")
-    }
-
-    /// When the oldest still-running background task started — the busy right
-    /// ear's clock counts from here, so it reads as total time under way (not
-    /// time since the panel folded).
-    private var busySince: Date {
-        var start = model.busySince ?? Date()
-        if agentRunning,
-           let earliest = agentManager.runningTasks.map(\.startedAt).min() {
-            start = min(start, earliest)
-        }
-        return start
+    /// Map the agent's activity line to a mood by the kind of action.
+    static func agentMood(for activity: String?) -> NotchiMark.Mood {
+        guard let activity, !activity.isEmpty else { return .working }
+        if activity.hasPrefix("Searching ") || activity.hasPrefix("Reading ") { return .searching }
+        if activity == L("agent.thinking") { return .composing }
+        return .working
     }
 
     /// True when the resting notch is offering (or narrating) a clipboard
@@ -861,8 +812,8 @@ struct NotchIsland: View {
 
     private var earLeftContent: CGFloat {
         if busy {
-            let content = workEarContent.left > 0 ? workEarContent.left : busyExtension
-            return agentRunning ? faceEar(content) : content + senseEarPad * 2
+            // The ear is just the mark.
+            return NotchiFace.slotWidth + 6
         }
         if sensing {
             // A write narrated by the eyes alone carries no text: the ear is
@@ -873,14 +824,11 @@ struct NotchIsland: View {
         return 0
     }
 
-    /// The resting notch's RIGHT flex — the busy elapsed clock while work runs,
-    /// or the copy-sense ⌘C ear while the offer stands (it folds shut on
+    /// The resting notch's RIGHT flex — nothing while work runs, or the
+    /// copy-sense ⌘C ear while the offer stands (it folds shut on
     /// confirm).
     private var earRightContent: CGFloat {
-        if busy {
-            return workEarContent.right > 0
-                ? workEarContent.right + senseEarPad * 2 : 0
-        }
+        if busy { return 0 }
         guard sensing, senseEarContent.right > 0 else { return 0 }
         return senseEarContent.right + senseEarPad * 2
     }
@@ -1047,17 +995,15 @@ struct NotchIsland: View {
                 }
 
                 // The background-work readout, in the two-eared idiom: while
-                // work runs, the verb on the left shoulder and a once-a-second
-                // elapsed clock on the right (the collapsed twin of the
-                // agent card's clock — no dots; ticking time IS the "it's
-                // alive" signal). When the last task settles the ears fold
-                // flat again. It all lives inside the island's own black
+                // work runs, NotchiMark on the left shoulder and, after a
+                // while, the clock or task count on the right; when a task
+                // finishes, its verdict and title for a few seconds, then the
+                // ears fold flat again. It all lives inside the island's own black
                 // zone — one material, one form — which is what makes the flex
                 // read as the notch working, not as a badge stuck beside it.
                 if busy {
                     BackgroundWorkEars(
-                        stage: .running(verb: busyVerb, since: busySince),
-                        showsFace: agentRunning,
+                        stage: workStage,
                         notchWidth: metrics.restWidth,
                         earLeft: max(0, earLeft - drawnEdgeInset),
                         earRight: max(0, earRight - drawnEdgeInset))
@@ -1230,6 +1176,22 @@ struct NotchIsland: View {
         // backdrop blur stops at the glass edge like every other overlay.
         .imageLightboxHost(topInset: metrics.restHeight)
         .clipShape(islandShape)
+        // The launch warm-up (`NotchModel.prewarmPanel`): the open content at
+        // its real width, invisible and untouchable, for a moment. Outside the
+        // island's clip, which at rest would cut it away before it is drawn;
+        // an overlay, so the resting form keeps its own size.
+        .overlay(alignment: .top) {
+            if !isOpen, let id = metrics.displayID, model.prewarmDisplay == id {
+                NotchBody(model: model)
+                    .frame(width: model.openWidth)
+                    .padding(.top, metrics.restHeight)
+                    // Not 0: SwiftUI skips drawing fully transparent content,
+                    // and the drawing is most of what needs warming.
+                    .opacity(0.001)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
+        }
         // The "slab of glass" look (per the reference): the dark body holds and
         // stays readable, the top reads near-solid and the lower body eases more
         // translucent (that vertical gradient lives in GlassMaterial's veil), and
@@ -1329,8 +1291,7 @@ struct NotchIsland: View {
         // stage's content changes size — hint phrase → dots → verdict, and the
         // ⌘C ear folding shut on confirm.
         .onPreferenceChange(SenseEarWidthsKey.self) { senseEarContent = $0 }
-        .onPreferenceChange(WorkEarWidthsKey.self) { workEarContent = $0 }
-        // Keep the model's resting-notch hover rect in step with the ears —
+                // Keep the model's resting-notch hover rect in step with the ears —
         // hovering the verb/clock or the copy hint must
         // count as hovering the notch (see `pointerInsideRestingNotch`).
         .onAppear { model.registerRestingEars(left: earLeft, right: earRight) }

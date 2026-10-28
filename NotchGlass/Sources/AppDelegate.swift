@@ -18,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var openObserver: AnyCancellable?
     /// Watches the Force Touch pause so it can end itself when the window lapses.
     private var forceTouchPauseObserver: AnyCancellable?
+    private var menuBarWorkObserver: AnyCancellable?
     /// The wake-up that ends that pause. Re-armed on every change to the window.
     private var forceTouchPauseExpiry: DispatchWorkItem?
     /// Debounces the full-screen re-evaluation: Space/app-activation events can
@@ -298,6 +299,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // temporary instrumentation for the "sometimes takes two clicks" report.
         ClickOpenProbe.shared.start(model: model)
 
+        // Build the open panel once, unseen, after launch has settled, so the
+        // first click doesn't stall on it (see `NotchModel.prewarmPanel`).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self else { return }
+            self.model.prewarmPanel(on: self.model.activeDisplay ?? self.preferredScreen()?.displayID)
+        }
+
         // Seed the configured flag to match the service the model launched with.
         model.isConfigured = AppDelegate.isConfigured()
 
@@ -400,6 +408,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         rebuildPanels()
         model.installThreadPullMonitor()
+        // The user's own Telegram bot, when one is set up (`TelegramBridge`).
+        TelegramBridge.shared.model = model
+        TelegramBridge.shared.start()
 
         // The one and only first run: the screen goes black, the mark becomes a
         // real 3D object, spins once and flies into the notch — and the panel
@@ -551,6 +562,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if env["NOTCH_OPEN"] == "1" {
             model.openPanel(on: preferredScreen()?.displayID)
             if env["NOTCH_DEMO_WELCOME"] != nil { model.offerWelcomeGuide() }
+            // NOTCH_DEMO_GIFT="Title|1" shows the grant chip; an empty title
+            // draws the welcome gift's name.
+            if let gift = env["NOTCH_DEMO_GIFT"] {
+                let parts = gift.split(separator: "|", omittingEmptySubsequences: false)
+                let title = parts.first.map(String.init).flatMap { $0.isEmpty ? nil : $0 }
+                let amount = parts.count > 1 ? Double(parts[1]) ?? 1 : 1
+                NoNoAccount.shared.seedDemoGrant(title: title, amountUSD: amount)
+            }
             if env["NOTCH_DEMO"] == "1" {
                 // NOTCH_DEMO_TEXT lets us seed arbitrary markdown for inspecting
                 // the answer renderer; falls back to the original one-liner.
@@ -624,6 +643,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     model.showAgentPicker = true
                 }
             }
+            // NOTCH_DEMO_MAIN_OPEN=1 opens the main thread the way ↓ on the
+            // empty prompt does, so the whole conversation can be shot.
+            // Screenshot aid only.
+            // NOTCH_DEMO_NO_SELECTION=1 drops whatever text happened to be
+            // selected in the front app when the panel opened, so its badge
+            // doesn't land in the shot.
+            if env["NOTCH_DEMO_NO_SELECTION"] == "1" || env["NOTCH_DEMO_MAIN_OPEN"] == "1" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+                    self?.model.dropSelectionContext()
+                }
+            }
+            // NOTCH_DEMO_HOLD=1 keeps the panel open when the pointer is away
+            // from it (the same hold Telegram setup uses), so a pose can be shot
+            // while someone else is using the Mac.
+            if env["NOTCH_DEMO_HOLD"] == "1" {
+                TelegramBridge.shared.holdsPanel = true
+            }
+            if env["NOTCH_DEMO_MAIN_OPEN"] == "1" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self] in
+                    _ = self?.model.openMainThreadFromKey()
+                }
+            }
+            // NOTCH_DEMO_SHELL=<command> poses an answer running that command
+            // (NOTCH_DEMO_SHELL_Q is the question; NOTCH_DEMO_SHELL_CONFIRM=1
+            // also raises the confirmation card a risky command gets).
+            if let command = env["NOTCH_DEMO_SHELL"], !command.isEmpty {
+                model._debugSeedShell(question: env["NOTCH_DEMO_SHELL_Q"] ?? command,
+                                      command: command,
+                                      confirm: env["NOTCH_DEMO_SHELL_CONFIRM"] == "1")
+            }
+            // NOTCH_DEMO_NEXT_Q=<question> puts a suggested next question under
+            // the last answer once the thread is open.
+            if let q = env["NOTCH_DEMO_NEXT_Q"], !q.isEmpty {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.6) { [weak self] in
+                    self?.model._debugSetNextQuestion(q)
+                }
+            }
             #endif
         }
         #if DEBUG
@@ -682,6 +738,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 logLines: env["NOTCH_DEMO_AGENT_LOG"].flatMap(Int.init) ?? 0
             )
             if env["NOTCH_OPEN"] == "1" { model.showHistory = true }
+        }
+        // NOTCH_DEMO_RESULT=<title> shows a finished task on the resting notch
+        // (NOTCH_DEMO_RESULT_FAILED=1 for a failure), after NOTCH_DEMO_RESULT_AT
+        // seconds (default 1). Screenshot aid only.
+        if let title = env["NOTCH_DEMO_RESULT"], !title.isEmpty {
+            let delay = env["NOTCH_DEMO_RESULT_AT"].flatMap(Double.init) ?? 1
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                RestingResult.shared.show(title, failed: env["NOTCH_DEMO_RESULT_FAILED"] == "1")
+            }
         }
         // NOTCH_DEMO_FORCE=menu|answer poses the force-click box beside a point
         // on screen, so the real surface can be shot without a trackpad press.
@@ -844,12 +909,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let workspaceCenter = NSWorkspace.shared.notificationCenter
         workspaceCenter.addObserver(
             self,
-            selector: #selector(fullScreenStateMaybeChanged),
+            selector: #selector(fullScreenStateMaybeChanged(_:)),
             name: NSWorkspace.activeSpaceDidChangeNotification,
             object: nil)
         workspaceCenter.addObserver(
             self,
-            selector: #selector(fullScreenStateMaybeChanged),
+            selector: #selector(fullScreenStateMaybeChanged(_:)),
             name: NSWorkspace.didActivateApplicationNotification,
             object: nil)
         // The Settings → General "Hide in full screen" toggle re-evaluates now.
@@ -1540,6 +1605,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             resumeForceTouch: { [weak self] in self?.model.resumeForceTouch() }
         ))
         menuBar?.apply()
+        // The menu bar eyes play the same work the resting notch shows.
+        menuBarWorkObserver = Publishers.CombineLatest3(
+            model.$roundsInFlight, model.$backgroundOrb, AgentTaskManager.shared.$tasks)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] rounds, orb, tasks in
+                let running = tasks.filter(\.isRunning)
+                let mood: NotchiMark.Mood?
+                if !running.isEmpty {
+                    let activity = (running.last(where: { $0.activity != nil }) ?? running.first)?.activity
+                    mood = NotchIsland.agentMood(for: activity)
+                } else {
+                    mood = rounds > 0 ? NotchiMark.Mood(orb) : nil
+                }
+                self?.menuBar?.setWork(mood)
+            }
     }
 
     /// Run a menu-driven open against the model, on the screen the mouse is on
@@ -1612,7 +1692,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// A Space switch or app activation may mean an app just entered or left full
     /// screen — re-evaluate, deferred a moment so the on-screen window list has
     /// settled into its new state before we read it.
-    @objc private func fullScreenStateMaybeChanged() {
+    @objc private func fullScreenStateMaybeChanged(_ note: Notification) {
+        // Opening the panel activates Notchi itself, which can't put another app
+        // into full screen. Re-reading the window list then only blocked the main
+        // thread on a WindowServer round trip 0.2s into the open animation.
+        if let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+           app.processIdentifier == ProcessInfo.processInfo.processIdentifier {
+            return
+        }
         scheduleFullScreenHidingUpdate()
     }
 

@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 
 /// The menu bar item — the app's only always-visible affordance besides the
 /// notch itself. Notch is an `.accessory` app with no Dock icon by default, so
@@ -36,6 +37,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     private var statusItem: NSStatusItem?
     private let actions: Actions
+    /// The mood of the work running now, nil when idle. With the face style
+    /// the eyes play it, the same forms the resting notch's NotchiMark plays.
+    private var workMood: NotchiMark.Mood?
+    private var frameTimer: Timer?
 
     init(actions: Actions) {
         self.actions = actions
@@ -50,16 +55,51 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     func apply() {
         if MenuBarIconVisibility.current == .shown || actions.isForceTouchDisabled() {
             install()
+            statusItem?.button?.image = Self.statusIcon(MenuBarIconStyle.current)
         } else {
             remove()
         }
+        updateAnimation()
+    }
+
+    /// Called whenever the notch's work changes: a round or an agent run
+    /// starts, changes what it is doing, or ends.
+    func setWork(_ mood: NotchiMark.Mood?) {
+        guard mood != workMood else { return }
+        workMood = mood
+        updateAnimation()
+    }
+
+    private func updateAnimation() {
+        let animate = workMood != nil && statusItem != nil
+            && MenuBarIconStyle.current == .face
+            && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if animate {
+            guard frameTimer == nil else { return }
+            let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.drawFrame() }
+            }
+            // .common keeps it running while the menu is open.
+            RunLoop.main.add(timer, forMode: .common)
+            frameTimer = timer
+        } else if let timer = frameTimer {
+            timer.invalidate()
+            frameTimer = nil
+            statusItem?.button?.image = Self.statusIcon(MenuBarIconStyle.current)
+        }
+    }
+
+    private func drawFrame() {
+        guard let mood = workMood else { return }
+        let blobs = NotchiDirector.work.blobs(at: Date.timeIntervalSinceReferenceDate, mood: mood)
+        statusItem?.button?.image = Self.faceIcon(blobs)
     }
 
     private func install() {
         guard statusItem == nil else { return }
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = item.button {
-            button.image = Self.statusIcon()
+            button.image = Self.statusIcon(MenuBarIconStyle.current)
             button.imagePosition = .imageOnly
             button.toolTip = "Notchi"
             button.setAccessibilityLabel("Notchi")
@@ -92,7 +132,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     /// are filleted, and the whole mark sits at 13pt rather than filling the
     /// bar's full content height. Hard 90° corners at 13pt, against a row of
     /// light SF Symbols, read as a black wedge louder than everything beside it.
-    private static func statusIcon() -> NSImage {
+    static func statusIcon(_ style: MenuBarIconStyle) -> NSImage {
+        if style == .face { return faceIcon() }
         let side: CGFloat = 13
         let icon = NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
             let u = rect.width / 3
@@ -122,6 +163,40 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         }
         // Template: macOS paints it in the menu bar's own label color, so it reads
         // on a light bar and a dark one without shipping two assets.
+        icon.isTemplate = true
+        return icon
+    }
+
+    /// The face's two eyes (`NotchiEyeShape`) at menu-bar size, as a template
+    /// like the mark: 10pt tall, about 18pt wide. Drawn from `NotchiBlob`s so
+    /// the same image can show any frame of a `NotchiDirector` run; the canvas
+    /// is 22pt square so forms that travel past the eyes stay inside it, and
+    /// the item does not change width when the eyes start moving.
+    private static func faceIcon(_ blobs: [NotchiBlob] = NotchiForm.restingEyes) -> NSImage {
+        let unit: CGFloat = 10
+        let side: CGFloat = 22
+        let icon = NSImage(size: NSSize(width: side, height: side), flipped: true) { rect in
+            guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
+            let c = CGPoint(x: rect.midX, y: rect.midY)
+            for b in blobs.sorted(by: { $0.z < $1.z }) {
+                let w = CGFloat(b.w) * unit, h = CGFloat(b.h) * unit
+                guard w > 0.05, h > 0.05, b.alpha > 0.01 else { continue }
+                let cap = min(w, h) / 2
+                func r(_ v: Double) -> CGFloat { min(CGFloat(v) * unit, cap) }
+                let shape = UnevenRoundedRectangle(
+                    cornerRadii: .init(topLeading: r(b.tl), bottomLeading: r(b.bl),
+                                       bottomTrailing: r(b.br), topTrailing: r(b.tr)),
+                    style: .continuous
+                ).path(in: CGRect(x: -w / 2, y: -h / 2, width: w, height: h))
+                let move = CGAffineTransform(translationX: c.x + CGFloat(b.x) * unit,
+                                             y: c.y + CGFloat(b.y) * unit)
+                    .rotated(by: CGFloat(b.rot))
+                ctx.addPath(shape.applying(move).cgPath)
+                ctx.setFillColor(NSColor.black.withAlphaComponent(b.alpha).cgColor)
+                ctx.fillPath()
+            }
+            return true
+        }
         icon.isTemplate = true
         return icon
     }
@@ -287,6 +362,32 @@ enum MenuBarIconVisibility: String, CaseIterable, Identifiable {
         get {
             UserDefaults.standard.string(forKey: key)
                 .flatMap(MenuBarIconVisibility.init) ?? .shown
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: key)
+        }
+    }
+}
+
+/// What the menu bar icon draws: the app icon's mark, or the face's two eyes.
+enum MenuBarIconStyle: String, CaseIterable, Identifiable {
+    case mark
+    case face
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .mark: return L("menuBarIcon.style.mark")
+        case .face: return L("menuBarIcon.style.face")
+        }
+    }
+
+    private static let key = "menuBarIconStyle"
+    static var current: MenuBarIconStyle {
+        get {
+            UserDefaults.standard.string(forKey: key)
+                .flatMap(MenuBarIconStyle.init) ?? .mark
         }
         set {
             UserDefaults.standard.set(newValue.rawValue, forKey: key)

@@ -107,6 +107,26 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.21",
+            date: "2026-10-28",
+            headline: "Notchi wakes up to 3x faster now.",
+            heroAssetName: "WhatsNew0921Promo",
+            features: [
+                "Notchi's eyes now show while it thinks, searches, or runs a tool.",
+                "The menu bar icon now moves while Notchi is answering.",
+            ],
+            improvements: [
+                "The first wake after launch now takes 102–163 ms, down from 315–486 ms.",
+                "Later wakes now take 65–79 ms, down from 65–116 ms.",
+                "Switching sections in Settings now slides between them.",
+                "Background work in the notch now shows only Notchi's eyes, without text.",
+                "Audit now links to the Privacy Policy.",
+            ],
+            fixes: [
+                "Fixed a conversation opened from Recent not showing that it was still answering.",
+            ]
+        ),
+        Entry(
             version: "0.9.20",
             date: "2026-10-27",
             features: [

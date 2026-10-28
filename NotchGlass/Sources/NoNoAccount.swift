@@ -29,6 +29,8 @@ struct NoNoRequestContext: Sendable {
     static let forceTouch = "forceTouch"
     /// A follow-up or regenerate in a detached conversation window.
     static let window = "window"
+    /// A message sent to the Notchi bot in Telegram (`TelegramBridge`).
+    static let telegram = "telegram"
     /// Background naming of a new prompt shortcut.
     static let naming = "naming"
     /// Background titling of a conversation thread.
@@ -277,6 +279,15 @@ final class NoNoAccount: ObservableObject {
         }
         for gift in gifts { known.insert(gift.id) }
         UserDefaults.standard.set(Array(known), forKey: Self.seenGiftsKey)
+    }
+
+    /// Debug aid for NOTCH_DEMO_GIFT: show the grant chip as if a gift had
+    /// landed this launch. No effect in normal use.
+    func seedDemoGrant(title: String?, amountUSD: Double) {
+        justGrantedUSD = amountUSD
+        justGranted = BalanceLine(id: "demo", kind: .gift, title: title,
+                                  amountUSD: amountUSD, expiresAt: nil,
+                                  at: Date().timeIntervalSince1970 * 1000)
     }
 
     /// The prompt's grant chip was tapped: hide it, and have the wallet card

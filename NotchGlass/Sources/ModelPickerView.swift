@@ -3162,11 +3162,20 @@ struct ModelSearchRow: View {
 /// `offByDefault`. Stored as newline-separated ids so Settings can bind it with
 /// `@AppStorage`: a bare id is switched off, a `+id` is an `offByDefault` model
 /// switched on.
+@MainActor
 enum NotchiModelVisibility {
     static let defaultsKey = "notchi_hidden_models"
 
-    /// Off until switched on, and listed last.
-    static let offByDefault: Set<String> = ["mimo-v2.6-flash", "mimo-v2.6-pro"]
+    /// Off until switched on, and listed last: the bundled pair, and every
+    /// model the gateway's `/v1/models` marks `offByDefault`.
+    static var offByDefault: Set<String> {
+        let served = ModelCatalogStore.shared.liveByProvider[.nono]?
+            .filter { $0.notchiPricing?.offByDefault == true }
+            .map(\.id) ?? []
+        return bundledOffByDefault.union(served)
+    }
+
+    private static let bundledOffByDefault: Set<String> = ["mimo-v2.6-flash", "mimo-v2.6-pro"]
 
     static func hidden(in raw: String) -> Set<String> {
         let lines = raw.split(separator: "\n").map(String.init)
@@ -3196,7 +3205,8 @@ enum NotchiModelVisibility {
     /// `items` with the `offByDefault` models moved to the end, otherwise in
     /// their own order.
     static func ordered<T>(_ items: [T], id: (T) -> String) -> [T] {
-        items.filter { !offByDefault.contains(id($0)) } + items.filter { offByDefault.contains(id($0)) }
+        let off = offByDefault
+        return items.filter { !off.contains(id($0)) } + items.filter { off.contains(id($0)) }
     }
 }
 

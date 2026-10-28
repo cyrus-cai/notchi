@@ -218,6 +218,7 @@ struct StatsDigest: Equatable {
 /// active days) live in About now, with the activity grid they describe.
 struct StatsPane: View {
     @State private var hoveringReveal = false
+    @State private var hoveringPolicy = false
 
     var body: some View {
         HStack(spacing: 14) {
@@ -238,6 +239,18 @@ struct StatsPane: View {
                 .buttonStyle(.plain).exemptsDoubleClickPin()
                 .onHover { hoveringReveal = $0 }
             }
+            Button {
+                LinkGate.shared.open(URL(string: "https://www.notch.website/privacy")!)
+            } label: {
+                Text(L("audit.privacyPolicy"))
+                    .font(.sf(Tokens.TypeSize.meta))
+                    .foregroundStyle(hoveringPolicy ? Tokens.text1 : Tokens.text4.opacity(0.8))
+                    .lineLimit(1)
+                    .fixedSize()
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain).exemptsDoubleClickPin()
+            .onHover { hoveringPolicy = $0 }
         }
     }
 

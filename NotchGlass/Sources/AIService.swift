@@ -3578,6 +3578,9 @@ enum ModelCatalog {
                 /// When the sale behind these prices ends, ISO 8601 UTC. Absent
                 /// where no sale is running, and on older payloads.
                 let promoEndsAt: String?
+                /// Switched off until the user turns it on. Absent on older
+                /// payloads, which means on. See `NotchiModelVisibility`.
+                let offByDefault: Bool?
 
                 struct Reference: Decodable, Equatable, Sendable {
                     let vendor: String

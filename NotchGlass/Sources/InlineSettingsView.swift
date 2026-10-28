@@ -137,6 +137,45 @@ private struct PermissionStatusPill: View {
     }
 }
 
+/// The Telegram setup step's action, in `PermissionStatusPill`'s neutral
+/// capsule. Without an action it is a status (Checking…) and does not react.
+private struct TelegramStepPill: View {
+    let title: String
+    let action: (() -> Void)?
+
+    init(title: String, action: (() -> Void)?) {
+        self.title = title
+        self.action = action
+    }
+
+    @State private var hovering = false
+
+    var body: some View {
+        Group {
+            if let action {
+                Button(action: action) { label }
+                    .buttonStyle(.plain).exemptsDoubleClickPin()
+                    .onHover { hovering = $0 }
+            } else {
+                label
+            }
+        }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+    }
+
+    private var label: some View {
+        Text(title)
+            .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+            .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
+            .lineLimit(1)
+            .padding(.horizontal, 11)
+            .frame(height: 28)
+            .background(Capsule().fill(Color.white.opacity(hovering ? 0.12 : 0.07)))
+            .overlay(Capsule().strokeBorder(Color.white.opacity(hovering ? 0.15 : 0.08), lineWidth: 0.5))
+            .contentShape(Capsule())
+    }
+}
+
 /// Settings rendered *inside* the notch panel, in place of the recent list —
 /// not a separate window — wearing the panel's Liquid Glass skin so it reads as
 /// part of the island. The gear and ⌘, both swap the RECENT block for
@@ -214,6 +253,12 @@ struct InlineSettingsView: View {
     /// instructions above it.
     @ObservedObject private var memory = UserMemory.shared
     @ObservedObject private var mcp = MCPHub.shared
+    @ObservedObject private var telegram = TelegramBridge.shared
+    @State private var telegramToken = ""
+    @State private var telegramOpenedBotFather = false
+    @State private var telegramSetupOpen = false
+    @State private var telegramConfirmForget = false
+    @State private var telegramBoardCount = NSPasteboard.general.changeCount
     @ObservedObject private var clipboardHistory = ClipboardHistory.shared
     /// Memory files as edited on the Memory page, by file name. Seeded from
     /// disk on first read; each edit is written straight back.
@@ -399,6 +444,7 @@ struct InlineSettingsView: View {
     enum Section: String, CaseIterable, Identifiable {
         case model = "Model"     // who answers: provider, API key, model override — and the search backend behind it
         case chat = "Chat"       // how a conversation behaves: emoji reactions, message sounds, custom instructions
+        case connect = "Connect" // other places that reach Notchi: the user's own Telegram bot
         case appearance = "Appearance" // notch style, interaction, and display placement
         case shortcuts = "Shortcuts" // editable keyboard controls + copy sensing, its own top-level settings category
         case general = "General" // language, app presence, note destination, permissions, + Advanced (proxy)
@@ -446,6 +492,7 @@ struct InlineSettingsView: View {
             switch self {
             case .model:      return L("sidebar.model")
             case .chat:       return L("sidebar.chat")
+            case .connect:    return L("sidebar.connect")
             case .general:    return L("sidebar.general")
             case .shortcuts:  return L("sidebar.shortcuts")
             case .appearance: return L("sidebar.appearance")
@@ -499,6 +546,7 @@ struct InlineSettingsView: View {
     /// go through `selectMenuBarIconVisibility` so `AppDelegate` adds or removes
     /// the status item immediately.
     @State private var menuBarIconVisibility: MenuBarIconVisibility = .current
+    @State private var menuBarIconStyle: MenuBarIconStyle = .current
 
     /// Whether the app launches itself at login — seeded from the live system
     /// login-item status (`SMAppService`), not `UserDefaults`. Writes go through
@@ -581,6 +629,11 @@ struct InlineSettingsView: View {
     /// rather than drawing every control against its label for one frame.
     /// Static so it outlives closing and reopening Settings.
     @MainActor private static var labelColumnWidths: [Section: CGFloat] = [:]
+    /// Which way the last pane switch moved through the category order (+1
+    /// down, -1 up). Read by the pane transition.
+    @State private var paneDirection: CGFloat = 1
+    /// Shared by the sidebar rows so the selection capsule slides between them.
+    @Namespace private var sidebarSelection
 
     /// Whether the General pane's folded Advanced block is open.
     @State private var advancedSectionOpen = false
@@ -645,7 +698,7 @@ struct InlineSettingsView: View {
                     // A hidden copy holds the sidebar's width and minimum height;
                     // the visible one is an overlay so it spans the full column
                     // height.
-                    sidebar
+                    sidebar(measuring: true)
                         .padding(.top, Self.paneTopRunway)
                         .hidden()
                         .accessibilityHidden(true)
@@ -654,7 +707,7 @@ struct InlineSettingsView: View {
                         .padding(.leading, 14)
                 }
                 .overlay(alignment: .topLeading) {
-                    sidebar
+                    sidebar()
                         .padding(.top, Self.paneTopRunway)
                 }
                 // Take the columns' own height, nothing more: the pane already
@@ -744,6 +797,38 @@ struct InlineSettingsView: View {
                 .padding(.top, -NotchBody.panelPadding)
                 .padding(.bottom, -NotchBody.panelPadding)
                 .transition(.opacity.combined(with: .scale(scale: 0.96)))
+            } else if telegramConfirmForget, case .connected(let bot, _) = telegram.state {
+                // Starting over unpairs the bot, and pairing again takes the
+                // whole setup, so it asks first. Same card as Forget memories.
+                ConfirmationDialogOverlay(onDismiss: { telegramConfirmForget = false }) {
+                    VStack(spacing: 14) {
+                        Text(L("telegram.forget.confirm", "@" + bot))
+                            .font(.sf(Tokens.TypeSize.reading, weight: .medium))
+                            .foregroundStyle(Tokens.text1)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                        HStack(spacing: 10) {
+                            ConfirmDialogButton(title: L("telegram.forget"), kind: .destructive) {
+                                telegramConfirmForget = false
+                                withAnimation(.easeOut(duration: Tokens.hoverFade)) {
+                                    telegramOpenedBotFather = false
+                                    telegramSetupOpen = true
+                                    telegram.forget()
+                                }
+                            }
+                            ConfirmDialogButton(title: L("clear.cancel"), kind: .neutral) {
+                                telegramConfirmForget = false
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 18)
+                    .frame(maxWidth: 280)
+                }
+                .padding(.horizontal, -NotchBody.panelPadding)
+                .padding(.top, -NotchBody.panelPadding)
+                .padding(.bottom, -NotchBody.panelPadding)
+                .transition(.opacity.combined(with: .scale(scale: 0.96)))
             } else if model.confirmingDisconnect {
                 // Disconnecting drops the stored sign-in, and getting it back
                 // takes the browser flow again, so it asks first.
@@ -767,6 +852,7 @@ struct InlineSettingsView: View {
         }
         .animation(.easeOut(duration: 0.16), value: model.confirmingDisconnect)
         .animation(.easeOut(duration: 0.16), value: memoryForgetTarget)
+        .animation(.easeOut(duration: 0.16), value: telegramConfirmForget)
         .animation(.easeOut(duration: 0.16), value: promptTemplatePickerOpen)
         .animation(.easeOut(duration: 0.16), value: presentedPromptShortcutID)
         // The Force Click gate is NOT mounted here: its scrim has to cover the
@@ -870,6 +956,10 @@ struct InlineSettingsView: View {
     /// A fixed pixel column can't do this job: French and Spanish labels are
     /// visibly longer than the
     /// English ones, so the number would either clip or waste half the pane.
+    fileprivate struct SettingsLabelColumnKey: EnvironmentKey {
+        static let defaultValue: CGFloat = 0
+    }
+
     private struct LabelColumnWidthKey: PreferenceKey {
         static let defaultValue: CGFloat = 0
         static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
@@ -918,7 +1008,16 @@ struct InlineSettingsView: View {
     /// same ceiling and the same edge tapers.
     @ViewBuilder
     private var paneContent: some View {
+        // The pane captured for this body pass. A pane leaving on a switch keeps
+        // the value it was built with, so its preference callbacks can tell they
+        // no longer speak for the open pane.
+        let pane = section
         ScrollViewReader { proxy in
+            // The outgoing and incoming panes overlap here for the length of the
+            // switch. Without this stack they were laid out side by side in the
+            // columns' HStack, which widened the columns and pushed both of them
+            // left for a frame.
+            ZStack(alignment: .topLeading) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     switch section {
@@ -1022,7 +1121,6 @@ struct InlineSettingsView: View {
                     .padding(.top, 2)
                 launchAtLoginRow
                 dockIconRow
-                menuBarIconRow
                 Text(L("capture.destination"))
                     .captionLabel()
                     .padding(.top, 2)
@@ -1033,14 +1131,15 @@ struct InlineSettingsView: View {
                 shortcutsSection
             case .appearance:
                 // Three small, literal groups: visual style, how the notch reacts,
-                // and which displays carry it. App-level presence in macOS (launch,
-                // Dock, menu bar) lives together in General instead of diluting this
-                // page with a second meaning of "show".
+                // and which displays carry it. Whether the menu bar icon shows at
+                // all lives in General with launch and Dock; what it looks like
+                // lives here.
+                Text(L("appearance.style"))
+                    .captionLabel()
                 if AppIconStyleFeature.isEnabled {
-                    Text(L("appearance.style"))
-                        .captionLabel()
                     appIconStyleRow
                 }
+                menuBarIconStyleRow
                 Text(L("appearance.behavior"))
                     .captionLabel()
                     .padding(.top, 2)
@@ -1057,6 +1156,8 @@ struct InlineSettingsView: View {
                     .padding(.top, 2)
                 placementRow
                 fullscreenAutoHideRow
+            case .connect:
+                telegramSection
             case .stats:
                 statsSection
             case .about:
@@ -1078,6 +1179,10 @@ struct InlineSettingsView: View {
             }
             }
             .frame(maxWidth: .infinity, alignment: .topLeading)
+            // The open pane follows the live measurement; a leaving pane keeps
+            // the column it was last measured with (see `LabelColumnFloor`).
+            .environment(\.settingsLabelColumn,
+                         pane == section ? labelColumnWidth : (Self.labelColumnWidths[pane] ?? 0))
             // How tall this pane's rows actually are, measured before the runway
             // and the bottom inset are added — the number the bottom taper is
             // gated on (see `paneOverflows`).
@@ -1107,12 +1212,14 @@ struct InlineSettingsView: View {
             .onPreferenceChange(PaneContentHeightKey.self) { height in
                 // The runway is empty by definition, so the rows only overflow
                 // once they outgrow what is left under it.
+                guard pane == section else { return }
                 let over = height > settingsPaneHeight - Self.paneTopRunway + 0.5
                 if over != paneOverflows { paneOverflows = over }
             }
             .onPreferenceChange(LabelColumnWidthKey.self) { width in
+                if width > 0 { Self.labelColumnWidths[pane] = width }
+                guard pane == section else { return }
                 if abs(width - labelColumnWidth) > 0.5 { labelColumnWidth = width }
-                if width > 0 { Self.labelColumnWidths[section] = width }
             }
             .scrollIndicators(.never)
             // One fixed height for every pane (see `settingsPaneHeight`) — the
@@ -1124,15 +1231,20 @@ struct InlineSettingsView: View {
             // carry that offset into General (and vice versa) — a fresh scroll
             // always starts at the top of its own content.
             .id(section)
-            // Swap panes outright. A keyed view otherwise cross-fades, and
-            // for that beat the outgoing and incoming panes sat side by side
-            // in the columns' HStack, nudging the category column sideways.
-            .transition(.identity)
-            // An identity transition still keeps the outgoing pane in the tree
-            // until the switch's animation ends, so for 0.16s both panes drew on
-            // top of each other and their labels fed one shared column width.
-            // The swap itself is not animated; the sidebar highlight still is.
-            .animation(nil, value: section)
+            // The new pane rises from the side the selection moved toward and
+            // the old one leaves the other way, so the motion follows the
+            // sidebar: a category further down comes up from below. The old
+            // pane fades faster than the new one arrives, so the two never
+            // read as overlapping text.
+            .transition(.asymmetric(
+                insertion: .opacity
+                    .combined(with: .offset(y: 14 * paneDirection))
+                    .animation(.spring(response: 0.34, dampingFraction: 0.88)),
+                removal: .opacity
+                    .combined(with: .offset(y: -8 * paneDirection))
+                    .animation(.easeOut(duration: 0.12))
+            ))
+            }
             // A required setup unfolds the key section past the pane's height
             // cap — snap the scroller to it so what just appeared is in view
             // (the anchor lives on `keySection`). The first frame of the unfold
@@ -1177,10 +1289,12 @@ struct InlineSettingsView: View {
 
     // MARK: - Sidebar
 
-    private var sidebar: some View {
+    /// `measuring` is the hidden copy that only holds the column's size; it
+    /// draws no selection capsule, so the sliding capsule has one source.
+    private func sidebar(measuring: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             ForEach(Section.sidebarCases) { s in
-                sidebarItem(s)
+                sidebarItem(s, measuring: measuring)
             }
             Spacer(minLength: 0)
         }
@@ -1188,10 +1302,11 @@ struct InlineSettingsView: View {
         .padding(.trailing, 12)
     }
 
-    private func sidebarItem(_ s: Section) -> some View {
+    private func sidebarItem(_ s: Section, measuring: Bool) -> some View {
         SidebarItem(
             title: s.title,
             selected: section == s,
+            selection: measuring ? nil : sidebarSelection,
             // The gear's update dot continues here: it leads to settings,
             // then the About entry carries it the rest of the way to the
             // update action — a quiet neutral dot, never a coloured one.
@@ -1206,13 +1321,35 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// Switch panes. The label column is cleared in the same update: left to
+    /// Switch panes. The label column is set in the same update: left to
     /// `onChange(of: section)`, the new pane's first layout still used the
     /// old pane's widest label, came out a few points wider than the panel,
     /// and both columns stepped right before sliding back.
+    ///
+    /// All three writes go in one `withAnimation`. Written outside it, the
+    /// column was committed as a separate update while the old pane was still
+    /// the open one, so Appearance laid out once under Chat's wider column and
+    /// pushed both columns left.
+    ///
+    /// The pane swap is animated (see the transition in `paneContent`); the
+    /// two panes overlap in a ZStack there. The selection capsule slides
+    /// between rows.
     private func showSection(_ s: Section) {
-        labelColumnWidth = Self.labelColumnWidths[s] ?? 0
-        withAnimation(.easeOut(duration: 0.16)) { section = s }
+        guard s != section else { return }
+        let direction = Self.direction(from: section, to: s)
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+            labelColumnWidth = Self.labelColumnWidths[s] ?? 0
+            paneDirection = direction
+            section = s
+        }
+    }
+
+    /// +1 when `to` sits below `from` in the category order, -1 above.
+    private static func direction(from: Section, to: Section) -> CGFloat {
+        let order = Section.allCases
+        let a = order.firstIndex(of: from) ?? 0
+        let b = order.firstIndex(of: to) ?? 0
+        return b >= a ? 1 : -1
     }
 
     private var isUpdateAvailable: Bool {
@@ -1225,6 +1362,8 @@ struct InlineSettingsView: View {
     private struct SidebarItem: View {
         var title: String
         var selected: Bool
+        /// The namespace the selection capsule moves in; nil draws none.
+        var selection: Namespace.ID?
         var badged: Bool
         var isNew = false
         var action: () -> Void
@@ -1239,10 +1378,17 @@ struct InlineSettingsView: View {
             Button(action: action) {
                 content
                     .foregroundStyle(ink)
-                    .background(
+                    .background {
+                        // The hover fill stays on its own row; the selected
+                        // fill is one capsule that slides to the new row.
                         Capsule()
-                            .fill(.white.opacity(selected ? 0.08 : (hovering ? 0.04 : 0)))
-                    )
+                            .fill(.white.opacity(!selected && hovering ? 0.04 : 0))
+                        if selected, let selection {
+                            Capsule()
+                                .fill(.white.opacity(0.08))
+                                .matchedGeometryEffect(id: "sidebarSelection", in: selection)
+                        }
+                    }
                     .contentShape(Capsule())
             }
             .buttonStyle(.plain).exemptsDoubleClickPin()
@@ -2320,8 +2466,12 @@ struct InlineSettingsView: View {
     }
 
     private func open(_ page: Section) {
-        labelColumnWidth = Self.labelColumnWidths[page] ?? 0   // see `showSection`
-        withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) { section = page }
+        let direction = Self.direction(from: section, to: page)
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+            labelColumnWidth = Self.labelColumnWidths[page] ?? 0   // see `showSection`
+            paneDirection = direction
+            section = page
+        }
     }
 
     /// What the account holds: gift and bought credit together.
@@ -3764,11 +3914,67 @@ struct InlineSettingsView: View {
                 get: { menuBarIconVisibility == .shown },
                 set: { Haptics.levelChange(); selectMenuBarIconVisibility($0 ? .shown : .hidden) }
             ))
-            .labelsHidden()
-            .toggleStyle(.switch)
-            .controlSize(.mini)
-            .tint(Tokens.text2)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .tint(Tokens.text2)
         }
+    }
+
+    /// Logo, face, or no menu bar icon. Cards with the real glyph and no text,
+    /// so the difference shows without opening a menu. Off is the
+    /// same setting as `MenuBarIconVisibility.hidden`.
+    private var menuBarIconStyleRow: some View {
+        settingRow(label: L("general.menuBarIcon"), verticalAlignment: .top) {
+            HStack(spacing: 8) {
+                ForEach(MenuBarIconStyle.allCases) { style in
+                    menuBarIconStyleCard(style)
+                }
+                menuBarIconOffCard
+            }
+        }
+    }
+
+    private func menuBarIconStyleCard(_ style: MenuBarIconStyle) -> some View {
+        let selected = menuBarIconVisibility == .shown && menuBarIconStyle == style
+        return menuBarIconCard(selected: selected, label: style.label) {
+            if !selected { Haptics.levelChange() }
+            selectMenuBarIconStyle(style)
+            selectMenuBarIconVisibility(.shown)
+        } glyph: {
+            Image(nsImage: MenuBarController.statusIcon(style))
+                .renderingMode(.template)
+        }
+    }
+
+    private var menuBarIconOffCard: some View {
+        menuBarIconCard(selected: menuBarIconVisibility == .hidden,
+                        label: L("menuBarIcon.style.off")) {
+            if menuBarIconVisibility != .hidden { Haptics.levelChange() }
+            selectMenuBarIconVisibility(.hidden)
+        } glyph: {
+            Image(systemName: "nosign")
+                .font(.system(size: 13, weight: .medium))
+        }
+    }
+
+    private func menuBarIconCard<Glyph: View>(
+        selected: Bool, label: String, action: @escaping () -> Void,
+        @ViewBuilder glyph: @escaping () -> Glyph
+    ) -> some View {
+        PickerCard(selected: selected, width: 64, action: action) {
+            glyph()
+                .foregroundStyle(selected ? Tokens.text1 : Tokens.text3)
+                .frame(width: 34, height: 34)
+        }
+        .accessibilityLabel(label)
+    }
+
+    private func selectMenuBarIconStyle(_ newValue: MenuBarIconStyle) {
+        guard newValue != menuBarIconStyle else { return }
+        menuBarIconStyle = newValue
+        MenuBarIconStyle.current = newValue
+        NotificationCenter.default.post(name: .menuBarIconVisibilityChanged, object: nil)
     }
 
     private func selectMenuBarIconVisibility(_ newValue: MenuBarIconVisibility) {
@@ -4737,6 +4943,242 @@ struct InlineSettingsView: View {
             .toggleStyle(.switch)
             .controlSize(.mini)
             .tint(Tokens.text2)
+        }
+    }
+
+    /// Connect: the user's own Telegram bot (`TelegramBridge`). One toggle,
+    /// like `memoryEnableRow`: off hides everything under it. On and not yet
+    /// connected, the three setup steps are rows in the shape of
+    /// `permissionRow` — a label and one neutral capsule on the right. On and
+    /// connected, the bot and the account, and a link to start over, placed
+    /// like Memory's "Manage your memories".
+    private var telegramSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            settingRow(label: L("telegram.title"), aligned: true, tag: "Beta") {
+                Toggle("", isOn: Binding(
+                    get: { telegramOn },
+                    set: { on in
+                        Haptics.levelChange()
+                        setTelegram(on)
+                    }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .tint(Tokens.text2)
+            }
+            if case .connected(let bot, let owner) = telegram.state {
+                // A detail of the row above, so it sits in meta, not as rows of
+                // its own.
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 12) {
+                        ForEach(owner.isEmpty ? ["@" + bot] : ["@" + bot, owner], id: \.self) { name in
+                            Text(name)
+                                .font(.sf(Tokens.TypeSize.meta))
+                                .foregroundStyle(Tokens.text3)
+                                .lineLimit(1)
+                                .textSelection(.enabled)
+                        }
+                        UnderlineLink(title: L("telegram.avatar")) { saveTelegramAvatar() }
+                        UnderlineLink(title: L("telegram.useAnother")) { telegramConfirmForget = true }
+                    }
+                }
+                .padding(.top, -6)
+            } else if telegramOn {
+                VStack(alignment: .leading, spacing: 6) {
+                    telegramStepRow(1, L("telegram.step1")) {
+                        TelegramStepPill(title: L("telegram.openBotFather")) {
+                            openBotFather()
+                            telegramOpenedBotFather = true
+                        }
+                    }
+                    if telegramCurrentStep == 1 { telegramStepNote(L("telegram.step1.detail")) }
+                    telegramStepRow(2, L("telegram.step2")) {
+                        if telegram.state == .checking {
+                            TelegramStepPill(title: L("telegram.checking"), action: nil)
+                        }
+                    }
+                    if telegramCurrentStep == 2, telegram.state != .checking {
+                        telegramTokenField
+                        if telegram.state == .invalidToken {
+                            Text(L("telegram.invalid"))
+                                .font(.sf(Tokens.TypeSize.meta))
+                                .foregroundStyle(Tokens.danger)
+                        }
+                    }
+                    telegramStepRow(3, L("telegram.step3")) {
+                        if case .pairing(let bot) = telegram.state {
+                            TelegramStepPill(title: "@" + bot) { telegram.openPairing() }
+                        }
+                    }
+                }
+                .transition(.opacity)
+            }
+        }
+        .onChange(of: telegramSettingUp, initial: true) { telegram.holdsPanel = telegramSettingUp }
+        .onDisappear { telegram.holdsPanel = false }
+        // A token copied in Telegram fills the field on its own.
+        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
+            guard telegramOn, telegram.state == .off || telegram.state == .invalidToken else { return }
+            let board = NSPasteboard.general
+            guard board.changeCount != telegramBoardCount else { return }
+            telegramBoardCount = board.changeCount
+            if let copied = board.string(forType: .string), TelegramBridge.looksLikeToken(copied) {
+                telegramOpenedBotFather = true
+                telegramToken = copied.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+    }
+
+    /// The setup steps are on screen.
+    private var telegramSettingUp: Bool {
+        if case .connected = telegram.state { return false }
+        return telegramOn
+    }
+
+    /// On while connected or being set up; off when never set up or paused.
+    private var telegramOn: Bool {
+        switch telegram.state {
+        case .connected, .pairing, .checking, .invalidToken: return true
+        case .paused: return false
+        case .off: return telegramSetupOpen
+        }
+    }
+
+    /// Off pauses a connected bot (kept for one-click on) and abandons a
+    /// setup in progress. On resumes a paused bot, or opens the setup steps.
+    private func setTelegram(_ on: Bool) {
+        withAnimation(.easeOut(duration: 0.16)) {
+            if on {
+                if case .paused = telegram.state {
+                    Task { await telegram.reconnect() }
+                } else {
+                    telegramSetupOpen = true
+                }
+            } else {
+                telegramSetupOpen = false
+                if case .connected = telegram.state {
+                    telegram.disconnect()
+                } else if telegram.state != .off {
+                    telegramOpenedBotFather = false
+                    telegram.forget()
+                }
+            }
+        }
+    }
+
+    /// Which setup step is on: 3 once the token works, 2 once BotFather was
+    /// opened (or a token arrived), else 1.
+    private var telegramCurrentStep: Int {
+        switch telegram.state {
+        case .pairing, .connected, .paused: return 3
+        case .checking, .invalidToken: return 2
+        case .off: return telegramOpenedBotFather ? 2 : 1
+        }
+    }
+
+    /// One setup step: `permissionRow`'s label, a check once done, dim until
+    /// reached. The capsule shows only on the current step.
+    private func telegramStepRow<Action: View>(_ number: Int, _ title: String,
+                                               @ViewBuilder action: () -> Action) -> some View {
+        let current = telegramCurrentStep
+        let done = number < current
+        return HStack(spacing: 8) {
+            Text("\(number)")
+                .font(.sf(Tokens.TypeSize.label).monospacedDigit())
+                .foregroundStyle(Tokens.text4)
+                .frame(width: 10, alignment: .leading)
+            Text(title)
+                .font(.sf(Tokens.TypeSize.label, weight: number == current ? .medium : .regular))
+                .foregroundStyle(number == current ? Tokens.text2 : done ? Tokens.text3 : Tokens.text4)
+                .lineLimit(1)
+            Spacer(minLength: 12)
+            if done {
+                Image(systemName: "checkmark")
+                    .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
+                    .foregroundStyle(Tokens.text3)
+            } else if number == current {
+                action()
+            }
+        }
+        .frame(minHeight: 28)
+    }
+
+    private func telegramStepNote(_ text: String) -> some View {
+        Text(text)
+            .font(.sf(Tokens.TypeSize.meta))
+            .foregroundStyle(Tokens.text3)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.leading, 18)
+            .padding(.top, -4)
+    }
+
+    /// The fallback for a token the clipboard watch did not catch. Same field
+    /// as `keenableKeyRow`'s.
+    private var telegramTokenField: some View {
+        ZStack(alignment: .leading) {
+            if telegramToken.isEmpty {
+                Text(L("telegram.pasteToken"))
+                    .font(.sf(Tokens.TypeSize.form))
+                    .foregroundStyle(Tokens.text3)
+                    .allowsHitTesting(false)
+            }
+            TextField("", text: $telegramToken)
+                .textFieldStyle(.plain)
+                .font(.sf(Tokens.TypeSize.form))
+                .foregroundStyle(Tokens.text1)
+                .onSubmit { connectTelegram() }
+                .onChange(of: telegramToken) {
+                    model.noteUserTyping()
+                    if TelegramBridge.looksLikeToken(telegramToken) { connectTelegram() }
+                }
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 34)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .recessedSurface(in: RoundedRectangle.control, lit: true)
+        .padding(.leading, 18)
+    }
+
+    /// Saves Notchi's two eyes (`NotchiMarkEyes`, the resting notch's face)
+    /// as two 640pt square JPEGs in Downloads — light eyes on black, and the
+    /// same inverted — and shows them in Finder. Sized so Telegram's circular
+    /// crop keeps both eyes whole.
+    private func saveTelegramAvatar() {
+        guard let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+        else { return }
+        var saved: [URL] = []
+        for (name, light) in [("Notchi Bot Dark.jpg", false), ("Notchi Bot Light.jpg", true)] {
+            let side: CGFloat = 640
+            let renderer = ImageRenderer(content:
+                ZStack {
+                    Color.black
+                    NotchiMarkEyes(pose: NotchiMarkPose(), eyeHeight: 210)
+                }
+                .frame(width: side, height: side)
+                .modifier(InvertIf(on: light)))
+            renderer.scale = 1
+            guard let image = renderer.cgImage,
+                  let data = NSBitmapImageRep(cgImage: image)
+                    .representation(using: .jpeg, properties: [.compressionFactor: 0.95])
+            else { continue }
+            let url = downloads.appendingPathComponent(name)
+            if (try? data.write(to: url)) != nil { saved.append(url) }
+        }
+        if !saved.isEmpty { NSWorkspace.shared.activateFileViewerSelecting(saved) }
+    }
+
+    private func openBotFather() {
+        if let url = URL(string: "https://t.me/BotFather") { NSWorkspace.shared.open(url) }
+    }
+
+    /// The field keeps what was pasted while it is checked, and stays filled
+    /// when the token is refused, so the user sees what was tried.
+    private func connectTelegram() {
+        let token = telegramToken
+        Task {
+            await telegram.connect(token: token)
+            if telegram.state != .invalidToken { telegramToken = "" }
         }
     }
 
@@ -8141,11 +8583,12 @@ struct InlineSettingsView: View {
         info: String? = nil,
         richInfo: AttributedString? = nil,
         aligned: Bool = false,
+        tag: String? = nil,
         verticalAlignment: VerticalAlignment = .firstTextBaseline,
         @ViewBuilder _ content: () -> Content
     ) -> some View {
         HStack(alignment: verticalAlignment, spacing: 12) {
-            settingLabel(label, info: info, richInfo: richInfo, aligned: aligned)
+            settingLabel(label, info: info, richInfo: richInfo, aligned: aligned, tag: tag)
             content()
             Spacer(minLength: 0)
         }
@@ -8157,7 +8600,8 @@ struct InlineSettingsView: View {
         _ label: String,
         info: String? = nil,
         richInfo: AttributedString? = nil,
-        aligned: Bool = false
+        aligned: Bool = false,
+        tag: String? = nil
     ) -> some View {
         HStack(spacing: 3) {
             Text(label)
@@ -8169,6 +8613,10 @@ struct InlineSettingsView: View {
                 SettingInfo(richInfo)
             } else if let info {
                 SettingInfo(info)
+            }
+            if let tag {
+                NewBadge(text: tag, tint: Tokens.text2)
+                    .padding(.leading, 3)
             }
         }
         .frame(minWidth: 64, alignment: .leading)
@@ -8188,8 +8636,23 @@ struct InlineSettingsView: View {
         // identical: the column IS the widest natural label, so every row is
         // exactly it.
         // `nil` keeps the row at its own width until the first measurement.
-        .frame(minWidth: aligned && labelColumnWidth > 0 ? labelColumnWidth : nil,
-               alignment: .leading)
+        .modifier(LabelColumnFloor(aligned: aligned))
+    }
+
+    /// Applies the pane's label column (`settingsLabelColumn`) as a minimum
+    /// width. Read from the environment rather than `labelColumnWidth`
+    /// directly: a pane leaving on a switch is still laid out for the length of
+    /// its transition, and with the live state it took the incoming pane's
+    /// column — Appearance under Chat's longer labels came out ~30pt wider
+    /// than the panel and pushed both columns left.
+    private struct LabelColumnFloor: ViewModifier {
+        var aligned: Bool
+        @Environment(\.settingsLabelColumn) private var column
+
+        func body(content: Content) -> some View {
+            content.frame(minWidth: aligned && column > 0 ? column : nil,
+                          alignment: .leading)
+        }
     }
 
     // MARK: - Logic
@@ -9494,5 +9957,22 @@ private struct MarkdownMark: View {
             glyphs.closeSubpath()
             context.fill(glyphs, with: .foreground)
         }
+    }
+}
+
+
+private extension EnvironmentValues {
+    /// The open Settings pane's shared label column width; 0 until measured.
+    var settingsLabelColumn: CGFloat {
+        get { self[InlineSettingsView.SettingsLabelColumnKey.self] }
+        set { self[InlineSettingsView.SettingsLabelColumnKey.self] = newValue }
+    }
+}
+
+/// `colorInvert()` when `on`, for the light Telegram avatar.
+private struct InvertIf: ViewModifier {
+    let on: Bool
+    func body(content: Content) -> some View {
+        if on { content.colorInvert() } else { content }
     }
 }

@@ -412,6 +412,8 @@ final class NotchModel: ObservableObject {
         /// so that popup's History button never mixes in unrelated Ask rows.
         enum Origin: String, Codable {
             case forceTouch
+            /// A message to the Notchi bot in Telegram (`TelegramBridge`).
+            case telegram
         }
         var origin: Origin? = nil
 
@@ -1021,6 +1023,9 @@ final class NotchModel: ObservableObject {
     /// Last-writer-wins across concurrent rounds; cleared when the last round
     /// settles (see the round task's defer).
     @Published private(set) var backgroundActivity: String? = nil
+    /// The kind of work `backgroundActivity` names, for the resting notch's
+    /// NotchiMark: the same mood the panel's wait line would play.
+    @Published private(set) var backgroundOrb: OrbState = .composing
 
     /// True once an in-flight round has started streaming answer text — the
     /// collapsed busy ear's "Writing" phase. The tool-activity label is nil
@@ -1048,6 +1053,13 @@ final class NotchModel: ObservableObject {
     /// when a round's task starts and removed on the same defer that settles
     /// `roundsInFlight`, so the two can never disagree.
     private var inFlightRounds: [InFlightRound] = []
+
+    /// True while a round for this thread is in flight. Reads `roundsInFlight`,
+    /// which is published, so a view asking this redraws when the round starts
+    /// or ends.
+    func isAnswering(threadID: UUID) -> Bool {
+        roundsInFlight > 0 && inFlightRounds.contains { $0.threadID == threadID }
+    }
 
     /// Bumped when a main-thread round's mirror changes while the idle prompt
     /// (and so the peek) is on screen, so the peek redraws the round as it
@@ -2057,6 +2069,7 @@ final class NotchModel: ObservableObject {
                      regenProvider: regenOverrideProvider,
                      loop: loopIntervalMinutes)
         nextSubmitSurface = origin == .forceTouch ? NoNoRequestContext.forceTouch
+            : origin == .telegram ? NoNoRequestContext.telegram
             : trackCompactTask ? NoNoRequestContext.shortcut
             : NoNoRequestContext.window
         armModelPin(pin)
@@ -2199,6 +2212,31 @@ final class NotchModel: ObservableObject {
         return runDetachedRound(threadID: threadID ?? UUID(), seed: seed,
                                 question: prompt, hideUserBubble: hide,
                                 mintsMirror: false)
+    }
+
+    // MARK: - Telegram
+
+    /// One message from the Notchi bot in Telegram, run detached like a loop
+    /// round: it lands in Recent as its own thread (`nil` starts one) and never
+    /// touches what the panel is showing. Returns the thread id, or nil when
+    /// that thread already has a round in flight.
+    @discardableResult
+    func runTelegramRound(threadID: UUID?, question: String, images: [NSImage]) -> UUID? {
+        if let threadID, inFlightRounds.contains(where: { $0.threadID == threadID }) { return nil }
+        var seed = threadID.flatMap { id in history.first { $0.id == id }?.conversation } ?? []
+        // Same repair as `runChatLoopRound`: a turn left streaming by a quit.
+        for i in seed.indices where seed[i].streaming {
+            seed[i].streaming = false
+            seed[i].toolActivity = nil
+        }
+        return runDetachedRound(threadID: threadID ?? UUID(), seed: seed, question: question,
+                                origin: .telegram, images: images, mintsMirror: false)
+    }
+
+    /// The live transcript of the round in flight on `threadID`, or nil when
+    /// none is. `TelegramBridge` reads it to stream the answer back.
+    func liveThread(_ threadID: UUID) -> [Turn]? {
+        inFlightRounds.last(where: { $0.threadID == threadID })?.thread
     }
 
     /// Enter pressed in a detached compose window (the torn-out idle prompt).
@@ -5409,6 +5447,33 @@ final class NotchModel: ObservableObject {
     /// Tab on an empty follow-up field: put the suggestion in the field to edit
     /// or send. Returns false when there is none. Called from the window's key
     /// monitor (`ContentView`), which takes Tab before the field sees it.
+    #if DEBUG
+    /// Screenshot aid (`NOTCH_DEMO_SHELL`): a question whose answer is in the
+    /// middle of running `command` — the wait row names it, and with `confirm`
+    /// the real confirmation card a flagged command gets is up under it.
+    func _debugSeedShell(question: String, command: String, confirm: Bool) {
+        let user = Turn(role: "user", text: question)
+        var answer = Turn(role: "assistant", text: "")
+        answer.streaming = true
+        let line = command.split(separator: "\n").first.map(String.init) ?? command
+        answer.toolActivity = L("agent.activity.runningTool", line.count > 48 ? line.prefix(48) + "…" : line)
+        turns = [user, answer]
+        mode = .result
+        guard confirm else { return }
+        let id = answer.id
+        Task { [weak self] in _ = try? await self?.confirmShellCommand(answerID: id, command: command) }
+    }
+    #endif
+
+    #if DEBUG
+    /// Screenshot aid: a suggested next question for the last answer on screen
+    /// (`NOTCH_DEMO_NEXT_Q`).
+    func _debugSetNextQuestion(_ q: String) {
+        guard let last = turns.last, last.role == "assistant" else { return }
+        nextQuestions[last.id] = q
+    }
+    #endif
+
     func acceptFollowUpSuggestion() -> Bool {
         guard mode == .result, !hasText, let suggestion = followUpSuggestion else { return false }
         text = suggestion
@@ -5864,6 +5929,7 @@ final class NotchModel: ObservableObject {
 
     init(ai: AIService = StubAIService()) {
         self.ai = ai
+        RestingResult.shared.model = self
         loadHistoryAsync()
         startClipboardSense()
         refreshAgentSkills()
@@ -8444,8 +8510,26 @@ final class NotchModel: ObservableObject {
     /// set BEFORE `open` so AppDelegate's combined observer keys the right panel.
     /// `velocity` is the cursor's approach vector (zero for non-hover opens);
     /// it must land before `open` so the island's animation reads it fresh.
+    /// The screen whose canvas is rendering the open panel's content unseen,
+    /// shortly after launch (see `prewarmPanel`). Nil otherwise.
+    @Published private(set) var prewarmDisplay: CGDirectDisplayID?
+
+    /// Render the open panel's content once, invisible, so the first real open
+    /// doesn't pay for building it. That first build — view types, text layout,
+    /// glass and blur surfaces, shader setup — blocked the main thread for
+    /// 0.3–0.4s on the first click after every launch; later opens reuse what it
+    /// set up. A no-op while the panel is open.
+    func prewarmPanel(on display: CGDirectDisplayID?) {
+        guard !open, prewarmDisplay == nil, let display else { return }
+        prewarmDisplay = display
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            self?.prewarmDisplay = nil
+        }
+    }
+
     func openPanel(on display: CGDirectDisplayID?, velocity: CGVector = .zero) {
         ClickOpenProbe.shared.note("openPanel edge=\(!open) display=\(display.map(String.init) ?? "nil")")
+        prewarmDisplay = nil
         claimDisplay(display)
         // Only the *closed→open* edge sets the clipboard baseline. Hover fires
         // `openPanel` again on every re-enter and on display migration while already
@@ -8727,6 +8811,12 @@ final class NotchModel: ObservableObject {
             cancelLeaveWatch()
             return
         }
+        // Telegram setup sends the user to Telegram and back (BotFather, the
+        // token, Start); the steps must still be there on return.
+        if TelegramBridge.shared.holdsPanel {
+            cancelLeaveWatch()
+            return
+        }
         // A system permission prompt Notchi raised holds it too: answering it
         // means moving the pointer to a window off the island (see
         // `PermissionPromptGate`). The leave is remembered, so the prompt's
@@ -8794,7 +8884,8 @@ final class NotchModel: ObservableObject {
     private func recheckLeaveWatch() {
         guard let watch = leaveWatch else { return }
         guard open else { leaveWatch = nil; return }
-        if isAnswerPinned || isFloatingCardOpen || InfoPopoverGate.open {
+        if isAnswerPinned || isFloatingCardOpen || InfoPopoverGate.open
+            || TelegramBridge.shared.holdsPanel {
             cancelLeaveWatch(); return
         }
         if PermissionPromptGate.open {
@@ -10856,6 +10947,7 @@ final class NotchModel: ObservableObject {
                 // it on the collapsed notch's busy ear.
                 if self.inFlightRounds.isEmpty {
                     self.backgroundActivity = nil
+                    self.backgroundOrb = .composing
                     self.backgroundWriting = false
                 }
                 // A question can't normally outlive its round (cancellation and the
@@ -11153,7 +11245,7 @@ final class NotchModel: ObservableObject {
                     guard let self else { throw CancellationError() }
                     return try await self.confirmEventDelete(answerID: answerID, title: title)
                 })
-                if shellToolEnabled {
+                if shellToolEnabled, nonoContext.surface != NoNoRequestContext.telegram {
                     agentTools.append(ScheduleActionTool { [weak self] command, minutes in
                         guard let self else { throw CancellationError() }
                         return try await self.scheduleAction(answerID: answerID, command: command, minutes: minutes)
@@ -11196,7 +11288,9 @@ final class NotchModel: ObservableObject {
                                                                 request: request)
                     })
                 }
-                if shellToolEnabled {
+                // A Telegram round has no one at the Mac to see what a command
+                // does, so it never gets a shell.
+                if shellToolEnabled, nonoContext.surface != NoNoRequestContext.telegram {
                     agentTools.append(RunShellTool { [weak self] command in
                         guard let self else { throw CancellationError() }
                         return try await self.confirmShellCommand(answerID: answerID,
@@ -11296,6 +11390,7 @@ final class NotchModel: ObservableObject {
                             // the isOnScreen gate: a detached round is exactly
                             // the one the resting notch is reporting on.
                             self.backgroundActivity = label
+                            self.backgroundOrb = label == nil ? .composing : orb
                             // The detached thread mirror needs the same live state:
                             // its header and answer wait row must say Search / Read /
                             // Calculate rather than falling back to a hard-coded verb.
@@ -11489,6 +11584,11 @@ final class NotchModel: ObservableObject {
                 let walkedAway = !self.isPresented(answerID: answerID)
                 self.markFinished(id: answerID)   // no-op when detached
                 self.persistThread(thread, threadID: threadID, answer: acc, service: askService)
+                // The same exchange in the user's Telegram bot, so both places
+                // hold one history. A Telegram round is already there.
+                if nonoContext.surface != NoNoRequestContext.telegram {
+                    TelegramBridge.shared.mirror(threadID: threadID, question: q, answer: acc)
+                }
                 if self.suggestFollowUpEnabled, loopRound == nil,
                    !acc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     self.predictNextQuestion(for: thread, answerID: answerID, answeredBy: askService)
@@ -11569,12 +11669,16 @@ final class NotchModel: ObservableObject {
                         thread[i].isError = true
                         thread[i].streaming = false
                     }
+                    let walkedAway = !self.isPresented(answerID: answerID)
                     self.persistThread(thread, threadID: threadID, answer: "",
                                        outOfCredit: (error as? OpenAICompatAIService.ServiceError)?
                                            .isOutOfCredit == true)
                     ChatLoopManager.shared.roundFinished(threadID: threadID,
                                                          loopRound: loopRound, failed: true,
                                                          answer: error.localizedDescription)
+                    if walkedAway, loopRound == nil {
+                        RestingResult.shared.show(error.localizedDescription, failed: true)
+                    }
                     if self.isOnScreen(answerID: answerID) {
                         // Surface the REAL reason (XII-85) — `ServiceError` already
                         // localizes to e.g. "Anthropic · HTTP 401" — and raise an
@@ -12717,6 +12821,8 @@ final class NotchModel: ObservableObject {
         // Nothing was actually saved (empty answer) → no row to reopen, no banner.
         guard !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let title = history.first(where: { $0.id == threadID })?.title
+        if RestingResult.shared.show(title?.isEmpty == false ? title! : question,
+                                     failed: false) { return }
         NotificationService.shared.postAnswerReady(
             threadID: threadID, title: title, question: question, answer: answer)
     }

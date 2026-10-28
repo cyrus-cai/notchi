@@ -2337,7 +2337,14 @@ final class AgentTaskManager: ObservableObject {
         // still filed above — it just doesn't buzz).
         // A loop's banner says so: each loop round replaces the last one without
         // a sound; the loop's end sounds.
-        if t.outcome != .cancelled {
+        // Outside a loop, a finish the resting notch can show itself (screen
+        // unlocked, panel closed, live activity on) shows there instead.
+        let shownInNotch = t.outcome != .cancelled && t.loop == nil
+            && RestingResult.shared.show(
+                t.outcome == .success ? (t.exchanges.last?.prompt ?? t.prompt)
+                    : (t.failureReason ?? t.prompt),
+                failed: t.outcome != .success)
+        if t.outcome != .cancelled, !shownInNotch {
             var subtitle: String? = nil
             var silent = false
             if let loop = t.loop {

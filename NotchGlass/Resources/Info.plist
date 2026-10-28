@@ -40,6 +40,8 @@
 	<string>Notchi uses your location for the weather and to show which Wi-Fi network you are on.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Notchi uses your location for the weather and to show which Wi-Fi network you are on.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Notchi transcribes the voice messages sent to your Telegram bot, on this Mac.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Notchi reads the photos you ask about to answer questions about them.</string>
 	<key>NSCalendarsFullAccessUsageDescription</key>
