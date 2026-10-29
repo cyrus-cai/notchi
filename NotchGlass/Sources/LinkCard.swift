@@ -439,6 +439,37 @@ extension Array where Element == NotchModel.Turn {
         }
         return keys
     }
+
+    /// Draws the cards of the answer `answerID` as the thread would show
+    /// them. An answer that finished with no thread on screen (one asked from
+    /// Telegram, or one the user walked away from) otherwise reads its pages
+    /// only when the thread is opened, and shows the loading card meanwhile.
+    @MainActor
+    func prepareCards(for answerID: UUID) {
+        guard let i = lastIndex(where: { $0.id == answerID }) else { return }
+        let turn = self[i]
+        guard turn.role == "assistant", !turn.isError else { return }
+        let text = CitationMarkup.rendered(
+            ReasoningTags.visible(turn.text), sources: turn.sources,
+            stripUnresolved: CitationMarkup.shouldStripUnresolved(
+                answerModel: turn.answerModel, regenModel: turn.regenModel))
+        let layout = LinkCardSplitter.layout(
+            text, streaming: false, sources: turn.sources,
+            question: question(at: i), shared: turn.sharedLinks,
+            recent: recentCards(at: i))
+        var links: [(URL, String?)] = []
+        for case .link(let url, let label) in layout.rest {
+            let target = url.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let title = turn.sources.first {
+                $0.url.trimmingCharacters(in: CharacterSet(charactersIn: "/")) == target
+            }?.title ?? label
+            links.append((url, title))
+        }
+        let large = links.count == 1
+        for (url, title) in links {
+            Task { _ = await LinkCardStore.shared.still(url: url, title: title, large: large) }
+        }
+    }
 }
 
 // MARK: - The card
@@ -574,16 +605,19 @@ final class LinkCardStore {
         return image
     }
 
-    /// Cards whose finished still could not be drawn this session. They keep
-    /// the loading card instead of drawing again on every mount.
-    private var failed: Set<String> = []
+    /// When a card's finished still last could not be drawn. It keeps the
+    /// loading card instead of drawing again on every mount, until
+    /// `retryAfter` has passed: a page that timed out once often loads on
+    /// the next try.
+    private var failed: [String: Date] = [:]
+    private static let retryAfter: TimeInterval = 60
 
     /// The finished card. Falls back to the loading card when the page
     /// cannot be read.
     func still(url: URL, title: String?, large: Bool) async -> NSImage? {
         let key = Self.key(url, title, large)
         if let hit = Self.stills.object(forKey: key) { return hit }
-        if failed.contains(key as String) { return nil }
+        if let at = failed[key as String], Date().timeIntervalSince(at) < Self.retryAfter { return nil }
         if let running = drawing[key as String] { return await running.value }
         let task = Task { () -> NSImage? in
             let local = Self.mapsDetails(url)
@@ -619,7 +653,7 @@ final class LinkCardStore {
             Self.stills.setObject(image, forKey: key)
             saveStill(image, key: key)
         } else {
-            failed.insert(key as String)
+            failed[key as String] = Date()
             if let loading = Self.stills.object(forKey: Self.loadingKey(url, title)) {
                 remember(size: loading.size, key: key)
             }

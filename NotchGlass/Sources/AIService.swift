@@ -585,7 +585,10 @@ need its id). Cancelling a reminder is action=delete; the tool asks the user its
 """),
     (["files"], """
 - A file in their Downloads, Desktop or Documents → files action=list to find \
-it, then action=read, and answer from its text.
+it, then action=read, and answer from its text. A file elsewhere → \
+action=find by name, action=grep by what it contains. Changing a text file \
+(a config, a script, notes on disk) → action=read, then action=edit, or \
+action=write for a new file; prefer these to sed or echo in run_shell.
 """),
     (["current_context"], """
 - "This page / article / email", "这篇 / 这封 / 这个页面" with nothing pasted, \

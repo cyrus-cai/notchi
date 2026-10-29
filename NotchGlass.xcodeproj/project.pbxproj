@@ -25,6 +25,7 @@
 		A1000961 /* NoNoAccount.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000960 /* NoNoAccount.swift */; };
 		A1000C71 /* ClipPrivacy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000C70 /* ClipPrivacy.swift */; };
 		A1000D91 /* LinkGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000D90 /* LinkGate.swift */; };
+		A1000DE1 /* DecisionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000DE0 /* DecisionModel.swift */; };
 		A1000D93 /* FeatureNudge.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000D92 /* FeatureNudge.swift */; };
 		A1000E91 /* VisualBlocks.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000E90 /* VisualBlocks.swift */; };
 		A1000C81 /* LinkCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000C80 /* LinkCard.swift */; };
@@ -155,6 +156,7 @@
 		A1000960 /* NoNoAccount.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoNoAccount.swift; sourceTree = "<group>"; };
 		A1000C70 /* ClipPrivacy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipPrivacy.swift; sourceTree = "<group>"; };
 		A1000D90 /* LinkGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkGate.swift; sourceTree = "<group>"; };
+		A1000DE0 /* DecisionModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionModel.swift; sourceTree = "<group>"; };
 		A1000D92 /* FeatureNudge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeatureNudge.swift; sourceTree = "<group>"; };
 		A1000E90 /* VisualBlocks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisualBlocks.swift; sourceTree = "<group>"; };
 		A1000C80 /* LinkCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkCard.swift; sourceTree = "<group>"; };
@@ -269,6 +271,7 @@
 				A1000960 /* NoNoAccount.swift */,
 				A1000C70 /* ClipPrivacy.swift */,
 				A1000D90 /* LinkGate.swift */,
+				A1000DE0 /* DecisionModel.swift */,
 				A1000D92 /* FeatureNudge.swift */,
 				A1000E90 /* VisualBlocks.swift */,
 				A1000C80 /* LinkCard.swift */,
@@ -440,6 +443,7 @@
 				A1000961 /* NoNoAccount.swift in Sources */,
 				A1000C71 /* ClipPrivacy.swift in Sources */,
 				A1000D91 /* LinkGate.swift in Sources */,
+				A1000DE1 /* DecisionModel.swift in Sources */,
 				A1000D93 /* FeatureNudge.swift in Sources */,
 				A1000E91 /* VisualBlocks.swift in Sources */,
 				A1000C81 /* LinkCard.swift in Sources */,
@@ -521,7 +525,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.9.21;
+				MARKETING_VERSION = 0.9.22;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -544,7 +548,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.9.21;
+				MARKETING_VERSION = 0.9.22;
 				PRODUCT_BUNDLE_IDENTIFIER = com.notchglass.app;
 				PRODUCT_NAME = Notchi;
 				SWIFT_EMIT_LOC_STRINGS = YES;

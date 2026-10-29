@@ -142,6 +142,7 @@ struct CommandCodeCLIService: AIService {
         DispatchQueue.global(qos: .utility).async {
             _ = resolveBinary()
             revalidateSeed()
+            loadGatewayCatalogIfMissing()
             warmLock.lock(); warmingUp = false; warmLock.unlock()
             // Anything that read `isAvailable` as "not yet known" while this ran now
             // has a real answer to redraw with.
@@ -168,6 +169,7 @@ struct CommandCodeCLIService: AIService {
             if found == nil {
                 modelLock.lock(); cachedModels = nil; modelLock.unlock()
                 forgetStored()
+                loadGatewayCatalogIfMissing()
             }
             DispatchQueue.main.async {
                 NotificationCenter.default.post(name: .cliAvailabilityResolved, object: nil)
@@ -334,23 +336,52 @@ struct CommandCodeCLIService: AIService {
     /// spawn fills the model cache the picker needs (one process, both answers).
     private static func locateBinary() -> String? {
         let fm = FileManager.default
-        for p in candidatePaths where fm.isExecutableFile(atPath: p) {
-            if let models = probeModels(p) {
+        var failure: String?
+        // Only an install that is Command Code's own package gets to report its
+        // crash; some other tool answering to `cmd` failing says nothing about it.
+        func attempt(_ p: String) -> String? {
+            let result = probe(p)
+            if let models = result.models {
                 adopt(models)
                 remember(path: p, models: models)
+                setStartupError(nil)
                 return p
             }
+            if failure == nil, let error = result.error,
+               URL(fileURLWithPath: p).resolvingSymlinksInPath().path
+                   .contains("/node_modules/command-code/") {
+                failure = error
+            }
+            return nil
+        }
+        for p in candidatePaths where fm.isExecutableFile(atPath: p) {
+            if let found = attempt(p) { return found }
         }
         // Fall back to the user's shell PATH — a node version manager (nvm / fnm /
         // volta / hermes) keeps its global bin dir out of a GUI app's inherited PATH
         // entirely, and out of the fixed list above (`ShellEnvironment`).
         if let p = ShellEnvironment.which(["command-code", "commandcode", "cmd"]),
-           let models = probeModels(p) {
-            adopt(models)
-            remember(path: p, models: models)
-            return p
+           let found = attempt(p) {
+            return found
         }
+        setStartupError(failure)
         return nil
+    }
+
+    private static let startupErrorLock = NSLock()
+    private static var storedStartupError: String?
+
+    /// The error line from the last detection that found Command Code installed but
+    /// crashing on launch, e.g. a broken dependency in its npm package. `nil` when
+    /// it started fine or isn't installed. Settings shows it so a CLI that is present
+    /// but dead doesn't read as "not installed".
+    static var startupError: String? {
+        startupErrorLock.lock(); defer { startupErrorLock.unlock() }
+        return storedStartupError
+    }
+
+    private static func setStartupError(_ error: String?) {
+        startupErrorLock.lock(); storedStartupError = error; startupErrorLock.unlock()
     }
 
     /// The Command Code home directory (`~/.commandcode`), where the auth file lands
@@ -373,14 +404,17 @@ struct CommandCodeCLIService: AIService {
         return json["apiKey"] != nil
     }
 
-    /// Whether Command Code can actually answer right now: the binary resolves AND
-    /// the user has signed in. Drives the picker (the provider is selectable only
-    /// when true) and the Settings status row.
-    ///
-    /// Reads the resolution **non-blockingly** — this is called from `body`. Until the
-    /// launch probe lands it answers "no"; `.cliAvailabilityResolved` then redraws
-    /// whoever asked.
-    static var isAvailable: Bool { resolvedBinaryIfReady() != nil && authExists() }
+    /// Whether Command Code can answer a chat turn right now: the user has signed in.
+    /// Chat goes straight to the gateway with the stored key, so it needs no working
+    /// CLI — a Command Code update that breaks `cmd` itself must not take chat down
+    /// with it. Drives the picker (the provider is selectable only when true).
+    static var isAvailable: Bool { authExists() }
+
+    /// Whether the agent engine can run: it spawns the CLI, so the binary has to
+    /// resolve too. Reads the resolution **non-blockingly** — this is called from
+    /// `body`. Until the launch probe lands it answers "no";
+    /// `.cliAvailabilityResolved` then redraws whoever asked.
+    static var isAgentAvailable: Bool { resolvedBinaryIfReady() != nil && authExists() }
 
     // MARK: - Model catalog
 
@@ -441,9 +475,50 @@ struct CommandCodeCLIService: AIService {
         let alreadyHave = (cachedModels?.isEmpty == false)
         modelLock.unlock()
         if alreadyHave, !force { return }
-        guard let binary = resolveBinary(), let models = probeModels(binary) else { return }
+        guard let binary = resolveBinary(), let models = probeModels(binary) else {
+            if force, let models = gatewayCatalog() { adopt(models) }
+            return
+        }
         adopt(models)
         remember(path: binary, models: models)
+    }
+
+    /// The catalog from the gateway's model list, for when no CLI could print one
+    /// (not installed, or an install that no longer starts). Same rows as
+    /// `--list-models`, minus its `(default)` mark, so the default is the model in
+    /// `~/.commandcode/config.json`. Blocking, so off the main thread only.
+    private static func gatewayCatalog() -> [CatalogEntry]? {
+        guard let apiKey = apiKey() else { return nil }
+        var req = URLRequest(url: modelsURL)
+        req.timeoutInterval = 10
+        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        req.setValue(cliVersion, forHTTPHeaderField: "x-command-code-version")
+        let done = DispatchSemaphore(value: 0)
+        var ids: [String] = []
+        ProxyConfig.urlSession.dataTask(with: req) { data, response, _ in
+            defer { done.signal() }
+            guard (response as? HTTPURLResponse)?.statusCode == 200, let data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let rows = json["data"] as? [[String: Any]]
+            else { return }
+            ids = rows.compactMap { $0["id"] as? String }.filter { !$0.isEmpty }
+        }.resume()
+        done.wait()
+        guard !ids.isEmpty else { return nil }
+        // `--list-models` prints ids lowercased; keep that spelling so a pick made
+        // from either source matches. `wireModelID` restores the gateway's casing.
+        let configured = requestModel(nil)?.lowercased()
+        return ids.map { id in
+            let lower = id.lowercased()
+            return CatalogEntry(id: lower, group: "", isDefault: lower == configured)
+        }
+    }
+
+    /// Fill an empty catalog from the gateway. The CLI's catalog wins whenever it
+    /// exists; this only covers its absence.
+    private static func loadGatewayCatalogIfMissing() {
+        guard fetchedModels().isEmpty, let models = gatewayCatalog() else { return }
+        adopt(models)
     }
 
     /// Spawn `<binary> --list-models` and parse its catalog. `nil` means "this is not
@@ -461,21 +536,55 @@ struct CommandCodeCLIService: AIService {
     ///     …
     ///     Pass the full id, or just the short name after the last "/":
     private static func probeModels(_ path: String) -> [CatalogEntry]? {
+        probe(path).models
+    }
+
+    /// `probeModels`, plus the error line when the CLI exits non-zero — what
+    /// `startupError` reports.
+    private static func probe(_ path: String) -> (models: [CatalogEntry]?, error: String?) {
         let p = ShellEnvironment.makeProcess(path, ["--list-models", "--no-auto-update"])
         let out = Pipe()
+        let err = Pipe()
         p.standardOutput = out
-        p.standardError = Pipe()
+        p.standardError = err
         p.standardInput = FileHandle.nullDevice
-        do { try p.run() } catch { return nil }
+        do { try p.run() } catch { return (nil, nil) }
+        // A crash prints the whole minified source line to stderr, well past a pipe's
+        // buffer, so stderr is drained alongside stdout or the child blocks on write.
+        var errData = Data()
+        let drained = DispatchGroup()
+        drained.enter()
+        DispatchQueue.global(qos: .utility).async {
+            errData = err.fileHandleForReading.readDataToEndOfFile()
+            drained.leave()
+        }
         let data = out.fileHandleForReading.readDataToEndOfFile()
+        drained.wait()
         p.waitUntilExit()
-        guard p.terminationStatus == 0,
-              let text = String(data: data, encoding: .utf8),
+        guard p.terminationStatus == 0 else {
+            return (nil, errorLine(String(decoding: errData, as: UTF8.self)))
+        }
+        guard let text = String(data: data, encoding: .utf8),
               text.contains("Available models")
-        else { return nil }
+        else { return (nil, nil) }
         let models = parseCatalog(text)
         // A catalog with no rows isn't Command Code (or is too broken to pick from).
-        return models.isEmpty ? nil : models
+        return (models.isEmpty ? nil : models, nil)
+    }
+
+    /// The line that names the failure in a Node crash: `SyntaxError: …`,
+    /// `Error: …`. Falls back to the last line printed.
+    static func errorLine(_ stderr: String) -> String? {
+        let lines = stderr.split(separator: "\n").map {
+            $0.trimmingCharacters(in: .whitespaces)
+        }.filter { !$0.isEmpty }
+        let named = lines.first { line in
+            guard let colon = line.firstIndex(of: ":") else { return false }
+            let head = line[..<colon]
+            return head.hasSuffix("Error") && !head.contains(" ")
+        }
+        guard let line = named ?? lines.last else { return nil }
+        return line.count > 240 ? String(line.prefix(240)) + "…" : line
     }
 
     /// Parse `--list-models` output. Exposed for the parser's own sake — the format is

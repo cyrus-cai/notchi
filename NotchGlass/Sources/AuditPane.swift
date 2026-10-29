@@ -427,8 +427,10 @@ private struct AuditFlow: View {
                     // Tool runs sit in their own lane, one bar per run.
                     lanes[3].append(bar(placement.start, placement.seconds))
                 case .jev:
-                    // One round trip, no stream to wait on: the Notchi lane alone.
-                    lanes[2].append(bar(placement.start, placement.seconds))
+                    // One round trip, no stream to wait on: a single bar, in the
+                    // Notchi lane, or in the user's lane when it went to TypeSafe
+                    // on their own key.
+                    lanes[AuditFlow.isNotchi(entry) ? 2 : 1].append(bar(placement.start, placement.seconds))
                 case .http, .cli:
                     // Send → first token in Input; first token → end in the lane
                     // of whose model answered. No token means it never reached
@@ -451,7 +453,7 @@ private struct AuditFlow: View {
     /// Whether the request went to Notchi's own models (Notchi Balance, Auto,
     /// Jev) rather than to a key or CLI the user set up.
     fileprivate static func isNotchi(_ entry: RequestAudit.Entry) -> Bool {
-        entry.transport == .jev || entry.provider == Provider.nono.displayName
+        entry.servedByNotchi
     }
 
     // MARK: Color

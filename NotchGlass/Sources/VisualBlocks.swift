@@ -220,6 +220,16 @@ struct VisualBlockView: View {
     var baseFont: CGFloat = Tokens.TypeSize.reading
 
     var body: some View {
+        if case .entity(let entity) = spec {
+            // A card sits in the answer as text does: no panel of its own.
+            EntityCardView(entity: entity)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            boxed
+        }
+    }
+
+    private var boxed: some View {
         Group {
             switch spec {
             case .ranked(let title, let total, let items, let footer):
@@ -231,9 +241,8 @@ struct VisualBlockView: View {
             case .stat(let label, let value, let delta, let note):
                 StatView(label: label, value: value, delta: delta, note: note)
                     .padding(.vertical, Viz.bodyPadding)
-            case .entity(let entity):
-                EntityCardView(entity: entity)
-                    .padding(.vertical, Viz.bodyPadding)
+            case .entity:
+                EmptyView()
             }
         }
         .padding(.horizontal, 12)
@@ -595,39 +604,48 @@ private struct StatView: View {
     }
 }
 
+/// Laid out after tool-ui's `ApprovalCard` (assistant-ui/tool-ui): a header
+/// line, a separator, then a description list with the label in a fixed
+/// column and the value beside it. The icon is a plain symbol, no tile.
 private struct EntityCardView: View {
     let entity: VisualEntity
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(spacing: 9) {
-                badge
-                VStack(alignment: .leading, spacing: 1) {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 7) {
+                if let symbol {
+                    Image(systemName: symbol)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Tokens.text3)
+                }
+                VStack(alignment: .leading, spacing: 2) {
                     Text(entity.title)
-                        .font(.sf(13, weight: .medium))
+                        .font(.sf(13, weight: .semibold))
                         .foregroundStyle(Tokens.text1)
-                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                     if let subtitle = entity.subtitle {
                         Text(subtitle)
                             .font(Viz.value)
                             .foregroundStyle(Tokens.text4)
-                            .lineLimit(1)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                Spacer(minLength: 0)
             }
             if !entity.facts.isEmpty {
-                VStack(spacing: 4) {
+                Divider().overlay(Tokens.hairline)
+                Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 14, verticalSpacing: 6) {
                     ForEach(Array(entity.facts.enumerated()), id: \.offset) { _, fact in
-                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        GridRow {
                             Text(fact.label)
                                 .font(Viz.value)
                                 .foregroundStyle(Tokens.text4)
-                            Spacer(minLength: 0)
+                                .fixedSize()
                             Text(fact.value)
                                 .font(Viz.row)
                                 .foregroundStyle(Tokens.text2)
-                                .multilineTextAlignment(.trailing)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
                         }
                     }
                 }
@@ -648,32 +666,15 @@ private struct EntityCardView: View {
                 .buttonStyle(.plain)
             }
         }
+        .padding(.vertical, 4)
         .accessibilityElement(children: .contain)
     }
 
-    /// The mark is provenance, not decoration: a symbol the answer names, in
-    /// the same recessed chip the panel uses for quiet controls.
-    private var badge: some View {
-        RoundedRectangle(cornerRadius: 6, style: .continuous)
-            .fill(Tokens.recessFill)
-            .overlay(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .strokeBorder(Tokens.recessRim, lineWidth: 1)
-            )
-            .overlay(
-                Image(systemName: symbol)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(Tokens.text2)
-            )
-            .frame(width: 26, height: 26)
-    }
-
-    /// An SF Symbol the model named, or the neutral one when it named nothing
-    /// the system has.
-    private var symbol: String {
+    /// An SF Symbol the model named; none when it named nothing the system has.
+    private var symbol: String? {
         guard let icon = entity.icon,
               NSImage(systemSymbolName: icon, accessibilityDescription: nil) != nil else {
-            return "square.text.square"
+            return nil
         }
         return icon
     }

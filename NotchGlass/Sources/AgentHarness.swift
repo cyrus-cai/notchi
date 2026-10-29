@@ -441,7 +441,52 @@ struct ToolRegistry: Sendable {
             out.isError = true
             audit.finish(.failed, kind: "tool")
         }
+        out.result = ToolOutputSpill.fit(out.result, tool: call.name)
         return out
+    }
+}
+
+/// A tool result longer than `inlineLimit` goes to a file; the model gets its
+/// start and end and the file's path, and reads the rest with `files`
+/// action=read and `offset`. Nothing is lost to a cut in the middle.
+enum ToolOutputSpill {
+    static let inlineLimit = 16_000
+
+    static var folder: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Notchi/tool-output", isDirectory: true)
+    }
+
+    static func fit(_ text: String, tool: String) -> String {
+        guard text.count > inlineLimit else { return text }
+        let fm = FileManager.default
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        sweep()
+        let stamp = Int(Date().timeIntervalSince1970)
+        let file = folder.appendingPathComponent("\(tool)-\(stamp)-\(UUID().uuidString.prefix(6)).txt")
+        guard (try? text.write(to: file, atomically: true, encoding: .utf8)) != nil else {
+            let head = inlineLimit * 3 / 4
+            return text.prefix(head) + "\n[… \(text.count - inlineLimit) characters omitted …]\n"
+                + text.suffix(inlineLimit - head)
+        }
+        let lines = text.reduce(into: 1) { if $1 == "\n" { $0 += 1 } }
+        let head = 10_000, tail = 4_000
+        return text.prefix(head)
+            + "\n[… \(text.count - head - tail) characters omitted …]\n"
+            + text.suffix(tail)
+            + "\n\n[The full result, \(text.count) characters in \(lines) lines, is saved at \(file.path). "
+            + "Read any part of it with files action=read path=\(file.path) offset=<line> lines=<count>.]"
+    }
+
+    /// Files older than a day are removed.
+    private static func sweep() {
+        let fm = FileManager.default
+        let cutoff = Date().addingTimeInterval(-86_400)
+        guard let items = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
+        for item in items {
+            let date = (try? item.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            if let date, date < cutoff { try? fm.removeItem(at: item) }
+        }
     }
 }
 
@@ -482,10 +527,12 @@ enum AgentHarnessError: LocalizedError {
 struct AgentHarness {
     let service: AgentCapableService
     let registry: ToolRegistry
-    /// Hard ceiling on tool-call rounds. A well-behaved turn finishes in 1–3; the
-    /// cap is a runaway-loop backstop, after which we force a final no-tools turn so
-    /// the user still gets a closing answer instead of a dangling tool request.
-    var maxIterations: Int = 8
+    /// Hard ceiling on tool-call rounds. Most turns finish in 1–3; a task across
+    /// several apps or a shell job can take dozens. The cap is a runaway-loop
+    /// backstop, after which we force a final no-tools turn so the user still gets
+    /// a closing answer instead of a dangling tool request. Old results are cut
+    /// down as the run goes (`pruneOldResults`), so a long run stays affordable.
+    var maxIterations: Int = 40
 
     /// Ceiling on *search* rounds specifically, hit well before `maxIterations`.
     ///
@@ -504,11 +551,10 @@ struct AgentHarness {
     /// fruitless search (open the one promising result and read it), not another
     /// lap of it.
     ///
-    /// Three is measured, not guessed: the question that prompted this answered
-    /// cleanly in four searches on a good run, and spent 8–10 on the runs that
-    /// came back empty. Anything a fourth search would have added, a fourth
-    /// *rewording* of the same fruitless query would not.
-    var maxSearchRounds: Int = 3
+    /// Was three (measured on 2026-09 models, which spent 8–10 rounds on
+    /// rewordings when the web had no answer). Raised to eight so a research
+    /// question can follow several leads; the nudge starts at the fourth round.
+    var maxSearchRounds: Int = 8
 
     /// When true, the first turn of a question whose answer moves with time is
     /// issued with `web_search` required — the model cannot skip it and reply
@@ -1064,6 +1110,7 @@ struct AgentHarness {
             convo.append(AgentMessage(kind: .assistantToolCalls(text: assistantText,
                                                                 calls: pendingCalls)))
             convo.append(AgentMessage(kind: .toolResults(resultsToSend)))
+            Self.pruneOldResults(&convo)
             if didSearchThisRound { searchRounds += 1 }
             didTool = true
             iteration += 1
@@ -1091,6 +1138,38 @@ struct AgentHarness {
             }
         }
         return nil
+    }
+
+    /// Tool-result rounds kept whole, counted from the newest.
+    static let keptResultRounds = 2
+    /// An older result longer than this keeps only its start and end.
+    static let prunedResultLimit = 4_000
+    static let prunedMarker = "characters of this older result were dropped"
+
+    /// Cut down long results older than the last `keptResultRounds` rounds to
+    /// their start and end. A result is cut once and then stays the same, so the
+    /// request prefix a provider caches changes only where a result ages out.
+    /// A spilled result keeps its file path in its last lines.
+    static func pruneOldResults(_ convo: inout [AgentMessage]) {
+        let rounds = convo.indices.filter {
+            if case .toolResults = convo[$0].kind { return true }
+            return false
+        }
+        for index in rounds.dropLast(keptResultRounds) {
+            guard case .toolResults(var calls) = convo[index].kind else { continue }
+            var changed = false
+            for i in calls.indices {
+                let text = calls[i].result
+                guard text.count > prunedResultLimit, !text.contains(prunedMarker) else { continue }
+                let head = 2_000, tail = 1_000
+                let cut = text.count - head - tail
+                calls[i].result = text.prefix(head)
+                    + "\n[… \(cut) \(prunedMarker); run the call again if you need them …]\n"
+                    + text.suffix(tail)
+                changed = true
+            }
+            if changed { convo[index] = AgentMessage(kind: .toolResults(calls)) }
+        }
     }
 
     /// Execute all of a turn's tool calls at once, preserving request order in the
@@ -1209,8 +1288,8 @@ struct AgentHarness {
         // the nudge from the results so it reads as a distinct instruction, not result text.
         let thisRound = priorSearchRounds + 1
         let nudge: String
-        if thisRound < 2 {
-            return nil  // first search: let it run clean, no pressure yet
+        if thisRound < 4 {
+            return nil  // the first three searches run clean
         } else if thisRound >= cap {
             // Last round a search can still be issued — after this the searcher is gone
             // from the tool list, so say so plainly rather than implying it's a choice.
@@ -1218,10 +1297,6 @@ struct AgentHarness {
                   + "to you. Answer the user now from what you already have, or read one "
                   + "page you have already found if a single fact is still missing. If the "
                   + "answer isn't in these results, say plainly that you could not find it."
-        } else if thisRound == 2 {
-            nudge = "You have already searched once. Prefer answering from the results "
-                  + "you now have; search again only if a specific, essential fact is "
-                  + "still missing."
         } else {
             nudge = "You have searched \(priorSearchRounds) times. Do not search again "
                   + "unless it is truly unavoidable — answer from what you already have, "

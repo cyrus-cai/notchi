@@ -569,6 +569,18 @@ struct InlineSettingsView: View {
     /// copy by `NoNoAccount.usesRemoteSense`, so a change applies to the next one.
     @State private var copySenseEngine: CopySenseEngine = .current
 
+    /// Which model makes the decision calls (Jev / the user's endpoint), and
+    /// that endpoint's fields. Written through to `DecisionModel` /
+    /// `DecisionEndpoint` as they change; read per call.
+    @State private var decisionModel: DecisionModel = .current
+    @State private var decisionURL: String = DecisionEndpoint.baseURL
+    @State private var decisionKey: String = DecisionEndpoint.apiKey
+    @State private var decisionModelID: String = DecisionEndpoint.model
+    @State private var typeSafeKey: String = TypeSafeKey.value
+    /// The decision model's Test: spinner while it runs, then the verdict.
+    @State private var decisionTesting = false
+    @State private var decisionTestResult: ConnectivityTest.Result?
+
     /// Where note captures land (Apple Notes / Markdown folder) — mirrors the
     /// persisted value; writes go through `selectNoteDestination`. Consulted per
     /// write, so the switch applies to the very next jot.
@@ -1058,6 +1070,20 @@ struct InlineSettingsView: View {
                     modelRow
                 }
                 keySection
+                // The model behind the small yes/no calls, beside the other
+                // "which model, whose key" choices.
+                Text(L("decision.title"))
+                    .captionLabel()
+                    .padding(.top, 2)
+                decisionModelRow
+                switch decisionModel {
+                case .jev:    EmptyView()
+                case .jevKey: decisionField(label: L("decision.key"), placeholder: L("model.pasteKey"),
+                                            text: $typeSafeKey, secure: true) { TypeSafeKey.value = $0 }
+                              decisionTestRow
+                case .custom: decisionEndpointRows
+                              decisionTestRow
+                }
                 // Web search is the same question this pane already answers
                 // (which backend, and its key), so it rides here as a labelled
                 // group rather than its own category.
@@ -3082,7 +3108,7 @@ struct InlineSettingsView: View {
                     .foregroundStyle(Tokens.text2)
                     .frame(width: 64, alignment: .leading)
 
-                if !installed {
+                if !installed && !signedIn {
                     // No CLI yet → link to the install docs.
                     codexPillButton(L("commandcode.status.get")) {
                         LinkGate.shared.open(Provider.commandCode.signupURL)
@@ -3117,13 +3143,27 @@ struct InlineSettingsView: View {
                 .notchTooltip(L("commandcode.action.redetect"))
             }
 
-            Text(installed
-                 ? (signedIn ? L("commandcode.status.hint.ready") : L("commandcode.status.hint.login"))
-                 : L("commandcode.status.hint.install"))
+            // Chat needs only the sign-in; the CLI matters for agent tasks alone.
+            // An install that crashes on launch is neither missing nor working, so it
+            // gets its own hint and the line the CLI died with.
+            let startupError = installed ? nil : CommandCodeCLIService.startupError
+            Text(startupError != nil
+                 ? L("commandcode.status.hint.broken")
+                 : signedIn
+                 ? (installed ? L("commandcode.status.hint.ready") : L("commandcode.status.hint.noCLI"))
+                 : (installed ? L("commandcode.status.hint.login") : L("commandcode.status.hint.install")))
                 .font(.sf(Tokens.TypeSize.label))
                 .foregroundStyle(Tokens.text3)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.leading, 76)
+            if let startupError {
+                Text(startupError)
+                    .font(Self.memoryMono)
+                    .foregroundStyle(Tokens.text3)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 76)
+            }
         }
         // The probe lands on a background queue; `cliTick` is the redraw.
         .onReceive(NotificationCenter.default.publisher(for: .cliAvailabilityResolved)) { _ in
@@ -4897,6 +4937,121 @@ struct InlineSettingsView: View {
         }
     }
 
+    /// Which model answers the decision calls: Copy Sense, emoji reactions, the
+    /// link pre-check and the follow-up check.
+    private var decisionModelRow: some View {
+        settingRow(label: L("decision.model"), info: L("decision.model.hint")) {
+            GlassMenu(title: decisionModel.label,
+                      items: DecisionModel.allCases.map { m in
+                GlassMenuItem(title: m.label, selected: m == decisionModel) {
+                    guard m != decisionModel else { return }
+                    decisionModel = m
+                    DecisionModel.current = m
+                    decisionTestResult = nil
+                }
+            })
+        }
+    }
+
+    /// The user's endpoint: base URL, key (optional for a local server), and
+    /// model id. Same field chrome as the custom chat endpoint's.
+    @ViewBuilder
+    private var decisionEndpointRows: some View {
+        decisionField(label: L("model.custom.url"), placeholder: L("model.custom.urlPlaceholder"),
+                      text: $decisionURL) { DecisionEndpoint.baseURL = $0 }
+        if let resolved = CustomProvider.normalized(decisionURL) {
+            Text(L("model.custom.resolved", resolved.absoluteString))
+                .font(.sf(Tokens.TypeSize.meta))
+                .foregroundStyle(Tokens.text3)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .padding(.leading, 76)
+        }
+        decisionField(label: L("decision.key"), placeholder: L("decision.keyPlaceholder"),
+                      text: $decisionKey, secure: true) { DecisionEndpoint.apiKey = $0 }
+        decisionField(label: L("model.custom.model"), placeholder: L("model.custom.modelPlaceholder"),
+                      text: $decisionModelID) { DecisionEndpoint.model = $0 }
+        if decisionURL.isEmpty || decisionModelID.isEmpty {
+            Text(L("decision.incomplete"))
+                .font(.sf(Tokens.TypeSize.meta))
+                .foregroundStyle(Tokens.text3)
+                .padding(.leading, 76)
+        }
+    }
+
+    /// Test for the picked decision model, trailing like the key section's,
+    /// with the verdict under it. Offered once there is something to test.
+    @ViewBuilder
+    private var decisionTestRow: some View {
+        let ready = decisionModel == .jevKey ? !typeSafeKey.isEmpty
+            : !decisionURL.isEmpty && !decisionModelID.isEmpty
+        if ready {
+            HStack(spacing: 12) {
+                Spacer(minLength: 0)
+                if decisionTesting {
+                    ProgressView().controlSize(.small)
+                } else {
+                    SettingActionButton(title: L("model.test")) { testDecisionModel() }
+                }
+            }
+        }
+        if let result = decisionTestResult {
+            statusPill(ok: result.isOK, message: result.isOK ? L("decision.test.ok") : result.message)
+                .padding(.leading, 76)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+        }
+    }
+
+    private func testDecisionModel() {
+        let target = decisionModel
+        decisionTesting = true
+        decisionTestResult = nil
+        Task {
+            let result = await OwnDecisionModel.test()
+            await MainActor.run {
+                decisionTesting = false
+                // Drop the verdict if the user switched models mid-flight.
+                guard target == decisionModel else { return }
+                withAnimation(.easeOut(duration: 0.2)) { decisionTestResult = result }
+            }
+        }
+    }
+
+    private func decisionField(label: String, placeholder: String, text: Binding<String>,
+                               secure: Bool = false,
+                               commit: @escaping (String) -> Void) -> some View {
+        HStack(spacing: 12) {
+            Text(label)
+                .font(.sf(Tokens.TypeSize.form, weight: .medium))
+                .foregroundStyle(Tokens.text2)
+                .frame(width: 64, alignment: .leading)
+            ZStack(alignment: .leading) {
+                if text.wrappedValue.isEmpty {
+                    Text(placeholder)
+                        .font(.sf(Tokens.TypeSize.form))
+                        .foregroundStyle(Tokens.text3)
+                        .lineLimit(1)
+                        .allowsHitTesting(false)
+                }
+                Group {
+                    if secure { SecureField("", text: text) } else { TextField("", text: text) }
+                }
+                .textFieldStyle(.plain)
+                .font(.sf(Tokens.TypeSize.form))
+                .foregroundStyle(Tokens.text1)
+                .onChange(of: text.wrappedValue) {
+                    model.noteUserTyping()
+                    commit(text.wrappedValue)
+                    decisionTestResult = nil
+                }
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 34)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .recessedSurface(in: RoundedRectangle.control, lit: false)
+        }
+    }
+
     /// Under Memory: whether copies feed it (`ClipboardHistory.enabled`). Off
     /// clears the clipboard history.
     private var memoryClipboardRow: some View {
@@ -4984,6 +5139,20 @@ struct InlineSettingsView: View {
                     }
                 }
                 .padding(.top, -6)
+                settingRow(label: L("telegram.lid"), info: L("telegram.lid.hint"), aligned: true) {
+                    Toggle("", isOn: Binding(
+                        get: { telegram.answersWithLidClosed },
+                        set: { on in
+                            Haptics.levelChange()
+                            Task { await telegram.setAnswersWithLidClosed(on) }
+                        }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .tint(Tokens.text2)
+                    .disabled(telegram.lidBusy)
+                }
             } else if telegramOn {
                 VStack(alignment: .leading, spacing: 6) {
                     telegramStepRow(1, L("telegram.step1")) {

@@ -64,8 +64,19 @@ final class RequestAudit: @unchecked Sendable {
         /// That argument's name as the tool spelled it ("query", "url", "command"),
         /// so the card can label the value the way the call did.
         var callName: String? = nil
+        /// Whether the request went to Notchi's gateway, decided when it was
+        /// recorded from the host it was actually sent to (`sentHost`), not
+        /// from the provider or transport label. Nil on records from before it
+        /// was kept; `servedByNotchi` falls back to the stored host for those.
+        var viaNotchi: Bool? = nil
 
         var tokens: Int { inputTokens + outputTokens }
+
+        /// Whether Notchi served this request. Tool runs never leave the app.
+        var servedByNotchi: Bool {
+            guard transport != .tool else { return false }
+            return viaNotchi ?? (host == RequestAudit.notchiHost)
+        }
     }
 
     /// How the request left the app: an HTTP call, a local agent CLI run — or a
@@ -212,11 +223,17 @@ final class RequestAudit: @unchecked Sendable {
                                                  ? RequestAudit.message(for: error) : nil,
                                              hasPayload: sent != nil || sentRequest != nil,
                                              call: sentCall?.value,
-                                             callName: sentCall?.name),
+                                             callName: sentCall?.name,
+                                             viaNotchi: transport == .tool ? false
+                                                 : (sentRequest?.url?.host ?? host) == RequestAudit.notchiHost),
                                        request: sentRequest,
                                        payload: sent)
         }
     }
+
+    /// The host of Notchi's gateway, local override included. A request counts
+    /// as Notchi's only when it was sent there.
+    static var notchiHost: String? { URL(string: Provider.nonoEndpoint)?.host }
 
     /// What the log keeps: the most recent 1,000 records, and nothing older than
     /// 90 days. A count alone makes "how long does history last" depend on how

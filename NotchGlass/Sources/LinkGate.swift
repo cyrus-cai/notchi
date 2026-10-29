@@ -103,7 +103,7 @@ final class LinkGate: ObservableObject {
 
     private static func applies(to url: URL) -> Bool {
         let scheme = url.scheme?.lowercased()
-        return isEnabled && (scheme == "http" || scheme == "https") && NoNoAccount.shared.hasToken
+        return isEnabled && (scheme == "http" || scheme == "https") && NoNoAccount.shared.canDecide
     }
 
     /// What is sent: the address without its password and fragment. The query

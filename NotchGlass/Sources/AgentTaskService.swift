@@ -32,7 +32,7 @@ enum AgentEngine: String, CaseIterable {
         case .claude: return ClaudeCLIService.isAvailable
         case .grok:   return GrokCLIService.isAvailable
         case .cursor: return CursorCLIService.isAvailable
-        case .commandCode: return CommandCodeCLIService.isAvailable
+        case .commandCode: return CommandCodeCLIService.isAgentAvailable
         case .pi:     return PiCLIService.isAvailable
         case .dsh:    return DshCLIService.isAvailable
         }

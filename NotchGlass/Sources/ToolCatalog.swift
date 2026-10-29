@@ -35,6 +35,17 @@ struct GroupedTool: NotchTool {
               let route = routes.first(where: { $0.action == action }) else {
             return "Error: action must be one of \(actions.joined(separator: ", "))."
         }
+        // The group's schema can only require `action`; the member's own schema
+        // says what this action needs, so check it before the member runs.
+        let required = (route.tool.schema["required"] as? [String] ?? []).filter { $0 != "action" }
+        let missing = required.filter { key in
+            guard let value = input[key] else { return true }
+            if let text = value as? String { return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            return false
+        }
+        if !missing.isEmpty {
+            return "Error: action=\(action) needs \(missing.joined(separator: ", ")). Call again with them."
+        }
         var inner = input
         if !route.keepsAction { inner.removeValue(forKey: "action") }
         return try await route.tool.execute(inner)
@@ -62,19 +73,10 @@ enum ToolCatalog {
     }
 
     /// Held back until the model loads them, with the line `load_tools` lists
-    /// for each. Measured on the use-case eval (2026-10-21): together these
-    /// are called on about 7% of questions; holding back the shell, files,
-    /// mail, photos and history tools as well sent half the questions through
-    /// an extra `load_tools` round, and a held-back photos tool went unused
-    /// where the answer was in a photo.
-    static let deferred: [(name: String, summary: String)] = [
-        ("manage_loop", "repeat a task on a schedule, or watch something over time"),
-        ("schedule_action", "run a command on this Mac later"),
-        ("travel_time", "how long a trip takes, from Apple Maps"),
-        ("recent_songs", "what the user played in Music lately"),
-        ("wifi_status", "the Wi-Fi network and its signal"),
-        ("account_usage", "what the user spent and has left on Notchi Balance"),
-    ]
+    /// for each. Empty since 2026-10-29: every built-in tool is on the wire
+    /// from the first turn, which saves the extra `load_tools` round. The
+    /// mechanism stays for MCP servers past `MCPHub.advertiseLimit`.
+    static let deferred: [(name: String, summary: String)] = []
 
     static var deferredNames: Set<String> { Set(deferred.map(\.name)) }
 
@@ -264,29 +266,49 @@ enum ToolCatalog {
 
     static let files = Group(
         name: "files",
-        intro: "Files in the user's Downloads, Desktop and Documents folders on this Mac.",
+        intro: "Files on this Mac.",
         parts: [
             Part(member: ListFilesTool.toolName, actions: ["list"], keepsAction: false,
                  copy: "action=list finds files, most recently changed first, with size and date (\"the latest PDF in Downloads\", \"that contract on my Desktop\"); it searches subfolders when `query` or `content` is given. Use `content` when they describe what is IN the file (\"the screenshot with the 快充 times\"): it searches the text inside documents and the text macOS recognized in screenshots and photos. It matches exact words, so put other wordings in `content_any`: synonyms and the term in Chinese and English, e.g. 押金 → [\"押金\", \"保证金\", \"deposit\"]. Use folder=all when unsure where it is.",
                  properties: ["folder", "query", "content", "content_any", "kind", "limit"]),
             Part(member: ReadFileTool.toolName, actions: ["read"], keepsAction: false,
-                 copy: "action=read returns the text of one PDF or text file, or the text in an image, by `path`: one action=list gave, or one the user names inside those folders. Other folders cannot be read.",
-                 properties: ["path"]),
+                 copy: "action=read returns the numbered lines of one PDF or text file, or the text in an image, by `path`, anywhere on this Mac; for a long file pass `offset` and `lines`.",
+                 properties: ["path", "offset", "lines"]),
+            Part(member: FindFilesTool.toolName, actions: ["find"], keepsAction: false,
+                 copy: "action=find lists files anywhere under `folder` (default home) whose name or path matches the glob `pattern` (*.pdf, src/**/*.swift), newest first.",
+                 properties: ["folder", "pattern", "limit"]),
+            Part(member: GrepFilesTool.toolName, actions: ["grep"], keepsAction: false,
+                 copy: "action=grep finds lines matching the regular expression `pattern` in text files under `path` (a folder or a file), with file and line number; `include` keeps files matching a glob.",
+                 properties: ["pattern", "path", "include", "ignore_case", "limit"]),
+            Part(member: WriteFileTool.toolName, actions: ["write"], keepsAction: false,
+                 copy: "action=write creates or replaces the text file at `path` with `content`.",
+                 properties: ["path", "content"]),
+            Part(member: EditFileTool.toolName, actions: ["edit"], keepsAction: false,
+                 copy: "action=edit replaces `old_text`, copied exactly from action=read without the line numbers, with `new_text` in the file at `path`; set replace_all for every occurrence.",
+                 properties: ["path", "old_text", "new_text", "replace_all"]),
         ],
-        outro: "",
+        outro: "Write and edit keep a copy of the file as it was and say where. Never say a file changed until the result says so.",
         properties: [
-            "folder": ["type": "string", "enum": ["downloads", "desktop", "documents", "all"],
-                       "description": "list: which folder; all searches the three."],
+            "folder": ["type": "string",
+                       "description": "list: downloads, desktop, documents or all (the three). find: any folder path, default ~."],
             "query": ["type": "string", "description": "list: only files whose name contains this."],
             "content": ["type": "string",
-                        "description": "list: words that appear inside the file, including text in a screenshot. Several words must all appear."],
+                        "description": "list: words that appear inside the file, including text in a screenshot; several words must all appear. write: the file's full new text."],
             "content_any": ["type": "array", "items": ["type": "string"], "maxItems": 10,
                             "description": "list: alternative wordings of what is inside the file; a file matches if it contains any one."],
             "kind": ["type": "string", "enum": ["pdf", "image", "text", "any"],
                      "description": "list: only this kind of file. Default any."],
-            "limit": ["type": "integer", "minimum": 1, "maximum": 50,
-                      "description": "list: how many, 1 to 50. Default 15."],
-            "path": ["type": "string", "description": "read: the file's path, e.g. ~/Downloads/report.pdf."],
+            "limit": ["type": "integer", "minimum": 1, "maximum": 1000,
+                      "description": "list: how many, up to 50, default 15. find: up to 500, default 100. grep: most lines, up to 1000, default 200."],
+            "path": ["type": "string", "description": "read/write/edit: the file's path, e.g. ~/Downloads/report.pdf. grep: a folder or file, default ~."],
+            "offset": ["type": "integer", "minimum": 1, "description": "read: first line, 1-based."],
+            "lines": ["type": "integer", "minimum": 1, "description": "read: how many lines."],
+            "pattern": ["type": "string", "description": "find: a glob such as *.md or **/invoice*.pdf. grep: a regular expression (grep -E)."],
+            "include": ["type": "string", "description": "grep: only files whose name matches this glob, e.g. *.swift."],
+            "ignore_case": ["type": "boolean", "description": "grep: match regardless of case."],
+            "old_text": ["type": "string", "description": "edit: the exact text to replace."],
+            "new_text": ["type": "string", "description": "edit: what replaces it."],
+            "replace_all": ["type": "boolean", "description": "edit: replace every occurrence."],
         ])
 
     static let memory = Group(

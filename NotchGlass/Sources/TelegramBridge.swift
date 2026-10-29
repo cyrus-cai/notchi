@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import Foundation
+import IOKit.pwr_mgt
 import Speech
 import UniformTypeIdentifiers
 
@@ -11,8 +12,15 @@ import UniformTypeIdentifiers
 /// Each user makes their own bot with @BotFather and pastes its token here.
 /// The app long-polls the Bot API directly (`getUpdates`), so nothing passes
 /// through Notchi's servers and one user's bot never shares a rate limit or a
-/// ban with another's. While the Mac sleeps nobody polls; Telegram keeps the
-/// messages for 24 hours and they are answered on wake.
+/// ban with another's.
+///
+/// A locked screen or a sleeping display does not stop the bot. While it
+/// polls, the Mac does not go to sleep on its own when on power, and the app
+/// is kept out of App Nap; while it answers, it does not sleep on battery
+/// either. A closed lid puts the Mac to sleep unless an external display is
+/// attached, or "Answer with the lid closed" is on (`LidSleep`). While the Mac
+/// sleeps nobody polls; Telegram keeps the messages for 24 hours and they are
+/// answered on wake.
 ///
 /// The bot answers one chat: the first private chat that taps Start within
 /// `pairingWindow` of the token being entered. Everyone else is ignored.
@@ -47,7 +55,14 @@ final class TelegramBridge: ObservableObject {
 
     weak var model: NotchModel?
 
-    private var pollTask: Task<Void, Never>?
+    private var pollTask: Task<Void, Never>? {
+        didSet {
+            pollAwake = pollTask == nil ? nil : Awake(.polling)
+            applyLidSleep()
+        }
+    }
+    /// Held while polling, released when polling stops.
+    private var pollAwake: Awake?
     private var pairingUntil: Date?
     /// Each chat's updates run one after another: a second message waits for
     /// the first answer instead of racing it on the same thread.
@@ -73,6 +88,12 @@ final class TelegramBridge: ObservableObject {
     /// Telegram's limit is 4096; the rest leaves room for HTML tags.
     private static let messageLimit = 3800
 
+    /// "Answer with the lid closed": while polling, the Mac does not sleep
+    /// when the lid closes (`pmset disablesleep`).
+    @Published private(set) var answersWithLidClosed = UserDefaults.standard.bool(forKey: TelegramBridge.lidKey)
+    @Published private(set) var lidBusy = false
+    private static let lidKey = "TelegramAnswerWithLidClosed"
+
     private var token: String { UserDefaults.standard.string(forKey: Self.tokenKey) ?? "" }
     private var owner: Int64? {
         let id = UserDefaults.standard.object(forKey: Self.ownerKey) as? NSNumber
@@ -89,6 +110,8 @@ final class TelegramBridge: ObservableObject {
 
     /// At launch: resume polling when a bot is set up.
     func start() {
+        // A crash or a forced quit can leave lid sleep off with nobody polling.
+        applyLidSleep()
         guard !token.isEmpty else { return }
         let bot = UserDefaults.standard.string(forKey: Self.botKey) ?? ""
         let ownerName = UserDefaults.standard.string(forKey: Self.ownerNameKey) ?? ""
@@ -171,6 +194,38 @@ final class TelegramBridge: ObservableObject {
         state = .off
     }
 
+    // MARK: - Lid
+
+    /// Turning it on installs the sudo rule `LidSleep` runs under and turns lid
+    /// sleep off; turning it off does the reverse. Each asks for an
+    /// administrator password once.
+    func setAnswersWithLidClosed(_ on: Bool) async {
+        guard !lidBusy, on != answersWithLidClosed else { return }
+        lidBusy = true
+        defer { lidBusy = false }
+        let done = on ? await LidSleep.install(disableNow: pollTask != nil)
+                      : await LidSleep.uninstall()
+        guard done else { return }
+        answersWithLidClosed = on
+        UserDefaults.standard.set(on, forKey: Self.lidKey)
+        LidSleep.applied = on && pollTask != nil
+    }
+
+    /// Lid sleep is off exactly while the setting is on and the bot polls.
+    private func applyLidSleep() {
+        let want = answersWithLidClosed && pollTask != nil
+        guard want != LidSleep.applied else { return }
+        LidSleep.applied = want
+        Task.detached { LidSleep.set(disabled: want) }
+    }
+
+    /// At quit: lid sleep goes back on, so a closed Mac in a bag still sleeps.
+    func restoreLidSleep() {
+        guard LidSleep.applied else { return }
+        LidSleep.applied = false
+        LidSleep.set(disabled: false)
+    }
+
     // MARK: - Polling
 
     private func stopPolling() {
@@ -235,6 +290,93 @@ final class TelegramBridge: ObservableObject {
         return ["ok": false]
     }
 
+    /// `pmset -a disablesleep`, the only switch that keeps a Mac awake with
+    /// the lid closed and no external display. It needs root, so turning the
+    /// setting on installs one sudoers rule allowing exactly the two pmset
+    /// commands without a password; after that it runs silently.
+    private enum LidSleep {
+        static let rulePath = "/etc/sudoers.d/notchi-lid"
+        private static let appliedKey = "TelegramLidSleepDisabled"
+
+        /// Whether this app turned lid sleep off and has not turned it back on.
+        static var applied: Bool {
+            get { UserDefaults.standard.bool(forKey: appliedKey) }
+            set { UserDefaults.standard.set(newValue, forKey: appliedKey) }
+        }
+
+        @discardableResult
+        static func set(disabled: Bool) -> Bool {
+            run("/usr/bin/sudo", ["-n", "/usr/bin/pmset", "-a", "disablesleep", disabled ? "1" : "0"]) == 0
+        }
+
+        static func install(disableNow: Bool) async -> Bool {
+            let user = NSUserName()
+            guard user.range(of: #"^[A-Za-z0-9._-]+$"#, options: .regularExpression) != nil else { return false }
+            let rule = "\(user) ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 1, /usr/bin/pmset -a disablesleep 0"
+            let tmp = "/tmp/notchi-lid.sudoers"
+            var steps = [
+                "/bin/echo '\(rule)' > \(tmp)",
+                "/usr/sbin/visudo -cf \(tmp)",
+                "/usr/sbin/chown root:wheel \(tmp)",
+                "/bin/chmod 0440 \(tmp)",
+                "/bin/mv -f \(tmp) \(rulePath)",
+            ]
+            if disableNow { steps.append("/usr/bin/pmset -a disablesleep 1") }
+            return await admin(steps.joined(separator: " && "))
+        }
+
+        static func uninstall() async -> Bool {
+            await admin("/usr/bin/pmset -a disablesleep 0 && /bin/rm -f \(rulePath)")
+        }
+
+        /// The system's administrator password dialog.
+        private static func admin(_ command: String) async -> Bool {
+            let script = "do shell script \"\(command)\" with administrator privileges"
+            return await Task.detached { run("/usr/bin/osascript", ["-e", script]) == 0 }.value
+        }
+
+        private static func run(_ path: String, _ arguments: [String]) -> Int32 {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: path)
+            process.arguments = arguments
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            guard (try? process.run()) != nil else { return -1 }
+            process.waitUntilExit()
+            return process.terminationStatus
+        }
+    }
+
+    /// Keeps the Mac awake for as long as the value lives.
+    private final class Awake {
+        enum Purpose {
+            /// No idle sleep on power (the system ignores this assertion on
+            /// battery), and no App Nap, so the long poll keeps running.
+            case polling
+            /// No idle sleep on power or battery while a reply is being made.
+            case answering
+        }
+
+        private var assertion = IOPMAssertionID(0)
+        private let activity: NSObjectProtocol
+
+        init(_ purpose: Purpose) {
+            let type = purpose == .polling ? kIOPMAssertionTypePreventSystemSleep
+                                           : kIOPMAssertionTypePreventUserIdleSystemSleep
+            let reason = purpose == .polling ? "Notchi is waiting for Telegram messages"
+                                             : "Notchi is answering a Telegram message"
+            IOPMAssertionCreateWithName(type as CFString, IOPMAssertionLevel(kIOPMAssertionLevelOn),
+                                        reason as CFString, &assertion)
+            activity = ProcessInfo.processInfo.beginActivity(
+                options: .userInitiatedAllowingIdleSystemSleep, reason: reason)
+        }
+
+        deinit {
+            if assertion != 0 { IOPMAssertionRelease(assertion) }
+            ProcessInfo.processInfo.endActivity(activity)
+        }
+    }
+
     // MARK: - Updates
 
     private func route(_ update: [String: Any]) {
@@ -285,6 +427,8 @@ final class TelegramBridge: ObservableObject {
     /// `messages` is one message, or the items of one album in order.
     private func answer(_ messages: [[String: Any]], chatID: Int64) async {
         guard let model, let message = messages.first else { return }
+        let awake = Awake(.answering)
+        defer { withExtendedLifetime(awake) {} }
         let text = messages.lazy
             .compactMap { (($0["text"] ?? $0["caption"]) as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .first { !$0.isEmpty } ?? ""

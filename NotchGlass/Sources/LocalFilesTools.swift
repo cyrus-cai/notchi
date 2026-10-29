@@ -1,9 +1,11 @@
 import Foundation
 import UniformTypeIdentifiers
 
-// Read-only tools over the user's Downloads, Desktop and Documents folders:
-// "看看下载里最新的 PDF", "桌面上那份合同写了什么". Nothing outside those three
-// folders is listed or read. macOS asks once per folder the first time.
+// File tools. `list_files` searches the user's Downloads, Desktop and
+// Documents folders, content included: "看看下载里最新的 PDF", "桌面上那份合同
+// 写了什么". `read_file`, `write_file`, `edit_file`, `find_files` and
+// `grep_files` work anywhere on this Mac except credential stores. macOS asks
+// once per protected folder the first time.
 
 enum UserFolders {
     static let all: [(key: String, url: URL)] = [
@@ -167,35 +169,65 @@ struct ListFilesTool: NotchTool {
     }
 }
 
-/// `read_file`: the text of one file from those folders.
+/// Paths the file tools resolve: `~`, `..` and symlinks resolved; nil for a
+/// credential store (`ShellRisk.credentialPaths`).
+enum FilePaths {
+    static func resolve(_ raw: String) -> URL? {
+        let expanded = (raw as NSString).expandingTildeInPath
+        let base = expanded.hasPrefix("/") ? expanded : NSHomeDirectory() + "/" + expanded
+        let url = URL(fileURLWithPath: base).standardizedFileURL.resolvingSymlinksInPath()
+        let lowered = url.path.lowercased()
+        if ShellRisk.credentialPaths.contains(where: { lowered.contains($0) }) { return nil }
+        return url
+    }
+
+    /// A copy of the file as it was, before a write or edit changes it, so
+    /// the change can be undone. Returns the copy's path.
+    static func backup(_ url: URL) -> String? {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else { return nil }
+        let folder = fm.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Notchi/file-backups", isDirectory: true)
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let copy = folder.appendingPathComponent("\(Int(Date().timeIntervalSince1970))-\(url.lastPathComponent)")
+        return (try? fm.copyItem(at: url, to: copy)) != nil ? copy.path : nil
+    }
+}
+
+/// `read_file`: the text of one file on this Mac.
 struct ReadFileTool: NotchTool {
     static let toolName = "read_file"
     let name = toolName
     let description = """
-    Reads one file from the user's Downloads, Desktop or Documents folder: the \
-    text of a PDF or text file, or the text in an image. Pass the path list_files \
-    gave, or a path the user names inside those folders — subfolders included, \
-    e.g. ~/Documents/grants/budget.pdf. Other folders and other file types \
-    cannot be read.
+    Reads one file on this Mac: the text of a PDF or text file, or the text in \
+    an image. Pass the path list_files or find gave, or a path the user names, \
+    e.g. ~/Documents/grants/budget.pdf or ~/.zshrc. Lines are numbered; for a \
+    long file pass offset (first line, 1-based) and lines to read part of it.
     """
     let schema: [String: Any] = [
         "type": "object",
         "properties": [
             "path": ["type": "string", "description": "The file's path, e.g. ~/Downloads/report.pdf."],
+            "offset": ["type": "integer", "minimum": 1, "description": "First line to read, 1-based. Default 1."],
+            "lines": ["type": "integer", "minimum": 1, "description": "How many lines. Default all, up to the size limit."],
         ],
         "required": ["path"],
     ]
 
-    private static let textLimit = 20_000
+    private static let textLimit = 200_000
 
     func execute(_ input: [String: Any]) async throws -> String {
         guard let raw = (input["path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
               !raw.isEmpty else { return "Error: give the file's path." }
-        guard let url = UserFolders.contained(raw) else {
-            return "Error: only files in Downloads, Desktop or Documents can be read."
+        guard let url = FilePaths.resolve(raw) else {
+            return "Error: that path holds credentials and cannot be read."
         }
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            return "Error: there is no file at \(raw). Find it with files action=list."
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else {
+            return "Error: there is no file at \(raw). Find it with files action=list or action=find."
+        }
+        if isDir.boolValue {
+            return "Error: \(raw) is a folder. List it with files action=find."
         }
         let type = UTType(filenameExtension: url.pathExtension)
         let text: String?
@@ -205,12 +237,259 @@ struct ReadFileTool: NotchTool {
         } else {
             text = NotchModel.droppedFileText(url, type: type)
         }
-        guard var body = text else {
+        guard let body = text else {
             return "Error: \(url.lastPathComponent) is not a PDF, text file or image, or it has no text."
         }
-        if body.count > Self.textLimit {
-            body = String(body.prefix(Self.textLimit)) + "\n[… the rest of the file was cut]"
+        let all = body.components(separatedBy: "\n")
+        let offset = max((input["offset"] as? NSNumber)?.intValue ?? 1, 1)
+        guard offset <= all.count else {
+            return "Error: \(url.lastPathComponent) has \(all.count) lines; offset \(offset) is past the end."
         }
-        return "\(url.lastPathComponent):\n\(body)"
+        let count = (input["lines"] as? NSNumber)?.intValue ?? all.count
+        let slice = all[(offset - 1)..<min(all.count, offset - 1 + max(count, 1))]
+        var out: [String] = []
+        var size = 0
+        var last = offset - 1
+        for (i, line) in slice.enumerated() {
+            size += line.count + 8
+            if size > Self.textLimit { break }
+            out.append("\(offset + i)\t\(line)")
+            last = offset + i
+        }
+        var header = "\(url.path) (\(all.count) lines)"
+        if offset > 1 || last < all.count { header += ", lines \(offset)–\(last)" }
+        var result = header + ":\n" + out.joined(separator: "\n")
+        if last < all.count { result += "\n[… more from line \(last + 1); call again with offset=\(last + 1)]" }
+        return result
+    }
+}
+
+/// `write_file`: create or replace a text file.
+struct WriteFileTool: NotchTool {
+    static let toolName = "write_file"
+    let name = toolName
+    let description = """
+    Creates a text file, or replaces one, with `content`. Missing folders are \
+    created. A file it replaces is copied aside first, and the result says where.
+    """
+    let schema: [String: Any] = [
+        "type": "object",
+        "properties": [
+            "path": ["type": "string", "description": "The file's path, e.g. ~/Desktop/notes.md."],
+            "content": ["type": "string", "description": "The file's full new text."],
+        ],
+        "required": ["path", "content"],
+    ]
+
+    func execute(_ input: [String: Any]) async throws -> String {
+        guard let raw = (input["path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else { return "Error: give the file's path." }
+        guard let content = input["content"] as? String else { return "Error: give the content." }
+        guard let url = FilePaths.resolve(raw) else {
+            return "Error: that path holds credentials and cannot be written."
+        }
+        let fm = FileManager.default
+        try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let backup = FilePaths.backup(url)
+        try content.write(to: url, atomically: true, encoding: .utf8)
+        let lines = content.components(separatedBy: "\n").count
+        var out = "Wrote \(url.path) (\(lines) lines)."
+        if let backup { out += " The previous version is at \(backup)." }
+        return out
+    }
+}
+
+/// `edit_file`: replace exact text inside a file.
+struct EditFileTool: NotchTool {
+    static let toolName = "edit_file"
+    let name = toolName
+    let description = """
+    Changes a text file by replacing `old_text` with `new_text`. `old_text` \
+    must match the file exactly, spaces and line breaks included, and occur \
+    once unless replace_all is true. Read the file first. The file as it was is \
+    copied aside, and the result says where.
+    """
+    let schema: [String: Any] = [
+        "type": "object",
+        "properties": [
+            "path": ["type": "string", "description": "The file's path."],
+            "old_text": ["type": "string", "description": "The exact text to replace."],
+            "new_text": ["type": "string", "description": "What replaces it."],
+            "replace_all": ["type": "boolean", "description": "Replace every occurrence. Default false."],
+        ],
+        "required": ["path", "old_text", "new_text"],
+    ]
+
+    func execute(_ input: [String: Any]) async throws -> String {
+        guard let raw = (input["path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else { return "Error: give the file's path." }
+        guard let old = input["old_text"] as? String, !old.isEmpty,
+              let new = input["new_text"] as? String else {
+            return "Error: give old_text and new_text."
+        }
+        guard let url = FilePaths.resolve(raw) else {
+            return "Error: that path holds credentials and cannot be changed."
+        }
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+            return "Error: \(raw) does not exist or is not a UTF-8 text file."
+        }
+        let count = text.components(separatedBy: old).count - 1
+        guard count > 0 else {
+            return "Error: old_text was not found in \(url.lastPathComponent). Read the file and copy the text exactly."
+        }
+        let all = (input["replace_all"] as? Bool) == true
+        guard count == 1 || all else {
+            return "Error: old_text occurs \(count) times. Give more surrounding text so it matches once, or set replace_all=true."
+        }
+        let updated: String
+        if all {
+            updated = text.replacingOccurrences(of: old, with: new)
+        } else {
+            let range = text.range(of: old)!
+            updated = text.replacingCharacters(in: range, with: new)
+        }
+        let backup = FilePaths.backup(url)
+        try updated.write(to: url, atomically: true, encoding: .utf8)
+        var out = "Replaced \(all ? count : 1) occurrence\(all && count > 1 ? "s" : "") in \(url.path)."
+        if let backup { out += " The previous version is at \(backup)." }
+        return out
+    }
+}
+
+/// `find_files`: files and folders whose path matches a glob.
+struct FindFilesTool: NotchTool {
+    static let toolName = "find_files"
+    let name = toolName
+    let description = """
+    Lists files under a folder whose path matches a glob: `*.pdf` matches by \
+    name at any depth, `src/**/*.swift` or `*/2026-*` match the path below the \
+    folder. Hidden folders, node_modules and ~/Library are skipped unless the \
+    folder itself is inside them. Newest first.
+    """
+    let schema: [String: Any] = [
+        "type": "object",
+        "properties": [
+            "folder": ["type": "string", "description": "Where to look, e.g. ~/Projects. Default the home folder."],
+            "pattern": ["type": "string", "description": "The glob, e.g. *.md or **/invoice*.pdf."],
+            "limit": ["type": "integer", "minimum": 1, "maximum": 500, "description": "How many. Default 100."],
+        ],
+        "required": ["pattern"],
+    ]
+
+    private static let skipped: Set<String> = ["node_modules", ".git", "DerivedData", "Pods", ".build"]
+
+    func execute(_ input: [String: Any]) async throws -> String {
+        guard let pattern = (input["pattern"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !pattern.isEmpty else { return "Error: give a pattern." }
+        let folderRaw = (input["folder"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "~"
+        guard let root = FilePaths.resolve(folderRaw) else { return "Error: that folder holds credentials." }
+        let limit = min(max((input["limit"] as? NSNumber)?.intValue ?? 100, 1), 500)
+        let home = NSHomeDirectory()
+        let skipLibrary = !root.path.hasPrefix(home + "/Library")
+        let byPath = pattern.contains("/")
+        let glob = pattern.hasPrefix("**/") ? String(pattern.dropFirst(3)) : pattern
+        let matchByName = !byPath || pattern.hasPrefix("**/") && !glob.contains("/")
+        guard let walker = FileManager.default.enumerator(
+            at: root, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey],
+            options: [.skipsPackageDescendants]) else {
+            return "Error: cannot read \(folderRaw)."
+        }
+        var hits: [(path: String, date: Date)] = []
+        var seen = 0
+        let started = Date()
+        let rootPrefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
+        while let item = walker.nextObject() as? URL {
+            seen += 1
+            if seen > 400_000 || Date().timeIntervalSince(started) > 20 { break }
+            let name = item.lastPathComponent
+            let values = try? item.resourceValues(forKeys: [.isDirectoryKey, .contentModificationDateKey])
+            if values?.isDirectory == true {
+                if name.hasPrefix(".") || Self.skipped.contains(name)
+                    || skipLibrary && item.path == home + "/Library" {
+                    walker.skipDescendants()
+                    continue
+                }
+            }
+            let rel = item.path.hasPrefix(rootPrefix) ? String(item.path.dropFirst(rootPrefix.count)) : name
+            let subject = matchByName ? name : rel
+            let pat = matchByName ? glob : pattern.replacingOccurrences(of: "**/", with: "*")
+            if fnmatch(pat, subject, 0) == 0 {
+                hits.append((item.path, values?.contentModificationDate ?? .distantPast))
+            }
+        }
+        guard !hits.isEmpty else { return "No files under \(root.path) match \(pattern)." }
+        hits.sort { $0.date > $1.date }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withFullDate]
+        let lines = hits.prefix(limit).map { "\($0.path)  \(formatter.string(from: $0.date))" }
+        var out = "\(hits.count) match\(hits.count == 1 ? "" : "es") under \(root.path):\n" + lines.joined(separator: "\n")
+        if hits.count > limit { out += "\n[\(hits.count - limit) more; narrow the pattern or raise limit]" }
+        return out
+    }
+}
+
+/// `grep_files`: lines in text files that match a pattern, via `/usr/bin/grep`.
+struct GrepFilesTool: NotchTool {
+    static let toolName = "grep_files"
+    let name = toolName
+    let description = """
+    Searches the text of files under a folder (or one file) for a regular \
+    expression, extended syntax, and returns matching lines with file and line \
+    number. `include` keeps files whose name matches a glob, e.g. *.swift. \
+    Binary files, .git and node_modules are skipped.
+    """
+    let schema: [String: Any] = [
+        "type": "object",
+        "properties": [
+            "pattern": ["type": "string", "description": "The regular expression (grep -E)."],
+            "path": ["type": "string", "description": "A folder or a file. Default the home folder; give a narrower one when you can."],
+            "include": ["type": "string", "description": "Only files whose name matches this glob."],
+            "ignore_case": ["type": "boolean", "description": "Match regardless of case. Default false."],
+            "limit": ["type": "integer", "minimum": 1, "maximum": 1000, "description": "Most lines to return. Default 200."],
+        ],
+        "required": ["pattern"],
+    ]
+
+    func execute(_ input: [String: Any]) async throws -> String {
+        guard let pattern = input["pattern"] as? String, !pattern.isEmpty else { return "Error: give a pattern." }
+        let pathRaw = (input["path"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "~"
+        guard let url = FilePaths.resolve(pathRaw) else { return "Error: that path holds credentials." }
+        let limit = min(max((input["limit"] as? NSNumber)?.intValue ?? 200, 1), 1000)
+        var args = ["-rnIE", "--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=Library",
+                    "--exclude-dir=.Trash", "-m", "50"]
+        if (input["ignore_case"] as? Bool) == true { args.append("-i") }
+        if let include = input["include"] as? String, !include.isEmpty { args.append("--include=\(include)") }
+        args += ["--", pattern, url.path]
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/grep")
+        process.arguments = args
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
+        try process.run()
+        let timer = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 30, execute: timer)
+        var lines: [String] = []
+        var total = 0
+        var pending = ""
+        let reader = pipe.fileHandleForReading
+        while true {
+            let chunk = reader.availableData
+            if chunk.isEmpty { break }
+            pending += String(decoding: chunk, as: UTF8.self)
+            while let nl = pending.firstIndex(of: "\n") {
+                total += 1
+                if lines.count < limit { lines.append(String(pending[..<nl]).prefix(400).description) }
+                pending = String(pending[pending.index(after: nl)...])
+            }
+            if total > limit * 20 { process.terminate(); break }
+        }
+        timer.cancel()
+        process.waitUntilExit()
+        guard !lines.isEmpty else { return "No matches for \(pattern) under \(url.path)." }
+        var out = lines.joined(separator: "\n")
+        if total > lines.count { out += "\n[\(total - lines.count) more matching lines; narrow path, include or pattern]" }
+        return out
     }
 }

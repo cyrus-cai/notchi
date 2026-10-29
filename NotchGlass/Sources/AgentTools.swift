@@ -2473,19 +2473,30 @@ struct ReadPageTool: NotchTool {
 
 /// Which commands ask the user before they run. Everything else runs directly.
 ///
+/// Only what cannot be taken back asks: data destroyed for good, something
+/// sent off this Mac, a credential read, administrator rights, disks and boot
+/// state. A plain `rm`, `rmdir` or `unlink` runs without asking, because
+/// `ShellRunner` defines them to move their files to the Trash; a deletion the
+/// shell function does not catch (`xargs rm`, `/bin/rm`, `sh -c "rm …"`,
+/// `find -delete`) still asks.
+///
 /// This is a lexical check on the command text, not a security boundary: a
 /// command can hide a deletion inside `python -c` or a script file and pass.
-/// It catches the plain forms a model actually writes — `rm`, `sudo`, `kill`,
-/// `git push`, a pipe into `sh` — and anything that names a credential store,
-/// plus `osascript` that sends a message or mail, empties the Trash or deletes.
 enum ShellRisk {
-    /// Commands that delete, stop processes, change ownership or permissions,
-    /// touch disks or boot state, or need administrator rights.
+    /// Commands that destroy data for good, touch disks or boot state, or need
+    /// administrator rights.
     private static let guarded: Set<String> = [
-        "rm", "rmdir", "unlink", "srm", "shred", "truncate",
+        "srm", "shred", "truncate",
         "sudo", "su", "dd", "mkfs", "newfs", "diskutil", "tmutil",
-        "shutdown", "reboot", "halt", "kill", "killall", "pkill",
-        "launchctl", "chmod", "chown", "chflags", "csrutil", "nvram", "security",
+        "shutdown", "reboot", "halt", "csrutil", "nvram", "security",
+    ]
+    /// Deletions the Trash functions in `ShellRunner.prelude` replace, when
+    /// they are the command a segment runs.
+    private static let deletions: Set<String> = ["rm", "rmdir", "unlink"]
+    /// Upload flags of curl and wget: the command sends data off this Mac.
+    private static let uploadFlags: Set<String> = [
+        "-d", "--data", "--data-raw", "--data-binary", "--data-urlencode",
+        "-F", "--form", "-T", "--upload-file", "--post-data", "--post-file", "--body-data",
     ]
     /// A nested shell runs text this check never sees.
     private static let shells: Set<String> = ["sh", "bash", "zsh", "eval"]
@@ -2494,7 +2505,7 @@ enum ShellRisk {
         "xargs", "env", "command", "builtin", "noglob", "nohup", "time", "exec", "nice",
     ]
     /// Credential stores. Reading one is as sensitive as deleting a file.
-    private static let credentialPaths = [
+    static let credentialPaths = [
         ".ssh", ".aws", ".gnupg", ".netrc", ".config/gh", "keychains",
         "id_rsa", "id_ed25519",
     ]
@@ -2545,11 +2556,25 @@ enum ShellRisk {
         if scriptAction(command) != nil { return true }
         let separators = CharacterSet(charactersIn: ";|&\n(){}`")
         for segment in command.components(separatedBy: separators) {
-            let words = segment.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(word)
+            let raw = segment.split(whereSeparator: { $0 == " " || $0 == "\t" })
+            let words = raw.map(word)
             guard let at = commandIndex(in: words) else { continue }
             let name = words[at]
             let rest = words[(at + 1)...]
-            if guarded.contains(name) || shells.contains(name) { return true }
+            if guarded.contains(name) { return true }
+            // A deletion the Trash function cannot catch: run through a
+            // wrapper (`xargs rm`, `command rm`), by path (`/bin/rm`), or
+            // named anywhere else in the segment (`sh -c "rm …"`).
+            if deletions.contains(name),
+               at > 0 && words[..<at].contains(where: wrappers.contains)
+                || raw[at].contains("/") {
+                return true
+            }
+            if name != "git", rest.contains(where: deletions.contains) { return true }
+            if name == "curl" || name == "wget",
+               rest.contains(where: { w in uploadFlags.contains { w == $0 || w.hasPrefix($0 + "=") } }) {
+                return true
+            }
             if name == "git",
                rest.contains("push") || rest.contains("clean")
                 || (rest.contains("reset") && rest.contains("--hard")) {
@@ -2599,8 +2624,62 @@ enum ShellRunner {
     static let defaultTimeout: TimeInterval = 30
     /// Long enough for a full build, a test suite or a dependency install.
     static let maxTimeout: TimeInterval = 600
-    /// Characters of output the model gets. Longer output keeps its start and end.
-    static let outputLimit = 8_000
+    /// Characters of output passed on. Past `ToolOutputSpill.inlineLimit` the
+    /// registry saves it to a file the model can read on.
+    static let outputLimit = 800_000
+
+    /// Defined before every command: `rm`, `rmdir` and `unlink` move their
+    /// arguments to the Trash, so a deletion can be put back from Finder.
+    /// Flags are dropped; a directory goes to the Trash whole.
+    static let prelude: String = {
+        let move = FileManager.default.isExecutableFile(atPath: "/usr/bin/trash")
+            ? #"/usr/bin/trash "${f[@]}""#
+            : #"local p; for p in "${f[@]}"; do [[ -e $p || -L $p ]] || { print -u2 "rm: $p: No such file or directory"; continue; }; mv -- "$p" ~/.Trash/"${p:t}-$(date +%s)$RANDOM"; done"#
+        return """
+        __notchi_trash() { local -a f; local a o=1; for a in "$@"; do if (( o )) && [[ $a == -- ]]; then o=0; elif (( o )) && [[ $a == -* ]]; then :; else f+=("$a"); fi; done; (( ${#f} )) || return 0; \(move); }
+        rm() { __notchi_trash "$@"; }; rmdir() { __notchi_trash "$@"; }; unlink() { __notchi_trash "$@"; }
+
+        """
+    }()
+
+    /// Where background jobs write their output.
+    static var jobFolder: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Notchi/jobs", isDirectory: true)
+    }
+
+    /// Start `command` without waiting for it. Its output goes to a log file;
+    /// the result names the file and the process id.
+    static func runInBackground(_ command: String) -> String {
+        let fm = FileManager.default
+        try? fm.createDirectory(at: jobFolder, withIntermediateDirectories: true)
+        let log = jobFolder.appendingPathComponent("job-\(Int(Date().timeIntervalSince1970))-\(UUID().uuidString.prefix(6)).log")
+        fm.createFile(atPath: log.path, contents: nil)
+        guard let handle = try? FileHandle(forWritingTo: log) else {
+            return "Error: could not create the job's log file."
+        }
+        let process = ShellEnvironment.makeProcess(
+            "/bin/zsh", ["-c", prelude + command],
+            cwd: URL(fileURLWithPath: NSHomeDirectory()))
+        process.standardOutput = handle
+        process.standardError = handle
+        process.standardInput = FileHandle.nullDevice
+        process.terminationHandler = { finished in
+            let line = "\n[exit code: \(finished.terminationStatus)]\n"
+            try? handle.write(contentsOf: Data(line.utf8))
+            try? handle.close()
+        }
+        do {
+            try process.run()
+        } catch {
+            return "Error: the shell could not start: \(error.localizedDescription)"
+        }
+        return """
+        Started in the background, pid \(process.processIdentifier). Output goes to \(log.path); \
+        the last line reads [exit code: N] once it ends. Check it with run_shell (tail \(log.path)), \
+        stop it with kill \(process.processIdentifier).
+        """
+    }
 
     private final class Output: @unchecked Sendable {
         private let lock = NSLock()
@@ -2625,7 +2704,7 @@ enum ShellRunner {
         // `-c`, not `-lc`: `makeProcess` already supplies the user's shell PATH,
         // and a login shell would print their rc banners into the output.
         let process = ShellEnvironment.makeProcess(
-            "/bin/zsh", ["-c", command],
+            "/bin/zsh", ["-c", prelude + command],
             cwd: URL(fileURLWithPath: NSHomeDirectory()))
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -2723,8 +2802,11 @@ struct RunShellTool: NotchTool {
     through osascript: Calendar events, Reminders, Contacts, Notes, Mail, Music. \
     The working directory is the home folder. \
     There is no terminal: nothing can prompt for input, so sudo and interactive \
-    programs fail. Output past 8000 characters is cut in the middle. Chain steps \
-    that belong together with && in one call.
+    programs fail. rm, rmdir and unlink move files to the Trash. Long output \
+    is saved to a file and the result shows its start, end and path. Chain \
+    steps that belong together with && in one call. A command that runs for \
+    minutes or does not end (a server, a long download, a watch) → \
+    background=true: it returns at once with a log file to check later.
     """
     let schema: [String: Any] = [
         "type": "object",
@@ -2738,6 +2820,10 @@ struct RunShellTool: NotchTool {
                 "minimum": 1,
                 "maximum": 600,
                 "description": "Seconds before the command is stopped. Default 30. Builds, test suites and installs can take minutes: give them up to 600. Above 30, tell the user it is running and may take a while before you call.",
+            ],
+            "background": [
+                "type": "boolean",
+                "description": "Start it and return at once instead of waiting; the result gives the log file and pid. timeout_seconds does not apply.",
             ],
         ],
         "required": ["command"],
@@ -2760,6 +2846,9 @@ struct RunShellTool: NotchTool {
             guard try await confirm(command) else {
                 return "The user did not approve this command. It was not run. Do not retry it."
             }
+        }
+        if (input["background"] as? Bool) == true || (input["background"] as? String) == "true" {
+            return ShellRunner.runInBackground(command)
         }
         return await ShellRunner.run(command, timeout: timeout)
     }

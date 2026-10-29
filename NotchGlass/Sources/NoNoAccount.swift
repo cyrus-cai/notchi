@@ -480,7 +480,12 @@ final class NoNoAccount: ObservableObject {
 
     /// Whether this account may use Jev at all: any account with a token. Free,
     /// no purchase needed.
-    var canUseRemoteSense: Bool { hasToken }
+    var canUseRemoteSense: Bool { canDecide }
+
+    /// Whether the decision calls (sense, react, link check, follow-up) can
+    /// run: through Jev with a token, or on the user's endpoint
+    /// or Jev with the user's own key (`DecisionModel`), with none.
+    var canDecide: Bool { hasToken || DecisionModel.usesOwn }
 
     /// Whether Copy Sense should ask Jev for this copy: the account qualifies
     /// and the user picked Jev in Settings.
@@ -490,6 +495,7 @@ final class NoNoAccount: ObservableObject {
     /// the on-device classifier. The caller must have run `ClipPrivacy` first.
     func sense(_ text: String) async -> SenseVerdict? {
         guard usesRemoteSense else { return nil }
+        if DecisionModel.usesOwn { return await OwnDecisionModel.sense(text) }
         // `purpose: memory` asks whether the copy could be useful later (to act
         // on or to know the person), not whether it looks like a note. A gateway
         // that predates it ignores the field and answers the note question.
@@ -512,6 +518,12 @@ final class NoNoAccount: ObservableObject {
         /// Glyph the gateway chose. Absent on older gateways; `emoji` then
         /// falls back to the original six names.
         private var glyph: String?
+
+        init(reaction: String, probability: Double, emoji: String?) {
+            self.reaction = reaction
+            self.probability = probability
+            self.glyph = emoji
+        }
 
         enum CodingKeys: String, CodingKey {
             case reaction, probability
@@ -557,6 +569,7 @@ final class NoNoAccount: ObservableObject {
     /// reply as context. Free for every account with a token, no purchase
     /// needed. Nil on any failure. The caller must have run `ClipPrivacy` first.
     func react(to text: String, previous: String) async -> ReactVerdict? {
+        if DecisionModel.usesOwn { return await OwnDecisionModel.react(to: text, previous: previous) }
         guard hasToken else { return nil }
         guard var request = try? jsonRequest("/react", body: ["text": text, "previous": previous],
                                              authorized: true) else { return nil }
@@ -576,6 +589,7 @@ final class NoNoAccount: ObservableObject {
     /// Ask the gateway whether `address` looks unsafe to open. Free for every
     /// account with a token. Nil on any failure; the caller then opens the link.
     func checkLink(_ address: String) async -> LinkVerdict? {
+        if DecisionModel.usesOwn { return await OwnDecisionModel.checkLink(address) }
         guard hasToken else { return nil }
         guard var request = try? jsonRequest("/linkcheck", body: ["url": address],
                                              authorized: true) else { return nil }
@@ -598,6 +612,9 @@ final class NoNoAccount: ObservableObject {
     /// caller then generates the prediction anyway. The caller must have run
     /// `ClipPrivacy` first.
     func checkFollowUp(question: String, answer: String) async -> FollowUpVerdict? {
+        if DecisionModel.usesOwn {
+            return await OwnDecisionModel.checkFollowUp(question: question, answer: answer)
+        }
         guard hasToken else { return nil }
         guard var request = try? jsonRequest("/followup", body: ["question": question, "answer": answer],
                                              authorized: true) else { return nil }

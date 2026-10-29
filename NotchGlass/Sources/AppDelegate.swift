@@ -251,6 +251,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true   // an even newer instance exists; it runs the same sweep
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        TelegramBridge.shared.restoreLidSleep()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // `current_context` reads the app before Notchi; start watching now.
         _ = FrontAppTracker.shared

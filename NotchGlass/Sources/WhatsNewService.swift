@@ -107,6 +107,30 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.22",
+            date: "2026-10-29",
+            headline: "Notchi now syncs with Telegram both ways.",
+            heroAssetName: "WhatsNew0922Promo",
+            blurb: "Connect a bot in Settings → Telegram, and the messages you send it are answered on your Mac, in the same conversation as the notch. Notchi keeps answering while the screen is locked, and with Answer with the lid closed turned on, while the lid is shut.",
+            features: [
+                "Notchi can now read, write, and edit files anywhere on your Mac.",
+                "You can now choose the model for quick decisions: Jev, Jev with your own TypeSafe key, or your own endpoint.",
+                "Commands can now run in the background.",
+            ],
+            improvements: [
+                "Files deleted by a command now go to the Trash.",
+                "Notchi keeps a copy of each file before changing it.",
+                "Research questions now get up to eight search rounds, up from three.",
+                "Long tool output is saved to a file instead of being cut off.",
+                "Cards in answers now sit inline with the text.",
+                "Command Code chat now works when the `cmd` CLI fails to start.",
+                "Suggested next questions now work with your own key or CLI.",
+            ],
+            fixes: [
+                "Fixed Audit counting requests sent to your own provider as Notchi's.",
+            ]
+        ),
+        Entry(
             version: "0.9.21",
             date: "2026-10-28",
             headline: "Notchi wakes up to 3x faster now.",

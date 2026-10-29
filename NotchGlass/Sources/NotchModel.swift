@@ -11224,6 +11224,13 @@ final class NotchModel: ObservableObject {
                 if ClipboardHistory.available { agentTools.append(ClipboardHistoryTool()) }
                 agentTools.append(ListFilesTool())
                 agentTools.append(ReadFileTool())
+                agentTools.append(FindFilesTool())
+                agentTools.append(GrepFilesTool())
+                // Changing files goes with the shell: off where the shell is.
+                if shellToolEnabled, nonoContext.surface != NoNoRequestContext.telegram {
+                    agentTools.append(WriteFileTool())
+                    agentTools.append(EditFileTool())
+                }
                 if UserMemory.shared.enabled {
                     agentTools.append(MemoryListTool())
                     agentTools.append(MemoryReadTool())
@@ -11343,11 +11350,6 @@ final class NotchModel: ObservableObject {
                     // (Darkbloom) cannot serve a forced `tool_choice`. See the flag.
                     var harness = AgentHarness(service: agent, registry: registry)
                     harness.requestContext = nonoContext
-                    // Look, change, check is three rounds for one step, so a
-                    // shell task needs more than the default eight.
-                    if registry.tool(named: RunShellTool.toolName) != nil {
-                        harness.maxIterations = 16
-                    }
                     // A line from the idle prompt that the model only filed as a
                     // note ends here: no second model turn for a reply that would
                     // just say it was saved.
@@ -11584,6 +11586,7 @@ final class NotchModel: ObservableObject {
                 let walkedAway = !self.isPresented(answerID: answerID)
                 self.markFinished(id: answerID)   // no-op when detached
                 self.persistThread(thread, threadID: threadID, answer: acc, service: askService)
+                if walkedAway { thread.prepareCards(for: answerID) }
                 // The same exchange in the user's Telegram bot, so both places
                 // hold one history. A Telegram round is already there.
                 if nonoContext.surface != NoNoRequestContext.telegram {
@@ -12451,7 +12454,7 @@ final class NotchModel: ObservableObject {
     private func requestReaction(to text: String, previous: String,
                                  questionID: UUID, answerID: UUID) {
         let account = NoNoAccount.shared
-        guard emojiReactionsEnabled, account.hasToken else { return }
+        guard emojiReactionsEnabled, account.canDecide else { return }
         let message = String(text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(1500))
         guard !message.isEmpty, !ClipPrivacy.containsSecret(message) else { return }
         let prior = ClipPrivacy.containsSecret(previous) ? "" : String(previous.suffix(1500))
@@ -13090,14 +13093,13 @@ final class NotchModel: ObservableObject {
     /// Predict the user's next question after a finished round and store it in
     /// `nextQuestions` under that answer, on screen or not.
     ///
-    /// A round answered by Notchi's own models runs on the free background model
-    /// (`NoNoAccount.backgroundModel`), and Jev is asked first whether the
-    /// exchange is worth it: a `skip` ends here, and no verdict (failure, or a
-    /// credential in the text) generates anyway. A round answered by the user's
-    /// own key or CLI (`answeredBy`) runs on that same model, with no Jev and
-    /// nothing through the gateway: the prompt tells the model to output
-    /// nothing when the exchange reads as finished. Failure or an empty reply
-    /// leaves the default placeholder.
+    /// It runs on the model that answered the round (`answeredBy`). A round
+    /// answered by Notchi's own models asks Jev first whether the exchange is
+    /// worth it: a `skip` ends here, and no verdict (failure, or a credential in
+    /// the text) generates anyway. A round answered by the user's own key or CLI
+    /// skips Jev and nothing goes through the gateway: the prompt tells the
+    /// model to output nothing when the exchange reads as finished. Failure or
+    /// an empty reply leaves the default placeholder.
     private func predictNextQuestion(for thread: [Turn], answerID: UUID, answeredBy: AIService) {
         guard !(answeredBy is StubAIService) else { return }
         let account = NoNoAccount.shared
@@ -13124,10 +13126,7 @@ final class NotchModel: ObservableObject {
         let askJev = !ownModel && !jevQuestion.isEmpty && !jevAnswer.isEmpty
             && !ClipPrivacy.containsSecret(jevQuestion) && !ClipPrivacy.containsSecret(jevAnswer)
 
-        let service = ownModel
-            ? answeredBy
-            : AppDelegate.makeService(provider: .nono, apiKey: account.token,
-                                      model: NoNoAccount.backgroundModel)
+        let service = answeredBy
         Task { [weak self] in
             if askJev, let verdict = await account.checkFollowUp(question: jevQuestion,
                                                                  answer: jevAnswer),
