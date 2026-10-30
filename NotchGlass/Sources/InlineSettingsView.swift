@@ -254,6 +254,7 @@ struct InlineSettingsView: View {
     @ObservedObject private var memory = UserMemory.shared
     @ObservedObject private var mcp = MCPHub.shared
     @ObservedObject private var telegram = TelegramBridge.shared
+    @ObservedObject private var instaBox = InstaBoxAccount.shared
     @State private var telegramToken = ""
     @State private var telegramOpenedBotFather = false
     @State private var telegramSetupOpen = false
@@ -593,6 +594,7 @@ struct InlineSettingsView: View {
     /// summon chord re-registers globally; product actions are read live by the
     /// panel key catcher.
     @State private var summonHotKey: SummonHotKey = .current
+    @State private var cardHotKey: SummonHotKey = .card
     @State private var appShortcuts: [AppShortcutAction: ShortcutChord] = AppShortcutStore.current
     /// User-authored global bindings are intentionally only a shortcut and one
     /// prompt. Their UUID exists solely so SwiftUI and AppDelegate can track rows.
@@ -684,6 +686,7 @@ struct InlineSettingsView: View {
 
     /// Whether the sidebar's Audit row has been clicked; its New tag goes then.
     @State private var auditSeen = SettingsNewMarks.auditSeen
+    @State private var surveyGrantSeen = SettingsNewMarks.surveyGrantSeen
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -1105,14 +1108,12 @@ struct InlineSettingsView: View {
                 case .deepseek:  deepSeekSearchKeyRow
                 }
             case .chat:
-                // Four groups: what the answers say and do, what is remembered,
-                // the sounds and reactions, and what is checked before a link
-                // opens.
+                // Three groups: what the answers say and do, what is remembered,
+                // and the sounds.
                 Text(L("chat.group.answers"))
                     .captionLabel()
                 customInstructionsRow
                 suggestFollowUpRow
-                runCommandsRow
                 // MCP is switched off for now.
                 // Text(L("mcp.title"))
                 //     .captionLabel()
@@ -1130,11 +1131,6 @@ struct InlineSettingsView: View {
                     .captionLabel()
                     .padding(.top, 2)
                 messageSoundsRow
-                emojiReactionsRow
-                Text(L("chat.group.safety"))
-                    .captionLabel()
-                    .padding(.top, 2)
-                linkPrecheckRow
             case .general:
                 // App-level settings: how it talks to you, where the app itself
                 // appears in macOS, where notes are saved, what the system lets
@@ -1147,6 +1143,7 @@ struct InlineSettingsView: View {
                     .padding(.top, 2)
                 launchAtLoginRow
                 dockIconRow
+                lidClosedRow
                 Text(L("capture.destination"))
                     .captionLabel()
                     .padding(.top, 2)
@@ -1184,6 +1181,9 @@ struct InlineSettingsView: View {
                 fullscreenAutoHideRow
             case .connect:
                 telegramSection
+                if DebugFeatureFlags.cloudMachine {
+                    cloudMachineSection
+                }
             case .stats:
                 statsSection
             case .about:
@@ -1309,6 +1309,7 @@ struct InlineSettingsView: View {
                 // pane's number would indent the first frame by a width no row
                 // here asked for.
                 labelColumnWidth = Self.labelColumnWidths[section] ?? 0
+                if section == .model { markSurveyGrantSeen() }
             }
         }
     }
@@ -1337,7 +1338,11 @@ struct InlineSettingsView: View {
             // then the About entry carries it the rest of the way to the
             // update action — a quiet neutral dot, never a coloured one.
             badged: s == .about && isUpdateAvailable,
-            isNew: s == .stats && !auditSeen
+            isNew: s == .stats && !auditSeen,
+            claim: s == .about && !isUpdateAvailable ? surveyClaim : nil,
+            claimAction: {
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) { section = .survey }
+            }
         ) {
             if s == .stats, !auditSeen {
                 auditSeen = true
@@ -1345,6 +1350,32 @@ struct InlineSettingsView: View {
             }
             showSection(s)
         }
+    }
+
+    /// The About row's tag while the gateway runs a survey this account has not
+    /// answered. The row has no room for it beside the update dot, which wins.
+    private var surveyClaim: String? {
+        guard let survey = nono.snapshot?.survey, survey.status == "none" else { return nil }
+        return L("sidebar.survey.claim", surveyAmount(survey.amountUSD))
+    }
+
+    /// Approved after this install saw the answer wait for review, and the Model
+    /// pane has not been opened since. An account approved before that has nothing
+    /// new to be told.
+    private var surveyJustGranted: Bool {
+        nono.snapshot?.survey?.status == "approved" && SettingsNewMarks.surveyWaited && !surveyGrantSeen
+    }
+
+    private func markSurveyGrantSeen() {
+        guard surveyJustGranted else { return }
+        surveyGrantSeen = true
+        SettingsNewMarks.surveyGrantSeen = true
+    }
+
+    /// The credit is on the Model pane's wallet.
+    private func openGrantedCredit() {
+        markSurveyGrantSeen()
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) { section = .model }
     }
 
     /// Switch panes. The label column is set in the same update: left to
@@ -1392,6 +1423,9 @@ struct InlineSettingsView: View {
         var selection: Namespace.ID?
         var badged: Bool
         var isNew = false
+        /// A tag at the row's trailing edge with its own destination.
+        var claim: String? = nil
+        var claimAction: () -> Void = {}
         var action: () -> Void
 
         @State private var hovering = false
@@ -1420,6 +1454,15 @@ struct InlineSettingsView: View {
             .buttonStyle(.plain).exemptsDoubleClickPin()
             .onHover { hovering = $0 }
             .animation(.easeOut(duration: Tokens.rowFade), value: hovering)
+            .overlay(alignment: .trailing) {
+                if let claim {
+                    Button(action: claimAction) {
+                        NewBadge(text: claim, tracking: 0)
+                    }
+                    .buttonStyle(.plain).exemptsDoubleClickPin()
+                    .padding(.trailing, 3)
+                }
+            }
         }
 
         private var content: some View {
@@ -2618,7 +2661,7 @@ struct InlineSettingsView: View {
                 // the model picker heads them (`addRows`). One set of column
                 // headers over both runs, so the rates still line up across
                 // them. A lineup that is all one kind gets no headings.
-                let rows = NotchiModelVisibility.ordered(nonoLineupRows, id: \.id)
+                let rows = Self.cheapestFirst(NotchiModelVisibility.ordered(nonoLineupRows, id: \.id))
                 let house = rows.filter { ModelRatings.isNonoBlend(id: $0.id, pricing: $0.pricing) }
                 let rest = rows.filter { !ModelRatings.isNonoBlend(id: $0.id, pricing: $0.pricing) }
                 if !house.isEmpty, !rest.isEmpty {
@@ -2642,6 +2685,18 @@ struct InlineSettingsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .task { await refreshNonoRates() }
+    }
+
+    /// Current input rate, then output, free models first. A row with no rates
+    /// goes last; ties keep the order they came in.
+    private static func cheapestFirst(_ rows: [NonoLineupRow]) -> [NonoLineupRow] {
+        rows.enumerated().sorted { a, b in
+            let left = a.element.pricing, right = b.element.pricing
+            let leftRates = (left?.inputPerMTok ?? .infinity, left?.outputPerMTok ?? .infinity)
+            let rightRates = (right?.inputPerMTok ?? .infinity, right?.outputPerMTok ?? .infinity)
+            if leftRates != rightRates { return leftRates < rightRates }
+            return a.offset < b.offset
+        }.map(\.element)
     }
 
     private func pricingGroupHeader(_ title: String) -> some View {
@@ -2672,8 +2727,8 @@ struct InlineSettingsView: View {
                     }
                     // Sold below the upstream's list price; the gateway sends
                     // the fraction as `savings`.
-                    if let percent = row.pricing?.percentOff {
-                        DiscountTag(percent: percent)
+                    if let label = row.pricing?.discountLabel {
+                        DiscountTag(text: label)
                             .padding(.leading, 3)
                         if let line = row.pricing?.saleLine {
                             SettingInfo(line)
@@ -3587,11 +3642,12 @@ struct InlineSettingsView: View {
     struct NewBadge: View {
         var text = L("tag.new")
         var tint = Tokens.accent
+        var tracking: CGFloat = 0.4
 
         var body: some View {
             Text(text)
                 .font(.sf(Tokens.TypeSize.caption, weight: .regular))
-                .tracking(0.4)
+                .tracking(tracking)
                 .foregroundStyle(tint)
                 .lineLimit(1)
                 .fixedSize()
@@ -3941,6 +3997,24 @@ struct InlineSettingsView: View {
             .toggleStyle(.switch)
             .controlSize(.mini)
             .tint(Tokens.text2)
+        }
+    }
+
+    /// Keeps the Mac awake with the lid closed while the Telegram bot is on.
+    private var lidClosedRow: some View {
+        settingRow(label: L("telegram.lid"), info: L("telegram.lid.hint")) {
+            Toggle("", isOn: Binding(
+                get: { telegram.answersWithLidClosed },
+                set: { on in
+                    Haptics.levelChange()
+                    Task { await telegram.setAnswersWithLidClosed(on) }
+                }
+            ))
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .tint(Tokens.text2)
+            .disabled(telegram.lidBusy)
         }
     }
 
@@ -4862,48 +4936,6 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// Whether Jev reacts to a sent message with an emoji. Same flag as
-    /// `NotchModel.emojiReactionsEnabled`, read per message.
-    private var emojiReactionsRow: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            settingRow(label: L("chat.emojiReactions"),
-                       richInfo: emojiReactionsHint,
-                       aligned: true) {
-                Toggle("", isOn: Binding(
-                    get: { model.emojiReactionsEnabled },
-                    set: { Haptics.levelChange(); model.emojiReactionsEnabled = $0 }
-                ))
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .controlSize(.mini)
-                .tint(Tokens.text2)
-            }
-            // The real question bubble with a sample message. The emoji is on
-            // its corner while the toggle is on and leaves with the bubble's
-            // own transition when it is turned off.
-            UserQuestionBubble(text: L("chat.emojiReactions.sample"),
-                               baseFont: Tokens.TypeSize.form,
-                               reaction: model.emojiReactionsEnabled ? "👍" : nil)
-                .allowsHitTesting(false)
-                .padding(.top, 9)
-                .animation(.spring(response: 0.3, dampingFraction: 0.7),
-                           value: model.emojiReactionsEnabled)
-        }
-    }
-
-    /// The reactions hint, with a Learn more link at the end of its last line.
-    /// Underlined for the same reason as Stats' privacy link: the popover body
-    /// is already `text2`.
-    private var emojiReactionsHint: AttributedString {
-        var text = AttributedString(L("chat.emojiReactions.hint") + " ")
-        var link = AttributedString(L("model.detail.learnMore"))
-        link.link = URL(string: "https://notch.website/reactions")
-        link.foregroundColor = Tokens.text1
-        link.underlineStyle = .single
-        text.append(link)
-        return text
-    }
-
     /// The message tones: sending, each reply bubble landing, and a reaction.
     /// Same flag as the row in the result header's more menu.
     private var messageSoundsRow: some View {
@@ -4912,23 +4944,6 @@ struct InlineSettingsView: View {
             Toggle("", isOn: Binding(
                 get: { model.messageSoundsEnabled },
                 set: { Haptics.levelChange(); model.messageSoundsEnabled = $0 }
-            ))
-            .labelsHidden()
-            .toggleStyle(.switch)
-            .controlSize(.mini)
-            .tint(Tokens.text2)
-        }
-    }
-
-    /// Whether Jev checks a clicked link before it opens. Same flag as
-    /// `NotchModel.linkPrecheckEnabled`, read per click by `LinkGate`.
-    private var linkPrecheckRow: some View {
-        settingRow(label: L("chat.linkPrecheck"),
-                   info: L("chat.linkPrecheck.hint"),
-                   aligned: true) {
-            Toggle("", isOn: Binding(
-                get: { model.linkPrecheckEnabled },
-                set: { Haptics.levelChange(); model.linkPrecheckEnabled = $0 }
             ))
             .labelsHidden()
             .toggleStyle(.switch)
@@ -5084,29 +5099,62 @@ struct InlineSettingsView: View {
         }
     }
 
-    /// Chat: whether the chat model gets `run_shell`. Same flag as
-    /// `NotchModel.shellToolEnabled`, read per question.
-    private var runCommandsRow: some View {
-        settingRow(label: L("lab.runCommands"),
-                   info: L("lab.commands.about"),
-                   aligned: true) {
-            Toggle("", isOn: Binding(
-                get: { model.shellToolEnabled },
-                set: { Haptics.levelChange(); model.shellToolEnabled = $0 }
-            ))
-            .labelsHidden()
-            .toggleStyle(.switch)
-            .controlSize(.mini)
-            .tint(Tokens.text2)
-        }
-    }
-
     /// Connect: the user's own Telegram bot (`TelegramBridge`). One toggle,
     /// like `memoryEnableRow`: off hides everything under it. On and not yet
     /// connected, the three setup steps are rows in the shape of
     /// `permissionRow` — a label and one neutral capsule on the right. On and
     /// connected, the bot and the account, and a link to start over, placed
     /// like Memory's "Manage your memories".
+    private var cloudMachineSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            settingRow(label: L("cloud.title"), info: L("cloud.hint"), aligned: true, tag: "Beta") {
+                Toggle("", isOn: Binding(
+                    get: { instaBox.isOn },
+                    set: { on in
+                        Haptics.levelChange()
+                        instaBox.setOn(on)
+                    }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .tint(Tokens.text2)
+            }
+            switch instaBox.state {
+            case .connected(let login):
+                HStack(spacing: 12) {
+                    if !login.isEmpty {
+                        Text(login)
+                            .font(.sf(Tokens.TypeSize.meta))
+                            .foregroundStyle(Tokens.text3)
+                            .lineLimit(1)
+                            .textSelection(.enabled)
+                    }
+                    UnderlineLink(title: L("cloud.manage")) { instaBox.openDashboard() }
+                    UnderlineLink(title: L("cloud.disconnect")) { instaBox.disconnect() }
+                }
+                .padding(.top, -6)
+            case .claiming(let code, _):
+                HStack(spacing: 12) {
+                    Text(L("cloud.claiming", code))
+                        .font(.sf(Tokens.TypeSize.meta))
+                        .foregroundStyle(Tokens.text3)
+                        .textSelection(.enabled)
+                    TelegramStepPill(title: L("cloud.openPage")) { instaBox.openClaimPage() }
+                }
+                .padding(.top, -6)
+            case .failed:
+                Text(L("cloud.failed"))
+                    .font(.sf(Tokens.TypeSize.meta))
+                    .foregroundStyle(Tokens.danger)
+                    .padding(.top, -6)
+            case .off:
+                EmptyView()
+            }
+        }
+        .onAppear { instaBox.refresh() }
+    }
+
     private var telegramSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             settingRow(label: L("telegram.title"), aligned: true, tag: "Beta") {
@@ -5139,20 +5187,6 @@ struct InlineSettingsView: View {
                     }
                 }
                 .padding(.top, -6)
-                settingRow(label: L("telegram.lid"), info: L("telegram.lid.hint"), aligned: true) {
-                    Toggle("", isOn: Binding(
-                        get: { telegram.answersWithLidClosed },
-                        set: { on in
-                            Haptics.levelChange()
-                            Task { await telegram.setAnswersWithLidClosed(on) }
-                        }
-                    ))
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                    .controlSize(.mini)
-                    .tint(Tokens.text2)
-                    .disabled(telegram.lidBusy)
-                }
             } else if telegramOn {
                 VStack(alignment: .leading, spacing: 6) {
                     telegramStepRow(1, L("telegram.step1")) {
@@ -6087,6 +6121,7 @@ struct InlineSettingsView: View {
         // longer the one the app is registering.
         .onReceive(NotificationCenter.default.publisher(for: .summonHotKeyChanged)) { _ in
             summonHotKey = .current
+            cardHotKey = .card
         }
         .onReceive(NotificationCenter.default.publisher(for: .appShortcutsChanged)) { _ in
             appShortcuts = AppShortcutStore.current
@@ -7333,6 +7368,9 @@ struct InlineSettingsView: View {
                 if target == .summon, summonHotKey.enabled {
                     Button(L("general.shortcut.disable")) { disableSummonHotKey() }
                 }
+                if target == .card, cardHotKey.enabled {
+                    Button(L("general.shortcut.disable")) { commitCardHotKey(.cardDefaultConfig) }
+                }
             }
         }
         .animation(.easeOut(duration: 0.16), value: shortcutIsModified(target))
@@ -7342,6 +7380,8 @@ struct InlineSettingsView: View {
         switch target {
         case .summon:
             return summonHotKey != .defaultConfig
+        case .card:
+            return cardHotKey.enabled
         case .action(let action):
             return (appShortcuts[action] ?? action.defaultChord) != action.defaultChord
         case .prompt:
@@ -7359,12 +7399,18 @@ struct InlineSettingsView: View {
         let appOwner: String? = switch target {
         case .summon:
             AppShortcutStore.conflictOwner(for: chord, editingSummon: true)
+        case .card:
+            AppShortcutStore.conflictOwner(for: chord)
         case .action(let action):
             AppShortcutStore.conflictOwner(for: chord, editingAction: action)
         case .prompt:
             AppShortcutStore.conflictOwner(for: chord)
         }
         if let appOwner { return appOwner }
+
+        if target != .card, cardHotKey.enabled, cardHotKey.chord == chord {
+            return L("shortcuts.card")
+        }
 
         let editingPromptID: UUID? = if case .prompt(let id) = target { id } else { nil }
         if promptShortcuts.contains(where: {
@@ -7397,13 +7443,15 @@ struct InlineSettingsView: View {
             summonHotKey.enabled && !summonHotKey.isDoubleTap
                 && summonHotKey.keyCode == chord.keyCode
                 && summonHotKey.modifiers == chord.modifiers
+        case .card:
+            cardHotKey.enabled && !cardHotKey.isDoubleTap && cardHotKey.chord == chord
         case .prompt(let id):
             promptShortcuts.first(where: { $0.id == id })?.shortcut == chord
         case .action:
             true
         }
         let needsGlobalProbe: Bool = switch target {
-        case .summon, .prompt: true
+        case .summon, .card, .prompt: true
         case .action: false
         }
         if needsGlobalProbe, !unchangedGlobal,
@@ -7421,6 +7469,10 @@ struct InlineSettingsView: View {
             commitSummonHotKey(SummonHotKey(keyCode: chord.keyCode,
                                             modifiers: chord.modifiers,
                                             enabled: true))
+        case .card:
+            commitCardHotKey(SummonHotKey(keyCode: chord.keyCode,
+                                          modifiers: chord.modifiers,
+                                          enabled: true))
         case .action(let action):
             AppShortcutStore.set(chord, for: action)
             appShortcuts[action] = chord
@@ -7455,6 +7507,11 @@ struct InlineSettingsView: View {
                                             modifiers: 0,
                                             doubleTapModifier: modifier,
                                             enabled: true))
+        case .card:
+            shortcutHints[target] = nil
+            recordingShortcut = nil
+            commitCardHotKey(SummonHotKey(keyCode: 0, modifiers: 0,
+                                          doubleTapModifier: modifier, enabled: true))
         case .prompt(let id):
             guard let index = promptShortcuts.firstIndex(where: { $0.id == id }) else { return }
             shortcutHints[target] = nil
@@ -7473,6 +7530,8 @@ struct InlineSettingsView: View {
         switch target {
         case .summon:
             commitSummonHotKey(.defaultConfig)
+        case .card:
+            commitCardHotKey(.cardDefaultConfig)
         case .action(let action):
             AppShortcutStore.reset(action)
             appShortcuts[action] = action.defaultChord
@@ -7504,6 +7563,12 @@ struct InlineSettingsView: View {
         var off = summonHotKey
         off.enabled = false
         commitSummonHotKey(off)
+    }
+
+    private func commitCardHotKey(_ newValue: SummonHotKey) {
+        cardHotKey = newValue
+        SummonHotKey.card = newValue
+        NotificationCenter.default.post(name: .summonHotKeyChanged, object: nil)
     }
 
     private func commitSummonHotKey(_ newValue: SummonHotKey) {
@@ -7784,6 +7849,8 @@ struct InlineSettingsView: View {
                 }
             }
 
+            surveyEntry
+
             // The archive's day grid, moved out of Stats: a year of use is a
             // thing About can say, and it says it without a card around it.
             if let stats, !stats.isEmpty {
@@ -7793,8 +7860,6 @@ struct InlineSettingsView: View {
                 }
                 .padding(.top, 14)
             }
-
-            surveyEntry
 
             VStack(spacing: 0) {
                 AboutUtilityButton(title: L("about.whatsNew"), leaves: false) {
@@ -7829,8 +7894,8 @@ struct InlineSettingsView: View {
 
     /// The survey's row, between the social buttons and the utility list. Shown
     /// while the gateway runs a survey this account has not had decided: open
-    /// before it answers, a status line while the answer waits for review.
-    /// Gone once approved; the credit then announces itself on the wallet.
+    /// before it answers, a status line while the answer waits for review, and
+    /// after approval a link to the wallet until the Model pane has been opened.
     @ViewBuilder
     private var surveyEntry: some View {
         if let survey = nono.snapshot?.survey, survey.status == "none" || survey.status == "pending" {
@@ -7841,6 +7906,11 @@ struct InlineSettingsView: View {
                            action: open ? {
                                withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) { section = .survey }
                            } : nil)
+                .padding(.top, 9)
+        } else if let survey = nono.snapshot?.survey, surveyJustGranted {
+            AboutSurveyRow(title: L("survey.row.granted", surveyAmount(survey.amountUSD)),
+                           tag: L("survey.row.view"),
+                           action: openGrantedCredit)
                 .padding(.top, 9)
         }
     }
@@ -8601,7 +8671,7 @@ struct InlineSettingsView: View {
                         .foregroundStyle(Tokens.text1)
                         .lineLimit(1)
                     Spacer(minLength: 4)
-                    ModelDetailCard.Tag(text: tag, hovered: hovering)
+                    NewBadge(text: tag, tracking: 0)
                 }
                 .padding(.leading, 13)
                 .padding(.trailing, 9)
@@ -10069,11 +10139,25 @@ private struct HotKeyRecorder: NSViewRepresentable {
 enum SettingsNewMarks {
     private static let copySenseKey = "settingsCopySenseSeen"
     private static let auditKey = "settingsAuditSeen"
+    private static let surveyGrantKey = "settingsSurveyGrantSeen"
+    private static let surveyWaitedKey = "settingsSurveyWaited"
 
     /// The sidebar's Audit row, until it is first clicked.
     static var auditSeen: Bool {
         get { UserDefaults.standard.bool(forKey: auditKey) }
         set { UserDefaults.standard.set(newValue, forKey: auditKey) }
+    }
+
+    /// This install has seen the survey answer waiting for review.
+    static var surveyWaited: Bool {
+        get { UserDefaults.standard.bool(forKey: surveyWaitedKey) }
+        set { UserDefaults.standard.set(newValue, forKey: surveyWaitedKey) }
+    }
+
+    /// The survey's granted credit, until the Model pane is opened.
+    static var surveyGrantSeen: Bool {
+        get { UserDefaults.standard.bool(forKey: surveyGrantKey) }
+        set { UserDefaults.standard.set(newValue, forKey: surveyGrantKey) }
     }
 
     static var copySenseSeen: Bool {

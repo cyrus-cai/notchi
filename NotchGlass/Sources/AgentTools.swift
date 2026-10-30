@@ -774,7 +774,8 @@ let appSettingsCatalog = """
 Supported setting ids and values:
 - app_language: system, english, chinese_simplified, chinese_traditional, japanese, korean, french, spanish
 - dock_icon / menu_bar_icon: shown or hidden
-- launch_at_login / hide_in_fullscreen / live_activity / copy_sense / run_commands: true or false
+- launch_at_login / hide_in_fullscreen / live_activity / copy_sense: true or false
+- emoji_reactions / link_check / run_commands: true or false. These have no row in Settings; chat is the only way to change them.
 - display_placement: all or built_in
 - hover_sensitivity: low, balanced, or instant
 - note_destination: apple_notes or markdown_folder; notes_folder: absolute path
@@ -1175,7 +1176,7 @@ struct LoopRequest: Sendable {
     let loopID: String?
     /// When round one runs. `start` only; nil runs it now.
     var firstRunAt: Date? = nil
-    /// The last day rounds run (end of that day). `start` only; nil runs a week.
+    /// The last day rounds run (end of that day). `start` only; nil runs until stopped.
     var endsOn: Date? = nil
     /// Rounds skip Saturday and Sunday. `start` only.
     var weekdaysOnly = false
@@ -1183,17 +1184,17 @@ struct LoopRequest: Sendable {
 
 /// Start, list, stop or re-time an Ask loop from the chat — the same loop a
 /// typed `/loop` starts, in the thread it was asked in. Each round is billed like a
-/// question, for up to a week: a loop that runs more often than hourly (up to
-/// 60 times the rounds) waits on an in-answer Confirm card; hourly or slower
-/// starts at once.
+/// question: a loop that runs more often than hourly waits on an in-answer
+/// Confirm card; hourly or slower starts at once.
 /// Never advertised on a loop round itself.
 struct ManageLoopTool: NotchTool {
     static let toolName = "manage_loop"
     let name = toolName
     let description = """
     Runs a prompt again on a schedule, in this thread: every 1 minute to once \
-    a day, for a week, or until `ends_on` (up to 90 days) when the user names an \
-    end ("until Dec 18", "到月底"); `weekdays_only` skips weekends. Each round is \
+    a day, until the user stops it, or until `ends_on` when the user names an \
+    end ("until Dec 18", "到月底"). Do not set or mention an end the user did \
+    not ask for. `weekdays_only` skips weekends. Each round is \
     a full answer (it can search, read \
     pages, compare with the last round) and is billed like a question. \
     action=start when the user wants something done repeatedly or watched over \
@@ -1231,11 +1232,11 @@ struct ManageLoopTool: NotchTool {
             ],
             "first_run_at": [
                 "type": "string",
-                "description": "start only: local time of round one, YYYY-MM-DDTHH:MM, within 7 days. Omit to run round one now.",
+                "description": "start only: local time of round one, YYYY-MM-DDTHH:MM. Omit to run round one now.",
             ],
             "ends_on": [
                 "type": "string",
-                "description": "start only: the last day it runs, YYYY-MM-DD, at most 90 days ahead. Omit to run for a week.",
+                "description": "start only: the last day it runs, YYYY-MM-DD, only when the user named an end. Omit to run until stopped.",
             ],
             "weekdays_only": [
                 "type": "boolean",
@@ -1284,8 +1285,8 @@ struct ManageLoopTool: NotchTool {
             guard let date = Self.parseLocal(raw) else {
                 return "Error: first_run_at must be local time as YYYY-MM-DDTHH:MM."
             }
-            guard date > Date(), date < Date().addingTimeInterval(LoopInterval.lifetime) else {
-                return "Error: first_run_at must be in the future and within 7 days. Call current_datetime if unsure of today's date."
+            guard date > Date() else {
+                return "Error: first_run_at must be in the future. Call current_datetime if unsure of today's date."
             }
             firstRunAt = date
         }
@@ -1296,10 +1297,6 @@ struct ManageLoopTool: NotchTool {
                 return "Error: ends_on must be a local day as YYYY-MM-DD."
             }
             guard day > (firstRunAt ?? Date()) else { return "Error: ends_on is before the first round." }
-            guard day <= Date().addingTimeInterval(LoopInterval.longestRun) else {
-                return "Error: a loop can run at most 90 days. The latest ends_on is "
-                    + Self.dayString(Date().addingTimeInterval(LoopInterval.longestRun)) + "; tell the user it stops then."
-            }
             endsOn = day
         }
         return try await handle(LoopRequest(action: action,
@@ -1308,13 +1305,6 @@ struct ManageLoopTool: NotchTool {
                                              loopID: loopID?.isEmpty == false ? loopID : nil,
                                              firstRunAt: firstRunAt, endsOn: endsOn,
                                              weekdaysOnly: action == .start && (input["weekdays_only"] as? Bool) == true))
-    }
-
-    private static func dayString(_ date: Date) -> String {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "yyyy-MM-dd"
-        return f.string(from: date)
     }
 
     /// Local wall-clock `YYYY-MM-DDTHH:MM` (or with a space), or a full ISO

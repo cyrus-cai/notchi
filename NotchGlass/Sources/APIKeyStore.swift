@@ -27,6 +27,25 @@ import Foundation
 /// app to others, move the key behind a small backend so it never ships or sits
 /// on disk in the clear.
 enum APIKeyStore {
+    private static let instaBoxDefaultsKey = "api_key.instabox"
+
+    /// The InstaBox key: `INSTABOX_API_KEY`, then what connecting stored.
+    static func currentInstaBoxKey() -> String? {
+        if let env = ProcessInfo.processInfo.environment["INSTABOX_API_KEY"],
+           !env.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return env
+        }
+        return UserDefaults.standard.string(forKey: instaBoxDefaultsKey)
+    }
+
+    static func saveInstaBoxKey(_ key: String) {
+        if key.isEmpty {
+            UserDefaults.standard.removeObject(forKey: instaBoxDefaultsKey)
+        } else {
+            UserDefaults.standard.set(key, forKey: instaBoxDefaultsKey)
+        }
+    }
+
     private static let keyPrefix = "api_key."
     private static let modelKeyPrefix = "model."
     private static let selectedProviderKey = "selected_provider"

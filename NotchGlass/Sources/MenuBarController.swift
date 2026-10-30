@@ -11,6 +11,9 @@ import SwiftUI
 /// update) and Quit. Nothing here is a feature of its own — every item routes
 /// into a path the panel already owns, so the menu can never drift from the app.
 ///
+/// One click on the icon opens or closes the top-right card (`Actions.toggleCard`).
+/// A double-click, right-click or control-click shows the menu.
+///
 /// The menu is rebuilt on every open (`menuNeedsUpdate`) rather than held live:
 /// the model list, the update phase and the interface language all change under
 /// it, and a rebuild is microseconds against a user-initiated click.
@@ -20,6 +23,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     /// display-resolution logic (which screen a summoned panel lands on) stays
     /// in one place instead of being reimplemented here.
     struct Actions {
+        var toggleCard: () -> Void
+        var closeCard: () -> Void
         var openNotch: () -> Void
         var openHistory: () -> Void
         var openSettings: () -> Void
@@ -33,6 +38,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         var isForceTouchDisabled: () -> Bool
         var forceTouchResumesAt: () -> Date?
         var resumeForceTouch: () -> Void
+        /// True while a screen's panel sits in the top-right corner (a Dynamic
+        /// Island screen). That panel has no resting island to hover, so this
+        /// item and the summon shortcut are the only ways to open it.
+        var isRequired: () -> Bool
     }
 
     private var statusItem: NSStatusItem?
@@ -41,6 +50,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     /// the eyes play it, the same forms the resting notch's NotchiMark plays.
     private var workMood: NotchiMark.Mood?
     private var frameTimer: Timer?
+    /// When the last left click landed, to tell a double-click from a single one.
+    private var lastClickAt: TimeInterval?
 
     init(actions: Actions) {
         self.actions = actions
@@ -50,10 +61,12 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     // MARK: - Presence
 
     /// Create or tear down the status item to match the persisted setting — with
-    /// one override: while Force Touch is paused the icon stays, because it is the
-    /// only place the gesture can be brought back before the window is up.
+    /// two overrides: while Force Touch is paused the icon stays, because it is the
+    /// only place the gesture can be brought back before the window is up; and
+    /// while a corner panel exists (`Actions.isRequired`).
     func apply() {
-        if MenuBarIconVisibility.current == .shown || actions.isForceTouchDisabled() {
+        if MenuBarIconVisibility.current == .shown || actions.isForceTouchDisabled()
+            || actions.isRequired() {
             install()
             statusItem?.button?.image = Self.statusIcon(MenuBarIconStyle.current)
         } else {
@@ -103,10 +116,17 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             button.imagePosition = .imageOnly
             button.toolTip = "Notchi"
             button.setAccessibilityLabel("Notchi")
+            if DebugFeatureFlags.menuBarCard {
+                button.target = self
+                button.action = #selector(statusItemClicked)
+                button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+            }
         }
-        let menu = NSMenu()
-        menu.delegate = self
-        item.menu = menu
+        if !DebugFeatureFlags.menuBarCard {
+            let menu = NSMenu()
+            menu.delegate = self
+            item.menu = menu
+        }
         statusItem = item
     }
 
@@ -199,6 +219,41 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         }
         icon.isTemplate = true
         return icon
+    }
+
+    // MARK: - Clicks
+
+    /// The first click acts at once, so a single click has no double-click delay.
+    /// The second click of a double-click closes the card that click opened and
+    /// shows the menu.
+    @objc private func statusItemClicked() {
+        let event = NSApp.currentEvent
+        if event?.type == .rightMouseUp || event?.modifierFlags.contains(.control) == true {
+            showMenu()
+            return
+        }
+        let now = ProcessInfo.processInfo.systemUptime
+        if let last = lastClickAt, now - last <= NSEvent.doubleClickInterval {
+            lastClickAt = nil
+            actions.closeCard()
+            // After the close hands activation back, so the menu's tracking
+            // does not run through it.
+            DispatchQueue.main.async { [weak self] in self?.showMenu() }
+        } else {
+            lastClickAt = now
+            actions.toggleCard()
+        }
+    }
+
+    /// A status item with a `menu` opens it on every click, so the menu is
+    /// attached only for this call. `performClick` returns when the menu closes.
+    private func showMenu() {
+        guard let item = statusItem, let button = item.button else { return }
+        let menu = NSMenu()
+        menu.delegate = self
+        item.menu = menu
+        button.performClick(nil)
+        item.menu = nil
     }
 
     // MARK: - Menu

@@ -2964,13 +2964,12 @@ struct AskRecentModelPickerView: View {
     /// The Notchi models listed first after the recents.
     static let featuredNotchiIDs = ["glm-5.3-flash", ModelNewMarks.modelID]
 
-    /// The row's tag: "New" on the featured model, else the percent off on a
-    /// Notchi model sold below its list price.
+    /// The row's tag: "New" on the featured model, else the percent off (or
+    /// "FREE") on a Notchi model sold below its list price.
     static func tag(for r: Row) -> String? {
         if showsNewTag(r) { return L("tag.new") }
-        guard r.provider.isFirstParty,
-              let percent = detailModel(for: r).info.notchiPricing?.percentOff else { return nil }
-        return L("nono.pricing.percentOff", percent)
+        guard r.provider.isFirstParty else { return nil }
+        return detailModel(for: r).info.notchiPricing?.discountLabel
     }
 
     /// The featured Notchi model, inside its seven days and not yet clicked.

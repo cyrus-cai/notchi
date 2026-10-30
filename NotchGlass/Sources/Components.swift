@@ -3679,7 +3679,9 @@ struct AssistantTurnView: View {
     /// its corner by the previous bubble.
     private static let landing: AnyTransition =
         .scale(scale: 0.85, anchor: .topLeading).combined(with: .opacity)
-    private static let landingSpring: Animation = .spring(response: 0.34, dampingFraction: 0.82)
+    /// Also the curve of the thread's scroll to its tail when a bubble lands
+    /// (`BubblePacer`), so the rows under the new bubble keep their place.
+    static let landingSpring: Animation = .spring(response: 0.34, dampingFraction: 0.82)
 
     /// The typing indicator between two bubbles: the waiting mark, or the
     /// running tool's line when the model went back to search. Never boxed.

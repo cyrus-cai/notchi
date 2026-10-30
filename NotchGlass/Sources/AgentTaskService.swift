@@ -1947,13 +1947,8 @@ final class AgentTaskManager: ObservableObject {
         else { return }
         let now = Date()
         for record in records {
-            let lifetimeEnd = record.startedAt.addingTimeInterval(LoopInterval.lifetime)
             let next = record.nextRoundAt
                 ?? now.addingTimeInterval(TimeInterval(record.intervalMinutes * 60))
-            guard next <= lifetimeEnd else {
-                stoppedLoopIntervals[record.id.uuidString] = record.intervalMinutes
-                continue
-            }
             if let i = taskIndex(record.id) {
                 if tasks[i].loop == nil {
                     tasks[i].loop = LoopState(intervalMinutes: record.intervalMinutes,
@@ -2304,8 +2299,8 @@ final class AgentTaskManager: ObservableObject {
 
         // Where the loop stands after this round — decided before the record is
         // filed and the banner posted, since both say whether it goes on. A stop
-        // by hand ends it quietly; the agent's done marker or a next round past
-        // the loop's lifetime end it with a banner. A failed round does not.
+        // by hand ends it quietly; the agent's done marker ends it with a
+        // banner. A failed round does not.
         var loopEnded = false
         if var loop = t.loop, loop.active {
             if t.outcome == .cancelled && run.interruptPrompt == nil {
@@ -2315,10 +2310,6 @@ final class AgentTaskManager: ObservableObject {
                 // own merits. The loop outlives the process — it waits out the
                 // interval and runs the next round.
             } else if run.loopRound != nil && loopDone {
-                loop.active = false
-                loopEnded = true
-            } else if Date().addingTimeInterval(TimeInterval(loop.intervalMinutes * 60))
-                        > loop.startedAt.addingTimeInterval(LoopInterval.lifetime) {
                 loop.active = false
                 loopEnded = true
             }
@@ -2431,8 +2422,7 @@ final class AgentTaskManager: ObservableObject {
     }
 
     /// The Continue in a stopped loop's ⌘ card. The next round runs now (or,
-    /// if a typed round is streaming, one interval after it settles) and the
-    /// loop's lifetime counts again from here.
+    /// if a typed round is streaming, one interval after it settles).
     func resumeLoop(taskID: UUID) {
         guard let i = taskIndex(taskID), let loop = tasks[i].loop, !loop.active
         else { return }

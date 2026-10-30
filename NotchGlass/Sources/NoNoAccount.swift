@@ -77,7 +77,11 @@ final class NoNoAccount: ObservableObject {
     /// What the gateway says about this account. `nil` until the first refresh
     /// lands — the difference between "no plan" and "not asked yet" matters to
     /// what the settings row draws.
-    @Published private(set) var snapshot: Snapshot?
+    @Published private(set) var snapshot: Snapshot? {
+        didSet {
+            if snapshot?.survey?.status == "pending" { SettingsNewMarks.surveyWaited = true }
+        }
+    }
     @Published private(set) var phase: Phase = .idle
     /// Dollars granted this process that the wallet card has not yet shown.
     /// Zero when this launch did not receive a gift, or after the notice is dismissed.
@@ -241,7 +245,10 @@ final class NoNoAccount: ObservableObject {
         refreshInFlight = true
         defer { refreshInFlight = false }
         do {
-            let fresh: Snapshot = try await get("/me")
+            var fresh: Snapshot = try await get("/me")
+            if let status = demoSurveyStatus {
+                fresh.survey = Snapshot.Survey(status: status, amountUSD: 5)
+            }
             if fresh != snapshot { snapshot = fresh }
             if phase != .idle { phase = .idle }
         } catch {
@@ -556,7 +563,29 @@ final class NoNoAccount: ObservableObject {
     /// Send the survey answers (`POST /v1/survey`), then read the account so
     /// the About row shows the review status. An account that already answered
     /// gets 409, which is the same outcome.
+    /// Debug aid: NOTCH_DEMO_SURVEY=none|pending|approved poses the survey's status
+    /// without touching the account. `flow` starts at `none`; submitting sends
+    /// nothing, shows `pending`, and turns `approved` 20 seconds later. No effect
+    /// in normal use.
+    private var demoSurveyStatus: String? = {
+        let value = ProcessInfo.processInfo.environment["NOTCH_DEMO_SURVEY"]
+        return value == "flow" ? "none" : value
+    }()
+
+    private func setDemoSurvey(_ status: String) {
+        demoSurveyStatus = status
+        snapshot?.survey = Snapshot.Survey(status: status, amountUSD: 5)
+    }
+
     func submitSurvey(_ answers: [String: Any]) async throws {
+        if demoSurveyStatus != nil {
+            setDemoSurvey("pending")
+            Task {
+                try? await Task.sleep(nanoseconds: 20_000_000_000)
+                setDemoSurvey("approved")
+            }
+            return
+        }
         struct Accepted: Decodable {}
         do {
             let _: Accepted = try await post("/survey", body: answers, authorized: true)

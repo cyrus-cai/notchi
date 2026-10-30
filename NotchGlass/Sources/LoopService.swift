@@ -15,10 +15,6 @@ enum LoopInterval {
     /// What a typed value may be: one minute to one day.
     static let typedRange = 1...1440
     static let defaultMinutes = 60
-    /// A loop ends on its own a week after it started, unless it was given an
-    /// end date (`ChatLoop.endsAt`), which may be up to `longestRun` away.
-    static let lifetime: TimeInterval = 7 * 24 * 3600
-    static let longestRun: TimeInterval = 90 * 24 * 3600
     /// What an agent writes at the end of a report to end its own loop.
     static let doneMarker = "[loop:done]"
     private static let lastKey = "loop.lastIntervalMinutes"
@@ -66,11 +62,6 @@ enum LoopInterval {
         guard slot <= now else { return slot }
         let passed = (now.timeIntervalSince(slot) / step).rounded(.down) + 1
         return slot.addingTimeInterval(passed * step)
-    }
-
-    /// The most rounds a loop at this interval runs before its lifetime ends.
-    static func maxRounds(minutes: Int) -> Int {
-        max(1, Int(lifetime / 60) / max(minutes, 1))
     }
 
     /// "45m" · "1h" · "1h 30m" · "6h" · "1d".
@@ -183,15 +174,13 @@ final class ChatLoopManager: ObservableObject {
         /// so its thread can continue it.
         var dismissed = false
         /// The last moment a round may start, when the user named an end date;
-        /// nil ends it `LoopInterval.lifetime` after it started.
+        /// nil runs until it is stopped.
         var endsAt: Date? = nil
         /// Rounds skip Saturdays and Sundays.
         var weekdaysOnly = false
         /// Set while the Routines switch has the loop off: when its next round
         /// was due, so switching it back on keeps the same schedule.
         var pausedSlot: Date? = nil
-
-        var end: Date { endsAt ?? startedAt.addingTimeInterval(LoopInterval.lifetime) }
 
         var isRunning: Bool { roundStartedAt != nil }
         var isWaiting: Bool { active && !isRunning }
@@ -259,7 +248,7 @@ final class ChatLoopManager: ObservableObject {
         guard !restored else { return }
         restored = true
         let now = Date()
-        for i in loops.indices where loops[i].active && loops[i].end < now {
+        for i in loops.indices where loops[i].active && (loops[i].endsAt.map { $0 < now } ?? false) {
             loops[i].active = false
             loops[i].nextRoundAt = nil
         }
@@ -303,7 +292,7 @@ final class ChatLoopManager: ObservableObject {
     }
 
     /// A loop whose round one waits for `firstRoundAt` ("every morning at 9").
-    /// Nothing has run yet, and the 7-day lifetime counts from that first round.
+    /// Nothing has run yet.
     func register(id: UUID, prompt: String, minutes: Int, firstRoundAt: Date,
                   endsAt: Date? = nil, weekdaysOnly: Bool = false) {
         loops.removeAll { $0.id == id }
@@ -358,8 +347,7 @@ final class ChatLoopManager: ObservableObject {
                    silent: false, answer: answer)
             return
         }
-        let pastLifetime = Date().addingTimeInterval(loop.interval) > loop.end
-        if pastLifetime {
+        if let endsAt = loop.endsAt, Date().addingTimeInterval(loop.interval) > endsAt {
             end(threadID, failed: loopRound != nil && failed)
             notify(loop, subtitle: L("notify.loop.ended", loop.rounds),
                    silent: false, answer: answer)
@@ -385,9 +373,8 @@ final class ChatLoopManager: ObservableObject {
         end(id, failed: false)
     }
 
-    /// The Continue in a stopped loop's ⌘ card. The next round runs now and
-    /// the loop's lifetime counts again from here. `turns` rebuilds a loop
-    /// thread that has no record (see `menuInfo`).
+    /// The Continue in a stopped loop's ⌘ card. The next round runs now.
+    /// `turns` rebuilds a loop thread that has no record (see `menuInfo`).
     func resume(_ id: UUID, turns: [NotchModel.Turn] = []) {
         if loop(for: id) == nil,
            let rounds = turns.compactMap(\.loopRound).max(),
@@ -522,7 +509,7 @@ final class ChatLoopManager: ObservableObject {
         guard let i = loops.firstIndex(where: { $0.id == id }), loops[i].active,
               !loops[i].isRunning else { return }
         // A weekday skip can carry the next round past the end date.
-        guard Date() <= loops[i].end else {
+        if let endsAt = loops[i].endsAt, Date() > endsAt {
             let loop = loops[i]
             end(id, failed: false)
             notify(loop, subtitle: L("notify.loop.ended", loop.rounds), silent: false, answer: "")

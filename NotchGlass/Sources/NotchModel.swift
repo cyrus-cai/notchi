@@ -791,13 +791,6 @@ final class NotchModel: ObservableObject {
         didSet { MessageTone.isEnabled = messageSoundsEnabled }
     }
 
-    /// Whether Jev may react to a sent message with an emoji
-    /// (`requestReaction`). Off by default.
-    @Published var emojiReactionsEnabled: Bool =
-        UserDefaults.standard.object(forKey: "emojiReactionsEnabled") as? Bool ?? false {
-        didSet { UserDefaults.standard.set(emojiReactionsEnabled, forKey: "emojiReactionsEnabled") }
-    }
-
     /// Whether a finished answer gets a predicted next question in the reply
     /// field (`predictNextQuestion`). On for new installs; existing ones are
     /// offered it by the feature nudge.
@@ -807,19 +800,6 @@ final class NotchModel: ObservableObject {
             UserDefaults.standard.set(suggestFollowUpEnabled, forKey: "suggestFollowUpEnabled")
             if !suggestFollowUpEnabled { nextQuestions = [:] }
         }
-    }
-
-    /// Whether a clicked link is checked by Jev before it opens (`LinkGate`).
-    /// Off by default.
-    @Published var linkPrecheckEnabled: Bool = LinkGate.isEnabled {
-        didSet { UserDefaults.standard.set(linkPrecheckEnabled, forKey: LinkGate.defaultsKey) }
-    }
-
-    /// Whether the chat model gets `run_shell`. A Lab setting, on for new
-    /// installs, off for existing ones.
-    @Published var shellToolEnabled: Bool =
-        OnboardingService.firstRunDefault("shellToolEnabled", fresh: true, existing: false) {
-        didSet { UserDefaults.standard.set(shellToolEnabled, forKey: "shellToolEnabled") }
     }
 
     /// A card hung off the island in its own window is open. The pointer on that
@@ -1428,6 +1408,10 @@ final class NotchModel: ObservableObject {
     func hoverEntered(on display: CGDirectDisplayID?, velocity: CGVector) {
         ClickOpenProbe.shared.hover("entered display=\(display.map(String.init) ?? "nil") open=\(open)")
         if open {
+            // The card stays up while the pointer crosses the resting notch, and
+            // a card in flight does not turn back when it passes under the pointer.
+            if activeDisplay == Self.menuBarCardDisplay, display != activeDisplay { return }
+            if cardFlyingOut { return }
             if pointerInsideIsland(on: display, slop: 16) == false { return }
             openPanel(on: display, velocity: velocity)
             return
@@ -3282,6 +3266,8 @@ final class NotchModel: ObservableObject {
             case noteDestination(NoteDestination)
             case notesFolder(String)
             case copySense(Bool)
+            case emojiReactions(Bool)
+            case linkCheck(Bool)
             case runCommands(Bool)
             case shortcut(SummonHotKey)
             /// `nil` chord ⇒ restore the shipped default for that action.
@@ -3306,7 +3292,8 @@ final class NotchModel: ObservableObject {
             var needsConfirmation: Bool {
                 switch self {
                 case .apiKey, .searchAPIKey, .proxy, .customProviderURL,
-                     .customInstructions, .runCommands, .promptShortcutRemoval:
+                     .customInstructions, .promptShortcutRemoval,
+                     .runCommands(true), .linkCheck(false):
                     return true
                 default:
                     return false
@@ -3442,8 +3429,12 @@ final class NotchModel: ObservableObject {
                 FileNotesService.folderPath = path
             case .copySense(let enabled):
                 copySenseEnabled = enabled
+            case .emojiReactions(let enabled):
+                ChatSwitch.emojiReactions = enabled
+            case .linkCheck(let enabled):
+                ChatSwitch.linkCheck = enabled
             case .runCommands(let enabled):
-                shellToolEnabled = enabled
+                ChatSwitch.runCommands = enabled
             case .shortcut(let value):
                 SummonHotKey.current = value
                 NotificationCenter.default.post(name: .summonHotKeyChanged, object: nil)
@@ -3554,9 +3545,8 @@ final class NotchModel: ObservableObject {
             guard prompt.count <= 4000 else {
                 return "Error: the prompt is too long. Keep it under 4000 characters."
             }
-            // Hourly or slower is at most 168 billed rounds over the loop's
-            // week, and the user asked for it in this message: start it. A
-            // faster loop bills up to 60 times as many rounds and still asks.
+            // Hourly or slower, and the user asked for it in this message:
+            // start it. A faster loop bills more rounds and still asks.
             if Self.loopNeedsConfirmation(minutes: minutes) {
                 guard settingsConfirmationAnswers.insert(answerID).inserted else {
                     return "Error: another confirmation is already waiting in this answer."
@@ -3580,7 +3570,7 @@ final class NotchModel: ObservableObject {
                     + "or stop on it (list gives its id)."
             }
             let span = (request.weekdaysOnly ? " on weekdays" : "")
-                + (request.endsOn.map { ", through \(Self.captureDueDescription($0))" } ?? ", for up to 7 days")
+                + (request.endsOn.map { ", through \(Self.captureDueDescription($0))" } ?? ", until the user stops it")
             bindChatLoops()
             LoopInterval.remember(minutes)
             if let first = request.firstRunAt {
@@ -3647,22 +3637,21 @@ final class NotchModel: ObservableObject {
         -> (start: String, change: String, schedule: String,
             confirmStart: String, confirmChange: String, cancel: String) {
         let every = LoopInterval.short(minutes)
-        let rounds = LoopInterval.maxRounds(minutes: minutes)
         let first = firstRunAt.map(Self.captureDueDescription) ?? ""
         let day = DateFormatter()
         day.locale = Self.localeForInterfaceLanguage()
         day.setLocalizedDateFormatFromTemplate("MMMd")
         let last = endsOn.map(day.string(from:)) ?? ""
-        // first-round label, weekdays word, "until <day>", "up to <n> rounds"
-        let t: (first: String, weekdays: String, until: String, upTo: String)
+        // first-round label, weekdays word, "until <day>"
+        let t: (first: String, weekdays: String, until: String)
         switch Localization.shared.language.resolved {
-        case .zhHans: t = ("首次 ", "仅工作日", "到 \(last) 为止", "最多 \(rounds) 轮")
-        case .zhHant: t = ("首次 ", "僅工作日", "到 \(last) 為止", "最多 \(rounds) 輪")
-        case .ja:     t = ("初回 ", "平日のみ", "\(last)まで", "最大\(rounds)回")
-        case .ko:     t = ("첫 실행 ", "평일만", "\(last)까지", "최대 \(rounds)회")
-        case .fr:     t = ("Premier tour ", "en semaine", "jusqu'au \(last)", "\(rounds) tours au plus")
-        case .es:     t = ("Primera ronda ", "solo entre semana", "hasta el \(last)", "hasta \(rounds) rondas")
-        case .en:     t = ("First round ", "weekdays only", "until \(last)", "up to \(rounds) rounds")
+        case .zhHans: t = ("首次 ", "仅工作日", "到 \(last) 为止")
+        case .zhHant: t = ("首次 ", "僅工作日", "到 \(last) 為止")
+        case .ja:     t = ("初回 ", "平日のみ", "\(last)まで")
+        case .ko:     t = ("첫 실행 ", "평일만", "\(last)까지")
+        case .fr:     t = ("Premier tour ", "en semaine", "jusqu'au \(last)")
+        case .es:     t = ("Primera ronda ", "solo entre semana", "hasta el \(last)")
+        case .en:     t = ("First round ", "weekdays only", "until \(last)")
         }
         let interval: String
         switch Localization.shared.language.resolved {
@@ -3674,7 +3663,7 @@ final class NotchModel: ObservableObject {
         case .en: interval = "Every \(every)"
         }
         let schedule = [first.isEmpty ? nil : t.first + first, interval,
-                        weekdaysOnly ? t.weekdays : nil, endsOn == nil ? t.upTo : t.until]
+                        weekdaysOnly ? t.weekdays : nil, endsOn == nil ? nil : t.until]
             .compactMap { $0 }.joined(separator: " · ")
         switch Localization.shared.language.resolved {
         case .zhHans: return ("开始这个循环？", "更改这个循环的间隔？", schedule, "开始", "更改", "取消")
@@ -4121,7 +4110,7 @@ final class NotchModel: ObservableObject {
         case "general", "app_language", "launch_at_login", "dock_icon", "menu_bar_icon",
              "proxy", "weather_city", "capture", "notes", "note_destination", "notes_folder":
             return "general"
-        case "chat", "emoji_reactions", "message_sounds", "custom_instructions":
+        case "chat", "emoji_reactions", "link_check", "run_commands", "message_sounds", "custom_instructions":
             return "chat"
         case "shortcuts", "summon_shortcut", "action_shortcut", "prompt_shortcut",
              "copy_sense", "selection_context":
@@ -4193,7 +4182,9 @@ final class NotchModel: ObservableObject {
             "note_destination=\(Self.noteDestinationToken(NoteDestination.current))",
             "notes_folder=\(FileNotesService.folderPath)",
             "copy_sense=\(copySenseEnabled)",
-            "run_commands=\(shellToolEnabled)",
+            "emoji_reactions=\(ChatSwitch.emojiReactions)",
+            "link_check=\(ChatSwitch.linkCheck)",
+            "run_commands=\(ChatSwitch.runCommands)",
             "summon_shortcut=\(shortcut.enabled ? shortcut.displayString : "disabled")",
             "custom_instructions=\(customInstructions.isEmpty ? "(empty)" : customInstructions)",
             "proxy=\(proxyURL.isEmpty ? "auto" : proxyURL)",
@@ -4229,7 +4220,7 @@ final class NotchModel: ObservableObject {
                 switch entry.editable {
                 case .summon: scope = " [setting=summon_shortcut]"
                 case .action(let action): scope = " [setting=action_shortcut scope=\(action.token)]"
-                case .prompt, nil: scope = ""
+                case .card, .prompt, nil: scope = ""
                 }
                 return "- \(entry.label): \(binding)\(scope)"
             }
@@ -4338,10 +4329,20 @@ final class NotchModel: ObservableObject {
             return made(setting, L("general.copySense"), localizedToggle(enabled),
                         .copySense(enabled), noOp: enabled == copySenseEnabled)
 
+        case "emoji_reactions":
+            guard let enabled = Self.parseBoolean(value) else { throw invalidBoolean(setting) }
+            return made(setting, L("chat.emojiReactions"), localizedToggle(enabled),
+                        .emojiReactions(enabled), noOp: enabled == ChatSwitch.emojiReactions)
+
+        case "link_check":
+            guard let enabled = Self.parseBoolean(value) else { throw invalidBoolean(setting) }
+            return made(setting, L("chat.linkPrecheck"), localizedToggle(enabled),
+                        .linkCheck(enabled), noOp: enabled == ChatSwitch.linkCheck)
+
         case "run_commands":
             guard let enabled = Self.parseBoolean(value) else { throw invalidBoolean(setting) }
             return made(setting, L("lab.runCommands"), localizedToggle(enabled),
-                        .runCommands(enabled), noOp: enabled == shellToolEnabled)
+                        .runCommands(enabled), noOp: enabled == ChatSwitch.runCommands)
 
         case "summon_shortcut":
             guard let shortcut = Self.parseShortcut(value) else {
@@ -4695,6 +4696,18 @@ final class NotchModel: ObservableObject {
             options: [copy.cancel, copy.run],
             inlineOptions: true)
         return choice == "The user chose: \"\(copy.run)\""
+    }
+
+    /// The card `cloud_machine` waits on before something crosses between this
+    /// Mac and the cloud machine, or a port goes public.
+    func confirmCloudAction(answerID: UUID, question: String) async throws -> Bool {
+        let allow = L("cloud.confirm.allow")
+        let choice = try await awaitUserChoice(
+            answerID: answerID,
+            question: question,
+            options: [shellConfirmationCopy().cancel, allow],
+            inlineOptions: true)
+        return choice == "The user chose: \"\(allow)\""
     }
 
     /// The card for an `osascript` that sends or deletes: what it will do, in
@@ -5232,6 +5245,15 @@ final class NotchModel: ObservableObject {
                     inlineOptions: inlineOptions)
                 pendingUserQuestions.append(pending)
                 updateRuntimeTurn(answerID) { $0.pendingQuestion = pending }
+                // Sent from the card and walked away from: the model is waiting
+                // on an answer, so say so.
+                if !isPresented(answerID: answerID),
+                   let round = inFlightRounds.first(where: { $0.answerID == answerID }),
+                   (cardSends[round.threadID] ?? 0) > 0 {
+                    let line = round.thread.last(where: { $0.role == "user" })?.text ?? question
+                    _ = CardToasts.shared.show(threadID: round.threadID, title: cardTitle(line),
+                                               body: question, hold: CardToasts.questionHold)
+                }
                 // Timeout backstop: an unanswered question (user walked away, panel
                 // stayed closed) must not hang the round forever — resolve with an
                 // explicit "no answer" the model is told to proceed on. Unstructured
@@ -6915,11 +6937,8 @@ final class NotchModel: ObservableObject {
     private func nudgeUsable(_ feature: NudgeFeature, requires: [String]) -> Bool {
         let isOn: Bool
         switch feature {
-        case .emojiReactions: isOn = emojiReactionsEnabled
-        case .linkPrecheck: isOn = linkPrecheckEnabled
         case .suggestFollowUp: isOn = suggestFollowUpEnabled
         case .memory: isOn = UserMemory.shared.enabled
-        case .runCommands: isOn = shellToolEnabled
         }
         guard !isOn, Provider.offered.contains(.nono), NoNoAccount.shared.hasToken
         else { return false }
@@ -6966,13 +6985,10 @@ final class NotchModel: ObservableObject {
     func startFeatureNudge() {
         guard var nudge = featureNudge, nudge.threadID == nil else { return }
         switch nudge.feature {
-        case .emojiReactions: emojiReactionsEnabled = true
-        case .linkPrecheck: linkPrecheckEnabled = true
         case .suggestFollowUp: suggestFollowUpEnabled = true
         case .memory:
             UserMemory.shared.enabled = true
             scanHistoryForMemories()
-        case .runCommands: shellToolEnabled = true
         }
 
         var invite = Turn(role: "assistant", text: nudge.invite)
@@ -8103,7 +8119,9 @@ final class NotchModel: ObservableObject {
     /// follow: the last turn of the round asked before the copies. Copies
     /// older than the thread's first question are left out.
     func copyThreadMarks(for drawn: [Turn]) -> [UUID: CopyMark] {
-        guard mode == .result else { return [:] }
+        // `.load` too: a follow-up's thread is on screen while it waits, and a
+        // mark that only arrived with `.result` pushed the question down.
+        guard mode != .idle else { return [:] }
         return copyThreadMarks(for: drawn, in: threadHistoryID)
     }
 
@@ -8486,6 +8504,11 @@ final class NotchModel: ObservableObject {
 
     // MARK: - Open / collapse
 
+    /// The key of the top-right card the menu bar icon opens: a panel of its own
+    /// beside the per-screen panels, so the screen's resting notch stays as it is.
+    /// Not a real display ID; `AppDelegate` picks the card's screen on each open.
+    static let menuBarCardDisplay: CGDirectDisplayID = .max - 1
+
     /// Whether the island on `display` should render expanded. A `nil` active
     /// display means "no specific screen claimed the panel" (debug launch paths
     /// set `open` directly) and unfurls everywhere; otherwise only the claiming
@@ -8497,6 +8520,14 @@ final class NotchModel: ObservableObject {
     /// Point the panel at `display`, or keep the current screen; a panel that
     /// has none yet takes `summonDisplay`.
     private func claimDisplay(_ display: CGDirectDisplayID?) {
+        // A reopen during the card's flight out keeps the page up.
+        if cardFlyingOut {
+            cardFlight?.cancel()
+            cardFlight = nil
+            cardFlyingOut = false
+            cardCloseCleanup?()
+            cardCloseCleanup = nil
+        }
         if let display {
             activeDisplay = display
         } else if activeDisplay == nil {
@@ -8939,7 +8970,9 @@ final class NotchModel: ObservableObject {
     /// open (`openPanel`/`openSettings`/…) clears `closing` so an interrupted close
     /// that reopens starts clean.
     func beginClose(sequenced: Bool = true) {
-        guard open, sequenced else { fullClose(); return }
+        // The card flies out whole, so it takes no pull-in beat first.
+        let onCard = activeDisplay.map(isCornerDisplay) ?? false
+        guard open, sequenced, !onCard else { fullClose(); return }
         guard !closing else { return }
         closing = true
         DispatchQueue.main.asyncAfter(deadline: .now() + NotchModel.closeAnticipation) { [weak self] in
@@ -8951,11 +8984,99 @@ final class NotchModel: ObservableObject {
         }
     }
 
+    private static let menuBarCardTipSeenKey = "menuBarCardTipSeen"
+
+    /// The first card opened from the menu bar icon says where the menu went: one
+    /// local message on the main thread, in history like any other. A panel
+    /// already showing a page stays on it.
+    func offerMenuBarCardTip() {
+        guard !UserDefaults.standard.bool(forKey: Self.menuBarCardTipSeenKey) else { return }
+        UserDefaults.standard.set(true, forKey: Self.menuBarCardTipSeenKey)
+        var tip = Turn(role: "assistant", text: L("menuBar.cardTip"))
+        tip.isLocal = true
+
+        let main = unifiedThreadsEnabled
+            ? history.firstIndex(where: { row in
+                row.mainThread && row.source == .ask && !row.pending
+                    && !inFlightRounds.contains(where: { $0.threadID == row.id })
+            })
+            : nil
+        var item: HistoryItem
+        if let main {
+            item = history.remove(at: main)
+            item.turns = item.conversation + [tip]
+            item.a = tip.text
+            item.t = Date()
+        } else {
+            item = HistoryItem(q: tip.text, a: tip.text, t: Date(), turns: [tip])
+            item.title = tip.text
+            if unifiedThreadsEnabled
+                && !history.contains(where: { $0.mainThread && $0.source == .ask }) {
+                item.mainThread = true
+            }
+        }
+        history.insert(item, at: 0)
+        saveHistory()
+
+        guard mode == .idle, turns.isEmpty else { return }
+        turns = item.conversation
+        threadHistoryID = item.id
+        mode = .result
+    }
+
+    /// The open card's bottom edge on screen, nil while no card is open.
+    func cornerCardBottom() -> CGFloat? {
+        guard open, let active = activeDisplay, isCornerDisplay(active),
+              let panel = panelScreenFrames[active],
+              let island = islandFrames[active] else { return nil }
+        return panel.maxY - island.maxY
+    }
+
+    /// Whether `display` draws the top-right card. Set by `AppDelegate`.
+    var isCornerDisplay: (CGDirectDisplayID) -> Bool = { _ in false }
+    /// The open card is flying off the screen's right edge. Its page stays as it
+    /// is for the flight; the close runs when the flight ends.
+    /// Deliberately not `@Published`: no view reads it, and publishing it would
+    /// re-render every panel on the flight's first frame. `AppDelegate` moves the
+    /// window through `onCardFlight`.
+    private(set) var cardFlyingOut = false {
+        didSet {
+            if cardFlyingOut != oldValue { onCardFlight?(cardFlyingOut) }
+        }
+    }
+    var onCardFlight: ((Bool) -> Void)?
+    private var cardFlight: DispatchWorkItem?
+    static let cardFlightDuration: TimeInterval = 0.28
+
+    /// Start the card's flight, or swallow a repeat close during one. False when
+    /// the close should run now: no card is open, Reduce Motion is on, or the
+    /// flight has just ended.
+    private func flyCardOut() -> Bool {
+        guard open, let active = activeDisplay, isCornerDisplay(active),
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return false }
+        if cardFlyingOut { return cardFlight != nil }
+        cancelLeaveWatch()
+        closing = false
+        cardFlyingOut = true
+        let flight = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.cardFlight = nil
+            self.fullClose()
+            self.cardFlyingOut = false
+        }
+        cardFlight = flight
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.cardFlightDuration, execute: flight)
+        return true
+    }
+
     /// Hard close from Esc / click-outside — always collapses regardless of mode,
     /// including mid-request: an answer still in flight is detached, not cancelled.
     /// The task keeps streaming on its own snapshot (see `submit`) and files the
     /// finished round into Recent, so closing never loses a conversation.
     func fullClose() {
+        if flyCardOut() { return }
+        cardCloseCleanup?()
+        cardCloseCleanup = nil
         // A pending leave watch is moot once the panel actually closes.
         cancelLeaveWatch()
         // A pull caught mid-way closes as the idle page it started from.
@@ -10342,6 +10463,147 @@ final class NotchModel: ObservableObject {
         mode = .idle
     }
 
+    /// Rounds sent from the top-right card and not finished yet, by thread. Their
+    /// answers arrive as cards (`CardToasts`).
+    private var cardSends: [UUID: Int] = [:]
+    /// What the close of a follow-up sent from the card still has to reset. Held
+    /// until the flight ends, so the thread page flies out at its own height.
+    private var cardCloseCleanup: (() -> Void)?
+
+    /// Enter on the prompt. On the top-right card an ask sends and the card flies
+    /// out at once; the answer comes back as a card of its own. Everywhere else,
+    /// and for anything but an ask, this is `submitCurrent`.
+    func submitFromPrompt() {
+        guard let active = activeDisplay, isCornerDisplay(active), editTarget == nil,
+              effectiveSubmitPanel == .chat, !agentComposeActive else {
+            submitCurrent()
+            return
+        }
+        if unifiedThreadsEnabled, turns.isEmpty, hasText,
+           let main = inFlightRounds.first(where: { isMainThread($0.threadID) })?.threadID {
+            cardSends[main, default: 0] += 1
+            submitAndStay()
+            fullClose()
+            return
+        }
+        let wasOnThread = !turns.isEmpty
+        let before = turns.count
+        submitCurrent()
+        guard turns.count > before else { return }
+        cardSends[threadHistoryID, default: 0] += 1
+        let cleanup = { [weak self] in
+            guard let self else { return }
+            self.task = nil
+            self.resetThreadPull()
+            self.lastMeasuredAnswerHeight = 0
+            self.turns = []
+            self.replyTarget = nil
+            self.mode = .idle
+        }
+        if wasOnThread {
+            cardCloseCleanup = cleanup
+        } else {
+            cleanup()
+        }
+        fullClose()
+    }
+
+    /// A click on an answer card. Unlike `openThread` this also takes a thread
+    /// still being answered, the case of a card asking the user something.
+    func openCardThread(id: UUID) {
+        guard let item = history.first(where: { $0.id == id }) else { return }
+        openHistory(item)
+    }
+
+    /// A round sent from the card, arriving as cards: the answer's first message
+    /// fills one from its first text, at the reply tone; each message after it
+    /// gets its own as `BubblePacer` lands it, at its tone.
+    private struct CardStream {
+        let lead: CardToasts.Toast
+        var rest: [AnswerSegment] = []
+        var finished = false
+        var lastTick = Date.distantPast
+    }
+    private var cardStreams: [UUID: CardStream] = [:]
+
+    /// Feed a card round's text so far. Called for every chunk and once at the
+    /// end with `streaming` false.
+    private func cardStreamTick(answerID: UUID, threadID: UUID, question: String, text: String,
+                                sources: [WebSource], shared: [String], streaming: Bool) {
+        guard !isPresented(answerID: answerID) else {
+            if cardStreams.removeValue(forKey: answerID) != nil {
+                BubblePacer.shared.landed[answerID] = nil
+            }
+            return
+        }
+        let now = Date()
+        if streaming, let stream = cardStreams[answerID],
+           now.timeIntervalSince(stream.lastTick) < 0.1 { return }
+        guard (cardSends[threadID] ?? 0) > 0 || cardStreams[answerID] != nil,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let layout = LinkCardSplitter.layout(text, streaming: streaming, sources: sources,
+                                             question: question, shared: shared)
+        let body = MarkdownParser.plainText(layout.lead)
+        var stream: CardStream
+        if let existing = cardStreams[answerID] {
+            stream = existing
+            stream.lead.update(body: body)
+        } else {
+            stream = CardStream(lead: CardToasts.shared.show(
+                threadID: threadID, title: cardTitle(question), body: body,
+                hold: CardToasts.hold(for: body)))
+            BubblePacer.shared.landed[answerID] = { [weak self] index in
+                self?.cardBubbleLanded(answerID: answerID, threadID: threadID, index: index)
+            }
+        }
+        stream.lastTick = now
+        stream.rest = layout.rest
+        stream.finished = !streaming
+        cardStreams[answerID] = stream
+        BubblePacer.shared.sync(answerID, items: layout.rest.map { segment in
+            switch segment {
+            case .link(let url, let label): return .link(url, title: label)
+            case .text(let body): return .text(body.count)
+            case .media: return .media
+            }
+        }, streaming: streaming)
+        if !streaming, layout.rest.isEmpty { endCardStream(answerID) }
+    }
+
+    private func cardBubbleLanded(answerID: UUID, threadID: UUID, index: Int) {
+        guard let stream = cardStreams[answerID], index < stream.rest.count else { return }
+        let body: String?
+        switch stream.rest[index] {
+        case .text(let text): body = MarkdownParser.plainText(text)
+        case .link(let url, let label): body = label ?? url.host ?? url.absoluteString
+        case .media: body = nil
+        }
+        if let body {
+            _ = CardToasts.shared.show(threadID: threadID, title: "", body: body,
+                                       hold: CardToasts.hold(for: body))
+        }
+        if stream.finished, index == stream.rest.count - 1 { endCardStream(answerID) }
+    }
+
+    private func endCardStream(_ answerID: UUID) {
+        cardStreams[answerID] = nil
+        BubblePacer.shared.landed[answerID] = nil
+    }
+
+    /// Whether this round was sent from the card, counting it as answered.
+    private func takeCardSend(_ threadID: UUID) -> Bool {
+        guard let count = cardSends[threadID], count > 0 else { return false }
+        cardSends[threadID] = count > 1 ? count - 1 : nil
+        return true
+    }
+
+    /// The line a card shows for `question`, without any envelope around it.
+    private func cardTitle(_ question: String) -> String {
+        let line = (Self.quoteEnvelope(in: question) ?? Self.fileEnvelopeQuote(in: question))?
+            .instruction ?? question
+        return line.split(whereSeparator: \.isNewline).first.map(String.init) ?? line
+    }
+
     /// Lines sent with ⌘↵ while the main thread was busy, oldest first.
     private var stayQueue: [String] = []
     private var drainingStayQueue = false
@@ -11147,6 +11409,10 @@ final class NotchModel: ObservableObject {
                         MessageTone.play(MessageTone.received)
                     }
                     acc += piece
+                    let cardTurn = thread.first(where: { $0.id == answerID })
+                    self.cardStreamTick(answerID: answerID, threadID: threadID, question: q, text: acc,
+                                        sources: cardTurn?.sources ?? [],
+                                        shared: cardTurn?.sharedLinks ?? [], streaming: true)
                     // First real text for this round ends the thinking phase — clear the
                     // dots even if the panel folded away (the round is detached but still
                     // ours). Idempotent: only the round that owns the flag clears it.
@@ -11227,7 +11493,7 @@ final class NotchModel: ObservableObject {
                 agentTools.append(FindFilesTool())
                 agentTools.append(GrepFilesTool())
                 // Changing files goes with the shell: off where the shell is.
-                if shellToolEnabled, nonoContext.surface != NoNoRequestContext.telegram {
+                if ChatSwitch.runCommands, nonoContext.surface != NoNoRequestContext.telegram {
                     agentTools.append(WriteFileTool())
                     agentTools.append(EditFileTool())
                 }
@@ -11252,7 +11518,7 @@ final class NotchModel: ObservableObject {
                     guard let self else { throw CancellationError() }
                     return try await self.confirmEventDelete(answerID: answerID, title: title)
                 })
-                if shellToolEnabled, nonoContext.surface != NoNoRequestContext.telegram {
+                if ChatSwitch.runCommands, nonoContext.surface != NoNoRequestContext.telegram {
                     agentTools.append(ScheduleActionTool { [weak self] command, minutes in
                         guard let self else { throw CancellationError() }
                         return try await self.scheduleAction(answerID: answerID, command: command, minutes: minutes)
@@ -11297,7 +11563,7 @@ final class NotchModel: ObservableObject {
                 }
                 // A Telegram round has no one at the Mac to see what a command
                 // does, so it never gets a shell.
-                if shellToolEnabled, nonoContext.surface != NoNoRequestContext.telegram {
+                if ChatSwitch.runCommands, nonoContext.surface != NoNoRequestContext.telegram {
                     agentTools.append(RunShellTool { [weak self] command in
                         guard let self else { throw CancellationError() }
                         return try await self.confirmShellCommand(answerID: answerID,
@@ -11310,6 +11576,19 @@ final class NotchModel: ObservableObject {
                     guard let self else { return .empty }
                     return await MainActor.run { self.searchArchive(query, offWire: offWire) }
                 })
+                // Last, so the list before it is the same with or without an
+                // account. A Telegram round gets it without the card: commands
+                // there touch nothing on this Mac, and what would is refused.
+                if InstaBoxAccount.isAvailable {
+                    if nonoContext.surface == NoNoRequestContext.telegram {
+                        agentTools.append(CloudMachineTool(confirm: nil))
+                    } else {
+                        agentTools.append(CloudMachineTool { [weak self] (question: String) -> Bool in
+                            guard let self else { throw CancellationError() }
+                            return try await self.confirmCloudAction(answerID: answerID, question: question)
+                        })
+                    }
+                }
                 // MCP is switched off for now.
                 // // The user's MCP servers come last, so the built-in prefix of
                 // // the list stays the same with or without them. Past
@@ -11597,8 +11876,16 @@ final class NotchModel: ObservableObject {
                     self.predictNextQuestion(for: thread, answerID: answerID, answeredBy: askService)
                 }
                 // A loop round's banner is the loop's own (`ChatLoopManager`).
+                let fromCard = self.takeCardSend(threadID)
                 if walkedAway, loopRound == nil {
-                    self.notifyAnswerReady(threadID: threadID, question: q, answer: acc)
+                    if fromCard {
+                        let cardTurn = thread.first(where: { $0.id == answerID })
+                        self.cardStreamTick(answerID: answerID, threadID: threadID, question: q, text: acc,
+                                            sources: cardTurn?.sources ?? [],
+                                            shared: cardTurn?.sharedLinks ?? [], streaming: false)
+                    } else {
+                        self.notifyAnswerReady(threadID: threadID, question: q, answer: acc)
+                    }
                 }
                 ChatLoopManager.shared.roundFinished(
                     threadID: threadID, loopRound: loopRound,
@@ -11657,7 +11944,14 @@ final class NotchModel: ObservableObject {
                     } else if walkedAway, loopRound == nil {
                         // Interrupted but salvaged a partial answer, and the user had
                         // already walked away — still notify, same as a clean finish.
-                        self.notifyAnswerReady(threadID: threadID, question: q, answer: saved)
+                        if self.takeCardSend(threadID) {
+                            let cardTurn = thread.first(where: { $0.id == answerID })
+                            self.cardStreamTick(answerID: answerID, threadID: threadID, question: q,
+                                                text: saved, sources: cardTurn?.sources ?? [],
+                                                shared: cardTurn?.sharedLinks ?? [], streaming: false)
+                        } else {
+                            self.notifyAnswerReady(threadID: threadID, question: q, answer: saved)
+                        }
                     }
                 } else {
                     // Failed before any text arrived (refused connection, bad key):
@@ -11679,8 +11973,15 @@ final class NotchModel: ObservableObject {
                     ChatLoopManager.shared.roundFinished(threadID: threadID,
                                                          loopRound: loopRound, failed: true,
                                                          answer: error.localizedDescription)
+                    let fromCard = self.takeCardSend(threadID)
                     if walkedAway, loopRound == nil {
-                        RestingResult.shared.show(error.localizedDescription, failed: true)
+                        if fromCard {
+                            let body = error.localizedDescription
+                            _ = CardToasts.shared.show(threadID: threadID, title: self.cardTitle(q),
+                                                       body: body, hold: CardToasts.hold(for: body))
+                        } else {
+                            RestingResult.shared.show(error.localizedDescription, failed: true)
+                        }
                     }
                     if self.isOnScreen(answerID: answerID) {
                         // Surface the REAL reason (XII-85) — `ServiceError` already
@@ -12454,7 +12755,7 @@ final class NotchModel: ObservableObject {
     private func requestReaction(to text: String, previous: String,
                                  questionID: UUID, answerID: UUID) {
         let account = NoNoAccount.shared
-        guard emojiReactionsEnabled, account.canDecide else { return }
+        guard ChatSwitch.emojiReactions, account.canDecide else { return }
         let message = String(text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(1500))
         guard !message.isEmpty, !ClipPrivacy.containsSecret(message) else { return }
         let prior = ClipPrivacy.containsSecret(previous) ? "" : String(previous.suffix(1500))

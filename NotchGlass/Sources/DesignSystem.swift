@@ -279,12 +279,12 @@ struct FreeTag: View {
 }
 
 /// An entry sold below the upstream host's list price in the Notchi pricing
-/// table: "50% OFF". `FreeTag`'s face.
+/// table: "50% OFF", or "FREE" at $0. `FreeTag`'s face.
 struct DiscountTag: View {
-    let percent: Int
+    let text: String
 
     var body: some View {
-        PriceTag(text: L("nono.pricing.percentOff", percent))
+        PriceTag(text: text)
     }
 }
 
@@ -334,6 +334,28 @@ struct AddCreditButtonFace: View {
     }
 }
 
+/// Features on by default with no row in Settings: the user turns them off or
+/// back on by asking in chat (`NotchModel`'s settings tool). Keys are new, so
+/// every install starts on, including one that had the old switches off.
+enum ChatSwitch {
+    static var emojiReactions: Bool {
+        get { read("chatSwitch.emojiReactions") }
+        set { UserDefaults.standard.set(newValue, forKey: "chatSwitch.emojiReactions") }
+    }
+    static var linkCheck: Bool {
+        get { read("chatSwitch.linkCheck") }
+        set { UserDefaults.standard.set(newValue, forKey: "chatSwitch.linkCheck") }
+    }
+    static var runCommands: Bool {
+        get { read("chatSwitch.runCommands") }
+        set { UserDefaults.standard.set(newValue, forKey: "chatSwitch.runCommands") }
+    }
+
+    private static func read(_ key: String) -> Bool {
+        UserDefaults.standard.object(forKey: key) as? Bool ?? true
+    }
+}
+
 /// Experiments that must never leak into a release build. Each flag is false by
 /// default and can only be enabled from a Debug executable, so an ordinary local
 /// reinstall and every shipped build keep the established UI unchanged.
@@ -341,6 +363,26 @@ enum DebugFeatureFlags {
     static let historySplitView: Bool = {
         #if DEBUG
         UserDefaults.standard.bool(forKey: "NotchiHistorySplitView")
+        #else
+        false
+        #endif
+    }()
+
+    /// The top-right card: the menu bar icon's click, its shortcut, and the
+    /// corner panel on a Dynamic Island screen. Off, the icon opens its menu and
+    /// every screen keeps its island.
+    static let menuBarCard: Bool = {
+        #if DEBUG
+        UserDefaults.standard.bool(forKey: "NotchiMenuBarCard")
+        #else
+        false
+        #endif
+    }()
+
+    /// The `cloud_machine` tool and its row in Settings → Connect.
+    static let cloudMachine: Bool = {
+        #if DEBUG
+        UserDefaults.standard.bool(forKey: "NotchiCloudMachine")
         #else
         false
         #endif
@@ -538,6 +580,21 @@ struct NotchMetrics {
     /// Width of the REAL cutout on this screen, measured from the gap between the
     /// menu bar's two auxiliary areas (185pt on a 14"); nil where there is none.
     var hardwareNotchWidth: CGFloat? = nil
+    /// The panel is a free-floating card in the screen's top-right corner rather
+    /// than an island hanging from the top edge: the Dynamic Island screen, where
+    /// the system owns the top centre. All four corners round, there is no black
+    /// camera zone (`restHeight` is 0), and the card is pinned to the canvas's
+    /// trailing edge so its right margin holds at every open width.
+    var floating: Bool = false
+    /// The floating card's distance from the screen's right edge. Its canvas
+    /// reaches that edge, so the card can fly in from it.
+    static let floatingInset: CGFloat = 16
+    /// How far every floating card flies, so all of them move at one speed: the
+    /// widest card but Settings, plus its inset.
+    static let floatingTravel: CGFloat = Tokens.openWidthResult * floatingWidthScale + floatingInset
+    /// The floating card draws narrower than the island.
+    static let floatingWidthScale: CGFloat = 0.7
+    var widthScale: CGFloat { floating ? Self.floatingWidthScale : 1 }
 
     /// The width the RESTING island draws at — the measured cutout wherever there
     /// is one, the drawing constant only on notch-less screens (there the island

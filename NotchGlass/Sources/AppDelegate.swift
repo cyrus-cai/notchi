@@ -172,6 +172,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// held strongly so they stay registered and rebuilt whenever the Settings →
     /// General recorder changes the config; both `nil` while disabled.
     private var summonHotKey: HotKey?
+    private var cardHotKey: HotKey?
+    private var cardDoubleTap: DoubleTapModifierMonitor?
     /// The global "ask about an area of the screen" chord (`AppShortcutAction.askScreen`).
     private var askScreenHotKey: HotKey?
     private var summonDoubleTap: DoubleTapModifierMonitor?
@@ -221,6 +223,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// nothing; `makePanel` insets the content by the same amount, which keeps
     /// every drawn pixel exactly where it was.
     static let canvasTopOverreach: CGFloat = 4
+
+    /// Displays whose panel sits in the top-right corner instead of the top
+    /// centre, because the system's Dynamic Island owns the centre (see
+    /// `isIslandScreen`). These panels have no resting island: they stay ordered
+    /// out until the menu bar item or the summon shortcut opens them.
+    private var cornerDisplays: Set<CGDirectDisplayID> = []
+
+    /// The floating card's distance from the menu bar's bottom and from the
+    /// screen's right edge — one value for both. Same as the detached window's
+    /// `screenMargin`, the other window that floats free of the notch.
+    private static let cornerInset: CGFloat = NotchMetrics.floatingInset
+    /// Each corner panel's frame at rest, from `position`.
+    private var cornerFrames: [CGDirectDisplayID: NSRect] = [:]
+    private let cornerFlight = WindowFlight()
 
     /// Resolve a duplicate-instance launch: the NEWEST instance survives (in the
     /// reinstall flow that's the freshly installed build; in the Xcode dev loop
@@ -466,11 +482,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the keyboard over with the island.
         // An open that names no screen lands where the pointer is.
         model.summonDisplay = { [weak self] in self?.displayForSummon() }
+        model.isCornerDisplay = { [weak self] in self?.cornerDisplays.contains($0) ?? false }
+        CardToasts.shared.openThread = { [weak self] id in
+            self?.openMenuBarCard { $0.openCardThread(id: id) }
+        }
+        CardToasts.shared.cardBottom = { [weak self] in self?.model.cornerCardBottom() }
+        model.onCardFlight = { [weak self] flying in
+            guard let self else { return }
+            if flying {
+                if let active = self.model.activeDisplay { self.slideCorner(active, out: true) }
+            } else {
+                // A reopen turned the flight back; a finished one has closed.
+                DispatchQueue.main.async {
+                    guard self.model.open, let active = self.model.activeDisplay,
+                          self.cornerDisplays.contains(active) else { return }
+                    self.slideCorner(active, out: false)
+                }
+            }
+        }
         openObserver = model.$open
             .combineLatest(model.$activeDisplay)
             .removeDuplicates(by: ==)
             .sink { [weak self] isOpen, active in
                 guard let self else { return }
+                // Before SwiftUI commits the open animation's first frame, so
+                // a corner panel is on screen for it.
+                self.updateCornerVisibility(isOpen: isOpen, active: active)
+                // Once the card has laid out, or its frame has gone with it.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    CardToasts.shared.relayout()
+                }
                 if isOpen {
                     // Read the outside selection HERE, on the synchronous open
                     // edge — before the activation below makes Notchi's own
@@ -750,6 +791,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let delay = env["NOTCH_DEMO_RESULT_AT"].flatMap(Double.init) ?? 1
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                 RestingResult.shared.show(title, failed: env["NOTCH_DEMO_RESULT_FAILED"] == "1")
+            }
+        }
+        // NOTCH_DEMO_CARD_TOASTS=1 lands two answer cards a second apart, each
+        // leaving after 3 seconds. Screenshot aid only.
+        if env["NOTCH_DEMO_CARD_TOASTS"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                _ = CardToasts.shared.show(threadID: UUID(), title: "How far is the moon?",
+                                           body: "About 384,400 km on average.", hold: 3)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                _ = CardToasts.shared.show(threadID: UUID(), title: "",
+                                           body: "Light covers that in about 1.3 seconds.", hold: 3)
             }
         }
         // NOTCH_DEMO_FORCE=menu|answer poses the force-click box beside a point
@@ -1222,10 +1275,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// The top-right card's own global shortcut, on the same path as summon's.
+    private func registerCardHotKey() {
+        cardHotKey = nil
+        cardDoubleTap = nil
+        let config = SummonHotKey.card
+        guard DebugFeatureFlags.menuBarCard, config.enabled, !ShortcutRecording.isActive else { return }
+        let fire: () -> Void = { [weak self] in self?.toggleMenuBarCard(tip: false) }
+        if config.isDoubleTap {
+            cardDoubleTap = DoubleTapModifierMonitor(carbonModifier: config.doubleTapModifier,
+                                                     action: fire)
+        } else {
+            cardHotKey = HotKey(keyCode: config.keyCode, modifiers: config.modifiers, action: fire)
+        }
+    }
+
     /// (Re)register the global summon shortcut from the persisted config. Dropping
     /// the old `HotKey`/monitor unregisters it (deinit), so this is also how
     /// "disabled" takes effect: when the config is off we just clear both refs.
     private func registerSummonHotKey() {
+        registerCardHotKey()
         summonHotKey = nil
         summonDoubleTap = nil
         let config = SummonHotKey.current
@@ -1571,6 +1640,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Opens land on the screen the mouse is on (`displayForSummon`), same as ⌘,.
     private func installMenuBar() {
         menuBar = MenuBarController(actions: MenuBarController.Actions(
+            toggleCard: { [weak self] in self?.toggleMenuBarCard(tip: true) },
+            closeCard: { [weak self] in
+                guard let self, self.model.open else { return }
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                    self.model.fullClose()
+                }
+            },
             openNotch: { [weak self] in
                 guard let self else { return }
                 // Open, never toggle: a menu item labelled "Open Notch" that
@@ -1606,7 +1682,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             },
             isForceTouchDisabled: { [weak self] in self?.model.isForceTouchDisabled ?? false },
             forceTouchResumesAt: { [weak self] in self?.model.forceTouchDisabledUntil },
-            resumeForceTouch: { [weak self] in self?.model.resumeForceTouch() }
+            resumeForceTouch: { [weak self] in self?.model.resumeForceTouch() },
+            isRequired: { [weak self] in
+                self?.cornerDisplays.contains { $0 != NotchModel.menuBarCardDisplay } ?? false
+            }
         ))
         menuBar?.apply()
         // The menu bar eyes play the same work the resting notch shows.
@@ -1622,8 +1701,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 } else {
                     mood = rounds > 0 ? NotchiMark.Mood(orb) : nil
                 }
+                NotchiDirector.work.workMood = mood
                 self?.menuBar?.setWork(mood)
             }
+    }
+
+    /// One click on the menu bar icon: close the card if it is up, otherwise open
+    /// the panel as the card on the screen the mouse is on. A panel already open
+    /// at the notch moves into the card with its content. A Dynamic Island screen
+    /// uses its own corner panel.
+    private func toggleMenuBarCard(tip: Bool) {
+        if model.open, let active = model.activeDisplay, cornerDisplays.contains(active) {
+            withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                model.fullClose()
+            }
+            return
+        }
+        openMenuBarCard { model in
+            if tip { model.offerMenuBarCardTip() }
+        }
+    }
+
+    /// Open the card on the screen the mouse is on, then run `body` on the model.
+    private func openMenuBarCard(_ body: (NotchModel) -> Void) {
+        var target = displayForSummon()
+        if target == nil || !cornerDisplays.contains(target!) {
+            let id = NotchModel.menuBarCardDisplay
+            guard let panel = panels[id],
+                  let screen = NSScreen.containing(NSEvent.mouseLocation) ?? preferredScreen()
+            else { return }
+            position(panel, on: screen, id: id)
+            target = id
+        }
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+            if !model.open { model.mode = .idle }
+            model.openPanel(on: target)
+            body(model)
+        }
     }
 
     /// Run a menu-driven open against the model, on the screen the mouse is on
@@ -1676,6 +1790,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 panels[id] = makePanel(on: screen, id: id)
             }
         }
+        // The menu bar icon's card exists on every setup; `toggleMenuBarCard`
+        // moves it to the screen the click came from.
+        if DebugFeatureFlags.menuBarCard {
+            let cardID = NotchModel.menuBarCardDisplay
+            live.insert(cardID)
+            if panels[cardID] == nil, let screen = preferredScreen() {
+                panels[cardID] = makePanel(on: screen, id: cardID)
+            }
+        }
         for (id, panel) in panels where !live.contains(id) {
             panel.close()
             panels.removeValue(forKey: id)
@@ -1689,6 +1812,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // A rebuild orders every (re)created panel to the front, so re-apply the
         // full-screen hiding on top of the fresh layout.
         updateFullScreenHiding()
+        // A corner display needs the menu bar item to be reachable at all.
+        menuBar?.apply()
+    }
+
+    // MARK: - Corner panels
+
+    /// Show a corner panel only while it is open; there is no resting island to
+    /// keep on screen. Same per-display rule as `NotchModel.isOpen(on:)`, but
+    /// fed the values being published, since `$open` fires before it changes.
+    private func updateCornerVisibility(isOpen: Bool, active: CGDirectDisplayID?) {
+        for id in cornerDisplays {
+            guard let panel = panels[id] else { continue }
+            // The card is not tied to a screen, so an open that claims none
+            // does not show it.
+            let shows = isOpen && (active == id
+                || (active == nil && id != NotchModel.menuBarCardDisplay))
+            if shows {
+                if !panel.isVisible {
+                    cornerFlight.stop()
+                    let flies = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                    if let frame = cornerFrame(id, out: flies) {
+                        panel.setFrame(frame, display: false)
+                    }
+                    panel.orderFrontRegardless()
+                    // After the open state's first commit, so a slow first build
+                    // does not eat the flight.
+                    if flies { DispatchQueue.main.async { self.slideCorner(id, out: false) } }
+                }
+            } else if panel.isVisible {
+                panel.orderOut(nil)
+            }
+        }
+    }
+
+    /// A corner panel's frame at rest, or, with `out`, just past the screen's
+    /// right edge. One distance, so every flight covers the same path at the same
+    /// speed; only Settings, wider than it, travels further.
+    private func cornerFrame(_ id: CGDirectDisplayID, out: Bool) -> NSRect? {
+        guard var frame = cornerFrames[id] else { return nil }
+        if out {
+            frame.origin.x += max(NotchMetrics.floatingTravel,
+                                  (model.showSettings ? model.openWidth : 0) + NotchMetrics.floatingInset)
+        }
+        return frame
+    }
+
+    /// The one flight of the corner card, both ways: its window moves along
+    /// `cornerFrame`. The window rather than a SwiftUI offset, which the system
+    /// glass behind the card does not follow.
+    private func slideCorner(_ id: CGDirectDisplayID, out: Bool) {
+        guard let panel = panels[id], let frame = cornerFrame(id, out: out) else { return }
+        cornerFlight.fly(panel, to: frame.origin, on: panel.screen)
+    }
+
+    /// Whether this panel draws as the top-right card: the menu bar icon's card,
+    /// or any panel on a Dynamic Island screen.
+    private static func isCorner(_ id: CGDirectDisplayID, on screen: NSScreen) -> Bool {
+        DebugFeatureFlags.menuBarCard && (id == NotchModel.menuBarCardDisplay || isIslandScreen(screen))
+    }
+
+    /// Whether the system's Dynamic Island owns the top centre of `screen`: the
+    /// built-in display of the 2026 PROLED MacBook Pro, whose camera sits in a
+    /// hole-punch instead of a notch. Detected as a built-in screen that reports
+    /// a top safe area but a cutout far narrower than any notch (185pt and up).
+    /// Unverified on the hardware; `NOTCH_DEMO_ISLAND_SCREEN=1` forces it on the
+    /// built-in display for testing.
+    static func isIslandScreen(_ screen: NSScreen) -> Bool {
+        guard let id = screen.displayID, CGDisplayIsBuiltin(id) != 0 else { return false }
+        if ProcessInfo.processInfo.environment["NOTCH_DEMO_ISLAND_SCREEN"] == "1" {
+            return true
+        }
+        guard screen.safeAreaInsets.top > 0,
+              let cutout = hardwareNotchWidth(of: screen) else { return false }
+        return cutout < 120
     }
 
     // MARK: - Full-screen hiding
@@ -1724,7 +1921,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// panel whose visibility actually needs to change.
     private func updateFullScreenHiding() {
         let enabled = HideNotchInFullscreen.isEnabled
-        for (id, panel) in panels {
+        for (id, panel) in panels where !cornerDisplays.contains(id) {
             guard let screen = NSScreen.screens.first(where: { $0.displayID == id })
             else { continue }
             let isVirtualNotch = screen.safeAreaInsets.top <= 0
@@ -1735,6 +1932,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 panel.orderFrontRegardless()
             }
         }
+        updateCornerVisibility(isOpen: model.open, active: model.activeDisplay)
     }
 
     /// True when an ordinary window is covering `screen` edge-to-edge on the space
@@ -1795,8 +1993,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let rect = NSRect(x: 0, y: 0, width: canvasWidth, height: canvasHeight + overreach)
         let panel = NotchPanel(contentRect: rect)
 
-        let hasNotch = screen.safeAreaInsets.top > 0
-        let hardwareNotchWidth = Self.hardwareNotchWidth(of: screen)
+        // A corner panel draws like a notch-less screen's: no camera dot, menu
+        // bar height, no cutout to fit.
+        let floating = Self.isCorner(id, on: screen)
+        let hasNotch = screen.safeAreaInsets.top > 0 && !floating
+        let hardwareNotchWidth = hasNotch ? Self.hardwareNotchWidth(of: screen) : nil
         let root = ZStack(alignment: .top) {
             ContentView(model: model)
                 .frame(width: canvasWidth, height: canvasHeight, alignment: .top)
@@ -1834,12 +2035,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // 1pt past the inset and let any residue land on the invisible
                 // side. (Screenshots can't verify this seam — the framebuffer
                 // has no notch — so the margin, not calibration, is the fix.)
-                restHeight: hasNotch ? screen.safeAreaInsets.top + 1
-                                     : Self.menuBarHeight(of: screen),
+                restHeight: Self.restHeight(of: screen, hasNotch: hasNotch, floating: floating),
                 hasHardwareNotch: hasNotch,
                 // The resting island draws at exactly this width, so it never
                 // overhangs the cutout onto live screen (see `NotchMetrics.restWidth`).
-                hardwareNotchWidth: hardwareNotchWidth
+                hardwareNotchWidth: hardwareNotchWidth,
+                floating: floating
             ))
 
         let hosting = FirstMouseHostingView(rootView: root)
@@ -1940,27 +2141,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Center the canvas horizontally and flush its top edge to the very top of
     /// the screen, so the SwiftUI notch sits exactly where the hardware notch
     /// (or the menu bar, on external screens) is.
+    ///
+    /// On a Dynamic Island screen the floating card sits in the top-right
+    /// corner instead: the canvas's right edge meets the screen's, the card sits
+    /// `cornerInset` in from it, and the top is `cornerInset` below the menu bar.
     private func position(_ panel: NSPanel, on screen: NSScreen, id: CGDirectDisplayID) {
         let full = screen.frame
-        let x = full.midX - canvasWidth / 2
+        let corner = Self.isCorner(id, on: screen)
+        if corner { cornerDisplays.insert(id) } else { cornerDisplays.remove(id) }
+        let x = corner
+            ? full.maxX - canvasWidth
+            : full.midX - canvasWidth / 2
         // AppKit's origin is bottom-left; place the canvas so its top aligns
-        // with the screen's top edge.
-        let y = full.maxY - canvasHeight
+        // with the screen's top edge (the card's top, on a corner display).
+        let top = corner
+            ? full.maxY - Self.menuBarHeight(of: screen) - Self.cornerInset
+            : full.maxY
+        let y = top - canvasHeight
         // Bottom stays put; the extra height goes on top, past the screen edge.
         let frame = NSRect(x: x, y: y,
                            width: canvasWidth,
                            height: canvasHeight + Self.canvasTopOverreach)
         panel.setFrame(frame, display: true)
+        cornerFrames[id] = corner ? frame : nil
         // Tell the model where this canvas sits on screen and how tall its
         // resting notch is — the ground-truth pointer test that filters
         // synthetic hover enter/exit events needs both (see
         // `NotchModel.pointerInsideIsland`). Same formula as the metrics
         // injection in `makePanel`.
-        let hasNotch = screen.safeAreaInsets.top > 0
+        let hasNotch = screen.safeAreaInsets.top > 0 && !corner
         model.registerPanelFrame(
             frame,
-            restHeight: hasNotch ? screen.safeAreaInsets.top + 1 : Self.menuBarHeight(of: screen),
-            hardwareNotchWidth: Self.hardwareNotchWidth(of: screen),
+            restHeight: Self.restHeight(of: screen, hasNotch: hasNotch, floating: corner),
+            hardwareNotchWidth: hasNotch ? Self.hardwareNotchWidth(of: screen) : nil,
             topOverreach: Self.canvasTopOverreach,
             for: id)
     }
@@ -2003,6 +2216,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// chain in `hardwareNotchWidth(of:)`.
     private static var measuredNotchWidths: [CGDirectDisplayID: CGFloat] = [:]
 
+    /// The black zone's height: the cutout's on a notched screen, the menu
+    /// bar's on a notch-less one, none on the floating card (its content takes
+    /// the same inset from the top as from the sides).
+    private static func restHeight(of screen: NSScreen, hasNotch: Bool, floating: Bool) -> CGFloat {
+        if floating { return 0 }
+        return hasNotch ? screen.safeAreaInsets.top + 1 : menuBarHeight(of: screen)
+    }
+
     /// The resting-zone height for a notch-less screen: match the menu bar so
     /// the virtual notch nests inside it. `visibleFrame` already subtracts the
     /// menu bar from the top (the Dock only ever affects the bottom/sides);
@@ -2024,6 +2245,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Where a summoned-from-anywhere open (⌘,) should land: the screen the
     /// mouse is on when it has a panel, else the preferred screen.
     private func displayForSummon() -> CGDirectDisplayID? {
+        // An open card stays the card.
+        if model.open, model.activeDisplay == NotchModel.menuBarCardDisplay {
+            return NotchModel.menuBarCardDisplay
+        }
         if let id = NSScreen.containing(NSEvent.mouseLocation)?.displayID,
            panels[id] != nil {
             return id

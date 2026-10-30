@@ -19,8 +19,14 @@ struct ContentView: View {
     /// one step — mirrors how the open spring already degrades to a plain settle.
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    /// Top centre for an island; top trailing for the floating card, so its
+    /// right margin holds as the open width changes (see `NotchMetrics.floating`).
+    private var islandAlignment: Alignment {
+        metrics.floating ? .topTrailing : .top
+    }
+
     var body: some View {
-        ZStack(alignment: .top) {
+        ZStack(alignment: islandAlignment) {
             // No click-outside scrim: leaving the island already folds the panel
             // (see `collapseOnLeave`), and a scrim would swallow the first click
             // on whatever sits under the canvas.
@@ -74,7 +80,7 @@ struct ContentView: View {
                     }
                 }
         }
-        .frame(width: metrics.canvasWidth, alignment: .top)
+        .frame(width: metrics.canvasWidth, alignment: islandAlignment)
         .ignoresSafeArea()
         // Round start/end drives the fly-into-notch exit — a snappy spring so the
         // tuck reads as one quick, intentional motion (not a slow drift). Panel
@@ -651,7 +657,7 @@ private struct BackgroundWorkEars: View {
                 ZStack {
                     switch stage {
                     case .running(let mood):
-                        NotchiMark(mood: mood, eyeHeight: 8, shared: .work)
+                        NotchiMark(mood: mood, eyeHeight: 8)
                             .transition(.opacity)
                     case .finished(let failed):
                         NotchiFace(expression: failed ? .alert : .saved)
@@ -686,7 +692,8 @@ struct NotchIsland: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// How far the black bleeds above the screen's top edge, guaranteeing no gap.
-    private let topBleed: CGFloat = 6
+    /// None on the floating card, which does not touch the edge.
+    private var topBleed: CGFloat { metrics.floating ? 0 : 6 }
 
     /// The copy-sense ears' measured content widths (via `SenseEarWidthsKey`),
     /// so each shoulder of the flex fits its own content — the phrase/dots/
@@ -897,7 +904,16 @@ struct NotchIsland: View {
         !isOpen && !showsPrompt && model.hoverSensitivity.opensOnClickOnly
     }
 
+    /// `openWidth` for this panel. Settings keeps its full width on the floating
+    /// card: its category column and fixed-width dialogs are laid out for it.
+    private var panelWidth: CGFloat {
+        model.showSettings ? model.openWidth : model.openWidth * metrics.widthScale
+    }
+
     private var width: CGFloat {
+        // The floating card has no resting form. Holding the open width at rest
+        // makes the open grow it downward only.
+        if metrics.floating { return panelWidth }
         // Open: the body keeps `openWidth`; the frame carries the two shoulder
         // flares on top of it, so the form's straight sides land exactly where
         // they always did and only the top edge reaches wider (see `topFlare`).
@@ -912,7 +928,7 @@ struct NotchIsland: View {
     /// pre-shrunk by the mean of the two axes — the *rendered* corner then holds
     /// at `notchRestRadius` through the flex instead of fattening a point.
     private var bottomRadius: CGFloat {
-        if isOpen || showsPrompt { return Tokens.Radius.shell }
+        if isOpen || showsPrompt || metrics.floating { return Tokens.Radius.shell }
         return Tokens.notchRestRadius / ((peekScaleX + peekScaleY) / 2)
     }
 
@@ -926,6 +942,8 @@ struct NotchIsland: View {
     /// this Mac, a taller one on a 16", a 24pt menu bar on an external display).
     private var topFlare: CGFloat {
         let cap = metrics.restHeight / 2          // never eat the black zone
+        // The floating card meets no screen edge, so it has no shoulder to draw.
+        if metrics.floating { return 0 }
         if isOpen || showsPrompt { return min(Tokens.notchShoulderFlare, cap) }
         // No cutout on this screen (external display, non-notched Mac): the drawn
         // island IS the notch, so it has to carry the transition itself — always,
@@ -948,7 +966,13 @@ struct NotchIsland: View {
     /// rim, the glass material and the hit area can never disagree — and so the
     /// flare animates on the open spring with the bottom radius.
     private var islandShape: NotchShape {
-        NotchShape(bottomRadius: bottomRadius, topRadius: topFlare)
+        NotchShape(bottomRadius: bottomRadius, topRadius: topFlare,
+                   topCornerRadius: topCornerRadius)
+    }
+
+    /// The floating card rounds its top corners as much as its bottom ones.
+    private var topCornerRadius: CGFloat {
+        metrics.floating ? Tokens.Radius.shell : 0
     }
 
     /// The body's exit on close. It shrinks toward the notch, anchored at its top
@@ -959,7 +983,7 @@ struct NotchIsland: View {
     /// reaches rest. Reduce Motion keeps a plain fade.
     private var foldIntoNotch: AnyTransition {
         guard !reduceMotion else { return .opacity }
-        let scale = min(1, metrics.restWidth / max(model.openWidth, 1))
+        let scale = min(1, metrics.restWidth / max(panelWidth, 1))
         return .modifier(active: FoldIntoNotch(progress: 1, endScale: scale),
                          identity: FoldIntoNotch(progress: 0, endScale: scale))
     }
@@ -1077,12 +1101,15 @@ struct NotchIsland: View {
         // stale width and snapped to the real one on the last frame.
         .modifier(PullWidthFrame(live: model.threadPullLive,
                                  pulling: isOpen && model.threadPulling,
-                                 width: width, flare: topFlare))
+                                 width: width, flare: topFlare,
+                                 scale: metrics.widthScale))
         .padding(.top, -topBleed)   // pull the form up so it bleeds off the top
         .background(GlassMaterial(bottomRadius: bottomRadius,
                                   topRadius: topFlare,
+                                  topCornerRadius: topCornerRadius,
                                   expanded: isOpen || showsPrompt,
-                                  cameraZone: metrics.restHeight))
+                                  cameraZone: metrics.restHeight,
+                                  sweepsOnOpen: !metrics.floating))
         // The destructive "Clear recent history?" confirmation floats centered over
         // the whole island (scrim + card). Mounted here so it centers in the full
         // glass body; clipped to the island shape below.
@@ -1183,7 +1210,7 @@ struct NotchIsland: View {
         .overlay(alignment: .top) {
             if !isOpen, let id = metrics.displayID, model.prewarmDisplay == id {
                 NotchBody(model: model)
-                    .frame(width: model.openWidth)
+                    .frame(width: panelWidth)
                     .padding(.top, metrics.restHeight)
                     // Not 0: SwiftUI skips drawing fully transparent content,
                     // and the drawing is most of what needs warming.
@@ -1209,7 +1236,7 @@ struct NotchIsland: View {
         // flashed in again as the shell settled; this fade is done in the first
         // part of the motion.
         .overlay(IslandRim(shape: islandShape).animation(.easeOut(duration: 0.14)) {
-            $0.opacity(isOpen || peeking ? 1 : 0)
+            $0.opacity(isOpen || peeking || metrics.floating ? 1 : 0)
         })
         // The island's hover hints, drawn here — OUTSIDE the clip above, so the
         // `NotchShape` can never slice a capsule, and after the rim so nothing
@@ -1271,7 +1298,9 @@ struct NotchIsland: View {
         .offset(x: (earRight - earLeft) / 2)
         // Spring expand (eased by how hard the cursor arrived — see `openSpring`);
         // the collapse settles on the overshoot-free `closeSpring`.
-        .animation(isOpen ? openSpring : closeSpring, value: isOpen)
+        // The floating card opens and closes at full size; its window moves it
+        // (see `AppDelegate.slideCorner`).
+        .animation(metrics.floating ? nil : (isOpen ? openSpring : closeSpring), value: isOpen)
         // The busy/sense extension's own grow/retract (no open/close involved —
         // e.g. the detached answer lands while the notch rests) must NOT bounce:
         // an underdamped settle undershoots the rest width, and for a beat the
@@ -1363,7 +1392,9 @@ struct NotchIsland: View {
                 model.collapseOnLeave(from: metrics.displayID, sequenced: !reduceMotion)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .center)   // center within canvas
+        .padding(.trailing, metrics.floating ? NotchMetrics.floatingInset : 0)
+        // Center within the canvas; the floating card pins to its right edge.
+        .frame(maxWidth: .infinity, alignment: metrics.floating ? .trailing : .center)
     }
 
     // MARK: - Tear-off (detach drag)
@@ -1436,7 +1467,7 @@ struct NotchIsland: View {
     /// wobble that settles. All gains are deliberately small — a hint of give,
     /// not a stunt.
     private func applyEntryKick() {
-        guard !reduceMotion else { return }
+        guard !reduceMotion, !metrics.floating else { return }
         let v = model.entryVelocity
         let speed = (v.dx * v.dx + v.dy * v.dy).squareRoot()
         // A slow deliberate approach gets no kick at all — the physics only
@@ -1566,10 +1597,11 @@ private struct PullWidthFrame: ViewModifier {
     let pulling: Bool
     let width: CGFloat
     let flare: CGFloat
+    let scale: CGFloat
 
     func body(content: Content) -> some View {
         let p = min(max(live.progress, 0), 1)
-        let pulled = Tokens.openWidthIdle + (Tokens.openWidthResult - Tokens.openWidthIdle) * p
+        let pulled = (Tokens.openWidthIdle + (Tokens.openWidthResult - Tokens.openWidthIdle) * p) * scale
         return content.frame(width: pulling ? pulled + flare * 2 : width)
     }
 }

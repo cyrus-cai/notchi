@@ -924,6 +924,12 @@ struct SummonHotKey: Equatable {
     /// Whether this config triggers on a double-tapped bare modifier.
     var isDoubleTap: Bool { doubleTapModifier != 0 }
 
+    /// This config as a chord, for comparing with a recorded one.
+    var chord: ShortcutChord {
+        isDoubleTap ? .doubleTap(doubleTapModifier)
+                    : ShortcutChord(keyCode: keyCode, modifiers: modifiers)
+    }
+
     /// Double-tap ⌥ — the shipped default. Reachable one-handed, taken by no
     /// system shortcut, and never collides with a typed character.
     static let defaultConfig = SummonHotKey(
@@ -933,19 +939,30 @@ struct SummonHotKey: Equatable {
         enabled: true
     )
 
-    private static let keyCodeKey = "summonHotKey.keyCode"
-    private static let modifiersKey = "summonHotKey.modifiers"
-    private static let doubleTapKey = "summonHotKey.doubleTapModifier"
-    private static let enabledKey = "summonHotKey.enabled"
+    /// The top-right card's own shortcut. Off until the user records one.
+    static let cardDefaultConfig = SummonHotKey(keyCode: 0, modifiers: 0, enabled: false)
 
     static var current: SummonHotKey {
-        get {
+        get { read(prefix: "summonHotKey", fallback: .defaultConfig) }
+        set { write(newValue, prefix: "summonHotKey") }
+    }
+
+    static var card: SummonHotKey {
+        get { read(prefix: "cardHotKey", fallback: .cardDefaultConfig) }
+        set { write(newValue, prefix: "cardHotKey") }
+    }
+
+    private static func read(prefix: String, fallback: SummonHotKey) -> SummonHotKey {
+            let keyCodeKey = prefix + ".keyCode"
+            let modifiersKey = prefix + ".modifiers"
+            let doubleTapKey = prefix + ".doubleTapModifier"
+            let enabledKey = prefix + ".enabled"
             let defaults = UserDefaults.standard
             // No stored config at all (neither a recorded chord nor a double-tap
-            // choice) → first run → ship the default (double-tap ⌥).
+            // choice) → first run → ship the default.
             guard defaults.object(forKey: keyCodeKey) != nil
                     || defaults.object(forKey: doubleTapKey) != nil else {
-                return .defaultConfig
+                return fallback
             }
             let code = UInt32(bitPattern: Int32(defaults.integer(forKey: keyCodeKey)))
             let mods = UInt32(bitPattern: Int32(defaults.integer(forKey: modifiersKey)))
@@ -955,14 +972,14 @@ struct SummonHotKey: Equatable {
             let enabled = defaults.object(forKey: enabledKey) as? Bool ?? true
             return SummonHotKey(keyCode: code, modifiers: mods,
                                 doubleTapModifier: dbl, enabled: enabled)
-        }
-        set {
-            let defaults = UserDefaults.standard
-            defaults.set(Int(Int32(bitPattern: newValue.keyCode)), forKey: keyCodeKey)
-            defaults.set(Int(Int32(bitPattern: newValue.modifiers)), forKey: modifiersKey)
-            defaults.set(Int(Int32(bitPattern: newValue.doubleTapModifier)), forKey: doubleTapKey)
-            defaults.set(newValue.enabled, forKey: enabledKey)
-        }
+    }
+
+    private static func write(_ value: SummonHotKey, prefix: String) {
+        let defaults = UserDefaults.standard
+        defaults.set(Int(Int32(bitPattern: value.keyCode)), forKey: prefix + ".keyCode")
+        defaults.set(Int(Int32(bitPattern: value.modifiers)), forKey: prefix + ".modifiers")
+        defaults.set(Int(Int32(bitPattern: value.doubleTapModifier)), forKey: prefix + ".doubleTapModifier")
+        defaults.set(value.enabled, forKey: prefix + ".enabled")
     }
 
     /// A human-readable rendering for the settings row: a double-tapped modifier
@@ -2152,6 +2169,7 @@ enum AppShortcutStore {
 
 enum EditableShortcut: Hashable {
     case summon
+    case card
     case action(AppShortcutAction)
     case prompt(UUID)
 }
@@ -2210,13 +2228,21 @@ struct AppShortcutReference {
                   [(shortcuts[action] ?? action.defaultChord).displayString],
                   editable: .action(action))
         }
+        var summonEntries = [
+            Entry(L("shortcuts.summon"),
+                  summonHotKey.enabled ? [summonHotKey.displayString] : [],
+                  note: summonHotKey.enabled ? nil : L("general.shortcut.off"),
+                  editable: .summon),
+        ]
+        if DebugFeatureFlags.menuBarCard {
+            summonEntries.append(
+                Entry(L("shortcuts.card"),
+                      SummonHotKey.card.enabled ? [SummonHotKey.card.displayString] : [],
+                      note: SummonHotKey.card.enabled ? nil : L("general.shortcut.off"),
+                      editable: .card))
+        }
         return [
-            Group(title: L("shortcuts.group.summon"), entries: [
-                Entry(L("shortcuts.summon"),
-                      summonHotKey.enabled ? [summonHotKey.displayString] : [],
-                      note: summonHotKey.enabled ? nil : L("general.shortcut.off"),
-                      editable: .summon),
-            ]),
+            Group(title: L("shortcuts.group.summon"), entries: summonEntries),
             Group(title: L("shortcuts.group.prompt"), entries: [
                 Entry(L("shortcuts.send"), ["↵"]),
                 Entry(L("shortcuts.sendOther"), [ReservedAppShortcut.sendOther.displayString]),

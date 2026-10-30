@@ -13,6 +13,10 @@ struct NotchShape: InsettableShape {
     /// (the resting island, which lives inside the real cutout and inherits the
     /// hardware's own curve).
     var topRadius: CGFloat = 0
+    /// Radius of ordinary convex top corners, for the floating card on a Dynamic
+    /// Island screen, which does not touch the screen edge. When set, the shape
+    /// is a plain rounded rectangle and `topRadius` is ignored.
+    var topCornerRadius: CGFloat = 0
     /// Inset applied by `.strokeBorder` (and `inset(by:)`) so a stroked edge
     /// stays fully inside the fill instead of being clipped in half.
     var inset: CGFloat = 0
@@ -28,6 +32,13 @@ struct NotchShape: InsettableShape {
     func path(in rect: CGRect) -> Path {
         let rect = rect.insetBy(dx: inset, dy: inset)
         let r = min(bottomRadius, min(rect.width, rect.height) / 2)
+        if topCornerRadius > 0 {
+            let tc = min(topCornerRadius, min(rect.width, rect.height) / 2)
+            return UnevenRoundedRectangle(topLeadingRadius: tc, bottomLeadingRadius: r,
+                                          bottomTrailingRadius: r, topTrailingRadius: tc,
+                                          style: .circular)
+                .path(in: rect)
+        }
         // The flare can never eat the bottom corners or cross the middle.
         let tr = max(0, min(topRadius,
                             min(rect.width / 2 - r, rect.height - r)))
@@ -87,6 +98,8 @@ struct GlassMaterial: View {
     var bottomRadius: CGFloat
     /// The island's concave top shoulders — see `NotchShape.topRadius`.
     var topRadius: CGFloat = 0
+    /// The floating card's convex top corners — see `NotchShape.topCornerRadius`.
+    var topCornerRadius: CGFloat = 0
     /// Whether the island is expanded. Resting (false) blends with the physical
     /// black bezel → near-opaque dark; expanded (true) becomes the translucent
     /// Control-Center glass that refracts the background.
@@ -94,6 +107,9 @@ struct GlassMaterial: View {
     /// Height of the camera/lens zone at the very top that gets extra darkening
     /// so the hardware notch stays discreet over a transparent slab.
     var cameraZone: CGFloat = Tokens.notchTopHeight
+    /// Plays the light sweep on open. Off on the floating card, which arrives
+    /// whole by moving its window.
+    var sweepsOnOpen: Bool = true
 
     /// Drives the one-shot light sweep that plays as the panel expands. Flipped
     /// by `.onChange(of: expanded)` so the shimmer travels exactly once per open.
@@ -128,7 +144,8 @@ struct GlassMaterial: View {
     }
 
     var body: some View {
-        let shape = NotchShape(bottomRadius: bottomRadius, topRadius: topRadius)
+        let shape = NotchShape(bottomRadius: bottomRadius, topRadius: topRadius,
+                               topCornerRadius: topCornerRadius)
 
         // Build the whole material — glass + tint + cap + rim — then HARD-CUT it
         // to the shape as the final step. Clipping the composited group (rather
@@ -147,7 +164,9 @@ struct GlassMaterial: View {
             // frame cost that frame its budget — a visible hitch right as the
             // expansion starts.
             diagonalGloss(shape).opacity(expanded ? 1 : 0)
-            blackCap(shape)
+            // No camera zone on the floating card; with a zero zone the cap
+            // would still paint its 46pt fade across the top.
+            if cameraZone > 0 { blackCap(shape) }
             expandShimmer(shape).opacity(expanded ? 1 : 0)
             // NOTE: the edge rim is intentionally NOT drawn here. It's stamped over
             // the island as a separate overlay *after* the bottom/left/right edge
@@ -187,7 +206,7 @@ struct GlassMaterial: View {
                 .allowsHitTesting(false)
         )
         .onChange(of: expanded) { _, isOpen in
-            if isOpen {
+            if isOpen, sweepsOnOpen {
                 // Reset to the top instantly, then drive the sweep down on the
                 // next runloop tick so the animation always plays from the start.
                 sweep = false

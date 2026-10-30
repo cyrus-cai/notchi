@@ -107,6 +107,27 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.23",
+            date: "2026-10-30",
+            headline: "Loops now run until you stop them.",
+            features: [
+                "Loops no longer end after a week. They stop when you stop them or on the end date you name.",
+                "Answer with the lid closed moved to Settings → General and is on by default for new Telegram bots.",
+                "Models that cost $0 now show FREE instead of 100% OFF.",
+            ],
+            improvements: [
+                "Emoji reactions, link checks, and running commands are now on by default. To turn one off, ask Notchi in chat.",
+                "Notchi's animation now moves in step across the panel, the notch, and the menu bar.",
+                "Models and pricing now lists models from cheapest to most expensive.",
+                "Settings now shows how much a survey reward is worth, and tells you once when it is added.",
+            ],
+            fixes: [
+                "Messages no longer shift while a new bubble lands.",
+                "A follow-up no longer pushes the question down while it waits.",
+                "Recent no longer ends on a hard cut when agent status rows make it overflow.",
+            ]
+        ),
+        Entry(
             version: "0.9.22",
             date: "2026-10-29",
             headline: "Notchi now syncs with Telegram both ways.",

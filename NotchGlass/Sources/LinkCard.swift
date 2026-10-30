@@ -1220,6 +1220,10 @@ final class BubblePacer: ObservableObject {
     /// Land this turn's bubbles without the reply tone.
     func silence(_ id: UUID) { silenced.insert(id) }
 
+    /// Called with a bubble's index as it lands, at its tone. For a turn no view
+    /// is drawing, whose bubbles arrive as cards (`NotchModel.cardStreamTick`).
+    var landed: [UUID: (Int) -> Void] = [:]
+
     /// A card whose page is slow to load lands anyway after this long. Past
     /// `LPMetadataProvider`'s 10 s timeout, so a card lands only once drawn:
     /// a Wikipedia page takes 4–7 s to read, and landing before that played
@@ -1366,8 +1370,14 @@ final class BubblePacer: ObservableObject {
         // again and nothing drew the landed bubble until something else did,
         // well after its tone.
         records[id] = record
-        revision += 1
+        // One transaction for the landing and the scroll that follows it: the
+        // threads scroll to their tail on `revision`, inside this block. On
+        // separate animations the scroll and the bubbles moved on different
+        // curves, and the rows under the new bubble shifted by up to 14pt and
+        // back while it landed.
+        withAnimation(AssistantTurnView.landingSpring) { revision += 1 }
         // Each bubble plays the reply tone as it lands, like the first.
         if ready, !silenced.contains(id) { MessageTone.play(MessageTone.received) }
+        landed[id]?(index)
     }
 }

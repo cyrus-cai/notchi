@@ -4502,7 +4502,7 @@ struct DetachedThreadView: View {
                     // after the stream has ended (`BubblePacer`). Follow each one.
                     .onReceive(BubblePacer.shared.$revision.dropFirst()) { _ in
                         if compactShortcut, !compactAnswerIsCapped { return }
-                        withAnimation(.easeOut(duration: 0.2)) {
+                        withAnimation(AssistantTurnView.landingSpring) {
                             proxy.scrollTo(Self.bottomID, anchor: .bottom)
                         }
                     }

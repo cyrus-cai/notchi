@@ -89,8 +89,12 @@ final class TelegramBridge: ObservableObject {
     private static let messageLimit = 3800
 
     /// "Answer with the lid closed": while polling, the Mac does not sleep
-    /// when the lid closes (`pmset disablesleep`).
-    @Published private(set) var answersWithLidClosed = UserDefaults.standard.bool(forKey: TelegramBridge.lidKey)
+    /// when the lid closes (`pmset disablesleep`). On unless it was set before.
+    /// A bot paired before this default keeps the off it was showing, so no
+    /// password dialog comes up for it.
+    @Published private(set) var answersWithLidClosed =
+        UserDefaults.standard.object(forKey: TelegramBridge.lidKey) as? Bool
+            ?? (UserDefaults.standard.object(forKey: TelegramBridge.ownerKey) == nil)
     @Published private(set) var lidBusy = false
     private static let lidKey = "TelegramAnswerWithLidClosed"
 
@@ -196,11 +200,17 @@ final class TelegramBridge: ObservableObject {
 
     // MARK: - Lid
 
-    /// Turning it on installs the sudo rule `LidSleep` runs under and turns lid
-    /// sleep off; turning it off does the reverse. Each asks for an
-    /// administrator password once.
+    /// With a paired bot, turning it on installs the sudo rule `LidSleep` runs
+    /// under and turns lid sleep off; turning it off does the reverse. Each asks
+    /// for an administrator password once. With nothing to change on the system
+    /// yet, only the choice is saved, and pairing installs the rule.
     func setAnswersWithLidClosed(_ on: Bool) async {
         guard !lidBusy, on != answersWithLidClosed else { return }
+        if !LidSleep.ruleInstalled, !on || owner == nil {
+            answersWithLidClosed = on
+            UserDefaults.standard.set(on, forKey: Self.lidKey)
+            return
+        }
         lidBusy = true
         defer { lidBusy = false }
         let done = on ? await LidSleep.install(disableNow: pollTask != nil)
@@ -211,9 +221,22 @@ final class TelegramBridge: ObservableObject {
         LidSleep.applied = on && pollTask != nil
     }
 
-    /// Lid sleep is off exactly while the setting is on and the bot polls.
+    /// First pairing with the setting on. Declining the password dialog turns
+    /// the setting off.
+    private func installLidRuleAfterPairing() async {
+        guard answersWithLidClosed, !LidSleep.ruleInstalled, !lidBusy else { return }
+        lidBusy = true
+        defer { lidBusy = false }
+        let done = await LidSleep.install(disableNow: pollTask != nil)
+        answersWithLidClosed = done
+        UserDefaults.standard.set(done, forKey: Self.lidKey)
+        LidSleep.applied = done && pollTask != nil
+    }
+
+    /// Lid sleep is off exactly while the setting is on, its sudo rule is in
+    /// place and the bot polls.
     private func applyLidSleep() {
-        let want = answersWithLidClosed && pollTask != nil
+        let want = answersWithLidClosed && pollTask != nil && LidSleep.ruleInstalled
         guard want != LidSleep.applied else { return }
         LidSleep.applied = want
         Task.detached { LidSleep.set(disabled: want) }
@@ -297,6 +320,8 @@ final class TelegramBridge: ObservableObject {
     private enum LidSleep {
         static let rulePath = "/etc/sudoers.d/notchi-lid"
         private static let appliedKey = "TelegramLidSleepDisabled"
+
+        static var ruleInstalled: Bool { FileManager.default.fileExists(atPath: rulePath) }
 
         /// Whether this app turned lid sleep off and has not turned it back on.
         static var applied: Bool {
@@ -399,6 +424,7 @@ final class TelegramBridge: ObservableObject {
             UserDefaults.standard.set(name, forKey: Self.ownerNameKey)
             pairingUntil = nil
             state = .connected(bot: UserDefaults.standard.string(forKey: Self.botKey) ?? "", owner: name)
+            Task { await installLidRuleAfterPairing() }
         }
         guard chatID == owner else { return }
         if let group = message["media_group_id"] as? String {

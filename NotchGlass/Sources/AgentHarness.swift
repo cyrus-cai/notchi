@@ -1178,7 +1178,7 @@ struct AgentHarness {
     private func runConcurrently(_ calls: [ToolInvocation]) async -> [ToolInvocation] {
         // Shell commands run in the order the model wrote them, and one
         // confirmation card is up at a time.
-        if calls.contains(where: { $0.name == RunShellTool.toolName }) {
+        if calls.contains(where: { $0.name == RunShellTool.toolName || $0.name == CloudMachineTool.toolName }) {
             var out: [ToolInvocation] = []
             for call in calls { out.append(await registry.run(call)) }
             return out
@@ -1356,6 +1356,11 @@ struct AgentHarness {
     /// round, where a search reads as "digging deeper" rather than a fresh start.
     /// Falls back to a generic line for unmapped tools.
     private func activityLabel(for calls: [ToolInvocation], isRepeatRound: Bool) -> String {
+        // Work leaving this Mac is named whatever runs beside it, so it never
+        // reads like a local command.
+        if calls.contains(where: { $0.capability == CloudMachineTool.toolName }) {
+            return L("agent.activity.cloudMachine")
+        }
         if let first = calls.first, calls.count == 1 {
             switch first.capability {
             case WebSearchTool.toolName:

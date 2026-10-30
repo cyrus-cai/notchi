@@ -7,11 +7,8 @@ import Foundation
 /// skips a feature it does not have. `NotchModel` holds what each one needs and
 /// how it is switched on.
 enum NudgeFeature: String, CaseIterable {
-    case emojiReactions
-    case linkPrecheck
     case suggestFollowUp
     case memory
-    case runCommands
 }
 
 // MARK: - Policy
@@ -118,9 +115,6 @@ final class FeatureNudges {
     private static let lastAnyKey = "nudge.lastShownAt"
     private static let versionKey = "nudge.version"
     private static let versionSinceKey = "nudge.versionSince"
-    /// Set by the emoji reactions guide that shipped before nudges. It counts
-    /// as one show of that feature.
-    private static let legacyReactionsKey = "emojiReactionsIntroShown"
 
     /// `NOTCH_DEMO_NUDGE=<path to a policy file>` reads the policy from disk
     /// and shows its first entry on every launch, skipping every condition.
@@ -216,18 +210,13 @@ final class FeatureNudges {
     }
 
     private func shows(of nudge: NudgePolicy.Nudge, feature: NudgeFeature) -> Int {
-        let defaults = UserDefaults.standard
-        let legacy = feature == .emojiReactions && defaults.bool(forKey: Self.legacyReactionsKey)
-        return defaults.integer(forKey: "nudge.shown.\(nudge.id)") + (legacy ? 1 : 0)
+        UserDefaults.standard.integer(forKey: "nudge.shown.\(nudge.id)")
     }
 
     private static func switchKey(_ feature: NudgeFeature) -> String {
         switch feature {
-        case .emojiReactions: return "emojiReactionsEnabled"
-        case .linkPrecheck: return LinkGate.defaultsKey
         case .suggestFollowUp: return "suggestFollowUpEnabled"
         case .memory: return UserMemory.enabledKey
-        case .runCommands: return "shellToolEnabled"
         }
     }
 

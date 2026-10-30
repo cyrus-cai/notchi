@@ -48,9 +48,10 @@ struct NotchiMark: View {
     var eyeHeight: CGFloat = 10
     /// Whole-mark opacity, for homes quieter than the wait line.
     var dim: Double = 1
-    /// A director shared with other marks, so they play the same forms at the
-    /// same moment. Nil gives the mark its own.
-    var shared: NotchiDirector? = nil
+    /// The director it draws from. Every mark shares one by default, so the
+    /// panel, the resting notch and the menu bar show the same form at the same
+    /// moment. Nil gives the mark its own.
+    var shared: NotchiDirector? = .work
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var own = NotchiDirector()
@@ -509,9 +510,14 @@ enum NotchiForm: CaseIterable {
 /// Picks which form plays when, and blends one into the next. A reference
 /// type held in `@State` so the canvas can advance it while drawing.
 final class NotchiDirector {
-    /// The background work's eyes: the resting notch's ear on every display
-    /// and the menu bar icon draw from this one, so they move together.
+    /// The work's eyes: the panel, the resting notch's ear on every display and
+    /// the menu bar icon draw from this one, so they move together.
     static let work = NotchiDirector()
+
+    /// What the running work is doing, set in one place (`AppDelegate`). While
+    /// set it overrides the mood each caller asks for: callers asking for
+    /// different moods would restart the form on every frame.
+    var workMood: NotchiMark.Mood?
 
     private struct Play {
         let form: NotchiForm
@@ -549,7 +555,10 @@ final class NotchiDirector {
         return Double.random(in: 0..<1, using: &rng)
     }
 
-    func blobs(at time: Double, mood: NotchiMark.Mood) -> [NotchiBlob] {
+    func blobs(at time: Double, mood asked: NotchiMark.Mood) -> [NotchiBlob] {
+        var mood = workMood ?? asked
+        // The same forms, so asking for one or the other does not restart them.
+        if mood == .waiting { mood = .composing }
         // Nobody drew for a while (the work ended): start fresh instead of
         // playing through every form that would have run meanwhile.
         if time - latest > 1 { current = nil; previous = nil }

@@ -52,6 +52,7 @@ struct NotchBody: View {
     /// yet (the card can be armed by ⌘⇧I before the chip ever mounts).
     @State private var agentChipAnchorX: CGFloat? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.notchMetrics) private var metrics
     /// Drives the custom field's first-responder. Set shortly after the panel
     /// opens so the caret lands without a click (the AppDelegate has just made
     /// the panel key; a tiny delay lets that settle first).
@@ -698,7 +699,9 @@ struct NotchBody: View {
                 // (The immersive variant above handles the overflowing case.)
                 if !promptHidesRecent && recentHasContent && model.showHistory {
                     historySection
-                        .padding(.top, 12)
+                        // An overflowing list carries a 12pt fade reserve of its
+                        // own (`compactTopFade`), which takes the place of this gap.
+                        .padding(.top, compactListOverflows ? 0 : 12)
                         .transition(moduleTransition)
                 }
 
@@ -777,14 +780,16 @@ struct NotchBody: View {
     /// Visible height of the peek at rest: the bottom edge of the newest
     /// answer's last card and a sliver above it — and the gap under it.
     private static let peekHeight: CGFloat = 30
-    private static let peekGap: CGFloat = 6
+    /// Wider on the floating card, whose prompt row has no padding of its own.
+    private var peekGap: CGFloat { metrics.floating ? 13 : 6 }
     /// The follow-up row on one line: `ComposerBox`'s resting height.
     private static let composerRowHeight: CGFloat = Tokens.Control.rail
     /// The result page's text column plus the turn stack's 8pt trailing inset.
     /// The reveal lays the thread out at this width at every progress, so no
     /// line re-wraps while the panel widens under it.
-    private static let resultStackWidth: CGFloat =
-        Tokens.openWidthResult - (panelPadding + resultSideInset) * 2
+    private var resultStackWidth: CGFloat {
+        Tokens.openWidthResult * metrics.widthScale - (Self.panelPadding + Self.resultSideInset) * 2
+    }
 
     /// Where a thread pull ends: the result page's geometry for the thread it
     /// opens, from the same constants `resultView` is built on. Short thread:
@@ -832,7 +837,7 @@ struct NotchBody: View {
             active: pulling,
             targets: revealTargets,
             peekHeight: Self.peekHeight,
-            peekGap: Self.peekGap,
+            peekGap: peekGap,
             sideInset: NotchBody.resultSideInset,
             showsHeader: pulling,
             header: RevealStill(key: [model.isAnswerPinned, headerChipsShown]) {
@@ -844,12 +849,12 @@ struct NotchBody: View {
             .equatable(),
             thread: RevealStill(key: RevealThreadKey(turns: shown, measures: pulling)) {
                 revealThread(shown, in: thread, measures: pulling)
-                    .frame(width: Self.resultStackWidth, alignment: .leading)
+                    .frame(width: resultStackWidth, alignment: .leading)
             }
             .equatable(),
             frost: RevealStill(key: RevealThreadKey(turns: resting, measures: false)) {
                 revealThread(resting, in: live ?? item.conversation, measures: false)
-                    .frame(width: Self.resultStackWidth, alignment: .leading)
+                    .frame(width: resultStackWidth, alignment: .leading)
             }
             .equatable())
         .contentShape(Rectangle())
@@ -882,7 +887,7 @@ struct NotchBody: View {
         // A pull draws the copy marks the result page draws. The one under the
         // newest turn is not in the peek, so it grows in with the pull below
         // the stack (`RevealCopyMarkTail`) and the turns above rise to make room.
-        let marks = measures && !model.threadPullSubmitting
+        let marks = measures
             ? model.copyThreadMarks(for: thread.filter(\.isDrawn), in: model.threadPullItemID) : [:]
         let lastID = turns.last?.id
         let tail = lastID.flatMap { marks[$0] }
@@ -938,7 +943,7 @@ struct NotchBody: View {
     private func syncThreadPullSpan() {
         let targets = revealTargets
         let opened = targets.headerSlot + targets.viewport + targets.gap + Self.composerRowHeight
-        let rest = Self.peekHeight + Self.peekGap + idleBottomHeight
+        let rest = Self.peekHeight + peekGap + idleBottomHeight
         model.threadPullSpan = min(max(opened - rest, 160), 420)
     }
 
@@ -984,6 +989,8 @@ struct NotchBody: View {
                 // doesn't linger over a line the user is actively rewriting.
                 if model.noteError != nil { model.noteError = nil }
             }
+            // The floating card's corners are too round for the 15pt inset alone.
+            .padding(.leading, metrics.floating ? 6 : 0)
             // The idle page has no header, so the input row's free strip is its
             // tear-off grip — see `detachGrip`.
             .background(detachGrip)
@@ -1363,7 +1370,7 @@ struct NotchBody: View {
     /// to the manage bar, so the row can end up empty — and an empty row would still
     /// spend its 10pt top padding, padding out the immersive header for nothing.
     private var bucketRowHasContent: Bool {
-        !recentListShown && !model.usingPromptShortcutContext
+        !recentListShown && !model.usingPromptShortcutContext && !metrics.floating
     }
 
     /// The idle prompt's Recent-list disclosure (and, once pinned, the tack) as a
@@ -1371,8 +1378,10 @@ struct NotchBody: View {
     /// one of two places: the bucket row's trailing edge when a local agent CLI
     /// gives us that row, else the input row's own trailing slot.
     private func idleTrailingCluster(chipSize: CGFloat = Tokens.Control.chip,
-                                     flat: Bool = false) -> IdleTrailingCluster {
-        IdleTrailingCluster(
+                                     flat: Bool = false,
+                                     moreMenu: Bool? = nil) -> IdleTrailingCluster {
+        let moreMenu = moreMenu ?? flat
+        return IdleTrailingCluster(
             pinned: model.isAnswerPinned,
             recentOpen: model.showHistory,
             showsRecent: recentHasContent,
@@ -1394,12 +1403,12 @@ struct NotchBody: View {
                     model.highlightedHistoryIndex = nil
                 }
             },
-            openSettings: flat ? {
+            openSettings: moreMenu ? {
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                     model.openSettings()
                 }
             } : nil,
-            openReleaseNotes: flat ? {
+            openReleaseNotes: moreMenu ? {
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
                     model.openWhatsNew(on: nil)
                 }
@@ -2695,9 +2704,9 @@ struct NotchBody: View {
 
             // The Recent (+ pin) cluster, handed over from the header for as long as
             // the list is up (see `bucketRow` / `inputRow`).
-            // Sized to the ⋯ chip opposite it (the rail, not the prompt row's
-            // chip) — the bar's two corners are one pair of controls.
-            let cluster = idleTrailingCluster(chipSize: Tokens.Control.rail)
+            // Drawn flat, like the home row's chips. No ⋯ menu here: with the list
+            // open the chip is the Recent toggle.
+            let cluster = idleTrailingCluster(flat: true, moreMenu: false)
             if !cluster.isEmpty {
                 cluster
             }
@@ -3874,6 +3883,23 @@ struct NotchBody: View {
     private let compactRowHeight: CGFloat = 34
     private let historyFooterHeight: CGFloat = 50
 
+    /// The compact list's height before any row is measured.
+    /// `historyFooterActions` rides at the tail of that content, so its height counts
+    /// here too — otherwise a 5-row list would quietly scroll its footer off a hard,
+    /// un-faded edge.
+    private var compactEstimatedContentHeight: CGFloat {
+        CGFloat(model.recentVisible.count) * compactRowHeight
+            + (model.recentVisible.isEmpty ? 0 : historyFooterHeight)
+    }
+
+    /// Whether the compact list outgrows its frame and scrolls. The measured height
+    /// wins once it exists: the estimate leaves out the agent status rows at the head
+    /// of the list, so a list they push past the frame would scroll with no taper and
+    /// end on a hard cut.
+    private var compactListOverflows: Bool {
+        (compactContentHeight ?? compactEstimatedContentHeight) > compactListHeight
+    }
+
     /// The recent list. `immersive` swaps the compact, below-the-header list for
     /// the tall variant whose content scrolls UP behind the floating input —
     /// frosting and fading as it goes (see `immersiveTopReach`). Only used once
@@ -3912,13 +3938,9 @@ struct NotchBody: View {
         // up behind the floating input, so it DOES taper (fade + frost) there.
         //
         // The compact bottom taper turns on exactly when the content outgrows the
-        // 220pt frame. `historyFooterActions` rides at the tail of that content, so
-        // its height counts here too — otherwise a 5-row list would quietly scroll
-        // its footer off a hard, un-faded edge.
-        let contentHeight =
-            CGFloat(model.recentVisible.count) * compactRowHeight
-            + (model.recentVisible.isEmpty ? 0 : historyFooterHeight)
-        let overflowing = contentHeight > compactListHeight
+        // 220pt frame (see `compactListOverflows`).
+        let contentHeight = compactEstimatedContentHeight
+        let overflowing = compactListOverflows
         return ScrollViewReader { proxy in
         ScrollView {
             // Lazy: the data holds up to `notchRecentCap` (100) rows but only ~6–9
@@ -4061,15 +4083,16 @@ struct NotchBody: View {
             // visible through/around the buttons) and only needs a little clearance
             // off the rounded corner; the compact list reserves the full edgeFade so
             // its bottom taper falls over empty space, not a row.
+            // The rows' real height, before the fade reserves below are added, so
+            // turning the tapers on can't feed back into whether they're on.
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                if !immersive { compactContentHeight = height }
+            }
             .padding(.top, immersive ? 0 : (overflowing ? compactTopFade : 0))
             // Immersive: a bottom runway rows scroll DOWN into behind the manage bar
             // (always present — the immersive layout only mounts for an overflowing
             // list). Compact: the edgeFade reserve, only when actually overflowing.
             .padding(.bottom, immersive ? immersiveBottomReach : (overflowing ? edgeFade : 0))
-            // The rows' real height, which the compact frame shrinks to.
-            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
-                if !immersive { compactContentHeight = height }
-            }
             // A real AppKit scroll-offset observer catches trackpad and mouse-wheel
             // scrolling on macOS 14. As soon as the Recent content moves under the
             // popup, fold the popup out of the way.
@@ -4287,7 +4310,7 @@ struct NotchBody: View {
     private var isAnswerClipped: Bool {
         let tall = measuredAnswerHeight > 0
             ? measuredAnswerHeight > answerMaxHeight
-            : Self.estimatedThreadExceeds(model.turns, answerMaxHeight)
+            : Self.estimatedThreadExceeds(model.turns, answerMaxHeight, widthScale: metrics.widthScale)
         // Older turns not mounted yet mount from the scroller
         // (`OlderTurnsLoader`), so a thread that has some scrolls even when the
         // mounted turns are short — a long question folded behind Show more
@@ -4303,10 +4326,11 @@ struct NotchBody: View {
     /// transcript. Accuracy only matters near the boundary, where being wrong
     /// costs exactly what the old behaviour cost everywhere: one crossover.
     private static func estimatedThreadExceeds(_ turns: [NotchModel.Turn],
-                                               _ ceiling: CGFloat) -> Bool {
+                                               _ ceiling: CGFloat,
+                                               widthScale: CGFloat) -> Bool {
         // The thread's text column: the result panel less its padding and the
         // turn stack's own trailing inset.
-        let column = Tokens.openWidthResult - (panelPadding + resultSideInset) * 2 - 8
+        let column = Tokens.openWidthResult * widthScale - (panelPadding + resultSideInset) * 2 - 8
         // Wrapped height of one run of text. A CJK glyph takes about a full em,
         // latin about half — precise enough to tell a two-line question from a
         // forty-line report.
@@ -5545,7 +5569,7 @@ struct NotchBody: View {
             // The bubbles after an answer's first land one at a time, some after
             // the stream has ended (`BubblePacer`). Follow each one.
             .onReceive(BubblePacer.shared.$revision.dropFirst()) { _ in
-                withAnimation(.easeOut(duration: 0.2)) {
+                withAnimation(AssistantTurnView.landingSpring) {
                     proxy.scrollTo(scrollBottomID, anchor: .bottom)
                 }
             }
@@ -5624,10 +5648,11 @@ struct NotchBody: View {
     /// The compact RECENT list's TOP taper — deliberately shorter than `edgeFade`.
     /// The compact list is only ~6 rows tall, so mirroring the full 64pt reserve up
     /// top would spend two rows of the viewport on empty runway. This is just enough
-    /// to swallow a row on its way out under the RECENT header instead of cutting it
+    /// to swallow a row on its way out under the prompt instead of cutting it
     /// mid-glyph, and the scroll content carries a matching top inset so the first
-    /// row still rests below the gradient at full strength.
-    private let compactTopFade: CGFloat = 24
+    /// row still rests below the gradient at full strength. Equal to the 12pt gap a
+    /// short list keeps under the prompt, so both lists start at the same height.
+    private let compactTopFade: CGFloat = 12
 
     /// Stable id for the invisible spacer at the very bottom of the thread; the
     /// `ScrollViewReader` scrolls to it to keep the newest text in view.
@@ -6030,7 +6055,7 @@ struct NotchBody: View {
                     // also routes by intent; this `followUp` branch is only the
                     // defensive path if `inputRow` is ever reused with `followUp: true`,
                     // and it keeps the plain-ask behaviour for that unused case.
-                    onSubmit: { followUp ? model.submit() : model.submitCurrent() },
+                    onSubmit: { followUp ? model.submit() : model.submitFromPrompt() },
                     // Idle prompt only: ↑/↓ are shared between shell-style recall
                     // (fill the box with a past question) and the recent list, with
                     // a fixed precedence — an open, highlighted list owns the keys;
@@ -6243,7 +6268,11 @@ struct NotchBody: View {
         // Grows with the box: the prompt keeps its resting breathing room and the row
         // gains a line's height for every line the text wraps to, so the panel unfolds
         // downward instead of the text scrolling away sideways.
-        .frame(height: followUp ? 30 : max(NotchBody.idleRowHeight, inputHeight + idleRowVerticalPadding))
+        // The floating card has no row below the prompt, so the text line alone
+        // sits on the panel's 15pt inset, top and bottom alike.
+        .frame(height: followUp ? 30
+               : metrics.floating ? inputHeight
+               : max(NotchBody.idleRowHeight, inputHeight + idleRowVerticalPadding))
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: model.hasText)
         // No `.animation(…, value: inputHeight)` here on purpose. It only ever
         // sprang THIS row while its siblings and the glass shell around it snapped,
@@ -6531,7 +6560,7 @@ struct NotchBody: View {
             // instead of being asked to the AI. A plain question still resolves
             // to `.chat` → `submit()`, which continues the existing thread
             // (firstTurn = turns.isEmpty), so the common path is unchanged.
-            onSubmit: { model.submitCurrent() },
+            onSubmit: { model.submitFromPrompt() },
             onPasteImage: { model.handleComposePasteImage() },
             onBack: {
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
@@ -6567,7 +6596,7 @@ struct NotchBody: View {
                         .transition(.scale(scale: 0.6).combined(with: .opacity))
                     }
                 } else if followUpHasDraft {
-                    SendButton(compact: true) { model.submitCurrent() }
+                    SendButton(compact: true) { model.submitFromPrompt() }
                         .transition(.scale(scale: 0.6).combined(with: .opacity))
                 }
             })
@@ -7742,9 +7771,15 @@ struct IdleTrailingCluster: View {
                     // A downward chevron reads as "pull the recent list down"; it flips
                     // to point up once the list is open, so the same control says
                     // "close" on the way back.
-                    Image(systemName: "chevron.down")
-                        .rotationEffect(.degrees(recentOpen ? 180 : 0))
-                        .animation(.spring(response: 0.32, dampingFraction: 0.8), value: recentOpen)
+                    Group {
+                        if flat {
+                            LucideIcon(mark: LucideIcons.chevronDown, size: glyphSize + 2)
+                        } else {
+                            Image(systemName: "chevron.down")
+                        }
+                    }
+                    .rotationEffect(.degrees(recentOpen ? 180 : 0))
+                    .animation(.spring(response: 0.32, dampingFraction: 0.8), value: recentOpen)
                 }
                 .transition(.scale(scale: 0.7).combined(with: .opacity))
             }

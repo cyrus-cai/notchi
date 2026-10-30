@@ -1,20 +1,17 @@
 import AppKit
 import SwiftUI
 
-/// The link pre-check (Settings → Chat, off by default). With it on, a clicked
-/// http(s) link is sent to the gateway's Jev route (`/v1/linkcheck`) before it
-/// reaches the browser. `open` opens it as usual; `warn` puts a confirmation
-/// card on the surface the click came from.
+/// The link pre-check, on unless turned off in chat (`ChatSwitch.linkCheck`).
+/// A clicked http(s) link is sent to the
+/// gateway's Jev route (`/v1/linkcheck`) before it reaches the browser. `open`
+/// opens it as usual; `warn` puts a confirmation card on the surface the click
+/// came from.
 ///
-/// With the setting off, without an account token, or when the gateway gives no
-/// answer, the link opens directly.
+/// Without an account token, or when the gateway gives no answer, the link
+/// opens directly.
 @MainActor
 final class LinkGate: ObservableObject {
     static let shared = LinkGate()
-
-    static let defaultsKey = "linkPrecheckEnabled"
-
-    static var isEnabled: Bool { UserDefaults.standard.bool(forKey: defaultsKey) }
 
     /// A flagged link waiting for the user's answer, and the window it was
     /// clicked in.
@@ -103,7 +100,8 @@ final class LinkGate: ObservableObject {
 
     private static func applies(to url: URL) -> Bool {
         let scheme = url.scheme?.lowercased()
-        return isEnabled && (scheme == "http" || scheme == "https") && NoNoAccount.shared.canDecide
+        return ChatSwitch.linkCheck && (scheme == "http" || scheme == "https")
+            && NoNoAccount.shared.canDecide
     }
 
     /// What is sent: the address without its password and fragment. The query

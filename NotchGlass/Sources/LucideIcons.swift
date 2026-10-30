@@ -98,6 +98,11 @@ enum LucideIcons {
         "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z",
     ], viewBox: 24)
 
+    /// Lucide `chevron-down` — the Recent disclosure on the flat chips.
+    static let chevronDown = Mark(paths: [
+        "m6 9 6 6 6-6",
+    ], viewBox: 24)
+
     static let clock = Mark(paths: [
         "M12 2a10 10 0 1 0 0 20 10 10 0 1 0 0-20",
         "M12 6v6l4 2",
