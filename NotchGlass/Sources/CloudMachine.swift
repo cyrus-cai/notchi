@@ -477,8 +477,7 @@ actor InstaBoxMachine {
 /// `run_shell` because the two reach different computers and the model has to
 /// choose. Commands there touch nothing on this Mac, so `shell`, `read` and
 /// `write` ask nothing. What crosses between the two, or opens the machine to the
-/// internet, waits on a card; `confirm` is nil where no one is at the Mac, and
-/// those actions are then refused.
+/// internet, waits on a card.
 struct CloudMachineTool: NotchTool {
     static let toolName = "cloud_machine"
     let name = CloudMachineTool.toolName
@@ -513,7 +512,7 @@ struct CloudMachineTool: NotchTool {
     ]
 
     /// Shows a question on the round's card; true when the user allowed it.
-    let confirm: (@Sendable (String) async throws -> Bool)?
+    let confirm: @Sendable (String) async throws -> Bool
 
     private static let readLimit = 800_000
     private static let uploadLimit = 2_000_000_000
@@ -590,7 +589,6 @@ struct CloudMachineTool: NotchTool {
     }
 
     private func upload(_ input: [String: Any]) async throws -> String {
-        guard let confirm else { return "Uploading needs the user at their Mac. It was not done." }
         guard let raw = Self.text(input, "local_path") else { return "Error: local_path is required." }
         let local = URL(fileURLWithPath: (raw as NSString).expandingTildeInPath)
         let lowered = local.path.lowercased()
@@ -658,7 +656,6 @@ struct CloudMachineTool: NotchTool {
     }
 
     private func download(_ input: [String: Any]) async throws -> String {
-        guard confirm != nil else { return "Saving to this Mac needs the user at it. It was not done." }
         guard let raw = Self.text(input, "path") else { return "Error: path is required." }
         let path = Self.remotePath(raw)
         let temp = try await InstaBoxMachine.shared.download(path)
@@ -678,7 +675,6 @@ struct CloudMachineTool: NotchTool {
     }
 
     private func publish(_ input: [String: Any]) async throws -> String {
-        guard let confirm else { return "Publishing a port needs the user at their Mac. It was not done." }
         guard let port = (input["port"] as? NSNumber)?.intValue else { return "Error: port is required." }
         guard try await confirm(L("cloud.confirm.publish", String(port))) else {
             return "The user did not approve publishing this port. It was not done. Do not retry it."

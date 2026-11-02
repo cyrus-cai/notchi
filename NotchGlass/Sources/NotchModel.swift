@@ -292,6 +292,13 @@ final class NotchModel: ObservableObject {
         /// dropped or the user pressed stop with text already written. Draws
         /// "Continue" under it (`continueAnswer`). Persisted.
         var interrupted: Bool = false
+        /// One line per tool call this *assistant* answer made, with what came
+        /// back (`ToolTrail.line`). `wireContext` writes them above the answer,
+        /// so a later round knows what was run and where files went; the text
+        /// alone left the model guessing ("lösche die Screenshots" deleted
+        /// nothing — the round that took them was down to one sentence).
+        /// Not drawn. Persisted.
+        var toolTrail: [String] = []
 
         struct Capture: Codable, Equatable, Hashable {
             var kind: CaptureRequest.Kind
@@ -326,7 +333,7 @@ final class NotchModel: ObservableObject {
         // its whole thread down with it. `decodeIfPresent` + defaults is what keeps old saved conversations
         // loadable. `role`/`text` are required — every saved turn has them.
         // `toolActivity` is deliberately absent: it's runtime-only UI state.
-        enum CodingKeys: String, CodingKey { case id, role, text, streaming, hidesUserBubble, usedClipboard, sources, isError, regenModel, answerModel, imageFiles, isAgent, agentLog, reasoning, loopRound, reaction, sharedLinks, isLocal, captures, sentAt, interrupted, example }
+        enum CodingKeys: String, CodingKey { case id, role, text, streaming, hidesUserBubble, usedClipboard, sources, isError, regenModel, answerModel, imageFiles, isAgent, agentLog, reasoning, loopRound, reaction, sharedLinks, isLocal, captures, sentAt, interrupted, example, toolTrail }
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -354,6 +361,7 @@ final class NotchModel: ObservableObject {
             sentAt       = try c.decodeIfPresent(Date.self, forKey: .sentAt)
             interrupted  = try c.decodeIfPresent(Bool.self, forKey: .interrupted) ?? false
             example      = try? c.decodeIfPresent(WelcomeExample.self, forKey: .example)
+            toolTrail    = try c.decodeIfPresent([String].self, forKey: .toolTrail) ?? []
         }
     }
 
@@ -807,7 +815,7 @@ final class NotchModel: ObservableObject {
     /// treat these as the pointer still being inside.
     var isFloatingCardOpen: Bool {
         isModelPickerOpen || isFolderPickerOpen || isResultMetadataMenuOpen
-            || isResultMoreMenuOpen || slashMenuOpen
+            || isResultMoreMenuOpen || slashMenuOpen || isCardPositionMenuOpen
     }
 
     /// The agent task whose detail page is open — the full-page work trail a
@@ -4690,9 +4698,21 @@ final class NotchModel: ObservableObject {
     /// out unanswered — leaves the command unrun.
     func confirmShellCommand(answerID: UUID, command: String) async throws -> Bool {
         let copy = ShellRisk.scriptAction(command).map(scriptActionCopy) ?? shellConfirmationCopy()
+        let removes = ShellRisk.deletionPreview(command)
         let choice = try await awaitUserChoice(
             answerID: answerID,
-            question: copy.question + "\n" + command,
+            question: copy.question + (removes.isEmpty ? "" : "\n" + removes) + "\n" + command,
+            options: [copy.cancel, copy.run],
+            inlineOptions: true)
+        return choice == "The user chose: \"\(copy.run)\""
+    }
+
+    /// The card `send_message` waits on: who gets it and what it says.
+    func confirmMessageSend(answerID: UUID, to: String, text: String) async throws -> Bool {
+        let copy = scriptActionCopy(.message(to: to, text: text))
+        let choice = try await awaitUserChoice(
+            answerID: answerID,
+            question: copy.question,
             options: [copy.cancel, copy.run],
             inlineOptions: true)
         return choice == "The user chose: \"\(copy.run)\""
@@ -5376,6 +5396,11 @@ final class NotchModel: ObservableObject {
         /// True when the web-search service failed and the model gave no answer —
         /// the action opens Settings where the search service is picked.
         let needsSearchSwitch: Bool
+        /// The backend the failed round streamed from. A round that failed on
+        /// another backend can be sent again through Notchi (`retryLastAskOnNotchi`):
+        /// one question failed 8 times on a BYOK model while the user kept
+        /// reopening the model list (gateway logs, 2026-10-30).
+        let provider: Provider
         /// The assistant turn this failure belongs to — the round's own error
         /// bubble. What binds the error state to ONE conversation: the capsule only
         /// renders while that exact turn is the on-screen thread's (see
@@ -9032,6 +9057,35 @@ final class NotchModel: ObservableObject {
         return panel.maxY - island.maxY
     }
 
+    /// Moves the open card's window with the pointer; `true` ends the drag.
+    /// Set by `AppDelegate`, which keeps the position for the next open.
+    var onCardDrag: ((Bool) -> Void)?
+    /// Puts the card back in the top-right corner. Set by `AppDelegate`.
+    var onCardPositionReset: (() -> Void)?
+    /// Whether the card sits somewhere the user moved it.
+    var cardMoved: () -> Bool = { false }
+    /// The card's position menu is up (see `isFloatingCardOpen`).
+    @Published var isCardPositionMenuOpen = false
+
+    func dragCard(ended: Bool) { onCardDrag?(ended) }
+
+    /// A click on the card's move handle: a menu with the default position.
+    func showCardPositionMenu() {
+        // At its default spot there is nothing to restore.
+        guard cardMoved() else { return }
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let item = NSMenuItem(title: L("card.restorePosition"),
+                              action: #selector(restoreCardPosition), keyEquivalent: "")
+        item.target = self
+        menu.addItem(item)
+        isCardPositionMenuOpen = true
+        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+        isCardPositionMenuOpen = false
+    }
+
+    @objc private func restoreCardPosition() { onCardPositionReset?() }
+
     /// Whether `display` draws the top-right card. Set by `AppDelegate`.
     var isCornerDisplay: (CGDirectDisplayID) -> Bool = { _ in false }
     /// The open card is flying off the screen's right edge. Its page stays as it
@@ -10470,42 +10524,10 @@ final class NotchModel: ObservableObject {
     /// until the flight ends, so the thread page flies out at its own height.
     private var cardCloseCleanup: (() -> Void)?
 
-    /// Enter on the prompt. On the top-right card an ask sends and the card flies
-    /// out at once; the answer comes back as a card of its own. Everywhere else,
-    /// and for anything but an ask, this is `submitCurrent`.
+    /// Enter on the prompt. The top-right card answers in place, the same as
+    /// the island: it keeps its size with the wait line, then shows the thread.
     func submitFromPrompt() {
-        guard let active = activeDisplay, isCornerDisplay(active), editTarget == nil,
-              effectiveSubmitPanel == .chat, !agentComposeActive else {
-            submitCurrent()
-            return
-        }
-        if unifiedThreadsEnabled, turns.isEmpty, hasText,
-           let main = inFlightRounds.first(where: { isMainThread($0.threadID) })?.threadID {
-            cardSends[main, default: 0] += 1
-            submitAndStay()
-            fullClose()
-            return
-        }
-        let wasOnThread = !turns.isEmpty
-        let before = turns.count
         submitCurrent()
-        guard turns.count > before else { return }
-        cardSends[threadHistoryID, default: 0] += 1
-        let cleanup = { [weak self] in
-            guard let self else { return }
-            self.task = nil
-            self.resetThreadPull()
-            self.lastMeasuredAnswerHeight = 0
-            self.turns = []
-            self.replyTarget = nil
-            self.mode = .idle
-        }
-        if wasOnThread {
-            cardCloseCleanup = cleanup
-        } else {
-            cleanup()
-        }
-        fullClose()
     }
 
     /// A click on an answer card. Unlike `openThread` this also takes a thread
@@ -10857,6 +10879,12 @@ final class NotchModel: ObservableObject {
         var messages: [ChatMessage] = []
         for turn in kept {
             var text = turn.text
+            // What the answer ran, above what it said: the next round needs the
+            // paths and exit codes, which the reply itself rarely repeats.
+            if turn.role == "assistant", !turn.toolTrail.isEmpty {
+                text = "[Tools you ran for this answer]\n" + turn.toolTrail.joined(separator: "\n")
+                    + "\n\n" + text
+            }
             if turn.role == "user", let note = imageLocationNote(turn.imageFiles) { text += note }
             if turn.role == "user" {
                 if let sent = turn.sentAt {
@@ -11062,7 +11090,9 @@ final class NotchModel: ObservableObject {
                 // From the idle prompt with the peek showing, the thread opens
                 // with the pull's motion (see `beginSubmitReveal`). Read before
                 // the thread lands in `turns`.
-                let reveals = threadPullAvailable
+                // The top-right card opens straight on its full-height
+                // thread page, without the reveal.
+                let reveals = threadPullAvailable && !(activeDisplay.map(isCornerDisplay) ?? false)
                 turns = main.conversation
                 threadHistoryID = main.id
                 threadImages = activeModelSupportsVision ? Self.parkedImages(for: main) : nil
@@ -11493,7 +11523,7 @@ final class NotchModel: ObservableObject {
                 agentTools.append(FindFilesTool())
                 agentTools.append(GrepFilesTool())
                 // Changing files goes with the shell: off where the shell is.
-                if ChatSwitch.runCommands, nonoContext.surface != NoNoRequestContext.telegram {
+                if ChatSwitch.runCommands {
                     agentTools.append(WriteFileTool())
                     agentTools.append(EditFileTool())
                 }
@@ -11518,7 +11548,7 @@ final class NotchModel: ObservableObject {
                     guard let self else { throw CancellationError() }
                     return try await self.confirmEventDelete(answerID: answerID, title: title)
                 })
-                if ChatSwitch.runCommands, nonoContext.surface != NoNoRequestContext.telegram {
+                if ChatSwitch.runCommands {
                     agentTools.append(ScheduleActionTool { [weak self] command, minutes in
                         guard let self else { throw CancellationError() }
                         return try await self.scheduleAction(answerID: answerID, command: command, minutes: minutes)
@@ -11542,6 +11572,10 @@ final class NotchModel: ObservableObject {
                 agentTools.append(DraftMailTool { [weak self] in
                     await self?.markCaptureLine(.mailDraft, answerID: answerID)
                 })
+                agentTools.append(SendMessageTool { [weak self] to, text in
+                    guard let self else { throw CancellationError() }
+                    return try await self.confirmMessageSend(answerID: answerID, to: to, text: text)
+                })
                 agentTools.append(ReadPhotosTool())
                 agentTools.append(EditNoteTool { [weak self] title in
                     guard let self else { throw CancellationError() }
@@ -11561,9 +11595,9 @@ final class NotchModel: ObservableObject {
                                                                 request: request)
                     })
                 }
-                // A Telegram round has no one at the Mac to see what a command
-                // does, so it never gets a shell.
-                if ChatSwitch.runCommands, nonoContext.surface != NoNoRequestContext.telegram {
+                // A flagged command's card reaches Telegram too, as inline buttons
+                // (`TelegramBridge.ask`).
+                if ChatSwitch.runCommands {
                     agentTools.append(RunShellTool { [weak self] command in
                         guard let self else { throw CancellationError() }
                         return try await self.confirmShellCommand(answerID: answerID,
@@ -11577,17 +11611,12 @@ final class NotchModel: ObservableObject {
                     return await MainActor.run { self.searchArchive(query, offWire: offWire) }
                 })
                 // Last, so the list before it is the same with or without an
-                // account. A Telegram round gets it without the card: commands
-                // there touch nothing on this Mac, and what would is refused.
+                // account.
                 if InstaBoxAccount.isAvailable {
-                    if nonoContext.surface == NoNoRequestContext.telegram {
-                        agentTools.append(CloudMachineTool(confirm: nil))
-                    } else {
-                        agentTools.append(CloudMachineTool { [weak self] (question: String) -> Bool in
-                            guard let self else { throw CancellationError() }
-                            return try await self.confirmCloudAction(answerID: answerID, question: question)
-                        })
-                    }
+                    agentTools.append(CloudMachineTool { [weak self] (question: String) -> Bool in
+                        guard let self else { throw CancellationError() }
+                        return try await self.confirmCloudAction(answerID: answerID, question: question)
+                    })
                 }
                 // MCP is switched off for now.
                 // // The user's MCP servers come last, so the built-in prefix of
@@ -11740,6 +11769,24 @@ final class NotchModel: ObservableObject {
                                let i = self.turns.firstIndex(where: { $0.id == answerID }) {
                                 self.turns[i].sharedLinks += shared
                             }
+                        },
+                        onTools: { [weak self] calls in
+                            guard let self else { return }
+                            let lines = calls.map(ToolTrail.line(for:))
+                            if let i = thread.firstIndex(where: { $0.id == answerID }) {
+                                thread[i].toolTrail = Array((thread[i].toolTrail + lines).suffix(ToolTrail.maxLines))
+                                self.syncInFlight(answerID, thread)
+                            }
+                            if self.isOnScreen(answerID: answerID),
+                               let i = self.turns.firstIndex(where: { $0.id == answerID }) {
+                                self.turns[i].toolTrail = Array((self.turns[i].toolTrail + lines).suffix(ToolTrail.maxLines))
+                            }
+                        },
+                        onRetract: { count in
+                            guard count > 0, acc.count >= count else { return }
+                            acc.removeLast(count)
+                            released = min(released, acc.count)
+                            flushChunks()
                         })
                 } else {
                     // A regenerate override (XII-135) streams from its pinned
@@ -11762,11 +11809,17 @@ final class NotchModel: ObservableObject {
                     let events = await NoNoRequestContext.$current.withValue(nonoContext) {
                         service.streamEvents(system: system, messages: context)
                     }
+                    // No tools are advertised on this path, but a thread whose
+                    // earlier turns ran tools still leads some models (DeepSeek)
+                    // to write a call as `<｜DSML｜…>` text. Hide it here as the
+                    // harness does; there is no tool to run it with.
+                    var markupFilter = ToolMarkupFilter()
                     for try await event in events {
                         if Task.isCancelled { return }
                         switch event {
                         case .text(let chunk):
-                            appendChunk(chunk)
+                            let visible = markupFilter.feed(chunk)
+                            if !visible.isEmpty { appendChunk(visible) }
                         case .reasoning(let piece):
                             guard !piece.isEmpty else { continue }
                             let prior = thread.first(where: { $0.id == answerID })?.reasoning ?? ""
@@ -11783,6 +11836,7 @@ final class NotchModel: ObservableObject {
                             }
                         }
                     }
+                    if let tail = markupFilter.flush(), !tail.isEmpty { appendChunk(tail) }
                     if runProvider == .grokCode,
                        let salvaged = GrokCLIService.consumeSalvagedAnswer(),
                        salvaged != acc {
@@ -12004,6 +12058,7 @@ final class NotchModel: ObservableObject {
                                                  needsCredit: (error as? OpenAICompatAIService.ServiceError)?
                                                      .isOutOfCredit == true,
                                                  needsSearchSwitch: error is SearchServiceError,
+                                                 provider: runProvider,
                                                  answerID: answerID)
                         self.mode = .result
                     }
@@ -12116,6 +12171,21 @@ final class NotchModel: ObservableObject {
         resubmitLastQuestion(model: model)
     }
 
+    /// Whether the visible failure can be sent again through Notchi: it came
+    /// from another backend, and there is a Notchi account to send it with.
+    var canRetryOnNotchi: Bool {
+        guard let error = visibleAskError else { return false }
+        return error.provider != .nono && !error.needsCredit && NoNoAccount.shared.hasToken
+    }
+
+    /// The error row's "Try with Notchi": the failed question once more, on
+    /// Notchi's default model, without changing the saved backend.
+    func retryLastAskOnNotchi() {
+        guard canRetryOnNotchi else { return }
+        askError = nil
+        resubmitLastQuestion(model: Provider.nono.defaultModel, provider: .nono)
+    }
+
     /// The newest SETTLED assistant answer's text, trimmed — the target of the
     /// keyboard copy/save actions (XII-131). `nil` when there's no answer or the
     /// last one is still streaming (nothing final to act on yet).
@@ -12168,13 +12238,14 @@ final class NotchModel: ObservableObject {
     /// back into the input, and re-run `submit()` so a fresh answer streams into a
     /// clean pair. No-op when there's no question to re-run. A non-nil `model` runs
     /// this one regeneration on that model only (XII-135).
-    private func resubmitLastQuestion(model: String? = nil) {
+    private func resubmitLastQuestion(model: String? = nil, provider: Provider? = nil) {
         guard let lastUser = turns.last(where: { $0.role == "user" }) else { return }
         let question = lastUser.text
         if turns.last?.role == "assistant" { turns.removeLast() }
         if turns.last?.role == "user" { turns.removeLast() }
         if turns.isEmpty, isMainThread(threadHistoryID) { nextSubmitMainThread = true }
         regenOverrideModel = model
+        regenOverrideProvider = provider
         text = question
         nextSubmitIsRegenerate = true
         submit()

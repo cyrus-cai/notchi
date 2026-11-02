@@ -237,6 +237,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Each corner panel's frame at rest, from `position`.
     private var cornerFrames: [CGDirectDisplayID: NSRect] = [:]
     private let cornerFlight = WindowFlight()
+    /// How far the user has dragged the card from the top-right corner. Kept
+    /// across launches; the card's position menu puts it back to zero.
+    private var cardOffset: CGSize = {
+        let stored = UserDefaults.standard.array(forKey: AppDelegate.cardOffsetKey) as? [Double]
+        guard let stored, stored.count == 2 else { return .zero }
+        return CGSize(width: stored[0], height: stored[1])
+    }()
+    private static let cardOffsetKey = "cardOffset"
+    /// The pointer and the offset when a card drag began.
+    private var cardDrag: (mouse: NSPoint, offset: CGSize)?
 
     /// Resolve a duplicate-instance launch: the NEWEST instance survives (in the
     /// reinstall flow that's the freshly installed build; in the Xcode dev loop
@@ -483,6 +493,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // An open that names no screen lands where the pointer is.
         model.summonDisplay = { [weak self] in self?.displayForSummon() }
         model.isCornerDisplay = { [weak self] in self?.cornerDisplays.contains($0) ?? false }
+        model.onCardDrag = { [weak self] ended in self?.dragCard(ended: ended) }
+        model.onCardPositionReset = { [weak self] in self?.resetCardPosition() }
+        model.cardMoved = { [weak self] in self?.cardOffset != .zero }
         CardToasts.shared.openThread = { [weak self] id in
             self?.openMenuBarCard { $0.openCardThread(id: id) }
         }
@@ -1831,10 +1844,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if shows {
                 if !panel.isVisible {
                     cornerFlight.stop()
+                    panel.alphaValue = 1
                     let flies = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
                     if let frame = cornerFrame(id, out: flies) {
                         panel.setFrame(frame, display: false)
                     }
+                    // A moved card fades in where it is (`slideCorner`).
+                    if flies, cardOffset != .zero { panel.alphaValue = 0 }
                     panel.orderFrontRegardless()
                     // After the open state's first commit, so a slow first build
                     // does not eat the flight.
@@ -1851,7 +1867,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// speed; only Settings, wider than it, travels further.
     private func cornerFrame(_ id: CGDirectDisplayID, out: Bool) -> NSRect? {
         guard var frame = cornerFrames[id] else { return nil }
-        if out {
+        if out, cardOffset == .zero {
             frame.origin.x += max(NotchMetrics.floatingTravel,
                                   (model.showSettings ? model.openWidth : 0) + NotchMetrics.floatingInset)
         }
@@ -1863,6 +1879,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// glass behind the card does not follow.
     private func slideCorner(_ id: CGDirectDisplayID, out: Bool) {
         guard let panel = panels[id], let frame = cornerFrame(id, out: out) else { return }
+        // A card the user moved away from the corner fades where it is.
+        if cardOffset != .zero {
+            if !out, panel.frame.origin != frame.origin { panel.setFrame(frame, display: false) }
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = NotchModel.cardFlightDuration
+                panel.animator().alphaValue = out ? 0 : 1
+            }
+            return
+        }
         cornerFlight.fly(panel, to: frame.origin, on: panel.screen)
     }
 
@@ -2149,7 +2174,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let full = screen.frame
         let corner = Self.isCorner(id, on: screen)
         if corner { cornerDisplays.insert(id) } else { cornerDisplays.remove(id) }
-        let x = corner
+        var x = corner
             ? full.maxX - canvasWidth
             : full.midX - canvasWidth / 2
         // AppKit's origin is bottom-left; place the canvas so its top aligns
@@ -2157,7 +2182,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let top = corner
             ? full.maxY - Self.menuBarHeight(of: screen) - Self.cornerInset
             : full.maxY
-        let y = top - canvasHeight
+        var y = top - canvasHeight
+        if corner {
+            let offset = clampedCardOffset(cardOffset, on: screen)
+            x += offset.width
+            y += offset.height
+        }
         // Bottom stays put; the extra height goes on top, past the screen edge.
         let frame = NSRect(x: x, y: y,
                            width: canvasWidth,
@@ -2176,6 +2206,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             hardwareNotchWidth: hasNotch ? Self.hardwareNotchWidth(of: screen) : nil,
             topOverreach: Self.canvasTopOverreach,
             for: id)
+    }
+
+    /// The card stays on `screen`: no further right or up than its corner, and
+    /// no further left or down than leaves it on screen.
+    private func clampedCardOffset(_ offset: CGSize, on screen: NSScreen) -> CGSize {
+        let full = screen.frame
+        let maxLeft = full.width - NotchMetrics.floatingWidth - Self.cornerInset * 2
+        let maxDown = full.height - Self.menuBarHeight(of: screen) - Self.cornerInset * 2 - 80
+        return CGSize(width: min(0, max(-maxLeft, offset.width)),
+                      height: min(0, max(-maxDown, offset.height)))
+    }
+
+    /// One step of a card drag: the window follows the pointer, and the
+    /// position is kept when the drag ends.
+    private func dragCard(ended: Bool) {
+        guard let id = model.activeDisplay, cornerDisplays.contains(id),
+              let panel = panels[id], let screen = panel.screen ?? preferredScreen() else { return }
+        let mouse = NSEvent.mouseLocation
+        let start = cardDrag ?? (mouse, cardOffset)
+        cardDrag = ended ? nil : start
+        cornerFlight.stop()
+        cardOffset = clampedCardOffset(CGSize(width: start.offset.width + mouse.x - start.mouse.x,
+                                              height: start.offset.height + mouse.y - start.mouse.y),
+                                       on: screen)
+        position(panel, on: screen, id: id)
+        if ended {
+            UserDefaults.standard.set([Double(cardOffset.width), Double(cardOffset.height)],
+                                      forKey: Self.cardOffsetKey)
+        }
+    }
+
+    /// The card's position menu: back to the top-right corner, flying there.
+    private func resetCardPosition() {
+        cardOffset = .zero
+        UserDefaults.standard.removeObject(forKey: Self.cardOffsetKey)
+        for id in cornerDisplays {
+            guard let panel = panels[id], let screen = panel.screen ?? preferredScreen() else { continue }
+            let from = panel.frame
+            position(panel, on: screen, id: id)
+            guard panel.isVisible, let target = cornerFrames[id] else { continue }
+            panel.setFrame(from, display: false)
+            cornerFlight.fly(panel, to: target.origin, on: screen)
+        }
     }
 
     /// The width of the screen's physical notch, measured from the gap between

@@ -2540,6 +2540,43 @@ enum ShellRisk {
         return .message(to: String(plain[to]), text: String(plain[text]))
     }
 
+    /// What an `osascript` delete would remove, for its confirmation card: each
+    /// `POSIX file "…"` it names, with a folder's first few items and sizes.
+    /// The card used to show only the script, and a user approved the delete of
+    /// a folder that held the presentation the model had just built (2026-10-25).
+    static func deletionPreview(_ command: String) -> String {
+        guard scriptAction(command) == .delete,
+              let regex = try? NSRegularExpression(pattern: #"POSIX file \\?"([^"\\]+)\\?""#) else { return "" }
+        let plain = command
+        let fm = FileManager.default
+        let sizes = ByteCountFormatter()
+        sizes.countStyle = .file
+        func size(_ url: URL) -> String {
+            let bytes = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            return sizes.string(fromByteCount: Int64(bytes))
+        }
+        var lines: [String] = []
+        for match in regex.matches(in: plain, range: NSRange(plain.startIndex..., in: plain)).prefix(3) {
+            guard let r = Range(match.range(at: 1), in: plain) else { continue }
+            let path = (String(plain[r]) as NSString).expandingTildeInPath
+            let url = URL(fileURLWithPath: path)
+            let shown = (path as NSString).abbreviatingWithTildeInPath
+            var isFolder: ObjCBool = false
+            guard fm.fileExists(atPath: path, isDirectory: &isFolder) else { continue }
+            guard isFolder.boolValue else {
+                lines.append("\(shown) (\(size(url)))")
+                continue
+            }
+            let items = ((try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: [.fileSizeKey],
+                                                      options: [.skipsHiddenFiles])) ?? [])
+                .sorted { $0.lastPathComponent < $1.lastPathComponent }
+            lines.append(shown + "/")
+            for item in items.prefix(6) { lines.append("  \(item.lastPathComponent) (\(size(item)))") }
+            if items.count > 6 { lines.append("  + \(items.count - 6)") }
+        }
+        return lines.joined(separator: "\n")
+    }
+
     static func needsConfirmation(_ command: String) -> Bool {
         let lowered = command.lowercased()
         if credentialPaths.contains(where: { lowered.contains($0) }) { return true }

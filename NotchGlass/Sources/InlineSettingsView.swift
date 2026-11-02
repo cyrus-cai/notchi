@@ -444,10 +444,10 @@ struct InlineSettingsView: View {
     /// setting gets a home without redesigning the panel.
     enum Section: String, CaseIterable, Identifiable {
         case model = "Model"     // who answers: provider, API key, model override — and the search backend behind it
-        case chat = "Chat"       // how a conversation behaves: emoji reactions, message sounds, custom instructions
+        case chat = "Chat"       // how a conversation behaves: custom instructions, lid-closed answers, cloud machine, memory, copy sensing, message sounds
         case connect = "Connect" // other places that reach Notchi: the user's own Telegram bot
         case appearance = "Appearance" // notch style, interaction, and display placement
-        case shortcuts = "Shortcuts" // editable keyboard controls + copy sensing, its own top-level settings category
+        case shortcuts = "Shortcuts" // editable keyboard controls, its own top-level settings category
         case general = "General" // language, app presence, note destination, permissions, + Advanced (proxy)
         case stats = "Stats"     // what the archive adds up to, and the requests behind it — read-only
         case about = "About"     // version + self-update
@@ -1108,12 +1108,16 @@ struct InlineSettingsView: View {
                 case .deepseek:  deepSeekSearchKeyRow
                 }
             case .chat:
-                // Three groups: what the answers say and do, what is remembered,
-                // and the sounds.
+                // Four groups: what the answers say and do, what is remembered,
+                // what starts a conversation from a copy, and the sounds.
                 Text(L("chat.group.answers"))
                     .captionLabel()
                 customInstructionsRow
                 suggestFollowUpRow
+                lidClosedRow
+                if DebugFeatureFlags.cloudMachine {
+                    cloudMachineSection
+                }
                 // MCP is switched off for now.
                 // Text(L("mcp.title"))
                 //     .captionLabel()
@@ -1127,6 +1131,10 @@ struct InlineSettingsView: View {
                     if ClipboardHistory.available { memoryClipboardRow }
                     UnderlineLink(title: L("memory.manage")) { open(.memory) }
                 }
+                Text(L("capture.sources"))
+                    .captionLabel()
+                    .padding(.top, 2)
+                copySenseRow
                 Text(L("chat.group.effects"))
                     .captionLabel()
                     .padding(.top, 2)
@@ -1143,7 +1151,6 @@ struct InlineSettingsView: View {
                     .padding(.top, 2)
                 launchAtLoginRow
                 dockIconRow
-                lidClosedRow
                 Text(L("capture.destination"))
                     .captionLabel()
                     .padding(.top, 2)
@@ -1181,9 +1188,6 @@ struct InlineSettingsView: View {
                 fullscreenAutoHideRow
             case .connect:
                 telegramSection
-                if DebugFeatureFlags.cloudMachine {
-                    cloudMachineSection
-                }
             case .stats:
                 statsSection
             case .about:
@@ -2657,23 +2661,21 @@ struct InlineSettingsView: View {
 
                 Divider().overlay(Tokens.hairline).gridCellColumns(5)
 
-                // Blend entries first, the resold lineup after, headed the way
-                // the model picker heads them (`addRows`). One set of column
+                // Free models first, pay-as-you-go after. One set of column
                 // headers over both runs, so the rates still line up across
                 // them. A lineup that is all one kind gets no headings.
                 let rows = Self.cheapestFirst(NotchiModelVisibility.ordered(nonoLineupRows, id: \.id))
-                let house = rows.filter { ModelRatings.isNonoBlend(id: $0.id, pricing: $0.pricing) }
-                let rest = rows.filter { !ModelRatings.isNonoBlend(id: $0.id, pricing: $0.pricing) }
-                if !house.isEmpty, !rest.isEmpty {
-                    pricingGroupHeader(L("model.picker.houseModels",
-                                         ModelRatings.vendor(for: house[0].id, provider: .nono)))
+                let free = rows.filter { Self.isFree($0) }
+                let paid = rows.filter { !Self.isFree($0) }
+                if !free.isEmpty, !paid.isEmpty {
+                    pricingGroupHeader(L("nono.pricing.freeModels"))
                         .padding(.top, 12)
-                    ForEach(house) { row in
+                    ForEach(free) { row in
                         pricingRow(row)
                     }
-                    pricingGroupHeader(L("model.picker.otherModels"))
+                    pricingGroupHeader(L("nono.pricing.payAsYouGo"))
                         .padding(.top, 18)
-                    ForEach(rest) { row in
+                    ForEach(paid) { row in
                         pricingRow(row)
                     }
                 } else {
@@ -2697,6 +2699,13 @@ struct InlineSettingsView: View {
             if leftRates != rightRates { return leftRates < rightRates }
             return a.offset < b.offset
         }.map(\.element)
+    }
+
+    /// Input and output both $0. A row whose rates have not loaded is not free.
+    private static func isFree(_ row: NonoLineupRow) -> Bool {
+        guard let pricing = row.pricing else { return false }
+        return pricing.inputPerMTok == 0 && pricing.outputPerMTok == 0
+            && (pricing.cachedInputPerMTok ?? 0) == 0
     }
 
     private func pricingGroupHeader(_ title: String) -> some View {
@@ -3219,6 +3228,22 @@ struct InlineSettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.leading, 76)
             }
+
+            HStack(spacing: 12) {
+                Text(L("commandcode.zdr"))
+                    .font(.sf(Tokens.TypeSize.form, weight: .medium))
+                    .foregroundStyle(Tokens.text2)
+                Spacer(minLength: 8)
+                Toggle("", isOn: $commandCodeZeroDataRetention)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .tint(Tokens.text2)
+            }
+            Text(L("commandcode.zdr.hint"))
+                .font(.sf(Tokens.TypeSize.label))
+                .foregroundStyle(Tokens.text3)
+                .fixedSize(horizontal: false, vertical: true)
         }
         // The probe lands on a background queue; `cliTick` is the redraw.
         .onReceive(NotificationCenter.default.publisher(for: .cliAvailabilityResolved)) { _ in
@@ -3229,6 +3254,7 @@ struct InlineSettingsView: View {
 
     /// The Command Code row's re-detect arrow is running its probe.
     @State private var commandCodeRedetecting = false
+    @AppStorage(CommandCodeCLIService.zeroDataRetentionKey) private var commandCodeZeroDataRetention = false
 
     // MARK: - pi sign-in status
 
@@ -4002,7 +4028,7 @@ struct InlineSettingsView: View {
 
     /// Keeps the Mac awake with the lid closed while the Telegram bot is on.
     private var lidClosedRow: some View {
-        settingRow(label: L("telegram.lid"), info: L("telegram.lid.hint")) {
+        settingRow(label: L("telegram.lid"), info: L("telegram.lid.hint"), aligned: true) {
             Toggle("", isOn: Binding(
                 get: { telegram.answersWithLidClosed },
                 set: { on in
@@ -5864,6 +5890,12 @@ struct InlineSettingsView: View {
                 SettingInfoPopover { copySenseComparisonTable }
             }
             .frame(minWidth: 64, alignment: .leading)
+            .background(
+                GeometryReader { g in
+                    Color.clear.preference(key: LabelColumnWidthKey.self, value: g.size.width)
+                }
+            )
+            .modifier(LabelColumnFloor(aligned: true))
             // Opening the menu marks the tag read, but does NOT take it off
             // the row: something disappearing under the cursor at the moment of
             // the click reads as a glitch, and the tag is still the label for
@@ -6074,14 +6106,6 @@ struct InlineSettingsView: View {
     /// convention wouldn't.
     private var shortcutsSection: some View {
         VStack(alignment: .leading, spacing: 18) {
-            // Copy sensing opens the notch without a key, so it heads the pane
-            // as its own group.
-            VStack(alignment: .leading, spacing: 8) {
-                Text(L("capture.sources"))
-                    .font(.sf(Tokens.TypeSize.label, weight: .medium))
-                    .foregroundStyle(Tokens.text1)
-                copySenseRow
-            }
             promptShortcutsGroup
             ForEach(Array(AppShortcutReference.groups(
                 summonHotKey: summonHotKey,

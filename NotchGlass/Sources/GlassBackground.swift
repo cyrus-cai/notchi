@@ -110,6 +110,10 @@ struct GlassMaterial: View {
     /// Plays the light sweep on open. Off on the floating card, which arrives
     /// whole by moving its window.
     var sweepsOnOpen: Bool = true
+    /// The top-right card: its tint lightens toward the bottom.
+    var floating: Bool = false
+    /// The floating card's tint at its bottom edge.
+    static let floatingBottomTint: Double = 0.45
 
     /// Drives the one-shot light sweep that plays as the panel expands. Flipped
     /// by `.onChange(of: expanded)` so the shimmer travels exactly once per open.
@@ -373,7 +377,15 @@ struct GlassMaterial: View {
             let glassBody = 0.82
 
             ZStack {
-                if expanded {
+                if expanded, floating {
+                    // No camera zone to hold black: the body tint eases from
+                    // the top toward a lighter bottom.
+                    LinearGradient(
+                        colors: [.black.opacity(veilAlpha(glassBody)),
+                                 .black.opacity(veilAlpha(GlassMaterial.floatingBottomTint))],
+                        startPoint: .top, endPoint: .bottom
+                    )
+                } else if expanded {
                     // Targets pass through `veilAlpha`, which discounts the
                     // darkening already baked into the glass tint — the
                     // composite stays exactly the tuned values above.

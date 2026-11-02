@@ -285,7 +285,7 @@ struct NotchBody: View {
                                         model.showRoutines = false
                                     }
                                 }, copies: { AnyView(copyThreadTab) })
-                                .frame(width: geo.size.width * 0.58)
+                                .frame(width: geo.size.width * (metrics.floating ? 0.75 : 0.58))
                                 .frame(maxWidth: .infinity, alignment: .trailing)
                             }
                             .padding(.trailing, -NotchBody.panelPadding)
@@ -387,6 +387,7 @@ struct NotchBody: View {
     // could not type-check `body` in reasonable time.
     var body: some View {
         panelWithPickerState
+        .environment(\.textScale, textScale)
         .onChange(of: model.open) { _, isOpen in
             if isOpen {
                 refocusInput()
@@ -602,7 +603,7 @@ struct NotchBody: View {
                 }
                 if model.usingPromptShortcutContext {
                     Text(L("shortcuts.promptAction.window.context"))
-                        .font(.sf(Tokens.TypeSize.label, weight: .medium))
+                        .sfFont(Tokens.TypeSize.label, weight: .medium)
                         .foregroundStyle(Tokens.text4)
                         .lineLimit(1)
                         .padding(.bottom, 8)
@@ -779,16 +780,17 @@ struct NotchBody: View {
 
     /// Visible height of the peek at rest: the bottom edge of the newest
     /// answer's last card and a sliver above it — and the gap under it.
-    private static let peekHeight: CGFloat = 30
-    /// Wider on the floating card, whose prompt row has no padding of its own.
-    private var peekGap: CGFloat { metrics.floating ? 13 : 6 }
+    /// None on the floating card: its prompt shows no peek, and a pull still
+    /// opens the thread from there.
+    private var peekHeight: CGFloat { metrics.floating ? 0 : 30 }
+    private var peekGap: CGFloat { metrics.floating ? 0 : 6 }
     /// The follow-up row on one line: `ComposerBox`'s resting height.
     private static let composerRowHeight: CGFloat = Tokens.Control.rail
     /// The result page's text column plus the turn stack's 8pt trailing inset.
     /// The reveal lays the thread out at this width at every progress, so no
     /// line re-wraps while the panel widens under it.
     private var resultStackWidth: CGFloat {
-        Tokens.openWidthResult * metrics.widthScale - (Self.panelPadding + Self.resultSideInset) * 2
+        metrics.resultWidth - (Self.panelPadding + Self.resultSideInset) * 2
     }
 
     /// Where a thread pull ends: the result page's geometry for the thread it
@@ -836,8 +838,9 @@ struct NotchBody: View {
             live: model.threadPullLive,
             active: pulling,
             targets: revealTargets,
-            peekHeight: Self.peekHeight,
+            peekHeight: peekHeight,
             peekGap: peekGap,
+            floating: metrics.floating,
             sideInset: NotchBody.resultSideInset,
             showsHeader: pulling,
             header: RevealStill(key: [model.isAnswerPinned, headerChipsShown]) {
@@ -943,7 +946,7 @@ struct NotchBody: View {
     private func syncThreadPullSpan() {
         let targets = revealTargets
         let opened = targets.headerSlot + targets.viewport + targets.gap + Self.composerRowHeight
-        let rest = Self.peekHeight + peekGap + idleBottomHeight
+        let rest = peekHeight + peekGap + idleBottomHeight
         model.threadPullSpan = min(max(opened - rest, 160), 420)
     }
 
@@ -1008,7 +1011,7 @@ struct NotchBody: View {
     /// only thing telling you the strip is grabbable at all.
     @ViewBuilder
     private var detachGrip: some View {
-        if NotchModel.detachedWindowsEnabled {
+        if NotchModel.detachedWindowsEnabled, !metrics.floating {
             Color.clear
                 .contentShape(Rectangle())
                 .grabCursor()
@@ -1197,7 +1200,7 @@ struct NotchBody: View {
         if let err = model.noteError {
             return AnyView(
                 Text(err)
-                    .font(.sf(Tokens.TypeSize.label))
+                    .sfFont(Tokens.TypeSize.label)
                     .foregroundStyle(Tokens.text2)
                     .lineLimit(4)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1220,7 +1223,7 @@ struct NotchBody: View {
     /// the same whisper as the RECENT label.
     private func feedbackLine(_ text: String) -> some View {
         Text(text)
-            .font(.sf(Tokens.TypeSize.label))
+            .sfFont(Tokens.TypeSize.label)
             .tracking(0.2)
             .foregroundStyle(Tokens.text4)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1258,11 +1261,11 @@ struct NotchBody: View {
     private func recallCounterLine(_ recall: (pos: Int, total: Int)) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 5) {
             Image(systemName: "clock.arrow.circlepath")
-                .font(.sf(Tokens.TypeSize.caption, weight: .semibold))
+                .sfFont(Tokens.TypeSize.caption, weight: .semibold)
                 .foregroundStyle(Tokens.text4)
                 .baselineOffset(-1)
             Text("\(recall.pos) / \(recall.total)")
-                .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                .sfFont(Tokens.TypeSize.meta, weight: .medium)
                 .monospacedDigit()
                 .tracking(0.3)
                 .contentTransition(.numericText(value: Double(recall.pos)))
@@ -1921,7 +1924,7 @@ struct NotchBody: View {
                 // target that opens it; the ✕ throws the row away without opening
                 // (the record stays in Recent either way).
                 Text(task.prompt)
-                    .font(.sf(Tokens.TypeSize.form))
+                    .sfFont(Tokens.TypeSize.form)
                     .tracking(-0.1)
                     .foregroundStyle(task.outcome == .failure
                         ? Tokens.danger.opacity(0.9)
@@ -1979,7 +1982,7 @@ struct NotchBody: View {
                     .contentTransition(.numericText(value: Double(seconds)))
                     .animation(reduceMotion ? nil : .snappy(duration: 0.3), value: seconds)
             }
-            .font(.sf(Tokens.TypeSize.meta))
+            .sfFont(Tokens.TypeSize.meta)
             .foregroundStyle(Tokens.text4)
             .lineLimit(1)
             .fixedSize()
@@ -2013,7 +2016,7 @@ struct NotchBody: View {
             AgentStatusDot(running: loop.isRunning,
                            outcome: loop.isRunning ? nil : (loop.failed ? .failure : .success))
             Text(loop.prompt)
-                .font(.sf(Tokens.TypeSize.form))
+                .sfFont(Tokens.TypeSize.form)
                 .tracking(-0.1)
                 .foregroundStyle(loop.isRunning ? Tokens.text3
                                  : (loop.failed ? Tokens.danger.opacity(0.9) : Tokens.text2))
@@ -2082,7 +2085,7 @@ struct NotchBody: View {
     private func agentElapsedLabel(_ elapsed: TimeInterval) -> some View {
         let seconds = max(0, Int(elapsed))
         return Text(NotchModel.formatAgentElapsed(TimeInterval(seconds)))
-            .font(.sf(Tokens.TypeSize.meta))
+            .sfFont(Tokens.TypeSize.meta)
             .monospacedDigit()
             .contentTransition(.numericText(value: Double(seconds)))
             .animation(reduceMotion ? nil : .snappy(duration: 0.3), value: seconds)
@@ -2307,7 +2310,7 @@ struct NotchBody: View {
                 VStack(alignment: .leading, spacing: 10) {
                     if let meta = agentRoundMeta(task, round: selected) {
                         Text(meta)
-                            .font(.sf(Tokens.TypeSize.meta))
+                            .sfFont(Tokens.TypeSize.meta)
                             .monospacedDigit()
                             .foregroundStyle(Tokens.text4)
                             .lineLimit(1)
@@ -2608,7 +2611,7 @@ struct NotchBody: View {
                     .init(tooltip: shortcutHelp("detached.open", action: .detach),
                           action: { model.openDetachedWindow() }) {
                         Image(systemName: "macwindow.on.rectangle")
-                            .font(.sf(Tokens.TypeSize.label, weight: .semibold))
+                            .sfFont(Tokens.TypeSize.label, weight: .semibold)
                     },
                 ])
             }
@@ -2627,7 +2630,7 @@ struct NotchBody: View {
                                     action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                 .foregroundStyle(Tokens.text4)
                 .frame(width: 18, height: 18)
                 .contentShape(Rectangle())
@@ -2906,12 +2909,12 @@ struct NotchBody: View {
                 LucideIcon(mark: icon)
                     .foregroundStyle(Tokens.text3)
                 Text(title)
-                    .font(.sf(ManageMenuMetrics.fontSize, weight: .medium))
+                    .sfFont(ManageMenuMetrics.fontSize, weight: .medium)
                     .foregroundStyle(Tokens.text2)
                 Spacer(minLength: 16)
                 if let shortcut {
                     Text(shortcut)
-                        .font(.sf(ManageMenuMetrics.accessoryFontSize))
+                        .sfFont(ManageMenuMetrics.accessoryFontSize)
                         .foregroundStyle(Tokens.text4)
                 }
             }
@@ -3227,7 +3230,7 @@ struct NotchBody: View {
                     } label: {
                         HStack(spacing: 6) {
                             Text(task.prompt)
-                                .font(.sf(Tokens.TypeSize.form))
+                                .sfFont(Tokens.TypeSize.form)
                                 .foregroundStyle(selectedID == task.id ? Tokens.text1 : Tokens.text2)
                                 .lineLimit(1)
                                 .truncationMode(.tail)
@@ -3260,7 +3263,7 @@ struct NotchBody: View {
                             // weight or size that shifts under the pointer makes
                             // the whole column twitch as you move down it.
                             Text(item.displayTitle)
-                                .font(.sf(Tokens.TypeSize.form))
+                                .sfFont(Tokens.TypeSize.form)
                                 .foregroundStyle(selectedID == item.id ? Tokens.text1 : Tokens.text2)
                                 .lineLimit(1)
                                 .truncationMode(.tail)
@@ -3273,13 +3276,13 @@ struct NotchBody: View {
                                 RecentPendingDots()
                             } else if item.failed {
                                 Text(L(item.outOfCredit ? "recent.badge.outOfCredit" : "recent.badge.failed"))
-                                    .font(.sf(Tokens.TypeSize.caption, weight: .medium))
+                                    .sfFont(Tokens.TypeSize.caption, weight: .medium)
                                     .foregroundStyle(Tokens.danger.opacity(0.9))
                             } else if !item.source.isThread {
                                 Text(item.source == .note
                                      ? L("recent.badge.notes")
                                      : L("recent.badge.reminders"))
-                                    .font(.sf(Tokens.TypeSize.caption, weight: .medium))
+                                    .sfFont(Tokens.TypeSize.caption, weight: .medium)
                                     .foregroundStyle(Tokens.text4)
                             }
                             // The bead rides the row's TRAILING edge. On the
@@ -3469,7 +3472,7 @@ struct NotchBody: View {
                     HStack(spacing: 8) {
                         RecentPendingDots()
                         Text(L("recent.answering"))
-                            .font(.sf(Tokens.TypeSize.form))
+                            .sfFont(Tokens.TypeSize.form)
                             .foregroundStyle(Tokens.text3)
                     }
                     Spacer(minLength: 0)
@@ -3564,7 +3567,7 @@ struct NotchBody: View {
                 // jump to the app that owns it are the whole record.
                 VStack(alignment: .leading, spacing: 14) {
                     Text(item.q)
-                        .font(.sf(Tokens.TypeSize.form))
+                        .sfFont(Tokens.TypeSize.form)
                         .foregroundStyle(Tokens.text1)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -3601,7 +3604,7 @@ struct NotchBody: View {
                         .padding(.leading, 12)
                 } else if turn.usedClipboard {
                     Text(L("result.basedOnCopied"))
-                        .font(.sf(Tokens.TypeSize.meta))
+                        .sfFont(Tokens.TypeSize.meta)
                         .tracking(0.2)
                         .foregroundStyle(Tokens.text4)
                         .padding(.leading, 12)
@@ -3647,9 +3650,9 @@ struct NotchBody: View {
                 } label: {
                     HStack(spacing: 8) {
                         Image(systemName: "arrow.clockwise")
-                            .font(.sf(Tokens.TypeSize.label, weight: .medium))
+                            .sfFont(Tokens.TypeSize.label, weight: .medium)
                         Text(L("agent.resume", engine.displayName))
-                            .font(.sf(Tokens.TypeSize.form, weight: .medium))
+                            .sfFont(Tokens.TypeSize.form, weight: .medium)
                         Spacer(minLength: 0)
                     }
                     .foregroundStyle(Tokens.text1)
@@ -3963,7 +3966,7 @@ struct NotchBody: View {
                     Button { model.openHistory(item) } label: {
                         HStack(alignment: .firstTextBaseline, spacing: 12) {
                             Text(item.displayTitle)
-                                .font(.sf(Tokens.TypeSize.form))
+                                .sfFont(Tokens.TypeSize.form)
                                 .tracking(-0.1)
                                 .foregroundStyle(Tokens.text2)
                                 .lineLimit(1)
@@ -3992,7 +3995,7 @@ struct NotchBody: View {
                                     // answer until you open it.
                                     if item.failed {
                                         Text(L(item.outOfCredit ? "recent.badge.outOfCredit" : "recent.badge.failed"))
-                                            .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                                            .sfFont(Tokens.TypeSize.meta, weight: .medium)
                                             .foregroundStyle(Tokens.danger.opacity(0.9))
                                     }
                                     Text(relativeTime(item.t))
@@ -4310,12 +4313,13 @@ struct NotchBody: View {
     private var isAnswerClipped: Bool {
         let tall = measuredAnswerHeight > 0
             ? measuredAnswerHeight > answerMaxHeight
-            : Self.estimatedThreadExceeds(model.turns, answerMaxHeight, widthScale: metrics.widthScale)
+            : Self.estimatedThreadExceeds(model.turns, answerMaxHeight, width: metrics.resultWidth)
         // Older turns not mounted yet mount from the scroller
         // (`OlderTurnsLoader`), so a thread that has some scrolls even when the
         // mounted turns are short — a long question folded behind Show more
         // fills the window's character budget in a few lines.
-        return tall || hasOlderTurns || hasNewerTurns
+        // The floating card's thread page always opens at its full height.
+        return tall || hasOlderTurns || hasNewerTurns || metrics.floating
     }
 
     /// Whether a thread's natural height clears `ceiling`, estimated from its text
@@ -4327,10 +4331,10 @@ struct NotchBody: View {
     /// costs exactly what the old behaviour cost everywhere: one crossover.
     private static func estimatedThreadExceeds(_ turns: [NotchModel.Turn],
                                                _ ceiling: CGFloat,
-                                               widthScale: CGFloat) -> Bool {
+                                               width: CGFloat) -> Bool {
         // The thread's text column: the result panel less its padding and the
         // turn stack's own trailing inset.
-        let column = Tokens.openWidthResult * widthScale - (panelPadding + resultSideInset) * 2 - 8
+        let column = width - (panelPadding + resultSideInset) * 2 - 8
         // Wrapped height of one run of text. A CJK glyph takes about a full em,
         // latin about half — precise enough to tell a two-line question from a
         // forty-line report.
@@ -4550,12 +4554,12 @@ struct NotchBody: View {
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "slider.horizontal.3")
-                    .font(.sf(Tokens.TypeSize.form, weight: .medium))
+                    .sfFont(Tokens.TypeSize.form, weight: .medium)
                 Text(L("result.setUpModel"))
-                    .font(.sf(Tokens.TypeSize.form, weight: .medium))
+                    .sfFont(Tokens.TypeSize.form, weight: .medium)
                 Spacer(minLength: 0)
                 Image(systemName: "arrow.up.right")
-                    .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
+                    .sfFont(Tokens.TypeSize.meta, weight: .semibold)
                     .foregroundStyle(Tokens.text3)
             }
             .foregroundStyle(Tokens.text1)
@@ -4587,12 +4591,12 @@ struct NotchBody: View {
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "arrow.clockwise")
-                        .font(.sf(Tokens.TypeSize.form, weight: .medium))
+                        .sfFont(Tokens.TypeSize.form, weight: .medium)
                     Text(L("agent.resume", engine.displayName))
-                        .font(.sf(Tokens.TypeSize.form, weight: .medium))
+                        .sfFont(Tokens.TypeSize.form, weight: .medium)
                     Spacer(minLength: 0)
                     Image(systemName: "chevron.right")
-                        .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
+                        .sfFont(Tokens.TypeSize.meta, weight: .semibold)
                         .foregroundStyle(Tokens.text3)
                 }
                 .foregroundStyle(Tokens.text1)
@@ -4606,7 +4610,7 @@ struct NotchBody: View {
         } else {
             Text(L("agent.interrupted.resume",
                    engine.resumeCommand(session: resume.session)))
-                .font(.sf(Tokens.TypeSize.meta))
+                .sfFont(Tokens.TypeSize.meta)
                 .monospaced()
                 .foregroundStyle(Tokens.text4)
                 .textSelection(.enabled)
@@ -4628,7 +4632,27 @@ struct NotchBody: View {
             ? .openSettings
             : askError.needsCredit ? .addCredit
             : .retry
-        return ErrorActionRow(
+        // A round that failed on another backend also offers Notchi, beside the
+        // first action and in the same capsule style.
+        return HStack(spacing: 8) {
+            errorActionCapsule(askError, action: action)
+            if model.canRetryOnNotchi {
+                ErrorActionRow(
+                    action: .retryNotchi,
+                    models: [],
+                    primary: {
+                        withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                            model.retryLastAskOnNotchi()
+                        }
+                    },
+                    retryWith: { _ in })
+            }
+        }
+    }
+
+    private func errorActionCapsule(_ askError: NotchModel.AskError,
+                                    action: ErrorActionRow.Action) -> some View {
+        ErrorActionRow(
             action: action,
             models: action == .retry ? model.regenerateModelOptions : [],
             primary: {
@@ -4642,6 +4666,7 @@ struct NotchBody: View {
                         }
                     case .addCredit: model.openProviderSettings(.nono)
                     case .retry: model.retryLastAsk()
+                    case .retryNotchi: model.retryLastAskOnNotchi()
                     }
                 }
             },
@@ -4814,7 +4839,7 @@ struct NotchBody: View {
         let turns = model.copyThreadConversation.filter(\.isDrawn)
         if turns.isEmpty {
             Text(L("copyThread.empty"))
-                .font(.sf(Tokens.TypeSize.label))
+                .sfFont(Tokens.TypeSize.label)
                 .foregroundStyle(Tokens.text4)
                 .multilineTextAlignment(.center)
                 .padding(.top, 8)
@@ -5703,7 +5728,7 @@ struct NotchBody: View {
                         .padding(.leading, 12)   // matches the bubble's horizontal inset
                 } else if turn.usedClipboard {
                     Text(L("result.basedOnCopied"))
-                        .font(.sf(Tokens.TypeSize.meta))
+                        .sfFont(Tokens.TypeSize.meta)
                         .tracking(0.2)
                         .foregroundStyle(Tokens.text4)
                         .padding(.leading, 12)   // matches the bubble's horizontal inset
@@ -5856,7 +5881,8 @@ struct NotchBody: View {
 
     private func resultHeader() -> some View {
         HStack(spacing: 10) {
-            backButton()
+            // The floating card goes back with a swipe up or Esc.
+            if !metrics.floating { backButton() }
             Spacer(minLength: 0)
             // Only a thread the loop started shows its schedule here. A loop
             // running in a conversation is managed from the task list.
@@ -5920,7 +5946,9 @@ struct NotchBody: View {
         // `NotchModel.detachDragChanged`). Buttons keep their taps — the drag
         // only arms past its minimum distance — so the hand cursor covers the
         // whole strip, which is exactly how far the drag reaches.
-        .tearOffGrip(NotchModel.detachedWindowsEnabled, gesture: detachDragGesture)
+        .tearOffGrip(NotchModel.detachedWindowsEnabled && !metrics.floating,
+                     gesture: detachDragGesture)
+
     }
 
     /// The folded follow-up's entry point (shortcut threads only): one speech
@@ -5938,7 +5966,7 @@ struct NotchBody: View {
                 refocusInput()
             }) {
                 Image(systemName: "bubble.left")
-                    .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                    .sfFont(Tokens.TypeSize.meta, weight: .medium)
             }
         ], glass: false)
     }
@@ -5973,6 +6001,9 @@ struct NotchBody: View {
     }
 
     // MARK: - Inputs
+
+    /// The floating card's text scale (`NotchMetrics.floatingTextScale`).
+    private var textScale: CGFloat { metrics.floating ? NotchMetrics.floatingTextScale : 1 }
 
     /// The prompt's type size, and the follow-up field's — shared by the field, its
     /// inline hint and the row metrics, so a one-line box and its row agree.
@@ -6031,7 +6062,7 @@ struct NotchBody: View {
     }
 
     private func inputRow(placeholder: String, followUp: Bool) -> some View {
-        let fontSize: CGFloat = followUp ? NotchBody.followUpFontSize : NotchBody.idleFontSize
+        let fontSize: CGFloat = (followUp ? NotchBody.followUpFontSize : NotchBody.idleFontSize) * textScale
         let trailingHint = followUp ? nil : trailingModeHint
         return HStack(spacing: 12) {
             // The field and its fading placeholder. Where Enter sends the line is
@@ -6219,7 +6250,7 @@ struct NotchBody: View {
                 // box. Anything at all in the editor takes the placeholder away.
                 if !followUp && model.text.isEmpty && caretWidth == 0 {
                     Text(placeholder)
-                        .font(.sf(fontSize))
+                        .sfFont(fontSize)
                         .foregroundStyle(Tokens.placeholder)
                         .lineLimit(1)
                         // Sit on the box's own ~2pt left inset so the label lands
@@ -6233,7 +6264,7 @@ struct NotchBody: View {
                     // left to say is that typing narrows it. Gone the moment a
                     // letter lands — the filtering has begun; saying so is noise.
                     Text(L("slash.filter"))
-                        .font(.sf(fontSize))
+                        .sfFont(fontSize)
                         .foregroundStyle(Tokens.placeholder)
                         .lineLimit(1)
                         .padding(.leading, PromptField.textInset + caretWidth + 1)
@@ -6268,10 +6299,10 @@ struct NotchBody: View {
         // Grows with the box: the prompt keeps its resting breathing room and the row
         // gains a line's height for every line the text wraps to, so the panel unfolds
         // downward instead of the text scrolling away sideways.
-        // The floating card has no row below the prompt, so the text line alone
-        // sits on the panel's 15pt inset, top and bottom alike.
+        // The floating card has no row below the prompt, so the text line sits
+        // on the panel's 15pt inset plus a little room of its own.
         .frame(height: followUp ? 30
-               : metrics.floating ? inputHeight
+               : metrics.floating ? inputHeight + 14
                : max(NotchBody.idleRowHeight, inputHeight + idleRowVerticalPadding))
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: model.hasText)
         // No `.animation(…, value: inputHeight)` here on purpose. It only ever
@@ -6314,7 +6345,7 @@ struct NotchBody: View {
                 Text(name)
                 Text(InlineSettingsView.moneyCharged(amount))
             }
-            .font(.sf(Tokens.TypeSize.meta, weight: flat ? .regular : .medium))
+            .sfFont(Tokens.TypeSize.meta, weight: flat ? .regular : .medium)
             .lineLimit(1)
             .foregroundStyle(giftCueHovered ? Tokens.text1 : Tokens.text2)
             .padding(.horizontal, flat ? 7 : 10)
@@ -6376,7 +6407,7 @@ struct NotchBody: View {
                 // something to decode.
                 LucideIcon(mark: LucideIcons.circleFadingArrowUp, size: flat ? 11 : 12)
                 Text(updateCueLabel(face))
-                    .font(.sf(Tokens.TypeSize.meta, weight: flat ? .regular : .medium))
+                    .sfFont(Tokens.TypeSize.meta, weight: flat ? .regular : .medium)
                     .lineLimit(1)
             }
             .foregroundStyle(failed ? Tokens.danger.opacity(0.92)
@@ -6819,7 +6850,7 @@ struct ResultMetadataRow: View {
                 // Same glyph, size and ink as `MenuCardRow`'s hover arrow; held in
                 // the layout at rest so hovering does not shift the title.
                 Image(systemName: hoverSymbol)
-                    .font(.sf(ManageMenuMetrics.accessoryFontSize + 1, weight: .medium))
+                    .sfFont(ManageMenuMetrics.accessoryFontSize + 1, weight: .medium)
                     .foregroundStyle(Tokens.text2)
                     .opacity(hovering ? 1 : 0)
             }
@@ -6871,7 +6902,7 @@ private struct HoverMarqueeText: View {
     var body: some View {
         GeometryReader { proxy in
             Text(text)
-                .font(.sf(ManageMenuMetrics.fontSize, weight: .medium))
+                .sfFont(ManageMenuMetrics.fontSize, weight: .medium)
                 .foregroundStyle(color)
                 .lineLimit(1)
                 .fixedSize(horizontal: true, vertical: false)
@@ -7120,10 +7151,10 @@ private struct HistoryFooterButton: View {
         Button(action: action) {
             HStack(spacing: 5) {
                 Image(systemName: icon)
-                    .font(.sf(compact ? 11 : 10, weight: .medium))
+                    .sfFont(compact ? 11 : 10, weight: .medium)
                 if !compact {
                     Text(title)
-                        .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                        .sfFont(Tokens.TypeSize.meta, weight: .medium)
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
                 }
@@ -7176,10 +7207,10 @@ private struct ActiveFilterChip: View {
         } label: {
             HStack(spacing: 5) {
                 Text(source.filterTitle)
-                    .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                    .sfFont(Tokens.TypeSize.meta, weight: .medium)
                     .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
                 Image(systemName: "xmark")
-                    .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                    .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                     .foregroundStyle(hovering ? Tokens.text2 : Tokens.text4)
             }
             .padding(.horizontal, 12)
@@ -7225,16 +7256,16 @@ struct SelectionContextChip: View {
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: icon ?? (isReply ? "arrowshape.turn.up.left" : "text.quote"))
-                .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                 .foregroundStyle(Tokens.text4)
             Text(label ?? (isReply ? preview
                  : source.map { L("selection.context.from", $0) } ?? L("selection.context")))
-                .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                .sfFont(Tokens.TypeSize.meta, weight: .medium)
                 .foregroundStyle(hovering ? Tokens.text2 : Tokens.text3)
                 .lineLimit(1)
             Button(action: drop) {
                 Image(systemName: "xmark")
-                    .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                    .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                     .foregroundStyle(hoveringDrop ? Tokens.text1 : Tokens.text4)
                     .frame(width: 14, height: 14)
                     .background(Circle().fill(.white.opacity(hoveringDrop ? 0.14 : 0)))
@@ -7287,21 +7318,21 @@ private struct CopyMarkLine: View {
         Button(action: open) {
             HStack(spacing: 5) {
                 Image(systemName: "arrow.turn.down.right")
-                    .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                    .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                 HStack(spacing: 10) {
                     ForEach(mark.counts, id: \.kind) { count in
                         HStack(spacing: 3) {
                             Image(systemName: Self.symbol(count.kind))
-                                .font(.sf(Tokens.TypeSize.badge, weight: .medium))
+                                .sfFont(Tokens.TypeSize.badge, weight: .medium)
                             Text("\(count.n)")
-                                .font(.sf(Tokens.TypeSize.meta))
+                                .sfFont(Tokens.TypeSize.meta)
                                 .monospacedDigit()
                         }
                     }
                 }
                 .lineLimit(1)
                 Image(systemName: "chevron.right")
-                    .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                    .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                     .offset(x: hovering ? 2 : 0)
             }
             .foregroundStyle(hovering || engaged ? Tokens.text2 : Tokens.text4)
@@ -7377,10 +7408,10 @@ private struct QuoteOfferChip: View {
             Button(action: accept) {
                 HStack(spacing: 5) {
                     Image(systemName: "text.quote")
-                        .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                        .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                         .foregroundStyle(Tokens.text4)
                     Text(L("quote.followUp"))
-                        .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                        .sfFont(Tokens.TypeSize.meta, weight: .medium)
                         .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
                         .lineLimit(1)
                 }
@@ -7389,7 +7420,7 @@ private struct QuoteOfferChip: View {
             .buttonStyle(.plain)
             Button(action: dismiss) {
                 Image(systemName: "xmark")
-                    .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                    .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                     .foregroundStyle(Tokens.text4)
                     .frame(width: 14, height: 14)
                     .contentShape(Circle())
@@ -7431,11 +7462,11 @@ private struct ThreadSearchBar: View {
         let matches = search.matches
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
-                .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                 .foregroundStyle(Tokens.text4)
             TextField(L("threadSearch.placeholder"), text: $text)
             .textFieldStyle(.plain)
-            .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+            .sfFont(Tokens.TypeSize.meta, weight: .medium)
             .foregroundStyle(Tokens.text1)
             .frame(width: 150)
             .focused($focused)
@@ -7443,14 +7474,14 @@ private struct ThreadSearchBar: View {
             .onSubmit { search.step(1); focused = true }
             if !search.query.isEmpty {
                 Text(matches.isEmpty ? "0/0" : "\(position.current + 1)/\(matches.count)")
-                    .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                    .sfFont(Tokens.TypeSize.meta, weight: .medium)
                     .monospacedDigit()
                     .foregroundStyle(Tokens.text3)
             }
             ForEach([("chevron.up", -1), ("chevron.down", 1)], id: \.0) { icon, step in
                 Button { search.step(step) } label: {
                     Image(systemName: icon)
-                        .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                        .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                         .foregroundStyle(matches.isEmpty ? Tokens.text4 : Tokens.text2)
                         .frame(width: 14, height: 14)
                         .contentShape(Rectangle())
@@ -7462,7 +7493,7 @@ private struct ThreadSearchBar: View {
                 withAnimation(.easeOut(duration: Tokens.hoverFade)) { close() }
             } label: {
                 Image(systemName: "xmark")
-                    .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                    .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                     .foregroundStyle(Tokens.text4)
                     .frame(width: 14, height: 14)
                     .contentShape(Circle())
@@ -7563,7 +7594,7 @@ private struct ImmersiveHeaderHeightKey: PreferenceKey {
 /// footer carries; while this row is up the footer's regenerate control is
 /// hidden, so the two never sit on screen at once.
 struct ErrorActionRow: View {
-    enum Action { case retry, openSettings, addCredit }
+    enum Action { case retry, openSettings, addCredit, retryNotchi }
 
     let action: Action
     /// The models the chevron menu offers, each flagged if it's the one already in
@@ -7582,7 +7613,7 @@ struct ErrorActionRow: View {
 
     private var symbol: String {
         switch action {
-        case .retry: return "arrow.clockwise"
+        case .retry, .retryNotchi: return "arrow.clockwise"
         case .openSettings: return "slider.horizontal.3"
         case .addCredit: return "creditcard"
         }
@@ -7591,6 +7622,7 @@ struct ErrorActionRow: View {
     private var title: String {
         switch action {
         case .retry: return L("error.retry")
+        case .retryNotchi: return L("error.retryNotchi")
         case .openSettings: return L("error.openSettings")
         case .addCredit: return L("nono.add")
         }
@@ -7601,16 +7633,16 @@ struct ErrorActionRow: View {
             Button(action: primary) {
                 HStack(spacing: 8) {
                     Image(systemName: symbol)
-                        .font(.sf(Tokens.TypeSize.form, weight: .medium))
+                        .sfFont(Tokens.TypeSize.form, weight: .medium)
                     Text(title)
-                        .font(.sf(Tokens.TypeSize.form, weight: .medium))
+                        .sfFont(Tokens.TypeSize.form, weight: .medium)
                     // Without a menu the row keeps its plain affordance glyph; with
                     // one, that trailing slot IS the menu (below), so it isn't
                     // drawn twice. Actions that lead to Settings point out of the
                     // thread; a retry stays in it.
                     if !hasMenu {
-                        Image(systemName: action == .retry ? "chevron.right" : "arrow.up.right")
-                            .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
+                        Image(systemName: action == .retry || action == .retryNotchi ? "chevron.right" : "arrow.up.right")
+                            .sfFont(Tokens.TypeSize.meta, weight: .semibold)
                             .foregroundStyle(Tokens.text3)
                     }
                 }
@@ -7625,7 +7657,7 @@ struct ErrorActionRow: View {
             if hasMenu {
                 Button { menuOpen.toggle() } label: {
                     Image(systemName: "chevron.down")
-                        .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
+                        .sfFont(Tokens.TypeSize.meta, weight: .semibold)
                         .foregroundStyle(Tokens.text3)
                         .frame(width: Tokens.Control.header, height: Tokens.Control.rail)
                         .contentShape(Rectangle())
@@ -7846,7 +7878,7 @@ struct IdleTrailingCluster: View {
             HStack(spacing: 5) {
                 AgentStatusDot(running: true, outcome: nil)
                 Text(L("agent.running.count", runningCount))
-                    .font(.sf(flat ? Tokens.TypeSize.meta : glyphSize, weight: .regular))
+                    .sfFont(flat ? Tokens.TypeSize.meta : glyphSize, weight: .regular)
                     .monospacedDigit()
                     .contentTransition(.numericText(value: Double(runningCount)))
                     // Roll the digit natively, the way the row clock ticks: the
@@ -7854,7 +7886,7 @@ struct IdleTrailingCluster: View {
                     // fire — on the outer Button it only drives the layout.
                     .animation(reduceMotion ? nil : .snappy(duration: 0.3), value: runningCount)
                 Image(systemName: "chevron.down")
-                    .font(.sf(glyphSize - 1.5, weight: .semibold))
+                    .sfFont(glyphSize - 1.5, weight: .semibold)
                     .rotationEffect(.degrees(recentOpen ? 180 : 0))
                     .animation(.spring(response: 0.32, dampingFraction: 0.8), value: recentOpen)
             }
@@ -7886,7 +7918,7 @@ struct IdleTrailingCluster: View {
         let hovering = hovered == segment
         return Button(action: action) {
             glyph()
-                .font(.sf(glyphSize, weight: .semibold))
+                .sfFont(glyphSize, weight: .semibold)
                 .foregroundStyle(hovering ? Tokens.text1 : Tokens.text3)
                 .frame(width: flat ? Self.flatSize : chipSize,
                        height: flat ? Self.flatSize : chipSize)
@@ -7960,6 +7992,31 @@ extension View {
     }
 }
 
+/// The floating card's grabber, as on an iPad window: three dots at the top
+/// centre. A drag moves the card; a click opens its position menu.
+struct CardGrabber: View {
+    let model: NotchModel
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(0..<3, id: \.self) { _ in
+                Circle().frame(width: 5, height: 5)
+            }
+        }
+        .foregroundStyle(hovering ? Tokens.text2 : Tokens.text4)
+        .frame(width: 56, height: 16)
+        .contentShape(Rectangle())
+        .grabCursor()
+        .gesture(DragGesture(minimumDistance: 3, coordinateSpace: .global)
+            .onChanged { _ in model.dragCard(ended: false) }
+            .onEnded { _ in model.dragCard(ended: true) })
+        .simultaneousGesture(TapGesture().onEnded { model.showCardPositionMenu() })
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
+    }
+}
+
 /// The result header's trailing control — pin, then more — held in ONE Liquid Glass
 /// capsule (`glassCapsule` = native `.glassEffect` on macOS 26+, blur fallback
 /// below). Two marks, one continuous pill: bare glyphs read as loose chrome
@@ -8007,10 +8064,10 @@ struct ResultTrailingCluster: View {
                     if detach == nil {
                         // The pin's stroke weight, so the two marks match.
                         Image(systemName: "sidebar.right")
-                            .font(.sf(13, weight: .light))
+                            .sfFont(13, weight: .light)
                     } else {
                         Image(systemName: "ellipsis")
-                            .font(.sf(15, weight: .bold))
+                            .sfFont(15, weight: .bold)
                     }
                 }
                 more.showsTooltip = false
@@ -8081,7 +8138,7 @@ private struct GlassBackButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: "chevron.left")
-                .font(.sf(Tokens.TypeSize.form, weight: .semibold))
+                .sfFont(Tokens.TypeSize.form, weight: .semibold)
                 .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
                 .frame(width: size, height: size)
                 .glassCapsule(in: Circle(), brighter: hovering)
@@ -8214,7 +8271,7 @@ struct UserQuestionBubble: View {
             VStack(alignment: .leading, spacing: 8) {
                 if !quote.instruction.isEmpty {
                     Text(quote.instruction)
-                        .font(.sf(bubbleFont, weight: .medium))
+                        .sfFont(bubbleFont, weight: .medium)
                         .tracking(-0.1)
                         .foregroundStyle(Tokens.text2)
                         // Reserve at least one collapsed line for the quote itself.
@@ -8223,7 +8280,7 @@ struct UserQuestionBubble: View {
                 }
 
                 Text(quote.selection)
-                    .font(.sf(bubbleFont, weight: .medium))
+                    .sfFont(bubbleFont, weight: .medium)
                     .tracking(-0.1)
                     .foregroundStyle(Tokens.text3)
                     .lineLimit(expanded ? nil : max(
@@ -8247,7 +8304,7 @@ struct UserQuestionBubble: View {
             .textSelection(.enabled)
         } else {
             Text(text)
-                .font(.sf(bubbleFont, weight: .medium))
+                .sfFont(bubbleFont, weight: .medium)
                 .tracking(-0.1)
                 .foregroundStyle(Tokens.text2)
                 // Collapsed to a fixed cap until the user expands; nil = unlimited.
@@ -8309,7 +8366,7 @@ struct UserQuestionBubble: View {
                     withAnimation(.easeOut(duration: Tokens.hoverFade)) { expanded.toggle() }
                 } label: {
                     Text(expanded ? L("bubble.showLess") : L("bubble.showMore"))
-                        .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                        .sfFont(Tokens.TypeSize.meta, weight: .medium)
                         .tracking(0.2)
                         .foregroundStyle(Tokens.text4)
                 }
@@ -8417,7 +8474,7 @@ private struct AgentChipFace<Icon: View>: View {
             icon
                 .foregroundStyle(tint ?? (hovering ? Tokens.text2 : Tokens.text4))
             Text(title)
-                .font(.sf(fontSize, weight: fontWeight))
+                .sfFont(fontSize, weight: fontWeight)
                 .foregroundStyle(tint ?? (hovering ? Tokens.text2 : Tokens.text4))
                 .lineLimit(1)
         }
@@ -8989,7 +9046,7 @@ private struct UnifiedComposeModeControl: View {
             }
         } label: {
             Text(title)
-                .font(.sf(Self.fontSize, weight: .regular))
+                .sfFont(Self.fontSize, weight: .regular)
                 .foregroundStyle(ink)
                 .brightness(0.1)
                 .lineLimit(1)
@@ -9302,7 +9359,7 @@ private struct BucketWord: View {
             .frame(minWidth: BucketTogglePill.iconSlot)
             ZStack(alignment: .leading) {
                 Text(title)
-                    .font(.sf(Tokens.TypeSize.label, weight: .medium))
+                    .sfFont(Tokens.TypeSize.label, weight: .medium)
                     // Within ONE destination the word can still change — a
                     // recurrence suffix ("Remind · Daily"→"· Weekly"). Identity
                     // holds across that, so it cross-fades in place instead of
@@ -9551,6 +9608,8 @@ fileprivate struct ThreadRevealTop<Header: View, Thread: View, Frost: View>: Vie
     let targets: ThreadRevealTargets
     let peekHeight: CGFloat
     let peekGap: CGFloat
+    /// The floating card's peek is shorter, so its fade and frost are stronger.
+    let floating: Bool
     let sideInset: CGFloat
     let showsHeader: Bool
     let header: Header
@@ -9558,8 +9617,11 @@ fileprivate struct ThreadRevealTop<Header: View, Thread: View, Frost: View>: Vie
     let frost: Frost
 
     /// The peek's own fade (clear at the top to this at the bottom) and frost.
-    private let peekAlpha: CGFloat = 0.85
-    private let peekBlurRadius: CGFloat = 6
+    private var peekAlpha: CGFloat { floating ? 0.65 : 0.85 }
+    private var peekBlurRadius: CGFloat { floating ? 9 : 6 }
+    /// Where the frost's mask starts to fall off, and where it reaches clear.
+    private var frostSolidUntil: CGFloat { floating ? 0.7 : 0.45 }
+    private var frostClearAt: CGFloat { floating ? 1 : 0.9 }
 
     var body: some View {
         let p = active ? min(max(live.progress, 0), 1) : 0
@@ -9589,8 +9651,8 @@ fileprivate struct ThreadRevealTop<Header: View, Thread: View, Frost: View>: Vie
                             LinearGradient(
                                 stops: [
                                     .init(color: .black, location: 0),
-                                    .init(color: .black, location: 0.45),
-                                    .init(color: .clear, location: 0.9),
+                                    .init(color: .black, location: frostSolidUntil),
+                                    .init(color: .clear, location: frostClearAt),
                                     .init(color: .clear, location: 1),
                                 ],
                                 startPoint: .top, endPoint: .bottom))
@@ -9740,7 +9802,7 @@ private struct WelcomeExampleCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(L("welcome.example"))
-                .font(.sf(Tokens.TypeSize.meta))
+                .sfFont(Tokens.TypeSize.meta)
                 .tracking(0.2)
                 .foregroundStyle(Tokens.text4)
                 .padding(.leading, 12)   // matches the bubble's horizontal inset
@@ -9904,7 +9966,7 @@ private struct AutoRetireModelCard: View {
             HStack(alignment: .top, spacing: 10) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(NotchModel.autoRetireName(modelID))
-                        .font(.sf(Tokens.TypeSize.label, weight: .semibold))
+                        .sfFont(Tokens.TypeSize.label, weight: .semibold)
                         .foregroundStyle(Tokens.text1)
                         .lineLimit(1)
                     if let pricing {
@@ -9914,16 +9976,16 @@ private struct AutoRetireModelCard: View {
                             price(L("nono.pricing.out"), pricing.outputPerMTok)
                             Text("/M").foregroundStyle(Tokens.text4)
                         }
-                        .font(.sf(Tokens.TypeSize.meta))
+                        .sfFont(Tokens.TypeSize.meta)
                         .lineLimit(1)
                         if let sale = pricing.saleLine {
                             Text(sale)
-                                .font(.sf(Tokens.TypeSize.meta))
+                                .sfFont(Tokens.TypeSize.meta)
                                 .foregroundStyle(Tokens.sale.opacity(0.85))
                                 .lineLimit(1)
                         } else if reservesSaleLine {
                             Text(" ")
-                                .font(.sf(Tokens.TypeSize.meta))
+                                .sfFont(Tokens.TypeSize.meta)
                                 .accessibilityHidden(true)
                         }
                     }
@@ -10063,7 +10125,7 @@ private struct UnifiedIntroOption: View {
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.sf(Tokens.TypeSize.meta))
+                .sfFont(Tokens.TypeSize.meta)
                 .foregroundStyle(hovering ? Tokens.text1 : Tokens.text3)
                 .lineLimit(1)
         }
@@ -10086,11 +10148,11 @@ private struct UnifiedIntroLearnMoreCard: View {
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(L("unifiedIntro.learnMore", NotchModel.unifiedIntroAutoName))
-                        .font(.sf(Tokens.TypeSize.label, weight: .semibold))
+                        .sfFont(Tokens.TypeSize.label, weight: .semibold)
                         .foregroundStyle(Tokens.text1)
                         .lineLimit(1)
                     Text(L("settings.title"))
-                        .font(.sf(Tokens.TypeSize.meta))
+                        .sfFont(Tokens.TypeSize.meta)
                         .foregroundStyle(Tokens.text3)
                         .lineLimit(1)
                 }
@@ -10176,7 +10238,7 @@ struct RoutinesPanel: View {
             let rows = items
             if rows.isEmpty {
                 Text(L("routines.empty"))
-                    .font(.sf(Tokens.TypeSize.label))
+                    .sfFont(Tokens.TypeSize.label)
                     .foregroundStyle(Tokens.text4)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -10208,16 +10270,16 @@ struct RoutinesPanel: View {
             VStack(alignment: .leading, spacing: 3) {
                 // The thread's own text, one step down.
                 Text(item.title)
-                    .font(.sf(Tokens.TypeSize.label))
+                    .sfFont(Tokens.TypeSize.label)
                     .foregroundStyle(item.active ? Tokens.text1 : Tokens.text3)
                     .lineLimit(1)
                 Text(rule(item))
-                    .font(.sf(Tokens.TypeSize.meta))
+                    .sfFont(Tokens.TypeSize.meta)
                     .foregroundStyle(Tokens.text3)
                     .lineLimit(1)
                 if let state = state(item) {
                     Text(state)
-                        .font(.sf(Tokens.TypeSize.meta))
+                        .sfFont(Tokens.TypeSize.meta)
                         .foregroundStyle(Tokens.text4)
                         .lineLimit(1)
                 }
@@ -10291,7 +10353,7 @@ struct SidePageHeader: View {
                     withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { selected = tab }
                 } label: {
                     Text(title)
-                        .font(.sf(Tokens.TypeSize.label, weight: .medium))
+                        .sfFont(Tokens.TypeSize.label, weight: .medium)
                         .foregroundStyle(selected == tab ? Tokens.text1 : Tokens.text3)
                         .padding(.horizontal, 12)
                         .frame(height: 28)
@@ -10310,7 +10372,7 @@ struct SidePageHeader: View {
             GlassSegmentCluster(segments: [
                 .init(id: "close", tooltip: L("detached.close"), action: onClose) {
                     Image(systemName: "xmark")
-                        .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
+                        .sfFont(Tokens.TypeSize.meta, weight: .semibold)
                 },
             ], showsTooltips: false)
         }

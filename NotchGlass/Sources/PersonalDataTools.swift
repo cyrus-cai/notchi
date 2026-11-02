@@ -1174,6 +1174,85 @@ struct DraftMailTool: NotchTool {
     }
 }
 
+/// `send_message`: one iMessage, or SMS through a paired iPhone, from the
+/// Messages app. Sent only after the user confirms it on a card.
+///
+/// The model used to write this AppleScript itself in run_shell, as
+/// `send … to buddy … of service "iMessage"`, which current Messages rejects
+/// (-10002); one request ran it 9 times before giving up (2026-10-23).
+struct SendMessageTool: NotchTool {
+    static let toolName = "send_message"
+    let name = toolName
+    let description = """
+    Sends a message from the Messages app on this Mac: iMessage, or SMS when \
+    iMessage cannot reach the number. `to` is a phone number with country code \
+    or the email address of the recipient's Apple Account; when the user names \
+    a person, look the number up in Contacts first (run_shell with osascript). \
+    The user confirms every message on a card before it goes out. Use this, \
+    never osascript in run_shell, to send a message. Never say it was sent \
+    until the result says Sent.
+    """
+    let schema: [String: Any] = [
+        "type": "object",
+        "properties": [
+            "to": ["type": "string", "description": "Phone number (+49…) or Apple Account email."],
+            "text": ["type": "string", "description": "The message, in the words and language the user asked for."],
+        ],
+        "required": ["to", "text"],
+    ]
+
+    /// Shows the confirmation card; true when the user chose to send.
+    let confirm: @Sendable (_ to: String, _ text: String) async throws -> Bool
+
+    /// iMessage first, then SMS. Arguments come in as `argv`, so the text
+    /// needs no escaping.
+    private static let script = """
+    on run argv
+        set theText to item 1 of argv
+        set theHandle to item 2 of argv
+        tell application "Messages"
+            try
+                set theAccount to 1st account whose service type = iMessage
+                send theText to participant theHandle of theAccount
+            on error
+                set theAccount to 1st account whose service type = SMS
+                send theText to participant theHandle of theAccount
+            end try
+        end tell
+    end run
+    """
+
+    func execute(_ input: [String: Any]) async throws -> String {
+        guard let to = PersonalDataFormat.string(input["to"]) else { return "Error: give to." }
+        guard let text = PersonalDataFormat.string(input["text"]) else { return "Error: give text." }
+        guard try await confirm(to, text) else {
+            return "The user did not approve this message. It was not sent. Do not retry it."
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", Self.script, text, to]
+        let errors = Pipe()
+        process.standardError = errors
+        process.standardOutput = Pipe()
+        let status: Int32? = await withCheckedContinuation { done in
+            process.terminationHandler = { done.resume(returning: $0.terminationStatus) }
+            do {
+                try process.run()
+            } catch {
+                process.terminationHandler = nil
+                done.resume(returning: nil)
+            }
+        }
+        guard let status else { return "Error: osascript did not start." }
+        guard status == 0 else {
+            let detail = String(data: errors.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return "Error: Messages did not send it. \(detail)"
+        }
+        return "Sent to \(to)."
+    }
+}
+
 /// `edit_note`: tag or delete a note the user filed, wherever notes go
 /// (`NoteDestination`). In the Markdown folder a note is one `## HH:MM`
 /// entry of a day file; in Apple Notes it is the whole note. Deleting waits

@@ -787,6 +787,11 @@ struct CommandCodeCLIService: AIService {
     /// goes to the CLI's own `POST /alpha/generate`, as `cmd` itself does.
     static let gatewayURL = URL(string: "https://api.commandcode.ai/alpha/generate")!
 
+    /// Settings toggle, off by default. On, requests go only to upstreams that keep
+    /// no data; a model without one answers with an error.
+    static let zeroDataRetentionKey = "commandCode.zeroDataRetention"
+    static var zeroDataRetention: Bool { UserDefaults.standard.bool(forKey: zeroDataRetentionKey) }
+
     /// `x-command-code-version` when the installed CLI's `package.json` can't be
     /// read. The gateway refuses a request without a version.
     private static let fallbackCLIVersion = "1.84.0"
@@ -873,6 +878,9 @@ struct CommandCodeCLIService: AIService {
                         req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
                         req.setValue(Self.cliVersion, forHTTPHeaderField: "x-command-code-version")
                         req.setValue("production", forHTTPHeaderField: "x-cli-environment")
+                        if Self.zeroDataRetention {
+                            req.setValue("1", forHTTPHeaderField: "x-cmd-zdr")
+                        }
                         req.setValue("false", forHTTPHeaderField: "x-co-flag")
                         req.httpBody = try JSONSerialization.data(
                             withJSONObject: Self.requestBody(model: modelID, system: system,

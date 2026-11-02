@@ -1331,6 +1331,9 @@ final class AgentTaskManager: ObservableObject {
         }
 
         let p = ShellEnvironment.makeProcess(binary, args, cwd: folder)
+        if engine == .commandCode, CommandCodeCLIService.zeroDataRetention {
+            p.environment?["CMD_ZDR"] = "1"
+        }
 
         // stdout/stderr go to FILES, not pipes — deliberately. A pipe ties the
         // CLI to this process: quit the app mid-run and the orphaned CLI dies

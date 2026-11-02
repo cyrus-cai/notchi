@@ -107,6 +107,27 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.24",
+            date: "2026-11-02",
+            headline: "Notchi can now send iMessages for you.",
+            features: [
+                "Notchi can send iMessage and SMS from the Messages app. You confirm each message first.",
+                "You can drag the top-right card anywhere on screen. Click its handle to put it back.",
+                "Notchi can now run commands from Telegram. Commands that need approval show buttons in the chat.",
+                "A question that failed on another model can be sent again with Notchi.",
+                "Command Code now has a zero data retention switch.",
+            ],
+            improvements: [
+                "When a reply says something was done but no step backs it, Notchi checks again and says so under the reply.",
+                "Notchi stops retrying a step that keeps failing and tells you what went wrong.",
+                "Notchi now remembers the commands it ran in earlier turns and where it saved files.",
+                "Confirming a delete now shows the files it would remove.",
+                "Models and pricing now lists free models apart from pay-as-you-go ones.",
+                "The top-right card now answers in place.",
+                "Answer with the lid closed, Cloud machine, and copy sensing moved to Settings → Chat.",
+            ]
+        ),
+        Entry(
             version: "0.9.23",
             date: "2026-10-30",
             headline: "Loops now run until you stop them.",

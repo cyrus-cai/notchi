@@ -257,6 +257,100 @@ struct ToolInvocation: Sendable {
     var searchFailure: SearchServiceError? = nil
 }
 
+/// What a finished tool call did, in the few forms the harness and the next
+/// round's wire need: one trail line, whether it failed, and whether it changes
+/// something on the Mac.
+///
+/// Read back from the gateway logs (2026-10): the model's later rounds saw only
+/// the text of earlier answers, so it no longer knew where it had saved a
+/// screenshot or a presentation, and said "Erledigt" for a delete it never ran.
+enum ToolTrail {
+    /// Lines kept per answer; the newest win.
+    static let maxLines = 20
+
+    /// `run_shell: rm ~/Desktop/a.png → exit 0`. Arguments and result cut to a
+    /// line each; a path or a command is what the next round needs, not output.
+    static func line(for call: ToolInvocation) -> String {
+        let name = call.name == call.capability ? call.name
+            : "\(call.name) action=\(call.input["action"] as? String ?? "")"
+        let args: String
+        if let command = call.input["command"] as? String {
+            args = clip(command, 300)
+        } else {
+            let parts = call.input.keys.sorted().filter { $0 != "action" }.compactMap { key -> String? in
+                guard let value = call.input[key] else { return nil }
+                let text = (value as? String) ?? "\(value)"
+                return "\(key)=\(clip(text, 120))"
+            }
+            args = clip(parts.joined(separator: " "), 300)
+        }
+        return "\(name): \(args) → \(outcome(of: call))"
+    }
+
+    /// Exit code, refusal or error, else the result's first line.
+    static func outcome(of call: ToolInvocation) -> String {
+        let lines = call.result.split(whereSeparator: \.isNewline).map(String.init)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        guard let first = lines.first else { return call.isError ? "error" : "ok" }
+        if first.hasPrefix("The user did not approve") { return "not approved by the user, not run" }
+        if first.hasPrefix("exit code: ") {
+            let code = first.dropFirst("exit code: ".count)
+            if code == "0" { return "exit 0" }
+            return "exit \(code)" + (lines.count > 1 ? ": " + clip(lines[1], 120) : "")
+        }
+        return clip(first, 120)
+    }
+
+    /// The call did not do what it was asked: an error, a non-zero exit, or a
+    /// command the user turned down.
+    static func failed(_ call: ToolInvocation) -> Bool {
+        if call.isError { return true }
+        let head = call.result.prefix(64)
+        if head.hasPrefix("The user did not approve") { return true }
+        if head.hasPrefix("exit code: "), !head.hasPrefix("exit code: 0\n"), head != "exit code: 0" {
+            return true
+        }
+        return head.hasPrefix("Error") || head.hasPrefix("Stopped after")
+    }
+
+    /// Calls that change something on the Mac or send something off it.
+    static func acts(_ call: ToolInvocation) -> Bool {
+        switch call.capability {
+        case "run_shell", "send_message", "write_file", "edit_file", "cloud_machine": return true
+        default: return false
+        }
+    }
+
+    /// A short reply that opens by saying something was done. Lexical and
+    /// deliberately narrow — it decides whether the harness spends one hidden
+    /// round asking the model to check, and that round can answer `keepMarker`.
+    static func claimsDone(_ answer: String) -> Bool {
+        let text = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, text.count <= 600 else { return false }
+        let opening = String(text.prefix(200))
+        return opening.range(of: claimPattern, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    /// The reply the check round gives when its first reply claimed nothing.
+    static let keepMarker = "[[keep]]"
+
+    private static let claimPattern = [
+        // English
+        #"\b(done|deleted|removed|saved|sent|printed|created|moved|installed|renamed|turned (on|off)|enabled|disabled|all set)\b"#,
+        // German
+        #"(erledigt|fertig|gelöscht|gespeichert|gesendet|verschickt|geschickt|gedruckt|erstellt|verschoben|installiert|umbenannt|aktiviert|deaktiviert)"#,
+        // French, Spanish
+        #"(c'est fait|terminé|supprimé|enregistré|envoyé|imprimé|créé|déplacé|listo|hecho|eliminado|borrado|guardado|enviado|impreso|creado|movido)"#,
+        // Chinese, Japanese
+        #"(已删除|删掉了|删好了|已完成|搞定|已保存|存好了|已发送|发好了|发出去了|已打印|已创建|建好了|已移动|已开启|已关闭|削除しました|完了しました|保存しました|送信しました|作成しました)"#,
+    ].joined(separator: "|")
+
+    private static func clip(_ text: String, _ limit: Int) -> String {
+        let flat = text.replacingOccurrences(of: "\n", with: " ⏎ ")
+        return flat.count > limit ? String(flat.prefix(limit)) + "…" : flat
+    }
+}
+
 /// The conversation as the harness threads it back to the provider. Beyond the
 /// plain user/assistant text turns, an agent conversation also carries
 /// *assistant tool-call* turns and *tool-result* turns, which the two wire
@@ -622,6 +716,12 @@ struct AgentHarness {
     /// line is appended, so the answer can trust them as cards
     /// (`Turn.sharedLinks`). Main-actor.
     typealias LinksSink = @MainActor ([URL]) -> Void
+    /// A tool round finished → its calls, results included, in request order.
+    /// The caller keeps `ToolTrail` lines of them on the answer turn.
+    typealias ToolsSink = @MainActor ([ToolInvocation]) -> Void
+    /// Take back the last `n` characters already passed to `onText`: the
+    /// reply the claim check replaced (`unbackedClaimNote`).
+    typealias RetractSink = @MainActor (Int) -> Void
 
     /// Run the loop to completion. `onText` receives answer chunks; `onActivity`
     /// receives tool-progress labels; `onSources` receives any web sources a search
@@ -641,7 +741,9 @@ struct AgentHarness {
              onSources: @escaping SourcesSink,
              onModel: ModelSink? = nil,
              onReasoning: ReasoningSink? = nil,
-             onLinks: LinksSink? = nil) async throws {
+             onLinks: LinksSink? = nil,
+             onTools: ToolsSink? = nil,
+             onRetract: RetractSink? = nil) async throws {
         var convo = messages
         var iteration = 0
         // True once the model has run at least one tool round. It changes what the
@@ -687,6 +789,18 @@ struct AgentHarness {
         // search returned — a link line naming one of those is already trusted.
         var spokenText = ""
         var allSources: [WebSource] = []
+        // Every call this run made, results included, for the claim check.
+        var ranCalls: [ToolInvocation] = []
+        // The claim check (`unbackedClaimNote`) runs at most once per answer.
+        // While it runs, the reply it questioned stays on screen and the new
+        // turn's text is held back until we know which one to keep.
+        var claimCheckDone = false
+        var heldReply: String? = nil
+        // Tools taken off the wire after failing the same way again and again
+        // (`repeatFailureLimit`), and the failure counts that decide it.
+        var withdrawn: Set<String> = []
+        var failureStreaks: [String: Int] = [:]
+        var shellFailures = 0
         let question: String = messages.reversed().lazy.compactMap { message -> String? in
             if case .text(let role, let text) = message.kind, role == "user" { return text }
             return nil
@@ -723,10 +837,13 @@ struct AgentHarness {
             if forceNoTools || iteration >= maxIterations {
                 toolsThisTurn = []
             } else if searchRounds >= maxSearchRounds {
-                toolsThisTurn = registry.specs.filter { !Self.isSearchTool($0.name) }
+                toolsThisTurn = registry.specs.filter { !Self.isSearchTool($0.name) && !withdrawn.contains($0.name) }
             } else {
-                toolsThisTurn = registry.specs
+                toolsThisTurn = registry.specs.filter { !withdrawn.contains($0.name) }
             }
+            // A claim-check turn's text waits in `assistantText` until the turn
+            // ends; every other turn streams.
+            let holding = heldReply != nil
 
             // First turn only: if this question's answer moves with calendar time
             // and search is still on the table, require it. Later turns (and
@@ -805,6 +922,10 @@ struct AgentHarness {
                 case .text(let piece):
                     let visible = markupFilter.feed(piece)
                     guard !visible.isEmpty else { continue }
+                    if holding {
+                        assistantText += visible
+                        continue
+                    }
                     if !clearedGapLabel {
                         onActivity(nil, .composing)
                         clearedGapLabel = true
@@ -857,8 +978,10 @@ struct AgentHarness {
             // stream ended mid-`<` it was just a stray `<`, so let it through.
             if let tail = markupFilter.flush(), !tail.isEmpty {
                 assistantText += tail
-                spokenText += tail
-                onText(tail)
+                if !holding {
+                    spokenText += tail
+                    onText(tail)
+                }
             }
 
             // A model that wrote its tool call as *text* markup instead of sending a
@@ -893,6 +1016,24 @@ struct AgentHarness {
             // `"length"` / Anthropic `"max_tokens"`) rather than finishing cleanly.
             // Two very different failure modes ride this flag, handled below.
             let truncated = stopReason == "length" || stopReason == "max_tokens"
+
+            // The claim check's turn is over: keep the reply it questioned, or
+            // take that reply back and show this turn's instead.
+            if let held = heldReply {
+                heldReply = nil
+                let reply = assistantText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if pendingCalls.isEmpty, reply.isEmpty || reply.contains(ToolTrail.keepMarker) {
+                    assistantText = held
+                } else {
+                    onRetract?(held.count)
+                    if spokenText.hasSuffix(held) { spokenText.removeLast(held.count) }
+                    if !reply.isEmpty {
+                        onActivity(nil, .composing)
+                        spokenText += assistantText
+                        onText(assistantText)
+                    }
+                }
+            }
 
             // No tool calls (or we suppressed them at the cap) → the model is done.
             if pendingCalls.isEmpty {
@@ -935,6 +1076,25 @@ struct AgentHarness {
                                                           text: Self.emptyTurnNote(leaked: leaked))))
                     iteration += 1
                     continue
+                }
+
+                // A reply that says it did something the tool results do not
+                // back: one more round, held off screen, to do it or to say it
+                // was not done (`unbackedClaimNote`).
+                if !claimCheckDone, !truncated, !forceNoTools, iteration < maxIterations,
+                   !registry.isEmpty, onRetract != nil,
+                   let note = Self.unbackedClaimNote(answer: assistantText, calls: ranCalls) {
+                    claimCheckDone = true
+                    heldReply = assistantText
+                    convo.append(AgentMessage(kind: .text(role: "assistant", text: assistantText)))
+                    convo.append(AgentMessage(kind: .text(role: "user", text: note)))
+                    iteration += 1
+                    continue
+                }
+                // Checked once and still claimed: say under the reply what the
+                // tool results show, so the user does not take it on trust.
+                if claimCheckDone, Self.unbackedClaimNote(answer: assistantText, calls: ranCalls) != nil {
+                    onText(L(ranCalls.isEmpty ? "agent.unbacked.noTool" : "agent.unbacked.failed"))
                 }
 
                 // Images that do not load: the answer hides them, and the model
@@ -1019,6 +1179,28 @@ struct AgentHarness {
             // part of the app that asked for it.
             let completed = await NoNoRequestContext.$current.withValue(requestContext) {
                 await runConcurrently(pendingCalls)
+            }
+            ranCalls += completed
+            onTools?(completed)
+            // The same call failing the same way again: past the limit, the tool
+            // leaves the wire for the rest of this answer, and the model is told
+            // to say so. One iMessage request ran the same broken AppleScript 9
+            // times in 17 rounds before this existed.
+            var exhausted: [String] = []
+            for call in completed {
+                let key = Self.failureKey(call)
+                if ToolTrail.failed(call) {
+                    failureStreaks[key, default: 0] += 1
+                    if call.capability == RunShellTool.toolName { shellFailures += 1 }
+                    if failureStreaks[key, default: 0] >= Self.repeatFailureLimit
+                        || (call.name == RunShellTool.toolName && shellFailures >= Self.shellFailureLimit),
+                       !withdrawn.contains(call.name) {
+                        withdrawn.insert(call.name)
+                        exhausted.append(call.name)
+                    }
+                } else {
+                    failureStreaks[key] = 0
+                }
             }
             for call in completed where Self.isSearchTool(call.name) {
                 if let failure = call.searchFailure {
@@ -1105,6 +1287,9 @@ struct AgentHarness {
             // text (`<tool_call>…`).
             if iteration + 1 >= maxIterations, !resultsToSend.isEmpty {
                 resultsToSend[resultsToSend.count - 1].result += Self.stepCapNote
+            }
+            if !exhausted.isEmpty, !resultsToSend.isEmpty {
+                resultsToSend[resultsToSend.count - 1].result += Self.withdrawnNote(exhausted)
             }
 
             convo.append(AgentMessage(kind: .assistantToolCalls(text: assistantText,
@@ -1219,6 +1404,61 @@ struct AgentHarness {
             + "only: use image addresses that appear in search results or in pages you read with "
             + "read_page, never ones you put together yourself. If you cannot find any, say so in "
             + "one short line. Do not repeat the rest of the answer."
+    }
+
+    /// Times the same call may fail the same way before its tool is withdrawn.
+    static let repeatFailureLimit = 3
+    /// Failed shell commands, any command, before run_shell is withdrawn.
+    static let shellFailureLimit = 8
+
+    /// The same call, for counting repeats: the tool and its arguments with
+    /// whitespace evened out.
+    static func failureKey(_ call: ToolInvocation) -> String {
+        let args: String
+        if let command = call.input["command"] as? String {
+            args = command
+        } else {
+            args = call.input.keys.sorted().map { "\($0)=\(call.input[$0].map { "\($0)" } ?? "")" }
+                .joined(separator: "&")
+        }
+        return call.name + " " + args.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    }
+
+    /// Appended to the round's last result when tools were withdrawn.
+    private static func withdrawnNote(_ names: [String]) -> String {
+        "\n\n[System note] " + names.map { "`\($0)`" }.joined(separator: ", ")
+            + " kept failing the same way and is no longer available in this answer. "
+            + "Do not try it another way. Tell the user plainly that it did not work and "
+            + "what the error said, then give the steps they can take themselves."
+    }
+
+    /// The note for a reply that says something was done when the run's tool
+    /// results do not show it: no tool ran at all, or the last call that acts
+    /// on the Mac failed and nothing after it succeeded. Nil when the reply
+    /// makes no such claim or the results back it.
+    ///
+    /// Measured on the gateway logs (2026-10): "Erledigt – die beiden
+    /// Screenshots sind gelöscht" came back in 15 tokens with no tool call, on
+    /// a request that carried the tools and the "never say … you did not call a
+    /// tool for" rule. The prompt rule alone does not hold on the small models.
+    static func unbackedClaimNote(answer: String, calls: [ToolInvocation]) -> String? {
+        guard ToolTrail.claimsDone(answer) else { return nil }
+        let keep = "If your reply did not say that anything was done, reply with exactly "
+            + ToolTrail.keepMarker + " and nothing else."
+        if calls.isEmpty {
+            return "[System note] Your reply says something was done, but you called no "
+                + "tool in this answer, so nothing was done. If the user asked you to do "
+                + "something, do it now with a tool and then report what the result says, "
+                + "or tell them plainly that it was not done. " + keep
+        }
+        let acting = calls.filter(ToolTrail.acts)
+        guard let last = acting.lastIndex(where: ToolTrail.failed),
+              acting[(last + 1)...].allSatisfy(ToolTrail.failed) else { return nil }
+        let failures = acting.filter(ToolTrail.failed).suffix(5).map { "- " + ToolTrail.line(for: $0) }
+        return "[System note] Your reply says it worked, but these calls failed and "
+            + "nothing after them succeeded:\n" + failures.joined(separator: "\n")
+            + "\nFix it with a tool now and report what the result says, or tell the user "
+            + "plainly what did not work. " + keep
     }
 
     /// Appended to the last tool result before the capped turn (`maxIterations`).
@@ -1546,7 +1786,7 @@ enum ReasoningTags {
 /// the harness can reconstruct the tool call the model was really asking for —
 /// see `recoveredCalls`. Hiding the soup from the user is right; losing the call
 /// inside it is what turned a leaked turn into a blank answer.
-private struct ToolMarkupFilter {
+struct ToolMarkupFilter {
     private var suppressing = false   // saw an opener — swallow the rest of the turn
     /// Text from a `<` whose meaning is still open: the bare `<`, or a prefix
     /// of `<tool_call>`. Released as ordinary text once it can no longer be one.

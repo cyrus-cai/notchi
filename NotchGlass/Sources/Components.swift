@@ -821,7 +821,7 @@ struct InlineModeHint: View {
         let start = min(PromptField.textInset + caretWidth + Self.gap, dock)
 
         Text("— \(text)")
-            .font(.sf(fontSize))
+            .sfFont(fontSize)
             .foregroundStyle(tint.opacity(0.42))
             .lineLimit(1)
             .fixedSize()
@@ -1038,9 +1038,9 @@ struct SendButton: View {
     private func pill(_ label: String) -> some View {
         HStack(spacing: 6) {
             Text(label)
-                .font(.sf(Tokens.TypeSize.form, weight: .medium))
+                .sfFont(Tokens.TypeSize.form, weight: .medium)
             Image(systemName: icon)
-                .font(.sf(Tokens.TypeSize.label, weight: .semibold))
+                .sfFont(Tokens.TypeSize.label, weight: .semibold)
         }
         .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
         .id(label)
@@ -1054,7 +1054,7 @@ struct SendButton: View {
     /// The bare form: just the send arrow in a glass circle (mid-thread follow-up).
     private var glyphCircle: some View {
         Image(systemName: icon)
-            .font(.sf(Tokens.TypeSize.form, weight: .semibold))
+            .sfFont(Tokens.TypeSize.form, weight: .semibold)
             .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
             .id(icon)
             .transition(.scale(scale: 0.55).combined(with: .opacity))
@@ -1083,7 +1083,7 @@ struct StopButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: "stop.circle")
-                .font(.sf(Tokens.TypeSize.form, weight: .regular))
+                .sfFont(Tokens.TypeSize.form, weight: .regular)
                 .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
                 .frame(width: size, height: size)
                 .contentShape(Rectangle())
@@ -1107,7 +1107,7 @@ struct AgentFollowUpKeyHints: View {
         Text(showsInterrupt
              ? L("agent.followUp.send") + "  ·  " + L("agent.followUp.interrupt")
              : L("agent.followUp.send"))
-        .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+        .sfFont(Tokens.TypeSize.meta, weight: .medium)
         .foregroundStyle(Tokens.text4.opacity(0.72))
         .lineLimit(1)
         .fixedSize()
@@ -1388,7 +1388,7 @@ struct ComposerBox<Placeholder: View, Trailing: View>: View {
                 // glyphs, so the ghost must be gone.)
                 if text.isEmpty && caretWidth == 0 {
                     placeholder()
-                        .font(.sf(fontSize))
+                        .sfFont(fontSize)
                         .foregroundStyle(Tokens.placeholder)
                         .lineLimit(1)
                         // Sit on the box's own ~2pt left inset, so the label
@@ -1503,7 +1503,7 @@ struct ComposeImagesAttachedLine: View {
                 .overlay(alignment: .topTrailing) {
                     Button { onRemove(index) } label: {
                         Image(systemName: "xmark")
-                            .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                            .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                             .foregroundStyle(Tokens.text1)
                             .frame(width: 15, height: 15)
                             .background(Circle().fill(Color.black.opacity(0.66)))
@@ -1525,7 +1525,7 @@ struct ComposeImagesAttachedLine: View {
             if images.count > Self.stripMax {
                 Button { presentLightbox(at: Self.stripMax) } label: {
                     Text("+\(images.count - Self.stripMax)")
-                        .font(.sf(Tokens.TypeSize.caption, weight: .medium))
+                        .sfFont(Tokens.TypeSize.caption, weight: .medium)
                         .monospacedDigit()
                         .foregroundStyle(Tokens.text4)
                         .frame(width: 26, height: 24)
@@ -1603,7 +1603,7 @@ struct GlassIconButton: View {
     var body: some View {
         Button(action: action) {
             glyph
-                .font(.sf(glyphSize, weight: .regular))
+                .sfFont(glyphSize, weight: .regular)
                 .foregroundStyle(hovering ? Tokens.text1 : Tokens.text3)
                 .frame(width: size, height: size)
                 .glassCapsule(in: Circle(), brighter: hovering)
@@ -1635,7 +1635,7 @@ struct PinStateGlyph: View {
     var body: some View {
         let systemName = alternateSystemName ?? (pinned ? "pin.fill" : "pin")
         Image(systemName: systemName)
-            .font(.sf(alternateSize ?? size, weight: weight))
+            .sfFont(alternateSize ?? size, weight: weight)
             .rotationEffect(.degrees(alternateSystemName == nil && !pinned ? 32 : 0))
             .contentTransition(.symbolEffect(.replace))
             .animation(reduceMotion ? nil : .easeOut(duration: Tokens.hoverFade), value: systemName)
@@ -1853,7 +1853,7 @@ struct GlassTextButton: View {
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.sf(fontSize, weight: .medium))
+                .sfFont(fontSize, weight: .medium)
                 .foregroundStyle(tint == nil
                                  ? (hovering ? Tokens.text2 : Tokens.text4)
                                  : (hovering ? Tokens.text1 : Tokens.text2))
@@ -1890,9 +1890,9 @@ struct PanelBackPill: View {
         Button(action: action) {
             HStack(spacing: 5) {
                 Image(systemName: "chevron.left")
-                    .font(.sf(Tokens.TypeSize.meta, weight: .semibold))
+                    .sfFont(Tokens.TypeSize.meta, weight: .semibold)
                 Text(title)
-                    .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                    .sfFont(Tokens.TypeSize.meta, weight: .medium)
                     .tracking(0.4)
                     .textCase(.uppercase)
                     .lineLimit(1)
@@ -1926,7 +1926,7 @@ struct PanelBackButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: "chevron.left")
-                .font(.sf(Tokens.TypeSize.form, weight: .semibold))
+                .sfFont(Tokens.TypeSize.form, weight: .semibold)
                 .foregroundStyle(Tokens.text2)
                 .frame(width: Tokens.Control.header, height: Tokens.Control.header)
                 .contentShape(Rectangle())
@@ -1988,11 +1988,11 @@ struct CaptureLineLink: View {
             Button { action?() } label: {
                 HStack(spacing: 3) {
                     Text(label)
-                        .font(.sf(font))
+                        .sfFont(font)
                         .lineLimit(1)
                     if action != nil, capture.kind != .copied {
                         Image(systemName: "arrow.up.right")
-                            .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                            .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                     }
                 }
                 .foregroundStyle(hovering ? Tokens.text2 : Tokens.text3)
@@ -2005,7 +2005,7 @@ struct CaptureLineLink: View {
             if capture.kind == .memory, let undo {
                 Button(action: undo) {
                     Text(L("agent.process.undo"))
-                        .font(.sf(font))
+                        .sfFont(font)
                         .foregroundStyle(hoveringUndo ? Tokens.text2 : Tokens.text3)
                         .contentShape(Rectangle())
                 }
@@ -2029,7 +2029,7 @@ struct AnswerLineButton: View {
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.sf(font))
+                .sfFont(font)
                 .lineLimit(1)
                 .foregroundStyle(hovering ? Tokens.text2 : Tokens.text3)
                 .contentShape(Rectangle())
@@ -2055,9 +2055,9 @@ struct CaptureJumpButton: View {
         Button(action: action) {
             HStack(spacing: 3) {
                 Text(title)
-                    .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                    .sfFont(Tokens.TypeSize.meta, weight: .medium)
                 Image(systemName: "arrow.up.right")
-                    .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                    .sfFont(Tokens.TypeSize.badge, weight: .semibold)
             }
             .foregroundStyle(hovering ? Tokens.text2 : Tokens.text3)
             .padding(.vertical, 3)
@@ -2349,12 +2349,12 @@ struct ClearHistoryConfirm: View {
             VStack(spacing: 14) {
                 VStack(spacing: 6) {
                     Text(L(agentOnly ? "clear.agent.title" : "clear.title"))
-                        .font(.sf(Tokens.TypeSize.reading, weight: .medium))
+                        .sfFont(Tokens.TypeSize.reading, weight: .medium)
                         .foregroundStyle(Tokens.text1)
                     Text(L(agentOnly
                            ? "clear.agent.body"
                            : (offersScopeChoice ? "clear.body.scope" : "clear.body")))
-                        .font(.sf(Tokens.TypeSize.label))
+                        .sfFont(Tokens.TypeSize.label)
                         .foregroundStyle(Tokens.text3)
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
@@ -2420,7 +2420,7 @@ struct ForceTouchDisableConfirm: View {
                 // does, and a paragraph explaining what stays working was answering
                 // a question nobody asks of a timer.
                 Text(L("disable.title"))
-                    .font(.sf(Tokens.TypeSize.reading, weight: .medium))
+                    .sfFont(Tokens.TypeSize.reading, weight: .medium)
                     .foregroundStyle(Tokens.text1)
 
                 VStack(spacing: 8) {
@@ -2457,10 +2457,10 @@ struct LinkWarningConfirm: View {
             VStack(spacing: 14) {
                 VStack(spacing: 6) {
                     Text(L("linkCheck.warn.title"))
-                        .font(.sf(Tokens.TypeSize.reading, weight: .medium))
+                        .sfFont(Tokens.TypeSize.reading, weight: .medium)
                         .foregroundStyle(Tokens.text1)
                     Text(L("linkCheck.warn.body", host))
-                        .font(.sf(Tokens.TypeSize.label))
+                        .sfFont(Tokens.TypeSize.label)
                         .foregroundStyle(Tokens.text3)
                         .multilineTextAlignment(.center)
                         .lineLimit(4)
@@ -2494,10 +2494,10 @@ struct AccountDisconnectConfirm: View {
             VStack(spacing: 14) {
                 VStack(spacing: 6) {
                     Text(L("model.disconnect.confirm.title", account))
-                        .font(.sf(Tokens.TypeSize.reading, weight: .medium))
+                        .sfFont(Tokens.TypeSize.reading, weight: .medium)
                         .foregroundStyle(Tokens.text1)
                     Text(L("model.disconnect.confirm.body"))
-                        .font(.sf(Tokens.TypeSize.label))
+                        .sfFont(Tokens.TypeSize.label)
                         .foregroundStyle(Tokens.text3)
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
@@ -2547,10 +2547,10 @@ struct ForceClickLookupDialog: View {
             VStack(spacing: 12) {
                 VStack(spacing: 6) {
                     Text(L("forceClick.lookup.title"))
-                        .font(.sf(Tokens.TypeSize.reading, weight: .medium))
+                        .sfFont(Tokens.TypeSize.reading, weight: .medium)
                         .foregroundStyle(Tokens.text1)
                     Text(L("forceClick.lookup.body"))
-                        .font(.sf(Tokens.TypeSize.label))
+                        .sfFont(Tokens.TypeSize.label)
                         .foregroundStyle(Tokens.text3)
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
@@ -2627,7 +2627,7 @@ struct ConfirmDialogButton: View {
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.sf(font, weight: .medium))
+                .sfFont(font, weight: .medium)
                 .foregroundStyle(label)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 10)
@@ -2802,7 +2802,7 @@ struct CrossfadeText: View {
     var body: some View {
         ZStack(alignment: .leading) {
             Text(shown)
-                .font(.sf(font, weight: .regular))
+                .sfFont(font, weight: .regular)
                 .foregroundStyle(color)
                 .modifier(WaitShimmer(active: shimmers && !reduceMotion))
                 .id(shown)
@@ -2906,7 +2906,7 @@ struct WaitElapsedSuffix: View {
 
     private func label(_ seconds: Int) -> some View {
         Text("\(seconds)s")
-            .font(.sf(font - 2))
+            .sfFont(font - 2)
             .monospacedDigit()
             .foregroundStyle(Tokens.text4)
             .padding(.leading, leadingGap)
@@ -2943,12 +2943,12 @@ private struct ReadingSourceRow: View {
         } label: {
             HStack(alignment: .firstTextBaseline, spacing: 4) {
                 Text(source.host)
-                    .font(.sf(font))
+                    .sfFont(font)
                     .foregroundStyle(hovering ? Tokens.text2 : Tokens.text3)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Image(systemName: "chevron.right")
-                    .font(.sf(font - 4, weight: .semibold))
+                    .sfFont(font - 4, weight: .semibold)
                     .foregroundStyle(Tokens.text4)
                     .opacity(hovering ? 1 : 0)
                 Spacer(minLength: 0)
@@ -3504,7 +3504,7 @@ struct AssistantTurnView: View {
                         // never shifts.
                         if !working {
                             Image(systemName: "chevron.right")
-                                .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                                .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                                 .frame(width: 9, height: 9)
                                 .centeredOnTextGlyphs(fontSize: waitFont)
                                 .rotationEffect(.degrees(expanded ? 90 : 0))
@@ -4222,7 +4222,7 @@ struct UserQuestionCard: View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 8) {
                 Text(title)
-                    .font(.sf(font, weight: .medium))
+                    .sfFont(font, weight: .medium)
                     .foregroundStyle(Tokens.text2)
                     .fixedSize(horizontal: false, vertical: true)
                 ForEach(changes, id: \.self) { changeRow($0) }
@@ -4264,7 +4264,7 @@ struct UserQuestionCard: View {
     /// actually being asked about, set at the answer's text size.
     private func changeRow(_ line: String) -> some View {
         Text(line)
-            .font(.sf(font))
+            .sfFont(font)
             .foregroundStyle(Tokens.text1)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -4313,7 +4313,7 @@ private struct UserQuestionOptionRow: View {
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.sf(font))
+                .sfFont(font)
                 .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -6210,7 +6210,7 @@ struct MarkdownBlockRow: View, Equatable {
         case .heading(let level, let text):
             let size = max(baseFont, baseFont + CGFloat(7 - min(level, 5)) * 1.5)
             InlineMarkdownText(text, linkColor: color)
-                .font(.sf(size, weight: .semibold))
+                .sfFont(size, weight: .semibold)
                 .tracking(-0.1)
                 .foregroundStyle(color)
                 .fixedSize(horizontal: false, vertical: true)
@@ -6233,7 +6233,7 @@ struct MarkdownBlockRow: View, Equatable {
 
         case .quote(let text):
             InlineMarkdownText(text, linkColor: color.opacity(0.8))
-                .font(.sf(baseFont))
+                .sfFont(baseFont)
                 .tracking(-0.05)
                 .lineSpacing(baseFont * 0.45)
                 .foregroundStyle(color.opacity(0.8))
@@ -6250,7 +6250,7 @@ struct MarkdownBlockRow: View, Equatable {
 
         case .paragraph(let text):
             InlineMarkdownText(text, linkColor: color)
-                .font(.sf(baseFont))
+                .sfFont(baseFont)
                 .tracking(-0.05)
                 .lineSpacing(baseFont * 0.6)
                 .foregroundStyle(color)
@@ -6284,7 +6284,7 @@ struct MarkdownBlockRow: View, Equatable {
             // Display math: the Unicode rendering, centred like a typeset
             // formula, a shade larger than body so it reads as an island.
             Text(MathTypeset.unicode(text))
-                .font(.sf(baseFont + 1))
+                .sfFont(baseFont + 1)
                 .tracking(0.1)
                 .lineSpacing(baseFont * 0.5)
                 .foregroundStyle(color)
@@ -6319,7 +6319,7 @@ struct MarkdownBlockRow: View, Equatable {
             marker()
                 .frame(minWidth: 16, alignment: .trailing)
             InlineMarkdownText(text, linkColor: color.opacity(textOpacity))
-                .font(.sf(baseFont))
+                .sfFont(baseFont)
                 .tracking(-0.05)
                 .lineSpacing(baseFont * 0.5)
                 .foregroundStyle(color.opacity(textOpacity))
@@ -6339,7 +6339,7 @@ struct MarkdownBlockRow: View, Equatable {
 
     private func markerText(_ image: Image) -> some View {
         Text(image)
-            .font(.sf(baseFont, weight: .medium))
+            .sfFont(baseFont, weight: .medium)
             .foregroundStyle(color.opacity(0.7))
     }
 
@@ -6440,7 +6440,7 @@ private struct MarkdownTableView: View {
             }
         } label: {
             Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                .font(.sf(Tokens.TypeSize.label, weight: .regular))
+                .sfFont(Tokens.TypeSize.label, weight: .regular)
                 .foregroundStyle(Tokens.text1)
                 .contentTransition(.symbolEffect(.replace))
                 .frame(width: 26, height: 26)
@@ -6462,7 +6462,7 @@ private struct MarkdownTableView: View {
     @ViewBuilder
     private func cellText(_ raw: String, weight: Font.Weight, opacity: Double) -> some View {
         let text = InlineMarkdownText(raw, linkColor: color.opacity(opacity))
-            .font(.sf(baseFont - 1, weight: weight))
+            .sfFont(baseFont - 1, weight: weight)
             .tracking(-0.05)
             .foregroundStyle(color.opacity(opacity))
             .textSelection(.enabled)
@@ -6753,14 +6753,14 @@ struct MediaLinkChip: View {
             HStack(spacing: 6) {
                 if let icon {
                     Image(systemName: icon)
-                        .font(.sf(baseFont - 3, weight: .medium))
+                        .sfFont(baseFont - 3, weight: .medium)
                 }
                 Text(label)
-                    .font(.sf(baseFont - 1))
+                    .sfFont(baseFont - 1)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Image(systemName: "arrow.up.right")
-                    .font(.sf(baseFont - 5, weight: .semibold))
+                    .sfFont(baseFont - 5, weight: .semibold)
                     .opacity(0.6)
             }
             .foregroundStyle(color.opacity(0.75))
@@ -6899,17 +6899,17 @@ private struct AnswerPDFView: View {
                         Divider().overlay(Tokens.hairline)
                         HStack(spacing: 6) {
                             Image(systemName: "doc.text")
-                                .font(.sf(baseFont - 3, weight: .medium))
+                                .sfFont(baseFont - 3, weight: .medium)
                             Text(displayTitle)
-                                .font(.sf(baseFont - 1, weight: .medium))
+                                .sfFont(baseFont - 1, weight: .medium)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                             Spacer(minLength: 8)
                             Text(preview.pageCount == 1 ? "1 page" : "\(preview.pageCount) pages")
-                                .font(.sf(baseFont - 2))
+                                .sfFont(baseFont - 2)
                                 .opacity(0.55)
                             Image(systemName: "arrow.up.right")
-                                .font(.sf(baseFont - 5, weight: .semibold))
+                                .sfFont(baseFont - 5, weight: .semibold)
                                 .opacity(0.6)
                         }
                         .foregroundStyle(color.opacity(0.85))
@@ -7019,7 +7019,7 @@ struct CodeBlockView: View {
                     withAnimation(.easeOut(duration: Tokens.hoverFade)) { unfolded.toggle() }
                 } label: {
                     Text(unfolded ? L("bubble.showLess") : L("code.showAllLines", lineCount))
-                        .font(.sf(Tokens.TypeSize.meta, weight: .medium))
+                        .sfFont(Tokens.TypeSize.meta, weight: .medium)
                         .tracking(0.2)
                         .foregroundStyle(Tokens.text4)
                 }
@@ -7063,7 +7063,7 @@ struct CodeBlockView: View {
             }
         } label: {
             Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                .font(.sf(Tokens.TypeSize.label, weight: .regular))
+                .sfFont(Tokens.TypeSize.label, weight: .regular)
                 .foregroundStyle(hovering || copied ? Tokens.text1 : Tokens.text3)
                 // Native SF Symbols swap — the doc morphs to the check
                 // instead of hard-cutting.
@@ -7393,7 +7393,7 @@ struct SavedTurnImages: View {
             if files.count > Self.stripMax {
                 Button { presentLightbox(at: Self.stripMax) } label: {
                     Text("+\(files.count - Self.stripMax)")
-                        .font(.sf(Tokens.TypeSize.caption, weight: .medium))
+                        .sfFont(Tokens.TypeSize.caption, weight: .medium)
                         .monospacedDigit()
                         .foregroundStyle(Tokens.text4)
                         .frame(width: 26, height: 24)
@@ -7624,7 +7624,7 @@ private struct AgentTrailProse: View {
                     }
                 } label: {
                     Text(L(expanded ? "agent.trail.less" : "agent.trail.more"))
-                        .font(.sf(max(Tokens.TypeSize.meta, baseFont - 2), weight: .medium))
+                        .sfFont(max(Tokens.TypeSize.meta, baseFont - 2), weight: .medium)
                         .foregroundStyle(Tokens.text4)
                         .contentShape(Rectangle())
                 }
@@ -7698,7 +7698,7 @@ struct ThinkingFoldRow: View {
                         // The preview is the thinking. The word "Thinking" in
                         // front of it says nothing the line doesn't already.
                         Text(headerPreview)
-                            .font(.sf(font))
+                            .sfFont(font)
                             .foregroundStyle(Tokens.text4)
                             .lineLimit(1)
                             .truncationMode(.tail)
@@ -7706,12 +7706,12 @@ struct ThinkingFoldRow: View {
                             .transition(.opacity)
                     } else {
                         Text(L("agent.trail.thinking"))
-                            .font(.sf(font))
+                            .sfFont(font)
                             .italic()
                             .foregroundStyle(Tokens.text4)
                     }
                     Image(systemName: "chevron.right")
-                        .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                        .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                         .foregroundStyle(Tokens.text4)
                         .rotationEffect(.degrees(expanded ? 90 : 0))
                     if live {
@@ -7756,7 +7756,7 @@ struct ThinkingFoldRow: View {
 
     private var expandedBody: some View {
         Text(text)
-            .font(.sf(font))
+            .sfFont(font)
             .foregroundStyle(Tokens.text4)
             .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
@@ -7810,7 +7810,7 @@ private struct AgentTrailPlanRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(entry.title)
-                .font(.sf(waitFont, weight: .medium))
+                .sfFont(waitFont, weight: .medium)
                 .foregroundStyle(Tokens.text4)
             ForEach(Array(AgentTodo.decode(entry.detail ?? "").enumerated()), id: \.offset) { i, item in
                 AgentTrailPlanItem(text: item.text, status: item.status,
@@ -7861,12 +7861,12 @@ private struct AgentTrailPlanItem: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 7) {
             Image(systemName: Self.glyph(status))
-                .font(.sf(Tokens.TypeSize.caption, weight: .semibold))
+                .sfFont(Tokens.TypeSize.caption, weight: .semibold)
                 .foregroundStyle(status == .done ? Tokens.text3 : Tokens.text4)
                 .contentTransition(.symbolEffect(.replace))
                 .frame(width: 11)
             Text(text)
-                .font(.sf(font))
+                .sfFont(font)
                 .foregroundStyle(status == .pending ? Tokens.text4 : Tokens.text2)
                 .fixedSize(horizontal: false, vertical: true)
                 // The strike is a clear copy of the same text with only its
@@ -7874,7 +7874,7 @@ private struct AgentTrailPlanItem: View {
                 // item is struck on every line, as `.strikethrough` would.
                 .overlay(alignment: .leading) {
                     Text(text)
-                        .font(.sf(font))
+                        .sfFont(font)
                         .foregroundStyle(.clear)
                         .strikethrough(true, color: Tokens.text4)
                         .fixedSize(horizontal: false, vertical: true)
@@ -7922,11 +7922,11 @@ private struct AgentTrailGroupRow: View {
             } label: {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(Self.summary(entries))
-                        .font(.sf(waitFont))
+                        .sfFont(waitFont)
                         .foregroundStyle(Tokens.text4)
                         .lineLimit(1)
                     Image(systemName: "chevron.right")
-                        .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                        .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                         .foregroundStyle(Tokens.text4)
                         .rotationEffect(.degrees(expanded ? 90 : 0))
                 }
@@ -8004,7 +8004,7 @@ private struct AgentTrailToolRow: View {
                         .fixedSize(horizontal: false, vertical: true)
                     if entry.detail != nil {
                         Image(systemName: "chevron.right")
-                            .font(.sf(Tokens.TypeSize.badge, weight: .semibold))
+                            .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                             .foregroundStyle(Tokens.text4)
                             .rotationEffect(.degrees(expanded ? 90 : 0))
                     }
@@ -8463,14 +8463,14 @@ struct MenuCardRow: View {
             HStack(spacing: 6) {
                 if let checkmark {
                     Image(systemName: "checkmark")
-                        .font(.sf(accessoryFontSize, weight: .semibold))
+                        .sfFont(accessoryFontSize, weight: .semibold)
                         .foregroundStyle(Tokens.text2)
                         .opacity(checkmark ? 1 : 0)
                         .frame(width: MenuCard.symbolWidth)
                 }
                 if let symbol {
                     Image(systemName: symbol)
-                        .font(.sf(fontSize, weight: .regular))
+                        .sfFont(fontSize, weight: .regular)
                         .foregroundStyle(selected ? Tokens.text1 : Tokens.text3)
                         .frame(width: MenuCard.symbolWidth)
                 }
@@ -8493,7 +8493,7 @@ struct MenuCardRow: View {
                 if let accessory {
                     if !lowBalance && tag == nil { Spacer(minLength: 0) }
                     Text(accessory)
-                        .font(.sf(accessoryFontSize, weight: .regular))
+                        .sfFont(accessoryFontSize, weight: .regular)
                         .foregroundStyle(selected ? Tokens.text2 : Tokens.text4)
                         .lineLimit(1)
                         .fixedSize()
@@ -8501,7 +8501,7 @@ struct MenuCardRow: View {
                 if let disclosure {
                     if accessory == nil && !lowBalance { Spacer(minLength: 0) }
                     Image(systemName: "chevron.right")
-                        .font(.sf(accessoryFontSize, weight: .semibold))
+                        .sfFont(accessoryFontSize, weight: .semibold)
                         .foregroundStyle(selected ? Tokens.text2 : Tokens.text4)
                         .rotationEffect(.degrees(disclosure ? 90 : 0))
                 }
@@ -8523,7 +8523,7 @@ struct MenuCardRow: View {
                         Spacer(minLength: 0)
                     }
                     Image(systemName: hoverSymbol)
-                        .font(.sf(accessoryFontSize + 1, weight: .medium))
+                        .sfFont(accessoryFontSize + 1, weight: .medium)
                         // Same ink as the row's own word — a brighter glyph beside
                         // a dim label read as two different rows.
                         .foregroundStyle(selected || (promptShortcutID != nil && hovering)

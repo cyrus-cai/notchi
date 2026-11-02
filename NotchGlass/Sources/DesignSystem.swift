@@ -379,7 +379,7 @@ enum DebugFeatureFlags {
         #endif
     }()
 
-    /// The `cloud_machine` tool and its row in Settings → Connect.
+    /// The `cloud_machine` tool and its row in Settings → Chat.
     static let cloudMachine: Bool = {
         #if DEBUG
         UserDefaults.standard.bool(forKey: "NotchiCloudMachine")
@@ -523,6 +523,36 @@ extension View {
     }
 }
 
+/// A factor on every `sfFont` size below it. The floating card sets it, so
+/// its text runs a little smaller than the island's.
+private struct TextScaleKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 1
+}
+
+extension EnvironmentValues {
+    var textScale: CGFloat {
+        get { self[TextScaleKey.self] }
+        set { self[TextScaleKey.self] = newValue }
+    }
+}
+
+private struct ScaledSF: ViewModifier {
+    @Environment(\.textScale) private var scale
+    let size: CGFloat
+    let weight: Font.Weight
+
+    func body(content: Content) -> some View {
+        content.font(.sf(size * scale, weight: weight))
+    }
+}
+
+extension View {
+    /// `.font(.sf(size, weight:))`, scaled by the environment's `textScale`.
+    func sfFont(_ size: CGFloat, weight: Font.Weight = .regular) -> some View {
+        modifier(ScaledSF(size: size, weight: weight))
+    }
+}
+
 extension Font {
     /// Native SF Text with optical sizing handled by the system. SwiftUI's
     /// `.system` already maps to San Francisco, so we just size/weight it.
@@ -594,6 +624,14 @@ struct NotchMetrics {
     static let floatingTravel: CGFloat = Tokens.openWidthResult * floatingWidthScale + floatingInset
     /// The floating card draws narrower than the island.
     static let floatingWidthScale: CGFloat = 0.7
+    /// The floating card's idle prompt width.
+    static let floatingIdleWidth: CGFloat = Tokens.openWidthIdle * 0.6
+    /// The floating card's thread page width.
+    static let floatingWidth: CGFloat = Tokens.openWidthResult * floatingWidthScale
+    /// The floating card's text runs this much of the island's size.
+    static let floatingTextScale: CGFloat = 0.94
+    /// The result page's width on this screen.
+    var resultWidth: CGFloat { floating ? Self.floatingWidth : Tokens.openWidthResult }
     var widthScale: CGFloat { floating ? Self.floatingWidthScale : 1 }
 
     /// The width the RESTING island draws at — the measured cutout wherever there

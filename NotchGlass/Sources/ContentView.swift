@@ -907,7 +907,12 @@ struct NotchIsland: View {
     /// `openWidth` for this panel. Settings keeps its full width on the floating
     /// card: its category column and fixed-width dialogs are laid out for it.
     private var panelWidth: CGFloat {
-        model.showSettings ? model.openWidth : model.openWidth * metrics.widthScale
+        if model.showSettings { return model.openWidth }
+        // The floating card: a narrow idle prompt, a wider thread page.
+        if metrics.floating, !model.showWhatsNew {
+            return model.mode == .idle ? NotchMetrics.floatingIdleWidth : NotchMetrics.floatingWidth
+        }
+        return model.openWidth * metrics.widthScale
     }
 
     private var width: CGFloat {
@@ -1102,14 +1107,18 @@ struct NotchIsland: View {
         .modifier(PullWidthFrame(live: model.threadPullLive,
                                  pulling: isOpen && model.threadPulling,
                                  width: width, flare: topFlare,
-                                 scale: metrics.widthScale))
+                                 from: metrics.floating ? NotchMetrics.floatingIdleWidth
+                                     : Tokens.openWidthIdle,
+                                 to: metrics.floating ? NotchMetrics.floatingWidth
+                                     : Tokens.openWidthResult))
         .padding(.top, -topBleed)   // pull the form up so it bleeds off the top
         .background(GlassMaterial(bottomRadius: bottomRadius,
                                   topRadius: topFlare,
                                   topCornerRadius: topCornerRadius,
                                   expanded: isOpen || showsPrompt,
                                   cameraZone: metrics.restHeight,
-                                  sweepsOnOpen: !metrics.floating))
+                                  sweepsOnOpen: !metrics.floating,
+                                  floating: metrics.floating))
         // The destructive "Clear recent history?" confirmation floats centered over
         // the whole island (scrim + card). Mounted here so it centers in the full
         // glass body; clipped to the island shape below.
@@ -1238,6 +1247,12 @@ struct NotchIsland: View {
         .overlay(IslandRim(shape: islandShape).animation(.easeOut(duration: 0.14)) {
             $0.opacity(isOpen || peeking || metrics.floating ? 1 : 0)
         })
+        .overlay(alignment: .top) {
+            if metrics.floating, isOpen, !model.showSettings {
+                CardGrabber(model: model)
+                    .padding(.top, 2)
+            }
+        }
         // The island's hover hints, drawn here — OUTSIDE the clip above, so the
         // `NotchShape` can never slice a capsule, and after the rim so nothing
         // paints over one. `inset` is the shoulder flare: the frame carries it,
@@ -1334,7 +1349,10 @@ struct NotchIsland: View {
         // (see `PullWidthFrame`), and this spring would replace it.
         .animation(.spring(response: 0.42, dampingFraction: 0.72),
                    value: !model.threadPulling ? model.openWidth : -1)
-        .animation(.spring(response: 0.42, dampingFraction: 0.78), value: model.mode)
+        // The floating card is short at rest, so the island's bounce on the way
+        // back to it reads as a squash; it settles with less.
+        .animation(.spring(response: 0.42, dampingFraction: metrics.floating ? 0.88 : 0.78),
+                   value: model.mode)
         // The note-save feedback line (Saving… → Added to Notes → gone) changes the
         // body's intrinsic height. Without these, only the inner idleView spring
         // governed that change — it animates the line's own fade/scale but does NOT
@@ -1509,8 +1527,11 @@ private struct FoldIntoNotch: ViewModifier, Animatable {
 
     func body(content: Content) -> some View {
         let p = min(max(progress, 0), 1)
+        // Height shrinks half as far as width, so the content isn't flattened
+        // on its way into the notch.
         content
-            .scaleEffect(1 - (1 - endScale) * p, anchor: .top)
+            .scaleEffect(x: 1 - (1 - endScale) * p,
+                         y: 1 - (1 - endScale) * p * 0.5, anchor: .top)
             .blur(radius: 6 * p * p)
             .opacity(1 - p * p * p)
     }
@@ -1597,11 +1618,13 @@ private struct PullWidthFrame: ViewModifier {
     let pulling: Bool
     let width: CGFloat
     let flare: CGFloat
-    let scale: CGFloat
+    /// The idle page's width and the result page's.
+    let from: CGFloat
+    let to: CGFloat
 
     func body(content: Content) -> some View {
         let p = min(max(live.progress, 0), 1)
-        let pulled = (Tokens.openWidthIdle + (Tokens.openWidthResult - Tokens.openWidthIdle) * p) * scale
+        let pulled = from + (to - from) * p
         return content.frame(width: pulling ? pulled + flare * 2 : width)
     }
 }
