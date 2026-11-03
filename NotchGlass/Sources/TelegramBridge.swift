@@ -508,7 +508,81 @@ final class TelegramBridge: ObservableObject {
             return
         }
         setThread(landed, chat: chatID)
+        let previous = threadID.flatMap { id in model.history.first { $0.id == id }?.conversation }?
+            .last(where: { $0.role == "assistant" && !$0.isError })?.text ?? ""
+        react(to: text, previous: previous, thread: landed, chatID: chatID, messageID: messageID)
         await stream(thread: landed, seedIDs: seedIDs, chatID: chatID, replyTo: messageID)
+    }
+
+    // MARK: - Reactions
+
+    /// Same bar as the notch's `NotchModel.reactionMinProbability`.
+    private static let reactionMinProbability = 0.5
+
+    /// The notch's emoji reaction, put on the Telegram message: Jev is asked in
+    /// parallel with the answer under the same switch and privacy rules, and
+    /// the emoji is dropped once the answer has finished, as in the notch.
+    private func react(to text: String, previous: String, thread: UUID, chatID: Int64, messageID: Int) {
+        let account = NoNoAccount.shared
+        guard ChatSwitch.emojiReactions, account.canDecide, messageID != 0 else { return }
+        let message = String(text.prefix(1500))
+        guard !message.isEmpty, !ClipPrivacy.containsSecret(message) else { return }
+        let prior = ClipPrivacy.containsSecret(previous) ? "" : String(previous.suffix(1500))
+        Task { [weak self] in
+            guard let verdict = await account.react(to: message, previous: prior),
+                  verdict.probability >= Self.reactionMinProbability,
+                  let emoji = verdict.emoji,
+                  let self, self.model?.liveThread(thread) != nil else { return }
+            await self.call("setMessageReaction", [
+                "chat_id": chatID, "message_id": messageID,
+                "reaction": [["type": "emoji", "emoji": Self.telegramReaction(for: emoji)]],
+            ])
+        }
+    }
+
+    /// Bots can only react with Telegram's fixed list of emoji, written
+    /// without variation selectors.
+    private static let allowedReactions: Set<String> = [
+        "👍", "👎", "❤", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱", "🤬", "😢", "🎉", "🤩",
+        "🤮", "💩", "🙏", "👌", "🕊", "🤡", "🥱", "🥴", "😍", "🐳", "❤‍🔥", "🌚", "🌭", "💯",
+        "🤣", "⚡", "🍌", "🏆", "💔", "🤨", "😐", "🍓", "🍾", "💋", "🖕", "😈", "😴", "😭",
+        "🤓", "👻", "👨‍💻", "👀", "🎃", "🙈", "😇", "😨", "🤝", "✍", "🤗", "🫡", "🎅", "🎄",
+        "☃", "💅", "🤪", "🗿", "🆒", "💘", "🙉", "🦄", "😘", "💊", "🙊", "😎", "👾",
+        "🤷‍♂", "🤷", "🤷‍♀", "😡",
+    ]
+
+    /// The closest allowed reaction for emoji outside the list.
+    private static let nearestReaction: [String: String] = [
+        "😂": "🤣", "😆": "😁", "😄": "😁", "😃": "😁", "😀": "😁", "😅": "😁", "😹": "🤣",
+        "🙂": "🥰", "😊": "🥰", "☺": "🥰", "🥹": "🥰", "😻": "😍", "🤤": "😍",
+        "🧡": "❤", "💛": "❤", "💚": "❤", "💙": "❤", "💜": "❤", "🖤": "❤", "🤍": "❤", "🤎": "❤",
+        "💕": "❤", "💖": "❤", "💗": "❤", "💓": "❤", "💞": "❤", "💝": "❤", "🫶": "❤", "♥": "❤",
+        "‼": "🤯", "❗": "🤯", "❕": "🤯", "⁉": "🤯", "😮": "🤯", "😲": "🤯", "😯": "🤯",
+        "❓": "🤔", "❔": "🤔", "🧐": "🤔",
+        "😞": "😢", "😔": "😢", "😟": "😢", "🥺": "😢", "😿": "😢", "😕": "😢", "🙁": "😢", "☹": "😢",
+        "😩": "😭", "😫": "😭", "😖": "😭", "😣": "😭",
+        "😠": "😡", "😤": "😡", "👿": "😈",
+        "😳": "😨", "😰": "😨", "😧": "😨", "😦": "😨", "🫣": "🙈",
+        "🙌": "👏", "💪": "🔥", "🚀": "🔥", "✨": "🤩", "🌟": "🤩", "⭐": "🤩", "💫": "🤩",
+        "🥳": "🎉", "🎊": "🎉", "🎈": "🎉", "🎁": "🎉", "🎂": "🎉", "🍰": "🎉", "🧁": "🎉",
+        "🍺": "🍾", "🍻": "🍾", "🥂": "🍾", "🍷": "🍾", "🍸": "🍾", "🥃": "🍾",
+        "🥇": "🏆", "🏅": "🏆", "👑": "🏆",
+        "😪": "😴", "💤": "😴", "🛌": "😴",
+        "🤒": "💊", "🤕": "💊", "😷": "💊", "🤧": "💊",
+        "🤞": "🙏", "🫂": "🤗", "👋": "🤝", "✅": "👌", "✔": "👌", "☑": "👌",
+        "💡": "⚡", "🌩": "⚡", "😬": "😐", "😑": "😐", "😶": "😐", "🙄": "🥱", "🤭": "🙊",
+        "💻": "👨‍💻", "🖥": "👨‍💻", "⌨": "👨‍💻", "🤑": "🤩", "😜": "🤪", "😝": "🤪", "😛": "🤪",
+        "😉": "😘", "😗": "😘", "😙": "😘", "😚": "😘", "🤢": "🤮", "💀": "👻", "☠": "👻",
+    ]
+
+    /// Maps the notch's emoji to one a bot may set. Variation selectors and
+    /// skin tones are dropped first; an emoji with no close match gets 👀.
+    static func telegramReaction(for emoji: String) -> String {
+        let bare = String(String.UnicodeScalarView(emoji.unicodeScalars.filter {
+            $0.value != 0xFE0F && !(0x1F3FB...0x1F3FF).contains($0.value)
+        }))
+        if allowedReactions.contains(bare) { return bare }
+        return nearestReaction[bare] ?? "👀"
     }
 
     /// Follows the round once a second (Telegram's edit rate for one chat) and
