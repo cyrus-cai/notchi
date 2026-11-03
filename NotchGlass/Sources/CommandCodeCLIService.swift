@@ -1190,6 +1190,14 @@ struct CommandCodeCLIService: AIService {
         var toolNames: [String: String] = [:]
         for m in messages {
             switch m.kind {
+            case .text(let role, let text) where !m.images.isEmpty:
+                var parts: [[String: Any]] = m.images.map {
+                    ["type": "image",
+                     "image": "data:\($0.mediaType);base64,\($0.base64)",
+                     "mimeType": $0.mediaType]
+                }
+                if !text.isEmpty { parts.append(["type": "text", "text": text]) }
+                out.append(["role": role, "content": parts])
             case .text(let role, let text):
                 out.append(["role": role, "content": text])
             case .assistantToolCalls(let text, let calls):

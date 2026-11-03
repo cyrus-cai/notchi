@@ -99,6 +99,10 @@ final class TelegramBridge: ObservableObject {
     private static let lidKey = "TelegramAnswerWithLidClosed"
 
     private var token: String { UserDefaults.standard.string(forKey: Self.tokenKey) ?? "" }
+    /// The bot's chat in Telegram, nil before a bot is set up.
+    var botChatURL: URL? {
+        UserDefaults.standard.string(forKey: Self.botKey).flatMap { URL(string: "https://t.me/\($0)") }
+    }
     private var owner: Int64? {
         let id = UserDefaults.standard.object(forKey: Self.ownerKey) as? NSNumber
         return id?.int64Value

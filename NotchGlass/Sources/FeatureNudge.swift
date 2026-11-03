@@ -220,7 +220,7 @@ final class FeatureNudges {
         }
     }
 
-    private static var languageKey: String {
+    static var languageKey: String {
         switch Localization.shared.language.resolved {
         case .en: return "en"
         case .zhHans: return "zh-Hans"
@@ -230,5 +230,134 @@ final class FeatureNudges {
         case .fr: return "fr"
         case .es: return "es"
         }
+    }
+}
+
+// MARK: - Announcements
+
+/// One-line messages from Notchi, read from
+/// `https://notch.website/announcements.json` so they can go out without a
+/// release. No reply and no button: the line is written into the thread as
+/// Notchi's message.
+///
+///     { "max_per_window": 1, "window_hours": 24,
+///       "announcements": [
+///         { "id": "issue-tag-1", "min_version": "0.9.25",
+///           "text": { "en": "…", "zh-Hans": "…" } } ] }
+///
+/// Each entry is shown once per install, in file order. At most
+/// `max_per_window` entries are shown in any `window_hours`. `text` is keyed by
+/// language like a nudge's and falls back to `en`. An entry that does not
+/// decode is dropped alone; every fetch failure reads as "no announcements".
+struct AnnouncementPolicy: Decodable {
+    struct Entry: Decodable {
+        let id: String
+        let min_version: String?
+        let max_version: String?
+        let text: [String: String]
+
+        @MainActor func matches(_ version: String) -> Bool {
+            if let min_version, UpdaterService.isNewer(min_version, than: version) { return false }
+            if let max_version, UpdaterService.isNewer(version, than: max_version) { return false }
+            return true
+        }
+    }
+
+    let maxPerWindow: Int
+    let window: TimeInterval
+    let announcements: [Entry]
+
+    private enum CodingKeys: String, CodingKey { case max_per_window, window_hours, announcements }
+
+    private struct Lossy: Decodable {
+        let entry: Entry?
+        init(from decoder: Decoder) { entry = try? Entry(from: decoder) }
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        maxPerWindow = max(0, (try? c.decode(Int.self, forKey: .max_per_window)) ?? 1)
+        window = ((try? c.decode(Double.self, forKey: .window_hours)) ?? 24) * 3600
+        announcements = try c.decode([Lossy].self, forKey: .announcements).compactMap(\.entry)
+    }
+}
+
+/// Holds the announcement policy and decides which entry is due.
+@MainActor
+final class Announcements {
+    static let shared = Announcements()
+
+    struct Pick {
+        let entry: AnnouncementPolicy.Entry
+        let text: String
+    }
+
+    private var policy: AnnouncementPolicy?
+    private var fetchedAt: Date?
+    private var fetching = false
+    private static let ttl: TimeInterval = 3600
+    private static let url = URL(string: "https://notch.website/announcements.json")!
+    private static let shownAtKey = "announcement.shownAt"
+
+    /// `NOTCH_DEMO_ANNOUNCEMENT=<path to a policy file>` reads the policy from
+    /// disk and shows its first entry on every launch, skipping every condition.
+    let forced: Bool
+
+    private init() {
+        if let path = ProcessInfo.processInfo.environment["NOTCH_DEMO_ANNOUNCEMENT"], !path.isEmpty {
+            forced = true
+            policy = (try? Data(contentsOf: URL(fileURLWithPath: path)))
+                .flatMap { try? JSONDecoder().decode(AnnouncementPolicy.self, from: $0) }
+        } else {
+            forced = false
+        }
+    }
+
+    func refreshIfDue() async {
+        guard !forced, !fetching else { return }
+        if let at = fetchedAt, Date().timeIntervalSince(at) < Self.ttl { return }
+        fetching = true
+        var req = URLRequest(url: Self.url)
+        req.timeoutInterval = 10
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        let result = try? await ProxyConfig.urlSession.data(for: req)
+        fetching = false
+        fetchedAt = Date()
+        // Offline keeps the last good copy.
+        guard let result, (result.1 as? HTTPURLResponse)?.statusCode == 200,
+              let fetched = try? JSONDecoder().decode(AnnouncementPolicy.self, from: result.0)
+        else { return }
+        policy = fetched
+    }
+
+    /// The entry to show now, or nil.
+    func pick() -> Pick? {
+        guard let policy else { return nil }
+        let entries = policy.announcements.compactMap { entry -> Pick? in
+            guard let text = (entry.text[FeatureNudges.languageKey] ?? entry.text["en"])?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !text.isEmpty
+            else { return nil }
+            return Pick(entry: entry, text: text)
+        }
+        if forced { return entries.first }
+        guard recentShows(within: policy.window).count < policy.maxPerWindow else { return nil }
+        let version = UpdaterService.currentVersion
+        return entries.first { pick in
+            pick.entry.matches(version)
+                && !UserDefaults.standard.bool(forKey: "announcement.shown.\(pick.entry.id)")
+        }
+    }
+
+    func noteShown(_ entry: AnnouncementPolicy.Entry) {
+        guard !forced, let policy else { return }
+        let defaults = UserDefaults.standard
+        defaults.set(true, forKey: "announcement.shown.\(entry.id)")
+        defaults.set(recentShows(within: policy.window) + [Date()], forKey: Self.shownAtKey)
+    }
+
+    private func recentShows(within window: TimeInterval) -> [Date] {
+        let all = UserDefaults.standard.array(forKey: Self.shownAtKey) as? [Date] ?? []
+        return all.filter { Date().timeIntervalSince($0) < window }
     }
 }

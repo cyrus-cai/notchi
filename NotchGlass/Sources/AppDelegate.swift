@@ -429,6 +429,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // Read the nudge policy now, so the first open can decide from it.
                 await FeatureNudges.shared.refreshIfDue()
                 model.maybeStartFeatureNudge()
+                await Announcements.shared.refreshIfDue()
+                model.maybeShowAnnouncement()
                 if NoNoAccount.shared.hasToken {
                     await ModelCatalogStore.shared.loadNono()
                     break
