@@ -2463,9 +2463,11 @@ struct ReadPageTool: NotchTool {
 
 /// Which commands ask the user before they run. Everything else runs directly.
 ///
-/// Only what cannot be taken back asks: data destroyed for good, something
-/// sent off this Mac, a credential read, administrator rights, disks and boot
-/// state. A plain `rm`, `rmdir` or `unlink` runs without asking, because
+/// Only what carries a large risk asks: data destroyed for good, a credential
+/// read, history rewritten on a remote, a message or mail sent, administrator
+/// rights, disks and boot state. Network calls run without asking, uploads
+/// included (`curl -X POST -d …`), unless they name a credential store; so does
+/// a plain `git push`. A plain `rm`, `rmdir` or `unlink` runs without asking, because
 /// `ShellRunner` defines them to move their files to the Trash; a deletion the
 /// shell function does not catch (`xargs rm`, `/bin/rm`, `sh -c "rm …"`,
 /// `find -delete`) still asks.
@@ -2483,10 +2485,9 @@ enum ShellRisk {
     /// Deletions the Trash functions in `ShellRunner.prelude` replace, when
     /// they are the command a segment runs.
     private static let deletions: Set<String> = ["rm", "rmdir", "unlink"]
-    /// Upload flags of curl and wget: the command sends data off this Mac.
-    private static let uploadFlags: Set<String> = [
-        "-d", "--data", "--data-raw", "--data-binary", "--data-urlencode",
-        "-F", "--form", "-T", "--upload-file", "--post-data", "--post-file", "--body-data",
+    /// `git push` flags that overwrite or delete history on the remote.
+    private static let destructivePushFlags: Set<String> = [
+        "-f", "--force", "--force-with-lease", "--force-if-includes", "--mirror", "-d", "--delete", "--prune",
     ]
     /// A nested shell runs text this check never sees.
     private static let shells: Set<String> = ["sh", "bash", "zsh", "eval"]
@@ -2598,14 +2599,19 @@ enum ShellRisk {
                 return true
             }
             if name != "git", rest.contains(where: deletions.contains) { return true }
-            if name == "curl" || name == "wget",
-               rest.contains(where: { w in uploadFlags.contains { w == $0 || w.hasPrefix($0 + "=") } }) {
-                return true
-            }
-            if name == "git",
-               rest.contains("push") || rest.contains("clean")
-                || (rest.contains("reset") && rest.contains("--hard")) {
-                return true
+            if name == "git" {
+                if rest.contains("clean") || (rest.contains("reset") && rest.contains("--hard")) {
+                    return true
+                }
+                // A plain push only adds commits; a forced or deleting push
+                // (`--force`, `-f`, `+branch`, `:branch`) loses work on the remote.
+                if rest.contains("push"),
+                   rest.contains(where: { w in
+                       destructivePushFlags.contains { w == $0 || w.hasPrefix($0 + "=") }
+                           || w.hasPrefix("+") || w.hasPrefix(":")
+                   }) {
+                    return true
+                }
             }
             if name == "find" {
                 if rest.contains("-delete") { return true }
