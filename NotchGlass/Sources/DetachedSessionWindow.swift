@@ -4882,7 +4882,8 @@ struct DetachedThreadView: View {
                         .foregroundStyle(Tokens.text4)
                         .padding(.leading, 12)
                 }
-                UserQuestionBubble(text: turn.text, isAgent: turn.isAgent, reaction: turn.reaction)
+                UserQuestionBubble(text: turn.text, isAgent: turn.isAgent, reaction: turn.reaction,
+                                   fromTelegram: turn.fromTelegram)
                     .contextMenu {
                         QuestionTurnMenu(onReply: replyAction(for: turn),
                                          onDelete: deleteAction(for: turn))
@@ -4927,6 +4928,8 @@ struct DetachedThreadView: View {
             sharedLinks: turn.sharedLinks,
             recentCards: store.turns.recentCards(before: turn.id),
             captures: turn.captures,
+            usedCloudMachine: turn.usedCloudMachine,
+            folders: turn.folders,
             onOpenCapture: model.map { model in { model.openTurnCapture($0) } },
             onUndoCapture: model.map { model in { model.undoTurnCapture($0) } },
             turnID: turn.id

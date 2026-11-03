@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import SwiftUI
 
 // MARK: - InstaBox HTTP
 
@@ -681,5 +682,55 @@ struct CloudMachineTool: NotchTool {
         }
         let url = try await InstaBoxMachine.shared.publish(port: port)
         return "Port \(port) is public at \(url). Anyone with the link can open it."
+    }
+}
+
+// MARK: - Status chip
+
+/// The cloud machine's connection, one glyph left of the result header's pin
+/// while the cloud machine is on: a cloud when connected, a dimmed cloud while
+/// the browser approval is pending, a struck-through cloud when connecting
+/// failed. Hidden when it is off. A click opens Settings → Chat, where it is
+/// turned on and off.
+struct CloudMachineStatusChip: View {
+    var openSettings: () -> Void
+    @ObservedObject private var account = InstaBoxAccount.shared
+
+    private enum Look: Equatable { case connected, connecting, failed }
+
+    private var look: Look? {
+        guard DebugFeatureFlags.cloudMachine else { return nil }
+        switch account.state {
+        case .off: return nil
+        case .claiming: return .connecting
+        case .connected: return .connected
+        case .failed: return .failed
+        }
+    }
+
+    var body: some View {
+        Group {
+            if let look {
+                GlassSegmentCluster(segments: [
+                    .init(id: "cloud", tooltip: tooltip(look), action: openSettings) {
+                        Image(systemName: look == .failed ? "icloud.slash" : "icloud")
+                            .sfFont(13, weight: .light)
+                            .opacity(look == .connecting ? 0.45 : 1)
+                            .id(look)
+                            .transition(.opacity)
+                    }
+                ])
+                .transition(.opacity.combined(with: .scale(scale: 0.8)))
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: look)
+    }
+
+    private func tooltip(_ look: Look) -> String {
+        switch look {
+        case .connected: return L("cloud.status.connected")
+        case .connecting: return L("cloud.status.connecting")
+        case .failed: return L("cloud.status.failed")
+        }
     }
 }

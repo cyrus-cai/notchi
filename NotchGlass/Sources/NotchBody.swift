@@ -3610,7 +3610,8 @@ struct NotchBody: View {
                         .padding(.leading, 12)
                 }
                 UserQuestionBubble(text: turn.text, baseFont: Tokens.TypeSize.reading,
-                                   isAgent: turn.isAgent, reaction: turn.reaction)
+                                   isAgent: turn.isAgent, reaction: turn.reaction,
+                                   fromTelegram: turn.fromTelegram)
             }
         } else {
             VStack(alignment: .leading, spacing: 14) {
@@ -3629,6 +3630,8 @@ struct NotchBody: View {
                     sharedLinks: turn.sharedLinks,
                     recentCards: item.conversation.recentCards(before: turn.id),
                     captures: turn.captures,
+                    usedCloudMachine: turn.usedCloudMachine,
+                    folders: turn.folders,
                     onOpenCapture: { model.openTurnCapture($0) },
                     onUndoCapture: { model.undoTurnCapture($0) }
                 )
@@ -4450,6 +4453,15 @@ struct NotchBody: View {
                         .onDisappear { floatingFollowUpHeight = 0 }
                         .transition(.opacity)
                 }
+
+                // Clipped + failed: the error row takes the input's place over the
+                // scroll's bottom runway. As a sibling below it stacked under that
+                // empty runway and made the panel taller by the runway's height.
+                if isAnswerClipped, let askError = model.visibleAskError {
+                    errorActionRow(askError)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .transition(.opacity)
+                }
             }
             // Clipped layout: the header floats over the scroll's TOP as fixed
             // chrome (no background of its own — legibility of the text passing
@@ -4486,10 +4498,13 @@ struct NotchBody: View {
             // "Open Settings" when there's no key to retry with, "Try again" otherwise.
             // Scoped to the round that failed (`visibleAskError`) — a failure in one
             // conversation must not replace another conversation's follow-up input.
+            // Short layout only; clipped, it floats in the ZStack above.
             if let askError = model.visibleAskError {
-                errorActionRow(askError)
-                    .padding(.top, isAnswerClipped ? 8 : 24)
-                    .transition(.opacity)
+                if !isAnswerClipped {
+                    errorActionRow(askError)
+                        .padding(.top, 24)
+                        .transition(.opacity)
+                }
             } else if !isAnswerClipped && !followUpIsFolded {
                 // Short layout: follow-up input (or setup CTA) as a sibling, as before.
                 // (Folded shortcut button excluded — it floats inside the ZStack so
@@ -4634,7 +4649,7 @@ struct NotchBody: View {
             : .retry
         // A round that failed on another backend also offers Notchi, beside the
         // first action and in the same capsule style.
-        return HStack(spacing: 8) {
+        return HStack(spacing: 6) {
             errorActionCapsule(askError, action: action)
             if model.canRetryOnNotchi {
                 ErrorActionRow(
@@ -5739,7 +5754,8 @@ struct NotchBody: View {
                 // thread reads cleaner. It hugs its content (not full width) and
                 // left-aligns with the answer below. Regenerate lives on the
                 // answer's right-click menu.
-                UserQuestionBubble(text: turn.text, isAgent: turn.isAgent, reaction: turn.reaction)
+                UserQuestionBubble(text: turn.text, isAgent: turn.isAgent, reaction: turn.reaction,
+                                   fromTelegram: turn.fromTelegram)
                     .contextMenu { QuestionTurnMenu(onReply: onReply, onEdit: onEdit, onDelete: onDelete) }
             }
         } else {
@@ -5819,6 +5835,8 @@ struct NotchBody: View {
                     sharedLinks: turn.sharedLinks,
                     recentCards: index.map { thread.recentCards(at: $0) } ?? [],
                     captures: turn.captures,
+                    usedCloudMachine: turn.usedCloudMachine,
+                    folders: turn.folders,
                     onOpenCapture: { model.openTurnCapture($0) },
                     onUndoCapture: { model.undoTurnCapture($0) },
                     turnID: turn.id
@@ -5905,6 +5923,10 @@ struct NotchBody: View {
                 if followUpIsFolded {
                     followUpChip
                         .transition(.opacity.combined(with: .scale(scale: 0.8)))
+                }
+                CloudMachineStatusChip {
+                    model.settingsSection = InlineSettingsView.Section.chat.rawValue
+                    model.openSettings()
                 }
                 ResultTrailingCluster(
                     pinned: model.isAnswerPinned,
@@ -6258,7 +6280,7 @@ struct NotchBody: View {
                         .padding(.leading, PromptField.textInset)
                         .allowsHitTesting(false)
                         .transition(.opacity)
-                } else if !followUp && model.slashMenuOpen && model.text == "/" {
+                } else if !followUp && model.slashMenuOpen && (model.text == "/" || model.text == "@") {
                     // The bare "/" gets its own hint, parked right after the slash:
                     // the menu below already lists every command, so the one thing
                     // left to say is that typing narrows it. Gone the moment a
@@ -7611,13 +7633,9 @@ struct ErrorActionRow: View {
 
     private var hasMenu: Bool { action == .retry && !models.isEmpty }
 
-    private var symbol: String {
-        switch action {
-        case .retry, .retryNotchi: return "arrow.clockwise"
-        case .openSettings: return "slider.horizontal.3"
-        case .addCredit: return "creditcard"
-        }
-    }
+    /// The home row's chip type and shape (`UnifiedComposeModeControl`).
+    private static let fontSize: CGFloat = Tokens.TypeSize.meta
+    private static let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
 
     private var title: String {
         switch action {
@@ -7631,25 +7649,24 @@ struct ErrorActionRow: View {
     var body: some View {
         HStack(spacing: 0) {
             Button(action: primary) {
-                HStack(spacing: 8) {
-                    Image(systemName: symbol)
-                        .sfFont(Tokens.TypeSize.form, weight: .medium)
+                HStack(spacing: 5) {
                     Text(title)
-                        .sfFont(Tokens.TypeSize.form, weight: .medium)
+                        .sfFont(Self.fontSize, weight: .regular)
+                        .lineLimit(1)
                     // Without a menu the row keeps its plain affordance glyph; with
                     // one, that trailing slot IS the menu (below), so it isn't
                     // drawn twice. Actions that lead to Settings point out of the
                     // thread; a retry stays in it.
                     if !hasMenu {
                         Image(systemName: action == .retry || action == .retryNotchi ? "chevron.right" : "arrow.up.right")
-                            .sfFont(Tokens.TypeSize.meta, weight: .semibold)
+                            .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                             .foregroundStyle(Tokens.text3)
                     }
                 }
-                .foregroundStyle(Tokens.text1)
-                .padding(.leading, 13)
-                .padding(.trailing, hasMenu ? 6 : 12)
-                .frame(height: Tokens.Control.rail)
+                .foregroundStyle(hovering ? Tokens.text1 : Tokens.text2)
+                .padding(.leading, 7)
+                .padding(.trailing, hasMenu ? 3 : 7)
+                .frame(height: Tokens.Control.inline)
                 .contentShape(Rectangle())
             }
             .buttonStyle(ErrorActionPressStyle())
@@ -7657,14 +7674,14 @@ struct ErrorActionRow: View {
             if hasMenu {
                 Button { menuOpen.toggle() } label: {
                     Image(systemName: "chevron.down")
-                        .sfFont(Tokens.TypeSize.meta, weight: .semibold)
+                        .sfFont(Tokens.TypeSize.badge, weight: .semibold)
                         .foregroundStyle(Tokens.text3)
-                        .frame(width: Tokens.Control.header, height: Tokens.Control.rail)
+                        .frame(width: 18, height: Tokens.Control.inline)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain).exemptsDoubleClickPin()
                 .fixedSize()
-                .padding(.trailing, 4)
+                .padding(.trailing, 2)
                 .notchTooltip(L("result.regenerate.with"))
                 .glassMenuCard(
                     open: $menuOpen,
@@ -7680,8 +7697,10 @@ struct ErrorActionRow: View {
             }
         }
         .fixedSize(horizontal: true, vertical: false)
-        .contentShape(Capsule())
-        .recessedSurface(in: Capsule(), lit: hovering)
+        // The home row's chips (the mode word, the model name, ⋯): small type
+        // on a flat wash in a 6pt rounded rect, brighter under the cursor.
+        .background(Self.shape.fill(Color.white.opacity(hovering ? 0.14 : 0.10)))
+        .contentShape(Self.shape)
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: Tokens.hoverFade), value: hovering)
     }
@@ -8188,6 +8207,10 @@ struct UserQuestionBubble: View {
     /// The emoji Jev reacted with (`Turn.reaction`), shown on the top-right
     /// corner. Nil shows nothing.
     var reaction: String? = nil
+    /// The turn came in from Telegram (`Turn.fromTelegram`): a line under the
+    /// text says so and opens the bot's chat.
+    var fromTelegram: Bool = false
+    @State private var hoveringForwarded = false
 
     /// Set one step under `baseFont`, the same step the answer card takes.
     private var bubbleFont: CGFloat { Tokens.TypeSize.stepDown(baseFont) }
@@ -8371,6 +8394,25 @@ struct UserQuestionBubble: View {
                         .foregroundStyle(Tokens.text4)
                 }
                 .buttonStyle(.plain).exemptsDoubleClickPin()
+            }
+
+            if fromTelegram {
+                Button {
+                    if let url = TelegramBridge.shared.botChatURL { NSWorkspace.shared.open(url) }
+                } label: {
+                    // Drawn like an answer's capture line (`CaptureLineLink`).
+                    HStack(spacing: 3) {
+                        Text(L("telegram.forwarded"))
+                            .sfFont(max(Tokens.TypeSize.meta, baseFont - 2))
+                            .lineLimit(1)
+                        Image(systemName: "arrow.up.right")
+                            .sfFont(Tokens.TypeSize.badge, weight: .semibold)
+                    }
+                    .foregroundStyle(hoveringForwarded ? Tokens.text2 : Tokens.text3)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).exemptsDoubleClickPin()
+                .onHover { hoveringForwarded = $0 }
             }
         }
         .padding(.horizontal, ChatBubbleChrome.horizontalPad)
@@ -8948,7 +8990,7 @@ private struct SlashCommandMenu: View {
         case .skill: return "Skill"
         case .mode(let command) where command == .loop:
             return LoopInterval.short(LoopInterval.lastMinutes)
-        case .mode: return nil
+        case .mode, .mention: return nil
         }
     }
 
@@ -8957,6 +8999,7 @@ private struct SlashCommandMenu: View {
         case .mode(let command): return command.title
         case .shortcut(let shortcut): return shortcut.displayName
         case .skill(let skill): return skill.displayName
+        case .mention(let command): return command.title
         }
     }
 
@@ -8964,6 +9007,9 @@ private struct SlashCommandMenu: View {
     /// shortcuts, and enabled skills — so the card holds still as the list filters
     /// down instead of breathing in and out per keystroke.
     private var cardWidth: CGFloat {
+        if model.text.hasPrefix("@") {
+            return MenuCard.width(titles: NotchModel.MentionCommand.allCases.map { ($0.title, nil) }, max: 260)
+        }
         let modes = NotchModel.SlashCommand.allCases.map { command -> (String, String?) in
             (command.title, command == .loop ? LoopInterval.short(LoopInterval.lastMinutes) : nil)
         }
@@ -9022,6 +9068,7 @@ private struct UnifiedComposeModeControl: View {
 
     private var title: String {
         if model.agentComposeActive { return L("hint.agent") }
+        if model.issueMode { return L("hint.issue") }
         if let shortcut = model.promptShortcutMode { return shortcut.displayName }
         switch model.manualPanelOverride ?? .chat {
         case .chat:      return L("hint.chat")

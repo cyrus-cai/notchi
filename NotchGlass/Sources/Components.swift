@@ -2018,6 +2018,44 @@ struct CaptureLineLink: View {
     }
 }
 
+/// "Used cloud machine" above an answer that ran something there. The settled
+/// headline's face, as plain text: it opens nothing.
+struct CloudMachineMark: View {
+    let font: CGFloat
+
+    var body: some View {
+        Text(L("agent.process.usedCloudMachine"))
+            .sfFont(font)
+            .lineLimit(1)
+            .foregroundStyle(Tokens.text3)
+    }
+}
+
+/// "Used folder Downloads" above an answer whose file calls worked in a folder
+/// on this Mac; "Used 3 folders" for more than one. Hover shows the paths.
+/// Plain text, like `CloudMachineMark`.
+struct FolderMark: View {
+    let folders: [String]
+    let font: CGFloat
+
+    private var label: String {
+        guard folders.count == 1, let only = folders.first else {
+            return L("agent.process.usedFolders", folders.count)
+        }
+        let name = only == "~" ? "~" : (only as NSString).lastPathComponent
+        return L("agent.process.usedFolder", name)
+    }
+
+    var body: some View {
+        Text(label)
+            .sfFont(font)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .foregroundStyle(Tokens.text3)
+            .help(folders.joined(separator: "\n"))
+    }
+}
+
 /// The action line under an answer: "Continue" on a cut-off answer. The capture
 /// line's face, below the answer instead of above it.
 struct AnswerLineButton: View {
@@ -3143,6 +3181,10 @@ struct AssistantTurnView: View {
     /// Notes and reminders this answer filed (`Turn.captures`), drawn as a
     /// line above it like "Searched the web".
     var captures: [NotchModel.Turn.Capture] = []
+    /// This answer ran something on the cloud machine (`Turn.usedCloudMachine`).
+    var usedCloudMachine: Bool = false
+    /// Folders on this Mac this answer worked in (`Turn.folders`).
+    var folders: [String] = []
     /// Opens a filed note or reminder in its app. `nil` draws the line as text.
     var onOpenCapture: ((NotchModel.Turn.Capture) -> Void)? = nil
     /// The "Undo" beside an "Updated memory" line.
@@ -3466,58 +3508,67 @@ struct AssistantTurnView: View {
         // Spacing 0: the gap under the headline is the LIST's own top padding, so
         // it collapses with the list instead of leaving a stranded band behind.
         return VStack(alignment: .leading, spacing: 0) {
-            Button {
-                userExpanded = !expanded
-            } label: {
-                HStack(alignment: .firstTextBaseline, spacing: 0) {
-                    // Fades AND closes: the gutter's width is animated to zero with
-                    // the orb inside it, so the settled headline slides left onto
-                    // the answer's own edge. Sized before the baseline guide so the
-                    // guide still reads the orb's real height at width 0.
-                    Group {
-                        if working {
-                            ThinkingOrb(state: orbState)
-                                .transition(.opacity)
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Button {
+                    userExpanded = !expanded
+                } label: {
+                    HStack(alignment: .firstTextBaseline, spacing: 0) {
+                        // Fades AND closes: the gutter's width is animated to zero with
+                        // the orb inside it, so the settled headline slides left onto
+                        // the answer's own edge. Sized before the baseline guide so the
+                        // guide still reads the orb's real height at width 0.
+                        Group {
+                            if working {
+                                ThinkingOrb(state: orbState)
+                                    .transition(.opacity)
+                            }
+                        }
+                            // Removing the orb stops its TimelineView after the fade;
+                            // a zero-width transparent orb still keeps animating and
+                            // can leak a clipped dot below the settled headline.
+                            .frame(height: Self.waitOrbSize)
+                            .frame(width: working ? Self.waitOrbSize : 0, alignment: .leading)
+                            .clipped()
+                            .opacity(working ? 1 : 0)
+                            .padding(.trailing, working ? Self.waitOrbGap : 0)
+                            .centeredOnTextGlyphs(fontSize: waitFont)
+                        HStack(alignment: .firstTextBaseline, spacing: 3) {
+                            CrossfadeText(text: headerLine, font: waitFont,
+                                          color: (working || headerHovering) ? Tokens.text2 : Tokens.text3,
+                                          shimmers: working)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                            // A chevron, not the capture line's outward arrow: this one
+                            // unfolds the sources in place rather than opening anything.
+                            // Held in the row only once the headline has settled: while
+                            // the round is still reading, the line is a status, not a link.
+                            // It turns down when the sources are open, about the
+                            // centre of a fixed square, so it rotates in place and
+                            // never shifts.
+                            if !working {
+                                Image(systemName: "chevron.right")
+                                    .sfFont(Tokens.TypeSize.badge, weight: .semibold)
+                                    .frame(width: 9, height: 9)
+                                    .centeredOnTextGlyphs(fontSize: waitFont)
+                                    .rotationEffect(.degrees(expanded ? 90 : 0))
+                                    .animation(.easeOut(duration: 0.2), value: expanded)
+                                    .foregroundStyle(headerHovering ? Tokens.text2 : Tokens.text3)
+                            }
                         }
                     }
-                        // Removing the orb stops its TimelineView after the fade;
-                        // a zero-width transparent orb still keeps animating and
-                        // can leak a clipped dot below the settled headline.
-                        .frame(height: Self.waitOrbSize)
-                        .frame(width: working ? Self.waitOrbSize : 0, alignment: .leading)
-                        .clipped()
-                        .opacity(working ? 1 : 0)
-                        .padding(.trailing, working ? Self.waitOrbGap : 0)
-                        .centeredOnTextGlyphs(fontSize: waitFont)
-                    HStack(alignment: .firstTextBaseline, spacing: 3) {
-                        CrossfadeText(text: headerLine, font: waitFont,
-                                      color: (working || headerHovering) ? Tokens.text2 : Tokens.text3,
-                                      shimmers: working)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                        // A chevron, not the capture line's outward arrow: this one
-                        // unfolds the sources in place rather than opening anything.
-                        // Held in the row only once the headline has settled: while
-                        // the round is still reading, the line is a status, not a link.
-                        // It turns down when the sources are open, about the
-                        // centre of a fixed square, so it rotates in place and
-                        // never shifts.
-                        if !working {
-                            Image(systemName: "chevron.right")
-                                .sfFont(Tokens.TypeSize.badge, weight: .semibold)
-                                .frame(width: 9, height: 9)
-                                .centeredOnTextGlyphs(fontSize: waitFont)
-                                .rotationEffect(.degrees(expanded ? 90 : 0))
-                                .animation(.easeOut(duration: 0.2), value: expanded)
-                                .foregroundStyle(headerHovering ? Tokens.text2 : Tokens.text3)
-                        }
-                    }
+                    .contentShape(Rectangle())
                 }
-                .contentShape(Rectangle())
+                .buttonStyle(.plain).exemptsDoubleClickPin()
+                .onHover { headerHovering = $0 }
+                .animation(.easeOut(duration: Tokens.hoverFade), value: headerHovering)
+                // Beside the headline, outside its button: it names where the
+                // work ran and opens nothing.
+                if showsMarks {
+                    HStack(alignment: .firstTextBaseline, spacing: 12) { marks }
+                        .transition(.opacity)
+                }
             }
-            .buttonStyle(.plain).exemptsDoubleClickPin()
-            .onHover { headerHovering = $0 }
-            .animation(.easeOut(duration: Tokens.hoverFade), value: headerHovering)
+            .animation(.easeOut(duration: 0.2), value: showsMarks)
             // Always mounted, opened by HEIGHT — an `if` would insert the list at
             // full size and only crossfade it, which is what made open and shut
             // read as a jump. Clipped so the rows slide out of view under the
@@ -3579,6 +3630,28 @@ struct AssistantTurnView: View {
     /// list's height uses its own spring (`revealReadingList`) so the card
     /// follows it continuously.
     private static let blockMotion: TimeInterval = 0.26
+
+    /// "Used cloud machine", once the answer has text. An agent turn's work
+    /// trail already lists each step, so it gets no second mention.
+    private var showsCloudMark: Bool { usedCloudMachine && agentTrail.isEmpty && hasText }
+
+    /// The folder line, under the same rule as `showsCloudMark`.
+    private var showsFolderMark: Bool { !folders.isEmpty && agentTrail.isEmpty && hasText }
+
+    /// Either line is up: they sit beside "Searched the web", or in the
+    /// capture row when there is no search.
+    private var showsMarks: Bool { showsCloudMark || showsFolderMark }
+
+    /// "Used cloud machine" and the folder line, in that order.
+    @ViewBuilder
+    private var marks: some View {
+        if showsCloudMark {
+            CloudMachineMark(font: waitFont)
+        }
+        if showsFolderMark {
+            FolderMark(folders: folders, font: waitFont)
+        }
+    }
 
     /// Whether the card has anything to hold. An `ask_user` card on its own is
     /// already a card; an empty answer card around nothing would be a blank box.
@@ -3767,7 +3840,7 @@ struct AssistantTurnView: View {
             // Captures of one kind share a line: it opens the first, and its
             // Undo takes back all of them, newest first, so two edits to one
             // file restore what was there before the first.
-            if !captures.isEmpty {
+            if !captures.isEmpty || (showsMarks && !showsReadingBlock) {
                 HStack(spacing: 12) {
                     ForEach(Self.captureGroups(captures), id: \.first?.kind) { group in
                         if let first = group.first {
@@ -3777,6 +3850,9 @@ struct AssistantTurnView: View {
                                                 group.reversed().forEach(undo)
                                             } })
                         }
+                    }
+                    if showsMarks && !showsReadingBlock {
+                        marks
                     }
                 }
                 .padding(.bottom, hasLeadText ? 1 : 0)

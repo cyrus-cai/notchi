@@ -287,6 +287,52 @@ enum ToolTrail {
         return "\(name): \(args) → \(outcome(of: call))"
     }
 
+    /// A line for a `cloud_machine` call that ran (one the user turned down
+    /// never reached the machine).
+    static func ranCloudMachine(_ line: String) -> Bool {
+        line.hasPrefix(CloudMachineTool.toolName + ":")
+            && !line.hasSuffix("→ not approved by the user, not run")
+    }
+
+    /// The folder a file call worked in, written with `~` (`~/Downloads`): the
+    /// folder it listed, searched or grepped, or the one holding the file it
+    /// wrote or edited. `nil` for any other call, and for one that failed or
+    /// only read a single file.
+    static func folder(of call: ToolInvocation) -> String? {
+        guard !failed(call) else { return nil }
+        func clean(_ raw: String) -> String {
+            let full = ((raw as NSString).expandingTildeInPath as NSString).standardizingPath
+            return (full as NSString).abbreviatingWithTildeInPath
+        }
+        func string(_ key: String) -> String? {
+            guard let v = call.input[key] as? String else { return nil }
+            let t = v.trimmingCharacters(in: .whitespacesAndNewlines)
+            return t.isEmpty ? nil : t
+        }
+        switch call.capability {
+        case ListFilesTool.toolName:
+            switch string("folder")?.lowercased() {
+            case "downloads": return "~/Downloads"
+            case "desktop": return "~/Desktop"
+            case "documents": return "~/Documents"
+            default: return nil
+            }
+        case FindFilesTool.toolName:
+            return clean(string("folder") ?? "~")
+        case GrepFilesTool.toolName:
+            let path = clean(string("path") ?? "~")
+            var isDir: ObjCBool = false
+            let exists = FileManager.default.fileExists(
+                atPath: (path as NSString).expandingTildeInPath, isDirectory: &isDir)
+            return exists && !isDir.boolValue ? (path as NSString).deletingLastPathComponent : path
+        case WriteFileTool.toolName, EditFileTool.toolName:
+            guard let path = string("path") else { return nil }
+            return (clean(path) as NSString).deletingLastPathComponent
+        default:
+            return nil
+        }
+    }
+
     /// Exit code, refusal or error, else the result's first line.
     static func outcome(of call: ToolInvocation) -> String {
         let lines = call.result.split(whereSeparator: \.isNewline).map(String.init)
@@ -367,6 +413,9 @@ struct AgentMessage: Sendable {
         case toolResults([ToolInvocation])
     }
     let kind: Kind
+    /// Images on a user `.text` turn, sent with it as the provider's image
+    /// parts. Empty on every other turn.
+    var images: [ChatImage] = []
 }
 
 /// The streaming-turn capability. A provider that can drive tool calls implements

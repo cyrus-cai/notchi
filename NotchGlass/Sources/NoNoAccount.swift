@@ -693,6 +693,27 @@ final class NoNoAccount: ObservableObject {
         return String(endpoint[endpoint.startIndex..<range.lowerBound])
     }
 
+    // MARK: - Issue
+
+    struct IssueFailure: Error { let message: String }
+
+    /// One `@issue` line to the operator's Discord (`POST /v1/issue`). Every
+    /// install can send: one without a token registers first. The caller must
+    /// have run `ClipPrivacy` first.
+    func sendIssue(_ text: String) async -> Result<Void, IssueFailure> {
+        if !hasToken { await register() }
+        guard hasToken else { return .failure(IssueFailure(message: L("issue.failed"))) }
+        struct Accepted: Decodable { let id: String }
+        do {
+            let _: Accepted = try await post("/issue", body: ["text": text], authorized: true)
+            return .success(())
+        } catch Failed.api(status: 429, _, _) {
+            return .failure(IssueFailure(message: L("issue.limited")))
+        } catch {
+            return .failure(IssueFailure(message: L("issue.failed")))
+        }
+    }
+
     private func get<T: Decodable>(_ path: String) async throws -> T {
         var request = URLRequest(url: URL(string: base + path)!)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")

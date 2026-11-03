@@ -107,6 +107,23 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.25",
+            date: "2026-11-03",
+            headline: "You can now send bugs and ideas with @issue.",
+            heroAssetName: "WhatsNew0925Promo",
+            blurb: "Type @ on the prompt and pick Issue. What you write goes directly to the review & dev pipeline.",
+            features: [
+                "Type @issue to send a bug or idea to the review & dev pipeline.",
+                "You can ask a follow-up while an answer is still coming. Esc stops both.",
+                "Notchi reacts to your Telegram messages with an emoji.",
+            ],
+            improvements: [
+                "Network calls and a plain git push no longer ask first. Forced pushes and commands that touch credentials still do.",
+                "An answer now shows the folders it worked in.",
+                "Questions from Telegram are marked on the Mac.",
+            ]
+        ),
+        Entry(
             version: "0.9.24",
             date: "2026-11-02",
             headline: "Notchi can now send iMessages for you.",

@@ -5395,6 +5395,13 @@ extension OpenAICompatAIService: AgentCapableService {
         var out: [[String: Any]] = [["role": "system", "content": system]]
         for m in messages {
             switch m.kind {
+            case .text(let role, let text) where !m.images.isEmpty:
+                var parts: [[String: Any]] = [["type": "text", "text": text]]
+                for image in m.images {
+                    parts.append(["type": "image_url",
+                                  "image_url": ["url": "data:\(image.mediaType);base64,\(image.base64)"]])
+                }
+                out.append(["role": role, "content": parts])
             case .text(let role, let text):
                 out.append(["role": role, "content": text])
             case .assistantToolCalls(let text, let calls):
@@ -5676,6 +5683,13 @@ extension AnthropicAIService: AgentCapableService {
         var out: [[String: Any]] = []
         for m in messages {
             switch m.kind {
+            case .text(let role, let text) where !m.images.isEmpty:
+                var content: [[String: Any]] = m.images.map {
+                    ["type": "image",
+                     "source": ["type": "base64", "media_type": $0.mediaType, "data": $0.base64]]
+                }
+                content.append(["type": "text", "text": text])
+                out.append(["role": role, "content": content])
             case .text(let role, let text):
                 out.append(["role": role, "content": text])
             case .assistantToolCalls(let text, let calls):
