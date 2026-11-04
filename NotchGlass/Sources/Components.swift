@@ -3660,6 +3660,14 @@ struct AssistantTurnView: View {
             || !agentTrail.isEmpty || (showActivityRow && !linkLayout.hasMore)
     }
 
+    /// The first bubble holds only a table and nothing else (no trail, wait,
+    /// captures or reading block): the table's own box is the bubble.
+    private var leadIsTableOnly: Bool {
+        hasLeadText && !showWait && !showsReadingBlock && agentTrail.isEmpty
+            && captures.isEmpty && !showsMarks && !showActivityRow
+            && MarkdownParser.isTableOnly(linkLayout.lead)
+    }
+
     var body: some View {
         let layout = linkLayout
         let landed = turnID.map { pacer.shown($0, total: layout.rest.count, streaming: streaming) }
@@ -3676,7 +3684,8 @@ struct AssistantTurnView: View {
             if cardHasContent || !layout.hasMore {
                 AnswerCard(visible: cardHasContent,
                            idealAtLeast: FractionWidthLayout.minimumLineWidth(layout.lead, fontSize: cardFont),
-                           chrome: !toolWaitOnly && !readingWaitOnly && !dotsWaitOnly) {
+                           chrome: !toolWaitOnly && !readingWaitOnly && !dotsWaitOnly,
+                           bare: leadIsTableOnly) {
                     cardContent
                 }
                     .contextMenu { answerTurnMenu }
@@ -3693,7 +3702,8 @@ struct AssistantTurnView: View {
                                  large: cardCount == 1)
                         .transition(Self.landing)
                 case .text(let body):
-                    AnswerCard(idealAtLeast: FractionWidthLayout.minimumLineWidth(body, fontSize: cardFont)) {
+                    AnswerCard(idealAtLeast: FractionWidthLayout.minimumLineWidth(body, fontSize: cardFont),
+                               bare: MarkdownParser.isTableOnly(body)) {
                         MarkdownBlocks(source: body, baseFont: cardFont, color: color,
                                        onInAppCopy: onInAppCopy)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -4138,6 +4148,9 @@ struct AnswerCard<Content: View>: View {
     /// False hides only the fill and border; width and padding stay, so the
     /// content does not move when the chrome fades back in.
     var chrome: Bool = true
+    /// True for content that carries its own box, such as a table: no fill,
+    /// border or padding, so the box is not drawn inside a second one.
+    var bare: Bool = false
     @ViewBuilder let content: Content
     @State private var cardHeight: CGFloat = 0
     @Environment(\.cardWidthFraction) private var widthFraction
@@ -4151,15 +4164,15 @@ struct AnswerCard<Content: View>: View {
         FractionWidthLayout(fraction: visible ? widthFraction : 1,
                             hugs: visible && hugs, idealAtLeast: idealAtLeast) {
             content
-                .padding(.horizontal, visible ? ChatBubbleChrome.horizontalPad : 0)
-                .padding(.vertical, visible ? ChatBubbleChrome.verticalPad : 0)
+                .padding(.horizontal, visible && !bare ? ChatBubbleChrome.horizontalPad : 0)
+                .padding(.vertical, visible && !bare ? ChatBubbleChrome.verticalPad : 0)
                 .background(
                     shape
                         .fill(Color.white.opacity(visible ? 0.06 : 0))
                         .overlay(
                             shape.strokeBorder(visible ? Tokens.hairline : .clear, lineWidth: 1)
                         )
-                        .opacity(chrome ? 1 : 0)
+                        .opacity(chrome && !bare ? 1 : 0)
                         .animation(.easeOut(duration: 0.2), value: chrome)
                 )
                 .contentShape(shape)
@@ -4926,6 +4939,13 @@ enum MarkdownParser {
 
     static func parse(_ source: String) -> [MarkdownBlock] {
         parseTracking(source).blocks
+    }
+
+    /// Whether `source` is one table and nothing else.
+    static func isTableOnly(_ source: String) -> Bool {
+        let blocks = parseCached(source)
+        guard blocks.count == 1, case .table = blocks[0] else { return false }
+        return true
     }
 
     /// The parse, plus the last point it can restart from: the line after a
