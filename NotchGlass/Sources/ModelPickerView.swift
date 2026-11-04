@@ -2667,10 +2667,12 @@ struct AskRecentModelPickerView: View {
         let id: String
     }
 
-    /// One captioned run of rows.
+    /// One captioned run of rows. A folded section is one row with a chevron
+    /// in place of its caption; its rows show under it only while it is open.
     struct Section: Hashable {
         let title: String
         let rows: [Row]
+        var folded: Bool = false
     }
 
     /// In display order. Empty sections are not drawn.
@@ -2679,6 +2681,8 @@ struct AskRecentModelPickerView: View {
     let onDone: () -> Void
 
     @State private var current: Row
+    /// The folded sections the user has opened, by title. All start closed.
+    @State private var unfolded: Set<String> = []
     /// A local keyDown monitor is the only reliable way to own the arrow keys inside a
     /// popover — a focused field editor swallows them before SwiftUI sees them.
     @State private var keyMonitor: Any?
@@ -2728,10 +2732,26 @@ struct AskRecentModelPickerView: View {
         r.provider.isFirstParty && r.id.hasPrefix("auto-")
     }
 
+    /// The sections as drawn: a folded section keeps only its rows while it
+    /// is open. A query shows every match, so it unfolds every section.
+    private var shownSections: [Section] {
+        if !query.isEmpty {
+            return matchedSections.map { Section(title: $0.title, rows: $0.rows) }
+        }
+        return Self.collapse(sections, unfolded: unfolded)
+    }
+
+    private static func collapse(_ sections: [Section], unfolded: Set<String>) -> [Section] {
+        sections.map {
+            $0.folded && !unfolded.contains($0.title)
+                ? Section(title: $0.title, rows: [], folded: true) : $0
+        }
+    }
+
     /// The sections narrowed to the query, empty ones dropped. Memoized on
     /// the query and the rows, so the several reads per render filter once,
     /// and each row's text is built once for the life of the card.
-    private var shownSections: [Section] {
+    private var matchedSections: [Section] {
         if query.isEmpty { return sections }
         if let key = search.key, key.query == query, key.sections == sections {
             return search.result
@@ -2750,7 +2770,7 @@ struct AskRecentModelPickerView: View {
             return terms.allSatisfy { hay.contains($0) }
         }
         let result = sections
-            .map { Section(title: $0.title, rows: $0.rows.filter(matches)) }
+            .map { Section(title: $0.title, rows: $0.rows.filter(matches), folded: $0.folded) }
             .filter { !$0.rows.isEmpty }
         search.key = (query, sections)
         search.result = result
@@ -2775,17 +2795,22 @@ struct AskRecentModelPickerView: View {
         Self.height(shownSections)
     }
 
-    /// Each section is its caption and rows; every section after the first
-    /// sits below a rule.
+    /// Each section is its caption and rows; a folded one is its row and,
+    /// while open, its rows. A rule comes before every section after the
+    /// first, except between two folded ones.
     private static func height(_ sections: [Section]) -> CGFloat {
         guard !sections.isEmpty else { return rowHeight }
         var h: CGFloat = 0
         for (i, section) in sections.enumerated() {
-            if i > 0 { h += sectionRule + MenuCard.rowSpacing }
-            h += captionHeight + MenuCard.rowSpacing
+            if ruleBefore(i, in: sections) { h += sectionRule + MenuCard.rowSpacing }
+            h += section.folded ? rowStride : captionHeight + MenuCard.rowSpacing
             h += CGFloat(section.rows.count) * rowStride
         }
         return h - MenuCard.rowSpacing
+    }
+
+    private static func ruleBefore(_ i: Int, in sections: [Section]) -> Bool {
+        i > 0 && !(sections[i].folded && sections[i - 1].folded)
     }
 
     /// A section caption's line: the caption type with 4pt above and 2pt
@@ -2801,7 +2826,7 @@ struct AskRecentModelPickerView: View {
     /// rows. Measured from the unfiltered sections, so the card keeps its size
     /// while a query narrows the list.
     private var listHeight: CGFloat {
-        min(Self.height(sections),
+        min(Self.height(Self.collapse(sections, unfolded: unfolded)),
             Self.captionHeight + CGFloat(Self.listRows) * Self.rowStride)
     }
 
@@ -2827,10 +2852,17 @@ struct AskRecentModelPickerView: View {
                     LazyVStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
                         let shown = shownSections
                         ForEach(Array(shown.enumerated()), id: \.element.title) { i, section in
-                            if i > 0 { hairline }
-                            caption(section.title)
-                            ForEach(section.rows, id: \.self) { r in
-                                modelRow(r).id(r)
+                            if Self.ruleBefore(i, in: shown) { hairline }
+                            if section.folded {
+                                foldRow(section)
+                                ForEach(section.rows, id: \.self) { r in
+                                    modelRow(r).padding(.leading, Self.foldIndent).id(r)
+                                }
+                            } else {
+                                caption(section.title)
+                                ForEach(section.rows, id: \.self) { r in
+                                    modelRow(r).id(r)
+                                }
                             }
                         }
                         if shown.isEmpty { ModelSearchRow.noMatch }
@@ -2917,6 +2949,30 @@ struct AskRecentModelPickerView: View {
                 } else if !inside {
                     ModelDetailPanel.shared.scheduleHide()
                 }
+            }
+    }
+
+    /// How far an open folded section's rows sit in from its row.
+    private static let foldIndent: CGFloat = 10
+
+    /// A folded section's row: its title and a chevron that turns down while
+    /// it is open. A click opens or closes it; the card stays up.
+    private func foldRow(_ section: Section) -> some View {
+        let open = unfolded.contains(section.title)
+        return MenuCardRow(
+            title: section.title,
+            disclosure: open,
+            fontSize: Self.fontSize,
+            height: Self.rowHeight,
+            horizontalPadding: Self.rowPad,
+            selected: false,
+            haptic: false) {
+                withAnimation(.easeOut(duration: 0.15)) {
+                    if open { unfolded.remove(section.title) } else { unfolded.insert(section.title) }
+                }
+            }
+            .onHover { inside in
+                if inside { ModelDetailPanel.shared.scheduleHide() }
             }
     }
 

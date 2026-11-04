@@ -107,6 +107,22 @@ final class WhatsNewService: ObservableObject {
     /// version first. Each string is one bullet; no leading `•`.
     private static let bundled: [Entry] = [
         Entry(
+            version: "0.9.26",
+            date: "2026-11-04",
+            headline: "You can now switch the app icon to Notchi's eyes.",
+            heroAssetName: "WhatsNew0926Promo",
+            features: [
+                "Settings → General can switch the app icon to Notchi's eyes. It follows dark mode.",
+                "Drop any file on the notch to ask about it. Word, RTF and OpenDocument files are read too.",
+            ],
+            improvements: [
+                "App icon and menu bar icon settings are now in General.",
+                "In the model menu, Notchi's free and pay-as-you-go models are folded. Click a group to open it.",
+                "On Telegram, more than 10 photos sent at once arrive as one question, with the text you send right after.",
+                "When you send more photos than a question can take, Notchi tells you how many were left out.",
+            ]
+        ),
+        Entry(
             version: "0.9.25",
             date: "2026-11-03",
             headline: "You can now send bugs and ideas with @issue.",

@@ -101,6 +101,6 @@ brew install --cask cyrus-cai/lofi-lab/notchi
 
 **Product** [Pricing](https://notch.website/pricing) · [Release Notes](https://notch.website/releases) · [Download](https://notch.website/downloads)<br>
 **Company** [About](https://notch.website/about) · [Privacy](https://notch.website/privacy) · [Terms of Use](https://notch.website/terms)<br>
-**Connect** [GitHub](https://github.com/cyrus-cai/notchi) · [Issues](https://github.com/cyrus-cai/notchi/issues) · [X](https://x.com/cyrusss_7) · [Email](mailto:xiikii@outlook.com)
+**Connect** [GitHub](https://github.com/cyrus-cai/notchi) · [Issues](https://github.com/cyrus-cai/notchi/issues) · [X](https://x.com/cyrusss_7) · [Email](mailto:hi@notch.website)
 
 © 2026 Lofi Lab · [MIT License](LICENSE)

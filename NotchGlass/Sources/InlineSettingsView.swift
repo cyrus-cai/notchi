@@ -1138,17 +1138,19 @@ struct InlineSettingsView: View {
                     .padding(.top, 2)
                 messageSoundsRow
             case .general:
-                // App-level settings: how it talks to you, where the app itself
-                // appears in macOS, where notes are saved, what the system lets
-                // it touch, and the escape hatch. Dock and menu-bar presence
-                // belong beside launch-at-login rather than among the notch's
-                // own visual and interaction settings.
+                // App-level settings: how it talks to you, launch, the app's
+                // icons (app icon, Dock, menu bar icon), where notes are saved,
+                // what the system lets it touch, and the escape hatch.
                 appLanguageRow
+                launchAtLoginRow
                 Text(L("general.appPresence"))
                     .captionLabel()
                     .padding(.top, 2)
-                launchAtLoginRow
+                if AppIconStyleFeature.isEnabled {
+                    appIconStyleRow
+                }
                 dockIconRow
+                menuBarIconStyleRow
                 Text(L("capture.destination"))
                     .captionLabel()
                     .padding(.top, 2)
@@ -1158,19 +1160,10 @@ struct InlineSettingsView: View {
             case .shortcuts:
                 shortcutsSection
             case .appearance:
-                // Three small, literal groups: visual style, how the notch reacts,
-                // and which displays carry it. Whether the menu bar icon shows at
-                // all lives in General with launch and Dock; what it looks like
-                // lives here.
-                Text(L("appearance.style"))
-                    .captionLabel()
-                if AppIconStyleFeature.isEnabled {
-                    appIconStyleRow
-                }
-                menuBarIconStyleRow
+                // Two small, literal groups: how the notch reacts and which
+                // displays carry it. The app and menu bar icons live in General.
                 Text(L("appearance.behavior"))
                     .captionLabel()
-                    .padding(.top, 2)
                 hoverSensitivityRow
                 if ForceClickFeature.isEnabled {
                     forceClickPressureRow
@@ -3941,7 +3934,7 @@ struct InlineSettingsView: View {
     private var appIconStyleRow: some View {
         settingRow(label: L("appearance.appIcon"), verticalAlignment: .top) {
             HStack(spacing: 8) {
-                ForEach(AppIconStyle.allCases) { style in
+                ForEach(AppIconStyle.selectable) { style in
                     appIconStyleCard(style)
                 }
             }

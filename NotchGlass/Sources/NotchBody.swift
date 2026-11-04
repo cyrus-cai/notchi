@@ -1571,8 +1571,8 @@ struct NotchBody: View {
         var own = recents.filter { !$0.provider.isFirstParty }
         own += askBYOKRows.filter { !own.contains($0) }
         return [
-            Section(title: "Notchi " + L("nono.pricing.freeModels"), rows: free),
-            Section(title: "Notchi " + L("nono.pricing.payAsYouGo"), rows: paid),
+            Section(title: "Notchi " + L("nono.pricing.freeModels"), rows: free, folded: true),
+            Section(title: "Notchi " + L("nono.pricing.payAsYouGo"), rows: paid, folded: true),
             Section(title: L("model.picker.ownKeys"), rows: own),
         ]
     }

@@ -69,11 +69,13 @@ final class TelegramBridge: ObservableObject {
     private var chains: [Int64: Task<Void, Never>] = [:]
     /// Option buttons sent for a pending question, by the question's id.
     private var questionOptions: [UUID: [String]] = [:]
-    /// An album arrives as one message per item, sharing a `media_group_id`.
-    /// The items wait here until no new one has come for `albumWait`.
-    private var albums: [String: [[String: Any]]] = [:]
-    private var albumFlush: [String: Task<Void, Never>] = [:]
-    private static let albumWait: UInt64 = 1_500_000_000
+    /// An album arrives as one message per item, sharing a `media_group_id`,
+    /// and Telegram splits more than 10 items into several albums. Album items,
+    /// and any message sent while some are waiting, collect here per chat until
+    /// no new one has come for `albumWait`, then go out as one round.
+    private var albums: [Int64: [[String: Any]]] = [:]
+    private var albumFlush: [Int64: Task<Void, Never>] = [:]
+    private static let albumWait: UInt64 = 3_000_000_000
 
     private static let tokenKey = "aux_key.telegram"
     private static let botKey = "TelegramBotUsername"
@@ -431,19 +433,25 @@ final class TelegramBridge: ObservableObject {
             Task { await installLidRuleAfterPairing() }
         }
         guard chatID == owner else { return }
-        if let group = message["media_group_id"] as? String {
-            albums[group, default: []].append(message)
-            albumFlush[group]?.cancel()
-            albumFlush[group] = Task { [weak self] in
+        let isCommand = (message["text"] as? String)?.hasPrefix("/") == true
+        if isCommand { flushAlbum(chatID: chatID) }
+        if !isCommand, message["media_group_id"] != nil || albums[chatID] != nil {
+            albums[chatID, default: []].append(message)
+            albumFlush[chatID]?.cancel()
+            albumFlush[chatID] = Task { [weak self] in
                 try? await Task.sleep(nanoseconds: Self.albumWait)
-                guard !Task.isCancelled, let self,
-                      let items = self.albums.removeValue(forKey: group) else { return }
-                self.albumFlush[group] = nil
-                self.enqueue(items, chatID: chatID)
+                guard !Task.isCancelled else { return }
+                self?.flushAlbum(chatID: chatID)
             }
             return
         }
         enqueue([message], chatID: chatID)
+    }
+
+    private func flushAlbum(chatID: Int64) {
+        albumFlush.removeValue(forKey: chatID)?.cancel()
+        guard let items = albums.removeValue(forKey: chatID) else { return }
+        enqueue(items, chatID: chatID)
     }
 
     private func enqueue(_ messages: [[String: Any]], chatID: Int64) {
@@ -459,9 +467,11 @@ final class TelegramBridge: ObservableObject {
         guard let model, let message = messages.first else { return }
         let awake = Awake(.answering)
         defer { withExtendedLifetime(awake) {} }
-        let text = messages.lazy
+        // Each split album, and a text sent after them, can carry its own words.
+        let text = messages
             .compactMap { (($0["text"] ?? $0["caption"]) as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .first { !$0.isEmpty } ?? ""
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
         let messageID = (message["message_id"] as? NSNumber)?.intValue ?? 0
 
         if text == "/new" || text.hasPrefix("/new@") {
@@ -475,12 +485,23 @@ final class TelegramBridge: ObservableObject {
         }
 
         var found = Attachments()
+        var skipped = 0
         for item in messages {
-            let more = await attachments(of: item, chatID: chatID)
+            let room = NotchModel.composeImageLimit - found.images.count
+            let more = await attachments(of: item, chatID: chatID, room: room)
             found.images += more.images
             found.files += more.files
+            skipped += more.skippedImages
         }
-        let images = Array(found.images.prefix(NotchModel.composeImageLimit))
+        let limit = NotchModel.composeImageLimit
+        skipped += max(0, found.images.count - limit)
+        let images = Array(found.images.prefix(limit))
+        if skipped > 0 {
+            found.files.append(NotchModel.DroppedFile(
+                name: "Images",
+                text: "\(images.count + skipped) images were sent. Only the first \(limit) are attached; "
+                    + "the other \(skipped) were left out. Tell the user and ask them to send those separately."))
+        }
         guard !text.isEmpty || !images.isEmpty || !found.files.isEmpty else {
             await call("sendMessage", ["chat_id": chatID, "text": L("telegram.unsupported"),
                                        "reply_to_message_id": messageID])
@@ -739,6 +760,8 @@ final class TelegramBridge: ObservableObject {
         /// Everything else, as text the model reads inside the question
         /// (`NotchModel.fileEnvelope`).
         var files: [NotchModel.DroppedFile] = []
+        /// Photos not downloaded because the round already has its limit.
+        var skippedImages = 0
     }
 
     /// Bots can download files up to 20 MB.
@@ -753,7 +776,9 @@ final class TelegramBridge: ObservableObject {
             .appendingPathComponent("Telegram")
     }
 
-    private func attachments(of message: [String: Any], chatID: Int64) async -> Attachments {
+    /// `room` is how many more images the round can take; a photo past it is
+    /// counted, not downloaded.
+    private func attachments(of message: [String: Any], chatID: Int64, room: Int) async -> Attachments {
         var found = Attachments()
         func note(_ name: String, _ text: String) {
             found.files.append(NotchModel.DroppedFile(name: name, text: text))
@@ -761,7 +786,9 @@ final class TelegramBridge: ObservableObject {
 
         if let photos = message["photo"] as? [[String: Any]],
            let largest = photos.last?["file_id"] as? String {
-            if let image = await downloadImage(largest) {
+            if room <= 0 {
+                found.skippedImages += 1
+            } else if let image = await downloadImage(largest) {
                 found.images.append(image)
             } else {
                 note("Photo", "The photo could not be downloaded.")

@@ -9919,8 +9919,8 @@ final class NotchModel: ObservableObject {
     // MARK: - Files dropped on the island
 
     /// Files other than a project folder attach to the next ask
-    /// (`handleFileDrop`). Off for now: a drop takes a single folder or PDFs.
-    static let fileDropAskEnabled = false
+    /// (`handleFileDrop`). When off, a drop takes a single folder or PDFs.
+    static let fileDropAskEnabled = true
     /// The `askScreen` chord (`askAboutScreenArea`). Off for now: the chord is
     /// not registered and Settings does not list it.
     static let screenAreaAskEnabled = false
@@ -10085,10 +10085,22 @@ final class NotchModel: ObservableObject {
 
     /// A PDF's text, or a text file's contents. Nil for anything else, or a
     /// file that is too large or not UTF-8. Also `read_file`'s reader.
+    /// Document types `droppedFileText` reads with `NSAttributedString`.
+    nonisolated private static let richDocumentTypes: [UTType] = [
+        .rtf, .rtfd, .flatRTFD,
+        UTType("org.openxmlformats.wordprocessingml.document"),
+        UTType("com.microsoft.word.doc"),
+        UTType("org.oasis-open.opendocument.text"),
+    ].compactMap { $0 }
+
     nonisolated static func droppedFileText(_ url: URL, type: UTType?) -> String? {
         let body: String?
         if type?.conforms(to: .pdf) == true {
             body = pdfText(url)
+        } else if let type, richDocumentTypes.contains(where: { type.conforms(to: $0) }) {
+            // Word, RTF and OpenDocument text: read through the system's text
+            // importers, which give the document's plain text.
+            body = (try? NSAttributedString(url: url, options: [:], documentAttributes: nil))?.string
         } else {
             let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
             guard size <= droppedFileByteLimit,

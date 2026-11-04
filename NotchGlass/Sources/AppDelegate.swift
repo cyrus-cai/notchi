@@ -951,7 +951,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 options: [.new]
             ) { [weak self] _, _ in
                 Task { @MainActor in
-                    guard AppIconStyle.current == .dot else { return }
+                    guard AppIconStyle.current.followsAppearance else { return }
                     self?.applyAppIconStyle()
                     NotificationCenter.default.post(
                         name: .appIconAppearanceChanged,
@@ -1612,7 +1612,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             appIconDockView = nil
             dockTile.contentView = nil
             NSApp.applicationIconImage = nil
-        case .dot:
+        case .eyes, .dot:
             guard let image = style.image else { return }
             NSApp.applicationIconImage = image
             // Draw the selected artwork as the tile content as well. Merely
@@ -1625,7 +1625,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Original's visible artwork occupies 80.47% of its source canvas;
             // Dot occupies 79.27%. The 1.5% optical correction is one visible
             // pixel at the current Dock size and keeps their heights aligned.
-            let opticalScale: CGFloat = 1.015
+            let opticalScale: CGFloat = style == .dot ? 1.015 : 1
             let imageSize = NSSize(
                 width: bounds.width * opticalScale,
                 height: bounds.height * opticalScale)
@@ -2468,16 +2468,23 @@ enum HoverSensitivity: String, CaseIterable, Identifiable {
 
 /// The artwork used by the running app in the Dock and app switcher. The bundle
 /// keeps `AppIcon` as its primary icon; this small preference only overrides the
-/// live `NSApplication` image when the user chooses the LED treatment.
+/// live `NSApplication` image when the user picks another style.
 enum AppIconStyle: String, CaseIterable, Identifiable {
     case original
+    case eyes
     case dot
 
     var id: String { rawValue }
 
+    /// The styles Settings offers. Dot stays out until it ships.
+    static var selectable: [AppIconStyle] {
+        AppIconStyleFeature.dotEnabled ? allCases : [.original, .eyes]
+    }
+
     var label: String {
         switch self {
         case .original: return L("appIcon.original")
+        case .eyes: return L("appIcon.eyes")
         case .dot: return L("appIcon.dot")
         }
     }
@@ -2486,6 +2493,8 @@ enum AppIconStyle: String, CaseIterable, Identifiable {
         switch self {
         case .original:
             return NSImage(named: "AppIcon")
+        case .eyes:
+            return Self.systemUsesDarkAppearance ? Self.eyesDark : Self.eyesLight
         case .dot:
             return NSImage(named: Self.systemUsesDarkAppearance
                            ? "DarkModeAppIcon"
@@ -2497,8 +2506,56 @@ enum AppIconStyle: String, CaseIterable, Identifiable {
         NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
     }
 
+    /// The original tile with Notchi's two resting eyes (`NotchiForm.restingEyes`)
+    /// in place of the mark, as wide as the mark was. Light: the original's
+    /// colours, dark eyes on the off-white tile. Dark: the same two colours
+    /// swapped, with the eyes in the resting notch's ink (`NotchiMarkPose.ink`).
+    /// The tile keeps the 1024px master's shape: it is repainted over the
+    /// master's own pixels (`sourceAtop`), so its outline and corners match.
+    private static func eyesImage(dark: Bool) -> NSImage? {
+        guard let base = NSImage(named: "AppIcon") else { return nil }
+        let side: CGFloat = 1024
+        let paper = NSColor(srgbRed: 247 / 255, green: 245 / 255, blue: 241 / 255, alpha: 1)
+        let ink = NSColor(srgbRed: 38 / 255, green: 38 / 255, blue: 42 / 255, alpha: 1)
+        let eyeInk = NSColor(srgbRed: 0xEC / 255, green: 0xEB / 255, blue: 0xE6 / 255, alpha: 1)
+        let tile = dark ? ink : paper
+        let eyes = dark ? eyeInk : ink
+        let unit: CGFloat = 442 / NotchiBlob.markWidth
+        return NSImage(size: NSSize(width: side, height: side), flipped: true) { rect in
+            guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
+            base.draw(in: rect)
+            ctx.setBlendMode(.sourceAtop)
+            ctx.setFillColor(tile.cgColor)
+            ctx.fill(rect)
+            ctx.setBlendMode(.normal)
+            let c = CGPoint(x: rect.midX, y: rect.midY)
+            for b in NotchiForm.restingEyes where b.alpha > 0.01 {
+                let w = CGFloat(b.w) * unit, h = CGFloat(b.h) * unit
+                let cap = min(w, h) / 2
+                func r(_ v: Double) -> CGFloat { min(CGFloat(v) * unit, cap) }
+                let shape = UnevenRoundedRectangle(
+                    cornerRadii: .init(topLeading: r(b.tl), bottomLeading: r(b.bl),
+                                       bottomTrailing: r(b.br), topTrailing: r(b.tr)),
+                    style: .continuous
+                ).path(in: CGRect(x: -w / 2, y: -h / 2, width: w, height: h))
+                let move = CGAffineTransform(translationX: c.x + CGFloat(b.x) * unit,
+                                             y: c.y + CGFloat(b.y) * unit)
+                ctx.addPath(shape.applying(move).cgPath)
+                ctx.setFillColor(eyes.cgColor)
+                ctx.fillPath()
+            }
+            return true
+        }
+    }
+
+    private static let eyesLight = eyesImage(dark: false)
+    private static let eyesDark = eyesImage(dark: true)
+
+    /// Styles that follow the system's light / dark appearance.
+    var followsAppearance: Bool { self != .original }
+
     /// Both catalog images already resolve to their visible app-icon bounds.
-    /// Keeping one shared scale makes the two Appearance previews line up.
+    /// Keeping one shared scale makes the Appearance previews line up.
     var previewScale: CGFloat {
         1
     }
@@ -2513,8 +2570,10 @@ enum AppIconStyle: String, CaseIterable, Identifiable {
             let stored = UserDefaults.standard.string(forKey: key)
             // Migrate the short-lived three-card build: either LED choice now
             // means the single adaptive Dot style.
-            if stored == "lightMode" || stored == "darkMode" { return .dot }
-            return stored.flatMap(AppIconStyle.init(rawValue:)) ?? .original
+            let style: AppIconStyle = (stored == "lightMode" || stored == "darkMode")
+                ? .dot
+                : stored.flatMap(AppIconStyle.init(rawValue:)) ?? .original
+            return selectable.contains(style) ? style : .original
         }
         set {
             UserDefaults.standard.set(newValue.rawValue, forKey: key)
@@ -2522,10 +2581,10 @@ enum AppIconStyle: String, CaseIterable, Identifiable {
     }
 }
 
-/// Keeps the alternate icon implementation ready without exposing or applying
-/// it in builds where the feature is not shipping yet.
+/// Gates the icon picker in Settings → Appearance, and the Dot style inside it.
 enum AppIconStyleFeature {
-    static let isEnabled = false
+    static let isEnabled = true
+    static let dotEnabled = false
 }
 
 /// Whether the app shows an icon in the Dock — persisted in `UserDefaults`,
