@@ -5161,7 +5161,7 @@ struct InlineSettingsView: View {
 
     private var telegramSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            settingRow(label: L("telegram.title"), aligned: true, tag: "Beta") {
+            settingRow(label: L("telegram.title"), aligned: true) {
                 Toggle("", isOn: Binding(
                     get: { telegramOn },
                     set: { on in
