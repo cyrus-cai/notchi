@@ -1507,10 +1507,8 @@ struct NotchBody: View {
             open: model.showAskModelPicker,
             onDismiss: { _ in model.showAskModelPicker = false },
             card: {
-                let sections = askModelSections
                 return AnyView(AskRecentModelPickerView(
-                    lead: sections.lead,
-                    rest: sections.rest,
+                    sections: askModelSections,
                     selectedProvider: selectedProvider,
                     selectedModelID: selectedModelID,
                     onSelect: { row in
@@ -1522,28 +1520,28 @@ struct NotchBody: View {
             }))
     }
 
-    /// The Ask chip's quick menu, one list across Notchi and the user's own keys.
-    /// `lead`: Notchi's Auto routers, then the selection in effect and the most
-    /// recently asked-through models (`AskModelMRU`) from either source, skipping
-    /// duplicates, keyed/CLI providers that can't serve right now and Notchi ids
-    /// the gateway no longer lists, capped at the MRU's ten. The same model on
-    /// Notchi and on the user's key is two rows. `rest`: the remaining Notchi
-    /// lineup, featured models first, then every model of each provider the
-    /// user has a key for (`askBYOKRows`).
+    /// The Ask chip's quick menu, in three captioned sections: Notchi's free
+    /// models, Notchi's pay-as-you-go models, then the user's own keys and
+    /// signed-in CLIs. Within each section: an Auto router first, then the
+    /// selection in effect and the most recently asked-through models
+    /// (`AskModelMRU`), then (Notchi) the featured models and the rest of the
+    /// lineup, or (own keys) every model of each provider the user has a key
+    /// for (`askBYOKRows`). Recents skip keyed/CLI providers that can't serve
+    /// right now and Notchi ids the gateway no longer lists. The same model on
+    /// Notchi and on the user's key is two rows.
     ///
     /// With nothing configured there are no recents worth listing — the "selection
     /// in effect" is a provider default nobody chose and every MRU slot is empty —
-    /// so the recents become the CLI offer instead: whichever of the local agent
-    /// CLIs is installed and signed in, ready to use as-is.
-    private var askModelSections: (lead: [AskRecentModelPickerView.Row],
-                                   rest: [AskRecentModelPickerView.Row]) {
+    /// so the own section becomes the CLI offer instead: whichever of the local
+    /// agent CLIs is installed and signed in, ready to use as-is.
+    private var askModelSections: [AskRecentModelPickerView.Section] {
         typealias Row = AskRecentModelPickerView.Row
+        typealias Section = AskRecentModelPickerView.Section
         let lineup = askNotchiLineup
-        let auto = lineup.filter { $0.id.hasPrefix("auto-") }
         var recents: [Row] = []
         if model.isConfigured {
             func add(_ r: Row) {
-                guard !auto.contains(r), !recents.contains(r) else { return }
+                guard !recents.contains(r) else { return }
                 if r.provider.isFirstParty {
                     guard lineup.contains(r) else { return }
                 } else {
@@ -1551,8 +1549,7 @@ struct NotchBody: View {
                 }
                 recents.append(r)
             }
-            let selected = Row(provider: selectedProvider, id: selectedModelID)
-            if !auto.contains(selected) { recents.append(selected) }
+            add(Row(provider: selectedProvider, id: selectedModelID))
             for e in AskModelMRU.entries { add(Row(provider: e.provider, id: e.model)) }
             recents = Array(recents.prefix(AskModelMRU.capacity))
         } else {
@@ -1560,12 +1557,33 @@ struct NotchBody: View {
                 Row(provider: $0, id: APIKeyStore.effectiveModel(for: $0) ?? $0.defaultModel)
             }
         }
-        let named = lineup.filter { !$0.id.hasPrefix("auto-") && !recents.contains($0) }
+        let auto = lineup.filter(AskRecentModelPickerView.isAuto)
         let featured = AskRecentModelPickerView.featuredNotchiIDs.compactMap { id in
-            named.first { $0.id == id }
+            lineup.first { $0.id == id }
         }
-        let byok = askBYOKRows.filter { !recents.contains($0) }
-        return (auto + recents, featured + named.filter { !featured.contains($0) } + byok)
+        var notchi: [Row] = []
+        for r in auto + recents.filter(\.provider.isFirstParty) + featured + lineup
+        where !notchi.contains(r) {
+            notchi.append(r)
+        }
+        let free = notchi.filter(Self.isFreeNotchiRow)
+        let paid = notchi.filter { !Self.isFreeNotchiRow($0) }
+        var own = recents.filter { !$0.provider.isFirstParty }
+        own += askBYOKRows.filter { !own.contains($0) }
+        return [
+            Section(title: "Notchi " + L("nono.pricing.freeModels"), rows: free),
+            Section(title: "Notchi " + L("nono.pricing.payAsYouGo"), rows: paid),
+            Section(title: L("model.picker.ownKeys"), rows: own),
+        ]
+    }
+
+    /// Input and output both $0 in the live lineup. A row whose rates have not
+    /// loaded is not free.
+    private static func isFreeNotchiRow(_ r: AskRecentModelPickerView.Row) -> Bool {
+        guard let pricing = AskRecentModelPickerView.detailModel(for: r).info.notchiPricing
+        else { return false }
+        return pricing.inputPerMTok == 0 && pricing.outputPerMTok == 0
+            && (pricing.cachedInputPerMTok ?? 0) == 0
     }
 
     /// Every model of every provider the user brought a key for, in the
@@ -1588,7 +1606,7 @@ struct NotchBody: View {
     /// currently serves, whether or not this account has asked through it.
     /// Listed even when the balance is empty or capped — the menu grays those
     /// rows (`AskRecentModelPickerView.unavailable`) instead of dropping them.
-    /// Models switched off in Settings (`NotchiModelVisibility`) are left out.
+    /// Every model is listed; `NotchiModelVisibility` only orders them.
     ///
     /// The lineup is the live `/v1/models` snapshot (`liveByProvider`).
     /// Until that fetch lands, the bundled `auto-us` row keeps the section
@@ -1598,7 +1616,7 @@ struct NotchBody: View {
         guard ModelCatalogStore.ready(.nono) else { return [] }
         let live = catalog.liveByProvider[.nono]?.map(\.id) ?? []
         let ids = live.isEmpty ? Provider.nono.availableModels : live
-        return NotchiModelVisibility.ordered(ids.filter(NotchiModelVisibility.isShown), id: { $0 })
+        return NotchiModelVisibility.ordered(ids, id: { $0 })
             .map { AskRecentModelPickerView.Row(provider: .nono, id: $0) }
     }
 

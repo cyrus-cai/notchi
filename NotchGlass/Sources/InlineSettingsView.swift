@@ -665,8 +665,6 @@ struct InlineSettingsView: View {
     @State private var proxyStatus: String = ""
     /// `WeatherCity`'s storage; the row edits it in place.
     @AppStorage("weather.city") private var weatherCity: String = ""
-    /// Notchi models switched off in Models and Pricing. See `NotchiModelVisibility`.
-    @AppStorage(NotchiModelVisibility.defaultsKey) private var hiddenNotchiModels: String = ""
 
     /// Live macOS authorization state for each protected capability the app
     /// uses. Missing entries read as `.checking`. Re-read while the permissions
@@ -2618,15 +2616,10 @@ struct InlineSettingsView: View {
     private static let walletCardIDs = ["claude-sonnet-5.5", "gpt-6-sol", "auto-us"]
 
     private var walletCards: [WalletCard] {
-        let hidden = NotchiModelVisibility.hidden(in: hiddenNotchiModels)
         let rows = nonoLineupRows
         let picked = Self.walletCardIDs.compactMap { id in rows.first { $0.id == id } }
-            .filter { !hidden.contains($0.id) }
         let fill = NotchiModelVisibility.ordered(rows, id: \.id)
-            .filter { row in
-                !hidden.contains(row.id)
-                    && !picked.contains { $0.id == row.id }
-            }
+            .filter { row in !picked.contains { $0.id == row.id } }
         return (picked + fill)
             .prefix(3)
             .map { row in
@@ -2752,28 +2745,13 @@ struct InlineSettingsView: View {
             // the cell is a dash rather than a repeat of the input figure.
             pricingRate(row.pricing?.cachedInputPerMTok)
             pricingRate(row.pricing?.outputPerMTok, limitedFree: true)
-            HStack(spacing: 8) {
-                Text(L(pricingOriginKey(row)))
-                    .font(.sf(Tokens.TypeSize.meta))
-                    .foregroundStyle(Tokens.text3)
-                    .lineLimit(1)
-                    // Written in full, never "US Pro…".
-                    .fixedSize(horizontal: true, vertical: false)
-                // Shown in the Ask chip's model menu.
-                Toggle("", isOn: Binding(
-                    get: { !NotchiModelVisibility.hidden(in: hiddenNotchiModels)
-                                          .contains(row.id) },
-                    set: { shown in
-                        Haptics.levelChange()
-                        hiddenNotchiModels = NotchiModelVisibility.setting(
-                            row.id, shown: shown, in: hiddenNotchiModels)
-                    }))
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                    .controlSize(.mini)
-                    .tint(Tokens.text2)
-            }
-            .frame(maxWidth: .infinity, alignment: .trailing)
+            Text(L(pricingOriginKey(row)))
+                .font(.sf(Tokens.TypeSize.meta))
+                .foregroundStyle(Tokens.text3)
+                .lineLimit(1)
+                // Written in full, never "US Pro…".
+                .fixedSize(horizontal: true, vertical: false)
+                .frame(maxWidth: .infinity, alignment: .trailing)
         }
         .padding(.vertical, 9)
     }

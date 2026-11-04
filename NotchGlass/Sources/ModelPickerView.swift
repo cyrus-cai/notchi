@@ -2653,12 +2653,10 @@ enum AskModelMRU {
 }
 
 /// What the Ask model chip opens: the agent quick picker's little glass card, on the
-/// chat side — one list across Notchi and the user's own keys. Notchi's Auto
-/// routers and the recently used models (either source) lead; the rest of
-/// Notchi's lineup follows below a rule. A row on the user's own key names its
-/// provider in the trailing slot; Notchi rows carry no source label. The same
-/// model on both sources is two rows. With no balance to spend, Notchi rows stay
-/// listed but grayed and cannot be picked.
+/// chat side. The rows come in captioned sections: Notchi's free models, Notchi's
+/// pay-as-you-go models, then the user's own keys and signed-in CLIs. The same
+/// model on both sources is two rows, one in each section. With no balance to
+/// spend, Notchi rows stay listed but grayed and cannot be picked.
 /// A click picks the model AND closes — one gesture, done. ↑/↓ still arm live
 /// for keyboard users (Return / Esc close). The armed row is mirrored in local
 /// state because a pick commits straight to UserDefaults, which re-renders
@@ -2669,10 +2667,14 @@ struct AskRecentModelPickerView: View {
         let id: String
     }
 
-    /// Auto routers, then recents from either source.
-    let lead: [Row]
-    /// Notchi models not already in `lead`, below the rule.
-    let rest: [Row]
+    /// One captioned run of rows.
+    struct Section: Hashable {
+        let title: String
+        let rows: [Row]
+    }
+
+    /// In display order. Empty sections are not drawn.
+    let sections: [Section]
     let onSelect: (Row) -> Void
     let onDone: () -> Void
 
@@ -2696,8 +2698,8 @@ struct AskRecentModelPickerView: View {
     @State private var search = SearchCache()
     private final class SearchCache {
         var haystacks: [Row: String] = [:]
-        var key: (query: String, lead: [Row], rest: [Row])?
-        var result: (lead: [Row], rest: [Row]) = ([], [])
+        var key: (query: String, sections: [Section])?
+        var result: [Section] = []
     }
     /// The quick menu is a custom child panel rather than an `NSMenu`, so the
     /// shared model-detail panel cannot discover its frame from AppKit's menu
@@ -2712,41 +2714,26 @@ struct AskRecentModelPickerView: View {
     /// Observed so the first-party rows' wallet note and gray follow the balance.
     @ObservedObject private var nono = NoNoAccount.shared
 
-    init(lead: [Row], rest: [Row] = [],
+    init(sections: [Section],
          selectedProvider: Provider, selectedModelID: String,
          onSelect: @escaping (Row) -> Void,
          onDone: @escaping () -> Void) {
-        self.lead = lead
-        self.rest = rest
+        self.sections = sections.filter { !$0.rows.isEmpty }
         self.onSelect = onSelect
         self.onDone = onDone
         _current = State(initialValue: Row(provider: selectedProvider, id: selectedModelID))
-    }
-
-    /// Auto, a row like the others, kept first in the list: the router in
-    /// effect, else the first Auto in Notchi's lineup.
-    private var autoRow: Row? {
-        if Self.isAuto(current), lead.contains(current) { return current }
-        return lead.first(where: Self.isAuto)
     }
 
     static func isAuto(_ r: Row) -> Bool {
         r.provider.isFirstParty && r.id.hasPrefix("auto-")
     }
 
-    /// The recents, Auto first.
-    private var fullLead: [Row] {
-        guard let autoRow else { return lead }
-        return [autoRow] + lead.filter { $0 != autoRow }
-    }
-
-    /// Both runs narrowed to the query. Memoized on the query and the rows, so
-    /// the several reads per render filter once, and each row's text is built
-    /// once for the life of the card.
-    private var filtered: (lead: [Row], rest: [Row]) {
-        let full = fullLead
-        if query.isEmpty { return (full, rest) }
-        if let key = search.key, key.query == query, key.lead == full, key.rest == rest {
+    /// The sections narrowed to the query, empty ones dropped. Memoized on
+    /// the query and the rows, so the several reads per render filter once,
+    /// and each row's text is built once for the life of the card.
+    private var shownSections: [Section] {
+        if query.isEmpty { return sections }
+        if let key = search.key, key.query == query, key.sections == sections {
             return search.result
         }
         let terms = ModelSearch.terms(query)
@@ -2762,20 +2749,15 @@ struct AskRecentModelPickerView: View {
             }
             return terms.allSatisfy { hay.contains($0) }
         }
-        let result = (full.filter(matches), rest.filter(matches))
-        search.key = (query, full, rest)
+        let result = sections
+            .map { Section(title: $0.title, rows: $0.rows.filter(matches)) }
+            .filter { !$0.rows.isEmpty }
+        search.key = (query, sections)
         search.result = result
         return result
     }
 
-    private var listLead: [Row] { filtered.lead }
-
-    private var listRest: [Row] { filtered.rest }
-
-    private var allRows: [Row] { listLead + listRest }
-
-    /// The rule between the two runs, drawn only when both have rows.
-    private var showsDivider: Bool { !listLead.isEmpty && !listRest.isEmpty }
+    private var allRows: [Row] { shownSections.flatMap(\.rows) }
 
     /// The model menus' shared numbers (`MenuCard.picker…`).
     static let fontSize: CGFloat = MenuCard.pickerFontSize
@@ -2786,29 +2768,41 @@ struct AskRecentModelPickerView: View {
     /// a row, enough to see a row go instead of reading as a hard cut.
     private static let edgeFade: CGFloat = 18
 
-    /// What the rows actually add up to, rule included — the other half of the
-    /// bottom-edge test (the observer reports the offset, not the remaining travel).
+    /// What the rows actually add up to, captions and rules included — the
+    /// other half of the bottom-edge test (the observer reports the offset, not
+    /// the remaining travel).
     private var contentHeight: CGFloat {
-        Self.height(rows: allRows.count, divider: showsDivider)
+        Self.height(shownSections)
     }
 
-    private static func height(rows: Int, divider: Bool) -> CGFloat {
-        var h = CGFloat(max(1, rows)) * rowStride - MenuCard.rowSpacing
-        if divider { h += sectionRule + MenuCard.rowSpacing }
-        return h
+    /// Each section is its caption and rows; every section after the first
+    /// sits below a rule.
+    private static func height(_ sections: [Section]) -> CGFloat {
+        guard !sections.isEmpty else { return rowHeight }
+        var h: CGFloat = 0
+        for (i, section) in sections.enumerated() {
+            if i > 0 { h += sectionRule + MenuCard.rowSpacing }
+            h += captionHeight + MenuCard.rowSpacing
+            h += CGFloat(section.rows.count) * rowStride
+        }
+        return h - MenuCard.rowSpacing
     }
+
+    /// A section caption's line: the caption type with 4pt above and 2pt
+    /// below, so it sits closer to the rows it names than to the rule above.
+    private static let captionHeight: CGFloat =
+        ceil(NSFont.systemFont(ofSize: Tokens.TypeSize.caption, weight: .semibold)
+            .boundingRectForFont.height) + 6
 
     /// Rows shown before the list scrolls.
     private static let listRows = 6
 
-    /// Capped at `listRows`; a shorter list is as tall as its rows. Measured
-    /// from the unfiltered rows, so the card keeps its size while a query
-    /// narrows the list.
+    /// Capped at `listRows` plus one caption; a shorter list is as tall as its
+    /// rows. Measured from the unfiltered sections, so the card keeps its size
+    /// while a query narrows the list.
     private var listHeight: CGFloat {
-        let full = fullLead
-        let h = Self.height(rows: full.count + rest.count,
-                            divider: !full.isEmpty && !rest.isEmpty)
-        return min(h, CGFloat(Self.listRows) * Self.rowStride - MenuCard.rowSpacing)
+        min(Self.height(sections),
+            Self.captionHeight + CGFloat(Self.listRows) * Self.rowStride)
     }
 
     /// Whether the list outgrows the window and scrolls — the gate for the fades.
@@ -2831,14 +2825,15 @@ struct AskRecentModelPickerView: View {
                     // Lazy: a BYOK catalog is hundreds of rows, and only the
                     // window's ten are on screen.
                     LazyVStack(alignment: .leading, spacing: MenuCard.rowSpacing) {
-                        ForEach(listLead, id: \.self) { r in
-                            modelRow(r).id(r)
+                        let shown = shownSections
+                        ForEach(Array(shown.enumerated()), id: \.element.title) { i, section in
+                            if i > 0 { hairline }
+                            caption(section.title)
+                            ForEach(section.rows, id: \.self) { r in
+                                modelRow(r).id(r)
+                            }
                         }
-                        if showsDivider { hairline }
-                        ForEach(listRest, id: \.self) { r in
-                            modelRow(r).id(r)
-                        }
-                        if allRows.isEmpty { ModelSearchRow.noMatch }
+                        if shown.isEmpty { ModelSearchRow.noMatch }
                     }
                     // Zero-size probe on the scroll CONTENT reads the clip view's
                     // offset. Only the two CROSSINGS are stored, never the live
@@ -2874,7 +2869,7 @@ struct AskRecentModelPickerView: View {
         .frame(width: cardWidth, height: cardHeight, alignment: .topLeading)
         .background(ModelDetailAnchorProbe(anchor: detailAnchor))
         .onAppear {
-            if !rest.isEmpty || lead.contains(where: { $0.provider.isFirstParty }) {
+            if sections.contains(where: { $0.rows.contains { $0.provider.isFirstParty } }) {
                 ModelCatalogStore.shared.refreshNono()
             }
             installKeyMonitor()
@@ -2929,6 +2924,17 @@ struct AskRecentModelPickerView: View {
     /// open; Delete erases, Esc clears it before it closes the card.
     private var searchRow: some View { ModelSearchRow(query: query) }
 
+    /// A section's name over its rows, inset like the rows' words.
+    private func caption(_ title: String) -> some View {
+        Text(title)
+            .captionLabel()
+            .lineLimit(1)
+            .padding(.horizontal, Self.rowPad)
+            .padding(.top, 4)
+            .padding(.bottom, 2)
+            .frame(height: Self.captionHeight, alignment: .bottomLeading)
+    }
+
     /// The rule between the card's sections.
     private var hairline: some View {
         Rectangle().fill(.white.opacity(0.07))
@@ -2942,13 +2948,12 @@ struct AskRecentModelPickerView: View {
         allRows.filter { !Self.unavailable($0) }
     }
 
-    /// The row's trailing word. A row on the user's own key says BYOK, one on a
-    /// signed-in CLI says CLI, since Notchi rows sit beside them and the same
-    /// model can appear on both. Ours names today's cap when that is what
-    /// stops it.
+    /// The row's trailing word. A row on a signed-in CLI says CLI; a row on the
+    /// user's own key needs none, since its section caption says so. Ours names
+    /// today's cap when that is what stops it.
     static func accessory(for r: Row) -> String? {
         if r.provider.isCLI { return "CLI" }
-        guard r.provider.isFirstParty else { return "BYOK" }
+        guard r.provider.isFirstParty else { return nil }
         guard NoNoAccount.shared.snapshot != nil,
               ModelDetailCard.Wallet.current?.state == .cappedForToday else { return nil }
         return L("nono.dailyCap")
@@ -2961,7 +2966,7 @@ struct AskRecentModelPickerView: View {
         r.provider.isFirstParty && ModelRatings.isNonoID(r.id)
     }
 
-    /// The Notchi models listed first after the recents.
+    /// The Notchi models listed first in their section after the recents.
     static let featuredNotchiIDs = ["glm-5.3-flash", ModelNewMarks.modelID]
 
     /// The row's tag: "New" on the featured model, else the percent off (or
@@ -3156,56 +3161,24 @@ struct ModelSearchRow: View {
     }
 }
 
-/// Notchi models the user switched off in Settings → Models and Pricing. They
-/// stay out of the Ask chip's model menu. Every model is on by default except
-/// `offByDefault`. Stored as newline-separated ids so Settings can bind it with
-/// `@AppStorage`: a bare id is switched off, a `+id` is an `offByDefault` model
-/// switched on.
+/// Ordering for Notchi's lineup. Every model is listed; the ones the gateway's
+/// `/v1/models` marks `offByDefault`, and the bundled pair, go last.
 @MainActor
 enum NotchiModelVisibility {
-    static let defaultsKey = "notchi_hidden_models"
-
-    /// Off until switched on, and listed last: the bundled pair, and every
-    /// model the gateway's `/v1/models` marks `offByDefault`.
-    static var offByDefault: Set<String> {
+    static var listedLast: Set<String> {
         let served = ModelCatalogStore.shared.liveByProvider[.nono]?
             .filter { $0.notchiPricing?.offByDefault == true }
             .map(\.id) ?? []
-        return bundledOffByDefault.union(served)
+        return bundledListedLast.union(served)
     }
 
-    private static let bundledOffByDefault: Set<String> = ["mimo-v2.6-flash", "mimo-v2.6-pro"]
+    private static let bundledListedLast: Set<String> = ["mimo-v2.6-flash", "mimo-v2.6-pro"]
 
-    static func hidden(in raw: String) -> Set<String> {
-        let lines = raw.split(separator: "\n").map(String.init)
-        let switchedOn = Set(lines.filter { $0.hasPrefix("+") }.map { String($0.dropFirst()) })
-        return Set(lines.filter { !$0.hasPrefix("+") })
-            .union(offByDefault.subtracting(switchedOn))
-    }
-
-    static var hidden: Set<String> {
-        hidden(in: UserDefaults.standard.string(forKey: defaultsKey) ?? "")
-    }
-
-    static func isShown(_ id: String) -> Bool {
-        !hidden.contains(id)
-    }
-
-    /// `raw` with `id` switched on or off.
-    static func setting(_ id: String, shown: Bool, in raw: String) -> String {
-        var lines = Set(raw.split(separator: "\n").map(String.init))
-        lines.remove(id)
-        lines.remove("+" + id)
-        if shown, offByDefault.contains(id) { lines.insert("+" + id) }
-        if !shown, !offByDefault.contains(id) { lines.insert(id) }
-        return lines.sorted().joined(separator: "\n")
-    }
-
-    /// `items` with the `offByDefault` models moved to the end, otherwise in
+    /// `items` with the `listedLast` models moved to the end, otherwise in
     /// their own order.
     static func ordered<T>(_ items: [T], id: (T) -> String) -> [T] {
-        let off = offByDefault
-        return items.filter { !off.contains(id($0)) } + items.filter { off.contains(id($0)) }
+        let last = listedLast
+        return items.filter { !last.contains(id($0)) } + items.filter { last.contains(id($0)) }
     }
 }
 
